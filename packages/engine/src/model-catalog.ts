@@ -2,32 +2,63 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 
-/** Deprecated model ids must not be selectable from any catalog source. */
-const HIDDEN_MODEL_IDS: ReadonlySet<string> = new Set(["openai/gpt-5.6-sol"]);
+// Metadata for releases newer than the pinned SDK. Built-in entries win by ID.
+// Sources and compatibility scope: docs/specs/2026-08-24-thread-model-pinning-and-compaction-design.md.
+const supplementalModels: Model<Api>[] = [
+  {
+    id: "gpt-6.1-sol", name: "GPT-6.1 Sol", provider: "openai", api: "openai-responses",
+    baseUrl: "https://api.openai.com/v1", reasoning: true, input: ["text", "image"],
+    contextWindow: 1_050_000, maxTokens: 128_000,
+    cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5,
+      tiers: [{ inputTokensAbove: 272_000, input: 4, output: 15, cacheRead: 0.2, cacheWrite: 5 }] },
+    thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+  },
+  {
+    id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", provider: "anthropic", api: "anthropic-messages",
+    baseUrl: "https://api.anthropic.com", reasoning: true, input: ["text", "image"],
+    contextWindow: 1_000_000, maxTokens: 128_000,
+    cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+    thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+    compat: { forceAdaptiveThinking: true, supportsTemperature: false },
+  },
+];
 
-/** True when a provider model may appear in Valet's catalog. */
+/** Astra is excluded across providers, aliases, and dated model IDs. */
+export function isDisabledModel(spec: string): boolean {
+  const id = spec.trim().toLowerCase().split("/").at(-1) ?? "";
+  return /(^|[^a-z0-9])astra($|[^a-z0-9])/.test(id);
+}
+
+export function assertModelEnabled(spec: string): void {
+  if (isDisabledModel(spec)) {
+    throw new Error("Astra is disabled in Valet. Choose GPT-6.1 Sol or Claude Opus 5.5.");
+  }
+}
+
+function bundledMetadata(provider: string): Model<Api>[] {
+  const builtinProvider = getBuiltinProviders().find((id) => id === provider);
+  const upstream = builtinProvider ? [...getBuiltinModels(builtinProvider)] : [];
+  const ids = new Set(upstream.map((model) => model.id));
+  return [...upstream, ...supplementalModels.filter((model) => model.provider === provider && !ids.has(model.id))];
+}
+
+/** Retired choices remain resolvable for existing sessions, but cannot be selected anew. */
 export function isCatalogModel(provider: string, modelId: string): boolean {
-  return !HIDDEN_MODEL_IDS.has(`${provider}/${modelId}`);
+  return !isDisabledModel(modelId) && !(provider === "openai" && modelId === "gpt-5.6-sol");
 }
 
-/** Pi's bundled catalog, filtered through Valet's catalog policy. */
+/** Selectable bundled models. Disabled metadata remains available for billing. */
 export function bundledModels(provider: string): Model<Api>[] {
-  const builtinProvider = getBuiltinProviders().find((id) => id === provider);
-  return builtinProvider
-    ? getBuiltinModels(builtinProvider).filter((model) => isCatalogModel(provider, model.id))
-    : [];
+  return bundledMetadata(provider).filter((model) => isCatalogModel(provider, model.id));
 }
 
-/**
- * One bundled model by provider and wire id, or undefined when unknown.
- *
- * This lookup intentionally bypasses catalog visibility. A retired model is
- * not selectable, but sessions and defaults persisted before its retirement
- * must keep resolving while the provider continues to serve it.
- */
+/** Historical usage pricing only; this lookup does not authorize execution. */
+export function bundledPricingModel(provider: string, modelId: string): Model<Api> | undefined {
+  return bundledMetadata(provider).find((model) => model.id === modelId);
+}
+
+/** One bundled model by provider and wire id, or undefined when unknown. */
 export function bundledModel(provider: string, modelId: string): Model<Api> | undefined {
-  const builtinProvider = getBuiltinProviders().find((id) => id === provider);
-  return builtinProvider
-    ? getBuiltinModels(builtinProvider).find((model) => model.id === modelId)
-    : undefined;
+  if (isDisabledModel(modelId)) return undefined;
+  return bundledMetadata(provider).find((model) => model.id === modelId);
 }

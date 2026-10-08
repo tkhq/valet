@@ -1,7 +1,7 @@
 /**
  * Plugins + credentials queries (plugin-system-v2 plan Task 15 — connect
  * surface, manual token entry only). House pattern: a query-key factory per
- * resource file, mirroring `~/api/workflows` / `~/api/orchestrator`.
+ * resource file, mirroring `~/api/workflows` / `~/api/workspace-runtime`.
  */
 import {
   useMutation,
@@ -97,9 +97,14 @@ export function useDisconnectCredential() {
   });
 }
 
+/** Returned from `onSuccess`, so the mutation stays pending until the lists
+ * refetch. Settling first rendered the pre-change state for one round trip:
+ * Share → Stop sharing blinked back to Share before it stuck. */
 function invalidateCredentialCaches(qc: ReturnType<typeof useQueryClient>) {
-  qc.invalidateQueries({ queryKey: qkIntegrations.pluginsAll() });
-  qc.invalidateQueries({ queryKey: ["credentials"] });
+  return Promise.all([
+    qc.invalidateQueries({ queryKey: qkIntegrations.pluginsAll() }),
+    qc.invalidateQueries({ queryKey: ["credentials"] }),
+  ]);
 }
 
 export function useDelegateCredential() {
@@ -116,8 +121,8 @@ export function useDelegateCredential() {
 
 export function useRevokeDelegation() {
   const qc = useQueryClient();
-  return useMutation<DeleteCredentialResponse, Error, { service: string; teamId: string }>({
-    mutationFn: ({ service, teamId }) => api.revokeDelegation(service, teamId),
+  return useMutation<DeleteCredentialResponse, Error, { service: string; teamId: string; userId?: string }>({
+    mutationFn: ({ service, teamId, userId }) => api.revokeDelegation(service, teamId, userId),
     onSuccess: () => invalidateCredentialCaches(qc),
   });
 }

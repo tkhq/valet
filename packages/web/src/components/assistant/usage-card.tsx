@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import type { UsageMemberSummary, UsageWindow } from "@valet/api/wire";
 import { api } from "~/api/client";
 import { useMe } from "~/api/settings";
-import { Spinner } from "~/components/primitives";
+import { Spinner, cardClass } from "~/components/primitives";
 import { formatTokens, formatUsd } from "~/lib/format-usage";
 import { cn } from "~/lib/cn";
 
@@ -30,7 +30,7 @@ export function UsageCard() {
   const maxMemberCost = Math.max(0, ...(org?.shown.map((m) => m.costUsd) ?? []));
 
   return (
-    <section className="min-w-0 rounded-lg border border-line bg-paper flex flex-col min-h-0">
+    <section className={cn(cardClass, "min-w-0 flex flex-col min-h-0")}>
       <header className="px-4 py-3 border-b border-line flex flex-wrap items-center justify-between gap-x-3">
         <h2 className="font-display text-base text-ink">Usage</h2>
         <Link

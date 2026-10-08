@@ -146,8 +146,7 @@ vi.mock("@tanstack/react-router", () => ({
   Link: RouterLinkStub,
 }));
 
-// importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
-// why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
+// importOriginal keeps the module's other exports real (see vitest.config.ts).
 vi.mock("~/components/settings/team-deletion-requests", () => ({
   TeamDeletionRequests: ({ teamId, canManage }: { teamId: string; canManage: boolean }) =>
     <section aria-label="Deletion requests" data-team-id={teamId} data-can-manage={canManage} />,
@@ -221,6 +220,7 @@ vi.mock("~/api/integrations", async (importOriginal) => {
     ...actual,
     useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
     useDisconnectCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null , reset: vi.fn() }),
+    useRevokeDelegation: () => ({ mutate: vi.fn(), isPending: false, error: null, reset: vi.fn() }),
   };
 });
 

@@ -1,10 +1,12 @@
+import { mergePresence, readPresence } from "@valet/shared";
+import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 /**
  * `ChannelHost` — inbound routing for channel transports (telegram etc,
  * Phase 7 / spec decisions 4-6, 10). `handleUpdate` is the single entry
  * point both the poll loop (Task 8) and the webhook route feed normalized
- * `InboundChannelEvent`s through. It never throws (rule 7): callers can
+ * `InboundChannelEvent`s through. By default it contains errors: callers can
  * fire-and-forget it from a poll loop or an HTTP handler without a
- * try/catch of their own.
+ * try/catch of their own. Durable ingress opts into propagated errors.
  *
  * Outbound (gate prompts, message edits on `decision_gate_resolved`) is
  * Task 7's job — this file only records enough state (`recordGatePrompt`)
@@ -12,8 +14,7 @@
  * lands in Task 8; `start` here only resolves credentials and constructs
  * transports.
  */
-import { randomBytes } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { runEventVisible, runOriginVisible } from "../services/thread-access.js";
 import {
   ConflictError,
   parseAssistantSessionId,
@@ -31,42 +32,47 @@ import {
   type GatePromptRef,
   type InboundChannelEvent,
   type PromptAttachment,
+  type SendRef,
   type Session,
   type SessionEntry,
-  type SignalContent,
   type SessionStore,
+  type SignalContent,
   type StoredCredential,
   type Unsubscribe,
   type ValetPlugin,
 } from "@valet/engine";
 import type { WorkflowStore } from "@valet/workflow";
-import type { AppDb } from "../lib/drizzle.js";
-import type { EngineHost } from "../engine/host.js";
-import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
-import { agentSessions, users, workflowDefinitions } from "../schema/index.js";
+import { and, eq, sql } from "drizzle-orm";
+import { randomBytes } from "node:crypto";
 import {
   ArchivedAssistantError,
-  assistantSenderIdentity as senderIdentityForAssistant,
   ensureDefaultAssistantSession,
   loadAssistant,
   loadAssistantBySessionId,
 } from "../assistants/service.js";
+import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
-import { canResolveSessionGate, type SessionOwnerLike } from "../services/session-access.js";
-import { isOrgAdmin } from "../services/org.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { userPrincipal } from "../lib/request-principal.js";
-import { writeDropLog } from "../orchestrator/signals.js";
-import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
-import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
-import { ingestChannelFile, type IngestedChannelFile } from "../services/channel-file-ingest.js";
-import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { attentionHref } from "../orchestrator/attention-wiring.js";
+import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
+import { activeChildWatch } from "../orchestrator/children.js";
+import { writeDropLog } from "../orchestrator/signals.js";
+import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
+import { teams, agentSessions, users, workflowDefinitions } from "../schema/index.js";
+import { ingestChannelFile, type IngestedChannelFile } from "../services/channel-file-ingest.js";
+import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
+import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
+import { isOrgAdmin } from "../services/org.js";
+import { answersGate, canResolveSessionGate, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
 import { recordThreadUserActivity } from "../services/thread-activity.js";
-import { digestGate } from "./gate-digest.js";
-import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
+import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
+import { digestGate } from "./gate-digest.js";
+import { savedGatePrompts, deleteSavedGatePrompts } from "./gate-prompts.js";
+import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
+import { recordChannelMessage, slackChannelKey, slackConversationFromThreadKey, slackMessageUrl } from "../services/channel-messages.js";
 
 export interface ChannelHostDeps {
   db: AppDb;
@@ -129,6 +135,8 @@ function gateResolutionLabel(
 const GATE_EXPIRED_LABEL = "⏳ Expired: no one answered in time. Start the run again in Valet.";
 const GATE_WITHDRAWN_LABEL =
   "🚫 Withdrawn: the run was stopped. Start it again in Valet if you still need it.";
+
+const OPEN_QUESTION_NOTE = "Answer this question in Valet. A reply here does not reach it.";
 
 const LOCALDEV_SUFFIX = ".localdev";
 
@@ -330,13 +338,15 @@ function chatIdFromKey(conversationKey: string): string {
  * deliver-by-binding behavior. The failure mode of this classifier is
  * silent muting, so every branch defaults to "not web".
  */
-function submissionIsWebPrompt(entries: SessionEntry[], queueItemId: string): boolean {
+function submissionIsWebPrompt(entries: SessionEntry[], queueItemId: string, personOnly = false): boolean {
   const prompts = entries.filter(
     (e): e is Extract<SessionEntry, { type: "message" }> =>
       e.type === "message" && e.role === "user" && e.queueItemId === queueItemId,
   );
   if (prompts.length === 0) return false;
-  return prompts.every((e) => e.channel === undefined && e.signal === undefined);
+  // `personOnly`: a child's prompt from its parent agent has no author, and
+  // only a person typing in the web app makes a child submission web-origin.
+  return prompts.every((e) => e.channel === undefined && e.signal === undefined && (!personOnly || e.author !== undefined));
 }
 
 /** Feature-detects a transport that opens a direct conversation with one of
@@ -367,6 +377,9 @@ export class ChannelHost {
    * in-flight DM send. This map lets the late prompt get the resolution edit
    * immediately instead of keeping live buttons forever. */
   private settledGates = new Map<string, DecisionResolution>();
+  /** Gates that expired or were withdrawn, kept the same way, so a prompt
+   * recorded after that still gets its outcome edit and loses its buttons. */
+  private endedGates = new Map<string, { label: string; resolvedAtMs: number }>();
   private settledOrder: string[] = [];
   private orgId: string | null = null;
   private outboundUnsub: Unsubscribe | null = null;
@@ -404,6 +417,8 @@ export class ChannelHost {
       streams: deps.activeStreams ?? new DbActiveStreamStore(deps.db),
       transportFor: (channelType) => this.transportFor(channelType),
       markDelivered: (dedupeKey) => this.markDelivered(dedupeKey),
+      onMessageClosed: (turn, providerMessageId, engineMessageId) =>
+        this.recordSentReply(turn.channelType, turn.conversationKey, turn.sessionId, turn.threadId, providerMessageId, { entryId: engineMessageId }),
       abortTurn: async (sessionId, threadId) => {
         // Streams only ever run on a channel thread, and channel threads only
         // exist on an assistant's session (`handleMessage` always threads
@@ -449,7 +464,7 @@ export class ChannelHost {
   recordGatePrompt(gateId: string, ref: GatePromptRef, sessionId: string): void {
     this.gateRefs.set(`${ref.conversationKey}#${ref.messageId}`, { gateId, sessionId });
     const refs = this.gatePrompts.get(gateId) ?? [];
-    refs.push(ref);
+    if (!refs.some(existing => existing.conversationKey === ref.conversationKey && existing.messageId === ref.messageId)) refs.push(ref);
     this.gatePrompts.set(gateId, refs);
   }
 
@@ -465,6 +480,15 @@ export class ChannelHost {
     }
     this.orgId = await this.deps.resolveOrgId();
     const orgId = this.orgId;
+    // Restore callback addresses before starting ingress. Authorization still
+    // runs for each click; a stored address grants no decision authority.
+    const restored = await savedGatePrompts(this.deps.db, orgId);
+    for (const prompt of restored) {
+      const gate = await this.deps.engineStore.getDecisionGate(prompt.sessionId, prompt.gateId);
+      if (!gate) continue;
+      this.recordGatePrompt(prompt.gateId, prompt.ref, prompt.sessionId);
+      this.gateActions.set(prompt.gateId, gate.actions);
+    }
     for (const plugin of this.deps.plugins) {
       for (const factory of plugin.transports ?? []) {
         // start() now runs on the api's background boot chain, so stop()
@@ -527,6 +551,13 @@ export class ChannelHost {
     }
     if (!this.started) return;
     this.startOutbound();
+    // A gate can settle while channel delivery is offline. Clear its old buttons.
+    const restoredGates = new Map(restored.map(prompt => [prompt.gateId, prompt]));
+    for (const prompt of restoredGates.values()) {
+      const gate = await this.deps.engineStore.getDecisionGate(prompt.sessionId, prompt.gateId);
+      if (gate?.status === "resolved" && gate.resolution) await this.deliverGateResolution(gate.id, gate.resolution);
+      else if (gate && gate.status !== "pending") await this.settleGatePrompts(gate.id, gate.status === "expired" ? GATE_EXPIRED_LABEL : GATE_WITHDRAWN_LABEL);
+    }
     // Close streams a previous boot left open. Runs after the transports are
     // up because closing one needs its transport, and after `startOutbound`
     // so a slow sweep cannot delay live traffic.
@@ -659,6 +690,7 @@ export class ChannelHost {
       {
         eventTypes: [
           "message_end",
+          "submission_settled",
           "tool_end",
           "decision_gate",
           "decision_gate_resolved",
@@ -711,6 +743,8 @@ export class ChannelHost {
           queueItemId: event.queueItemId,
           reason: e.reason,
         });
+      } else if (e.type === "submission_settled" && e.outcome.outcome === "failed") {
+        await this.deliverSubmissionFailure(event.sessionId, e.threadId, e.queueItemId);
       } else if (e.type === "tool_end" && event.queueItemId !== undefined) {
         await this.deliverFirstAssistantReply(event.sessionId, e.threadId, {
           queueItemId: event.queueItemId,
@@ -719,16 +753,34 @@ export class ChannelHost {
         await this.deliverGatePrompt(event.sessionId, e.gate);
       } else if (e.type === "decision_gate_resolved") {
         await this.deliverGateResolution(e.gateId, e.resolution);
-      } else if (e.type === "decision_gate_expired") {
-        await this.settleGatePrompts(e.gateId, GATE_EXPIRED_LABEL, { resolvedAtMs: event.timestamp });
-      } else if (e.type === "decision_gate_withdrawn") {
-        await this.settleGatePrompts(e.gateId, GATE_WITHDRAWN_LABEL, { resolvedAtMs: event.timestamp });
+      } else if (e.type === "decision_gate_expired" || e.type === "decision_gate_withdrawn") {
+        await this.endGate(e.gateId, e.type === "decision_gate_expired" ? GATE_EXPIRED_LABEL : GATE_WITHDRAWN_LABEL, event.timestamp);
       } else if (e.type === "command_result") {
         await this.deliverCommandResult(event.sessionId, e.threadId, e.entry);
       }
     } catch (err) {
       console.error("[channels] outbound delivery failed", err);
     }
+  }
+
+  /** Provider attempts can recover. Only a settled failure needs a channel notice. */
+  private async deliverSubmissionFailure(sessionId: string, threadId: string, queueItemId: string): Promise<void> {
+    const dedupeKey = `${sessionId}:failure:${queueItemId}`;
+    if (this.delivered.has(dedupeKey)) return;
+    const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
+    const origin = turnOrigin(entries, queueItemId);
+    if (!origin || origin.reply === "manual") return;
+    if (originReplyState(entries, queueItemId) === "succeeded") return;
+    const target = this.channelThreadFor(origin.threadKey);
+    if (!target) return;
+    const transport = this.transports.get(target.channelType);
+    if (!transport) return;
+    const sender = await this.workspaceSenderForSession(sessionId, queueItemId);
+    await transport.send(target.conversationKey, {
+      markdown: "This turn failed. Open the session in Valet for details.",
+      ...(sender !== undefined ? { sender } : {}),
+    });
+    this.markDelivered(dedupeKey);
   }
 
   /** Post only the first assistant text for an addressed channel turn. */
@@ -768,6 +820,7 @@ export class ChannelHost {
         entry.type === "message" &&
         entry.role === "assistant" &&
         entry.queueItemId === queueItemId &&
+        entry.stopReason !== "error" && entry.stopReason !== "abort" &&
         Boolean(entry.content),
     );
     if (!first || first.type !== "message" || !first.content) return;
@@ -787,6 +840,7 @@ export class ChannelHost {
             "Only call the current signal origin service's reply_to_origin action if you intended to reply. " +
             "This reminder is sent once per assistant thread.",
           acceptDispatchConflict: true,
+          queueItemId,
         });
       }
       return;
@@ -800,9 +854,10 @@ export class ChannelHost {
     if (this.delivered.has(dedupeKey)) return;
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
-    const sender = await this.assistantSenderIdentity(sessionId);
+    const sender = await this.workspaceSenderForSession(sessionId, queueItemId);
+    let sent: SendRef;
     try {
-      await transport.send(target.conversationKey, {
+      sent = await transport.send(target.conversationKey, {
         markdown: first.content,
         ...(sender !== undefined ? { sender } : {}),
       });
@@ -820,7 +875,49 @@ export class ChannelHost {
       }
       await this.retryFailedReplyFeedback(sessionId, thread.key, queueItemId, origin, reason);
       this.markDelivered(dedupeKey);
+      return;
     }
+    // Outside the send's error handling: the reply is already posted, so a
+    // failed record must never tell the agent to post it again.
+    await this.recordSentReply(target.channelType, target.conversationKey, sessionId, threadId, sent.messageId, { text: first.content });
+  }
+
+  /**
+   * Records a reply Valet posted in a channel thread, with the engine message
+   * it carried. A DM is not a channel, so it records nothing. Best effort: it
+   * logs a failure and never throws, because the reply is already posted.
+   */
+  private async recordSentReply(
+    channelType: string, conversationKey: string, sessionId: string, threadId: string,
+    providerMessageId: string, body: { text: string } | { entryId: string },
+  ): Promise<void> {
+    try {
+      await this.recordSentReplyOrThrow(channelType, conversationKey, sessionId, threadId, providerMessageId, body);
+    } catch (err) {
+      console.error("[channels] could not record a sent reply", err);
+    }
+  }
+
+  private async recordSentReplyOrThrow(
+    channelType: string, conversationKey: string, sessionId: string, threadId: string,
+    providerMessageId: string, body: { text: string } | { entryId: string },
+  ): Promise<void> {
+    const threadKey = this.transports.get(channelType)?.threadKeyFromConversationKey?.(conversationKey);
+    const conversation = slackConversationFromThreadKey(threadKey);
+    if (!threadKey || !conversation || providerMessageId === "") return;
+    // One row by id, not the thread's whole transcript: this runs on every reply.
+    const text = "text" in body ? body.text : ((await this.deps.db.execute(sql`SELECT content FROM engine_entries
+      WHERE session_id = ${sessionId} AND id = ${body.entryId}`)) as { rows: Array<{ content: string | null }> }).rows[0]?.content ?? undefined;
+    await recordChannelMessage(this.deps.db, {
+      orgId: this.orgId ?? (await this.deps.resolveOrgId()),
+      sessionId, threadId,
+      channelKey: slackChannelKey(conversation.channelId),
+      conversationKey: threadKey,
+      providerMessageId,
+      direction: "out",
+      ...(text ? { text } : {}),
+      url: slackMessageUrl(conversation.channelId, providerMessageId, conversation.threadTs),
+    });
   }
 
   private async retryFailedReplyFeedback(
@@ -835,6 +932,7 @@ export class ChannelHost {
       dispatchId: `feedback:reply-failed:${queueItemId}`,
       body: `Your response was not posted to ${origin.threadKey}. Delivery failed: ${reason}. Call ${origin.channelType}.reply_to_origin with the response text to retry.`,
       acceptDispatchConflict: true,
+      queueItemId,
     };
     for (const delay of FEEDBACK_RETRY_DELAYS_MS) {
       if (delay > 0) await this.sleepOrAbort(delay, signal);
@@ -851,7 +949,7 @@ export class ChannelHost {
     sessionId: string,
     threadKey: string,
     origin: ChannelOrigin,
-    feedback: { dispatchId: string; body: string; acceptDispatchConflict?: boolean },
+    feedback: { dispatchId: string; body: string; acceptDispatchConflict?: boolean; queueItemId?: string },
   ): Promise<"admitted" | "retryable" | "not_live"> {
     try {
       const session = this.deps.engineHost.liveSession(sessionId);
@@ -859,6 +957,8 @@ export class ChannelHost {
         console.warn("[channels] reply-dropped feedback skipped: session is not live", { sessionId });
         return "not_live";
       }
+      const item = feedback.queueItemId ? await this.deps.engineStore.getQueueItem(sessionId, feedback.queueItemId) : undefined;
+      const presence = readPresence(item?.metadata?.presence);
       await session.thread(threadKey).submitPrompt(
         {
           kind: "signal",
@@ -872,7 +972,7 @@ export class ChannelHost {
             reply: "manual",
           },
         },
-        { dispatchId: feedback.dispatchId, queueMode: "followup" },
+        { dispatchId: feedback.dispatchId, queueMode: "followup", ...(presence ? { metadata: { presence } } : {}) },
       );
       return "admitted";
     } catch (error) {
@@ -900,6 +1000,12 @@ export class ChannelHost {
    * through `conversationKeyFromThreadKey`. Without this hop every outbound
    * call for such a transport is handed a key it did not mint.
    */
+  /** The channel conversation that spawned an unsettled child session. */
+  private async childOriginConversation(sessionId: string): Promise<{ channelType: string; conversationKey: string } | null> {
+    const watch = await activeChildWatch(this.deps.db, sessionId);
+    return watch?.origin ? this.channelThreadFor(watch.origin.threadKey) : null;
+  }
+
   channelThreadFor(key: string): { channelType: string; conversationKey: string } | null {
     const idx = key.indexOf(":");
     if (idx === -1) return null;
@@ -934,12 +1040,26 @@ export class ChannelHost {
    * override set — the transport then posts under the bot's own identity.
    * Best-effort: a lookup failure must not stop the delivery.
    */
-  private async assistantSenderIdentity(
+  /** "Only members of <team> can approve.", or undefined when the team is gone. */
+  private async teamApproverNote(teamId: string): Promise<string | undefined> {
+    try {
+      const [team] = await this.deps.db.select({ name: teams.name }).from(teams).where(eq(teams.id, teamId)).limit(1);
+      return team ? `Only members of ${team.name} can approve.` : undefined;
+    } catch (err) {
+      console.error("[channels] team name lookup failed", err);
+      return undefined;
+    }
+  }
+
+  private async workspaceSenderForSession(
     sessionId: string,
+    queueItemId?: string,
   ): Promise<{ displayName?: string; avatarUrl?: string } | undefined> {
     try {
       const row = await loadAssistantBySessionId(this.deps.db, sessionId);
-      return row ? senderIdentityForAssistant(row) : undefined;
+      const base = row ? await workspaceSenderIdentity(this.deps.db, row.orgId, { type: row.ownerType, id: row.ownerId }) : undefined;
+      const item = queueItemId ? await this.deps.engineStore.getQueueItem(sessionId, queueItemId) : undefined;
+      return mergePresence(base, readPresence(item?.metadata?.presence));
     } catch (err) {
       // Identity is decoration on the post; the text must still land.
       console.error("[channels] assistant identity lookup failed", err);
@@ -980,7 +1100,7 @@ export class ChannelHost {
     if (!transport) return;
 
     const markdown = `\`${entry.command}\`\n${entry.output}`;
-    const sender = await this.assistantSenderIdentity(sessionId);
+    const sender = await this.workspaceSenderForSession(sessionId);
     await transport.send(mapped.conversationKey, {
       markdown,
       ...(sender !== undefined ? { sender } : {}),
@@ -991,7 +1111,11 @@ export class ChannelHost {
   private async deliverGatePrompt(sessionId: string, gate: DecisionGate): Promise<void> {
     const thread = await this.deps.engineStore.getThread(sessionId, gate.threadId);
     if (!thread) return;
-    const mapped = this.channelThreadFor(thread.key);
+    // A child's own thread is never a channel thread. Its card goes to the
+    // conversation that spawned the work, so the person who asked there can
+    // answer it (TKAI-564). The callback still resolves the child's gate.
+    const direct = this.channelThreadFor(thread.key);
+    const mapped = direct ?? await this.childOriginConversation(sessionId);
     if (!mapped) return;
     const transport = this.transports.get(mapped.channelType);
     if (!transport) return;
@@ -1001,11 +1125,27 @@ export class ChannelHost {
     // channel, its card would be a live approve/deny button with zero
     // surrounding context — an invitation to approve an action the channel
     // reader never saw described.
+    // A child's prompt from its parent agent is not a web prompt, and the
+    // stored origin proves the work started in this conversation. A person
+    // can still prompt the child in the web app; that gate stays in the web.
     const entries = await this.deps.engineStore.getEntries(sessionId, gate.threadId);
-    if (submissionIsWebPrompt(entries, gate.queueItemId)) {
+    if (submissionIsWebPrompt(entries, gate.queueItemId, !direct)) {
       console.debug(
         `[channels] web-origin gate stays off ${mapped.channelType} (session=${sessionId} gate=${gate.id})`,
       );
+      return;
+    }
+
+    // A gate asking to use a member's shared account answers to that member,
+    // who gets it directly (`attention-wiring.ts`). The conversation learns
+    // that the request went to them, with no buttons to press.
+    const approver = gateApprover(gate);
+    if (approver) {
+      const sender = await this.workspaceSenderForSession(sessionId, gate.queueItemId);
+      await transport.send(mapped.conversationKey, {
+        markdown: `This needs ${approver.name ?? "a teammate"}'s shared account. Valet asked them for permission and continues once they allow it.`,
+        ...(sender !== undefined ? { sender } : {}),
+      });
       return;
     }
 
@@ -1013,9 +1153,12 @@ export class ChannelHost {
     // tool_id/args JSON dump; the card shows the summary plus labeled
     // fields instead, with a link for the full request.
     const digest = digestGate(gate);
-    const link = this.openInValetLink(attentionHref(sessionId));
-    const body =
-      link === undefined ? digest.body : digest.body === undefined ? link : `${digest.body}\n\n${link}`;
+    const source = await this.deps.engineStore.getSession(sessionId);
+    const link = this.openInValetLink(attentionHref(sessionId, gate.threadId, source?.owner));
+    // Anyone in the channel can mention a team's Valet, but only the team can
+    // settle its approvals. Say so on the card, so its buttons are not a dead end.
+    const who = source?.owner?.type === "team" ? await this.teamApproverNote(source.owner.id) : undefined;
+    const body = [digest.body, who, link].filter((part): part is string => part !== undefined).join("\n\n") || undefined;
     await this.sendAndRecordGatePrompt(
       transport,
       mapped.conversationKey,
@@ -1045,19 +1188,53 @@ export class ChannelHost {
     sessionId: string,
   ): Promise<void> {
     // The card carries the asking assistant's identity. In a channel with
-    // several assistants, the reader must see who asks for approval.
+    // shared workspaces, the reader must see who asks for approval.
     // Resolution edits keep the posted identity.
-    const sender = await this.assistantSenderIdentity(sessionId);
+    const sourceGate = await this.deps.engineStore.getDecisionGate(sessionId, prompt.gateId);
+    const sender = await this.workspaceSenderForSession(sessionId, sourceGate?.queueItemId);
+    // A channel reply cannot answer an open question (one with no options),
+    // so the card says where the answer goes instead of showing no control.
+    const body = prompt.actions.length > 0 ? prompt.body
+      : [prompt.body, OPEN_QUESTION_NOTE].filter((part): part is string => part !== undefined).join("\n\n");
     const ref = await transport.sendGatePrompt(conversationKey, {
       ...prompt,
+      ...(body !== undefined ? { body } : {}),
       ...(sender !== undefined ? { sender } : {}),
     });
+    // The card is live once sent, so this host records its callback address
+    // first. The saved ref only lets a restarted host restore the address; a
+    // failed save costs that restore, not the buttons on this host.
     this.gateActions.set(prompt.gateId, prompt.actions);
     this.recordGatePrompt(prompt.gateId, ref, sessionId);
+    try {
+      const gate = await this.deps.engineStore.getDecisionGate(sessionId, prompt.gateId);
+      if (gate) {
+        await this.deps.engineStore.saveDecisionGateRef(sessionId, gate.threadId, gate.id, {
+          channelType: transport.channelType, ref: { channelId: ref.conversationKey, messageId: ref.messageId },
+        });
+      }
+    } catch (err) {
+      console.error(`[channels] could not save the callback reference for gate ${prompt.gateId}; the card works until this host restarts`, err);
+    }
     const settled = this.settledGates.get(prompt.gateId);
+    const ended = this.endedGates.get(prompt.gateId);
     if (settled) {
       await this.deliverGateResolution(prompt.gateId, settled);
+    } else if (ended) {
+      await this.settleGatePrompts(prompt.gateId, ended.label, { resolvedAtMs: ended.resolvedAtMs });
     }
+  }
+
+  /** An expiry or a withdrawal: remembered first, like a decision, so a
+   * prompt whose send is still in flight is settled when it lands. */
+  private async endGate(gateId: string, label: string, resolvedAtMs: number): Promise<void> {
+    this.endedGates.set(gateId, { label, resolvedAtMs });
+    this.settledOrder.push(gateId);
+    if (this.settledOrder.length > DEDUP_CAP) {
+      const evict = this.settledOrder.shift();
+      if (evict !== undefined) { this.settledGates.delete(evict); this.endedGates.delete(evict); }
+    }
+    await this.settleGatePrompts(gateId, label, { resolvedAtMs });
   }
 
   /** Rule 4: decision_gate_resolved → edit every prompt message with the outcome label, then clear all gate maps. */
@@ -1069,7 +1246,7 @@ export class ChannelHost {
     this.settledOrder.push(gateId);
     if (this.settledOrder.length > DEDUP_CAP) {
       const evict = this.settledOrder.shift();
-      if (evict !== undefined) this.settledGates.delete(evict);
+      if (evict !== undefined) { this.settledGates.delete(evict); this.endedGates.delete(evict); }
     }
 
     const refs = this.gatePrompts.get(gateId);
@@ -1087,18 +1264,17 @@ export class ChannelHost {
    * the gate from all three gate maps. The single place a gate's channel
    * state ends: a decision, an expiry, and a withdrawal all arrive here.
    *
-   * One window stays open. A prompt whose send is still in flight has no ref
-   * yet, so this settles nothing for it, and `sendAndRecordGatePrompt`
-   * re-seeds the maps when that send lands. Only a decision is replayed onto
-   * such a prompt (`settledGates` holds a resolution), so an expiry or a
-   * withdrawal in that window leaves that one message with live buttons
-   * until someone clicks and reads the answer.
+   * A prompt whose send is still in flight has no ref yet, so this settles
+   * nothing for it. `sendAndRecordGatePrompt` replays the remembered outcome
+   * (`settledGates` for a decision, `endedGates` for an expiry or a
+   * withdrawal) when that send lands.
    */
   private async settleGatePrompts(
     gateId: string,
     label: string,
     outcome: { actionId?: string; resolvedAtMs?: number } = {},
   ): Promise<void> {
+    let allUpdated = true;
     for (const ref of this.gatePrompts.get(gateId) ?? []) {
       const channelType = ref.conversationKey.slice(0, ref.conversationKey.indexOf(":"));
       const transport = this.transports.get(channelType);
@@ -1108,14 +1284,18 @@ export class ChannelHost {
         } catch (err) {
           // One stale message (deleted DM, revoked scope) must not keep the
           // other copies of the same prompt un-updated.
+          allUpdated = false;
           console.error(`[channels] ${channelType}: gate prompt update failed`, err);
         }
+      } else {
+        allUpdated = false;
       }
       this.gateRefs.delete(`${ref.conversationKey}#${ref.messageId}`);
     }
 
     this.gatePrompts.delete(gateId);
     this.gateActions.delete(gateId);
+    if (allUpdated) await deleteSavedGatePrompts(this.deps.db, gateId);
   }
 
   /**
@@ -1156,11 +1336,13 @@ export class ChannelHost {
     await writeDropLog(this.deps.db, { orgId, reason, conversationKey, detail });
   }
 
-  async handleUpdate(channelType: string, event: InboundChannelEvent): Promise<void> {
+  async handleUpdate(channelType: string, event: InboundChannelEvent, propagateErrors = false): Promise<void> {
     try {
       await this.routeUpdate(channelType, event);
     } catch (err) {
+      this.seenDispatchIds.delete(event.dispatchId);
       console.error("[channels] update failed", err);
+      if (propagateErrors) throw err;
     }
   }
 
@@ -1313,6 +1495,15 @@ export class ChannelHost {
       orgId,
     });
 
+    const alreadyAdmitted = async () => {
+      const rows = await this.deps.db.execute(sql`SELECT id FROM engine_queue_items
+        WHERE session_id=${session.id} AND dispatch_id=${event.dispatchId} LIMIT 1`) as { rows: Array<{ id: string }> };
+      return rows.rows.length > 0;
+    };
+    // A restart may replay after admission but before inbox deletion. Do not
+    // download attachments again: their filenames or contents may have changed.
+    if (await alreadyAdmitted()) return;
+
     // Ask the transport for the thread key when it owns the mapping, so this
     // half and `channelThreadFor`'s inverse cannot drift apart. The default
     // below is the same derivation Telegram has always used.
@@ -1362,7 +1553,7 @@ export class ChannelHost {
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(event.sender.displayName ? { attributes: { sender: event.sender.displayName } } : {}),
     };
-    await thread.submitPrompt(
+    try { await thread.submitPrompt(
       content,
       {
         dispatchId: event.dispatchId,
@@ -1374,7 +1565,10 @@ export class ChannelHost {
         // channel turn from a web turn on the same bound thread (TKAI-323).
         channel: { channelType, channelId: event.conversationKey },
       },
-    );
+    ); } catch (err) {
+      // A concurrent consumer may have admitted the same authenticated delivery.
+      if (!(err instanceof ConflictError) || !await alreadyAdmitted()) throw err;
+    }
 
     // Bump lastActivityAt so a long-lived channel-bound session rises in
     // the session list when it receives a message (TKAI-341).
@@ -1415,6 +1609,7 @@ export class ChannelHost {
     sessionId: string,
     orgId: string,
     userId: string,
+    gateId: string,
   ): Promise<
     | { ok: true; owner: SessionOwnerLike; orgId: string }
     | { ok: false; reason: "workflow_session_malformed" | "workflow_session_missing" | "workflow_session_deleted" | "workflow_session_cross_org" | "unauthorized" }
@@ -1451,6 +1646,18 @@ export class ChannelHost {
       ? await isOrgAdmin(this.deps.db, workflowOrgId, userId)
       : await canResolveSessionGate(this.deps.db, owner, userPrincipal(userId));
     if (!authorized) return { ok: false, reason: "unauthorized" };
+    // A run from a private thread or a private Slack channel's event is that
+    // audience's. A named account approver may answer only their pending gate.
+    const gate = await this.deps.engineStore.getDecisionGate(sessionId, gateId);
+    const namedApprover = gate?.status === "pending" && gateApprover(gate)?.userId === userId;
+    if (owner.ownerType === "team" && !namedApprover) {
+      const access = { db: this.deps.db, engineCredentials: this.deps.engineCredentials, onePassword: this.deps.onePassword, engineStore: this.deps.engineStore };
+      const viewer = { orgId: workflowOrgId, userId };
+      if (!(await runOriginVisible(access, viewer, { ownerType: "team", origin: run.params.origin, actorUserId: run.actorUserId }))
+        || !(await runEventVisible(access, viewer, run.params))) {
+        return { ok: false, reason: "unauthorized" };
+      }
+    }
     return { ok: true, owner, orgId: workflowOrgId };
   }
 
@@ -1499,9 +1706,11 @@ export class ChannelHost {
 
     // Explicit resolve authorization — the same named check the web
     // decision routes make (`canResolveSessionGate`): the session's direct
-    // owner, or a live member of the owning team. The reply deliberately
-    // matches the unknown-ref case so a probe cannot distinguish "not
-    // yours" from "gone".
+    // owner, or a live member of the owning team. A refusal matches the
+    // unknown-ref reply, so a probe cannot tell "not yours" from "gone". One
+    // exception, below: a team-owned card already names its team to everyone
+    // in the thread ("Only members of X can approve."), so a non-member's
+    // click gets that same sentence; it discloses nothing the card did not.
     const rows = await this.deps.db
       .select()
       .from(agentSessions)
@@ -1511,7 +1720,7 @@ export class ChannelHost {
     let workflow: Awaited<ReturnType<ChannelHost["authorizeWorkflowGate"]>> | null = null;
     try {
       workflow = mapped.sessionId.startsWith("wf:")
-        ? await this.authorizeWorkflowGate(mapped.sessionId, orgId, userId)
+        ? await this.authorizeWorkflowGate(mapped.sessionId, orgId, userId, mapped.gateId)
         : null;
     } catch (err) {
       console.error("[channels] workflow gate authorization failed", err);
@@ -1530,7 +1739,15 @@ export class ChannelHost {
       return;
     }
     if (sessionRow && (sessionRow.orgId !== orgId || (!workflow?.ok && !(await canResolveSessionGate(this.deps.db, sessionRow, userPrincipal(userId)))))) {
-      await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
+      // A team's card already names who may approve, so a non-member's click
+      // gets that answer, not "expired". Every other refusal keeps the reply
+      // that cannot be told apart from an unknown card.
+      const teamNote = sessionRow.orgId === orgId && sessionRow.ownerType === "team" && sessionRow.ownerId
+        ? await this.teamApproverNote(sessionRow.ownerId) : undefined;
+      await transport?.answerCallback?.(
+        gateCallback.callbackId,
+        teamNote ? `${teamNote} Ask a team member to answer it.` : "This approval has expired — resolve it on the web.",
+      );
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "sender may not resolve this session's gates");
       return;
     }
@@ -1542,6 +1759,13 @@ export class ChannelHost {
     if (gateCallback.actionId === GATE_ACTION_ALWAYS_ALLOW && sessionOrgId && !(await canApplyAlwaysAllow(this.deps.db, sessionOrgId, userId))) {
       await transport?.answerCallback?.(gateCallback.callbackId, "Only an org admin can choose Always allow — resolve it on the web.");
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "always_allow requires org admin");
+      return;
+    }
+    // A gate asking to use a member's shared account answers to that member alone.
+    const stored = await this.deps.engineStore.getDecisionGate(mapped.sessionId, mapped.gateId);
+    if (stored && !answersGate(stored, userPrincipal(userId))) {
+      await transport?.answerCallback?.(gateCallback.callbackId, `Only ${gateApprover(stored)?.name ?? "the account's owner"} can allow use of their account.`);
+      await this.dropLog(orgId, "unauthorized", event.conversationKey, "only the account's owner may answer this gate");
       return;
     }
 
@@ -1569,7 +1793,7 @@ export class ChannelHost {
         if (!sessionRow) throw new Error("missing session row for channel gate callback");
         const assistant = await loadAssistantBySessionId(this.deps.db, mapped.sessionId);
         session = assistant
-          ? await this.deps.engineHost.assistantSessionFor(assistant.id, { actorUserId: userId, orgId })
+          ? await this.deps.engineHost.assistantSessionFor(assistant.id, { actorUserId: userId, orgId }, { sessionId: mapped.sessionId })
           : await this.deps.engineHost.sessionFor(mapped.sessionId, await loadSessionMeta(this.deps.db, sessionRow));
       }
     } catch (err) {
@@ -1621,6 +1845,26 @@ export class ChannelHost {
    */
   attentionDeliverer(): AttentionChannelDeliverer {
     return {
+      deliverTeam: async (event): Promise<void> => {
+        if (event.owner.type !== "team") return;
+        const transport = this.transports.get("slack");
+        if (!transport?.sendToChannel) return;
+        const orgId = this.orgId ?? await this.deps.resolveOrgId();
+        const [team] = await this.deps.db.select().from(teams)
+          .where(and(eq(teams.id, event.owner.id), eq(teams.orgId, orgId))).limit(1);
+        if (!team?.slackHomeChannelId) return;
+        if (event.sessionId && event.threadId) {
+          const thread = await this.deps.engineStore.getThread(event.sessionId, event.threadId);
+          // Existing Slack conversations keep their origin. This is only a new-message default.
+          if (thread?.key.startsWith("slack:")) return;
+        }
+        // Channel membership can differ from team membership. Keep sensitive details and
+        // approval controls behind the authorized web route.
+        const href = event.href ?? `/chat?workspace=${encodeURIComponent(team.id)}`;
+        await transport.sendToChannel(team.slackHomeChannelId, {
+          markdown: ["A team notification is ready in Valet.", this.openInValetLink(href)].filter(Boolean).join("\n\n"),
+        });
+      },
       deliver: async (userId: string, event: AttentionEvent): Promise<void> => {
         for (const channelType of this.transports.keys()) {
           try {
@@ -1642,7 +1886,7 @@ export class ChannelHost {
             // can be broader than the resolver set (org admins for an
             // org-owned session), and a button that always answers "expired"
             // is worse than the plain summary.
-            if (event.gate && event.sessionId && (await this.mayResolveGateOverDm(event.sessionId, userId))) {
+            if (event.gate && event.sessionId && (await this.mayResolveGateOverDm(event.sessionId, userId, event.gate.id))) {
               await this.sendAndRecordGatePrompt(
                 transport,
                 conversationKey,
@@ -1660,7 +1904,7 @@ export class ChannelHost {
             // No gate, a recipient who cannot resolve it, or a lookup that
             // failed: fall through to the plain summary with the web link.
             const sender = event.sessionId
-              ? await this.assistantSenderIdentity(event.sessionId)
+              ? await this.workspaceSenderForSession(event.sessionId)
               : undefined;
             await transport.send(conversationKey, {
               markdown: this.attentionMarkdown(event),
@@ -1683,7 +1927,7 @@ export class ChannelHost {
    * plain summary, which carries the web link. Throwing here instead would
    * lose the whole notification for a run that is waiting on it.
    */
-  private async mayResolveGateOverDm(sessionId: string, userId: string): Promise<boolean> {
+  private async mayResolveGateOverDm(sessionId: string, userId: string, gateId: string): Promise<boolean> {
     try {
       const rows = await this.deps.db
         .select()
@@ -1701,6 +1945,7 @@ export class ChannelHost {
         sessionId,
         this.orgId ?? (await this.deps.resolveOrgId()),
         userId,
+        gateId,
       );
       return workflow.ok;
     } catch (err) {

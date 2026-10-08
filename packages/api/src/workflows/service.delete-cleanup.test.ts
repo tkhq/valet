@@ -75,6 +75,24 @@ afterAll(async () => {
 });
 
 describe("deleteWorkflowDefinition trigger cleanup", () => {
+  it("retains caller-owned execution of an organization definition", async () => {
+    const def = await createWorkflowDefinition(deps, OWNER, { name: "org-caller",
+      definition: { version: "dag/v1", nodes: [], edges: [] } });
+    await db.update(workflowDefinitions).set({ ownerType: "org", ownerId: OWNER.orgId }).where(eq(workflowDefinitions.id, def.id));
+    const run = await deps.workflowStore.createRun("org-caller-run", { workflowId: def.id, definitionVersionId: "v1" },
+      def.definition, "v1", { ownerType: "user", ownerId: OWNER.userId });
+    expect(run.owner).toEqual({ ownerType: "user", ownerId: OWNER.userId, actorUserId: undefined });
+  });
+
+  it("rejects a personal run started from a snapshot after definition deletion", async () => {
+    const def = await createWorkflowDefinition(deps, OWNER, { name: "deleted-personal",
+      definition: { version: "dag/v1", nodes: [], edges: [] } });
+    expect(await deleteWorkflowDefinition(deps, OWNER, def.id)).toBe("deleted");
+    await expect(deps.workflowStore.createRun("personal-orphan", { workflowId: def.id, definitionVersionId: "v1" },
+      def.definition, "v1", { ownerType: "user", ownerId: OWNER.userId })).rejects.toThrow(/was deleted before the run could start/);
+    expect(await deps.workflowStore.getRun("personal-orphan")).toBeNull();
+  });
+
   it("keeps a terminalizing run with a reserved outcome as history", async () => {
     const def = await createWorkflowDefinition(deps, OWNER, {
       name: "terminalizing-history",

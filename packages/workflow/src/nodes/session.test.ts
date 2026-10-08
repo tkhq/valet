@@ -335,10 +335,17 @@ describe('executeSession: schema validation failure triggers exactly one repair'
     const repairText = String(repairCalls[0]?.text);
     expect(repairText).toContain(JSON.stringify(outputSchema));
     expect(repairText).toContain('missing value');
+    expect(repairText).toContain('Reuse prior successful tool results');
+    expect(repairText).toContain('Do not repeat actions with side effects');
+    expect(repairText).toContain('Do not invent empty arrays');
+    const primary = calls.find((call) => call.kind === 'prompt' && call.dispatchId === 'workflow:run-7:s');
+    expect(String(primary?.text)).toContain(JSON.stringify(outputSchema));
+    expect(String(primary?.text)).toContain('Return ONLY JSON');
 
     const byNode = new Map((await store.getCheckpoints('run-7')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('s')?.status).toBe('intent'); // still parked on the repair submission, not terminal
     expect(byNode.get('s')?.effects?.repairAttempted).toBe(true);
+    expect(byNode.get('s')?.effects?.firstError).toContain('missing value');
   });
 });
 
@@ -373,6 +380,8 @@ describe('executeSession: second validation failure fails the node', () => {
     const byNode = new Map((await store.getCheckpoints('run-8')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('s')?.status).toBe('failed');
     expect(byNode.get('s')?.error).toMatch(/second validation error/);
+    expect(byNode.get('s')?.effects?.firstError).toBe('first validation error');
+    expect(byNode.get('s')?.result).toBeUndefined();
 
     const repairCalls = calls.filter((c) => c.kind === 'prompt' && c.dispatchId === 'workflow:run-8:s:repair');
     expect(repairCalls).toHaveLength(1); // exactly one repair attempt, ever
@@ -510,5 +519,36 @@ describe('executeSession: aliases', () => {
 
     const promptCall = calls.find((c) => c.kind === 'prompt');
     expect(promptCall?.text).toBe('process widget-7 at index 1');
+  });
+});
+
+// Schema validity cannot prove whether an empty inventory reflects successful inspection.
+describe('sessionDefinition: structured inventory results', () => {
+  it.each(['completed', 'failed'] as const)('preserves the %s outcome when repair returns a schema-valid empty array', async (outcome) => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const outputSchema = { type: 'object', properties: { candidates: { type: 'array', items: { type: 'string' } } }, required: ['candidates'] };
+    const { engine, calls } = makeEngine({
+      isSettledQueue: [true],
+      awaitResultQueue: [
+        { outcome: 'completed', text: 'The inspection needs more time.', error: 'no JSON content found in result text' },
+        { outcome, text: '{"candidates":[]}', output: { candidates: [] }, ...(outcome === 'failed' ? { error: 'inspection tool failed' } : {}) },
+      ],
+    });
+    await store.createRun('inventory', runParams(), sessionDefinition({ outputSchema }), 'v1');
+    for (let i = 0; i < 3; i++) {
+      const attempt = await claimAttempt(store, 'inventory', `owner-${i}`);
+      await driveUntilPark('inventory', attempt, { store, engine, clock: clock.now });
+    }
+    const checkpoint = (await store.getCheckpoints('inventory')).find((cp) => cp.nodeId === 's');
+    expect(checkpoint?.status).toBe(outcome);
+    expect(checkpoint?.effects).toMatchObject({ repairAttempted: true, firstError: 'no JSON content found in result text' });
+    if (outcome === 'failed') {
+      expect(checkpoint?.error).toBe('inspection tool failed');
+      expect(checkpoint?.result).toBeUndefined();
+    } else {
+      expect(checkpoint?.result).toMatchObject({ output: { candidates: [] } });
+    }
+    expect(calls.filter((call) => call.kind === 'prompt')).toHaveLength(2);
   });
 });

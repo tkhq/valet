@@ -18,8 +18,8 @@
  * deliver an event into another org's assistant.
  */
 import type { ChannelOrigin, SignalContent } from "@valet/engine";
-import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { deliverToAssistantThread } from "./assistant-delivery.js";
 import type { OrchestratorDeliverFn } from "./dispatcher.js";
 
@@ -47,19 +47,19 @@ export function buildOrchestratorTarget(deps: {
   /** Seed a channel thread's earlier messages on the assistant's first turn. */
   fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
 }): OrchestratorDeliverFn {
-  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, assistantId }) => {
-    // A subscription names an owner and MAY name one of that owner's
-    // assistants. Without one the shared delivery helper resolves the owner's
-    // default, which is what every rule written before the field did.
+  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, threadKey, target, inbound, author, presence }) => {
+    // Every subscription resolves the singleton runtime of its owner.
     await deliverToAssistantThread(deps, {
       orgId,
       owner: { type: ownerType, id: ownerId },
       actorUserId,
-      threadKey: threadKeyForSignal(signal),
+      threadKey: threadKey ?? threadKeyForSignal(signal),
       signal,
-      dispatchId,
-      assistantId,
+      ...(presence ? { presence } : {}),      dispatchId,
+      target,
       mismatchReason: "event_target_mismatch",
+      ...(inbound ? { inbound } : {}),
+      ...(author ? { author } : {}),
     });
   };
 }

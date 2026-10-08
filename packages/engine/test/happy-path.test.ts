@@ -7,6 +7,7 @@ import {
   VirtualSandboxProvider,
   type BusEvent,
   type ToolDef,
+  type ToolContext,
   type CredentialOwner,
 } from "../src/index.js";
 
@@ -210,10 +211,43 @@ describe("engine: single-thread happy path", () => {
       const receipt = await session.prompt("record", { author: actor ? { id: actor } : undefined });
       await waitForStatus(events, receipt.threadId, "idle");
     }
-    expect(actors).toEqual(["member-b", "member-c", "credential-owner"]);
+    expect(actors).toEqual(["member-b", "member-c", ownerType === "team" ? "team:credential-owner" : "credential-owner"]);
     expect(credentialOwners).toEqual(Array.from({ length: 3 }, () => ({ type: ownerType, id: "credential-owner" })));
     expect(session.options.userId).toBe("credential-owner");
     faux.unregister();
+  });
+
+  it("keeps queued presence isolated between threads and captured tool contexts", async () => {
+    const faux = registerFauxProvider({ provider: "turn-presence" });
+    const { engine, store } = makeEngine();
+    const contexts: ToolContext[] = [];
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      resolveOutboundSender: async () => ({ displayName: "Workspace", avatarUrl: "https://example.com/default.png" }),
+      tools: [{ name: "identity", description: "Read sender", parameters: Type.Object({}), execute: async (_args, ctx) => {
+        contexts.push(ctx); return { text: "ok" };
+      } }],
+    });
+    try {
+      for (const [index, presence] of [{ displayName: "Automation" }, { avatarUrl: "https://example.com/run.png" }, undefined].entries()) {
+        faux.setResponses([
+          fauxAssistantMessage([fauxToolCall("identity", {}, { id: `identity-${index}` })], { stopReason: "toolUse" }),
+          fauxAssistantMessage("done"),
+        ]);
+        const thread = session.thread(index === 1 ? "other" : "web:default");
+        const receipt = await thread.submitPrompt("read sender", presence ? { metadata: { presence } } : {});
+        await thread.awaitResult(receipt.queueItemId);
+        expect((await store.getQueueItem(session.id, receipt.queueItemId))?.metadata?.presence).toEqual(presence);
+      }
+      expect(await Promise.all(contexts.map((ctx) => ctx.resolveOutboundSender?.()))).toEqual([
+        { displayName: "Automation", avatarUrl: "https://example.com/default.png" },
+        { displayName: "Workspace", avatarUrl: "https://example.com/run.png" },
+        { displayName: "Workspace", avatarUrl: "https://example.com/default.png" },
+      ]);
+      expect(await session.options.resolveOutboundSender?.()).toEqual({ displayName: "Workspace", avatarUrl: "https://example.com/default.png" });
+    } finally {
+      faux.unregister();
+    }
   });
 
   it("durably appends the turn's lifecycle events (offset-ordered, no text_delta, submission-linked)", async () => {

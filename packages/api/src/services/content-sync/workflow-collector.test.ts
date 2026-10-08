@@ -1,3 +1,4 @@
+import linearEventPlugin from "@valet/plugin-linear/plugin";
 /**
  * The workflow collector, driven through `syncOnce` — the same entry point
  * the skills collector runs under, against the same GitHub fixture.
@@ -7,8 +8,10 @@
  * rows alone. A mirror that loses a working workflow because someone pushed a
  * typo is worse than a mirror that lags a commit.
  */
+import * as workflowService from "../../workflows/service.js";
+import { shareCredential } from "../credential-shares.js";
 import { createHash } from "node:crypto";
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../../lib/drizzle.js";
 import { freshTestPgDb } from "../../test-helpers/pg-test-db.js";
@@ -19,6 +22,7 @@ import {
   type GithubFixture,
 } from "../../test-helpers/github-fixture.js";
 import {
+  linearInstallations,
   contentSources,
   eventSubscriptions,
   orgMembers,
@@ -26,6 +30,7 @@ import {
   teamMembers,
   teams,
   users,
+  workflowActionGrants,
   workflowDefinitions,
   workflowRuns,
   workflowSchedules,
@@ -381,11 +386,34 @@ describe("workflow collector", () => {
     const id = await teamSource();
     await serviceFor(f).syncOnce(id);
 
+    // An admin allowed an action for this workflow.
+    const [synced] = await db.select().from(workflowDefinitions);
+    await db.insert(workflowActionGrants).values({ id: "grant", orgId: synced!.orgId, workflowId: synced!.id,
+      ownerType: synced!.ownerType, ownerId: synced!.ownerId, actionId: "slack.post_message", grantedBy: "admin", createdAt: 1 });
+
     repo.sha = "c2";
     // A different graph, still valid: the stop node is renamed, which moves
     // the definition hash and so mints a version.
     repo.files[".valet/workflows/nightly.yaml"] = workflowYaml("Nightly", "done");
-    const outcome = await serviceFor(f).syncOnce(id);
+    const revoke = workflowService.revokeWorkflowGrants;
+    const revokeSpy = vi.spyOn(workflowService, "revokeWorkflowGrants");
+    revokeSpy.mockImplementation(async (...args) => {
+      await revoke(...args);
+      if (revokeSpy.mock.calls.length === 1) {
+        // An approval committed against the old definition after revocation.
+        await args[0].insert(workflowActionGrants).values({ id: "racing-grant", orgId: synced!.orgId, workflowId: synced!.id,
+          ownerType: synced!.ownerType, ownerId: synced!.ownerId, actionId: "slack.post_message", grantedBy: "admin", createdAt: 2 });
+      }
+    });
+    let outcome;
+    try {
+      outcome = await serviceFor(f).syncOnce(id);
+      expect(revokeSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      revokeSpy.mockRestore();
+    }
+    // A repository commit is not an approver's edit, so both grants go.
+    expect(await db.select().from(workflowActionGrants)).toHaveLength(0);
     expect(outcome?.warnings).toEqual([]);
     expect(outcome?.status).toBe("ok");
 
@@ -756,6 +784,23 @@ describe("workflow collector", () => {
         "",
       ].join("\n");
 
+    it("mirrors disconnected Linear workflows without arming events and preserves their schedule", async () => {
+      const path = ".valet/workflows/linear.yaml";
+      const repo: FakeRepo = { sha: "c1", files: { [path]: scheduled("0 3 * * *") + "\nevents:\n  - eventKeys: [linear.issue.update]\n" } };
+      const f = serve(repo);
+      const id = await teamSource();
+      const outcome = await serviceFor(f,[linearEventPlugin]).syncOnce(id);
+      expect(outcome?.warnings.join(" ")).toContain("Linear event triggers remain off");
+      expect(await mirrored()).toHaveLength(1);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+      expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
+      await db.insert(linearInstallations).values({ id: "repo-install", orgId: ORG, workspaceId: "linear-org", workspaceName: "Linear", webhookId: "webhook", connectedBy: "u1", createdAt: 1, updatedAt: 1 });
+      await credentials.save({ type: "org", id: ORG },"linear",{ type: "oauth2", accessToken: "token", metadata: { webhookSecret: "secret" } });
+      // Connecting ingress must arm the same repository commit on the next sync.
+      await serviceFor(f,[linearEventPlugin]).syncOnce(id);
+      expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
+    });
+
     it("arms a schedule, rewrites it when the cron moves, and disarms it when the block goes", async () => {
       const repo: FakeRepo = {
         sha: "c1",
@@ -1023,9 +1068,9 @@ describe("workflow collector", () => {
       ].join("\n");
     }
 
-    it("disarms and restores delegated schedules after membership changes at the same commit", async () => {
+    it("disarms shared-account schedules when the member leaves, and restores them once they share again", async () => {
       await credentials.save({ type: "user", id: "u1" }, "github", { type: "oauth2", accessToken: "personal-token" });
-      await credentials.save({ type: "team", id: TEAM }, "github", { type: "oauth2", metadata: { delegatedFrom: "u1" } });
+      await shareCredential(db, { teamId: TEAM, service: "github", userId: "u1", createdAt: 1 });
       const f = serve({ sha: "c1", files: { ".valet/workflows/report.yaml": nightlyReport() } });
       const id = await teamSource();
       await serviceFor(f).syncOnce(id);
@@ -1033,7 +1078,9 @@ describe("workflow collector", () => {
       await removeMember(db, { teamId: TEAM, userId: "u1" });
       await serviceFor(f).pollOnce();
       expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+      // The share left with the member, so a returning member shares again.
       await addMember(db, { teamId: TEAM, userId: "u1", role: "member" });
+      await shareCredential(db, { teamId: TEAM, service: "github", userId: "u1", createdAt: 2 });
       await serviceFor(f).pollOnce();
       expect(await db.select().from(workflowSchedules)).toHaveLength(1);
       expect(await mirrored()).toHaveLength(1);

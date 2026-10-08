@@ -8,17 +8,13 @@
  */
 import { useQuery, useMutation, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import type {
-  ProxyUsageSummary,
   ProxyRequestListItem,
-  ProxyRequestDetail,
   ProxySettingsResponse,
 } from "@valet/api/wire";
 import { api } from "~/api/client";
 
 export const qkProxy = {
-  summary: (window: string) => ["proxy", "usage", "summary", window] as const,
   requests: (filters: ProxyRequestFilters) => ["proxy", "requests", filters] as const,
-  detail: (id: string) => ["proxy", "requests", id] as const,
   settings: () => ["proxy", "settings"] as const,
 };
 
@@ -38,18 +34,6 @@ export interface ProxyRequestPage {
   hasMore: boolean;
 }
 
-export function useProxyUsageSummary(
-  window: string = "7d",
-  opts?: Partial<UseQueryOptions<ProxyUsageSummary>>,
-) {
-  return useQuery<ProxyUsageSummary>({
-    queryKey: qkProxy.summary(window),
-    queryFn: () => api.proxyUsageSummary(window),
-    staleTime: 60_000,
-    ...opts,
-  });
-}
-
 export function useProxyRequests(
   filters: ProxyRequestFilters = {},
   opts?: Partial<UseQueryOptions<ProxyRequestPage>>,
@@ -63,19 +47,6 @@ export function useProxyRequests(
       return { items: raw.requests, nextCursor: raw.nextCursor, pageSize: raw.pageSize, hasMore: raw.hasMore };
     },
     staleTime: 30_000,
-    ...opts,
-  });
-}
-
-export function useProxyRequestDetail(
-  id: string,
-  opts?: Partial<UseQueryOptions<ProxyRequestDetail>>,
-) {
-  return useQuery<ProxyRequestDetail>({
-    queryKey: qkProxy.detail(id),
-    queryFn: () => api.proxyRequestDetail(id),
-    enabled: !!id,
-    staleTime: 5 * 60_000,
     ...opts,
   });
 }

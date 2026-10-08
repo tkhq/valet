@@ -8,21 +8,24 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
-  type QueryClient,
   type UseQueryOptions,
+  type Query,
 } from "@tanstack/react-query";
 import type {
   CreateSessionRequest,
   CreateSessionResponse,
   CreateThreadRequest,
   CreateThreadResponse,
+  DeliverIdentityLinkFallback,
+  DeliverIdentityLinkRequest,
+  DeliverIdentityLinkResponse,
   GetSessionResponse,
   ListDecisionsResponse,
   ListIdentityLinksResponse,
+  ListLinkMembersResponse,
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
   ListNotificationsResponse,
-  ListSessionsResponse,
   ListThreadsResponse,
   PatchIdentityLinkRequest,
   PatchSessionResponse,
@@ -33,15 +36,9 @@ import type {
   ResolveDecisionRequest,
   SandboxJwtResponse,
   SandboxProfile,
-  SessionRunState,
   SetNotificationPreferenceRequest,
-  DeliverIdentityLinkFallback,
-  DeliverIdentityLinkRequest,
-  DeliverIdentityLinkResponse,
-  ListLinkMembersResponse,
   StartIdentityLinkResponse,
 } from "@valet/api/wire";
-import { useLiveQuery } from "~/lib/use-live-query";
 import { api, type OwnerFilter } from "./client";
 
 // ── Query key factory ────────────────────────────────────────────────────
@@ -53,6 +50,7 @@ export const qk = {
     ["sessions", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   session: (id: string) => ["sessions", id] as const,
   threads: (id: string) => ["sessions", id, "threads"] as const,
+  threadSearch: (id: string, query: string) => ["sessions", id, "threads", "search", query] as const,
   threadsArchived: (id: string) => ["sessions", id, "threads", "archived"] as const,
   messages: (id: string, threadId?: string) =>
     threadId
@@ -60,78 +58,24 @@ export const qk = {
       : (["sessions", id, "messages"] as const),
   decisions: (id: string) => ["sessions", id, "decisions"] as const,
   ratings: (id: string) => ["sessions", id, "ratings"] as const,
-  /** Spelled here (not in assistants.ts's `qkAssistants`) so useDeleteSession
-   * below can invalidate it without an import cycle — assistants.ts already
-   * imports this factory and derives `qkAssistants.list` from it. */
-  assistants: () => ["assistants"] as const,
   notifications: () => ["notifications"] as const,
   notificationPreferences: () => ["notifications", "preferences"] as const,
   identityLinks: () => ["identityLinks"] as const,
   linkMembers: (provider: string, query: string) => ["linkMembers", provider, query] as const,
 };
 
+/** Execution updates also refresh workspace aggregates containing that execution. */
+export function threadListFilters(sessionId: string) {
+  return { predicate: ({ queryKey, state }: Query) => {
+    if (queryKey[0] !== "sessions" || queryKey[2] !== "threads") return false;
+    if (queryKey[1] === sessionId) return true;
+    const data = state.data;
+    return Boolean(data && typeof data === "object" && "threads" in data && Array.isArray(data.threads)
+      && data.threads.some(thread => thread && typeof thread === "object" && "sessionId" in thread && thread.sessionId === sessionId));
+  } };
+}
+
 // ── Reads ────────────────────────────────────────────────────────────────
-
-/**
- * The run states that keep the sessions list polling.
- *
- * `working` changes on its own — that is the whole reason the page is open.
- * `needs_you` changes when a person answers the gate, and the person can
- * answer from a chat channel or a second tab, so this page has to follow
- * that too. The rest are quiet: `failed`, `sleeping` and `idle` only move
- * when someone sends new work, and every path that sends work already
- * invalidates this query.
- */
-const LIVE_SESSION_STATES: ReadonlySet<SessionRunState> = new Set<SessionRunState>([
-  "working",
-  "needs_you",
-]);
-
-/** The "is anything moving?" rule for the sessions list. Exported because
- * the poll cost of the page depends on it, so it gets its own test. */
-export function sessionsAreLive(data: ListSessionsResponse): boolean {
-  return data.sessions.some((s) => LIVE_SESSION_STATES.has(s.runState));
-}
-
-/**
- * Polls while any session is working or blocked on a person, and stops when
- * none are. See `lib/use-live-query.ts` for the policy.
- */
-/** The sessions of one workspace, or of everything the caller can reach.
- * `owner` MUST reach the query key, or switching answers from the previous
- * workspace's cache. */
-export function useSessions(
-  owner?: OwnerFilter,
-  opts?: UseQueryOptions<ListSessionsResponse>,
-) {
-  return useLiveQuery<ListSessionsResponse>({
-    queryKey: qk.sessions(owner),
-    queryFn: () => api.listSessions(owner),
-    isLive: sessionsAreLive,
-    ...opts,
-  });
-}
-
-/**
- * Re-reads a session whose row the caller has just created.
- *
- * `invalidateQueries` alone does not do it. A read that started before the
- * row existed may still be in flight, and a query with no data yet keeps
- * its running attempt when asked to refetch (query-core only cancels a
- * refetch over existing data), so that attempt's 404 lands after the
- * invalidation and stays. Cancelling first discards the stale attempt; the
- * invalidation then starts a fresh one. `qk.session(id)` prefixes every read
- * under the session — `qk.threads(id)`, messages and decisions included —
- * so one call covers them all.
- *
- * Resolves once the active reads have answered again, so a caller that
- * awaits it mounts on fresh data rather than on the error the reads held.
- */
-export async function refetchSessionReads(qc: QueryClient, sessionId: string): Promise<void> {
-  const queryKey = qk.session(sessionId);
-  await qc.cancelQueries({ queryKey });
-  await qc.invalidateQueries({ queryKey });
-}
 
 export function useSession(id: string, opts?: Partial<UseQueryOptions<GetSessionResponse>>) {
   return useQuery<GetSessionResponse>({
@@ -142,12 +86,21 @@ export function useSession(id: string, opts?: Partial<UseQueryOptions<GetSession
   });
 }
 
-export function useThreads(id: string, opts?: UseQueryOptions<ListThreadsResponse>) {
+export function useThreads(id: string, opts?: UseQueryOptions<ListThreadsResponse>, selectedThreadId?: string) {
   return useQuery<ListThreadsResponse>({
-    queryKey: qk.threads(id),
-    queryFn: () => api.listThreads(id),
+    queryKey: selectedThreadId ? [...qk.threads(id), "selected", selectedThreadId] : qk.threads(id),
+    queryFn: () => api.listThreads(id, { threadId: selectedThreadId }),
     enabled: !!id,
     ...opts,
+  });
+}
+
+export function useThreadSearch(id: string, query: string, enabled: boolean) {
+  return useQuery<ListThreadsResponse>({
+    queryKey: qk.threadSearch(id, query),
+    queryFn: () => api.listThreads(id, { q: query }),
+    enabled: enabled && !!id && !!query,
+    staleTime: 0,
   });
 }
 
@@ -200,12 +153,6 @@ export function useDeleteSession() {
     mutationFn: (id) => api.deleteSession(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.sessions() });
-      // Deleting a team assistant's session retires the assistant row
-      // server-side (TKAI-296) — refresh the rail so it drops right away
-      // instead of on the next focus refetch. Unconditional on purpose:
-      // migrated assistants keep legacy non-`assistant:`-prefixed session
-      // ids, so the id alone cannot say whether a retire happened.
-      qc.invalidateQueries({ queryKey: qk.assistants() });
     },
   });
 }
@@ -244,7 +191,7 @@ export function useCreateThread(sessionId: string) {
   return useMutation<CreateThreadResponse, Error, CreateThreadRequest | void>({
     mutationFn: (body) => api.createThread(sessionId, body ?? {}),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+      qc.invalidateQueries(threadListFilters(sessionId));
     },
   });
 }
@@ -285,16 +232,6 @@ export function useSessionRatings(sessionId: string) {
   });
 }
 
-/** Session-level 👍/👎. `null` clears the rating. */
-export function useRateSession(sessionId: string) {
-  const qc = useQueryClient();
-  return useMutation<PutRatingResponse, Error, RatingValue | null>({
-    mutationFn: (rating) => api.rateSession(sessionId, { rating }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.ratings(sessionId) });
-    },
-  });
-}
 
 /** Message-level 👍/👎 on one assistant entry. `null` clears the rating. */
 export function useRateMessage(sessionId: string) {
@@ -355,11 +292,20 @@ export function useSetSessionProfile(sessionId: string) {
 export function useSetThreadModel(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; model: string | null }>({
-    mutationFn: ({ threadId, model }) => api.patchThread(sessionId, threadId, { model }),
-    onSuccess: () => {
-      // Thread PATCH touches only the thread row; the session detail (and
-      // its default model) is unchanged — no session invalidation.
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+    mutationFn: ({ threadId, model }) => api.patchThread(threadId, { model }),
+    onSuccess: async (saved) => {
+      // A GET started before the save must not overwrite its confirmed pin.
+      await qc.cancelQueries(threadListFilters(sessionId));
+      // PATCH confirms the pin. Update only that field so newer activity
+      // and title updates survive a slower model save.
+      qc.setQueriesData<ListThreadsResponse>(
+        threadListFilters(sessionId),
+        (current) => current && ({
+          ...current,
+          threads: current.threads.map((thread) =>
+            thread.id === saved.id ? { ...thread, model: saved.model } : thread),
+        }),
+      );
     },
   });
 }
@@ -370,9 +316,30 @@ export function useSetThreadModel(sessionId: string) {
 export function useSetThreadReasoning(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; reasoning: string | null }>({
-    mutationFn: ({ threadId, reasoning }) => api.patchThread(sessionId, threadId, { reasoning }),
+    mutationFn: ({ threadId, reasoning }) => api.patchThread(threadId, { reasoning }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+      qc.invalidateQueries(threadListFilters(sessionId));
+    },
+  });
+}
+
+/** Marks threads read for the viewer; with no ids, every thread in the session.
+ * The list shows them read at once; the server keeps the later timestamp. */
+export function useMarkThreadsRead(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<void, Error, { threadIds?: string[] }>({
+    mutationFn: ({ threadIds }) => api.markThreadsRead(sessionId, threadIds),
+    onMutate: ({ threadIds }) => {
+      const at = Date.now();
+      const ids = threadIds ?? qc.getQueryData<ListThreadsResponse>(qk.threads(sessionId))?.threads.map(thread => thread.id);
+      qc.setQueriesData<ListThreadsResponse>(threadListFilters(sessionId), (current) => current && ({
+        ...current,
+        threads: current.threads.map((thread) =>
+          (ids ? ids.includes(thread.id) : thread.sessionId === sessionId) ? { ...thread, readAt: Math.max(thread.readAt ?? 0, at) } : thread),
+      }));
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ["workspace-waiting"] });
     },
   });
 }
@@ -381,9 +348,9 @@ export function useSetThreadArchived(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean }>({
     mutationFn: ({ threadId, archived }) =>
-      api.patchThread(sessionId, threadId, { archived }),
+      api.patchThread(threadId, { archived }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+      qc.invalidateQueries(threadListFilters(sessionId));
       qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
     },
   });
@@ -394,9 +361,9 @@ export function useRenameThread(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; title: string | null }>({
     mutationFn: ({ threadId, title }) =>
-      api.patchThread(sessionId, threadId, { title }),
+      api.patchThread(threadId, { title }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+      qc.invalidateQueries(threadListFilters(sessionId));
       qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
     },
   });
@@ -414,6 +381,10 @@ export function useDecisions(
   });
 }
 
+export function useNotificationDecisions(cursor?: string, enabled = true) {
+  return useQuery({ queryKey: ["notification-decisions", cursor], queryFn: () => api.listNotificationDecisions(cursor), enabled, refetchInterval: 5000 });
+}
+
 export function useResolveDecision(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<
@@ -423,7 +394,10 @@ export function useResolveDecision(sessionId: string) {
   >({
     mutationFn: ({ gateId, body }) => api.resolveDecision(sessionId, gateId, body),
     // Approval-only views poll this query without a session stream.
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.decisions(sessionId) }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) });
+      void qc.invalidateQueries({ queryKey: ["notification-decisions"] });
+    },
   });
 }
 
@@ -432,7 +406,10 @@ export function useWithdrawDecision(sessionId: string) {
   return useMutation<{ ok: true }, Error, { gateId: string }>({
     mutationFn: ({ gateId }) =>
       api.withdrawDecision(sessionId, gateId, { reason: "cancel" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.decisions(sessionId) }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) });
+      void qc.invalidateQueries({ queryKey: ["notification-decisions"] });
+    },
   });
 }
 
@@ -483,7 +460,7 @@ export function useSendPrompt(sessionId: string) {
     // Socket events update other viewers; a later thread-list fetch reconciles
     // this cache with the persisted value.
     onSuccess: (data, { text }) => {
-      qc.setQueryData<ListThreadsResponse>(qk.threads(sessionId), (current) => current && ({
+      qc.setQueriesData<ListThreadsResponse>(threadListFilters(sessionId), (current) => current && ({
         ...current,
         threads: current.threads.map((thread) =>
           thread.id === data.threadId
@@ -511,7 +488,7 @@ export function useSandboxJwt(sessionId: string) {
 export function useAbortThread(sessionId: string) {
   return useMutation<{ ok: true }, Error, { threadId: string; targetItemId: string }>({
     mutationFn: ({ threadId, targetItemId }) =>
-      api.abortThread(sessionId, threadId, { targetItemId }),
+      api.abortThread(threadId, { targetItemId }),
     // No invalidation — the abort's terminal state (submission settled
     // `aborted`, thread status back to idle) arrives via the WS stream,
     // same as every other engine-driven state transition.
@@ -520,7 +497,7 @@ export function useAbortThread(sessionId: string) {
 
 export function useResumeThread(sessionId: string) {
   return useMutation<{ ok: true }, Error, { threadId: string }>({
-    mutationFn: ({ threadId }) => api.resumeThread(sessionId, threadId),
+    mutationFn: ({ threadId }) => api.resumeThread(threadId),
   });
 }
 

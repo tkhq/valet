@@ -27,8 +27,9 @@ const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider 
 
 it("lets a member request deletion with the styled picker and withdraw only their own request", async () => {
   render(<TeamDeletionRequests teamId="team-a" canManage={false} />, { wrapper });
-  await screen.findByText("Daily report (Workflow) — pending");
+  await screen.findByText("Daily report");
   expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Request deletion…" }));
   fireEvent.keyDown(screen.getByRole("button", { name: "Resource to delete" }), { key: "Enter" });
   fireEvent.click(screen.getByRole("menuitem", { name: "Daily report (Workflow)" }));
   fireEvent.change(screen.getByRole("textbox", { name: "Deletion reason" }), { target: { value: "Replaced" } });
@@ -58,6 +59,7 @@ it("displays departed requesters and never offers decisions on expired requests"
   vi.mocked(api.listTeamDeletionRequests).mockResolvedValue({ requests: [{ ...pending, status: "expired", requesterIsMember: false }], nextCursor: null });
   render(<TeamDeletionRequests teamId="team-a" canManage />, { wrapper });
   await screen.findByText(/no longer a team member/);
+  expect(screen.getByText("expired")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Withdraw" })).toBeNull();
 });
@@ -68,7 +70,7 @@ it("clears confirmation and entered fields when changing teams", async () => {
   fireEvent.change(screen.getByRole("textbox", { name: "Decision note" }), { target: { value: "Private note for A" } });
   view.rerender(<TeamDeletionRequests teamId="team-b" canManage />);
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(api.listTeamDeletionRequests).toHaveBeenCalledWith("team-b", { status: "pending", limit: 50, cursor: undefined });
+  expect(api.listTeamDeletionRequests).toHaveBeenCalledWith("team-b", { status: "all", limit: 50, cursor: undefined });
   expect(api.decideTeamDeletionRequest).not.toHaveBeenCalled();
 });
 
@@ -85,6 +87,8 @@ it("handles empty targets without enabling submission", async () => {
   vi.mocked(api.listTeamDeletionTargets).mockResolvedValue({ targets: [] });
   vi.mocked(api.listTeamDeletionRequests).mockResolvedValue({ requests: [], nextCursor: null });
   render(<TeamDeletionRequests teamId="team-a" canManage={false} />, { wrapper });
+  await screen.findByText("No deletion requests.");
+  fireEvent.click(screen.getByRole("button", { name: "Request deletion…" }));
   await screen.findByText("No resources are available for deletion requests.");
   expect(screen.getByRole("button", { name: "Request deletion" }).hasAttribute("disabled")).toBe(true);
 });
@@ -93,41 +97,34 @@ it("shows a retryable list error and blocks submission", async () => {
   vi.mocked(api.listTeamDeletionRequests).mockRejectedValue(new Error("offline"));
   render(<TeamDeletionRequests teamId="team-a" canManage />, { wrapper });
   await screen.findByText("Could not load deletion requests.");
-  expect(screen.getByRole("button", { name: "Request deletion" }).hasAttribute("disabled")).toBe(true);
+  expect(screen.getByRole("button", { name: "Request deletion…" }).hasAttribute("disabled")).toBe(true);
   vi.mocked(api.listTeamDeletionRequests).mockResolvedValue({ requests: [], nextCursor: null });
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   await screen.findByText("No deletion requests.");
 });
 
-
-it("pages pending requests, resets the cursor for history and team changes, and decides a later request", async () => {
+it("pages requests, resets the cursor on a team change, and decides a later request", async () => {
   const older = { ...pending, id: "older", resourceLabel: "Oldest pending" };
   vi.mocked(api.listTeamDeletionRequests).mockImplementation(async (_teamId, options) => {
-    if (options?.status === "history") return { requests: [{ ...pending, status: "withdrawn" }], nextCursor: null };
     return options?.cursor ? { requests: [older], nextCursor: null } : { requests: [pending], nextCursor: "page-two" };
   });
   const view = render(<TeamDeletionRequests teamId="team-a" canManage />, { wrapper });
-  await screen.findByText("Daily report (Workflow) — pending");
+  await screen.findByText("Daily report");
   await waitFor(() => expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(false));
   fireEvent.click(screen.getByRole("button", { name: "Next" }));
-  await screen.findByText("Oldest pending (Workflow) — pending");
+  await screen.findByText("Oldest pending");
   expect(screen.getByText("Page 2")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Approve" }));
   fireEvent.click(screen.getByRole("button", { name: "Approve deletion" }));
   await waitFor(() => expect(api.decideTeamDeletionRequest).toHaveBeenCalledWith("team-a", "older", "approve", ""));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   fireEvent.click(screen.getByRole("button", { name: "Previous" }));
-  await screen.findByText("Daily report (Workflow) — pending");
+  await screen.findByText("Daily report");
   await waitFor(() => expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(false));
   fireEvent.click(screen.getByRole("button", { name: "Next" }));
-  await screen.findByText("Oldest pending (Workflow) — pending");
-  fireEvent.keyDown(screen.getByRole("button", { name: "Deletion request status" }), { key: "Enter" });
-  fireEvent.click(screen.getByRole("menuitem", { name: "History" }));
-  await screen.findByText("Daily report (Workflow) — withdrawn");
-  expect(api.listTeamDeletionRequests).toHaveBeenLastCalledWith("team-a", { status: "history", limit: 50, cursor: undefined });
-  expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+  await screen.findByText("Oldest pending");
   view.rerender(<TeamDeletionRequests teamId="team-b" canManage />);
-  await waitFor(() => expect(api.listTeamDeletionRequests).toHaveBeenLastCalledWith("team-b", { status: "pending", limit: 50, cursor: undefined }));
+  await waitFor(() => expect(api.listTeamDeletionRequests).toHaveBeenLastCalledWith("team-b", { status: "all", limit: 50, cursor: undefined }));
 });
 
 it("keeps Previous available when a later page is empty or fails", async () => {
@@ -140,11 +137,20 @@ it("keeps Previous available when a later page is empty or fails", async () => {
   await screen.findByText("Could not load deletion requests.");
   expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Previous" }));
-  await screen.findByText("Daily report (Workflow) — pending");
+  await screen.findByText("Daily report");
   vi.mocked(api.listTeamDeletionRequests).mockImplementation(async (_teamId, options) => ({ requests: options?.cursor ? [] : [pending], nextCursor: options?.cursor ? null : "next" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(false));
   fireEvent.click(screen.getByRole("button", { name: "Next" }));
   await screen.findByText("No deletion requests.");
   fireEvent.click(screen.getByRole("button", { name: "Previous" }));
-  await screen.findByText("Daily report (Workflow) — pending");
+  await screen.findByText("Daily report");
+});
+
+it("opens the request form on a target the caller picks, such as the team menu", async () => {
+  const onRequestChange = vi.fn();
+  render(<TeamDeletionRequests teamId="team-a" canManage={false} request="workflow:workflow-1" onRequestChange={onRequestChange} />, { wrapper });
+  expect(await screen.findByRole("button", { name: "Resource to delete" })).toBeTruthy();
+  await screen.findByText("Daily report (Workflow)");
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(onRequestChange).toHaveBeenCalledWith(null);
 });

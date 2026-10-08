@@ -170,7 +170,7 @@ export type ServiceAvailabilityState =
   | "not_connected"
   | "deployment_unconfigured"
   | "disabled_by_org"
-  | "excluded_by_assistant"
+  | "limited_by_workspace"
   | "load_failed";
 
 export interface ServiceAvailability {
@@ -263,8 +263,11 @@ export function pinnedToolName(actionId: string): string | undefined {
   return actionId.replace(".", "__");
 }
 
-/** TTL for the dynamic `resolveActions` cache, keyed per plugin service. */
+/** TTL for dynamic action discovery within an actor and thread scope. */
 export const RESOLVE_TTL_MS = 300_000;
+
+// Reserved from plugin action names: discovery approval is never execution approval.
+const DISCOVERY_ACTION_NAME = "__valet_discovery__";
 
 /**
  * Applies TypeBox `Value.Default` to a cloned copy of `params`, then
@@ -340,6 +343,10 @@ export type InvokeActionResult =
   | { kind: "unknown"; toolId: string }
   | { kind: "invalid-args"; error: string }
   | { kind: "denied-policy"; scope?: "team" }
+  /** The action needs approval and the turn came from a channel sender with
+   * no Valet account (`ToolContext.externalSender`). No gate opens, so a
+   * newcomer can never send a teammate an approval request. */
+  | { kind: "denied-external-sender" }
   | { kind: "denied-approval"; reason?: "approval-processing-failed" }
   | { kind: "expired-approval" }
   | { kind: "pending-approval" }
@@ -519,6 +526,7 @@ export async function invokeAction(
   if (!resolver) {
     const approvalMode = approvalModeFor(entry);
     if (approvalMode === "deny") return { kind: "denied-policy" };
+    if (approvalMode === "require_approval" && ctx.externalSender) return { kind: "denied-external-sender" };
     if (approvalMode === "require_approval") {
       const gateOutcome = await requestApprovalDecision(
         ctx,
@@ -559,6 +567,7 @@ export async function invokeAction(
     sessionId: ctx.sessionId,
     threadId: ctx.threadId,
     appliesIn: "session",
+    ...(ctx.externalSender ? { externalSender: true } : {}),
   };
   const baseRecord: BaseInvocationRecord = {
     service: entry.service,
@@ -606,6 +615,16 @@ export async function invokeAction(
   // the terminal audit record can carry it — absent for allow/deny.
   let gateOrdinal: number | undefined;
 
+  if (decision.mode === "require_approval" && ctx.externalSender) {
+    emitInvocation(resolver, {
+      ...baseRecord,
+      status: "denied",
+      resolvedMode: "require_approval",
+      provenance: decision.provenance,
+    });
+    return { kind: "denied-external-sender" };
+  }
+
   if (decision.mode === "require_approval") {
     // Reject reserved ids up front: "approve"/"deny" are the engine's own
     // default gate actions (added below), so a host extra reusing one would
@@ -626,16 +645,28 @@ export async function invokeAction(
     // Pass `approves` through to the gate — DecisionAction persists it on
     // the row so denial stickiness classifies host rejection actions the
     // same way isApprovedResolution does.
-    const extras: DecisionAction[] = decision.extraGateActions ?? [];
+    const extras: DecisionAction[] = decision.approver ? [] : decision.extraGateActions ?? [];
     const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey);
+    if (decision.approver?.shareGeneration) {
+      const share = `:share:${decision.approver.shareGeneration}`;
+      baseReq.dedupeKey = `${qualifiedId(entry)}${share}`;
+      baseReq.resumeKey = `${baseReq.dedupeKey}:${boundedArgsKey(stableJson(args ?? {}))}`;
+      baseRecord.resumeKey = baseReq.resumeKey;
+    }
+    // Another member's account: only they answer, so the gate asks them.
+    const borrowScope = ctx.sessionId.startsWith("wf:") ? "workflow run" : "thread";
+    const borrowed = decision.approver
+      ? { title: `Let a teammate use your ${entry.service} account?`, body: `${summary}\n\nValet would run ${entry.action.name} through your ${entry.service} account. Allowing this also permits later ${entry.service} actions in this ${borrowScope}, including actions requested by other teammates. Only you can answer.` }
+      : {};
     const gateOutcome = await requestApprovalDecision(ctx, {
       ...baseReq,
+      ...borrowed,
       actions: [
-        { id: "approve", label: "Approve", style: "primary" },
+        { id: "approve", label: decision.approver ? "Allow" : "Approve", style: "primary" },
         { id: "deny", label: "Deny", style: "danger" },
         ...extras,
       ],
-      context: { ...baseReq.context, provenance: decision.provenance },
+      context: { ...baseReq.context, provenance: decision.provenance, ...(decision.approver ? { approver: decision.approver } : {}) },
     });
     if (gateOutcome.kind === "expired") {
       // The gate opened and nobody answered before the deadline — a terminal
@@ -733,7 +764,7 @@ interface Catalog {
   byId: Map<string, CatalogEntry>;
   /** Plugins with a `resolveActions` seam, resolved on demand (not eagerly at catalog build). */
   dynamicPlugins: ActionPlugin[];
-  /** TTL cache of resolved dynamic actions, keyed by plugin service. */
+  /** TTL cache of dynamic actions, scoped to service, actor, thread, and sender class. */
   resolved: Map<string, ResolvedDynamic>;
   serviceAvailability: readonly ServiceAvailability[];
   resolveServiceAvailability?: PluginCatalogAvailabilityOptions["resolveServiceAvailability"];
@@ -748,6 +779,9 @@ function buildEntries(
   const entries: CatalogEntry[] = [];
   const byId = new Map<string, CatalogEntry>();
   for (const action of actions) {
+    if (action.id === DISCOVERY_ACTION_NAME || action.id.endsWith(`.${DISCOVERY_ACTION_NAME}`)) {
+      throw new Error("Plugin action uses the reserved discovery identity");
+    }
     const entry: CatalogEntry = { service, plugin, action };
     entries.push(entry);
     const fqid = action.id.includes(".") ? action.id : `${service}.${action.id}`;
@@ -851,7 +885,8 @@ async function resolveDynamic(
   ctx: ToolContext,
 ): Promise<ResolvedDynamic> {
   const now = catalog.now();
-  const cached = catalog.resolved.get(plugin.service);
+  const cacheKey = JSON.stringify([plugin.service, ctx.userId, ctx.threadId, ctx.externalSender === true]);
+  const cached = catalog.resolved.get(cacheKey);
   if (cached && now - cached.fetchedAt < RESOLVE_TTL_MS) {
     return cached;
   }
@@ -859,12 +894,44 @@ async function resolveDynamic(
   const resolveActions = plugin.resolveActions;
   if (!resolveActions) throw new Error(`plugin ${plugin.service} has no resolveActions`);
   const credentialService = plugin.credentialService ?? plugin.service;
-  const actions = await resolveActions({
+  const discover = () => resolveActions({
     credentials: scopedCredentialProvider(ctx, credentialService),
   });
+  let actions: PluginAction[];
+  if (ctx.owner?.type === "team" && ctx.policyResolver) {
+    // Discovery can transmit a member's credential before any remote action
+    // schema is known. Reuse the ordinary policy/gate/audit pipeline first.
+    let discovered: PluginAction[] | undefined;
+    const action: PluginAction = {
+      id: `${plugin.service}.${DISCOVERY_ACTION_NAME}`, name: `Discover ${plugin.service} tools`,
+      description: "Read the tools available through this account.", riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => {
+        discovered = await discover();
+        return { success: true };
+      },
+    };
+    const entry: CatalogEntry = { service: plugin.service, plugin, action };
+    const outcome = await invokeAction(
+      { ...catalog, entries: [entry], byId: new Map([[action.id, entry]]), dynamicPlugins: [] },
+      action.id, {}, ctx, `Read available ${plugin.service} tools using this account.`,
+    );
+    if (outcome.kind !== "ok" || !outcome.result.success || !discovered) {
+      const reason = outcome.kind === "ok" ? outcome.result.error ?? "discovery failed" : outcome.kind;
+      throw new Error(`Tool discovery requires permitted account access: ${reason}`);
+    }
+    actions = discovered;
+  } else {
+    actions = await discover();
+  }
   const built = buildEntries(plugin.service, plugin, actions);
   const result: ResolvedDynamic = { ...built, fetchedAt: now };
-  catalog.resolved.set(plugin.service, result);
+  // Actor/thread scoping can create many keys in a long-lived runtime.
+  if (!catalog.resolved.has(cacheKey) && catalog.resolved.size >= 200) {
+    const oldest = catalog.resolved.keys().next().value;
+    if (oldest !== undefined) catalog.resolved.delete(oldest);
+  }
+  catalog.resolved.set(cacheKey, result);
   return result;
 }
 
@@ -1132,6 +1199,7 @@ function resolveFailurePrefix(message: string): string {
 function makeCallTool(catalog: Catalog): ToolDef {
   return {
     name: "call_tool",
+    policyChecked: true,
     description:
       "Invoke a plugin action by tool_id (discovered via list_tools). Approval gates may suspend execution for high/critical risk actions.",
     parameters: Type.Object({
@@ -1181,6 +1249,10 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
       };
     case "denied-policy":
       return { text: `denied: ${toolId} is blocked by ${outcome.scope === "team" ? "team" : "org"} policy` };
+    case "denied-external-sender":
+      return {
+        text: `denied: ${toolId} needs approval, and this message came from someone with no Valet account. Do not retry it. Tell them a teammate with a Valet account must ask for this.`,
+      };
     // The LLM tool path has no distinct "pending" state — requestDecision
     // blocks until the gate resolves — so both approval outcomes collapse
     // to the same "did not approve" text.
@@ -1398,6 +1470,7 @@ function makePinnedTool(
   // sends no summary or the schema cannot carry one.
   const derivedSummary = `${entry.action.name} (${name})`;
   return {
+    policyChecked: true,
     name,
     description: parts.join(" "),
     parameters: published.schema,
@@ -1616,10 +1689,14 @@ function actionResultToToolResult(
       ok: true,
     };
   }
+  const createdPullRequest = /^github[.:]create_pull_request$/.test(toolId) && typeof result.data === "object" && result.data !== null
+    && "url" in result.data && typeof result.data.url === "string" ? result.data.url : undefined;
   return {
     text: typeof result.data === "string" ? result.data : encodeToolOutput(result.data),
     attachments: attachments && attachments.length > 0 ? attachments : undefined,
     ok: true,
+    // Usage counts terminal PRs from bash parts only; the action has its own fact.
+    ...(createdPullRequest ? { outcome: { kind: "pull_request_created" as const, url: createdPullRequest } } : {}),
   };
 }
 

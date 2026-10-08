@@ -7,7 +7,7 @@ import { describe, expect, it, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { teams, users } from "../schema/index.js";
+import { agentSessions, teams, users } from "../schema/index.js";
 import { internalToken } from "../lib/internal-auth.js";
 
 let api: TestApi | undefined;
@@ -39,9 +39,11 @@ describe("auth middleware ladder — stub-mode boots", () => {
     expect(res.status).toBe(200);
   });
 
-  it("a sandbox token reaches memory routes and the owner derives from the token, not headers", async () => {
+  it("a sandbox token reaches memory routes and the owner derives from its session, not headers", async () => {
     api = await bootTestApi();
     const { db } = api.providers;
+    await db.insert(agentSessions).values({ id: "sbx-sess", userId: "sbx-user", orgId: "local-org",
+      ownerType: "user", ownerId: "sbx-user", workspace: "w", createdAt: 1, updatedAt: 1 });
     const { token } = await mintSandboxToken(db, { sessionId: "sbx-sess", userId: "sbx-user", orgId: "local-org" });
 
     // Write scoped to the sandbox token's userId, even though a bogus

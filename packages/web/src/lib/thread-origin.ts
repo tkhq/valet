@@ -1,5 +1,5 @@
 /**
- * Thread origin bucketing + search for the chat sidebar (V2 counterpart of
+ * Thread origin bucketing for the chat sidebar (V2 counterpart of
  * V1's `thread-origin-buckets.ts`). V2 encodes origin in the engine thread
  * KEY convention rather than persisted origin_* columns:
  *
@@ -15,16 +15,15 @@
  * automation existed.
  */
 import type { ThreadSummary } from "@valet/api/wire";
-import { matchesNeedle } from "./text-match";
 
 export type ThreadOriginBucket = "all" | "chat" | "auto" | "channel" | "other";
 
 export const THREAD_ORIGIN_FILTERS: readonly { id: ThreadOriginBucket; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "chat", label: "Chat" },
-  { id: "auto", label: "Auto" },
-  { id: "channel", label: "Channels" },
-  { id: "other", label: "Other" },
+  { id: "all", label: "All threads" },
+  { id: "chat", label: "Web chat" },
+  { id: "channel", label: "Slack and other channels" },
+  { id: "auto", label: "Automations" },
+  { id: "other", label: "Other agents" },
 ];
 
 const CHANNEL_KEY_PREFIXES = ["telegram:", "slack:", "discord:", "email:", "sms:"];
@@ -37,29 +36,19 @@ export function threadOriginBucket(thread: Pick<ThreadSummary, "key">): Exclude<
   return "other";
 }
 
+/** The channel a channel-owned thread lives in (`slack`, `telegram`, …),
+ * read from its key prefix. Undefined for every other origin. */
+export function threadChannelType(thread: Pick<ThreadSummary, "key">): string | undefined {
+  const key = thread.key;
+  if (!key) return undefined;
+  const prefix = CHANNEL_KEY_PREFIXES.find((p) => key.startsWith(p));
+  return prefix?.slice(0, -1);
+}
+
 /** Per-bucket totals over the loaded threads (client-side; the V2
  * orchestrator's thread count is small enough to load in full). */
 export function bucketCounts(threads: readonly Pick<ThreadSummary, "key">[]): Record<ThreadOriginBucket, number> {
   const counts: Record<ThreadOriginBucket, number> = { all: threads.length, chat: 0, auto: 0, channel: 0, other: 0 };
   for (const t of threads) counts[threadOriginBucket(t)] += 1;
   return counts;
-}
-
-/** Case-insensitive substring match over title, key, and id. */
-export function threadMatchesSearch(
-  thread: Pick<ThreadSummary, "id" | "title" | "key">,
-  query: string,
-): boolean {
-  return matchesNeedle(query, [thread.title, thread.key, thread.id]);
-}
-
-/** The sidebar's combined filter: bucket + search, order-preserving. */
-export function filterThreads<T extends Pick<ThreadSummary, "id" | "title" | "key">>(
-  threads: readonly T[],
-  bucket: ThreadOriginBucket,
-  query: string,
-): T[] {
-  return threads.filter(
-    (t) => (bucket === "all" || threadOriginBucket(t) === bucket) && threadMatchesSearch(t, query),
-  );
 }

@@ -81,6 +81,16 @@ wrap a Radix primitive and add tokens.
 Never build a custom control for something `primitives/` already provides, and
 never reach past a primitive to style its internals from a consumer.
 
+### Reusing feature components
+
+Search existing feature components before adding UI. Extend typed variants or sizes when a primitive almost fits.
+Keep one-off components beside their feature. Promote them when a second caller appears. Update both callers.
+Use `WorkRow` inside `WorkList` or `WorkSection` for work lists, and `SubSection` for titled settings sections.
+Reuse `cardClass`/`Card`, `pageClass`, `FilterChips`, and `TabBar` for existing layout patterns.
+Use `textLinkClass` for text links and `Button asChild` for links presented as buttons.
+Delete superseded implementations. Preserve test seams and unique coverage for code that still runs.
+Check unused locals with `pnpm --filter @valet/web exec tsc --noEmit -p . --noUnusedLocals`. Check export references with `rg`.
+
 ### Accepting `className` for composition
 
 A primitive takes `className`, merges it, and forwards its remaining props:

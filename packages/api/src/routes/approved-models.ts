@@ -55,13 +55,17 @@ approvedModelsRouter.put("/", async (c) => {
 
   const catalog = await buildOrgCatalog(db, engineCredentials, user.orgId);
   const validIds = catalogValidIds(catalog);
-  const error = validateApprovedModelsList(approved, validIds);
-  if (error) return c.json({ error }, 400);
   const tierError = await db.transaction(async (tx) => {
     await lockOrgModelPolicy(tx, user.orgId);
+    // The settings UI preserves saved approvals when adding a new model.
+    // Allow retaining retired Sol, but never introduce it into a new policy.
+    const previous = await getApprovedModels(tx, user.orgId);
+    if (previous?.includes("openai/gpt-5.6-sol")) validIds.add("openai/gpt-5.6-sol");
+    const error = validateApprovedModelsList(approved, validIds);
+    if (error) return error;
     const validationError = validateTierTargetsRemainApproved(
       approved,
-      await getOrgTierMap(tx, user.orgId),
+      await getOrgTierMap(tx, user.orgId, approved),
     );
     if (validationError) return validationError;
     await setApprovedModels(tx, user.orgId, approved);

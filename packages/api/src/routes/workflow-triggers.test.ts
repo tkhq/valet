@@ -150,6 +150,17 @@ async function seedTeamWithCaller(a: TestApi, teamId: string): Promise<void> {
 // ── 1. POST /api/workflows/schedules — orchestrator target ────────────────
 
 describe("POST /api/workflows/schedules", () => {
+  it.each(["invalid", 42, true, null])("400s a malformed schedule target %j without storing a row", async target => {
+    const a = await boot();
+    const response = await fetch(`${a.baseUrl}/api/workflows/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Malformed", cron: VALID_CRON, target }),
+    });
+    expect(response.status).toBe(400);
+    expect(await a.providers.db.select().from(workflowSchedules)).toEqual([]);
+  });
+
   it("201s an orchestrator-target schedule with nextFireAt > now", async () => {
     const a = await boot();
     const before = Date.now();
@@ -420,6 +431,26 @@ describe("event-trigger CRUD", () => {
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("Confirm the id");
+  });
+
+  it("stores trigger presence under workflow ownership and rejects invalid identity", async () => {
+    const a = await boot();
+    const workflowId = await createWorkflow(a.baseUrl, "presence_workflow");
+    const presence = { displayName: "Review helper", avatarUrl: "https://example.com/reviewer.webp" };
+    const create = (identity: unknown) => fetch(`${a.baseUrl}/api/workflows/event-triggers`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workflowId, name: "PR review", eventKeys: ["github.pull_request.opened"], presence: identity }),
+    });
+    const response = await create(presence);
+    expect(response.status).toBe(201);
+    const created = await response.json() as WorkflowEventTriggerResponse;
+    const [stored] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.trigger.triggerId));
+    const [workflow] = await a.providers.db.select().from(workflowDefinitions).where(eq(workflowDefinitions.id, workflowId));
+    expect(stored).toMatchObject({ ownerType: workflow!.ownerType, ownerId: workflow!.ownerId, target: { kind: "workflow", workflowId, presence } });
+    const invalid = await create({ avatarUrl: "http://example.com/reviewer.webp" });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toMatchObject({ error: expect.stringContaining("HTTPS") });
+    expect(await a.providers.db.select().from(eventSubscriptions)).toHaveLength(1);
   });
 
   it("round-trips create/patch/delete and 400s a bogus event key on create", async () => {

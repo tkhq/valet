@@ -496,6 +496,18 @@ describe('policy gate', () => {
     expect(pending[0]).toMatchObject({ kind: 'policy_gate', service: 'linear', action: 'save_issue' });
   });
 
+  it("stores and announces the member whose shared account the step would use", async () => {
+    const pending: unknown[] = [];
+    const args = await makeArgs({
+      engine: { invokeAction: async () => ({ ...GATE_RESPONSE, provenance: 'shared_account', approver: { userId: 'bea', name: 'Bea' } }) },
+      onApprovalPending: (info) => { pending.push(info); },
+    });
+    expect((await executeTool(args)).status).toBe('parked');
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find((c) => c.nodeId === 't1');
+    expect(cp?.effects?.approver).toEqual({ userId: 'bea', name: 'Bea' });
+    expect(pending[0]).toMatchObject({ kind: 'policy_gate', approver: { userId: 'bea', name: 'Bea' } });
+  });
+
   it('approved signal: invokes with the approval field, then consumes signal atomically', async () => {
     const seen: WorkflowInvokeActionRequest[] = [];
     const args = await makeArgs({

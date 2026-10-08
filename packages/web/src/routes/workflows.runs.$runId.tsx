@@ -1,3 +1,5 @@
+import { RunWorkspace } from "~/components/workflows/run-workspace";
+import { textParam } from "~/lib/search-params";
 import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type { WorkflowRunDetail } from "@valet/api/wire";
@@ -13,6 +15,7 @@ import {
   formatRunDuration,
   runNeedsApproval,
   statusByNodeId,
+  runLabel,
 } from "~/components/workflows/run-detail-helpers";
 import { RunResultPanel } from "~/components/workflows/run-detail-result";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
@@ -22,17 +25,22 @@ import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { formatWhen } from "~/lib/format-when";
 
 /**
- * `/workflows/runs/$runId` — the settled run's result first, then the canvas,
- * pending-gate cards and the checkpoint list, with a status header and Cancel
- * button (plan decision 19). Polls every 5s via `useRunDetail` (stops once
+ * `/workflows/runs/$runId` — the settled run's result first, then
+ * pending gates and expandable steps. The diagram is optional.
+ * Polls every 5s via `useRunDetail` (stops once
  * `run.status === 'settled'`).
  */
 export const Route = createFileRoute("/workflows/runs/$runId")({
   component: RunDetailPage,
+  validateSearch: (raw: unknown): { view?: "details" | "conversation"; conversation?: string } => ({
+    view: textParam(raw, "view") === "details" ? "details" : undefined,
+    conversation: textParam(raw, "conversation"),
+  }),
 });
 
 function RunDetailPage() {
   const { runId } = Route.useParams();
+  const search = Route.useSearch();
   const { data, isLoading, error } = useRunDetail(runId);
   // Arriving from a run notification for a team's run: move the switcher to
   // the run's workspace so the nav matches the page instead of showing
@@ -60,6 +68,8 @@ function RunDetailPage() {
           ← Workflows
         </Link>
       </div>
+      <RunWorkspace conversations={data.conversations ?? []} view={search.view} conversationId={search.conversation}
+        onSelect={(view, conversation) => void navigate({ to: "/workflows/runs/$runId", params: { runId }, search: { view, conversation }, replace: true })}>
       <RunDetailBody
         runId={runId}
         data={data}
@@ -73,6 +83,7 @@ function RunDetailPage() {
         }
         retryPending={retryRun.isPending}
       />
+      </RunWorkspace>
     </div>
   );
 }
@@ -102,13 +113,19 @@ export function RunDetailBody({
 }: RunDetailBodyProps) {
   // Cancel stops a run part-way and cannot be undone, so it asks first.
   const [cancelOpen, setCancelOpen] = useState(false);
+  const [diagramOpen, setDiagramOpen] = useState(false);
   const { run, checkpoints } = data;
   const pendingGates = data.pendingGates ?? [];
   const needsApproval = runNeedsApproval(run, pendingGates);
   const nonTerminal = run.status !== "settled";
   const retryable =
     run.status === "settled" && (run.outcome === "failed" || run.outcome === "cancelled");
+  const definition = isWorkflowDefinitionShape(run.definition) ? run.definition : undefined;
+  const nodeOrder = definition?.nodes.flatMap((node) => node.type === "foreach" ? [node.id, node.body.id] : [node.id]);
   const nodeStatuses = statusByNodeId(run, checkpoints);
+  const activeSteps = Object.entries(nodeStatuses.status)
+    .filter(([, status]) => status === "running" || status === "waiting")
+    .map(([id]) => id);
   // The answer the person came for. Present only once the run has settled.
   const result = deriveRunResult(run, checkpoints);
   const duration = formatRunDuration(run.createdAt, run.updatedAt);
@@ -130,8 +147,8 @@ export function RunDetailBody({
             `min-width: auto`, so without `min-w-0` the heading refuses to
             shrink and pushes the status chip and the run controls off the
             row. */}
-        <h1 className="min-w-0 break-all text-lg sm:truncate font-semibold tracking-tight text-ink font-display">
-          {run.runId}
+        <h1 className="min-w-0 break-words text-lg sm:truncate font-semibold tracking-tight text-ink font-display" title={run.runId}>
+          {runLabel(run)}
         </h1>
         <div className="flex max-w-full flex-wrap items-center gap-2">
           <RunStatusChip
@@ -183,16 +200,13 @@ export function RunDetailBody({
           {/* `updatedAt` is the last write, not the current time. It gives a
               true duration only after the run stops writing. */}
           {run.status === "settled" && duration && ` · Ran for ${duration}`}
-          {` · ${checkpoints.length} ${checkpoints.length === 1 ? "checkpoint" : "checkpoints"}`}
+          {` · ${checkpoints.length} ${checkpoints.length === 1 ? "step" : "steps"}`}
         </p>
 
-        {isWorkflowDefinitionShape(run.definition) && (
-          <WorkflowPreview
-            definition={run.definition}
-            statusByNodeId={nodeStatuses.status}
-            badgeByNodeId={nodeStatuses.badges}
-            height={320}
-          />
+        {nonTerminal && activeSteps.length > 0 && (
+          <p role="status" className="text-sm text-ink">
+            {run.status === "parked" ? "Waiting at: " : "Running: "}{activeSteps.join(", ")}
+          </p>
         )}
 
         {/* Render ALL pending gates — approval gates first, then policy gates */}
@@ -203,6 +217,8 @@ export function RunDetailBody({
               runId={runId}
               nodeId={gate.nodeId}
               prompt={gate.prompt ?? findApprovalPrompt(run.definition, gate.nodeId)}
+              summary={gate.summary}
+              details={gate.details}
               iteration={gate.iteration}
             />
           ) : (
@@ -217,10 +233,18 @@ export function RunDetailBody({
 
         <div>
           <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">
-            Checkpoints
+            Steps
           </h2>
-          <CheckpointList checkpoints={checkpoints} promotedNodeId={result?.nodeId} />
+          <CheckpointList checkpoints={checkpoints} promotedNodeId={result?.nodeId} nodeStatuses={nodeStatuses.status} nodeOrder={nodeOrder} />
         </div>
+        {definition && (
+          <details onToggle={(event) => setDiagramOpen(event.currentTarget.open)}>
+            <summary className="min-h-11 cursor-pointer py-3 text-sm text-muted hover:text-ink">Workflow diagram</summary>
+            {diagramOpen && (
+              <WorkflowPreview definition={definition} statusByNodeId={nodeStatuses.status} badgeByNodeId={nodeStatuses.badges} height={320} />
+            )}
+          </details>
+        )}
       </div>
     </>
   );

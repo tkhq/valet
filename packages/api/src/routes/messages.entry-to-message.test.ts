@@ -343,6 +343,13 @@ describe("entryToMessage — author projection", () => {
     expect(msg?.author).toEqual({ id: "u_bob", name: "Bob" });
   });
 
+  it("marks a sender with no Valet account without sending their channel id", () => {
+    const entry = baseEntry({
+      author: { id: "u_creator", name: "Sam from Slack", externalId: "U999", externalSender: true },
+    });
+    expect(entryToMessage(entry, "sess", "th")?.author).toEqual({ id: "u_creator", name: "Sam from Slack", externalSender: true });
+  });
+
   it("omits the field for authorless entries and non-user roles", () => {
     expect(entryToMessage(baseEntry(), "sess", "th")?.author).toBeUndefined();
     const assistant = baseEntry({
@@ -351,4 +358,11 @@ describe("entryToMessage — author projection", () => {
     });
     expect(entryToMessage(assistant, "sess", "th")?.author).toBeUndefined();
   });
+});
+
+it("preserves interruption state when loading message history", () => {
+  const aborted = entryToMessage(baseEntry({ role: "assistant", content: "", stopReason: "abort" }), "sess", "th");
+  expect(aborted).toMatchObject({ completed: false, stopReason: "abort" });
+  const failed = entryToMessage(baseEntry({ role: "assistant", content: "", stopReason: "error" }), "sess", "th");
+  expect(failed).toMatchObject({ completed: false, stopReason: "error" });
 });

@@ -1,8 +1,9 @@
 import { useRef, useState } from "react";
 import type { GetSlackAppResponse } from "@valet/api/wire";
-import { Badge, Button, ConfirmDialog, Input, Spinner, Textarea } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Input, Spinner, Textarea, cardClass } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { useDeleteSlackApp, useSaveSlackCredential, useSlackApp } from "~/api/settings";
+import { cn } from "~/lib/cn";
 
 /** Where an operator manages the app after creation — install page, signing
  * secret, scope review all live behind it. */
@@ -121,7 +122,7 @@ function SetupCards({
   return (
     <div className="max-w-2xl space-y-4">
       {/* Step 1 — create the app on Slack from the manifest below. */}
-      <div className="rounded-lg border border-line bg-paper">
+      <div className={cn(cardClass)}>
         <div className="flex items-start gap-3 border-b border-line px-6 py-5">
           <SlackTile />
           <div className="min-w-0">
@@ -209,7 +210,7 @@ function SetupCards({
       </div>
 
       {/* Step 2 — bring back the two credentials the installed app minted. */}
-      <div className="rounded-lg border border-line bg-paper">
+      <div className={cn(cardClass)}>
         <div className="border-b border-line px-6 py-5">
           <div className="font-display text-base text-ink">Connect the installed app</div>
           <p className="mt-0.5 text-sm leading-relaxed text-muted">

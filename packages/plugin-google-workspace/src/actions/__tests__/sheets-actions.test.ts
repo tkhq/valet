@@ -115,7 +115,21 @@ describe('sheets actions', () => {
       pluginCtx(),
     );
 
-    expect(result).toEqual({ success: false, error: 'Error: Failed to read range: 403' });
+    expect(result).toEqual({ success: false, error: 'Error: Sheets API 403: Forbidden' });
+  });
+
+  it('read_spreadsheet exposes the disabled API cause and enable link to the agent', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(403, { error: {
+      message: 'API disabled', details: [{ reason: 'SERVICE_DISABLED', metadata: {
+        service: 'sheets.googleapis.com', consumer: 'projects/1070525638420',
+      } }],
+    } }));
+    const result = await action('sheets.read_spreadsheet').execute(
+      { spreadsheetId: 'ss1', range: 'Sheet1!A1' }, pluginCtx(),
+    );
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('SERVICE_DISABLED') });
+    expect(result.error).toContain('https://console.cloud.google.com/apis/library/sheets.googleapis.com?project=1070525638420');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('write_spreadsheet PUTs values with default USER_ENTERED input option', async () => {

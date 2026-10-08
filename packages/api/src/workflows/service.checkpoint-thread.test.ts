@@ -39,6 +39,7 @@ describe("toRunCheckpoint — thread id", () => {
     );
     expect(wire.sessionId).toBe("assistant:asst_1");
     expect(wire.threadId).toBe("thr_run_1");
+    expect(wire.queueItemId).toBe("q_1");
   });
 
   it("omits it for a node that dispatched nothing", () => {
@@ -54,6 +55,7 @@ describe("toRunCheckpoint — thread id", () => {
     expect(toRunCheckpoint(checkpoint({ receipt: null })).threadId).toBeUndefined();
     expect(toRunCheckpoint(checkpoint({ receipt: { threadId: 7 } })).threadId).toBeUndefined();
     expect(toRunCheckpoint(checkpoint({ receipt: {} })).threadId).toBeUndefined();
+    expect(toRunCheckpoint(checkpoint({ receipt: { queueItemId: 7 } })).queueItemId).toBeUndefined();
   });
 
   it("keeps childRunId independent of the receipt", () => {

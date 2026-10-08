@@ -1,3 +1,4 @@
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Team-owned sessions resolve credentials from the team principal, not the
  * prompting member. GitHub uses the App installation. Slack uses the org
@@ -20,7 +21,7 @@ import { EngineHost, sessionPrincipal } from "./host.js";
 import { githubTokenArgsForOwner, isUsableGithubRow } from "../services/session-github-token.js";
 import { agentSessions, orgs, teamMembers, teams } from "../schema/index.js";
 import { createLlmProvider } from "../services/llm-providers.js";
-import { createAssistant } from "../assistants/service.js";
+
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 
 const orgId = "team-cred-org";
@@ -342,6 +343,23 @@ describe("EngineHost team-owned session credentials", () => {
   });
 
   describe("credential_owner_mode", () => {
+    it("requires an explicit matching actor before reading a legacy member credential", async () => {
+      const { appDb, credentials } = await harness();
+      await credentials.save({ type: "user", id: userId }, "linear", {
+        type: "api_key", apiKey: "member-linear",
+      });
+      await credentials.save({ type: "team", id: teamId }, "linear", {
+        type: "api_key", apiKey: "team-linear",
+      });
+      fixture = startGithubFixture();
+      const h = makeHost(appDb, credentials, fixture.url);
+      const session = await h.sessionFor("legacy-authorless", legacyTeamMeta);
+      expect((await session.credentialProvider().get("linear"))?.accessToken).toBe("team-linear");
+      expect((await session.credentialProvider({ actorId: "someone-else" }).get("linear"))?.accessToken).toBe("team-linear");
+      expect((await session.credentialProvider({ actorId: userId, externalSender: true }).get("linear"))?.accessToken).toBe("team-linear");
+      expect((await session.credentialProvider({ actorId: userId }).get("linear"))?.accessToken).toBe("member-linear");
+    });
+
     it("actor mode resolves the acting member's row with org fallback, as before team ownership", async () => {
       const { appDb, credentials } = await harness();
       await credentials.save({ type: "user", id: userId }, "linear", {
@@ -352,7 +370,7 @@ describe("EngineHost team-owned session credentials", () => {
       const h = makeHost(appDb, credentials, fixture.url);
 
       const session = await h.sessionFor("sess-legacy-team-linear", legacyTeamMeta);
-      const cred = await session.credentialProvider().get("linear");
+      const cred = await session.credentialProvider({ actorId: userId }).get("linear");
 
       expect(cred?.accessToken).toBe("member-linear");
     });
@@ -375,7 +393,7 @@ describe("EngineHost team-owned session credentials", () => {
       const h = makeHost(appDb, credentials, fixture.url);
 
       const session = await h.sessionFor("sess-legacy-team-outsider", { ...legacyTeamMeta, userId: outsider });
-      const cred = await session.credentialProvider().get("linear");
+      const cred = await session.credentialProvider({ actorId: outsider }).get("linear");
 
       expect(cred?.accessToken).toBe("team-linear");
     });
@@ -391,7 +409,7 @@ describe("EngineHost team-owned session credentials", () => {
       const h = makeHost(appDb, credentials, fixture.url);
 
       const session = await h.sessionFor("sess-legacy-team-gh", legacyTeamMeta);
-      const cred = await session.credentialProvider().get("github");
+      const cred = await session.credentialProvider({ actorId: userId }).get("github");
 
       expect(cred?.accessToken).toBe("member-tok");
     });
@@ -408,7 +426,7 @@ describe("EngineHost team-owned session credentials", () => {
       const h = makeHost(appDb, credentials, fixture.url);
 
       const session = await h.sessionFor("sess-legacy-team-slack", legacyTeamMeta);
-      const cred = await session.credentialProvider().get("slack");
+      const cred = await session.credentialProvider({ actorId: userId }).get("slack");
 
       expect(cred?.accessToken).toBe("xoxb-org-bot");
       expect(cred?.metadata?.["owner_slack_user_id"]).toBe("U42");
@@ -425,7 +443,7 @@ describe("EngineHost team-owned session credentials", () => {
       const h = makeHost(appDb, credentials, fixture.url);
 
       const session = await h.sessionFor("sess-legacy-team-openai", legacyTeamMeta);
-      const cred = await session.credentialProvider().get("openai");
+      const cred = await session.credentialProvider({ actorId: userId }).get("openai");
 
       expect(cred?.accessToken).toBe("sk-member");
     });
@@ -451,7 +469,7 @@ describe("EngineHost team-owned session credentials", () => {
         workspace: "/tmp",
         credentialOwnerMode: "actor",
       });
-      const cred = await child.credentialProvider().get("linear");
+      const cred = await child.credentialProvider({ actorId: userId }).get("linear");
       expect(cred?.accessToken).toBe("member-linear");
     });
 
@@ -503,7 +521,7 @@ describe("EngineHost team-owned session credentials", () => {
         type: "api_key",
         apiKey: "member-linear",
       });
-      const assistant = await createAssistant(appDb, orgId, { type: "team", id: teamId }, "Team bot");
+      const assistant = await seedWorkspaceAssistant(appDb, orgId, { type: "team", id: teamId });
       await appDb.insert(agentSessions).values({
         id: assistant.sessionId,
         userId,
@@ -537,7 +555,7 @@ describe("EngineHost team-owned session credentials", () => {
       const session = await h.assistantSessionFor(assistant.id, { actorUserId: userId, orgId }, {
         sessionId: assistant.sessionId,
       });
-      const cred = await session.credentialProvider().get("linear");
+      const cred = await session.credentialProvider({ actorId: userId }).get("linear");
 
       expect(cred?.accessToken).toBe("member-linear");
     });

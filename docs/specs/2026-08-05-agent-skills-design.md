@@ -79,6 +79,10 @@ Skills use progressive disclosure, as the spec describes:
 
 `packages/api/src/plugins/skill-tool.ts` builds the tool. `pluginSessionExtras` appends it to the session's tools whenever the assembled set holds at least one skill.
 
+A cached session can live for days, and a person can add, edit, or delete a skill during that time. The tool therefore reads the session's skill map, not the list it was built with. Each session builder calls `PluginSessionExtras.bindSession` after the session exists. At the start of each turn, `Session.refreshSkills()` re-reads the map through the host `skillsProvider`, and the engine then rebuilds its tool list. The tool description is a getter, so the model sees that turn's skills. A changed description reaches the model as a tool redefinition in the transcript. If the re-read fails, the turn keeps the previous map. If the model asks for a name the map does not hold, the tool re-reads the map once before it answers `skill_not_found`. That covers a skill saved earlier in the same turn.
+
+The tool is still absent from a session that had no skills at build. Every shipped plugin set has skills, so this case occurs only in tests.
+
 `GET /api/skills` and the web Skills tab read the same two sources a session build reads, so the catalog a person browses is the catalog the agent can request.
 
 ## Storage
@@ -298,3 +302,5 @@ An imported skill uses neither. Both stay because Valet's own skills and `Thread
 - **Write-back.** Sync reads. Nothing pushes a locally written skill into a repository.
 - **Org-wide skills.** `owner_type` accepts `org`, and delivery reads an `org` principal's rows, but no route creates one. An org-wide skill needs an admin gate first.
 - **`argsSchema` on a stored skill.** Only a plugin can supply one, because it is code, not frontmatter. A stored skill takes no arguments.
+
+Session-bound skill tools remain installed even when the initial registry is empty. The first saved skill becomes visible on the next turn.

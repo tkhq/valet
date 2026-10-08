@@ -1,8 +1,10 @@
+import { eq } from "drizzle-orm";
+import githubPlugin from "@valet/plugin-github/plugin";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { PluginActionContext } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { eventDropLog, orgMembers, orgs, users } from "../schema/index.js";
+import { eventDropLog, eventReceipts, eventSubscriptions, orgMembers, orgs, users, teams, teamMembers } from "../schema/index.js";
 import { eventsActionPlugin } from "./actions.js";
 
 const ORG = "event-problems-org";
@@ -31,6 +33,111 @@ describe("eventsActionPlugin", () => {
       { orgId: ORG, userId: "admin", role: "admin" },
       { orgId: ORG, userId: "member", role: "member" },
     ]);
+  });
+
+  it("lists only the current workspace with bounded pages and exact name matching", async () => {
+    const now = Date.now();
+    await db.insert(eventSubscriptions).values([
+      { id: "a", orgId: ORG, ownerType: "user", ownerId: "member", name: "Match", eventKeys: [], filters: [], target: { kind: "orchestrator" }, createdBy: "member", createdAt: now, updatedAt: now },
+      { id: "b", orgId: ORG, ownerType: "user", ownerId: "member", name: "Other", eventKeys: [], filters: [], target: { kind: "orchestrator" }, createdBy: "member", createdAt: now, updatedAt: now },
+      { id: "c", orgId: ORG, ownerType: "user", ownerId: "admin", name: "Match", eventKeys: [], filters: [], target: { kind: "orchestrator" }, createdBy: "admin", createdAt: now, updatedAt: now },
+      { id: "d", orgId: "foreign", ownerType: "user", ownerId: "member", name: "Match", eventKeys: [], filters: [], target: { kind: "orchestrator" }, createdBy: "member", createdAt: now, updatedAt: now },
+    ]);
+    const tool = eventsActionPlugin(db).actions.find(a => a.id === "events.list_subscriptions")!;
+    expect(await tool.execute({ limit: 1 }, context("member"))).toMatchObject({ success: true, data: { subscriptions: [{ id: "a" }], nextOffset: 1 } });
+    expect(await tool.execute({ limit: 1, offset: 1 }, context("member"))).toMatchObject({ data: { subscriptions: [{ id: "b" }], nextOffset: null } });
+    expect(await tool.execute({ name: "Match" }, context("member"))).toMatchObject({ data: { subscriptions: [{ id: "a" }], nextOffset: null } });
+    expect(await tool.execute({ limit: 101 }, context("member"))).toMatchObject({ success: false });
+    expect(await tool.execute({}, context("member", { externalSender: true }))).toMatchObject({ success: false });
+    expect(await tool.execute({}, context("member", { owner: { type: "user", id: "admin" } }))).toMatchObject({ success: false });
+  });
+
+  it("sets and clears only presence while preserving target fields and refusing other tenants or owners", async () => {
+    const now = Date.now();
+    const target = { kind: "workflow", workflowId: "wf", deliveryPolicy: "always", futureField: "preserve" };
+    await db.insert(eventSubscriptions).values({ id: "edit", orgId: ORG, ownerType: "user", ownerId: "member", name: "Rule", eventKeys: ["github.pull_request.opened"], filters: [], target, enabled: false, createdBy: "member", createdAt: now, updatedAt: now });
+    await db.insert(orgs).values({ id: "foreign", name: "Foreign", createdAt: now });
+    await db.insert(orgMembers).values({ orgId: "foreign", userId: "member", role: "member" });
+    const tool = eventsActionPlugin(db).actions.find(a => a.id === "events.set_subscription_presence")!;
+    const input = { subscription_id: "edit", presence: { displayName: "Helper" } };
+    expect(await tool.execute(input, context("admin"))).toMatchObject({ success: false });
+    expect(await tool.execute(input, context("member", { orgId: "foreign" }))).toMatchObject({ success: false });
+    expect(await tool.execute(input, context("member", { externalSender: true }))).toMatchObject({ success: false });
+    expect(await tool.execute({ ...input, presence: { avatarUrl: "http://example.com/a" } }, context("member"))).toMatchObject({ success: false });
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { subscription: { target: { ...target, presence: input.presence }, enabled: false } } });
+    expect(await tool.execute({ ...input, presence: null }, context("member"))).toMatchObject({ success: true });
+    const [row] = await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "edit"));
+    expect(row!.target).toEqual(target);
+    expect(row!.enabled).toBe(false);
+    expect(row!.updatedAt).toBeGreaterThan(now);
+    expect(row!.eventKeys).toEqual(["github.pull_request.opened"]);
+  });
+
+  it("requires current membership for team subscription reads and writes", async () => {
+    const now = Date.now();
+    await db.insert(teams).values({ id: "presence-team", orgId: ORG, name: "Team", createdAt: now });
+    await db.insert(teamMembers).values({ teamId: "presence-team", userId: "member", role: "member" });
+    await db.insert(eventSubscriptions).values({ id: "team-rule", orgId: ORG, ownerType: "team", ownerId: "presence-team", name: "Team rule", eventKeys: [], filters: [], target: { kind: "orchestrator", orchestrator: "team", teamId: "presence-team" }, createdBy: "member", createdAt: now, updatedAt: now });
+    const plugin = eventsActionPlugin(db);
+    const list = plugin.actions.find(a => a.id === "events.list_subscriptions")!;
+    const set = plugin.actions.find(a => a.id === "events.set_subscription_presence")!;
+    const ctx = context("member", { owner: { type: "team", id: "presence-team" } });
+    expect(await list.execute({}, ctx)).toMatchObject({ success: true, data: { subscriptions: [{ id: "team-rule" }] } });
+    expect(await set.execute({ subscription_id: "team-rule", presence: { displayName: "Team helper" } }, ctx)).toMatchObject({ success: true });
+    await db.delete(teamMembers).where(eq(teamMembers.userId, "member"));
+    expect(await list.execute({}, ctx)).toMatchObject({ success: false });
+    expect(await set.execute({ subscription_id: "team-rule", presence: null }, ctx)).toMatchObject({ success: false });
+    expect((await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "team-rule")))[0]!.target).toMatchObject({ presence: { displayName: "Team helper" } });
+  });
+
+  it("persists proposal presence and rejects invalid avatar URLs", async () => {
+    const tool = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
+    const input = { proposal_key: "presence", name: "Pulls", event_keys: ["github.pull_request.opened"], presence: { displayName: "PR helper", avatarUrl: "https://example.com/a.webp" } };
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { config: { target: { presence: input.presence } } } } });
+    expect(await tool.execute({ ...input, proposal_key: "bad-presence", presence: { avatarUrl: "http://example.com/a" } }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("HTTPS") });
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
+  });
+
+  it("stores one disabled proposal per owner and preserves enabled configuration on retry", async () => {
+    const tool = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
+    const input = { proposal_key: "pulls", name: "Pulls", event_keys: ["github.pull_request.opened"] };
+    const results = await Promise.all([tool.execute(input, context("member")), tool.execute(input, context("member"))]);
+    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { kind: "subscription", enabled: false, config: { ownerId: "member" } } } });
+    const rows = await db.select().from(eventSubscriptions);
+    expect(rows).toHaveLength(1);
+    await db.update(eventSubscriptions).set({ enabled: true }).where(eq(eventSubscriptions.id, rows[0]!.id));
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { enabled: true, config: { name: "Pulls" } } } });
+    expect(await tool.execute({ ...input, name: "Changed" }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("new proposal_key") });
+    expect(await tool.execute(input, context("admin"))).toMatchObject({ success: true });
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(2);
+    expect(await tool.execute(input, context("member", { owner: { type: "team", id: "foreign" } }))).toMatchObject({ success: false });
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(2);
+  });
+
+  it("persists explicit personal thread preferences and rejects them for team proposals", async () => {
+    const tool = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
+    const base = { proposal_key: "thread", name: "Thread", event_keys: ["github.pull_request.opened"] };
+    expect(await tool.execute({ ...base, follow: true }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("slack.app_mention") });
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
+    const prefs = { follow: false, delivery_policy: "ignoreIfMyTeamSubscribed", pause_on_overlap: false };
+    expect(await tool.execute({ ...base, ...prefs }, context("member"))).toMatchObject({
+      success: true, data: { proposal: { enabled: false, config: { target: {
+        follow: false, deliveryPolicy: "ignoreIfMyTeamSubscribed", pauseOnOverlap: false,
+      } } } },
+    });
+    const [stored] = await db.select().from(eventSubscriptions);
+    expect(stored!.target).toMatchObject({ follow: false, deliveryPolicy: "ignoreIfMyTeamSubscribed", pauseOnOverlap: false });
+    for (const preference of [{ delivery_policy: "always" }, { pause_on_overlap: false }]) {
+      expect(await tool.execute({ ...base, ...preference }, context("member", { owner: { type: "team", id: "team" } }))).toMatchObject({
+        success: false, error: expect.stringContaining("personal subscriptions"),
+      });
+    }
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
+    await db.insert(teams).values({ id: "follow-team", orgId: ORG, name: "Follow team", createdAt: Date.now() });
+    await db.insert(teamMembers).values({ teamId: "follow-team", userId: "member", role: "member" });
+    expect(await tool.execute({ ...base, follow: false }, context("member", { owner: { type: "team", id: "follow-team" } }))).toMatchObject({
+      success: true, data: { proposal: { config: { target: { orchestrator: "team", teamId: "follow-team", follow: false } } } },
+    });
   });
 
   function list() {
@@ -230,4 +337,31 @@ describe("eventsActionPlugin", () => {
     const result = await list().execute({}, context("not-a-member"));
     expect(result).toMatchObject({ success: false, error: "You are not a member of this organization." });
   });
+  it("keeps receipt access out of member and shared transcripts", async () => {
+    const logs = eventsActionPlugin(db).actions.find(entry => entry.id === "events.list_event_logs")!;
+    for (const ctx of [
+      context("member", { owner: { type: "user", id: "member" } }),
+      context("admin", { owner: { type: "team", id: "team" } }),
+      context("admin", { owner: { type: "user", id: "admin" }, sharedTranscript: true }),
+      context("admin"),
+    ]) {
+      expect(await logs.execute({}, ctx)).toMatchObject({ success: false });
+    }
+  });
+
+  it("scopes receipt logs by organization and retention and sanitizes metadata", async () => {
+    const now = Date.now();
+    await db.insert(eventReceipts).values([
+      { id: "visible", orgId: ORG, service: "slack", createdAt: now, updatedAt: now, metadata: { channelId: "C1", secret: "must-not-return" } },
+      { id: "other-org", orgId: "different-org", service: "slack", createdAt: now, updatedAt: now },
+      { id: "expired", orgId: ORG, service: "slack", createdAt: now - 8 * 86400000, updatedAt: now },
+    ]);
+    const logs = eventsActionPlugin(db).actions.find(entry => entry.id === "events.list_event_logs")!;
+    const result = await logs.execute({}, context("admin", { owner: { type: "user", id: "admin" } }));
+    expect(result).toMatchObject({ success: true, data: { receipts: [{ id: "visible", metadata: { channelId: "C1" } }], hasMore: false } });
+    expect(JSON.stringify(result)).not.toContain("must-not-return");
+    expect(JSON.stringify(result)).not.toContain("other-org");
+    expect(JSON.stringify(result)).not.toContain("expired");
+  });
+
 });

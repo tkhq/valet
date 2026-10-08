@@ -197,19 +197,6 @@ export async function getOrgFeatures(db: AppQueryable, orgId: string): Promise<O
 }
 
 /**
- * Reads the feature gates of the deployment's org, without creating one.
- *
- * No org means no gate row, so every opt-in feature reads as off. A caller
- * on the login path must use this instead of `ensureOrg` + `getOrgFeatures`: a gate
- * check must not be the thing that creates an org.
- */
-export async function findOrgFeatures(db: AppQueryable): Promise<OrgFeatures> {
-  const org = await findOrg(db);
-  if (!org) return { ...FEATURES_OFF };
-  return getOrgFeatures(db, org.id);
-}
-
-/**
  * Merges `features` into `orgs.features`. Only the given keys change.
  *
  * The merge is against the RAW jsonb, not against `getOrgFeatures`. The

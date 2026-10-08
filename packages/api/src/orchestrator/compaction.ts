@@ -22,6 +22,9 @@ import { todayJournalPath } from "./bootstrap.js";
  * after midnight lands in the new day's journal). */
 export function journalCompactionHook(db: AppDb, scope: MemoryScope): CompactionHook {
   return async ({ mode, summary }) => {
+    // A team runtime contains threads with narrower audiences. Keep summaries
+    // in engine history until memory supports the same audience boundaries.
+    if (scope.owner.type === "team") return;
     const path = todayJournalPath();
 
     const existingRows = await db
@@ -30,7 +33,7 @@ export function journalCompactionHook(db: AppDb, scope: MemoryScope): Compaction
       .where(
         and(
           eq(memoryFiles.ownerType, scope.owner.type),
-          eq(memoryFiles.ownerId, scope.owner.id),
+          eq(memoryFiles.ownerId, scope.owner.id), eq(memoryFiles.namespace, scope.namespace ?? ""),
           eq(memoryFiles.path, path),
         ),
       )

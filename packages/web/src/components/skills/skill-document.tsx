@@ -17,7 +17,7 @@
  */
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { Spinner } from "~/components/primitives";
+import { Spinner, pageClass } from "~/components/primitives";
 import { Markdown } from "~/components/markdown";
 import { Section } from "~/components/settings/section";
 
@@ -51,7 +51,7 @@ export function SkillDocument({
 }) {
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
+      <div className={pageClass}>
         <Link to="/skills" className="inline-flex min-h-11 items-center text-xs text-muted underline-offset-2 hover:underline">
           ← Skills
         </Link>

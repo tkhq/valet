@@ -1,15 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
+import { fauxAssistantMessage, fauxToolCall, Type, registerFauxProvider, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
 import { VirtualSandboxProvider, type MessageEntry } from "@valet/engine";
-import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
-import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
+import { PgEventStream, PgSessionStore } from "@valet/store-postgres";
+import { eq, sql } from "drizzle-orm";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
 import { EngineHost } from "../engine/host.js";
-import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { PgCredentialStore } from "../plugins/credential-store.js";
+import { assistantExecutions, assistants, sessionThreads, teams, users } from "../schema/index.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
-import { createAssistant, loadAssistant } from "../assistants/service.js";
-import { eq } from "drizzle-orm";
-import { assistants, users, eventDropLog } from "../schema/index.js";
+import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
+import { ensureAssistantExecution } from "../assistants/service.js";
 import { deliverToAssistantThread } from "./assistant-delivery.js";
 
 const ORG = "org-1";
@@ -68,6 +70,16 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" as const },
   });
 
+  it("creates a shared runtime with a machine actor and persists that identity", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: OWNER, actorUserId: `org:${ORG}`, threadKey: "events",
+      signal: { kind: "signal", signalType: "github.issues.opened", body: "External issue" },
+      dispatchId: "machine-delivery", mismatchReason: "test",
+    });
+    expect(await firstUserEntry(deps, "events")).toMatchObject({ author: { id: `org:${ORG}` } });
+  });
+
   it("persists each delivery actor on a cached session without rebinding its owner", async () => {
     const deps = { db: testDb.appDb, engineHost };
     const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
@@ -83,37 +95,149 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     expect(session.owner).toEqual(OWNER);
   });
 
-  it("uses the current assistant default for new Slack threads after restore", async () => {
+  it("persists presence per delivery without changing other turns", async () => {
     const deps = { db: testDb.appDb, engineHost };
-    const assistant = await createAssistant(testDb.appDb, ORG, OWNER, "Channel assistant");
-    await testDb.appDb.update(assistants).set({ model: "claude-opus-4-5", reasoning: "high" }).where(eq(assistants.id, assistant.id));
-    const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+    for (const [dispatchId, presence] of [
+      ["presence-first", { displayName: "Hestia", avatarUrl: "https://example.com/hestia.webp" }],
+      ["presence-default", undefined],
+    ] as const) {
+      await deliverToAssistantThread(deps, {
+        orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "events",
+        signal: { kind: "signal", signalType: "test", body: dispatchId },
+        dispatchId, presence, mismatchReason: "test",
+      });
+      const result = await testDb.appDb.execute(sql`SELECT metadata FROM engine_queue_items WHERE dispatch_id = ${dispatchId}`) as { rows: Array<{ metadata: unknown }> };
+      const metadata = result.rows[0]?.metadata;
+      expect(typeof metadata === "string" ? JSON.parse(metadata) : metadata).toEqual(presence ? { presence } : null);
+    }
+  });
+
+  it("uses the current team defaults for new Slack threads after restore", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const owner = { type: "team", id: "team-defaults" } as const;
+    await testDb.appDb.insert(teams).values({ id: owner.id, orgId: ORG, name: "Defaults", createdAt: Date.now(), defaultModel: "claude-opus-4-5", defaultReasoning: "high" });
+    const session = await defaultAssistantSessionFor(deps, owner, { actorUserId: USER, orgId: ORG });
     const oldThread = await session.createThread("slack:C1:old", { model: "claude-sonnet-4-5", reasoning: "low" });
-    await testDb.appDb.update(assistants).set({ model: "m", reasoning: "low" }).where(eq(assistants.id, assistant.id));
-    // An org assistant must not inherit the member who delivered the event.
+    await testDb.appDb.update(teams).set({ defaultModel: "m", defaultReasoning: "low" }).where(eq(teams.id, owner.id));
+    // A team runtime must not inherit the member who delivered the event.
     await testDb.appDb.insert(users).values({ id: USER, email: "event-model@example.com", name: "Event user", defaultModel: "l" });
     engineHost.evictAll();
 
     await deliverToAssistantThread(deps, {
-      orgId: ORG, owner: OWNER, actorUserId: USER,
+      orgId: ORG, owner: owner, actorUserId: USER,
       threadKey: "slack:C1:1.2", signal: channelSignal("first"),
       dispatchId: "model-first", mismatchReason: "event_target_mismatch",
     });
-    const restored = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+    const restored = await defaultAssistantSessionFor(deps, owner, { actorUserId: USER, orgId: ORG });
     expect((await restored.threadByKey("slack:C1:1.2"))?.modelId()).toBe("m");
     expect((await restored.threadByKey("slack:C1:1.2"))?.reasoning()).toBe("low");
     expect(restored.threadById(oldThread.id)?.modelId()).toBe("claude-sonnet-4-5");
     expect(restored.options.modelSpec).toBe("claude-opus-4-5");
 
-    await testDb.appDb.update(assistants).set({ model: null, reasoning: null }).where(eq(assistants.id, assistant.id));
+    await testDb.appDb.update(teams).set({ defaultModel: null, defaultReasoning: null }).where(eq(teams.id, owner.id));
     await deliverToAssistantThread(deps, {
-      orgId: ORG, owner: OWNER, actorUserId: USER,
+      orgId: ORG, owner: owner, actorUserId: USER,
       threadKey: "slack:C1:next", signal: channelSignal("next"),
       dispatchId: "model-next", mismatchReason: "event_target_mismatch",
     });
     expect((await restored.threadByKey("slack:C1:next"))?.modelId()).toBe("s");
     expect((await restored.threadByKey("slack:C1:next"))?.toThreadData().reasoning).toBe("off");
     expect((await restored.threadByKey("slack:C1:1.2"))?.modelId()).toBe("m");
+  });
+
+  it.each(["queued", "settled"])("keeps a %s pre-upgrade event admission when channel routing changes", async (state) => {
+    const owner = { type: "team", id: "cutover-team" } as const;
+    await testDb.appDb.insert(teams).values({ id: owner.id, orgId: ORG, name: "Cutover team", createdAt: 1 });
+    const deps = { db: testDb.appDb, engineHost };
+    const root = await defaultAssistantSessionFor(deps, owner, { actorUserId: USER, orgId: ORG });
+    await testDb.appDb.execute(sql`INSERT INTO legacy_assistant_runtimes (session_id, org_id) VALUES (${root.id}, ${ORG})`);
+    engineHost.evictCache(root.id);
+    const original = await defaultAssistantSessionFor(deps, owner, { actorUserId: USER, orgId: ORG });
+    const externalAction = vi.fn(async () => ({ text: "sent once" }));
+    original.options.tools = [...(original.options.tools ?? []), {
+      name: "external_write", description: "Send an external update", parameters: Type.Object({}), execute: externalAction,
+    }];
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("external_write", {}, { id: "external-once" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("sent"),
+    ]);
+    const thread = original.thread("events");
+    if (state === "queued") await thread.pause();
+    const signal = { kind: "signal" as const, signalType: "slack.reaction_added", body: "Review this reaction", attributes: { eventId: "old-event", service: "slack" } };
+    const receipt = await thread.submitPrompt(signal, { dispatchId: "event:cutover-delivery" });
+    if (state === "settled") await thread.awaitResult(receipt.queueItemId);
+    const remaining = faux.getPendingResponseCount();
+    engineHost.evictCache(original.id);
+    for (let retry = 0; retry < 2; retry++) {
+      await deliverToAssistantThread(deps, {
+        orgId: ORG, owner, actorUserId: USER, threadKey: "slack-events:C1", signal,
+        dispatchId: "event:cutover-delivery", mismatchReason: "event_target_mismatch",
+      });
+      engineHost.evictCache(original.id);
+    }
+    const rows = await testDb.appDb.execute(sql`SELECT id, session_id, thread_id FROM engine_queue_items WHERE dispatch_id = 'event:cutover-delivery'`) as { rows: Array<{ id: string; session_id: string; thread_id: string }> };
+    expect(rows.rows).toEqual([{ id: receipt.queueItemId, session_id: original.id, thread_id: thread.id }]);
+    expect(await testDb.appDb.select().from(assistantExecutions)).toHaveLength(0);
+    expect(faux.getPendingResponseCount()).toBe(remaining);
+    expect(externalAction).toHaveBeenCalledTimes(state === "settled" ? 1 : 0);
+  });
+
+  it("recovers the admitted event before a new PR target and verifies its original content", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+    const thread = session.thread("events");
+    await thread.pause();
+    const signal = channelSignal("review the change");
+    const seeded = { ...signal, body: `Conversation so far in this thread:\nEarlier history\n\n---\n\n${signal.body}` };
+    const admitted = await thread.submitPrompt(seeded, { dispatchId: "event:pr-cutover" });
+    const args = { orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "web:pr-origin",
+      target: { sessionId: "new-pr-runtime", threadId: "new-pr-thread" }, signal,
+      dispatchId: "event:pr-cutover", mismatchReason: "test" };
+    await expect(deliverToAssistantThread(deps, args)).resolves.toBeUndefined();
+    await expect(deliverToAssistantThread(deps, { ...args, signal: channelSignal("changed work") })).rejects.toThrow("different content");
+    expect((await session.providers.store.listUnsettledSubmissions(session.id)).map(item => item.id)).toEqual([admitted.queueItemId]);
+    await expect(deliverToAssistantThread(deps, { ...args, owner: { type: "user", id: USER } })).rejects.toThrow("original event owner differs");
+    // An identical ID in another organization must not resolve this receipt.
+    await expect(deliverToAssistantThread(deps, { ...args, orgId: "other-org" })).rejects.toThrow("original conversation is unavailable");
+  });
+
+  it("restores the exact private PR thread and refuses deliveries archived while queued", async () => {
+    const owner = { type: "team", id: "pr-team" } as const;
+    await testDb.appDb.insert(teams).values({ id: owner.id, orgId: ORG, name: "PR team", createdAt: 1 });
+    const deps = { db: testDb.appDb, engineHost };
+    const key = `app-assistant:${USER}`;
+    const { session } = await ensureAssistantExecution(deps, owner, { actorUserId: USER, orgId: ORG }, key);
+    const thread = await session.createThread("web:original-pr");
+    await thread.pause();
+    engineHost.evictCache(session.id);
+    const args = { orgId: ORG, owner, actorUserId: USER, threadKey: key,
+      target: { sessionId: session.id, threadId: thread.id }, signal: channelSignal("Review feedback"),
+      dispatchId: "cold-pr-reply", mismatchReason: "test" };
+    await deliverToAssistantThread(deps, args);
+    const restored = engineHost.liveSession(session.id)!;
+    expect(restored).not.toBe(session);
+    expect(await restored.providers.store.listUnsettledSubmissions(session.id)).toEqual([
+      expect.objectContaining({ threadId: thread.id }),
+    ]);
+
+    const empty = await restored.createThread("web:queued-pr");
+    await empty.pause();
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const fetchThreadContext = async () => { entered(); await new Promise<void>(resolve => { release = resolve; }); return "Earlier review"; };
+    const target = { sessionId: session.id, threadId: empty.id };
+    const first = deliverToAssistantThread({ ...deps, fetchThreadContext }, { ...args, target, dispatchId: "queued-first" });
+    await waiting;
+    const second = deliverToAssistantThread(deps, { ...args, target, dispatchId: "queued-second" });
+    const results = Promise.allSettled([first, second]);
+    await testDb.appDb.insert(sessionThreads).values({ id: empty.id, sessionId: session.id, createdAt: 1, archivedAt: Date.now() });
+    release();
+    expect(await results).toEqual([
+      { status: "rejected", reason: expect.objectContaining({ message: expect.stringContaining("archived or deleted") }) },
+      { status: "rejected", reason: expect.objectContaining({ message: expect.stringContaining("archived or deleted") }) },
+    ]);
+    expect((await restored.providers.store.listUnsettledSubmissions(session.id)).some(item => item.threadId === empty.id)).toBe(false);
   });
 
   it("prepends the fetched thread transcript on the first turn in a channel thread", async () => {
@@ -264,102 +388,15 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     attributes: {},
   });
 
-  /** A second, non-default assistant for `OWNER`. The first call for a
-   * principal takes the default slot, so seed that one first. */
-  async function secondAssistant(): Promise<string> {
-    await createAssistant(testDb.appDb, ORG, OWNER, "Primary");
-    const created = await createAssistant(testDb.appDb, ORG, OWNER, "Ops");
-    return created.id;
-  }
-
-  it("routes to the NAMED assistant, not the owner's default", async () => {
-    const assistantId = await secondAssistant();
-    await deliverToAssistantThread(
-      { db: testDb.appDb, engineHost },
-      {
-        orgId: ORG,
-        owner: OWNER,
-        actorUserId: USER,
-        threadKey: "events",
-        signal: signal("go"),
-        dispatchId: "d1",
-        assistantId,
-        mismatchReason: "event_target_mismatch",
-      },
-    );
-
-    // The named assistant's own session holds it...
-    const row = await loadAssistant(testDb.appDb, assistantId);
-    const named = await engineHost.assistantSessionFor(
-      assistantId,
-      { actorUserId: USER, orgId: ORG },
-      { sessionId: row!.sessionId },
-    );
-    const namedThread = named.thread("events").id;
-    let landed: string | undefined;
-    for (let i = 0; i < 100; i++) {
-      const entries = await named.providers.store.getEntries(named.id, namedThread);
-      const entry = entries.find((e) => e.type === "message" && e.role === "user") as
-        | MessageEntry
-        | undefined;
-      if (entry) {
-        landed = entry.content ?? "";
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    expect(landed).toBe("go");
-
-    // ...and the default's does NOT. Without the routing, this is where it went.
-    const fallback = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, OWNER, {
-      actorUserId: USER,
-      orgId: ORG,
+  it("delivers into the owner's singleton and persists the initiating actor", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    await deliverToAssistantThread(deps, {
+      orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "events",
+      signal: signal("go"), dispatchId: "d1", mismatchReason: "event_target_mismatch",
     });
-    const defaultEntries = await fallback.providers.store.getEntries(
-      fallback.id,
-      fallback.thread("events").id,
-    );
-    expect(defaultEntries.filter((e) => e.type === "message" && e.role === "user")).toHaveLength(0);
-  });
-
-  it("refuses an assistant that does not exist, and drop-logs it", async () => {
-    await expect(
-      deliverToAssistantThread(
-        { db: testDb.appDb, engineHost },
-        {
-          orgId: ORG,
-          owner: OWNER,
-          actorUserId: USER,
-          threadKey: "events",
-          signal: signal("go"),
-          dispatchId: "d-missing",
-          assistantId: "no-such-assistant",
-          mismatchReason: "event_target_mismatch",
-        },
-      ),
-    ).rejects.toThrow(/no such assistant/);
-
-    const drops = await testDb.appDb.select().from(eventDropLog);
-    expect(drops.map((d) => d.reason)).toContain("event_target_assistant_invalid");
-  });
-
-  it("refuses an assistant owned by a different principal", async () => {
-    // Live and in-org, but owned by a user rather than by the delivery's org.
-    const other = await createAssistant(testDb.appDb, ORG, { type: "user", id: USER }, "Someone else's");
-    await expect(
-      deliverToAssistantThread(
-        { db: testDb.appDb, engineHost },
-        {
-          orgId: ORG,
-          owner: OWNER,
-          actorUserId: USER,
-          threadKey: "events",
-          signal: signal("go"),
-          dispatchId: "d-foreign",
-          assistantId: other.id,
-          mismatchReason: "event_target_mismatch",
-        },
-      ),
-    ).rejects.toThrow(/owned by user:/);
+    expect(await firstUserEntry(deps, "events")).toMatchObject({ content: "go", author: { id: USER } });
+    const rows = await testDb.appDb.select().from(assistants);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ ownerType: OWNER.type, ownerId: OWNER.id });
   });
 });

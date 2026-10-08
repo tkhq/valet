@@ -1,4 +1,5 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { finishAuthChange } from "~/lib/auth-navigation";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { authClient } from "~/lib/auth-client";
 import { useAuthConfig } from "~/api/auth-config";
@@ -39,7 +40,6 @@ const SOCIAL_LABEL: Record<"google" | "github", string> = {
 };
 
 export function LoginPage({ next }: { next?: string } = {}) {
-  const navigate = useNavigate();
   const authConfigQ = useAuthConfig();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -66,7 +66,7 @@ export function LoginPage({ next }: { next?: string } = {}) {
       setError(signInError.message ?? "Couldn’t sign in. Check your email and password.");
       return;
     }
-    navigate({ to: next ?? "/" });
+    finishAuthChange(safeNextPath(next) ?? "/");
   }
 
   const social = authConfigQ.data?.social ?? [];

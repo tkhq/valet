@@ -12,7 +12,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "node:net";
 import { eq } from "drizzle-orm";
 import {
   VirtualSandboxProvider,
@@ -200,43 +199,6 @@ export interface BootTestApiOpts {
   sandboxApiHost?: string;
 }
 
-/** Pre-allocates a port for the app to bind. `EngineHost` needs its
- * `apiBaseUrl` before `createApp`/`serve` can hand back the port
- * `serve({ port: 0 })` would otherwise assign, so a pre-allocated port is
- * the only order that works here.
- *
- * Allocation probes SEQUENTIALLY inside a per-vitest-worker range instead
- * of `listen(0)` → close → reuse: the OS hands sibling workers the same
- * ephemeral port in the release window, and the resulting EADDRINUSE
- * failed whole 10-minute suite runs. Disjoint ranges make cross-worker
- * collisions impossible; the in-worker cursor never re-probes a port it
- * already handed out. */
-const PORT_RANGE_BASE = 21000;
-const PORT_RANGE_SIZE = 20000;
-// Seed from the PID, not VITEST_POOL_ID: pool ids restart per vitest
-// project, so two projects' workers could share a "unique" id and probe
-// the same cursor simultaneously. Live processes can't share a PID, and
-// the multiplier scatters cursors so even a mod-collision starts far away.
-let portCursor = PORT_RANGE_BASE + ((process.pid * 137) % PORT_RANGE_SIZE);
-
-function canBind(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const srv = createServer();
-    srv.once("error", () => resolve(false));
-    srv.listen(port, () => {
-      srv.close(() => resolve(true));
-    });
-  });
-}
-
-async function getFreePort(): Promise<number> {
-  for (;;) {
-    if (portCursor >= PORT_RANGE_BASE + PORT_RANGE_SIZE) portCursor = PORT_RANGE_BASE;
-    const candidate = portCursor++;
-    if (await canBind(candidate)) return candidate;
-  }
-}
-
 export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> {
   const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
   // Test-only: enables the `x-valet-test-user-id` impersonation header in
@@ -305,11 +267,13 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
   const blobs = new FsBlobStore(blobsRoot);
 
-  // Pre-allocate the port: EngineHost needs `apiBaseUrl` at construction
-  // time, before `serve()` (below) would otherwise hand back a `port: 0`
-  // assignment. See `getFreePort`'s comment for the tradeoff.
-  const port = await getFreePort();
-  const apiBaseUrl = `http://127.0.0.1:${port}`;
+  // Resolve callback URLs only after the server binds. Keeping port 0 bound
+  // removes the probe/close/rebind race between concurrent test workers.
+  let boundPort: number | undefined;
+  const serverPort = () => {
+    if (boundPort === undefined) throw new Error("Test API has not started listening");
+    return boundPort;
+  };
 
   // The security plugin is a bundled plugin: at real boot it is always in the
   // assembled set (registry.gen.ts), so `EngineHost.isPluginLoaded("security")`
@@ -361,8 +325,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     githubTokenDeps: opts.githubTokenDeps,
     onePassword,
     db,
-    apiBaseUrl,
-    ...(opts.sandboxApiHost ? { sandboxApiUrl: `http://${opts.sandboxApiHost}:${port}` } : {}),
+    get apiBaseUrl() { return `http://127.0.0.1:${serverPort()}`; },
+    get sandboxApiUrl() {
+      return opts.sandboxApiHost ? `http://${opts.sandboxApiHost}:${serverPort()}` : undefined;
+    },
     sandboxTokenMaster: "test-key",
     plugins,
     actionPluginByService,
@@ -628,12 +594,15 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // Node-only test boot: `createApp` defaults to the Node server adapter.
   const { startServer } = createApp(providers, authWiring, { webDistDir: opts.webDistDir, isReady: opts.isReady });
   const server = await new Promise<ReturnType<typeof startServer>>((resolve) => {
-    const handle = startServer({ port, onListen: () => resolve(handle) });
+    const handle = startServer({ port: 0, onListen: (port) => {
+      boundPort = port;
+      resolve(handle);
+    } });
   });
 
   return {
-    baseUrl: `http://localhost:${port}`,
-    wsUrl: `ws://localhost:${port}`,
+    baseUrl: `http://localhost:${server.port}`,
+    wsUrl: `ws://localhost:${server.port}`,
     providers,
     async cleanup() {
       await server.close();

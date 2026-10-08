@@ -4,10 +4,11 @@ import type {
   GithubAppInstallationSummary,
   PostGithubAppManifestResponse,
 } from "@valet/api/wire";
-import { Badge, Button, ConfirmDialog, Input, Spinner, Switch, Textarea } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Input, Spinner, Switch, Textarea, cardClass } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
-import { livePollInterval } from "~/lib/use-live-query";
+import { livePollInterval } from "~/lib/live-poll";
 import { relativeTime } from "~/lib/relative-time";
+import { cn } from "~/lib/cn";
 import {
   qkSettings,
   useOrg,
@@ -148,7 +149,7 @@ function NotConfiguredCard({ webhookMode }: { webhookMode: "public" | "manual" }
 
   return (
     <div className="max-w-2xl space-y-4">
-      <div className="rounded-lg border border-line bg-paper">
+      <div className={cn(cardClass)}>
         {/* Header */}
         <div className="flex items-start gap-3 border-b border-line px-6 py-5">
           <span
@@ -402,7 +403,7 @@ function ExistingAppCard() {
 
   if (!open) {
     return (
-      <div className="rounded-lg border border-line bg-paper px-6 py-4">
+      <div className={cn(cardClass, "px-5 py-4")}>
         <button
           type="button"
           onClick={() => setOpen(true)}
@@ -419,7 +420,7 @@ function ExistingAppCard() {
   }
 
   return (
-    <div className="rounded-lg border border-line bg-paper">
+    <div className={cn(cardClass)}>
       <div className="border-b border-line px-6 py-5">
         <div className="font-display text-base text-ink">Connect an App you already have</div>
         <p className="mt-0.5 text-sm leading-relaxed text-muted">
@@ -664,7 +665,7 @@ function ConfiguredCard({
         open={confirmRemove}
         onOpenChange={setConfirmRemove}
         title="Remove the GitHub App?"
-        description="Sessions using it for repo access lose that access. The App stays on GitHub, so you can connect it again with its App ID and private key."
+        description="Runtimes using it for repo access lose that access. The App stays on GitHub, so you can connect it again with its App ID and private key."
         confirmLabel="Remove App"
         pendingLabel="Removing…"
         pending={deleteApp.isPending}

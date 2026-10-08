@@ -29,12 +29,14 @@
  * Subscribe callbacks must never throw back into the EventStream's fan-out
  * — every handler is wrapped in try/catch that logs and swallows.
  */
-import { eq } from "drizzle-orm";
+import type { DeliveredBusEvent, EventStream, Principal, SessionStore } from "@valet/engine";
 import { parseAssistantSessionId } from "@valet/engine";
-import type { DeliveredBusEvent, EventStream, SessionStore } from "@valet/engine";
-import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions } from "../schema/index.js";
+import { eq } from "drizzle-orm";
 import { digestGate } from "../channels/gate-digest.js";
+import { gateApprover } from "../services/session-access.js";
+import { governingThreadKey, runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { agentSessions, workflowRuns } from "../schema/index.js";
 import {
   markGateNotificationsRead,
   routeAttention,
@@ -59,25 +61,14 @@ async function sessionLabel(db: AppDb, sessionId: string): Promise<string> {
   return row?.title || sessionId;
 }
 
-/**
- * Where a person should land to answer this.
- *
- * An assistant's conversation lives at `/chat`, not `/sessions` — assistants
- * are deliberately excluded from the standalone sessions list, so a
- * `/sessions/{id}` link for one points at a surface that does not list it.
- * The `?assistant=` form also carries the owner implicitly, which is what
- * lets the client put the reader in the right context rather than leaving
- * them looking at a conversation their current scope excludes.
- *
- * Other sessions keep the direct link. The web route shows workflow-agent
- * approvals separately because workflow sessions have no app session row.
- */
-export function attentionHref(sessionId: string, threadId?: string): string {
-  const assistantId = parseAssistantSessionId(sessionId);
-  const href = assistantId === null
-    ? `/sessions/${encodeURIComponent(sessionId)}`
-    : `/chat?assistant=${encodeURIComponent(assistantId)}`;
-  return threadId ? `${href}${assistantId === null ? "?" : "&"}thread=${encodeURIComponent(threadId)}` : href;
+/** Notifications address the workspace conversation or an execution detail. */
+export function attentionHref(sessionId: string, threadId?: string, owner?: Principal): string {
+  const isAssistant = parseAssistantSessionId(sessionId) !== null || sessionId.startsWith("orchestrator:");
+  const workspace = owner?.type === "team" ? owner.id : "user";
+  const href = isAssistant && owner
+    ? `/chat?workspace=${encodeURIComponent(workspace)}`
+    : `/sessions/${encodeURIComponent(sessionId)}`;
+  return threadId ? `${href}${href.includes("?") ? "&" : "?"}thread=${encodeURIComponent(threadId)}` : href;
 }
 
 async function handleSubmissionStuck(deps: AttentionWiringDeps, delivered: DeliveredBusEvent): Promise<void> {
@@ -93,9 +84,10 @@ async function handleSubmissionStuck(deps: AttentionWiringDeps, delivered: Deliv
     urgency: "high",
     owner: sessionData.owner,
     sessionId,
+    threadId,
     title: `Stuck submission in "${label}" (thread ${threadId})`,
     body: `Queue item ${queueItemId} hasn't settled after ${delivered.event.attemptCount} attempt(s).`,
-    href: attentionHref(sessionId, threadId),
+    href: attentionHref(sessionId, threadId, sessionData.owner),
     dedupeKey: queueItemId,
   });
 }
@@ -126,17 +118,42 @@ async function handleDecisionGate(deps: AttentionWiringDeps, delivered: Delivere
   // a channel DM should show that. The digest keeps the one-line summary and
   // hands the key parameters over as labeled fields.
   const digest = digestGate(gate);
+  // A gate asking to use a member's shared account goes to that member
+  // alone. The thread may be private to the requester, so it carries no link
+  // into it; the member answers from their inbox or the channel message.
+  const approver = gateApprover(gate);
+  const audienceKey = await workflowGateAudience(deps, sessionId);
   await routeAttention(deps, {
     kind: "approval",
     urgency: "high",
-    owner,
+    owner: approver ? { type: "user", id: approver.userId } : owner,
     sessionId,
+    threadId: gate.threadId,
+    ...(audienceKey !== undefined ? { audienceKey } : {}),
     title: digest.title,
     body: digest.body,
-    href: attentionHref(sessionId, gate.threadId),
+    ...(approver ? {} : { href: attentionHref(sessionId, gate.threadId, sessionData.owner) }),
     dedupeKey: gate.id,
     gate: { id: gate.id, actions: gate.actions, fields: digest.fields },
   });
+}
+
+/**
+ * Who may see a workflow run's gate (a `wf:<runId>:<node>` session): the
+ * audience of the thread the run started from, or of the Slack channel whose
+ * event started it. A run neither started is the team's. The key stands in
+ * for the run's own session, which has no thread of its own to judge.
+ */
+async function workflowGateAudience(deps: AttentionWiringDeps, sessionId: string): Promise<string | undefined> {
+  if (!sessionId.startsWith("wf:")) return undefined;
+  const [run] = await deps.db.select({ params: workflowRuns.params }).from(workflowRuns)
+    .where(eq(workflowRuns.id, sessionId.split(":")[1] ?? "")).limit(1);
+  const params = run?.params as { origin?: { assistantSessionId: string; threadId: string }; input?: unknown } | undefined;
+  if (params?.origin) {
+    return await governingThreadKey(deps.db, params.origin.assistantSessionId, params.origin.threadId, "parent link") ?? "app-assistant:";
+  }
+  const channel = params ? runEventChannel(params) : undefined;
+  return channel ? slackEventsThreadKey(channel) : undefined;
 }
 
 /**

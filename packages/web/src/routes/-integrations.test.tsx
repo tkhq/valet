@@ -20,6 +20,9 @@ import type {
   PluginServiceSummary,
 } from "@valet/api/wire";
 
+vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog: [] } }) }));
+vi.mock("~/components/integrations/integration-limit-notice", () => ({ IntegrationLimitNotice: () => null }));
+
 const pluginsData = {
   plugins: [
     {
@@ -231,8 +234,8 @@ vi.mock("~/api/onepassword", () => ({
 }));
 
 // The org-provided tile's pairing block (identity-link-block.tsx) reads
-// these three hooks. importOriginal: see -new-session-dialog.test.tsx for
-// why a bare replacement is unsafe under vitest.config.ts's isolate:false.
+// these three hooks. importOriginal keeps the module's other exports real
+// (see vitest.config.ts).
 let identityLinksData: { links: IdentityLinkStatus[] } | undefined;
 let identityLinksLoading = false;
 let linkMembersData: { members: Array<{ externalId: string; displayName: string; handle: string }> } | undefined;
@@ -642,7 +645,7 @@ describe("connected dynamic service tool count", () => {
       ],
     };
     render(<IntegrationsPage />);
-    expect(screen.getByText("52 tools")).toBeTruthy();
+    expect(screen.getByText(/^52 tools$/)).toBeTruthy();
     expect(screen.queryByText("tools load on connect")).toBeNull();
   });
 
@@ -669,7 +672,7 @@ describe("connected dynamic service tool count", () => {
       ],
     };
     render(<IntegrationsPage />);
-    expect(screen.getByText("tools load on connect")).toBeTruthy();
+    expect(screen.getByText(/^tools load on connect$/)).toBeTruthy();
   });
 });
 
@@ -1280,8 +1283,8 @@ describe("IntegrationsPage — the search box", () => {
   });
 
   it("sends the search to the URL once typing settles", async () => {
-    // Fake timers drive the debounce by hand; see use-live-query.test.tsx
-    // for why waitFor and vitest's clock do not mix.
+    // Fake timers drive the debounce by hand. Testing Library's waitFor polls
+    // on a clock that only vi.advanceTimersByTimeAsync moves, so it is not used.
     vi.useFakeTimers();
     try {
       render(<IntegrationsPage />);

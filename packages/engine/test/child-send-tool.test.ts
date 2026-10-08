@@ -162,3 +162,15 @@ describe("child_send tool: sender present", () => {
     ).rejects.toThrow("engine store unavailable");
   });
 });
+
+describe("child_send tool: newcomer turn", () => {
+  it("refuses a channel sender with no Valet account before it reaches the sender", async () => {
+    const sender = vi.fn();
+    const result = await childSendTool.execute(
+      { child_session_id: "child-1", message: "go" },
+      makeCtx({ externalSender: true, config: { childSender: sender } }),
+    );
+    expect(result.text).toContain("[child_unavailable]");
+    expect(sender).not.toHaveBeenCalled();
+  });
+});

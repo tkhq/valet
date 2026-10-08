@@ -377,6 +377,60 @@ describe("policyResolver seam: require_approval gate", () => {
   });
 });
 
+describe("policyResolver seam: another member's shared account", () => {
+  it.each([["s1", "thread"], ["wf:run-1:node-1", "workflow run"]])("names the full borrow scope for %s and asks only that member", async (sessionId, scope) => {
+    let gateReq: DecisionGateRequest | undefined;
+    const { resolver } = makeResolver({
+      decision: {
+        mode: "require_approval",
+        provenance: { baseMode: "allow", source: "shared_account" },
+        approver: { userId: "bea", name: "Bea" },
+        extraGateActions: [{ id: "approve_always", label: "Always allow", approves: true }],
+      },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ sessionId, policyResolver: resolver, requestDecision: async (req) => { gateReq = req; return { actionId: "deny", resolvedBy: "bea", resolvedAt: Date.now() }; } }),
+    );
+    expect(gateReq?.title).toBe("Let a teammate use your github account?");
+    expect(gateReq?.body).toContain(`later github actions in this ${scope}`);
+    expect(gateReq?.body).toContain("including actions requested by other teammates");
+    expect(gateReq?.actions?.map((a) => a.id)).toEqual(["approve", "deny"]);
+    expect((gateReq?.context as Record<string, unknown>)?.approver).toEqual({ userId: "bea", name: "Bea" });
+  });
+});
+
+describe("policyResolver seam: sender with no Valet account", () => {
+  it("refuses an action that needs approval without opening a gate", async () => {
+    let executed = false;
+    let gateOpened = false;
+    const { resolver, invocations } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "risk_high" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction({ execute: async () => { executed = true; return { success: true }; } }))] });
+    const result = await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({
+        externalSender: true,
+        policyResolver: resolver,
+        requestDecision: async () => { gateOpened = true; return { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() }; },
+      }),
+    );
+    expect(result.text).toContain("no Valet account");
+    expect(executed).toBe(false);
+    expect(gateOpened).toBe(false);
+    expect(invocations.map((r) => r.status)).toEqual(["denied"]);
+  });
+
+  it("still runs an action its policy allows", async () => {
+    const { resolver } = makeResolver();
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    const result = await callTool.execute({ tool_id: "github.get_issue", params: { n: 1 }, summary: "s" }, makeCtx({ externalSender: true, policyResolver: resolver }));
+    expect(result.text).not.toContain("denied");
+  });
+});
+
 describe("policyResolver seam: fail-closed + audit edges", () => {
   it("resolve() throw → fails closed to require_approval with provenance source resolver_error", async () => {
     let gateReq: DecisionGateRequest | undefined;

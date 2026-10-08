@@ -19,10 +19,11 @@
  * "Remove" and not "Disable".
  *
  * `owner` pins the listing to ONE owner, server-side. The `/skills` panel
- * sends none and lists personal and team sources, asking the server to drop
- * org rows (`excludeOrg`). Organization repositories live on
- * `/settings/organization/library`. A row's scope was the reason there were
- * two personal pages; now it is a badge on personal and team rows.
+ * pins the workspace in view (your own, or a team), so it lists the same
+ * owner's repositories as the skills below it. Without `owner` the panel lists
+ * personal and team sources and asks the server to drop org rows
+ * (`excludeOrg`). Organization repositories live on
+ * `/settings/organization/library`.
  *
  * A new source goes to the org when `owner` names it, and otherwise to the
  * active workspace, which the nav switcher sets: your own, or a team. No
@@ -40,7 +41,7 @@
  */
 import { useState, type FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
-import { Button, Input, Spinner } from "~/components/primitives";
+import { Button, Input, Spinner, cardClass } from "~/components/primitives";
 import { Pager } from "~/components/pager";
 import { relativeTime } from "~/lib/relative-time";
 import { errorText } from "~/lib/error-text";
@@ -56,6 +57,7 @@ import {
   type SkillSourceSummary,
 } from "~/api/skill-sources";
 import { ScopeBadge, scopeForOwnerType } from "./scope-badge";
+import { cn } from "~/lib/cn";
 
 /** The one owner a panel pins its listing to. */
 export interface SourcesOwner {
@@ -142,7 +144,7 @@ export function RepoSourcesPanel({
   }
 
   return (
-    <section className="rounded-lg border border-line bg-paper">
+    <section className={cn(cardClass)}>
       <div className="px-4 py-3">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-sm font-medium text-ink">Repositories</h2>

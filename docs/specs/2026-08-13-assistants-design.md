@@ -273,3 +273,7 @@ The shared display helper also names the personal orchestrator and workspace-spe
 
 The team dashboard and team settings action `Edit assistant` opens `/assistants`, the full list for the selected workspace.
 Links on individual assistant names and per-assistant edit actions still open `/assistants/$assistantId`.
+
+## Retired workspace entry points
+
+Opening a live workspace whose default was retired creates a fresh runtime. The resolver moves the tombstone to a distinct owner key in the same transaction. It preserves the original retirement timestamp, sessions, files, and history. Direct access to that retired identity remains blocked. Workspace integration limits carry over to the replacement. Team recovery uses the same ownership lock as team deletion. Missing owners do not receive replacements. No database rewrite or migration is required.

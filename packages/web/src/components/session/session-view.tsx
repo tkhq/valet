@@ -1,4 +1,6 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ListTree } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "~/components/primitives/popover";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { X, ExternalLink } from "lucide-react";
 import {
@@ -29,6 +31,8 @@ import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { BrowserOverlay } from "~/components/session/browser/browser-overlay";
 import { useBrowserWatch } from "~/components/session/browser/use-browser-watch";
+import { ThreadContextPanel } from "~/components/session/thread-context-panel";
+import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 import { SessionHeader } from "~/components/session/session-header";
 import { useMe } from "~/api/settings";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
@@ -36,7 +40,7 @@ import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messag
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { Button, Spinner } from "~/components/primitives";
 import type { MessageReplyReference } from "@valet/api/wire";
-import { defaultThreadId } from "~/lib/thread-default";
+import { defaultThreadId, isAppAssistantThread } from "~/lib/thread-default";
 
 /**
  * Reusable session view (assistant-centered web UI, decisions 13/14):
@@ -60,16 +64,27 @@ import { defaultThreadId } from "~/lib/thread-default";
 export function SessionView({
   sessionId,
   panel,
+  hidePanelHeader = false,
+  renderPanelHeader,
   activeThreadId,
   onClose,
   onOpenChild,
   activeTab,
   onTabChange,
   enableReplies = false,
+  scopeNotice,
+  chatOnly = false,
+  active = true,
 }: {
+  /** Hidden embedded views keep drafts/streams but suppress floating overlays. */
+  active?: boolean;
+  chatOnly?: boolean;
+  scopeNotice?: string;
   sessionId: string;
   /** Renders the compact slide-over header instead of `SessionHeader`. */
   panel?: boolean;
+  hidePanelHeader?: boolean;
+  renderPanelHeader?: (summary: ReactNode) => ReactNode;
   /**
    * Controlled active thread id, typically derived from the host route's
    * `?thread=` search param (full/standalone). When omitted (panel), the
@@ -99,6 +114,7 @@ export function SessionView({
   /** Enable message-level replies on an orchestrator chat surface. */
   enableReplies?: boolean;
 }) {
+  const [summaryOpen, setSummaryOpen] = useState(() => !panel && typeof window.matchMedia === "function" && window.matchMedia("(min-width: 768px)").matches);
   const session = useSession(sessionId);
   // Keep the header's model picker honest for switches this client did not
   // make itself (/model command, other tabs, direct API).
@@ -108,7 +124,6 @@ export function SessionView({
   // and this refetch is what pulls it into the transcript.
   useInvalidateMessagesOnCompaction(sessionId);
   const [localTab, setLocalTab] = useState<SandboxTabId>("chat");
-  const tab = activeTab ?? localTab;
   const setTab = onTabChange ?? setLocalTab;
   const viewRef = useRef<HTMLDivElement>(null);
   const restoreTabFocus = useRef(false);
@@ -117,8 +132,19 @@ export function SessionView({
     restoreTabFocus.current = next !== tab && active instanceof HTMLElement
       && active.getAttribute("role") === "tab"
       && Boolean(viewRef.current?.contains(active));
+    if (tab === "browser" && next !== "browser") browserWatch.open();
     setTab(next);
   }
+  const threads = useThreads(sessionId, undefined, activeThreadId);
+  // Open the WS — pipes events into the store keyed by sessionId.
+  useSessionWebSocket(sessionId);
+  const stream = useSessionStream(sessionId);
+
+  // The shared default keeps an omitted ?thread aligned with the sidebar, regardless of its sort mode.
+  const effectiveThreadId = activeThreadId ?? defaultThreadId(threads.data?.threads ?? []);
+  const helperThread = threads.data?.threads.find((thread) => thread.id === effectiveThreadId);
+  const hideBrowser = chatOnly || Boolean(helperThread && isAppAssistantThread(helperThread));
+  const tab = hideBrowser ? "chat" : activeTab ?? localTab;
   useLayoutEffect(() => {
     if (!restoreTabFocus.current) return;
     restoreTabFocus.current = false;
@@ -126,13 +152,6 @@ export function SessionView({
     // Keep keyboard focus on the selected replacement when it moves.
     viewRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus({ preventScroll: true });
   }, [tab]);
-  const threads = useThreads(sessionId);
-  // Open the WS — pipes events into the store keyed by sessionId.
-  useSessionWebSocket(sessionId);
-  const stream = useSessionStream(sessionId);
-
-  // The shared default keeps an omitted ?thread aligned with the sidebar, regardless of its sort mode.
-  const effectiveThreadId = activeThreadId ?? defaultThreadId(threads.data?.threads ?? []);
   const [replyTarget, setReplyTarget] = useState<MessageReplyReference>();
   useEffect(() => setReplyTarget(undefined), [effectiveThreadId]);
 
@@ -189,7 +208,7 @@ export function SessionView({
   function closeBrowserPreview() {
     browserWatch.close();
     viewRef.current
-      ?.querySelector<HTMLElement>('[aria-label="Watch browser"]')
+      ?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
       ?.focus({ preventScroll: true });
   }
   function expandBrowserPreview() {
@@ -227,40 +246,73 @@ export function SessionView({
 
   if (session.isLoading) {
     return (
-      <div className="flex-1 grid place-items-center text-sm text-muted">
-        <Spinner /> Loading session…
+      <div className="flex min-h-0 flex-1 flex-col">
+        {panel && !hidePanelHeader && renderPanelHeader?.(null)}
+        <div className="flex-1 grid place-items-center text-sm text-muted"><Spinner /> Loading conversation…</div>
       </div>
     );
   }
   if (session.error || !session.data) {
     return (
-      <div className="flex-1 grid place-items-center text-center text-sm text-danger-500 p-8">
-        Failed to load session
-        <div className="text-xs text-muted mt-1">{(session.error as Error)?.message}</div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {panel && !hidePanelHeader && renderPanelHeader?.(null)}
+        <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center text-sm text-danger-500">
+          Failed to load conversation
+          <div className="text-xs text-muted">{session.error?.message}</div>
+          <Button size="sm" variant="secondary" onClick={() => void session.refetch()}>Retry</Button>
+        </div>
       </div>
     );
   }
+
+  const summaryControl = effectiveThreadId ? (
+    <Popover key={`${sessionId}:${effectiveThreadId}`} open={active && summaryOpen} onOpenChange={setSummaryOpen}>
+      <PopoverTrigger asChild>
+        <button type="button" aria-label="Toggle summary" title="Toggle summary" className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink data-[state=open]:bg-ink-wash focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss">
+          <ListTree className="h-4 w-4" aria-hidden />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent aria-label="Thread summary" align="end" sideOffset={12} onOpenAutoFocus={(event) => event.preventDefault()} className="w-80 max-w-[calc(100vw-2rem)] max-h-[var(--radix-popover-content-available-height)] overflow-y-auto p-0 rounded-2xl">
+                <ThreadContextPanel
+                  key={`${sessionId}:${effectiveThreadId}`}
+                  owner={{ ownerType: session.data.owner.type, ownerId: session.data.owner.id }}
+                  sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages} busy={agentBusy}
+                  onCreate={() => {
+                    const key = draftKey(sessionId, effectiveThreadId);
+                    const store = useComposerDraftStore.getState();
+                    const text = store.byKey[key]?.text ?? "";
+                    store.setText(key, text ? `${text}\nCreate a file or site: ` : "Create a file or site: ");
+                    viewRef.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus();
+                  }}
+                  onAttach={() => viewRef.current?.querySelector<HTMLButtonElement>('[aria-label="Attach files"], [aria-label="Attach images"]')?.click()}
+                  onReveal={(messageId) => {
+                    const row = [...(viewRef.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? [])].find((el) => el.dataset.messageId === messageId);
+                    row?.scrollIntoView({ behavior: "smooth", block: "center" });
+                  }}
+                />
+      </PopoverContent>
+    </Popover>
+  ) : null;
 
   const sessionHeader = (
     <SessionHeader
       session={session.data}
       agentStatus={threadStatus.status}
-      turnStartedAt={threadStatus.turnStartedAt}
       conn={stream.conn}
       sandbox={stream.sandbox}
       threadId={effectiveThreadId}
       messages={stream.messages}
+      summaryControl={summaryControl}
     />
   );
-  const sandboxTabs = (
+  const sandboxTabs = !hideBrowser && (
     <SandboxTabs
       sessionId={sessionId}
       profile={session.data.profile}
       activeTab={tab}
       onTabChange={changeTab}
+      notice={scopeNotice}
       sandbox={stream.sandbox}
-      onWatchBrowser={browserWatch.open}
-      browserPreviewOpen={browserWatch.mode === "open"}
     />
   );
 
@@ -269,11 +321,13 @@ export function SessionView({
     <div ref={viewRef} className="flex-1 flex flex-col min-h-0 min-w-0">
       {(panel || tab !== "chat") && (
         <>
-          {panel ? <PanelHeader sessionId={sessionId} title={session.data.title} onClose={onClose} /> : sessionHeader}
+          {panel ? (!hidePanelHeader && (renderPanelHeader ? renderPanelHeader(summaryControl) : <div className="flex shrink-0 items-center border-b border-line pr-3"><PanelHeader sessionId={sessionId} threadId={effectiveThreadId} title={session.data.title} onClose={onClose} />{summaryControl}</div>)) : sessionHeader}
           {sandboxTabs}
         </>
       )}
       {tab === "chat" ? (
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <PageDropTarget>
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
             <MessageList
@@ -286,7 +340,7 @@ export function SessionView({
               viewerId={me.data?.id}
               onReply={enableReplies ? setReplyTarget : undefined}
             />
-            {(browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
+            {!hideBrowser && (browserWatch.mode === "open" || browserWatch.mode === "minimized") && (
               <BrowserOverlay
                 key={JSON.stringify([sessionId, effectiveThreadId])}
                 sessionId={sessionId}
@@ -319,7 +373,7 @@ export function SessionView({
           {/* No key: drafts are per-thread in the composer-drafts store, so
               a thread switch swaps the draft without a remount (a remount
               would orphan in-flight uploads). */}
-          <Composer
+          {session.data?.readOnlyReason ? <p className="border-t border-border px-4 py-3 text-sm text-muted" role="status">{session.data.readOnlyReason}</p> : <Composer
             sessionId={sessionId}
             threadId={effectiveThreadId}
             agentStatus={threadStatus.status}
@@ -327,8 +381,11 @@ export function SessionView({
             queuedItemCount={threadQueueState?.pendingIds.length ?? 0}
             replyTarget={replyTarget}
             onCancelReply={() => setReplyTarget(undefined)}
-          />
+          />}
         </PageDropTarget>
+        </div>
+
+        </div>
       ) : null}
     </div>
     </ComposerDropContext.Provider>
@@ -337,23 +394,26 @@ export function SessionView({
 
 function PanelHeader({
   sessionId,
+  threadId,
   title,
   onClose,
 }: {
   sessionId: string;
+  threadId?: string;
   title?: string;
   onClose?: () => void;
 }) {
   return (
-    <header className="border-b border-line px-4 py-3 flex items-center gap-3">
+    <header className="min-w-0 flex-1 px-4 py-3 flex items-center gap-3">
       <div className="min-w-0 flex-1">
         <div className="text-sm font-semibold tracking-tight truncate text-ink">
-          {title || "Untitled session"}
+          {title || "Untitled thread"}
         </div>
       </div>
       <Link
         to="/sessions/$sessionId"
         params={{ sessionId }}
+        search={{ thread: threadId }}
         className="inline-flex items-center gap-1 text-xs text-muted hover:text-moss"
         aria-label="Open full page"
       >

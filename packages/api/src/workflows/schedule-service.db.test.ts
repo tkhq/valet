@@ -192,7 +192,7 @@ describe("updateWorkflowSchedule", () => {
     expect(updated.ok).toBe(false);
     if (updated.ok) return;
     expect(updated.status).toBe(400);
-    expect(updated.error).toContain("orchestrator");
+    expect(updated.error).toContain("assistant-prompt");
   });
 });
 

@@ -1,3 +1,6 @@
+import { type Presence, validatePresence } from "@valet/shared";
+import { PresenceSettings } from "~/components/presence-settings";
+import { AutomationReview } from "~/components/events/automation-review";
 /**
  * TriggerDialog — create or edit a schedule or event trigger.
  *
@@ -51,7 +54,7 @@ import {
   SLACK_APP_MENTION,
 } from "~/lib/slack-mention";
 
-type TriggerKind = "schedule" | "event";
+export type TriggerKind = "schedule" | "event";
 type TargetKind = "workflow" | "orchestrator";
 
 function defaultTimezone(): string {
@@ -63,17 +66,24 @@ export function TriggerDialog({
   onOpenChange,
   workflowId,
   editing,
+  schedulesOnly = false,
+  review = false,
+  initialKind,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   workflowId?: string;
   editing?: WorkflowTriggerItem;
+  schedulesOnly?: boolean;
+  review?: boolean;
+  /** The kind a new trigger starts as, when the caller already knows it. */
+  initialKind?: TriggerKind;
 }) {
   const isEditing = editing !== undefined;
-  const lockedKind: TriggerKind | undefined = editing?.kind;
+  const lockedKind: TriggerKind | undefined = editing?.kind ?? (schedulesOnly ? "schedule" : undefined);
 
   // ── kind picker ────────────────────────────────────────────────────────
-  const [kind, setKind] = useState<TriggerKind>(lockedKind ?? "schedule");
+  const [kind, setKind] = useState<TriggerKind>(lockedKind ?? initialKind ?? "schedule");
 
   // ── shared fields ──────────────────────────────────────────────────────
   const [name, setName] = useState("");
@@ -88,6 +98,7 @@ export function TriggerDialog({
   const [inputJsonError, setInputJsonError] = useState<string | null>(null);
 
   // ── event fields ───────────────────────────────────────────────────────
+  const [presence, setPresence] = useState<Presence>({});
   const [eventKey, setEventKey] = useState("");
   const [filterRows, setFilterRows] = useState<UiFilterRow[]>([]);
   // Explicit opt-out of the channel requirement on a `slack.app_mention`
@@ -111,9 +122,10 @@ export function TriggerDialog({
   // each entry's filter fields so the Filters box can show which fields the
   // selected event actually declares.
   const catalogEntries = (catalogQ.data?.catalog ?? []).flatMap((svc) =>
-    svc.entries.map((e) => ({ key: e.key, label: `${e.key} — ${e.description}`, filters: e.filters })),
+    svc.entries.map((e) => ({ key: e.key, label: e.description, filters: e.filters, readiness: svc.readiness })),
   );
   const selectedEntry = catalogEntries.find((e) => e.key === eventKey);
+  const missingSetup = kind === "event" && selectedEntry?.readiness?.ready === false;
 
   // Populate fields when editing.
   useEffect(() => {
@@ -140,7 +152,7 @@ export function TriggerDialog({
       }
     } else {
       // Reset for create.
-      setKind(lockedKind ?? "schedule");
+      setKind(lockedKind ?? initialKind ?? "schedule");
       setName("");
       setCron("");
       setTimezone(defaultTimezone());
@@ -150,12 +162,13 @@ export function TriggerDialog({
       setInputJson("");
       setInputJsonError(null);
       setEventKey("");
+      setPresence({});
       setFilterRows([]);
       setAnyChannel(false);
       setFormError(null);
       setServerError(null);
     }
-  }, [open, editing, workflowId, lockedKind]);
+  }, [open, editing, workflowId, lockedKind, initialKind]);
 
   /** Parse a JSON textarea. Empty input returns undefined (the caller picks
    * the default); a parse failure sets the field error and returns null. */
@@ -186,6 +199,10 @@ export function TriggerDialog({
     setServerError(null);
     setFormError(null);
     setInputJsonError(null);
+    if (missingSetup) {
+      setFormError(selectedEntry?.readiness?.reason ?? "Ask an organization admin to connect this event source.");
+      return;
+    }
 
     // Client-side: require a workflow selection on create when the workflowId
     // prop is absent and a workflow target is needed.
@@ -214,13 +231,14 @@ export function TriggerDialog({
           // editing.kind matches `kind` (set in the open-reset effect); TS can't narrow through useState
           const orig = editing as Extract<WorkflowTriggerItem, { kind: "schedule" }>;
           type ScheduleUpdate = {
+            enabled?: boolean;
             name?: string;
             cron?: string;
             timezone?: string;
             prompt?: string;
             input?: unknown;
           };
-          const body: ScheduleUpdate = {};
+          const body: ScheduleUpdate = review && !orig.enabled ? { enabled: true } : {};
           if (name !== orig.name) body.name = name;
           if (cron !== orig.detail.cron) body.cron = cron;
           if (timezone !== orig.detail.timezone) body.timezone = timezone;
@@ -255,6 +273,10 @@ export function TriggerDialog({
         }
       } else {
         // Event trigger.
+        if (!isEditing) {
+          const presenceError = validatePresence(presence);
+          if (presenceError) { setFormError(presenceError); return; }
+        }
         const incomplete = incompleteFilterRow(filterRows);
         if (incomplete) {
           setFormError(`Enter a value for the "${incomplete}" filter, or remove the row.`);
@@ -281,12 +303,13 @@ export function TriggerDialog({
           // editing.kind matches `kind` (set in the open-reset effect); TS can't narrow through useState
           const orig = editing as Extract<WorkflowTriggerItem, { kind: "event" }>;
           type EventUpdate = {
+            enabled?: boolean;
             name?: string;
             eventKeys?: string[];
             filters?: unknown[];
             anyChannel?: boolean;
           };
-          const body: EventUpdate = {};
+          const body: EventUpdate = review && !orig.enabled ? { enabled: true } : {};
           if (name !== orig.name) body.name = name;
           if (eventKey !== (orig.detail.eventKeys[0] ?? "")) {
             body.eventKeys = [eventKey];
@@ -324,6 +347,7 @@ export function TriggerDialog({
           const wfId = workflowId ?? selectedWorkflowId;
           await createEvent.mutateAsync({
             workflowId: wfId,
+            ...(Object.keys(presence).length > 0 ? { presence } : {}),
             name,
             eventKeys: [eventKey],
             filters,
@@ -338,14 +362,14 @@ export function TriggerDialog({
     }
   }
 
-  const title = isEditing ? `Edit ${editing.name}` : "New trigger";
+  const title = isEditing ? `Edit ${editing.name}` : schedulesOnly ? "New schedule" : "New trigger";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title={title} className="max-w-2xl">
+      <DialogContent title={title} description={review ? "Review the configuration before enabling it." : "Set when this automation runs and what it does."} className="max-w-2xl">
         <div className="grid gap-4">
           {/* Kind picker — only shown when creating */}
-          {!isEditing && (
+          {!lockedKind && (
             <div className="flex flex-wrap gap-2">
               <Button
                 variant={kind === "schedule" ? "primary" : "ghost"}
@@ -400,7 +424,7 @@ export function TriggerDialog({
               </div>
 
               {/* Target radio — locked when editing */}
-              {!isEditing && (
+              {!lockedKind && (
                 <fieldset className="grid gap-1">
                   <legend className="text-sm font-medium text-ink">Target</legend>
                   <div className="flex flex-wrap gap-x-4 pt-1">
@@ -427,9 +451,9 @@ export function TriggerDialog({
                         value="orchestrator"
                         checked={targetKind === "orchestrator"}
                         onChange={() => setTargetKind("orchestrator")}
-                        aria-label="orchestrator"
+                        aria-label="assistant"
                       />
-                      Orchestrator
+                      Assistant
                     </label>
                   </div>
                 </fieldset>
@@ -529,6 +553,7 @@ export function TriggerDialog({
               {/* Event key select — from useTriggerCatalog() */}
               <div className="grid gap-1">
                 <Label htmlFor="trigger-event-key">Event</Label>
+                <p className="text-xs text-muted">Run when an event arrives. Actions are configured inside the workflow.</p>
                 <select
                   id="trigger-event-key"
                   value={eventKey}
@@ -556,6 +581,10 @@ export function TriggerDialog({
               </div>
 
               {/* Filters — field/op/value rows from the event catalog */}
+              {eventKey.startsWith("linear.") && <p className="text-xs text-muted">
+                {missingSetup ? selectedEntry?.readiness?.reason : "Requires your organization’s Linear connection. Personal Linear connections give tools, not events."}{" "}
+                <a className="underline" href="/settings/organization/linear">Linear settings</a>
+              </p>}
               <div className="grid gap-1.5">
                 <Label>Filters</Label>
                 {selectedEntry ? (
@@ -594,7 +623,14 @@ export function TriggerDialog({
             </>
           )}
 
+          {kind === "event" && !isEditing && <PresenceSettings value={presence} onChange={setPresence} subscription disabled={isPending} />}
+
           {/* Form validation error */}
+          <AutomationReview workflowId={targetKind === "workflow" ? selectedWorkflowId || workflowId : undefined} when={kind === "schedule" ? `${cron} (${timezone})` : eventKey}
+            scope={kind === "schedule" ? "This workspace" : filterRows.map(row => `${row.field} ${row.op} ${row.label || row.value}`).join("; ") || "All matching events"}
+            result={targetKind === "orchestrator" ? prompt : "Run the workflow with its configured steps and inputs"}
+            destination={targetKind === "orchestrator" ? "Workspace assistant, in a scheduled thread" : workflows.find(w => w.id === selectedWorkflowId)?.name || selectedWorkflowId || workflowId}
+          />
           {formError && (
             <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
               {formError}
@@ -617,8 +653,8 @@ export function TriggerDialog({
           >
             Cancel
           </Button>
-          <Button onClick={() => void submit()} disabled={isPending}>
-            {isPending ? (isEditing ? "Saving…" : "Creating…") : isEditing ? "Save" : "Create"}
+          <Button onClick={() => void submit()} disabled={isPending || missingSetup}>
+            {isPending ? (isEditing ? "Saving…" : "Creating…") : review && editing && !editing.enabled ? "Enable automation" : isEditing ? "Save" : "Create"}
           </Button>
         </DialogFooter>
       </DialogContent>

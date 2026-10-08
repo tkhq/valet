@@ -26,6 +26,7 @@ import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
 import type {
   ActionPlugin,
   ApprovalMode,
+  CredentialStore,
   DecisionResolution,
   PolicyDecision,
   PolicyInvocationRecord,
@@ -35,8 +36,14 @@ import type {
   ValetPlugin,
 } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
-import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants } from "../schema/index.js";
+import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants, users, workflowActionGrants, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { shareGeneration, canBorrowCredential, isUnattendedTeamRuntime, writeBorrowGrant } from "../services/credential-borrow.js";
+import { orgFallbackPolicy, readTeamCredential } from "../services/credential-resolution.js";
+import { membersSharing } from "../services/credential-shares.js";
+import type { OnePasswordService } from "../services/onepassword.js";
+import { isTeamMember } from "../services/teams.js";
 import { isOrgAdmin } from "../services/org.js";
+import { recordActionChannelMessage } from "../services/channel-messages.js";
 import {
   grantPolicyKey,
   resolvePolicyDecision,
@@ -84,11 +91,14 @@ export function alwaysAllowPolicyId(orgId: string, actionId: string): string {
 }
 
 export interface PolicyRowScope {
+  workflowId?: string;
   orgId: string;
   teamId?: string;
   userId?: string;
   sessionId?: string;
   workflowExecutionId?: string;
+  /** Leave out the session's grants: a newcomer's turn asks again. */
+  externalSender?: boolean;
 }
 
 /**
@@ -129,7 +139,7 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
   }));
 
   let grants: RuntimeGrantRow[] = [];
-  if (scope.sessionId) {
+  if (scope.sessionId && !scope.externalSender) {
     const rows = await db
       .select()
       .from(runtimeGrants)
@@ -172,7 +182,22 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
     }));
   }
 
-  return { policies, grants, overrides };
+  let workflowId = scope.workflowId;
+  if (!workflowId && scope.workflowExecutionId) {
+    const [run] = await db.select({ workflowId: workflowRuns.workflowId }).from(workflowRuns)
+      .innerJoin(workflowDefinitions, and(eq(workflowDefinitions.id, workflowRuns.workflowId), eq(workflowDefinitions.orgId, scope.orgId)))
+      .where(eq(workflowRuns.id, scope.workflowExecutionId)).limit(1);
+    workflowId = run?.workflowId;
+  }
+  const workflowGrants = workflowId ? await db.select({ id: workflowActionGrants.id, actionId: workflowActionGrants.actionId })
+    .from(workflowActionGrants)
+    .innerJoin(workflowDefinitions, and(eq(workflowDefinitions.id, workflowActionGrants.workflowId),
+      eq(workflowDefinitions.orgId, scope.orgId), eq(workflowDefinitions.ownerType, workflowActionGrants.ownerType),
+      eq(workflowDefinitions.ownerId, workflowActionGrants.ownerId)))
+    .where(and(eq(workflowActionGrants.orgId, scope.orgId), eq(workflowActionGrants.workflowId, workflowId),
+      eq(workflowActionGrants.ownerType, teamId ? "team" : "user"),
+      eq(workflowActionGrants.ownerId, teamId ?? scope.userId ?? ""))) : [];
+  return { policies, grants, overrides, workflowGrants };
 }
 
 function toGrantRow(r: {
@@ -204,6 +229,7 @@ export interface ResolveActionPolicyInput {
   workflowExecutionId?: string;
   pluginDefault: ApprovalMode | undefined;
   now: number;
+  externalSender?: boolean;
 }
 
 /**
@@ -218,6 +244,7 @@ export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyI
     userId: input.userId,
     sessionId: input.sessionId,
     workflowExecutionId: input.workflowExecutionId,
+    ...(input.externalSender ? { externalSender: true } : {}),
   });
   return resolvePolicyDecision(
     rows,
@@ -276,7 +303,7 @@ export async function writeSessionGrant(db: AppDb, sessionId: string, grant: Gra
 /** Workflow-execution-scoped twin of `writeSessionGrant` — backed by the
  *  `runtime_grants_execution_policy_key` partial unique index. */
 export async function writeExecutionGrant(
-  db: AppDb,
+  db: AppQueryable,
   workflowExecutionId: string,
   grant: GrantWrite,
 ): Promise<void> {
@@ -429,6 +456,7 @@ export interface AuditInvocationRow {
   matchedOverrideId?: string | null;
   status?: PolicyInvocationRecord["status"] | null;
   sessionId?: string | null;
+  threadId?: string | null;
   workflowExecutionId?: string | null;
   userId?: string | null;
   orgId?: string | null;
@@ -471,6 +499,7 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
         matchedOverrideId: row.matchedOverrideId ?? null,
         status: row.status ?? null,
         sessionId: row.sessionId ?? null,
+        threadId: row.threadId ?? null,
         workflowExecutionId: row.workflowExecutionId ?? null,
         userId: row.userId ?? null,
         orgId: row.orgId ?? null,
@@ -558,6 +587,12 @@ export interface PolicyResolverDeps {
   db: AppDb;
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
   clock?: () => number;
+  /** The team accounts an action could use, read to tell when it would use
+   * another member's shared account (`services/credential-borrow.ts`).
+   * Absent: an action never asks a member. */
+  credentials?: CredentialStore;
+  onePassword?: OnePasswordService;
+  plugins?: ValetPlugin[];
 }
 
 /**
@@ -568,6 +603,40 @@ export interface PolicyResolverDeps {
  */
 export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
   const clock = deps.clock ?? Date.now;
+  const credentialServiceFor = (service: string): string =>
+    deps.actionPluginByService.get(service)?.actionPlugin.credentialService ?? service;
+
+  /** The member whose shared account this team action would use, when no
+   * account of the acting member's or the team's own answers. GitHub has the
+   * organization App behind the team's row, so it never borrows. */
+  async function sharedAccountApprover(input: PolicyResolveInput): Promise<{ userId: string; name?: string; shareGeneration: string } | undefined> {
+    const service = credentialServiceFor(input.service);
+    if (!deps.credentials || !input.teamId || !input.orgId || service === "github") return undefined;
+    const sharers = await membersSharing(deps.db, input.teamId, service);
+    if (sharers.length === 0) return undefined;
+    let approvalFrom: string | undefined;
+    try {
+      ({ approvalFrom } = await readTeamCredential(
+        { credentials: deps.credentials, onePassword: deps.onePassword, shares: async () => sharers },
+        {
+          orgId: input.orgId, teamId: input.teamId,
+          ...(input.userId && !input.externalSender ? { userId: input.userId } : {}),
+          // A sender with no Valet account never rides a teammate's approval.
+          mayBorrow: async (memberId) => !input.externalSender && canBorrowCredential(deps.db, { orgId: input.orgId!, teamId: input.teamId!, actorId: input.userId, sessionId: input.sessionId, threadId: input.threadId, service, memberId }),
+        },
+        service,
+        orgFallbackPolicy(deps.plugins, service),
+      ));
+    } catch {
+      // A share that no longer resolves: the action itself reports that.
+      return undefined;
+    }
+    if (!approvalFrom) return undefined;
+    const [member] = await deps.db.select({ name: users.name }).from(users).where(eq(users.id, approvalFrom)).limit(1);
+    const generation = await shareGeneration(deps.db, input.teamId, service, approvalFrom);
+    if (!generation) return undefined;
+    return { shareGeneration: generation, userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
+  }
 
   const pluginDefaultFor = (service: string): ApprovalMode | undefined =>
     deps.actionPluginByService.get(service)?.actionPlugin.defaultApprovalMode;
@@ -606,8 +675,20 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         sessionId: input.sessionId,
         pluginDefault: pluginDefaultFor(input.service),
         now: clock(),
+        ...(input.externalSender ? { externalSender: true } : {}),
       });
 
+      if (decision.mode === "deny") return decision;
+      // Another member's account: they answer, and nobody else can.
+      const approver = await sharedAccountApprover(input);
+      if (approver) {
+        if (!input.externalSender && (!input.userId || !input.teamId || (!await isTeamMember(deps.db, input.teamId, input.userId) && !await isUnattendedTeamRuntime(deps.db, {
+          orgId: input.orgId, teamId: input.teamId, sessionId: input.sessionId, threadId: input.threadId, actorId: input.userId,
+        })))) {
+          return { mode: "deny", provenance: { ...decision.provenance, source: "shared_account" } };
+        }
+        return { mode: "require_approval", provenance: { ...decision.provenance, source: "shared_account" }, approver };
+      }
       if (decision.mode !== "require_approval") return decision;
 
       // Offer the two escalation actions on the gate. `onResolution`
@@ -639,6 +720,20 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       if (!input.orgId) return;
 
       const now = clock();
+      if (decision.approver) {
+        if (resolution.actionId !== "approve") return;
+        // The routes let only the approver answer; refuse anyone else here too.
+        if (resolution.resolvedBy !== decision.approver.userId) {
+          throw new Error(`Only ${decision.approver.name ?? "the account's owner"} can allow use of their account.`);
+        }
+        if (!decision.approver.shareGeneration) throw new Error("This approval is stale. Request account approval again.");
+        if (!input.teamId) throw new Error("The team is unavailable. Request account approval again.");
+        await writeBorrowGrant(deps.db, input.orgId, {
+          teamId: input.teamId, shareGeneration: decision.approver.shareGeneration,
+          sessionId: input.sessionId, threadId: input.threadId, service: credentialServiceFor(input.service), memberId: decision.approver.userId,
+        }, now);
+        return;
+      }
       if (resolution.actionId === GATE_ACTION_APPROVE_SESSION) {
         if (!input.sessionId) return;
         await writeSessionGrant(deps.db, input.sessionId, {
@@ -685,6 +780,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         matchedOverrideId: record.provenance.matchedOverrideId ?? null,
         status: record.status,
         sessionId: record.sessionId,
+        threadId: record.threadId,
         workflowExecutionId: null,
         userId: record.userId ?? null,
         orgId: record.orgId ?? null,
@@ -694,6 +790,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         durationMs,
         startedAt,
       });
+      await recordActionChannelMessage(deps.db, record);
     },
   };
 }

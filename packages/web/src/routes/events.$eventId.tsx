@@ -3,7 +3,7 @@ import type { GetEventResponse } from "@valet/api/wire";
 import { useEvent } from "~/api/events";
 import { DeliveryList } from "~/components/events/delivery-list";
 import { RedeliverButton } from "~/components/events/redeliver-button";
-import { Badge, ErrorRow, LoadingRow } from "~/components/primitives";
+import { Badge, ErrorRow, LoadingRow, pageClass } from "~/components/primitives";
 import { formatWhen } from "~/lib/format-when";
 
 /**
@@ -24,8 +24,8 @@ function EventDetailPage() {
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
-        <Link to="/events" className="inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0">
+      <div className={pageClass}>
+        <Link to="/events" search={{ tab: "log" }} className="inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0">
           ← Events
         </Link>
         {isLoading && <LoadingRow label="Loading event…" />}

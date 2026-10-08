@@ -16,14 +16,14 @@
  * Same lifecycle shape as `EventDispatcher`: constructed in providers,
  * `start()`/`stop()` from main.ts.
  */
-import { and, eq, lte } from "drizzle-orm";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
+import { and, eq, lte } from "drizzle-orm";
+import type { OrchestratorDeliverFn } from "../events/dispatcher.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
 import { accessibleScheduleRow, nextFireAt } from "./schedule-service.js";
 import type { WorkflowOwner } from "./service.js";
-import type { OrchestratorDeliverFn } from "../events/dispatcher.js";
 
 const POLL_MS = 30_000;
 
@@ -98,15 +98,14 @@ export class WorkflowScheduler {
 
     if (schedule.targetKind === "orchestrator") {
       if (!schedule.prompt || schedule.prompt.trim() === "") {
-        return { error: "orchestrator target without a prompt. Edit the schedule and set a prompt." };
+        return { error: "assistant-prompt schedule without a prompt. Edit the schedule and set a prompt." };
       }
       await this.deps.deliverToOrchestrator({
         orgId: schedule.orgId,
         ownerType: schedule.ownerType,
         ownerId: schedule.ownerId,
-        // The schedule's author, not its owner: on a team or org schedule
-        // the owner is not a user, and nobody is present when cron fires.
-        actorUserId: schedule.createdBy,
+        // Shared schedules never inherit their creator's personal authority.
+        actorUserId: schedule.ownerType === "user" ? schedule.createdBy : `${schedule.ownerType}:${schedule.ownerId}`,
         signal: {
           kind: "signal",
           signalType: "schedule",
@@ -119,9 +118,6 @@ export class WorkflowScheduler {
           },
         },
         dispatchId: `schedule:${schedule.id}:${slotMs}`,
-        // Null on a schedule from before the column and on one that named no
-        // assistant; both fall back to the owner's default at delivery.
-        assistantId: schedule.assistantId ?? undefined,
       });
       return "ok";
     }
@@ -165,9 +161,12 @@ export class WorkflowScheduler {
       // `def` (the workflow definition row) is already fetched above.
       // Matches `events/dispatcher.ts`'s workflow-target fire, which
       // never had this bug.
+      // A shared workflow uses a machine actor even when manually fired.
+      // Editing or firing its schedule grants no personal account authority.
       await workflowRunHost.start(runId, params, def.definition, {
         ownerType: def.ownerType,
         ownerId: def.ownerId,
+        actorUserId: def.ownerType === "user" ? schedule.createdBy : `${def.ownerType}:${def.ownerId}`,
       });
     }
     return "ok";

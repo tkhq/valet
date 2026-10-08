@@ -228,3 +228,12 @@ describe("task tool: spawner present", () => {
     expect(seenCtx?.owner).toEqual({ type: "user", id: "u2" });
   });
 });
+
+describe("task tool: newcomer turn", () => {
+  it("refuses a channel sender with no Valet account before it spawns a child", async () => {
+    const spawner = vi.fn();
+    const result = await taskTool.execute({ prompt: "do it" }, makeCtx({ externalSender: true, config: { childSpawner: spawner } }));
+    expect(result.text).toContain("[child_unavailable]");
+    expect(spawner).not.toHaveBeenCalled();
+  });
+});

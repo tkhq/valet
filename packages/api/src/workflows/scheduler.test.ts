@@ -57,11 +57,11 @@ beforeEach(async () => {
 });
 
 describe("WorkflowScheduler fire ownership", () => {
-  it("bills the WORKFLOW's own owner, not the schedule creator, when they differ", async () => {
+  it.each(["user", "team", "org"] as const)("uses the workflow owner and a safe %s actor when the schedule creator differs", async (ownerType) => {
     await db.insert(workflowDefinitions).values({
       id: "wf_1",
       orgId: "org-1",
-      ownerType: "user",
+      ownerType,
       ownerId: "workflow-owner",
       name: "target",
       definition: { version: "dag/v1", nodes: [], edges: [] },
@@ -102,6 +102,23 @@ describe("WorkflowScheduler fire ownership", () => {
     await scheduler.tick();
 
     expect(runHost.started).toHaveLength(1);
-    expect(runHost.started[0]!.owner).toEqual({ ownerType: "user", ownerId: "workflow-owner" });
+    // Shared automations cannot inherit the original creator's personal share.
+    expect(runHost.started[0]!.owner).toEqual({ ownerType, ownerId: "workflow-owner", actorUserId: ownerType === "user" ? "schedule-creator" : `${ownerType}:workflow-owner` });
   });
 });
+
+ it("delivers a team prompt schedule without its creator's identity", async () => {
+    await db.insert(workflowSchedules).values({
+      id: "team-prompt", orgId: "org-1", ownerType: "team", ownerId: "team-1",
+      targetKind: "orchestrator", prompt: "A teammate changed this prompt", name: "Team prompt",
+      cron: "0 * * * *", timezone: "UTC", enabled: true, nextFireAt: 500,
+      createdBy: "original-creator", createdAt: 100, updatedAt: 200,
+    });
+    const actors: string[] = [];
+    const scheduler = new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
+      deliverToOrchestrator: async (args) => { actors.push(args.actorUserId); }, now: () => 1000,
+    });
+    await scheduler.tick();
+    expect(actors).toEqual(["team:team-1"]);
+  });

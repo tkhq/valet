@@ -124,15 +124,15 @@ describe("useSessionWebSocket", () => {
     );
 
     expect(invalidate).toHaveBeenCalledTimes(3);
-    expect(invalidate).toHaveBeenCalledWith({
-      queryKey: ["sessions", "s1", "threads"],
-      exact: true,
-    });
+    expect(invalidate).toHaveBeenCalledWith({ predicate: expect.any(Function) });
     unmount();
   });
 
   it("refreshes persisted titles when the server finishes naming", () => {
     const { queryClient, unmount } = renderSocketHook("s1");
+    queryClient.setQueryData<ListThreadsResponse>(["sessions", "root", "threads"], {
+      threads: [{ id: "t1", sessionId: "s1", createdAt: 1, lastUserActivityAt: 1 }],
+    });
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const socket = FakeWebSocket.instances[0];
 
@@ -151,11 +151,9 @@ describe("useSessionWebSocket", () => {
     );
 
     expect(invalidate).toHaveBeenCalledTimes(3);
-    expect(invalidate).toHaveBeenCalledWith({
-      queryKey: ["sessions", "s1", "threads"],
-      exact: true,
-    });
+    expect(invalidate).toHaveBeenCalledWith({ predicate: expect.any(Function) });
     expect(useStreamStore.getState().bySession.s1).toBeDefined();
+    expect(queryClient.getQueryState(["sessions", "root", "threads"])?.isInvalidated).toBe(true);
     unmount();
   });
 
@@ -165,6 +163,12 @@ describe("useSessionWebSocket", () => {
       threads: [
         { id: "t1", sessionId: "s1", createdAt: 1, lastUserActivityAt: 10 },
         { id: "t2", sessionId: "s1", createdAt: 2, lastUserActivityAt: 20 },
+      ],
+    });
+    queryClient.setQueryData<ListThreadsResponse>(["sessions", "root", "threads"], {
+      threads: [
+        { id: "t1", sessionId: "s1", createdAt: 1, lastUserActivityAt: 10 },
+        { id: "other", sessionId: "s2", createdAt: 1, lastUserActivityAt: 5 },
       ],
     });
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
@@ -196,6 +200,7 @@ describe("useSessionWebSocket", () => {
     const cached = queryClient.getQueryData<ListThreadsResponse>(["sessions", "s1", "threads"]);
     expect(cached?.threads.find((thread) => thread.id === "t1")?.lastUserActivityAt).toBe(30);
     expect(cached?.threads.find((thread) => thread.id === "t2")?.lastUserActivityAt).toBe(20);
+    expect(queryClient.getQueryData<ListThreadsResponse>(["sessions", "root", "threads"])?.threads.map(t => t.lastUserActivityAt)).toEqual([30, 5]);
     expect(invalidate).not.toHaveBeenCalled();
     unmount();
   });

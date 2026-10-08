@@ -95,7 +95,7 @@ id from the session. It never accepts a target user id from the client.
 - Member list: avatar, name, email, role badge, joined date — `GET /api/org/members`.
 - Role select per row (admin | member) → `PATCH /api/org/members/:userId {role}`; optimistic update with rollback on error.
 - Last-admin guard: server rejects demoting the only admin (400 `{error:"an organization needs at least one admin"}`); UI disables the control on the sole admin row with a tooltip.
-- Footer note: "Invites arrive with real login." No invite/remove controls this phase.
+- Pending invites follow the member list in a separate section with top padding. The separator must not touch the heading or Invite button.
 
 ### Organization · Teams
 - Team list: name, member count, created date — `GET /api/teams` (existing).

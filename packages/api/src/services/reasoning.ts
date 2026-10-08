@@ -11,7 +11,7 @@
  */
 import { eq } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
-import { orgs } from "../schema/index.js";
+import { orgs, teams, users } from "../schema/index.js";
 
 /** The six reasoning levels, in order. */
 export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -156,4 +156,30 @@ export async function assertReasoningSelectable(
   }
 
   return null;
+}
+
+/**
+ * A workflow step's reasoning level: the one the step names, otherwise the
+ * run owner's default (the team's or the user's), then the org's, capped at
+ * the org's maximum. Chat threads resolve the same cascade.
+ */
+export async function workflowReasoningLevel(
+  db: AppQueryable,
+  orgId: string,
+  owner: { type: string; id: string },
+  requested: string | undefined,
+): Promise<ReasoningLevel | undefined> {
+  const settings = await getOrgReasoningSettings(db, orgId);
+  let ownerDefault: string | null | undefined;
+  if (requested === undefined && owner.type === "team") {
+    ownerDefault = (await db.select({ level: teams.defaultReasoning }).from(teams).where(eq(teams.id, owner.id)).limit(1))[0]?.level;
+  } else if (requested === undefined && owner.type === "user") {
+    ownerDefault = (await db.select({ level: users.defaultReasoning }).from(users).where(eq(users.id, owner.id)).limit(1))[0]?.level;
+  }
+  const level = requested ?? ownerDefault ?? settings.default;
+  return isLevel(level) ? clampToMax(level, settings.max) : undefined;
+}
+
+function isLevel(value: unknown): value is ReasoningLevel {
+  return typeof value === "string" && (REASONING_LEVELS as readonly string[]).includes(value);
 }

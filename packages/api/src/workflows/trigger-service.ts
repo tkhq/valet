@@ -8,6 +8,9 @@
  * Scoped deliberately to workflow targets: orchestrator/signal
  * subscriptions have their own management surface (`/api/event-subscriptions`).
  */
+import { readPresence, type Presence } from "@valet/shared";
+import { linearEventArmBlock } from "../services/linear-ingress.js";
+import { proposalId } from "../events/proposals.js";
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
@@ -32,6 +35,7 @@ import {
 } from "./service.js";
 
 export interface WorkflowTriggerSummary {
+  presence?: Presence;
   triggerId: string;
   workflowId: string;
   name: string;
@@ -58,9 +62,11 @@ export function listEventTypes(plugins: ValetPlugin[]): EventTypeCatalog[] {
 }
 
 function rowToTrigger(row: typeof eventSubscriptions.$inferSelect): WorkflowTriggerSummary | null {
-  const target = row.target as { kind?: string; workflowId?: string };
+  const target = row.target as { kind?: string; workflowId?: string; presence?: unknown };
   if (target?.kind !== "workflow" || typeof target.workflowId !== "string") return null;
+  const presence = readPresence(target.presence);
   return {
+    ...(presence ? { presence } : {}),
     triggerId: row.id,
     workflowId: target.workflowId,
     name: row.name,
@@ -80,10 +86,10 @@ function rowToTrigger(row: typeof eventSubscriptions.$inferSelect): WorkflowTrig
 export async function createWorkflowTrigger(
   deps: TeamServiceReadinessDeps,
   owner: WorkflowOwner,
-  input: { workflowId: string; name: string; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean },
+  input: { workflowId: string; name: string; presence?: Presence; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean; proposalKey?: string },
 ): Promise<{ ok: true; trigger: WorkflowTriggerSummary } | { ok: false; error: string }> {
   const db = deps.db;
-  const target = { kind: "workflow" as const, workflowId: input.workflowId };
+  const target = { kind: "workflow" as const, workflowId: input.workflowId, ...(input.presence !== undefined ? { presence: input.presence } : {}) };
   const write = await validateSubscriptionWrite(
     db,
     deps.plugins,
@@ -103,6 +109,9 @@ export async function createWorkflowTrigger(
   const owned = await armableDefinitionRow(db, owner, input.workflowId);
   if (!owned) return { ok: false, error: `workflow not found: ${input.workflowId}` };
 
+  const ingressBlocked = await linearEventArmBlock(db,deps.credentials,owner.orgId,input.eventKeys);
+  if (ingressBlocked) return { ok: false, error: ingressBlocked };
+
   // An event-fired team run bills the team, so it resolves the TEAM's
   // credentials. Refuse here rather than arm a trigger that fails on every
   // event; the person is present and can act on the reason now.
@@ -120,7 +129,7 @@ export async function createWorkflowTrigger(
 
   const now = Date.now();
   const values = {
-    id: randomUUID(),
+    id: input.proposalKey ? proposalId("trigger", owner.orgId, owned.ownerType === "team" ? "team" : "user", owned.ownerType === "team" ? owned.ownerId : owner.userId, input.proposalKey, input.workflowId) : randomUUID(),
     orgId: owner.orgId,
     // Owner follows the workflow, team only — see the insert in `routes/events.ts`.
     ownerType: owned.ownerType === "team" ? ("team" as const) : ("user" as const),
@@ -129,7 +138,7 @@ export async function createWorkflowTrigger(
     eventKeys: input.eventKeys,
     filters,
     target,
-    enabled: true,
+    enabled: !input.proposalKey,
     createdBy: owner.userId,
     createdAt: now,
     updatedAt: now,
@@ -165,7 +174,8 @@ export async function createWorkflowTrigger(
             ),
           );
         if (!targetWorkflow) return [];
-        return tx.insert(eventSubscriptions).values(values).returning();
+        const inserted = await tx.insert(eventSubscriptions).values(values).onConflictDoNothing().returning();
+        return inserted.length ? inserted : tx.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, values.id));
       },
     );
     if (!rows?.[0]) {
@@ -173,8 +183,8 @@ export async function createWorkflowTrigger(
     }
     insertedRow = rows[0];
   } else {
-    const inserted = await db.insert(eventSubscriptions).values(values).returning();
-    insertedRow = inserted[0];
+    const inserted = await db.insert(eventSubscriptions).values(values).onConflictDoNothing().returning();
+    insertedRow = inserted[0] ?? (await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, values.id)))[0];
   }
 
   const trigger = rowToTrigger(insertedRow!);
@@ -256,8 +266,7 @@ export interface WorkflowTriggerPatch {
 }
 
 export async function updateWorkflowTrigger(
-  db: AppDb,
-  plugins: ValetPlugin[],
+  deps: TeamServiceReadinessDeps,
   owner: WorkflowOwner,
   triggerId: string,
   patch: WorkflowTriggerPatch,
@@ -265,6 +274,7 @@ export async function updateWorkflowTrigger(
   | { ok: true; trigger: WorkflowTriggerSummary }
   | { ok: false; status: 400 | 404; error: string }
 > {
+  const { db, plugins } = deps;
   const accessible = await accessibleTriggerRow(db, owner, triggerId);
   if (!accessible) return { ok: false, status: 404, error: "trigger not found" };
   const current = accessible.trigger;
@@ -295,6 +305,11 @@ export async function updateWorkflowTrigger(
   );
   if (!write.ok) return { ok: false, status: 400, error: write.error };
   const filters = write.filters;
+
+  if ((patch.enabled ?? current.enabled) && (patch.enabled === true || patch.eventKeys !== undefined || patch.filters !== undefined)) {
+    const ingressBlocked = await linearEventArmBlock(db,deps.credentials,owner.orgId,eventKeys);
+    if (ingressBlocked) return { ok: false, status: 400, error: ingressBlocked };
+  }
 
   const updated = await db
     .update(eventSubscriptions)

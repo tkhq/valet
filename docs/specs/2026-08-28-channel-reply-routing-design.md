@@ -189,26 +189,40 @@ and `signal` records engine-routed admissions.
 - **Sender.** `#441` renders a sender line for user messages. Confirm the
   channel-origin signal carries an author (1.2 sets it from `event.actor`) so
   the same line renders. If a gap remains on the events path, close it here.
-- **Outbound identity (TKAI-387).** Every gate card, command result,
-  attention summary, and Slack outbound action carries the sending assistant's
-  identity. This includes `reply_to_origin`, `send_message`, `dm_owner`, and
-  `dm_user`. `ChannelHost` resolves the session's `assistants` row for host
-  deliveries. The engine gives session actions a dynamic
-  `resolveOutboundSender` callback. Headless workflow actions and workflow
-  session nodes resolve the run owner's default assistant when they post.
-  Child-agent sessions resolve the assistant that owns their parent session,
-  then use the owner's default assistant when the parent has no assistant.
-  Both paths read the current row, so profile edits apply without a
-  cached-session rebuild. The Slack
-  paths map `name` and `avatar_url` to `username` and `icon_url` on
-  `chat.postMessage` with the `chat:write.customize` scope. They sanitize the
-  name to Slack's 80-character limit and omit malformed avatar URLs. If Slack
-  rejects an identity override, they retry once without it. A network failure
-  does not retry because Slack might have accepted the first request. An
-  assistant with neither field set posts under the bot's own identity.
+- **Outbound identity (TKAI-387).** Host deliveries and Slack actions resolve
+  the current workspace name. Team and organization runs use their owner's
+  name. Personal runs use the bot identity. Workflows may set
+  `definition.presence: { displayName?, avatarUrl? }`; event subscriptions may
+  set `target.presence` for either an assistant or workflow target. Fields
+  inherit in order: workspace, workflow, subscription, explicit action arguments.
+  The editor exposes these as Presence settings. Clearing a field restores its
+  inherited default. Settings change appearance, never the runtime owner.
+  Runs retain the definition and subscription presence captured at admission;
+  assistant turns carry presence in durable submission metadata. Followed Slack
+  replies read the bound subscription's current settings. No schema migration
+  or rewrite of existing definitions, chats, files, or memories is required.
+  `reply_to_origin`, `send_message`, `dm_owner`, and `dm_user` accept optional
+  `sender_name` and `sender_avatar_url` parameters. Each parameter overrides
+  its default for that message. Workflow tool steps persist these parameters.
+  Existing per-step overrides continue to work.
+  Agent steps pass the same parameters through their tool calls.
+  These settings do not change credentials, permissions, or the bot's DM identity.
+  `profile_pictures.publish_avatar` converts a current-chat image attachment
+  into a durable avatar URL. It reads at most 50 entries from the invoking
+  thread and rejects other organizations or externally linked images.
+  The existing profile-picture normalizer bounds the size, removes metadata,
+  and writes a WebP copy. Only this copy is public under `/avatars/workflows/`.
+  The publication tool uses the normal high-risk action approval path.
+  Workflow authors store its URL in `presence.avatarUrl`; later runs do not
+  depend on the source chat. Retries reuse the same source-scoped content key.
+  Automatic replies and approval cards use the asking submission's presence.
+  Slack maps the display name and avatar URL to `username` and `icon_url` on
+  `chat.postMessage`, using `chat:write.customize`. Names have an 80-character
+  limit. Avatar URLs must use HTTPS and be accessible to Slack.
+  If Slack rejects an override, Valet retries once without it. Network failures
+  do not retry because Slack might have accepted the first request.
   Resolution edits (`chat.update`) keep the identity the card posted with.
-  File attachments keep the app identity because Slack's upload API has no
-  equivalent override.
+  File uploads keep the app identity because Slack has no equivalent override.
 
 ### Part 2 — one routing wizard, names not ids
 
@@ -434,3 +448,21 @@ Row expansion stops at the caller's text budget before formatting. Section split
 keep complete native spans together. Truncated output includes a visible notice.
 This is a deliberate compatibility fallback, not a claim that Markdown blocks
 support native spans.
+
+
+### Images in question answers
+
+The web question card accepts image uploads, clipboard images, and dropped images. An answer can contain images without text. Failed submissions retain the draft and its images. Changing questions clears that draft.
+
+Question resolutions retain inline images for restart replay. The question tool returns them as model-visible image attachments. The avatar publishing tool can select a question-answer photo from the same thread. Approval and credential gates do not accept images. Existing image count and size limits apply; remote URLs are rejected.
+
+### Agent configuration tools
+
+`events.list_subscriptions` lists the current personal or team workspace's subscriptions.
+It supports an exact name filter and bounded pagination (default 25, maximum 100).
+`events.set_subscription_presence` replaces the selected subscription's presence; null clears it.
+Both tools require organization membership. Team access also requires current team membership.
+Unlinked channel senders cannot use either tool. Organization-owned subscriptions remain outside these tools.
+The write changes only the target's presence field and update timestamp with an atomic JSONB operation.
+It preserves concurrent target edits, matching rules, ownership, and enabled state.
+`workflows.create_trigger` and `workflows.propose_trigger` accept presence for new workflow event subscriptions.

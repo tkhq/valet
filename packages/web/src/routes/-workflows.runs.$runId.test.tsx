@@ -65,19 +65,34 @@ function renderInRouter(ui: React.ReactElement) {
     path: "/sessions/$sessionId",
     component: () => null,
   });
+  const threadRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/threads/$threadId",
+    component: () => null,
+  });
   const runRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/workflows/runs/$runId",
     component: () => null,
   });
   const router = createRouter({
-    routeTree: rootRoute.addChildren([sessionRoute, runRoute]),
+    routeTree: rootRoute.addChildren([sessionRoute, threadRoute, runRoute]),
     history: createMemoryHistory({ initialEntries: ["/"] }),
   });
   return render(<RouterProvider router={router} />);
 }
 
 describe("RunDetailBody", () => {
+  it("keeps the diagram collapsed after the steps and names the waiting step", () => {
+    const data = baseRun({ status: "parked", waitingOn: [{ kind: "submission", nodeId: "apply" }] });
+    data.checkpoints = [{ nodeId: "apply", iteration: 0, status: "intent", createdAt: Date.now() }];
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    const diagram = screen.getByText("Workflow diagram");
+    expect(diagram.closest("details")?.open).toBe(false);
+    expect(screen.getByText("Steps").compareDocumentPosition(diagram) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("Waiting at: apply");
+    expect(screen.queryByText("Running")).toBeNull();
+  });
   it("shows the approval card when a pendingGate of kind approval exists", () => {
     const data = baseRun(
       {
@@ -216,7 +231,7 @@ describe("RunDetailBody", () => {
     }
   });
 
-  it("links a checkpoint to the session it drove and the child run it started", async () => {
+  it("offers inline submission logs, preserves child links, and declines unscoped legacy logs", async () => {
     const data = baseRun({ status: "settled", outcome: "failed" });
     data.checkpoints = [
       {
@@ -227,6 +242,7 @@ describe("RunDetailBody", () => {
         sessionId: "s_abc",
         createdAt: Date.now(),
       },
+      { nodeId: "thread-step", iteration: 0, status: "completed", sessionId: "s_abc", threadId: "thread_abc", queueItemId: "q-step", createdAt: Date.now() },
       { nodeId: "sub", iteration: 0, status: "completed", childRunId: "wfrun_sub_1", createdAt: Date.now() },
       { nodeId: "set1", iteration: 0, status: "completed", createdAt: Date.now() },
     ];
@@ -240,12 +256,14 @@ describe("RunDetailBody", () => {
         retryPending={false}
       />,
     );
-    expect((await screen.findByText("Open session")).getAttribute("href")).toBe("/sessions/s_abc");
+    expect(await screen.findByText("Scoped agent logs were not recorded for this step.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "View agent logs" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("link", { name: "View agent logs" })).toBeNull();
     expect(screen.getByText("Open child run").getAttribute("href")).toBe(
       "/workflows/runs/wfrun_sub_1",
     );
     // A checkpoint carrying neither id gets no link row.
-    expect(screen.getAllByText("Open session")).toHaveLength(1);
+    expect(screen.getAllByText("Scoped agent logs were not recorded for this step.")).toHaveLength(1);
   });
 
   it("renders checkpoints with status and a result preview", () => {
@@ -313,7 +331,7 @@ describe("RunDetailBody", () => {
 
     // The panel must come before the checkpoint list in document order, so
     // the answer is the first thing on the page.
-    const list = screen.getByText("Checkpoints");
+    const list = screen.getByText("Steps");
     expect(panel.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
@@ -354,7 +372,7 @@ describe("RunDetailBody", () => {
     const { unmount } = render(
       <RunDetailBody runId="wfrun_1" data={running} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />,
     );
-    expect(screen.getByText(/1 checkpoint/)).toBeTruthy();
+    expect(screen.getByText(/1 step/)).toBeTruthy();
     expect(screen.queryByText(/Ran for/)).toBeNull();
     unmount();
 

@@ -23,13 +23,10 @@ import type {
   SecurityDigestIssueResponse,
   SecurityFileIssueResponse,
   SecurityFindingWire,
-  SecurityPlanCellInput,
   SecurityPreviewRequest,
   SecurityPreviewResponse,
   SecurityResolveNeedsResponse,
   SecurityReviewFindingResponse,
-  SecuritySetConfigResponse,
-  SecuritySetPlanResponse,
 } from "@valet/api/wire";
 import { api, ApiError, type OwnerFilter, type SecurityFindingsQuery } from "./client";
 import { qk } from "./queries";
@@ -192,42 +189,6 @@ export function useRescanReview() {
       api.createSession({ workspace, kind: "security", rescanOf }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qk.sessions() });
-    },
-  });
-}
-
-/**
- * POST .../security/plan/cells — replace the plan from the step editor's
- * structured steps during planning (dynamic-config M-F2). The server assigns
- * dense ordinals in array order and validates against the persona registry.
- * Invalidates the engagement query so the panel re-reads the saved plan.
- */
-export function useSetPlanCells(sessionId: string) {
-  const qc = useQueryClient();
-  return useMutation<SecuritySetPlanResponse, Error, SecurityPlanCellInput[]>({
-    mutationFn: (cells) => api.setSecurityPlanCells(sessionId, cells),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: qkSecurity.engagement(sessionId) });
-    },
-  });
-}
-
-/**
- * POST .../security/config — edit the engagement's focus, known invariants, and
- * loaded threat categories during planning (dynamic-config M-F3, M-P2a; session
- * admin). Invalidates the engagement query so the panel re-reads the saved
- * values.
- */
-export function useSetEngagementConfig(sessionId: string) {
-  const qc = useQueryClient();
-  return useMutation<
-    SecuritySetConfigResponse,
-    Error,
-    { focus?: string | null; invariants?: string[]; categories?: string[] }
-  >({
-    mutationFn: (body) => api.setSecurityConfig(sessionId, body),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: qkSecurity.engagement(sessionId) });
     },
   });
 }

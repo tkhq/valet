@@ -122,6 +122,12 @@ describe("TelegramTransport", () => {
     expect(call?.body.text).toBe("<b>hi</b>");
   });
 
+  it("sendGatePrompt sends an open question with no keyboard", async () => {
+    await transport.sendGatePrompt("telegram:dm:99", { gateId: "gate-open", title: "Which repo?", actions: [] });
+    const sent = fake.calls.find((c) => c.method === "sendMessage");
+    expect(sent?.body.reply_markup).toBeUndefined();
+  });
+
   it("sendGatePrompt builds an inline keyboard and updateGatePrompt edits it", async () => {
     const ref = await transport.sendGatePrompt("telegram:dm:99", {
       gateId: "gate:long:id",

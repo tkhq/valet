@@ -3,6 +3,7 @@
  * plan, Task 6). Route-level: real Hono app via `bootTestApi`, a fake
  * GitHub API server (`startGithubFixture`) subbed in via `GITHUB_API_URL`.
  */
+import { listTeamShares, shareCredential } from "../services/credential-shares.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -461,26 +462,11 @@ describe("DELETE /api/me/github", () => {
       name: "Platform",
       creatorUserId: "local-user",
     });
-    // The row shape `POST /api/credentials/:service/delegate` writes.
-    const now = Date.now();
-    await api.providers.db.insert(credentials).values({
-      ownerType: "team",
-      ownerId: team.id,
-      service: "github",
-      type: "oauth2",
-      metadata: { delegatedFrom: "local-user", sourceType: "oauth2" },
-      createdAt: now,
-      updatedAt: now,
-    });
+    await shareCredential(api.providers.db, { teamId: team.id, service: "github", userId: "local-user", createdAt: Date.now() });
 
     const res = await fetch(`${api.baseUrl}/api/me/github`, { method: "DELETE", headers: HEADERS });
     expect(res.status).toBe(204);
-
-    const teamRows = await api.providers.db
-      .select({ service: credentials.service })
-      .from(credentials)
-      .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, team.id)));
-    expect(teamRows).toEqual([]);
+    expect(await listTeamShares(api.providers.db, team.id)).toEqual([]);
   });
 });
 

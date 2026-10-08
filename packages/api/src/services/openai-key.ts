@@ -4,6 +4,8 @@ import {
   resolveTeamCredentialRead,
   resolveUserCredentialRead,
   type OrgFallback,
+  type CredentialReadDeps,
+  type TeamReadCtx,
 } from "./credential-resolution.js";
 import { listLlmProviders } from "./llm-providers.js";
 import type { OnePasswordService, OnePasswordScope } from "./onepassword.js";
@@ -21,7 +23,8 @@ import type { OnePasswordService, OnePasswordScope } from "./onepassword.js";
  *      (`orgFallbackPolicy`), so a team session reaches the same org-scoped
  *      1Password item a team workflow reaches; a user owner reads via
  *      `resolveUserCredentialRead`. A team or org owner never reads the
- *      prompting member's user row.
+ *      prompting member's unshared user row. Team member shares require the
+ *      caller's actor and borrowing policy, just like other tool services.
  *   3. The host's `OPENAI_API_KEY` env var.
  *
  * `null` means "not configured": the plugin catalog hides the openai tools.
@@ -38,6 +41,8 @@ export async function resolveOpenAiCredential(
      * what `orgFallbackPolicy` yields for a service that declares no org
      * credential, which `openai` does not. */
     orgFallback?: OrgFallback;
+    shares?: CredentialReadDeps["shares"];
+    mayBorrow?: TeamReadCtx["mayBorrow"];
   },
   env: Record<string, string | undefined> = process.env,
   onePassword?: OnePasswordService,
@@ -52,8 +57,8 @@ export async function resolveOpenAiCredential(
   const ownerType = ctx.owner?.type;
   if (ownerType === "team" && ctx.owner) {
     const team = await resolveTeamCredentialRead(
-      { credentials, onePassword },
-      { orgId: ctx.orgId, teamId: ctx.owner.id, userId: ctx.userId, scopes: ctx.scopes },
+      { credentials, onePassword, shares: ctx.shares },
+      { orgId: ctx.orgId, teamId: ctx.owner.id, userId: ctx.userId, scopes: ctx.scopes, mayBorrow: ctx.mayBorrow },
       "openai",
       ctx.orgFallback ?? "reference-only",
     );

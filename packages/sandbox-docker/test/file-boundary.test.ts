@@ -69,3 +69,20 @@ it("rejects a working-directory mount that exposes the provider private state tr
     /overlaps private/,
   );
 });
+class ExitCodeSandbox extends DockerSandbox {
+  constructor(private readonly exitCode: number, workspace: string) {
+    super("fixture", { containerId: "fixture", workspace, containerWorkspace: "/workspace", image: "alpine" });
+  }
+  override async exec(): Promise<ExecResult> {
+    return { stdout: "", stderr: "", exitCode: this.exitCode };
+  }
+}
+it("reports a missing path from stat as ENOENT, so callers can tell absence from failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "valet-file-stat-"));
+  cleanup.push(root);
+  // The upload route checks the destination with stat before it writes, and
+  // only an ENOENT-coded error means "free to write". A plain error made
+  // every new-file upload on this backend fail.
+  await expect(new ExitCodeSandbox(2, root).stat("new.yaml")).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(new ExitCodeSandbox(1, root).stat("new.yaml")).rejects.not.toMatchObject({ code: "ENOENT" });
+});

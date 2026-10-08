@@ -71,7 +71,7 @@ describe("model catalog", () => {
     });
   });
 
-  it("lists Claude Fable 5.1 and GPT-6 Astra", async () => {
+  it("lists Claude Fable 5.1 and excludes Astra", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
     vi.stubEnv("OPENAI_API_KEY", "test-key");
     try {
@@ -79,8 +79,32 @@ describe("model catalog", () => {
       const fable = entries.find((entry) => entry.id === "anthropic/claude-fable-5-1");
       expect(fable).toMatchObject({ name: "Claude Fable 5.1", contextWindow: 1_000_000, active: true });
       const astra = entries.find((entry) => entry.id === "openai/gpt-6-astra");
-      expect(astra).toMatchObject({ name: "GPT-6 Astra", contextWindow: 272_000, active: true });
-      expect(catalogValidIds(entries).has("openai/gpt-6-astra")).toBe(true);
+      expect(astra).toBeUndefined();
+      expect(catalogValidIds(entries).has("openai/gpt-6-astra")).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("exposes supplemental models through normal provider eligibility and approval rules", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-key");
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
+    try {
+      await setApprovedModels(db, orgId, ["openai/gpt-6.1-sol"]);
+      const entries = await buildOrgCatalog(db, credentials, orgId);
+      for (const id of ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-5-5"]) {
+        expect(entries.filter((entry) => entry.id === id)).toHaveLength(1);
+        expect(entries.find((entry) => entry.id === id)).toMatchObject({
+          active: true, resolvable: true, approved: id === "openai/gpt-6.1-sol",
+          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+        });
+        expect(catalogValidIds(entries).has(id)).toBe(true);
+      }
+      const row = await createLlmProvider(db, { orgId, kind: "openai", name: "OpenAI" });
+      await updateLlmProvider(db, orgId, row.id, { enabled: false });
+      const disabled = await buildOrgCatalog(db, credentials, orgId);
+      expect(disabled.find((entry) => entry.id === "openai/gpt-6.1-sol")?.active).toBe(false);
+      expect(catalogValidIds(disabled).has("openai/gpt-6.1-sol")).toBe(false);
     } finally {
       vi.unstubAllEnvs();
     }

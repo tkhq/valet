@@ -40,6 +40,8 @@ export type OnApprovalPending = (info: {
   action?: string;
   params?: unknown;
   iteration?: number;        // set only when > 0
+  /** The one member who may answer: the action would use their shared account. */
+  approver?: { userId: string; name?: string; shareGeneration?: string };
 }) => Promise<void> | void;
 
 /** Host audit seam: the tool executor reports gate settlements the HTTP
@@ -153,7 +155,7 @@ export { executeApproval } from './approval.js';
 export { executeSession } from './session.js';
 export { executeLlm, llmUsageSpanAttributes } from './llm.js';
 export { executeTool } from './tool.js';
-export { executeOrchestrator } from './orchestrator.js';
+export { executeThread } from './thread.js';
 export { executeForeach } from './foreach.js';
 export { executeWorkflowCall, deriveChildRunId } from './workflow-call.js';
 
@@ -166,7 +168,7 @@ import { executeApproval } from './approval.js';
 import { executeSession } from './session.js';
 import { executeLlm } from './llm.js';
 import { executeTool } from './tool.js';
-import { executeOrchestrator } from './orchestrator.js';
+import { executeThread } from './thread.js';
 import { executeForeach } from './foreach.js';
 import { executeWorkflowCall } from './workflow-call.js';
 
@@ -182,7 +184,7 @@ export function createDefaultNodeExecutors(): NodeExecutorRegistry {
     session: { execute: executeSession },
     llm: { execute: executeLlm },
     tool: { execute: executeTool },
-    orchestrator: { execute: executeOrchestrator },
+    orchestrator: { execute: executeThread },
     foreach: { execute: executeForeach },
     workflow: { execute: executeWorkflowCall },
   };

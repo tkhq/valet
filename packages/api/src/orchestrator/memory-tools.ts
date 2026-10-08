@@ -57,11 +57,14 @@ function resolveOwner(ctx: ToolContext): Principal {
   return ctx.owner ?? { type: "user", id: ctx.userId };
 }
 
-function memoryHeaders(cfg: MemoryToolConfig, owner: Principal, actorUserId: string, json: boolean): Record<string, string> {
+function memoryHeaders(cfg: MemoryToolConfig, owner: Principal, ctx: ToolContext, json: boolean): Record<string, string> {
   const headers: Record<string, string> = {
     "x-valet-internal": cfg.internalToken,
     "x-valet-owner": serializePrincipal(owner),
-    "x-valet-actor": actorUserId,
+    "x-valet-actor": ctx.userId,
+    "x-valet-session-id": ctx.sessionId,
+    "x-valet-thread-id": ctx.threadId,
+    "x-valet-org-id": ctx.orgId,
   };
   if (json) headers["Content-Type"] = "application/json";
   return headers;
@@ -211,7 +214,7 @@ export const memWriteTool = defineTool({
       url,
       {
         method: "PUT",
-        headers: memoryHeaders(cfg, owner, ctx.userId, true),
+        headers: memoryHeaders(cfg, owner, ctx, true),
         body: JSON.stringify({
           path: args.path,
           content: args.content,
@@ -259,7 +262,7 @@ export const memPatchTool = defineTool({
       url,
       {
         method: "POST",
-        headers: memoryHeaders(cfg, owner, ctx.userId, true),
+        headers: memoryHeaders(cfg, owner, ctx, true),
         body: JSON.stringify({ path: args.path, oldString: args.oldString, newString: args.newString }),
       },
       (res) => relayWriteResult(res, "patched"),
@@ -294,7 +297,7 @@ export const memReadTool = defineTool({
     const owner = resolveOwner(ctx);
     const url = new URL("/api/memory", cfg.apiBaseUrl);
     url.searchParams.set("path", args.path);
-    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx.userId, false) }, async (res) => {
+    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx, false) }, async (res) => {
       const body = asReadResultBody(await parseJsonBody(res));
       return { text: body?.rendered ?? "" };
     });
@@ -350,7 +353,7 @@ export const memSearchTool = defineTool({
     const url = new URL("/api/memory/search", cfg.apiBaseUrl);
     url.searchParams.set("q", args.query);
     if (args.limit !== undefined) url.searchParams.set("limit", String(args.limit));
-    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx.userId, false) }, async (res) => {
+    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx, false) }, async (res) => {
       const body = asSearchResultBody(await parseJsonBody(res));
       const results = body?.results ?? [];
       if (results.length === 0) return { text: `(no memory results for "${args.query}")` };
@@ -392,7 +395,7 @@ export const artifactCopyToTeamTool = defineTool({
     const cfg = resolveMemoryConfig(ctx);
     if (!cfg) return { text: UNAVAILABLE_TEXT };
     return memoryRequest(new URL("/api/artifacts/copy-to-team", cfg.apiBaseUrl), {
-      method: "POST", headers: memoryHeaders(cfg, resolveOwner(ctx), ctx.userId, true),
+      method: "POST", headers: memoryHeaders(cfg, resolveOwner(ctx), ctx, true),
       body: JSON.stringify(args),
     }, async (res) => ({ text: encodeToolOutput(await parseJsonBody(res)) }));
   },
@@ -420,7 +423,7 @@ export const memCopyToTeamTool = defineTool({
     if (!cfg) return { text: UNAVAILABLE_TEXT };
     return memoryRequest(new URL("/api/memory/copy-to-team", cfg.apiBaseUrl), {
       method: "POST",
-      headers: memoryHeaders(cfg, resolveOwner(ctx), ctx.userId, true),
+      headers: memoryHeaders(cfg, resolveOwner(ctx), ctx, true),
       body: JSON.stringify({ ...args, replacement: args.replacement
         ? { expectedVersion: args.replacement.expectedVersion } : undefined }),
     }, async (res) => ({ text: encodeToolOutput(await parseJsonBody(res)) }));
@@ -444,7 +447,7 @@ export const memCopyFromTeamTool = defineTool({
     if (!cfg) return { text: UNAVAILABLE_TEXT };
     return memoryRequest(new URL("/api/memory/copy-from-team", cfg.apiBaseUrl), {
       method: "POST",
-      headers: memoryHeaders(cfg, resolveOwner(ctx), ctx.userId, true),
+      headers: memoryHeaders(cfg, resolveOwner(ctx), ctx, true),
       body: JSON.stringify({ ...args, replacement: args.replacement
         ? { expectedVersion: args.replacement.expectedVersion } : undefined }),
     }, async (res) => ({ text: JSON.stringify(await parseJsonBody(res)) }));
@@ -468,7 +471,7 @@ export const memMoveTool = defineTool({
       url,
       {
         method: "POST",
-        headers: memoryHeaders(cfg, owner, ctx.userId, true),
+        headers: memoryHeaders(cfg, owner, ctx, true),
         body: JSON.stringify({ from: args.from, to: args.to }),
       },
       async (res) => {
@@ -541,7 +544,7 @@ export const memLinksTool = defineTool({
     const owner = resolveOwner(ctx);
     const url = new URL("/api/memory/links", cfg.apiBaseUrl);
     url.searchParams.set("path", args.path);
-    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx.userId, false) }, async (res) => {
+    return memoryRequest(url, { method: "GET", headers: memoryHeaders(cfg, owner, ctx, false) }, async (res) => {
       const body = asLinksResultBody(await parseJsonBody(res));
       if (!body) return { text: `links for ${args.path}\ninbound (0)\noutbound (0)` };
       return {
@@ -582,9 +585,7 @@ export const memShareTool = defineTool({
     if (!cfg) return { text: UNAVAILABLE_TEXT };
     const owner = resolveOwner(ctx);
     const url = new URL("/api/artifacts/share", cfg.apiBaseUrl);
-    const headers = memoryHeaders(cfg, owner, ctx.userId, true);
-    // Audit column: which session ran the share.
-    headers["x-valet-session-id"] = ctx.sessionId;
+    const headers = memoryHeaders(cfg, owner, ctx, true);
     return memoryRequest(
       url,
       {
@@ -741,9 +742,7 @@ export const artifactPublishTool = defineTool({
 
     const owner = resolveOwner(ctx);
     const url = new URL("/api/artifacts/share", cfg.apiBaseUrl);
-    const headers = memoryHeaders(cfg, owner, ctx.userId, true);
-    // Audit column — and the target for reader comments sent to the agent.
-    headers["x-valet-session-id"] = ctx.sessionId;
+    const headers = memoryHeaders(cfg, owner, ctx, true);
     return memoryRequest(
       url,
       {
@@ -789,7 +788,7 @@ export const memRmTool = defineTool({
     const owner = resolveOwner(ctx);
     const url = new URL("/api/memory", cfg.apiBaseUrl);
     url.searchParams.set("path", args.path);
-    return memoryRequest(url, { method: "DELETE", headers: memoryHeaders(cfg, owner, ctx.userId, false) }, async () => ({
+    return memoryRequest(url, { method: "DELETE", headers: memoryHeaders(cfg, owner, ctx, false) }, async () => ({
       text: `removed ${args.path}`,
     }));
   },

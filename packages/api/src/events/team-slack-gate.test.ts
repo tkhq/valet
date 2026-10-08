@@ -1,17 +1,17 @@
+import type { NormalizedEvent } from "@valet/engine";
+import slackPlugin from "@valet/plugin-slack/plugin";
+import type { RunHost } from "@valet/workflow";
+import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { and, eq } from "drizzle-orm";
-import slackPlugin from "@valet/plugin-slack/plugin";
-import type { NormalizedEvent } from "@valet/engine";
-import type { RunHost } from "@valet/workflow";
+import { eventDeliveries, eventDropLog, eventReceipts, events, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { eventDeliveries, eventDropLog, events, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/index.js";
-import { __resetIngestDropThrottle, ingestEvent, catalogForService } from "./ingest.js";
-import { authorizedSubscriptionMatchesEvent } from "./team-slack-gate.js";
-import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
+import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
 import { findFollowedThread } from "./followed-threads.js";
+import { __resetIngestDropThrottle, catalogForService, ingestEvent } from "./ingest.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
+import { authorizedSubscriptionMatchesEvent, channelMessageAuthor, newcomerAuthor } from "./team-slack-gate.js";
 
 const ORG = "org-team-events";
 const channelFilter = { field: "channel", op: "eq", value: "C1" } as const;
@@ -58,7 +58,7 @@ describe("team assistant mentions through the org bot event pipeline", () => {
       id: randomUUID(), orgId: ORG, ownerType, ownerId: ownerType === "team" ? "team-1" : "member-a",
       createdBy: "member-a", name: "Team replies", eventKeys: ["slack.app_mention"],
       filters: legacy || ownerType === "user" || workflow ? [channelFilter, creatorFilter] : [channelFilter],
-      target: workflow ? { kind: "workflow", workflowId: "wf-1" } : { kind: "orchestrator", assistantId: "team-assistant", follow: true },
+      target: workflow ? { kind: "workflow", workflowId: "wf-1" } : { kind: "orchestrator", follow: true },
       audience,
       enabled: true, createdAt: Date.now(), updatedAt: Date.now(),
     }).returning();
@@ -91,15 +91,25 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     const { host, deliver } = dispatcher();
     await host.pollOnce();
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({
-      orgId: ORG, ownerType: "team", ownerId: "team-1", actorUserId: "member-b", assistantId: "team-assistant",
+      orgId: ORG, ownerType: "team", ownerId: "team-1", actorUserId: "member-b",
       signal: expect.objectContaining({ body: "Help us", origin: { channelType: "slack", threadKey: "slack:C1:100.2", messageTs: "100.2" } }),
     }));
     const key = { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "100.2" };
-    expect(await findFollowedThread(tdb.appDb, key)).toMatchObject({ ownerType: "team", ownerId: "team-1", createdBy: "member-b", assistantId: "team-assistant" });
+    expect(await findFollowedThread(tdb.appDb, key)).toMatchObject({ ownerType: "team", ownerId: "team-1", createdBy: "member-b" });
     await ingest(mention("U_A", "C1", "100.2"));
     await host.pollOnce();
     expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver.mock.calls[0][0]).not.toHaveProperty("assistantId");
     expect(await findFollowedThread(tdb.appDb, key)).toMatchObject({ createdBy: "member-b", ownerId: "team-1" });
+  });
+
+  it.each(["team", "organization"] as const)("keeps unlinked senders denied on an existing %s rule", async (audience) => {
+    await seed("team", false, false, audience);
+    expect(await ingest(mention("U_UNLINKED"))).toMatchObject({ deliveries: 0, skipped: true });
+    expect(await tdb.appDb.select().from(eventDeliveries)).toHaveLength(0);
+    expect(await tdb.appDb.select().from(eventDropLog)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: "unlinked_sender" }),
+    ]));
   });
 
   it.each([["U_X", "not_team_member"], ["U_UNLINKED", "unlinked_sender"]])("denies %s before event persistence", async (sender, reason) => {
@@ -119,6 +129,11 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     expect(rows).not.toEqual(expect.arrayContaining([expect.objectContaining({ reason: "filter_excluded" })]));
     expect(JSON.stringify(rows)).not.toContain("Help us");
     expect(JSON.stringify(rows)).not.toContain("C1");
+    const [receipt] = await tdb.appDb.select().from(eventReceipts);
+    expect(receipt.stages).toEqual(expect.arrayContaining([expect.objectContaining({ stage: "subscription_match", outcome: "authorization_denied" })]));
+    expect(receipt.subscriptions).toEqual(expect.arrayContaining([expect.objectContaining({ outcome: "authorization_denied" })]));
+    expect(JSON.stringify(receipt)).not.toContain("Help us");
+    expect(JSON.stringify(receipt)).not.toContain("U_X");
   });
 
   it("redacts an unauthorized sender from a team-only filter miss", async () => {
@@ -139,7 +154,7 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     const rows = await tdb.appDb.select().from(eventDropLog);
     expect(rows).toEqual([expect.objectContaining({
       reason: "filter_excluded",
-      eventMetadata: expect.objectContaining({ channel: "C2", text: "Help us" }),
+      eventMetadata: expect.objectContaining({ channel: "C2" }),
     })]);
     expect(rows).not.toEqual(expect.arrayContaining([expect.objectContaining({ reason: "not_team_member" })]));
   });
@@ -158,7 +173,7 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     const { host, deliver } = dispatcher();
     await host.pollOnce();
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({
-      ownerType: "team", ownerId: "team-1", actorUserId: "member-c", assistantId: "team-assistant",
+      ownerType: "team", ownerId: "team-1", actorUserId: "member-c",
     }));
     // The follow names the rule it came from, or the router would re-check
     // team membership and drop every later message in the thread.
@@ -289,5 +304,37 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     expect(await validateSubscriptionWrite(tdb.appDb, plugins, body, scope)).toEqual({ ok: true, filters: [channelFilter] });
     expect(await validateSubscriptionWrite(tdb.appDb, plugins, { ...body, filters: [] }, scope)).toMatchObject({ ok: false });
     expect(await validateSubscriptionWrite(tdb.appDb, plugins, { ...body, filters: [] }, { ...scope, anyChannel: true })).toEqual({ ok: true, filters: [] });
+  });
+});
+
+describe("newcomerAuthor", () => {
+  it("keeps the newcomer limits unless the sender is linked to the user the turn runs as", async () => {
+    const tdb = await freshTestPgDb();
+    await tdb.appDb.insert(userIdentityLinks).values({ id: "link-a", provider: "slack", externalId: "U_A", userId: "member-a", createdAt: Date.now() });
+    // Linked to the actor: the member writes as themselves.
+    expect(await newcomerAuthor(tdb.appDb, ORG, "member-a", "U_A")).toBeUndefined();
+    // Unlinked, or linked to someone else than the actor (a link that changed
+    // after the actor was chosen): the turn keeps the limits.
+    expect(await newcomerAuthor(tdb.appDb, ORG, "creator", "U_NEW", "Sam")).toEqual({ id: "creator", name: "Sam", externalSender: true });
+    expect(await newcomerAuthor(tdb.appDb, ORG, "creator", "U_A")).toMatchObject({ id: "creator", externalSender: true });
+  });
+});
+
+describe("channelMessageAuthor", () => {
+  it("keeps member tools available without lending the creator identity", async () => {
+    const tdb = await freshTestPgDb();
+    await tdb.appDb.insert(teamMembers).values({ teamId: "team-msg", userId: "member-a", role: "member" });
+    await tdb.appDb.insert(userIdentityLinks).values([
+      { id: "link-a", provider: "slack", externalId: "U_A", userId: "member-a", createdAt: Date.now() },
+      { id: "link-x", provider: "slack", externalId: "U_X", userId: "outsider", createdAt: Date.now() },
+    ]);
+    const author = (payload: Record<string, unknown>) => channelMessageAuthor(tdb.appDb, "team-msg", payload, "Sam");
+    // Membership controls tool restrictions; the machine actor supplies authority.
+    expect(await author({ user: "U_A", text: "hi" })).toBeUndefined();
+    // Bot events also execute as the team.
+    expect(await author({ user: "U_BOT", bot_id: "B1", text: "alert" })).toBeUndefined();
+    // An unlinked sender, or one linked to someone off the team, does not lend the creator's authority.
+    expect(await author({ user: "U_NEW", text: "hi" })).toEqual({ id: "team:team-msg", name: "Sam", externalSender: true });
+    expect(await author({ user: "U_X", text: "hi" })).toMatchObject({ externalSender: true });
   });
 });

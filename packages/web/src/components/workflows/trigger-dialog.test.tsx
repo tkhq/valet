@@ -38,6 +38,8 @@ vi.mock("~/api/workflows", () => ({
   useTriggerCatalog: () => ({
     data: {
       catalog: [
+        { service: "linear", readiness: { ready: false, reason: "Ask an organization admin to connect Linear in Organization settings > Linear." },
+          entries: [{ key: "linear.issue.update", description: "Issue updated in Linear", filters: [] }] },
         {
           service: "github",
           entries: [
@@ -57,13 +59,13 @@ vi.mock("~/api/workflows", () => ({
 import { TriggerDialog } from "./trigger-dialog";
 
 describe("TriggerDialog", () => {
-  it("creates an orchestrator schedule from the form", async () => {
+  it("creates an assistant schedule from the form", async () => {
     createScheduleMutateAsync.mockClear().mockResolvedValue({});
     render(<TriggerDialog open onOpenChange={() => {}} />);
     fireEvent.click(screen.getByText(/^Schedule$/));
-    fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "digest" } });
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "digest" } });
     fireEvent.change(screen.getByLabelText(/cron/i), { target: { value: "0 9 * * *" } });
-    fireEvent.click(screen.getByLabelText(/orchestrator/i));
+    fireEvent.click(screen.getByLabelText(/^assistant$/i));
     fireEvent.change(screen.getByLabelText(/prompt/i), { target: { value: "summarize" } });
     fireEvent.click(screen.getByText(/^Create$/));
     await waitFor(() =>
@@ -85,7 +87,7 @@ describe("TriggerDialog", () => {
     // Provide workflowId prop so the client-side workflow-required check is bypassed.
     render(<TriggerDialog open onOpenChange={() => {}} workflowId="wf_test" />);
     fireEvent.click(screen.getByText(/^Schedule$/));
-    fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "bad" } });
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "bad" } });
     fireEvent.change(screen.getByLabelText(/cron/i), { target: { value: "x" } });
     fireEvent.click(screen.getByText(/^Create$/));
     await waitFor(() => expect(screen.getByText(/Use 5 fields/)).toBeTruthy());
@@ -163,7 +165,7 @@ describe("TriggerDialog", () => {
     createEventTriggerMutateAsync.mockClear().mockResolvedValue({});
     render(<TriggerDialog open onOpenChange={() => {}} workflowId="wf_1" />);
     fireEvent.click(screen.getByText(/^Event$/));
-    fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "on pr" } });
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "on pr" } });
     fireEvent.change(screen.getByLabelText(/event/i), {
       target: { value: "github.pull_request.opened" },
     });
@@ -185,7 +187,7 @@ describe("TriggerDialog", () => {
     // No workflowId prop — dialog shows the workflow select. Leave it empty.
     render(<TriggerDialog open onOpenChange={() => {}} />);
     fireEvent.click(screen.getByText(/^Schedule$/));
-    fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "no wf" } });
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "no wf" } });
     fireEvent.change(screen.getByLabelText(/cron/i), { target: { value: "0 9 * * *" } });
     // targetKind defaults to "workflow" and no workflow is selected.
     fireEvent.click(screen.getByText(/^Create$/));
@@ -197,7 +199,7 @@ describe("TriggerDialog", () => {
     createEventTriggerMutateAsync.mockClear().mockResolvedValue({});
     render(<TriggerDialog open onOpenChange={() => {}} workflowId="wf_1" />);
     fireEvent.click(screen.getByText(/^Event$/));
-    fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "on pr" } });
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "on pr" } });
     fireEvent.change(screen.getByLabelText(/event/i), {
       target: { value: "github.pull_request.opened" },
     });
@@ -239,4 +241,43 @@ describe("TriggerDialog", () => {
     const callArg = updateEventMutateAsync.mock.calls[updateEventMutateAsync.mock.calls.length - 1][0];
     expect(callArg.body.filters).toEqual([]);
   });
+});
+
+it("distinguishes Linear triggers from actions and blocks an unconfigured Linear connection", () => {
+  createEventTriggerMutateAsync.mockClear();
+  render(<TriggerDialog open onOpenChange={() => {}} workflowId="wf_1" />);
+  fireEvent.click(screen.getByText(/^Event$/));
+  fireEvent.change(screen.getByLabelText(/event/i), { target: { value: "linear.issue.update" } });
+  expect(screen.getByRole("option", { name: "Issue updated in Linear" })).toBeTruthy();
+  expect(screen.getByText(/Ask an organization admin to connect Linear in Organization settings > Linear/)).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Linear settings" }).getAttribute("href")).toBe("/settings/organization/linear");
+  const button = screen.getByRole("button", { name: "Create" });
+  expect(button.hasAttribute("disabled")).toBe(true);
+  fireEvent.click(button);
+  expect(createEventTriggerMutateAsync).not.toHaveBeenCalled();
+});
+
+
+it("includes Presence when creating an event trigger from a workflow", async () => {
+  createEventTriggerMutateAsync.mockClear().mockResolvedValue({});
+  render(<TriggerDialog open onOpenChange={() => {}} workflowId="wf_1" initialKind="event" />);
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "PR bot" } });
+  fireEvent.change(screen.getByLabelText("Event"), { target: { value: "github.pull_request.opened" } });
+  fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Release bot" } });
+  fireEvent.change(screen.getByLabelText("Avatar URL"), { target: { value: "https://example.com/avatar.png" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create" }));
+  await waitFor(() => expect(createEventTriggerMutateAsync).toHaveBeenCalledWith({
+    workflowId: "wf_1", name: "PR bot", eventKeys: ["github.pull_request.opened"], filters: [],
+    presence: { displayName: "Release bot", avatarUrl: "https://example.com/avatar.png" },
+  }));
+});
+
+it("rejects an insecure avatar before creating an event trigger", async () => {
+  createEventTriggerMutateAsync.mockClear();
+  render(<TriggerDialog open onOpenChange={() => {}} workflowId="wf_1" initialKind="event" />);
+  fireEvent.change(screen.getByLabelText("Event"), { target: { value: "github.pull_request.opened" } });
+  fireEvent.change(screen.getByLabelText("Avatar URL"), { target: { value: "http://example.com/avatar.png" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create" }));
+  expect(createEventTriggerMutateAsync).not.toHaveBeenCalled();
+  expect(screen.getAllByText(/Enter an HTTPS URL/).length).toBeGreaterThan(0);
 });

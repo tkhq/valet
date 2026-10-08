@@ -1,4 +1,5 @@
 import { completeSimple, isContextOverflow } from "@earendil-works/pi-ai/compat";
+import { assertModelEnabled } from "./model-catalog.js";
 import type { Message, Model } from "@earendil-works/pi-ai/compat";
 import { formatSenderLine } from "./submission.js";
 import type { CompactionConfig, SessionEntry } from "./types.js";
@@ -842,6 +843,7 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
     : "";
   const prompt = `${anchor}\n\n${SUMMARY_TEMPLATE}${steer}`;
 
+  assertModelEnabled(opts.model.id);
   const result = await completeSimple(opts.model, {
     systemPrompt:
       "You are a session compaction summarizer. Produce a concise, structured summary that lets a coding agent resume work without the original transcript.",

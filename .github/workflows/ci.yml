@@ -13,6 +13,11 @@ on:
   # each PR once against whatever branch it currently targets.
   pull_request:
 
+# Cancel superseded PR validation; publishing pushes must finish.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 

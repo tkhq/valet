@@ -366,10 +366,14 @@ export function generateDockerfile(opts: GenerateDockerfileOpts): string {
   lines.push(
     `  GIT_ASKPASS=${ASKPASS_PATH} git clone "${cloneUrl}" ${PREBUILT_REPO_PATH} && \\`,
   );
+  // The checkout shares the clone's RUN so the commit is part of that
+  // layer's cache key. As a separate step, Docker reused a cached clone from
+  // an earlier bake, which lacked every newer commit, and the checkout failed
+  // with "reference is not a tree" on every bake after the first.
+  lines.push(`  git -C ${PREBUILT_REPO_PATH} checkout ${commitSha} && \\`);
   lines.push(`  rm -f ${ASKPASS_PATH}'`);
   lines.push("");
   lines.push(`WORKDIR ${PREBUILT_REPO_PATH}`);
-  lines.push(`RUN git checkout ${commitSha}`);
 
   emitStepRuns(lines, recipe, setup);
 

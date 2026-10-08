@@ -1,3 +1,7 @@
+import { type Presence, validatePresence } from "@valet/shared";
+import { PresenceSettings } from "~/components/presence-settings";
+import { AutomationReview } from "./automation-review";
+import { DeliveryPreferences, type DeliveryPreferencesValue } from "./delivery-preferences";
 /**
  * EditSubscriptionDialog — edit an existing event subscription: name, event
  * keys, filters, and, for an assistant target, its prompt templates. The
@@ -30,18 +34,14 @@ import {
 import { useEventCatalog, usePatchEventSubscription } from "~/api/events";
 import { errorText } from "~/lib/error-text";
 import {
-  hasChannelScopeFilter,
   selectsSlackMention,
   storedAnyChannel,
 } from "~/lib/slack-mention";
 import { CollisionNotice, collisionsFromError } from "./collision-notice";
-import { EventMatchStep, unionFilterFields } from "./automation-wizard";
+import { EventMatchStep } from "./event-match-step";
+import { useSubscriptionMatch, validateSubscriptionFilters } from "./subscription-match";
 import {
   fromWireFilters,
-  incompleteFilterRow,
-  pruneFilterRows,
-  toWireFilters,
-  type UiFilterRow,
 } from "./filter-editor";
 import {
   PromptFields,
@@ -55,6 +55,7 @@ export function EditSubscriptionDialog({
   onOpenChange,
   sub,
   targetLabel,
+  review = false,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -62,14 +63,21 @@ export function EditSubscriptionDialog({
   /** The stored target as a display sentence (the row already resolves
    * workflow and team names); the dialog only shows it. */
   targetLabel: string;
+  review?: boolean;
 }) {
   const catalogQ = useEventCatalog();
   const patch = usePatchEventSubscription();
   const services = catalogQ.data?.services ?? [];
 
+  const [deliveryPreferences, setDeliveryPreferences] = useState<DeliveryPreferencesValue>({
+    deliveryPolicy: sub.target.kind === "orchestrator" ? sub.target.deliveryPolicy ?? "always" : "always",
+    pauseOnOverlap: sub.target.kind === "orchestrator" ? sub.target.pauseOnOverlap ?? true : true,
+  });
+  const [presence, setPresence] = useState<Presence>(sub.target.presence ?? {});
   const [name, setName] = useState(sub.name);
-  const [keys, setKeys] = useState<Set<string>>(() => new Set(sub.eventKeys));
-  const [filterRows, setFilterRows] = useState<UiFilterRow[]>(() => fromWireFilters(sub.filters));
+  const { keys, filterRows, setFilterRows, filterFields, toggleKey } = useSubscriptionMatch(
+    services, sub.eventKeys, () => fromWireFilters(sub.filters),
+  );
   const [anyChannel, setAnyChannel] = useState(() => storedAnyChannel(sub.eventKeys, sub.filters));
   // Seeded from the stored target at mount, which is open time (see the
   // header comment). Only an assistant target renders a template.
@@ -84,20 +92,10 @@ export function EditSubscriptionDialog({
     committed: boolean;
   } | null>(null);
 
-  const filterFields = unionFilterFields(services, keys);
-
-  function toggleKey(key: string) {
-    const next = new Set(keys);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    setKeys(next);
-    // Drop filters whose field none of the now-selected events declare, so an
-    // orphaned filter cannot 400 on save.
-    setFilterRows((rows) => pruneFilterRows(rows, unionFilterFields(services, next)));
-  }
-
   function save(allowCollision = false) {
     setError(null);
+    const presenceError = validatePresence(presence);
+    if (presenceError) { setError(presenceError); return; }
     if (name.trim().length === 0) {
       setError("Enter a name.");
       return;
@@ -106,40 +104,25 @@ export function EditSubscriptionDialog({
       setError("Select at least one event.");
       return;
     }
-    const incomplete = incompleteFilterRow(filterRows);
-    if (incomplete) {
-      setError(`Enter a value for the "${incomplete}" filter, or remove the row.`);
+    const match = validateSubscriptionFilters(filterRows, {
+      mention: selectsSlackMention([...keys]), anyChannel, requireChannelScope: true,
+    });
+    if (match.error !== undefined) {
+      setError(match.error);
       return;
     }
-    const filters = toWireFilters(filterRows);
-    // Mirror the server's mention channel rules (TKAI-299) so the form names
-    // the gap before a round trip. Both directions: a scoped mention rule
-    // needs a channel filter, and "Any channel" contradicts one — the server
-    // refuses the pair outright, and this dialog can seed the checkbox
-    // checked (a stored any-channel rule), so adding a channel filter walks
-    // straight into that refusal without this gate.
-    if (selectsSlackMention([...keys])) {
-      if (!anyChannel && !hasChannelScopeFilter(filters)) {
-        setError(
-          'A mention rule needs a channel filter (equals, or is one of). Add one, or check "Any channel".',
-        );
-        return;
-      }
-      if (anyChannel && hasChannelScopeFilter(filters)) {
-        setError(
-          '"Any channel" removes the channel restriction. Remove the channel filters, or turn "Any channel" off.',
-        );
-        return;
-      }
-    }
+    const { filters } = match;
 
-    const body = buildSubscriptionPatch(sub, {
+    let body = buildSubscriptionPatch(sub, {
       name,
       eventKeys: [...keys],
       filters,
       anyChannel,
       prompts,
+      presence,
+      ...(sub.ownerType === "user" && sub.target.kind === "orchestrator" ? { deliveryPreferences } : {}),
     });
+    if (review && !sub.enabled) body = { ...body, enabled: true };
     if (body === null) {
       onOpenChange(false);
       return;
@@ -172,8 +155,8 @@ export function EditSubscriptionDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        title={`Edit ${sub.name}`}
-        description="Change what this automation matches. A save keeps its target."
+        title={`${review ? "Review" : "Edit"} ${sub.name}`}
+        description={review ? (sub.enabled ? "This subscription is already enabled. Review its current configuration." : "Review the saved proposal. It stays paused until you enable it.") : "Change what this automation matches. A save keeps its target."}
         className="max-w-lg"
       >
         <div className="space-y-4">
@@ -220,6 +203,13 @@ export function EditSubscriptionDialog({
             )}
           </div>
 
+          {sub.ownerType === "user" && sub.target.kind === "orchestrator" && <DeliveryPreferences value={deliveryPreferences} onChange={setDeliveryPreferences} />}
+
+          <PresenceSettings value={presence} onChange={setPresence} subscription disabled={patch.isPending} />
+
+          <AutomationReview follow={sub.target.kind === "orchestrator" ? sub.target.follow : undefined} audience={sub.audience} workflowId={sub.target.kind === "workflow" ? sub.target.workflowId : undefined} when={[...keys].join(", ")} scope={filterRows.map(row => `${row.field} ${row.op} ${row.label || row.value}`).join("; ") || "All matching events"}
+            result={sub.target.kind === "orchestrator" ? prompts.userPromptTemplate || "Deliver matching events to the workspace assistant" : targetLabel}
+            destination={targetLabel} />
           {collisions !== null && (
             <CollisionNotice
               report={collisions.report}
@@ -248,7 +238,7 @@ export function EditSubscriptionDialog({
                 Cancel
               </Button>
               <Button type="button" onClick={() => save()} disabled={patch.isPending}>
-                {patch.isPending ? "Saving…" : "Save"}
+                {patch.isPending ? "Saving…" : review && !sub.enabled ? "Enable subscription" : "Save"}
               </Button>
               {collisions !== null && collisions.report.blocking.length > 0 && (
                 <Button
@@ -257,7 +247,7 @@ export function EditSubscriptionDialog({
                   onClick={() => save(true)}
                   disabled={patch.isPending}
                 >
-                  Save anyway
+                  {review ? "Enable anyway" : "Save anyway"}
                 </Button>
               )}
             </>

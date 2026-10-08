@@ -22,6 +22,7 @@ import {
   assistants,
   channelBindings,
   credentials,
+  credentialShares,
   eventSubscriptions,
   followedThreads,
   orgMembers,
@@ -322,7 +323,6 @@ export async function seedMissingTeamDefaults(db: AppDb): Promise<string[]> {
         eq(assistants.ownerType, "team"),
         eq(assistants.ownerId, teams.id),
         eq(assistants.orgId, teams.orgId),
-        eq(assistants.isDefault, true),
       ),
     )
     .where(isNull(assistants.id))
@@ -390,6 +390,7 @@ export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<Cr
     createdAt: now,
     defaultModel: null,
     defaultReasoning: null,
+    slackHomeChannelId: null,
   };
   const adoptedSources: ContentSourceRow[] = [];
 
@@ -517,6 +518,10 @@ export async function removeMember(db: AppDb, opts: RemoveMemberOptions): Promis
     await tx
       .delete(teamMembers)
       .where(and(eq(teamMembers.teamId, opts.teamId), eq(teamMembers.userId, opts.userId)));
+    // A shared account belongs to the member, so it leaves with them.
+    await tx
+      .delete(credentialShares)
+      .where(and(eq(credentialShares.teamId, opts.teamId), eq(credentialShares.userId, opts.userId)));
     await invalidateWorkflowSources(tx, { teamId: opts.teamId });
   });
 }
@@ -533,6 +538,7 @@ export async function listTeamsForUser(db: AppDb, userId: string): Promise<TeamR
       createdAt: teams.createdAt,
       defaultModel: teams.defaultModel,
       defaultReasoning: teams.defaultReasoning,
+      slackHomeChannelId: teams.slackHomeChannelId,
     })
     .from(teamMembers)
     .innerJoin(teams, eq(teamMembers.teamId, teams.id))
@@ -643,6 +649,7 @@ export async function listTeamsForOrg(db: AppDb, orgId: string): Promise<TeamRow
       createdAt: teams.createdAt,
       defaultModel: teams.defaultModel,
       defaultReasoning: teams.defaultReasoning,
+      slackHomeChannelId: teams.slackHomeChannelId,
     })
     .from(teams)
     .where(eq(teams.orgId, orgId))
@@ -786,11 +793,9 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
       .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, opts.teamId)));
     for (const assistant of teamAssistants) {
       await retireAssistant(tx, assistant.id);
-      await tx
-        .update(agentSessions)
-        .set({ status: "deleted", updatedAt: Date.now() })
-        .where(eq(agentSessions.id, assistant.sessionId));
     }
+    await tx.update(agentSessions).set({ status: "deleted", updatedAt: Date.now() })
+      .where(and(eq(agentSessions.orgId, team.orgId), eq(agentSessions.ownerType, "team"), eq(agentSessions.ownerId, opts.teamId)));
     // Machine-driven delivery targets go too. A surviving team-owned event
     // subscription, channel binding, or followed thread keeps dispatching
     // to the team principal, and `resolveDefaultAssistant` would then MINT
@@ -812,6 +817,7 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
     await tx
       .delete(credentials)
       .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, opts.teamId)));
+    await tx.delete(credentialShares).where(eq(credentialShares.teamId, opts.teamId));
     // The team's `vlt_` keys go with it. Once the team row is gone, every
     // route that could revoke one is closed: the team key list 404s, and
     // the personal routes refuse a team-pinned key, so a surviving row is

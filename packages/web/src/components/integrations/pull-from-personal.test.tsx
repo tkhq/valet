@@ -26,6 +26,8 @@ vi.mock("~/api/integrations", () => ({
   }),
 }));
 
+vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { id: "me" } }) }));
+
 import { PullFromPersonal, blockedReason } from "./pull-from-personal";
 
 const cred = (over: Partial<CredentialSummary> = {}): CredentialSummary => ({
@@ -67,11 +69,19 @@ describe("PullFromPersonal", () => {
     expect(delegateMutate).not.toHaveBeenCalled();
   });
 
-  it("says so when the team already has that service", async () => {
-    teamCreds = [cred()];
+  it("still shares when the team or another member already has that service", async () => {
+    teamCreds = [cred(), cred({ delegatedFrom: "bea" })];
     const user = await openPicker();
     await user.click(screen.getByRole("checkbox"));
-    expect(screen.getByText("This team already has a connection for this service.")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Share Linear with Platform" }));
+    expect(delegateMutate).toHaveBeenCalledWith({ service: "linear", body: { teamId: "t1" } });
+  });
+
+  it("says so when the caller already shares that service", async () => {
+    teamCreds = [cred({ delegatedFrom: "me" })];
+    const user = await openPicker();
+    await user.click(screen.getByRole("checkbox"));
+    expect(screen.getByText("You already share this with the team.")).toBeTruthy();
     expect(
       (screen.getByRole("button", { name: "Share Linear with Platform" }) as HTMLButtonElement)
         .disabled,

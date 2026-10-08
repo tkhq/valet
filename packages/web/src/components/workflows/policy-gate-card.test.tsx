@@ -16,12 +16,13 @@ import { PolicyGateCard } from "./policy-gate-card";
 const mutate = vi.fn();
 let mockOrgRole: string | undefined = "member";
 let mockIsError = false;
+let mockIsPending = false;
 let mockError: ApiError | null = null;
 
 vi.mock("~/api/workflows", () => ({
   useResolveApproval: () => ({
     mutate,
-    isPending: false,
+    isPending: mockIsPending,
     isError: mockIsError,
     error: mockError,
   }),
@@ -29,7 +30,7 @@ vi.mock("~/api/workflows", () => ({
 }));
 
 vi.mock("~/api/settings", () => ({
-  useMe: () => ({ data: mockOrgRole != null ? { orgRole: mockOrgRole } : undefined }),
+  useMe: () => ({ data: mockOrgRole != null ? { id: "me", orgRole: mockOrgRole } : undefined }),
 }));
 
 vi.mock("@tanstack/react-query", async (importOriginal) => {
@@ -60,6 +61,7 @@ describe("PolicyGateCard", () => {
     mutate.mockClear();
     mockOrgRole = "member";
     mockIsError = false;
+    mockIsPending = false;
     mockError = null;
   });
 
@@ -116,66 +118,14 @@ describe("PolicyGateCard", () => {
     });
   });
 
-  // ── Case 4: Always allow — non-admin ──────────────────────────────────────
-
-  it("non-admin: Always allow item is disabled with org-admin-only suffix", async () => {
+  it("confirms a persistent permission confined to this workflow", async () => {
     const user = userEvent.setup();
-    mockOrgRole = "member";
     render(<PolicyGateCard runId="wfrun_1" gate={makeGate()} />);
-
-    // Open the dropdown
-    await user.click(screen.getByRole("button", { name: "More approval options" }));
-
-    // The item text includes the "(org admin only)" suffix and is disabled
-    const item = screen.getByText(/org admin only/i);
-    expect(item).toBeTruthy();
-
-    // The menu item must be aria-disabled or have data-disabled
-    const menuItem = screen.getByRole("menuitem", { name: /Always allow/i });
-    const isDisabled =
-      menuItem.getAttribute("aria-disabled") === "true" ||
-      menuItem.dataset["disabled"] === "true" ||
-      menuItem.hasAttribute("disabled");
-    expect(isDisabled).toBe(true);
-  });
-
-  // ── Case 4 cont: Always allow — admin ─────────────────────────────────────
-
-  it("admin: Always allow is enabled; confirm step shows blast radius and policies link", async () => {
-    const user = userEvent.setup();
-    mockOrgRole = "admin";
-    const gate = makeGate();
-    render(<PolicyGateCard runId="wfrun_1" gate={gate} />);
-
-    // Open the dropdown
-    await user.click(screen.getByRole("button", { name: "More approval options" }));
-
-    const menuItem = screen.getByRole("menuitem", { name: /Always allow/i });
-    // admin sees enabled item (no disabled attribute)
-    expect(
-      menuItem.getAttribute("aria-disabled") === "true" ||
-      menuItem.dataset["disabled"] === "true",
-    ).toBe(false);
-
-    // Click to open confirm step
-    await user.click(menuItem);
-
-    // Blast radius copy
-    expect(
-      screen.getByText(/Allows linear\.save_issue for every user and run in this org/i),
-    ).toBeTruthy();
-
-    // Link to /settings/organization policies
-    const link = screen.getByRole("link", { name: /policies/i });
-    expect(link.getAttribute("href")).toContain("/settings/organization");
-
-    // Confirm fires scope=always
-    await user.click(screen.getByRole("button", { name: /Confirm/i }));
-
-    expect(mutate).toHaveBeenCalledWith({
-      nodeId: "node_1",
-      body: { approved: true, scope: "always", note: undefined, iteration: undefined },
-    });
+    await user.click(screen.getByRole("button", { name: "Allow for this workflow" }));
+    expect(screen.getByText(/future runs of this workflow only/i)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Allow action" }));
+    expect(mutate).toHaveBeenCalledWith({ nodeId: "node_1", body: { approved: true, scope: "workflow", note: undefined, iteration: undefined } });
+    expect(screen.queryByText("Always allow")).toBeNull();
   });
 
   // ── Case 5: Deny microcopy ────────────────────────────────────────────────
@@ -255,4 +205,54 @@ describe("PolicyGateCard", () => {
     render(<PolicyGateCard runId="wfrun_1" gate={makeGate({ iteration: 4 })} />);
     expect(screen.getByText(/Iteration 4/i)).toBeTruthy();
   });
+
+  it("cancels workflow permission then confirms denial without retaining its scope", () => {
+    render(<PolicyGateCard runId="wfrun_1" gate={makeGate({ iteration: 4 })} confirmActions />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Optional note" }), {
+      target: { value: "  needs changes  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Allow for this workflow" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(mutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+    expect(mutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Deny action" }));
+    expect(mutate).toHaveBeenCalledExactlyOnceWith({
+      nodeId: "node_1",
+      body: { approved: false, scope: "once", note: "needs changes", iteration: 4 },
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("disables the note and actions while a response is pending", () => {
+    const gate = makeGate();
+    const { rerender } = render(<PolicyGateCard runId="wfrun_1" gate={gate} />);
+    fireEvent.click(screen.getByRole("button", { name: "Approve once" }));
+    mockIsPending = true;
+    rerender(<PolicyGateCard runId="wfrun_1" gate={gate} />);
+    expect(screen.getByRole("textbox", { name: "Optional note" }).hasAttribute("disabled")).toBe(true);
+    for (const button of screen.getAllByRole("button")) {
+      expect(button.hasAttribute("disabled")).toBe(true);
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+    expect(mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("only exposes credential approval actions to the named approver", () => {
+    const gate = makeGate({ approver: { userId: "other", name: "Ada" } });
+    const { rerender } = render(<PolicyGateCard runId="wfrun_1" gate={gate} />);
+    expect(screen.getByRole("status").textContent).toContain("Asked Ada for permission");
+    expect(screen.queryByRole("button")).toBeNull();
+    rerender(<PolicyGateCard runId="wfrun_1" gate={{ ...gate, approver: { userId: "me" } }} />);
+    expect(screen.getByRole("button", { name: "Allow for this run" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Approve once" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Allow for this workflow" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "More approval options" })).toBeNull();
+    expect(screen.getByText(/also lets Valet use your linear account for later actions in this workflow run/)).toBeTruthy();
+    expect(screen.getByText(/including actions requested by other teammates/)).toBeTruthy();
+    expect(mutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Allow for this run" }));
+    expect(mutate).toHaveBeenCalledExactlyOnceWith({ nodeId: "node_1", body: { approved: true, scope: "run" } });
+  });
+
 });

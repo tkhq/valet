@@ -1,3 +1,6 @@
+import { isDocxDocumentMime, normalizeDocumentMime } from "@valet/engine";
+import { extractDocx } from "./docx-extract.js";
+
 /**
  * PDF extraction via @firecrawl/pdf-inspector.
  *
@@ -89,16 +92,18 @@ export function pdfStubMarkdown(): string {
  * for example — and the native extractor lives here, beside the api bundle.
  *
  * Returns `null` when the document carries no extractable text, so the
- * caller can say why rather than return an empty string. Anything other
- * than a PDF is `null` too: this is the only format the api can extract.
- * Throws only when extraction itself is unavailable.
+ * caller can explain the limitation. Supports PDF and DOCX text locally.
+ * Throws when extraction fails or a safety limit prevents complete extraction.
  */
 export async function extractDocumentText(doc: {
   data: Uint8Array;
   mimeType: string;
   name?: string;
+  signal?: AbortSignal;
 }): Promise<{ markdown: string } | null> {
-  if (doc.mimeType !== "application/pdf") return null;
+  doc.signal?.throwIfAborted();
+  if (isDocxDocumentMime(doc.mimeType, doc.name)) return extractDocx(doc.data, doc.signal);
+  if (normalizeDocumentMime(doc.mimeType) !== "application/pdf") return null;
   const result = await extractPdf(doc.data);
   return result.markdown ? { markdown: result.markdown } : null;
 }

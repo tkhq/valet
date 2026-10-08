@@ -8,7 +8,7 @@
  * this file checks the DOM wiring.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { TooltipProvider } from "~/components/primitives";
@@ -16,7 +16,7 @@ import type {
   DecisionGate,
   GetModelTiersResponse,
   ModelInfo,
-  OrchestratorChildSummary,
+  ChildWorkSummary,
   ThreadSummary,
 } from "@valet/api/wire";
 
@@ -27,13 +27,17 @@ const dismissMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const renameMutateAsync = vi.fn().mockResolvedValue({ id: "thread-1" });
 
 let threads: ThreadSummary[] = [];
+let searchMatches: ThreadSummary[] = [];
 let archivedThreads: ThreadSummary[] = [];
-let children: OrchestratorChildSummary[] = [];
+let children: ChildWorkSummary[] = [];
+let hasNextPage = false;
+const fetchNextPage = vi.fn();
 let pendingGates: Record<string, DecisionGate> = {};
 let sessionModel: string | undefined;
 let models: ModelInfo[] = [];
 let tierMap: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
 
+const markThreadsReadMutate = vi.fn();
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
     <a {...rest}>{children}</a>
@@ -42,12 +46,12 @@ vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => navigate,
 }));
 
-// importOriginal: see -new-session-dialog.test.tsx for why a bare
-// replacement here is unsafe under vitest.config.ts's isolate:false.
+// importOriginal keeps the module's other exports real (see vitest.config.ts).
 vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
   return {
     ...actual,
+    useThreadSearch: () => ({ data: { threads: searchMatches }, isFetching: false, isError: false }),
     useThreads: () => ({ data: { threads }, isLoading: false, error: null }),
     useSession: () => ({
       data: sessionModel ? { model: sessionModel } : undefined,
@@ -63,6 +67,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useSetThreadArchived: () => ({ mutateAsync: setArchivedMutateAsync, isPending: false }),
     useRenameThread: () => ({ mutateAsync: renameMutateAsync, isPending: false }),
     useReplaceSandbox: () => ({ mutateAsync: replaceMutateAsync, isPending: false }),
+    useMarkThreadsRead: () => ({ mutate: markThreadsReadMutate, isPending: false }),
     // The gate seed (usePendingGatesSeed) stays inert: with no data the
     // effect never touches the store. Gates enter through `pendingGates`.
     useDecisions: () => ({ data: undefined, isLoading: false, error: null }),
@@ -73,22 +78,23 @@ vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {
     ...actual,
+    useMe: () => ({ data: { id: "user-1" }, error: null }),
     useModels: () => ({ data: { models }, isLoading: false, error: null }),
     useModelTiers: () => ({ data: tierMap, isLoading: false, error: null }),
   };
 });
 
-vi.mock("~/api/orchestrator", () => ({
-  useOrchestratorInfo: () => ({ data: { sessionId: "orchestrator:user-1" } }),
-  useOrchestratorChildren: () => ({ data: { children }, refetch: vi.fn() }),
-  useDismissChild: () => ({ mutateAsync: dismissMutateAsync, isPending: false }),
+vi.mock("~/api/workspace-runtime", () => ({
+  useWorkspaceRuntimeInfo: () => ({ data: { sessionId: "orchestrator:user-1" } }),
+
 }));
 
 // Applies the component's real selectors against a minimal store shape:
 // `pendingGates` drives the response-required bell, `queueByThread` the children
 // live-update hook, and the absent `setPendingGates` is never called
 // because the mocked useDecisions returns no data.
-vi.mock("~/stores/stream", () => {
+vi.mock("~/stores/stream", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/stores/stream")>();
   interface FakeStreamState {
     bySession: Record<
       string,
@@ -97,6 +103,9 @@ vi.mock("~/stores/stream", () => {
     setPendingGates?: (sessionId: string, gates: DecisionGate[]) => void;
   }
   return {
+    ...actual,
+    useThreadLiveStatus: () => ({ status: "idle" }),
+    useQueueStateForThread: () => undefined,
     useStreamStore: (sel: (s: FakeStreamState) => unknown) =>
       sel({ bySession: { "orchestrator:user-1": { pendingGates, queueByThread: {} } } }),
   };
@@ -115,7 +124,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
   };
 }
 
-function child(overrides: Partial<OrchestratorChildSummary> = {}): OrchestratorChildSummary {
+function child(overrides: Partial<ChildWorkSummary> = {}): ChildWorkSummary {
   return {
     sessionId: "child-1",
     title: "fix-auth",
@@ -157,15 +166,17 @@ beforeEach(() => {
   renameMutateAsync.mockClear();
   threads = [thread()];
   archivedThreads = [];
+  searchMatches = [];
   children = [];
+  hasNextPage = false;
   pendingGates = {};
   sessionModel = undefined;
   models = [];
   tierMap = { xs: [], s: [], m: [], l: [], xl: [] };
 });
 
-describe("ThreadTree — model label", () => {
-  it("shows the resolved model name with the selected size in a pill", () => {
+describe("ThreadTree — title-first sidebar", () => {
+  it("keeps model names and size badges out of the thread row", () => {
     sessionModel = "s";
     models = [
       {
@@ -179,12 +190,13 @@ describe("ThreadTree — model label", () => {
       },
     ];
     tierMap = { xs: [], s: [], m: [], l: ["anthropic/claude-sonnet-5"], xl: [] };
-    threads = [thread({ model: "l" })];
+    threads = [thread({ model: "l", title: "Investigate onboarding workflow" })];
 
     renderTree();
 
-    expect(screen.getByText("Claude Sonnet 5")).toBeTruthy();
-    expect(screen.getByText("Large")).toBeTruthy();
+    expect(screen.getByText("Investigate onboarding workflow")).toBeTruthy();
+    expect(screen.queryByText("Claude Sonnet 5")).toBeNull();
+    expect(screen.queryByText("Large")).toBeNull();
     expect(screen.queryByText("l")).toBeNull();
   });
 });
@@ -376,14 +388,14 @@ describe("ThreadTree — response-required bell", () => {
     pendingGates = { g1: gate("g1", "thread-old") };
     renderTree();
 
-    const bell = screen.getByLabelText("Response required");
+    const bell = screen.getByLabelText("Needs approval");
     expect(bell.closest("a")?.textContent).toContain("Gated thread");
-    expect(bell.getAttribute("title")).toBe("Response required");
+    expect(bell.getAttribute("role")).toBe("img");
   });
 
   it("shows no bell when no gate is pending", () => {
     renderTree();
-    expect(screen.queryByLabelText("Response required")).toBeNull();
+    expect(screen.queryByLabelText("Needs approval")).toBeNull();
   });
 
   it("marks each gated thread, and only those", () => {
@@ -395,7 +407,7 @@ describe("ThreadTree — response-required bell", () => {
     pendingGates = { g1: gate("g1", "thread-a"), g2: gate("g2", "thread-b") };
     renderTree();
 
-    const bells = screen.getAllByLabelText("Response required");
+    const bells = screen.getAllByLabelText("Needs approval");
     const marked = bells.map((bell) => bell.closest("a")?.textContent ?? "");
     expect(marked.some((t) => t.includes("Active thread"))).toBe(true);
     expect(marked.some((t) => t.includes("Gated B"))).toBe(true);
@@ -403,7 +415,7 @@ describe("ThreadTree — response-required bell", () => {
     expect(bells).toHaveLength(2);
   });
 
-  it("keeps a gated thread visible when the search query would hide it", async () => {
+  it("keeps approval state in the sidebar when dialog search filters other threads", async () => {
     threads = [
       thread({ id: "thread-new", title: "Newest", createdAt: 3_000 }),
       thread({ id: "thread-gated", title: "Plan the launch", createdAt: 2_000 }),
@@ -413,12 +425,15 @@ describe("ThreadTree — response-required bell", () => {
     const user = userEvent.setup();
     renderTree();
 
-    await user.type(screen.getByLabelText("Search threads"), "Newest");
+    await user.click(screen.getByRole("button", { name: "Search threads" }));
+    await user.type(screen.getByRole("combobox", { name: "Search threads" }), "Newest");
+    const results = within(screen.getByRole("listbox"));
+    expect(results.getByText("Newest")).toBeTruthy();
+    expect(results.queryByText("Plan the launch")).toBeNull();
+    expect(results.queryByText("Old notes")).toBeNull();
+    await user.keyboard("{Escape}");
+    expect(screen.getByLabelText("Needs approval").closest("a")?.textContent).toContain("Plan the launch");
 
-    expect(screen.getByText("Newest")).toBeTruthy();
-    expect(screen.getByText("Plan the launch")).toBeTruthy();
-    expect(screen.queryByText("Old notes")).toBeNull();
-    expect(screen.getByLabelText("Response required")).toBeTruthy();
   });
 
   it("surfaces a gate on an archived thread: toggle bell, then row bell", async () => {
@@ -550,12 +565,14 @@ describe("ThreadTree — sort preference", () => {
     const newer = screen.getByText("Newer");
     expect(older.compareDocumentPosition(newer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
 
-    await user.click(screen.getByRole("button", { name: "Sort threads" }));
+    await user.click(screen.getByRole("button", { name: "Sidebar options" }));
+    await user.hover(screen.getByRole("menuitem", { name: "Sort chats by" }));
+    await screen.findByRole("menuitemradio", { name: "Created" });
     expect(screen.getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual([
       "Last user activity",
       "Created",
     ]);
-    await user.click(screen.getByRole("menuitemradio", { name: "Created" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Created" }));
     expect(window.localStorage.getItem("valet:thread-sort")).toBe("created");
     view.unmount();
 
@@ -564,4 +581,98 @@ describe("ThreadTree — sort preference", () => {
     const restoredOlder = screen.getByText("Older");
     expect(restoredNewer.compareDocumentPosition(restoredOlder) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   });
+});
+
+describe("ThreadTree — origin", () => {
+  it("marks each row with its origin and filters by origin", async () => {
+    const user = userEvent.setup();
+    threads = [
+      thread({ id: "slack-thread", title: "From the channel", key: "slack:C1:1.2" }),
+      thread({ id: "web-thread", title: "Typed here", key: "web:abc" }),
+    ];
+    renderTree();
+    expect(screen.getByRole("img", { name: "From Slack" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "From web chat" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Sidebar options" }));
+    await user.hover(screen.getByRole("menuitem", { name: "Show threads from" }));
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: /Slack and other channels/ }));
+    expect(screen.getByText("From the channel")).toBeTruthy();
+    expect(screen.queryByText("Typed here")).toBeNull();
+    expect(window.localStorage.getItem("valet:thread-origin")).toBe("channel");
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(screen.getByText("Typed here")).toBeTruthy();
+  });
+});
+
+describe("ThreadTree — questions", () => {
+  it("marks a thread amber while Valet's question waits on a reply", () => {
+    threads = [
+      thread({ id: "home", title: "Home", key: "default" }),
+      thread({ id: "asked", title: "Asked", lastUserActivityAt: 10, lastAgentActivityAt: 20, agentQuestion: "Merge it once CI passes?" }),
+      thread({ id: "answered", title: "Answered", lastUserActivityAt: 30, lastAgentActivityAt: 20, readAt: 40, agentQuestion: "Merge it?" }),
+    ];
+    renderTree();
+    expect(screen.getAllByLabelText("Valet asked you a question")).toHaveLength(1);
+    // The question outranks the unread dot on the same row.
+    expect(screen.queryAllByLabelText("Unread")).toHaveLength(0);
+  });
+});
+
+describe("ThreadTree — unread and pull requests", () => {
+  it("dots unread threads, shows pull request state, and marks all read", async () => {
+    const user = userEvent.setup();
+    markThreadsReadMutate.mockClear();
+    // Fixed creation times: the newest thread is the open one, and an open
+    // thread shows no unread dot. `Date.now()` per fixture made that a race.
+    threads = [
+      thread({ id: "home", title: "Home", key: "default", createdAt: 3 }),
+      thread({ id: "replied", title: "Agent replied", createdAt: 2, lastUserActivityAt: 10, lastAgentActivityAt: 20,
+        pullRequests: [{ url: "https://github.com/acme/app/pull/7", repo: "acme/app", number: 7, state: "merged" }] }),
+      thread({ id: "read", title: "Already read", createdAt: 1, lastUserActivityAt: 10, lastAgentActivityAt: 20, readAt: 30,
+        pullRequests: [{ url: "https://github.com/acme/app/pull/8", repo: "acme/app", number: 8, state: "open" }] }),
+    ];
+    renderTree();
+    expect(screen.getAllByLabelText("Unread")).toHaveLength(1);
+    expect(screen.getByRole("img", { name: "Pull request merged: acme/app#7" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "Pull request open: acme/app#8" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Sidebar options" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Mark all as read" }));
+    expect(markThreadsReadMutate).toHaveBeenCalledWith({});
+  });
+});
+
+vi.mock("~/api/child-work", async (importOriginal) => {
+ const actual = await importOriginal<typeof import("~/api/child-work")>();
+ return { ...actual,
+  useChildWork: () => ({ hasNextPage, fetchNextPage, data: { pages: [{ children, runningCount: 0, nextCursor: null }] }, refetch: vi.fn() }),
+  useDismissChild: () => ({ mutateAsync: dismissMutateAsync, isPending: false }),
+ };
+});
+
+it("loads the next page of child work from the thread tree", async () => {
+  hasNextPage = true;
+  renderTree();
+  await userEvent.setup().click(screen.getByRole("button", { name: "Load more work" }));
+  expect(fetchNextPage).toHaveBeenCalledOnce();
+});
+
+
+it("keeps the selected search thread when content matches arrive", async () => {
+  threads = [thread({ id: "content", title: "Deployment notes", lastUserActivityAt: 3 }), thread({ id: "first", title: "Linear plans", lastUserActivityAt: 2 }), thread({ id: "chosen", title: "Linear receipts", lastUserActivityAt: 1 })];
+  const view = renderTree();
+  fireEvent.click(screen.getByRole("button", { name: "Search threads" }));
+  const input = screen.getByRole("combobox");
+  fireEvent.change(input, { target: { value: "Linear" } });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 300)); });
+  // Mouse and keyboard selection share the same active-result state.
+  fireEvent.mouseMove(screen.getByRole("option", { name: "Linear receipts" }));
+  searchMatches = [threads[0]!];
+  view.rerender(<TooltipProvider><ThreadTree /></TooltipProvider>);
+  expect(screen.getByRole("option", { name: "Deployment notes" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "Linear receipts" }).getAttribute("aria-selected")).toBe("true");
+  fireEvent.keyDown(input, { key: "Enter" });
+  const navigateOptions = navigate.mock.calls.at(-1)?.[0];
+  expect(navigateOptions.search({})).toMatchObject({ thread: "chosen" });
 });

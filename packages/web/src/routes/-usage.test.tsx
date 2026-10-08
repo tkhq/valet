@@ -229,7 +229,7 @@ const mockSessionItems: UsageDrillResponse = {
     },
     {
       id: "sess_child1",
-      label: "Child session",
+      label: "Child thread",
       useCase: "session",
       isChild: true,
       parentId: "sess_parent1",
@@ -674,16 +674,16 @@ describe("UsagePage — By-member table (org scope)", () => {
 describe("UsagePage — by-use-case table", () => {
   it("renders all four use-case labels", () => {
     render(<UsagePage />);
-    expect(screen.getByText("Orchestrator")).toBeTruthy();
+    expect(screen.getByText("Assistant")).toBeTruthy();
     expect(screen.getAllByText("Sessions").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Workflows").length).toBeGreaterThan(0);
     expect(screen.getByText("Proxy (external tools)")).toBeTruthy();
   });
 
-  it("expanding Orchestrator row shows orchestrator items", async () => {
+  it("expanding Assistant row shows runtime items", async () => {
     render(<UsagePage />);
     const orchRow = screen.getByRole("button", {
-      name: /Orchestrator — expand items/,
+      name: /Assistant — expand items/,
     });
     fireEvent.click(orchRow);
     await waitFor(() => {
@@ -691,10 +691,10 @@ describe("UsagePage — by-use-case table", () => {
     });
   });
 
-  it("orchestrator item does not render as a link (orch: prefix)", async () => {
+  it("runtime item does not render as a link (orchestrator: prefix)", async () => {
     render(<UsagePage />);
     const orchRow = screen.getByRole("button", {
-      name: /Orchestrator — expand items/,
+      name: /Assistant — expand items/,
     });
     fireEvent.click(orchRow);
     await waitFor(() => {
@@ -714,7 +714,7 @@ describe("UsagePage — by-use-case table", () => {
     fireEvent.click(sessRow);
     await waitFor(() => {
       expect(screen.getByText("Parent session")).toBeTruthy();
-      expect(screen.getByText("Child session")).toBeTruthy();
+      expect(screen.getByText("Child thread")).toBeTruthy();
     });
   });
 
@@ -725,12 +725,12 @@ describe("UsagePage — by-use-case table", () => {
     });
     fireEvent.click(sessRow);
     await waitFor(() => {
-      expect(screen.getByText("Child session")).toBeTruthy();
+      expect(screen.getByText("Child thread")).toBeTruthy();
     });
     const childRows = Array.from(container.querySelectorAll(".pl-8"));
     expect(childRows.length).toBeGreaterThan(0);
     const childText = childRows.some((el) =>
-      el.textContent?.includes("Child session"),
+      el.textContent?.includes("Child thread"),
     );
     expect(childText).toBe(true);
   });

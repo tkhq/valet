@@ -2,6 +2,8 @@
  * Pure subscription-matching primitives for the event system. No IO — the
  * ingest transaction and the subscriptions CRUD validator both call these.
  */
+import { eventKeyMatches } from "@valet/shared";
+export { eventKeyMatches } from "@valet/shared";
 import type { EventCatalogEntry } from "@valet/engine";
 
 export interface SubscriptionFilter {
@@ -67,17 +69,6 @@ function compileRegexCached(pattern: string): RegExp | null {
   }
   compiledRegexCache.set(pattern, compiled);
   return compiled;
-}
-
-/** Trailing-wildcard key match: "github.pull_request.*" matches
- * "github.pull_request.opened" but not "github.pull_request_review.x" —
- * the wildcard only crosses a `.` boundary. */
-export function eventKeyMatches(eventKey: string, patterns: string[]): boolean {
-  return patterns.some((pattern) => {
-    if (pattern === eventKey) return true;
-    if (pattern.endsWith(".*")) return eventKey.startsWith(pattern.slice(0, -1));
-    return false;
-  });
 }
 
 export function resolvePath(payload: unknown, path: string): unknown {

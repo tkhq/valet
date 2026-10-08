@@ -1,4 +1,5 @@
 import { Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
+import { uid } from "./ids.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import { buildCommandRegistry, type CommandRegistry } from "./commands/registry.js";
@@ -19,7 +20,7 @@ import type {
 } from "./commands/types.js";
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
 import type { PolicySandbox } from "./sandbox/policy.js";
-import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
+import { ConflictError, NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
 import {
   isReasoningLevel,
   parseReasoningLevel,
@@ -38,6 +39,7 @@ import type {
   MessageEntry,
   CreateSessionOptions,
   CredentialOwner,
+  CredentialUse,
   CredentialProvider,
   DecisionGate,
   DecisionGateRequest,
@@ -67,10 +69,6 @@ import type {
 } from "./types.js";
 import { credentialSecret } from "./types.js";
 
-let nextId = 1;
-function uid(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
-}
 
 function submissionsByThread(items: readonly QueueItem[]): Map<string, QueueItem[]> {
   const grouped = new Map<string, QueueItem[]>();
@@ -141,6 +139,11 @@ function formatPluginOutcome(
       return {
         ok: false,
         output: "This action is blocked by org policy. Ask an administrator to allow it.",
+      };
+    case "denied-external-sender":
+      return {
+        ok: false,
+        output: "This action needs approval. Only a teammate with a Valet account can run it.",
       };
     case "denied-approval":
       return {
@@ -259,6 +262,7 @@ export class Session {
   readonly skills = new Map<string, SkillSource>();
   private threads = new Map<string, Thread>();
   private threadsByKey = new Map<string, Thread>();
+  private creatingThreads = new Map<string, Promise<Thread>>();
   /** Lazily-built slash-command registry; invalidated by refreshCommandRegistry(). */
   private commandRegistryCache: CommandRegistry | null = null;
   /**
@@ -585,6 +589,10 @@ export class Session {
    * re-running is safe.
    */
   async reconcile(): Promise<void> {
+    if (this.options.readOnlyReason) {
+      await this.settleReadOnlySubmissions(this.options.readOnlyReason);
+      return;
+    }
     const items = await this.providers.store.listUnsettledSubmissions(this.id);
     for (const item of items) {
       // startup: this instance is the definitive new owner (restoreSession's
@@ -620,12 +628,39 @@ export class Session {
     }
   }
 
+  /** A cutover must terminate old work without restoring its tools or sandbox. */
+  private async settleReadOnlySubmissions(reason: string): Promise<void> {
+    const store = this.providers.store;
+    for (const item of await store.listUnsettledSubmissions(this.id)) {
+      try {
+        await store.forceSettle(this.id, item.id, "aborted", reason);
+      } catch (error) {
+        if (!(error instanceof ConflictError)) throw error;
+        continue; // Another restore already settled it.
+      }
+      await this.emit({ type: "submission_settled", sessionId: this.id, threadId: item.threadId,
+        queueItemId: item.id, outcome: { outcome: "aborted", error: reason } },
+      { eventKey: `settled:${item.id}`, queueItemId: item.id });
+    }
+    // Also repair a crash between settlement and gate cleanup. No gate is re-armed.
+    for (const gate of await store.listDecisionGates(this.id)) {
+      if (gate.status !== "pending" || !gate.queueItemId) continue;
+      const item = await store.getQueueItem(this.id, gate.queueItemId);
+      if (item?.outcome?.outcome !== "aborted" || item.outcome.error !== reason) continue;
+      await persistTerminalGate(store, this.id, gate.threadId, gate, { status: "withdrawn", reason: "cancel" });
+      await this.emit({ type: "decision_gate_withdrawn", threadId: gate.threadId, gateId: gate.id, reason: "cancel" },
+        { eventKey: `gate:${gate.id}:withdrawn`, queueItemId: item.id });
+      await store.clearSuspendedTurn(this.id, gate.threadId);
+    }
+  }
+
   /**
    * Gather the ReconcileContext from the store, consult the pure decision
    * function, and apply the resulting action via the owning Thread. Also
    * observes the stuck-head condition for the attention signal.
    */
   private async reconcileItem(item: QueueItem, opts?: { startup?: boolean }): Promise<void> {
+    if (this.options.readOnlyReason) return;
     if (item.status === "settled") return;
     const thread = this.threads.get(item.threadId);
     if (!thread) return; // thread not hydrated — nothing to drive it with
@@ -799,8 +834,28 @@ export class Session {
   async createThread(key: string, initial?: ThreadInitialSettings): Promise<Thread> {
     const existing = this.threadsByKey.get(key);
     if (existing) return existing;
-    const data = this.buildThreadData(key, initial);
-    await this.providers.store.saveThread(this.id, data);
+    const pending = this.creatingThreads.get(key);
+    if (pending) return pending;
+    const creating = this.createKeyedThread(key, initial);
+    this.creatingThreads.set(key, creating);
+    try {
+      return await creating;
+    } finally {
+      this.creatingThreads.delete(key);
+    }
+  }
+
+  private async createKeyedThread(key: string, initial?: ThreadInitialSettings): Promise<Thread> {
+    let data = this.buildThreadData(key, initial);
+    try {
+      await this.providers.store.saveThread(this.id, data);
+    } catch (error) {
+      // A different host can win the durable (session_id, key) constraint.
+      // Recover only when that winner exists; preserve unrelated failures.
+      const winner = (await this.providers.store.listThreads(this.id)).find(thread => thread.key === key);
+      if (!winner) throw error;
+      data = winner;
+    }
     const thread = new Thread(this, data);
     this.attachThread(thread);
     return thread;
@@ -844,6 +899,7 @@ export class Session {
   // ── public API ──────────────────────────────────────────────────
 
   async prompt(content: PromptContent, opts: PromptOptions = {}): Promise<PromptReceipt> {
+    if (this.options.readOnlyReason) throw new ValidationError(this.options.readOnlyReason);
     const thread = this.resolveTargetThread(opts.threadId);
     const text = commandText(content);
     if (text?.startsWith("/")) {
@@ -1106,9 +1162,9 @@ export class Session {
         // `resolveDecision`, same as every other gate.
         return this.awaitCommandGate(thread, req);
       },
-      threadRead: (key, opts) => this.readEntries(key, opts),
+      threadRead: (key, opts) => this.readEntries(key, opts, thread),
       listThreads: async () => {
-        const datas = await this.providers.store.listThreads(this.id);
+        const datas = await this.readableThreads(thread);
         return datas.map((d) => ({
           id: d.id,
           key: d.key,
@@ -1167,15 +1223,34 @@ export class Session {
       skillsProvider ? skillsProvider() : Promise.resolve(null),
     ]);
     this.workspaceSkillsCache = workspaceSkills;
-    if (managedSkills !== null) {
-      // Replace, not merge: the provider returns the full merged set (plugin
-      // + stored). A deleted or renamed stored skill must drop out here, and
-      // `skill`-tool lookups (thread.ts) read this same map, so both surfaces
-      // stay consistent.
-      this.skills.clear();
-      for (const skill of managedSkills) this.skills.set(skill.name, skill);
-    }
+    if (managedSkills !== null) this.replaceSkills(managedSkills);
     this.commandRegistryCache = null;
+  }
+
+  /**
+   * Re-read the session's skill map from the host `skillsProvider` only.
+   * Each turn calls this before it builds its tools, so a skill created,
+   * edited, or deleted while the session sat in the host cache reaches the
+   * model on the next turn. The `workspaceSkillsProvider` is not read: repo
+   * templates reach slash commands only, and that read can need the sandbox.
+   * No provider === no-op. A provider rejection propagates, and the previous
+   * map keeps serving.
+   */
+  async refreshSkills(): Promise<void> {
+    const skillsProvider = this.options.skillsProvider;
+    if (!skillsProvider) return;
+    this.replaceSkills(await skillsProvider());
+    this.commandRegistryCache = null;
+  }
+
+  /**
+   * Replace, not merge: the provider returns the full merged set (plugin +
+   * stored). A deleted or renamed stored skill must drop out here. The host's
+   * `skill` tool reads this same map, so both surfaces stay consistent.
+   */
+  private replaceSkills(skills: SkillSource[]): void {
+    this.skills.clear();
+    for (const skill of skills) this.skills.set(skill.name, skill);
   }
 
   /**
@@ -1359,7 +1434,14 @@ export class Session {
     }
     for (const t of this.threads.values()) {
       if (t.isPendingGate(gateId)) {
-        t.withdrawDecision(gateId, reason);
+        const gate = t.pendingDecisionGates().find((pending) => pending.id === gateId);
+        if (reason === "cancel" && gate) {
+          // Stamp abort intent before unblocking the tool. Otherwise its
+          // cancellation error triggers another model call.
+          await t.abortSubmission(gate.queueItemId, reason);
+        } else {
+          t.withdrawDecision(gateId, reason);
+        }
         return;
       }
     }
@@ -1441,6 +1523,7 @@ export class Session {
   }
 
   async resume(opts: { threadId?: string } = {}): Promise<void> {
+    if (this.options.readOnlyReason) throw new ValidationError(this.options.readOnlyReason);
     if (opts.threadId) {
       await this.threads.get(opts.threadId)?.resume();
       return;
@@ -1480,10 +1563,29 @@ export class Session {
     return this.providers.store.listDecisionGates(this.id);
   }
 
-  async readEntries(threadKey: string, opts?: MessageQuery): Promise<SessionEntry[]> {
-    const t = await this.threadByKey(threadKey);
-    if (!t) return [];
+  /** Reads a thread by key, or by id when no thread has that key. */
+  /** A thread's entries by key or id. With `reader`, only a thread that
+   * reader may see (`CreateSessionOptions.threadAccess`); any other reads as
+   * missing. */
+  async readEntries(threadKey: string, opts?: MessageQuery, reader?: { id: string; key: string }): Promise<SessionEntry[]> {
+    const t = (await this.threadByKey(threadKey)) ?? this.threadById(threadKey);
+    if (!t || (reader && !(await this.threadReadable(reader, t)))) return [];
     return t.readEntries(opts);
+  }
+
+  /** Whether `reader` may see `target` (`CreateSessionOptions.threadAccess`). */
+  async threadReadable(reader: { id: string; key: string }, target: { id: string; key: string }): Promise<boolean> {
+    const check = this.options.threadAccess;
+    if (!check || reader.id === target.id) return true;
+    return check({ owner: this.principal, orgId: this.options.orgId, reader: { id: reader.id, key: reader.key }, target: { id: target.id, key: target.key } })
+      .catch(() => false);
+  }
+
+  /** The stored threads `reader` may see, for `list_threads`. */
+  async readableThreads(reader: { id: string; key: string }): Promise<ThreadData[]> {
+    const datas = await this.providers.store.listThreads(this.id);
+    const shown = await Promise.all(datas.map((d) => this.threadReadable(reader, d)));
+    return datas.filter((_, i) => shown[i]);
   }
 
   /** Owning principal (Phase 4 decision 8). See `principal` field doc. */
@@ -1645,7 +1747,7 @@ export class Session {
 
   // ── credential provider for tools ───────────────────────────────
 
-  credentialProvider(): CredentialProvider {
+  credentialProvider(use: CredentialUse = {}): CredentialProvider {
     // The session owner is the credential owner. A user session stays
     // `{ type: "user", id: userId }` because that is the default principal.
     // A team session must not read as the synthetic `team:{id}` actor.
@@ -1667,7 +1769,7 @@ export class Session {
         { "valet.credential.service": service, "valet.credential.via_resolver": !!resolver },
         async (span) => {
           const stored = resolver
-            ? await resolver(owner, service)
+            ? await resolver(owner, service, use)
             : credStore
               ? await credStore.get(owner, service)
               : null;

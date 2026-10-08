@@ -6,11 +6,14 @@ import {
   Dialog,
   DialogContent,
   DialogFooter,
+  EmptyRow,
+  ErrorRow,
   Input,
   Label,
-  Spinner,
+  LoadingRow,
 } from "~/components/primitives";
 import { RadioCard } from "./radio-card";
+import { SubSection } from "./section";
 import { useCreateInvite, useInvites, useRevokeInvite } from "~/api/invites";
 import { formatDate } from "~/lib/format-when";
 import { useCopyToClipboard } from "~/lib/use-copy";
@@ -33,33 +36,17 @@ export function InvitesPanel() {
   const [open, setOpen] = useState(false);
 
   return (
-    <div className="space-y-3 pt-2">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium text-ink">Pending invites</h3>
-        <Button type="button" size="sm" onClick={() => setOpen(true)}>
-          Invite
-        </Button>
-      </div>
-
-      {invitesQ.isLoading && (
-        <div className="flex items-center gap-2 py-2 text-xs text-muted">
-          <Spinner size={12} /> Loading…
-        </div>
-      )}
-      {invitesQ.error && <p className="py-2 text-xs text-danger-500">Failed to load invites.</p>}
-      {invitesQ.data && invitesQ.data.invites.length === 0 && (
-        <p className="py-2 text-xs text-muted">No pending invites.</p>
-      )}
+    <SubSection title="Pending invites" actions={<Button type="button" size="sm" onClick={() => setOpen(true)}>Invite</Button>}>
+      {invitesQ.isLoading && <LoadingRow className="py-2" />}
+      {invitesQ.error && <ErrorRow className="py-2">Could not load invites. Reload the page to try again.</ErrorRow>}
+      {invitesQ.data && invitesQ.data.invites.length === 0 && <EmptyRow className="py-2">No pending invites.</EmptyRow>}
       {invitesQ.data && invitesQ.data.invites.length > 0 && (
         <div className="divide-y divide-line border-t border-line">
-          {invitesQ.data.invites.map((invite) => (
-            <InviteRow key={invite.id} invite={invite} />
-          ))}
+          {invitesQ.data.invites.map((invite) => <InviteRow key={invite.id} invite={invite} />)}
         </div>
       )}
-
       <InviteDialog open={open} onOpenChange={setOpen} />
-    </div>
+    </SubSection>
   );
 }
 

@@ -9,12 +9,15 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { orgMembers, teamMembers, teams, users } from "../schema/index.js";
 import { setApprovedModels } from "../services/approved-models.js";
 import { setOrgReasoningSettings } from "../services/reasoning.js";
+import { resetThreadAccessCache } from "../services/thread-access.js";
 import type { ListTeamsResponse, PatchTeamResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
 
 afterEach(async () => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+  resetThreadAccessCache();
   await api?.cleanup();
   api = undefined;
 });
@@ -47,6 +50,38 @@ async function patchTeam(
 }
 
 describe("PATCH /api/teams/:id", () => {
+  it("home channel is admin-only, rejects DM IDs, and can be cleared", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    // Slack answers that C0PRIVATE is private with no members; every other channel is public.
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.hostname !== "slack.com") return realFetch(input, init);
+      const isPrivate = url.searchParams.get("channel") === "C0PRIVATE";
+      const body = url.pathname.endsWith("conversations.members") ? { ok: true, members: [] } : { ok: true, channel: { is_private: isPrivate } };
+      return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+    });
+    // A private channel the admin is not in cannot become the team's home.
+    expect((await patchTeam(api, { slackHomeChannelId: "C0PRIVATE" }, "test-lead")).status).toBe(403);
+    expect((await patchTeam(api, { slackHomeChannelId: "C0123456789" }, "test-member")).status).toBe(404);
+    expect((await patchTeam(api, { slackHomeChannelId: "D0123456789" }, "test-lead")).status).toBe(400);
+    const saved = await patchTeam(api, { slackHomeChannelId: "C0123456789" }, "test-lead");
+    expect(saved.status).toBe(200);
+    expect(((await saved.json()) as PatchTeamResponse).team.slackHomeChannelId).toBe("C0123456789");
+    // Another team already uses this channel as its home.
+    await api.providers.db.insert(teams).values({ id: "other-team", orgId: "local-org", name: "Other", createdAt: 1, slackHomeChannelId: "C0999999999" });
+    const taken = await patchTeam(api, { slackHomeChannelId: "C0999999999" }, "test-lead");
+    expect(taken.status).toBe(409);
+    expect(((await taken.json()) as { error: string }).error).toContain("Other already uses this channel");
+    // The database enforces it too: a second team on the same channel is refused.
+    await expect(api.providers.db.insert(teams).values({ id: "racing-team", orgId: "local-org", name: "Racing", createdAt: 2, slackHomeChannelId: "C0999999999" }))
+      .rejects.toThrow();
+    const cleared = await patchTeam(api, { slackHomeChannelId: null }, "test-lead");
+    expect(((await cleared.json()) as PatchTeamResponse).team.slackHomeChannelId).toBeNull();
+  });
+
   it("team admin sets the default model; GET /api/teams reflects it", async () => {
     // The catalog reports an Anthropic entry as valid only when a key
     // exists (zero-config env fallback), same as me.test.ts.

@@ -595,6 +595,11 @@ The active conversation path is reconstructed by following `parentId` pointers f
 
 **Suspension history rules:** Decision-gated turns are represented in the DAG by a first-class `DecisionGateEntry`, not by synthetic system messages. The entry is created when the gate is opened and then updated in place as it moves through `pending`, `resolved`, `expired`, or `withdrawn` states. This keeps the history model explicit and replayable: gates are decision artifacts, not conversation utterances.
 
+**User cancellation:** Dismissing a thread decision cancels its submission. Persist abort intent before withdrawing the gate.
+The cancellation does not trigger another model call. Other threads and queued submissions are preserved.
+Approval denial remains a decision response; dismissal is not approval denial.
+An explicit user instruction to wait should end the agent turn without opening a question.
+
 **One gate cycle at a time per thread (TKAI-238):** pi-agent-core runs a block's tool calls in parallel, but the gate machinery holds two single-slot resources: the strict `running↔blocked_on_decision_gate` queue toggle and the per-thread suspended-turn checkpoint. `Thread` therefore serializes gate open/wait cycles — a second gated tool call waits until the previous gate resolves and releases the blocked toggle, then opens its own gate. A queued cycle re-checks the turn before it opens: if the thread aborted or the agent run's signal aborted (steer supersession) while it waited, it unwinds with a withdrawal error and persists nothing. Supporting rules keep pending rows honest:
 
 - A gate open writes the suspended-turn checkpoint BEFORE the gate row. The checkpoint is the ownership anchor for the orphan repair below, so a resolve that lands before the waiter arms is left alone (retryable), and a crash in the window leaves an inert checkpoint rather than an orphan row.
@@ -1117,10 +1122,11 @@ Hooks are registered via `CreateSessionOptions` (`compactionHooks?: CompactionHo
 
 ### Provider-call resilience (TKAI-319)
 
-Two retry layers, both bounded and visible:
+Three recovery layers, all bounded and visible:
 
 - **Transport** — every turn LLM call passes an explicit retry policy to pi-ai (`maxRetries: 2`, `maxRetryDelayMs: 30s`, `timeoutMs: 10min`), as defaults that upstream-supplied options override, never as pins. Kept at SDK-default parity deliberately: the turn-level layer multiplies with it. Side calls (the compaction summarizer) fail fast instead: `maxRetries: 1`, 15s delay cap — nobody waits on a summarizer during a capacity event, and the compaction failure paths own recovery.
-- **Turn-level** — when a turn settles with a transient provider error (pi-ai's `isRetryableAssistantError` taxonomy — the engine deliberately does not fork it), unattended sessions (purpose orchestrator, workflow, or child; `purpose` survives restarts via `Session.rehydrate`) drop the failed assistant message and call `agent.continue()` — never a re-prompt, which would duplicate the user content in live context. Backoff is [10s, 30s], 2 attempts by default (`CreateSessionOptions.turnRetry` overrides), chunked: `this.aborted` is checked every second and the durable queue item every 5s plus once at the end, so an abort or steer during the wait stands the retry down instead of racing its successor. Each retry emits `turn_transient_retry`. Interactive sessions never auto-retry: a human is present to decide.
+- **Turn-level**: unattended sessions retry transient provider errors with `agent.continue()`. The retry removes only the failed assistant message. It preserves the user message and completed tool results. The default is two retries with 10s and 30s backoff. `CreateSessionOptions.turnRetry` can override these limits. Abort and supersession checks stop retries during backoff. Each retry emits `turn_transient_retry`.
+- **Provider fallback**: the optional host `resolveFallbackModel` seam enables recovery for interactive and unattended turns. The host selects an approved, configured, credentialed provider. The engine passes the original selection, failed model, and attempted provider IDs. Transient capacity, rate-limit, server, and network failures permit fallback. Provider billing and quota failures also permit fallback, but never same-provider retries. Authentication, invalid input, policy, application budget, and cancellation failures stop recovery. Each recovery loop tries at most three distinct providers, then uses the remaining same-provider retry allowance. A fallback continues the same queue item and transcript. The engine publishes the active model and emits `turn_provider_fallback` as recovery progress. The fallback model and key apply only to the current turn. The next turn resolves the user's selection again. Consumers use `submission_settled` to decide terminal delivery; intermediate provider errors and `turn_end` events can precede recovery.
 
 ### Prompt-cache discipline (TKAI-320)
 

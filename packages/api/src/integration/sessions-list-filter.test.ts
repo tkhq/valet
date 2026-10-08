@@ -1,8 +1,8 @@
 /**
  * GET /api/sessions — assistant-centered web UI decision 8: the list
- * excludes orchestrator ids and child ids server-side, seeded here directly
- * (no engine turns needed) — a standalone row, an orchestrator row, and a
- * child row, asserting only the standalone one comes back.
+ * excludes workspace runtime ids and child ids server-side, seeded here
+ * directly (no engine turns needed) — a standalone row, two assistant rows,
+ * and a child row, asserting only the standalone one comes back.
  */
 import { describe, it, expect } from "vitest";
 import { bootTestApi } from "./_setup.js";

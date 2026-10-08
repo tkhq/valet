@@ -1,0 +1,40 @@
+// @vitest-environment jsdom
+import { expect, it, vi } from "vitest";
+import { render, screen, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { Message } from "@valet/api/wire";
+import { api } from "~/api/client";
+import { ThreadContextPanel } from "./thread-context-panel";
+
+vi.mock("@tanstack/react-router", () => ({ Link: () => null }));
+vi.mock("~/api/channels", () => ({ useThreadChannelActivity: () => ({ data: undefined }) }));
+
+it("opens shared links in a new tab and downloads uploaded files", () => {
+  vi.spyOn(api, "listArtifacts").mockResolvedValue({ artifacts: [] });
+  const message: Message = {
+    id: "m1", sessionId: "s1", threadId: "t1", role: "user", parts: [], createdAt: 1,
+    content: "Read https://docs.google.com/document/d/abc/edit and [the deck](https://docs.google.com/presentation/d/xyz).",
+    attachments: [{ kind: "file", path: "/workspace/uploads/Q3 report.pdf", bytes: 10, sha256: "h", name: "Q3 report.pdf" }],
+  };
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <ThreadContextPanel owner={{ ownerType: "user", ownerId: "u" }} sessionId="s1" threadId="t1" messages={[message]} busy={false}
+        onCreate={() => {}} onAttach={() => {}} onReveal={() => {}} />
+    </QueryClientProvider>,
+  );
+  const sources = within(screen.getByRole("region", { name: "Sources" }));
+
+  const file = sources.getByRole("link", { name: "Q3 report.pdf" });
+  expect(file.getAttribute("href")).toBe("/api/sessions/s1/threads/t1/files?path=%2Fworkspace%2Fuploads%2FQ3+report.pdf");
+  expect(file.getAttribute("download")).toBe("Q3 report.pdf");
+  expect(file.getAttribute("target")).toBeNull();
+
+  for (const [name, href] of [
+    ["docs.google.com/document/d/abc/edit", "https://docs.google.com/document/d/abc/edit"],
+    ["the deck", "https://docs.google.com/presentation/d/xyz"],
+  ]) {
+    const link = sources.getByRole("link", { name });
+    expect([link.getAttribute("href"), link.getAttribute("target"), link.getAttribute("rel"), link.hasAttribute("download")])
+      .toEqual([href, "_blank", "noopener noreferrer", false]);
+  }
+});

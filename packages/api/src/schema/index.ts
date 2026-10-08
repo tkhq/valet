@@ -512,10 +512,13 @@ export const teams = pgTable(
     defaultModel: text("default_model"),
     /** Team default reasoning level. Null = inherit. */
     defaultReasoning: text("default_reasoning"),
+    slackHomeChannelId: text("slack_home_channel_id"),
   },
   (t) => [
     uniqueIndex("teams_org_name").on(t.orgId, t.name),
     uniqueIndex("teams_org_external").on(t.orgId, t.origin, t.externalId),
+    // One team per home channel, so two admins saving at once cannot both win.
+    uniqueIndex("teams_org_slack_home").on(t.orgId, t.slackHomeChannelId).where(sql`"slack_home_channel_id" IS NOT NULL`),
   ],
 );
 
@@ -549,17 +552,11 @@ export const teamJoinEligibilities = pgTable(
 
 // ─── Assistants ─────────────────────────────────────────────────────────────
 
-/**
- * An assistant: a named agent a principal owns, with its own session.
- *
- * Replaces `orchestrator_identities`, whose `UNIQUE (org, owner_type,
- * owner_id)` was the one-assistant-per-principal rule. A principal now owns
- * any number, and is the assistant's OWNER and SCOPE rather than its
- * identity. See `docs/specs/2026-08-13-assistants-design.md`.
- *
- * `sessionId` is `assistant:{id}` for every row, the default included — one
- * address, so no consumer has to branch on which kind of assistant it holds.
- */
+/** One runtime identity per personal or team workspace. Ownership is unique,
+ * including retired identities. Threads share this identity and execution
+ * sessions retain separate sandbox lifecycles. */
+// Legacy profile/default columns remain in SQL for rollback. This model omits
+// them so the workspace runtime cannot overwrite an older binary's settings.
 export const assistants = pgTable(
   "assistants",
   {
@@ -567,42 +564,26 @@ export const assistants = pgTable(
     orgId: text("org_id").notNull(),
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
-    /** What the reader calls it. Was `orchestrator_identities.handle`. Also
-     * the outbound display name on channel posts (Slack `username`). */
-    name: text("name"),
-    /** Avatar image URL for outbound channel posts (Slack `icon_url`).
-     * Null falls back to the bot's own icon. */
-    avatarUrl: text("avatar_url"),
-    /** Per-assistant persona text. Null falls back to the owner's
-     * assistant/personality.md memory file (the pre-config behavior). */
-    personality: text("personality"),
-    /** JSON `AssistantBehavior` (wire/types.ts). Null means every skill and
-     * integration. Validated on write (`validateAssistantBehavior`); parsed
-     * fail-open on read (`parseAssistantBehavior`). */
-    behavior: text("behavior"),
-    /** Tier token or catalog model id. Null = inherit the cascade. */
-    model: text("model"),
-    /** Reasoning level. Null = inherit the cascade. */
-    reasoning: text("reasoning"),
     sessionId: text("session_id").notNull(),
-    /**
-     * The one a machine picks when nobody chose. Workflow orchestrator
-     * nodes, event subscriptions and channel bindings all say "the team's
-     * assistant" and have no basis for choosing between several, so they
-     * resolve to this. Exactly one per principal, held by a partial unique
-     * index — see the migration.
-     */
-    isDefault: boolean("is_default").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
-    /** Null while live. Archiving hides an assistant without destroying the
-     * conversation it held; the default cannot be archived while default. */
+    /** Null while live. Team teardown retires the workspace identity; the
+     * owner slot remains reserved. */
     archivedAt: bigint("archived_at", { mode: "number" }),
   },
   (t) => [
     uniqueIndex("assistants_session").on(t.sessionId),
-    index("assistants_owner").on(t.orgId, t.ownerType, t.ownerId),
+    uniqueIndex("assistants_workspace").on(t.orgId, t.ownerType, t.ownerId),
   ],
 );
+
+/** Execution state is separate from the workspace assistant's identity. */
+export const assistantExecutions = pgTable("assistant_executions", {
+  sessionId: text("session_id").primaryKey(),
+  assistantId: text("assistant_id").notNull(),
+  conversationKey: text("conversation_key").notNull(),
+  governingThreadId: text("governing_thread_id").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [uniqueIndex("assistant_executions_conversation").on(t.assistantId, t.conversationKey)]);
 
 // ─── Child watches ───────────────────────────────────────────────────────────
 //
@@ -611,11 +592,7 @@ export const assistants = pgTable(
 // re-arms every unsettled row on boot — this table is the restart-survival
 // mechanism for `child.settled` reporting. `settled` is a plain 0/1 flag
 // with no arithmetic on it (only `eq(childWatches.settled, 0)` equality
-// filters) — boolean per decision 7's "boolean-as-integer" rule. NOTE for
-// Task 7 (cutover): every `eq(childWatches.settled, 0)` call site
-// (`routes/orchestrator.ts`, `orchestrator/children.ts`) must flip to
-// `eq(childWatches.settled, false)`, and `r.settled === 1` (`routes/
-// orchestrator.ts`) to `r.settled`.
+// filters) — boolean per decision 7's "boolean-as-integer" rule.
 
 export const childWatches = pgTable(
   "child_watches",
@@ -692,6 +669,7 @@ export const userNotificationPreferences = pgTable(
     userId: text("user_id").notNull(),
     kind: text("kind").notNull(),
     web: boolean("web").notNull().default(true),
+    teamDm: boolean("team_dm").notNull().default(false),
   },
   (t) => [primaryKey({ columns: [t.userId, t.kind] })],
 );
@@ -704,6 +682,20 @@ export const userNotificationPreferences = pgTable(
 // org_ceiling. Phase 6 adds routing-specific reasons (unlinked bindings,
 // non-member senders, unbound conversations, trigger-mode filtering) once
 // channel routing lands.
+
+export const eventReceipts = pgTable("event_receipts", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  service: text("service").notNull(),
+  externalId: text("external_id"),
+  metadata: jsonb("metadata").notNull().default({}),
+  stages: jsonb("stages").notNull().default([]),
+  eventKey: text("event_key"),
+  eventId: text("event_id"),
+  subscriptions: jsonb("subscriptions").notNull().default([]),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+}, (t) => [index("event_receipts_page").on(t.orgId, t.createdAt, t.id)]);
 
 export const eventDropLog = pgTable(
   "event_drop_log",
@@ -851,6 +843,7 @@ export const memoryFiles = pgTable(
   {
     ownerType: text("owner_type").notNull(),
     ownerId: text("owner_id").notNull(),
+    namespace: text("namespace").notNull().default(""),
     path: text("path").notNull(),
     title: text("title").notNull().default(""),
     content: text("content").notNull(),
@@ -880,7 +873,7 @@ export const memoryFiles = pgTable(
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.path] })],
+  (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.namespace, t.path] })],
 );
 
 // ─── Artifacts ──────────────────────────────────────────────────────────────
@@ -917,6 +910,7 @@ export const artifacts = pgTable(
     orgId: text("org_id").notNull(),
     actorUserId: text("actor_user_id").notNull(),
     sourceSessionId: text("source_session_id").notNull().default(""),
+    sourceThreadId: text("source_thread_id"),
     sourceMemoryPath: text("source_memory_path").notNull(),
     title: text("title").notNull().default(""),
     content: text("content").notNull(),
@@ -1317,8 +1311,9 @@ export const workflowRuns = pgTable(
     // path once it resolves the workflow's owner.
     ownerType: text("owner_type").notNull().default("user"),
     ownerId: text("owner_id").notNull().default(""),
-    // Who clicked Run. Null on a scheduled, event, or webhook start.
-    // Display and audit only — credential resolution uses owner_type/owner_id.
+    // The member a run acts for: who clicked Run, or who set up the schedule
+    // or event rule. Null on a webhook start. A team run uses this member's
+    // own shared accounts first (`services/credential-shares.ts`).
     actorUserId: text("actor_user_id"),
     // When the settled-run sandbox reclaim destroyed this run's session
     // sandboxes (workflows/sandbox-reclaim.ts). NULL until the run settles
@@ -1399,6 +1394,25 @@ export const credentials = pgTable(
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
   (t) => [primaryKey({ columns: [t.ownerType, t.ownerId, t.service] })],
+);
+
+/** A member's own account for `service`, shared with a team. The row holds
+ * no secret: a read follows it to the member's live user credential. Each
+ * member keeps their own share, so a team can hold several per service
+ * (`services/credential-shares.ts`). */
+export const credentialShares = pgTable(
+  "credential_shares",
+  {
+    teamId: text("team_id").notNull(),
+    service: text("service").notNull(),
+    userId: text("user_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    generation: text("generation").notNull().default(sql`gen_random_uuid()::text`),
+  },
+  (t) => [
+    primaryKey({ columns: [t.teamId, t.service, t.userId] }),
+    index("credential_shares_user").on(t.userId, t.service),
+  ],
 );
 
 // `mcp_oauth_clients` — one dynamically-registered OAuth client per MCP
@@ -1515,6 +1529,7 @@ export const actionPolicyOverrides = pgTable(
     actionId: text("action_id"),
     riskLevel: text("risk_level", { enum: ["low", "medium", "high", "critical"] }),
     mode: text("mode", { enum: ["allow", "require_approval", "deny"] }).notNull(),
+    legacyUnscoped: boolean("legacy_unscoped").notNull().default(false),
     paramMatchers: jsonb("param_matchers").notNull().default([]).$type<ParamMatcher[]>(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
@@ -1563,6 +1578,10 @@ export const actionInvocations = pgTable(
       enum: ["pending", "allowed", "denied", "approved", "rejected", "error", "completed", "cancelled", "timeout"],
     }),
     sessionId: text("session_id"),
+    /** The thread the action ran in, so a team feed can apply that thread's
+     * access (`thread-access.ts`). Null on rows from before the column and on
+     * workflow actions. */
+    threadId: text("thread_id"),
     workflowExecutionId: text("workflow_execution_id"),
     userId: text("user_id"),
     orgId: text("org_id"),
@@ -1955,11 +1974,6 @@ export const followedThreads = pgTable(
      * overheard line after downtime arrives with the missed context. Null on
      * rows from before the column: the first delivery starts tracking. */
     lastSeenTs: text("last_seen_ts"),
-    /** The assistant that answered the mention this follow was bound from, so
-     * later messages in the thread reach the SAME assistant rather than the
-     * owner's default. Null on rows from before the column, and on any follow
-     * whose rule named no assistant — both read as "the owner's default". */
-    assistantId: text("assistant_id"),
     /** The mention rule this thread was bound from. The follow router reads
      * that row's CURRENT invocation audience, because the audience is the
      * rule's state, not the conversation's: narrowing a rule back to the team
@@ -1998,7 +2012,6 @@ export const workflowSchedules = pgTable(
      * `target_kind = 'orchestrator'`. Null on rows from before the column, and
      * on any schedule that named none — both read as "the owner's default".
      * Ignored for a `workflow` target, which has no assistant. */
-    assistantId: text("assistant_id"),
     name: text("name").notNull(),
     cron: text("cron").notNull(),
     timezone: text("timezone").notNull().default("UTC"),
@@ -2044,7 +2057,7 @@ export const eventDeliveries = pgTable(
     id: text("id").primaryKey(),
     eventId: text("event_id").notNull(),
     subscriptionId: text("subscription_id").notNull(),
-    status: text("status", { enum: ["pending", "delivered", "failed", "dead"] })
+    status: text("status", { enum: ["pending", "delivered", "failed", "dead", "skipped"] })
       .notNull()
       .default("pending"),
     attempts: integer("attempts").notNull().default(0),
@@ -2675,3 +2688,158 @@ export const usageDaily = pgTable("usage_daily", {
  index("usage_daily_org_window").on(t.orgId,t.createdAt),
  index("usage_daily_outcomes").on(t.createdAt,t.sessionId).where(sql`${t.pullRequests}>0 OR ${t.reviews}>0`),
  index("usage_daily_empty").on(t.createdAt).where(sql`${t.turns}=0 AND ${t.toolCalls}=0 AND ${t.pullRequests}=0 AND ${t.reviews}=0`)]);
+
+/** One durable, fenced briefing snapshot per workspace. */
+export const workspaceBriefingCache = pgTable("workspace_briefing_cache", {
+  orgId: text("org_id").notNull(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  version: text("version").notNull(),
+  evidenceHash: text("evidence_hash"),
+  response: jsonb("response").$type<import("../wire/types.js").WorkspaceBriefingsResponse>(),
+  checkedAt: bigint("checked_at", { mode: "number" }),
+  nextCheckAt: bigint("next_check_at", { mode: "number" }).notNull().default(0),
+  leaseToken: text("lease_token"),
+  leaseUntil: bigint("lease_until", { mode: "number" }).notNull().default(0),
+}, t => [primaryKey({ columns: [t.orgId,t.ownerType,t.ownerId] })]);
+
+/** A brief one person dismissed in one workspace. A brief's id hashes its
+ * sources, so new activity makes a new brief that shows again. */
+export const briefingDismissals = pgTable("briefing_dismissals", {
+  userId: text("user_id").notNull(),
+  orgId: text("org_id").notNull(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  briefingId: text("briefing_id").notNull(),
+  dismissedAt: bigint("dismissed_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.userId, t.ownerType, t.ownerId, t.briefingId] })]);
+
+/** When each person last read each thread. A thread with a later agent message shows as unread. */
+export const threadReads = pgTable("thread_reads", {
+  userId: text("user_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  readAt: bigint("read_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.userId, t.threadId] })]);
+
+/** Messages Valet sent to, or received from, a channel (a Slack channel or a
+ * pull request), with the engine thread each belongs to. A view aid: a write
+ * failure never fails the delivery it describes. */
+export const channelMessages = pgTable("channel_messages", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  channelKey: text("channel_key").notNull(),
+  conversationKey: text("conversation_key").notNull(),
+  providerMessageId: text("provider_message_id").notNull(),
+  direction: text("direction", { enum: ["in", "out"] }).notNull(),
+  author: text("author"),
+  text: text("text"),
+  url: text("url"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, t => [
+  uniqueIndex("channel_messages_session_message").on(t.orgId, t.sessionId, t.channelKey, t.providerMessageId, t.direction),
+  index("channel_messages_channel").on(t.orgId, t.channelKey, t.createdAt),
+  index("channel_messages_thread").on(t.sessionId, t.threadId, t.createdAt),
+]);
+
+/** Whether a Slack channel is private, as the bot last saw it
+ * (`services/thread-access.ts`). */
+export const slackChannelPrivacy = pgTable("slack_channel_privacy", {
+  orgId: text("org_id").notNull(),
+  channelId: text("channel_id").notNull(),
+  isPrivate: boolean("is_private").notNull(),
+  checkedAt: bigint("checked_at", { mode: "number" }).notNull(),
+}, t => [primaryKey({ columns: [t.orgId, t.channelId] })]);
+
+/** Pull requests a thread created, with their last known GitHub state. */
+export const threadPullRequests = pgTable("thread_pull_requests", {
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  url: text("url").notNull(),
+  repo: text("repo").notNull(),
+  number: bigint("number", { mode: "number" }).notNull(),
+  state: text("state", { enum: ["open", "merged", "closed"] }).notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  checkedAt: bigint("checked_at", { mode: "number" }).notNull(),
+}, t => [
+  primaryKey({ columns: [t.sessionId, t.threadId, t.url] }),
+  index("thread_pull_requests_url").on(t.url),
+]);
+
+/** Durable permissions confined to a workflow and its current owner. */
+export const workflowActionGrants = pgTable("workflow_action_grants", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  workflowId: text("workflow_id").notNull(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  actionId: text("action_id").notNull(),
+  grantedBy: text("granted_by").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, (t) => [index("workflow_action_grants_workflow").on(t.orgId, t.workflowId)]);
+
+/** Verified Slack requests waiting for durable consumer delivery. Payloads are encrypted. */
+export const slackWebhookInbox = pgTable("slack_webhook_inbox", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  payload: text("payload").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  failedAt: bigint("failed_at", { mode: "number" }),
+}, t => [index("slack_webhook_inbox_due").on(t.nextAttemptAt)]);
+
+/** Upgrade snapshots. Only the one-time continuity migration inserts these rows. */
+export const legacyAssistantRuntimes = pgTable("legacy_assistant_runtimes", {
+  assistantId: text("assistant_id"),
+  ownerType: text("owner_type", { enum: ["user", "team", "org"] }),
+  ownerId: text("owner_id"),
+  sessionId: text("session_id").primaryKey(),
+  orgId: text("org_id").notNull(),
+});
+export const legacyAssistantConversations = pgTable("legacy_assistant_conversations", {
+  threadId: text("thread_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  conversationKey: text("conversation_key").notNull(),
+});
+export const legacyWorkflowRuntimes = pgTable("legacy_workflow_runtimes", {
+  workflowId: text("workflow_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  orgId: text("org_id").notNull(),
+});
+
+export const legacyWorkflowAdmissions = pgTable("legacy_workflow_admissions", {
+  queueItemId: text("queue_item_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  dispatchId: text("dispatch_id").notNull(),
+  orgId: text("org_id").notNull(),
+});
+
+export const legacyWorkflowRunRuntimes = pgTable("legacy_workflow_run_runtimes", {
+  runId: text("run_id").primaryKey(),
+  sessionId: text("session_id").notNull(),
+  orgId: text("org_id").notNull(),
+});
+
+export const legacyArtifactPublications = pgTable("legacy_artifact_publications", {
+  artifactId: text("artifact_id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  ownerType: text("owner_type").notNull(),
+  ownerId: text("owner_id").notNull(),
+  sourceSessionId: text("source_session_id").notNull(),
+});
+
+// Release activation is seeded once; acknowledgements belong to the signed-in user.
+export const productAnnouncements = pgTable("product_announcements", {
+  id: text("id").primaryKey(),
+  activatedAt: bigint("activated_at", { mode: "number" }).notNull(),
+});
+export const productAnnouncementAcknowledgements = pgTable("product_announcement_acknowledgements", {
+  announcementId: text("announcement_id").notNull(),
+  userId: text("user_id").notNull(),
+  acknowledgedAt: bigint("acknowledged_at", { mode: "number" }).notNull(),
+}, (t) => [primaryKey({ columns: [t.announcementId, t.userId] })]);

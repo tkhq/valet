@@ -24,7 +24,7 @@ import type { Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
 import type { AssistantRow } from "../schema/index.js";
-import { canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
+import { canViewSession, type SessionOwnerLike } from "../services/session-access.js";
 
 /** The owner of an assistant, in the shape the session checks read. */
 function ownerLike(principal: Principal): SessionOwnerLike {
@@ -38,15 +38,6 @@ function ownerLike(principal: Principal): SessionOwnerLike {
 /** May `caller` read this assistant and prompt its session? */
 export function canViewAssistantOwner(db: AppDb, owner: Principal, caller: RequestPrincipal): Promise<boolean> {
   return canViewSession(db, ownerLike(owner), caller);
-}
-
-/** May `caller` create, rename, promote or archive assistants for this owner? */
-export function canAdministerAssistantOwner(
-  db: AppDb,
-  owner: Principal,
-  caller: RequestPrincipal,
-): Promise<boolean> {
-  return canAdministerSession(db, ownerLike(owner), caller);
 }
 
 /** The owner principal of a stored assistant. */

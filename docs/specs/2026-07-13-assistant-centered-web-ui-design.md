@@ -14,7 +14,7 @@ Phase 4 added the orchestrator, memory, signals, and child sessions to the engin
 4. **Memory is browse + read + search** this pass. Writes stay agent-mediated ("ask the assistant to edit it"); no UI editing.
 5. **The assistant is named and given a personality on first visit**, and users are actively encouraged to do both: one step, suggested name + reroll, plus a personality field seeded by selectable trait chips ("warm and direct", "dry wit", "meticulous planner", "cheerful hype-person") that compose into editable free text. Skippable (defaults to a neutral persona), editable later from the dashboard identity header. No avatar/handle ceremony.
 6. **Org visibility is deferred** to a future `/org` page; the dashboard stays personal, with the activity feed shaped to accept org events later.
-7. **Aesthetic: calm companion** — warm, quiet, personal; one signature element (the presence mark); everything else disciplined.
+7. **Aesthetic: calm companion** — warm, quiet, personal; consistent chat and dashboard components.
 
 ## Information Architecture
 
@@ -32,7 +32,7 @@ Top nav: `◈ {name}` (→ `/`) · `Sessions` (→ `/sessions`) · notifications
 ### `/` — Assistant dashboard
 
 - **First visit** (no `assistants.name` on the caller's default assistant): an inline identity step — "Meet your assistant". A suggested name (Atlas/Wren/… pool) with 🎲 reroll and an editable field, then a **personality** field: 3–4 trait chips ("warm and direct", "dry wit", "meticulous planner", "cheerful hype-person") that append composable phrases into an editable textarea, or write your own. Copy encourages it ("Give them a voice — you can change this anytime"). Start = `PATCH /api/orchestrator/info { name, personality }` + ensure. Skipping personality yields the neutral persona.
-- **Identity header**: name set in the display face, presence mark beneath (see Visual Language), one-line status ("idle" / "thinking" / "working on 2 tasks") derived from live agent status + unsettled children. An edit affordance on the header reopens the identity step inline for renaming / re-personality.
+- **Identity header**: name set in the display face, one-line status ("idle" / "thinking" / "working on 2 tasks") derived from live agent status + unsettled children. An edit affordance on the header reopens the identity step inline for renaming / re-personality.
 - **Chat card**: the last ~3 exchanges of the active thread, live via the existing stream store; a composer at its foot — sending admits the prompt and navigates to `/chat`.
 - **Memory card**: pinned files (📌) + today's journal excerpt (first lines, rendered), each linking into `/memory/$path`.
 - **Your work card**: recent **standalone** sessions (status dot, title, relative time) linking to `/sessions/$id`, plus a count line for active children ("2 tasks running under today's thread") linking to `/chat`. Children are NOT listed flat here — they live in the chat's thread tree.
@@ -42,7 +42,7 @@ Top nav: `◈ {name}` (→ `/`) · `Sessions` (→ `/sessions`) · notifications
 
 The existing session view re-mounted for the assistant session id (threads, gates, tool cards, WS resume — not a rebuild), with three changes:
 
-1. **Thread tree sidebar.** Threads list children nested beneath the thread that spawned them:
+1. **Thread tree sidebar.** Thread titles take priority over compact status indicators. Model names and size badges appear in the open thread’s header, not sidebar rows. Threads list children nested beneath the thread that spawned them:
 
    ```
    THREADS
@@ -76,7 +76,7 @@ The existing session view re-mounted for the assistant session id (threads, gate
 
 ### `/memory` and `/memory/$` — memory explorer
 
-Two panes:
+Two panes. The Files/Graph tabs keep their width; long workspace names truncate to one line, with the full name in the existing tooltip.
 
 - **Tree** (left): directories collapsed/expandable, pinned files marked 📌, `journal/` sorted newest-first with "today" highlighted. Data from the new JSON tree endpoint. A search field above the tree runs FTS (`GET /api/memory/search`) and swaps the tree for a result list (path, type badge, description) while active.
 - **Document** (right): the rendered OKF doc — title in the display face, `type`/`tags`/`sensitivity`/`origin` as quiet badges, body as book-like rendered markdown (Newsreader). Frontmatter never shown raw. Footer affordance: **"Ask {name} to update this"** → navigates to `/chat` with the composer pre-filled (`Update memory file {path}: …`).
@@ -130,15 +130,14 @@ Also in scope: fix the notifications bell's stale-dropdown (refetch on open) whi
 Deliberately NOT the stock cream-and-terracotta AI look.
 
 - **Palette (light):** paper `#FAF9F7`, ink `#1F1D1A`, muted `#6E6A63`, hairline `#E7E4DE`; accent **moss** `#3E6B4F` (actions, links, live presence); **amber** `#B98A2F` reserved for waiting states (thinking, pending gates); error red unchanged. **Dark:** ground `#171614`, ink `#ECE9E4`, moss `#7FAE8F`, hairline `#2A2825`. Delivered as CSS variables consumed by Tailwind config; both themes supported from day one.
-- **Type:** UI remains the existing sans (Inter) — quiet and disciplined. **Newsreader** (self-hosted via fontsource) is the assistant's voice: the name in the presence header, dashboard section headings, and memory document rendering (title + body) — the explorer reads like a notebook. Mono only for ids/paths.
-- **Signature element — the presence mark.** The assistant's name with a small living indicator beneath: slow breath (≈2.4s ease) while idle, quicker while thinking, steady while children run. It shrinks into the nav on other pages so the assistant feels present app-wide. This is the single place the design spends boldness. `prefers-reduced-motion` → static dot.
+- **Type:** UI remains the existing sans (Inter) — quiet and disciplined. **Newsreader** (self-hosted via fontsource) is the assistant's voice: dashboard section headings, and memory document rendering (title + body) — the explorer reads like a notebook. Mono only for ids/paths.
 - **Signal cards** carry a soft moss left rail — events from the world look categorically different from typed messages.
 - Everything else: quiet cards on paper, hairline borders, generous spacing, gentle hover lift, no gradients, no numbered decorations.
 
 ## Component/unit boundaries
 
 - `packages/web/src/api/`: `orchestrator.ts` (info/children queries), `memory.ts` (tree/doc/search queries) — query-key factories per house pattern.
-- `components/assistant/`: `presence-mark.tsx`, `identity-header.tsx`, `naming-step.tsx`, dashboard cards (`chat-card`, `memory-card`, `work-card`, `activity-strip`).
+- `components/assistant/`: `identity-header.tsx`, `naming-step.tsx`, dashboard cards (`chat-card`, `memory-card`, `work-card`, `activity-strip`).
 - `components/session/`: gains `signal-card.tsx` (+ child card), `thread-tree.tsx` (replaces the flat thread list when children exist), `child-panel.tsx` (slide-over), and a `variant` prop threaded through the existing view for panel/standalone modes.
 - `components/memory/`: `memory-tree.tsx`, `memory-doc.tsx`, `memory-search.tsx`.
 - Theme tokens in one `theme.css` (CSS variables) + Tailwind config mapping; no per-component color literals.
@@ -156,3 +155,27 @@ Empty states direct, in-voice: dashboard before first message ("Say hello — {n
 ## Explicitly out of scope
 
 Org page and org activity; memory editing/graph/import UI; avatars and handles beyond the name; team management UI; channel/schedule thread origins (render when Phase 6 delivers them); mobile-app polish beyond responsive-that-works; legacy client changes.
+
+On phone widths, the thread summary stays closed until the user opens it. Opening a chat does not cover its transcript with the summary popover.
+
+On phones, Ask Valet and available plugins live inside the navigation menu. Briefing cards wrap their titles, actions, links, and timestamps instead of imposing fixed row heights. The thread summary popover is bounded by the viewport width and available height.
+
+A cold briefing request waits up to two seconds for evidence collection and generation after claiming its lease. If it is still running, the response reports `refreshing` and the UI polls the same job. The generation lease stays active until publication or failure; repeated reads do not start duplicate model calls.
+
+Briefings reuse a valid snapshot for five minutes before collecting evidence again. Each read still checks source access. Collection failures preserve the last valid snapshot. The generator skips model calls when the evidence cannot meet the two-source-kind and contextual-source requirements. Refresh logs report collection and generation durations separately, without source text.
+
+Workflow-owned run conversations are listed under Automations, with Conversation and Run details views sharing the existing chat components. The normal Threads list retains human-origin and workflow-editor conversations. Run links keep their existing session/thread IDs and access checks. Switching run views retains the mounted composer and draft, while suppressing hidden summary overlays. A reply continues the conversation; retrying a workflow remains a separate Run details action.
+
+On phones, work-list actions sit below the title and details. Long identifiers wrap within the row. Section tabs scroll horizontally within their own strip. Event review fields, workflow status controls, and integration connection actions wrap or stack without reducing the text to a narrow column. Desktop rows retain their horizontal layout.
+
+On desktop, drag the thread sidebar divider to resize it from 200 to 480 pixels. Focus the divider and use arrow keys for keyboard resizing. Width persists across reloads and collapse. The mobile drawer keeps its existing width.
+
+On narrow screens, conversation sharing details open from an information button beside the thread tabs. The full notice stays visible on wide screens.
+
+### Draft synchronization across browser tabs
+
+Remote draft updates change only in-memory state. They must not write back to browser storage. Ignore queued storage events whose values no longer match storage, including events queued before a successful send cleared the draft. This prevents stale text from cycling between tabs.
+
+### Artifacts navigation
+
+Artifacts is one desktop navigation link with an inline chevron. Clicking it opens Artifacts. Hover opens a list containing Artifacts and Memory. Arrow Down opens the same list for keyboard users. Mobile navigation keeps both destinations as separate menu entries.

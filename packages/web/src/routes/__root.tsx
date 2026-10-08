@@ -1,7 +1,13 @@
-import { useEffect } from "react";
+import { AUTH_CHANGE_KEY } from "~/lib/auth-navigation";
+import { WorkspaceAssistantProvider, WorkspaceAssistantDock } from "~/components/layout/workspace-assistant";
+import { ApiError } from "~/api/client";
+import { useEffect, useState, type ReactNode } from "react";
+import { useMe } from "~/api/settings";
+import { useComposerDraftStore } from "~/stores/composer-drafts";
 import { Link, Outlet, createRootRouteWithContext, useRouterState } from "@tanstack/react-router";
 import type { QueryClient } from "@tanstack/react-query";
 import { TooltipProvider } from "~/components/primitives/tooltip";
+import { ProductAnnouncement } from "~/components/product-announcement";
 import { AppShell } from "~/components/layout/app-shell";
 import { TopNav } from "~/components/layout/top-nav";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
@@ -51,7 +57,7 @@ function NotFound() {
  *
  * - `/chat` — the nested thread-tree (children grouped under their
  *   spawning thread), replacing the flat thread list.
- * - everything else (`/`, `/sessions`, `/sessions/$sessionId`,
+ * - everything else (`/`, `/sessions/$sessionId`,
  *   `/memory` and `/memory/*`, …) — no app sidebar. Standalone sessions
  *   have no thread UI (decision 14); the memory explorer renders its own
  *   tree pane inside the route (Task 6); the dashboard and session list
@@ -74,6 +80,13 @@ function isPublicPath(pathname: string): boolean {
 }
 
 function RootLayout() {
+  useEffect(() => {
+    const changed = (event: StorageEvent) => {
+      if (event.key === AUTH_CHANGE_KEY) window.location.reload();
+    };
+    window.addEventListener("storage", changed);
+    return () => window.removeEventListener("storage", changed);
+  }, []);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const isPublic = isPublicPath(pathname);
 
@@ -89,14 +102,19 @@ function RootLayout() {
   // teams, which a signed-out visitor cannot fetch.
   return (
     <TooltipProvider>
+      <DraftAccountBoundary>
       <WorkspaceScopeProvider>
+        <WorkspaceAssistantProvider>
         <SignedInEffects />
-        <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)}>
+        <ProductAnnouncement />
+        <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)} rightPanel={<WorkspaceAssistantDock />}>
           {/* Keybindings must sit under AppShell so sidebar controls resolve. */}
           <ChatKeybindingsHost />
           <Outlet />
         </AppShell>
+        </WorkspaceAssistantProvider>
       </WorkspaceScopeProvider>
+      </DraftAccountBoundary>
     </TooltipProvider>
   );
 }
@@ -140,4 +158,26 @@ function useUnlockAudioOnFirstGesture() {
       for (const e of events) window.removeEventListener(e, onGesture);
     };
   }, []);
+}
+
+/** Mount composers only after their draft namespace matches the authenticated account. */
+export function DraftAccountBoundary({ children }: { children: ReactNode }) {
+  const me = useMe({ staleTime: 0, refetchOnMount: "always", refetchOnWindowFocus: "always" });
+  const owner = me.data ? JSON.stringify([me.data.orgId, me.data.id]) : "";
+  const activeOwner = useComposerDraftStore((s) => s.owner);
+  const [verifiedOwner, setVerifiedOwner] = useState("");
+  const unauthorized = me.error instanceof ApiError && (me.error.status === 401 || me.error.status === 403);
+  useEffect(() => {
+    if (unauthorized) setVerifiedOwner("");
+    else if (!me.isFetching && !me.error && owner) {
+      useComposerDraftStore.getState().activateOwner(owner);
+      setVerifiedOwner(owner);
+    }
+  }, [owner, me.isFetching, me.error, unauthorized]);
+  if (unauthorized || (me.error && verifiedOwner !== owner)) return <p role="alert">Could not load your account. Reload to try again.</p>;
+  if (!owner || activeOwner !== owner || verifiedOwner !== owner) return <p role="status">Loading your account…</p>;
+  return <>
+    {me.error && <p role="status">Connection interrupted. Reconnect to sync your work.</p>}
+    <div key={owner} className="contents">{children}</div>
+  </>;
 }

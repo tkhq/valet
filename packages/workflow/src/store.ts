@@ -1,3 +1,5 @@
+import type { Presence } from "@valet/shared";
+
 /**
  * The `WorkflowStore` port — checkpoints, signals, run ownership.
  *
@@ -57,6 +59,8 @@ export interface RunParams {
   workflowId: string;
   definitionVersionId: string;
   triggerId?: string;
+  /** Per-run sender identity override, captured when the run starts. */
+  presence?: Presence;
   input?: unknown; // JSON-serializable trigger/manual input
   /** Present only when an assistant conversation explicitly started this run. */
   origin?: WorkflowRunOrigin;
@@ -93,8 +97,11 @@ export interface WorkflowRun extends RunParkState {
    */
   owner?: WorkflowRunPrincipal;
   /**
-   * Who clicked Run. Display and audit only. Absent on a scheduled,
-   * event, or webhook start, and never used for credential resolution.
+   * The member a run acts for: who clicked Run, or who set up the schedule
+   * or event rule that started it. Absent on a webhook start. A team run
+   * uses this member's own shared accounts first. It also names the one
+   * member who may see a run whose private origin thread is gone
+   * (`runOriginVisible` in the api).
    */
   actorUserId?: string;
 }
@@ -166,7 +173,7 @@ export interface WorkflowRunListItem {
   createdAt: number;
   updatedAt: number;
   owner?: WorkflowRunPrincipal;
-  /** Who clicked Run. Absent on an unattended start. */
+  /** The member a run acts for. Absent on a webhook start. */
   actorUserId?: string;
   /** What a parked run is blocked on. Carried on the list item so a run
    * list can name the gate without a per-run fetch. Empty unless parked. */

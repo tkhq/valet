@@ -39,7 +39,7 @@ import { resolveReturnOrigin } from "./credential-connect.js";
 import { githubAppInstallUrl, resolveGithubApiUrl, resolveGithubUrl } from "../services/github-env.js";
 import { loadAppConfig, relinkInstallations, type GithubAppDeps } from "../services/github-app.js";
 import { githubInstallations, orgs } from "../schema/index.js";
-import { deleteDelegationsFrom } from "../services/credential-delegations.js";
+import { deleteSharesFrom } from "../services/credential-shares.js";
 import type { GetGithubOrgStatusResponse, PostGithubConnectResponse } from "../wire/types.js";
 
 export const githubConnectRouter = new Hono<AppEnv>();
@@ -311,7 +311,7 @@ githubConnectRouter.delete("/", async (c) => {
   await engineCredentials.delete({ type: "user", id: user.id }, GITHUB_CREDENTIAL_SERVICE);
   // A team reference to this row goes with it (team credentials design,
   // decision 4), the same cascade `DELETE /api/credentials/github` runs.
-  const revoked = await deleteDelegationsFrom(db, { userId: user.id, service: GITHUB_CREDENTIAL_SERVICE });
+  const revoked = await deleteSharesFrom(db, { userId: user.id, service: GITHUB_CREDENTIAL_SERVICE });
   for (const teamId of new Set(revoked)) await c.var.providers.contentSync.resyncTeamWorkflowSources(teamId);
   await db
     .update(githubInstallations)

@@ -18,7 +18,7 @@ export function useInvalidateSessionOnModelSwitch(sessionId: string | undefined)
 
   useEffect(() => {
     if (!sessionId || nonce === 0) return;
-    void qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+    void qc.invalidateQueries({ queryKey: qk.session(sessionId), exact: true });
     void qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
   }, [qc, sessionId, nonce]);
 }

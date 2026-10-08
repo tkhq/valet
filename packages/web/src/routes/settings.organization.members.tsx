@@ -33,7 +33,7 @@ export function OrganizationMembersPage() {
         <p className="py-4 text-sm text-danger-500">Failed to load members.</p>
       )}
       {membersQ.data && <MembersTable members={membersQ.data.members} />}
-      {isAdmin && <InvitesPanel />}
+      {isAdmin && <div className="pt-6"><InvitesPanel /></div>}
     </Section>
   );
 }

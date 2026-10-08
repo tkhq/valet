@@ -7,6 +7,8 @@
  * BEFORE `workflowsRouter`, whose `GET /:id` would otherwise swallow
  * `/triggers` as a workflow id.
  */
+import { validatePresence } from "@valet/shared";
+import { getLinearIngressStatus } from "../services/linear-ingress.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { AppEnv } from "../env.js";
@@ -118,9 +120,13 @@ workflowTriggersRouter.get("/triggers", async (c) => {
   return c.json(resp);
 });
 
-workflowTriggersRouter.get("/trigger-catalog", (c) => {
+workflowTriggersRouter.get("/trigger-catalog", async (c) => {
+  const { db, engineCredentials, plugins } = c.var.providers;
+  const catalog = listEventTypes(plugins);
+  const linear = catalog.some(item => item.service === "linear")
+    ? await getLinearIngressStatus(db,engineCredentials,c.var.user.orgId) : undefined;
   const resp: GetWorkflowTriggerCatalogResponse = {
-    catalog: listEventTypes(c.var.providers.plugins),
+    catalog: catalog.map(item => item.service === "linear" && linear ? { ...item, readiness: { ready: linear.ready, ...(linear.reason ? { reason: linear.reason } : {}) } } : item),
   };
   return c.json(resp);
 });
@@ -149,6 +155,7 @@ workflowTriggersRouter.post("/schedules", async (c) => {
   if (!body.name || typeof body.name !== "string") {
     return c.json({ error: "name is required" }, 400);
   }
+  if (body.target && typeof body.target === "object" && "assistantId" in body.target) return c.json({ error: "Choose a workspace instead of an assistant." }, 400);
   if (!body.target || (body.target.kind !== "workflow" && body.target.kind !== "orchestrator")) {
     return c.json(
       {
@@ -158,17 +165,6 @@ workflowTriggersRouter.post("/schedules", async (c) => {
       400,
     );
   }
-  // Shape only, matching the subscription validator. Whether the id names a
-  // live assistant of this schedule's owner is checked in the service, which
-  // is where the owner is settled.
-  if (
-    body.target.kind === "orchestrator" &&
-    body.target.assistantId !== undefined &&
-    (typeof body.target.assistantId !== "string" || body.target.assistantId.length === 0)
-  ) {
-    return c.json({ error: "target.assistantId must be a non-empty string" }, 400);
-  }
-
   // An orchestrator-prompt schedule created in a team workspace fires the
   // TEAM's assistant, so it is team-owned. `resolveCreateOwner` settles the
   // owner before anything is written: a cookie caller's team id needs live
@@ -196,7 +192,6 @@ workflowTriggersRouter.post("/schedules", async (c) => {
     prompt: body.target.kind === "orchestrator" ? body.target.prompt : undefined,
     input: body.target.kind === "workflow" ? body.target.input : undefined,
     teamId,
-    assistantId: body.target.kind === "orchestrator" ? body.target.assistantId : undefined,
   });
   if (!result.ok) return c.json({ error: withCronHint(result.error) }, 400);
   const resp: WorkflowScheduleResponse = { schedule: result.schedule };
@@ -246,7 +241,6 @@ workflowTriggersRouter.post("/schedules/:id/run", async (c) => {
 // ── Event triggers ───────────────────────────────────────────────────────
 
 workflowTriggersRouter.post("/event-triggers", async (c) => {
-  const { db, plugins } = c.var.providers;
   const owner = ownerFrom(c);
   let body: CreateWorkflowEventTriggerRequest;
   try {
@@ -257,7 +251,12 @@ workflowTriggersRouter.post("/event-triggers", async (c) => {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
+  if (body.presence !== undefined) {
+    const error = validatePresence(body.presence);
+    if (error) return c.json({ error }, 400);
+  }
   const result = await createWorkflowTrigger(armDeps(c), owner, {
+    presence: body.presence,
     workflowId: body.workflowId,
     name: body.name,
     eventKeys: body.eventKeys,
@@ -281,7 +280,7 @@ workflowTriggersRouter.patch("/event-triggers/:id", async (c) => {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
   const owner = ownerFrom(c);
-  const result = await updateWorkflowTrigger(db, plugins, owner, c.req.param("id"), body);
+  const result = await updateWorkflowTrigger(armDeps(c), owner, c.req.param("id"), body);
   if (!result.ok) {
     const msg =
       result.status === 404
@@ -301,5 +300,3 @@ workflowTriggersRouter.delete("/event-triggers/:id", async (c) => {
     return c.json({ error: "trigger not found. Confirm the id and that you have access to it." }, 404);
   return c.json({ ok: true });
 });
-
-export type WorkflowTriggersRouter = typeof workflowTriggersRouter;

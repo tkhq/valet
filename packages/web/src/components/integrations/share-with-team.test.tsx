@@ -182,7 +182,7 @@ describe("ShareWithTeam", () => {
     await waitFor(() =>
       expect(
         screen.getByText(
-          "This team already has Linear. Ask a team admin to change it in Settings → Organization → Teams.",
+          "POST /api/credentials/linear/delegate → 409",
         ),
       ).toBeTruthy(),
     );

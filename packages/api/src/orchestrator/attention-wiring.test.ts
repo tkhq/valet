@@ -5,14 +5,16 @@
  * cares about the event shape and the durable session rows) and asserts
  * the resulting `notifications` rows.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { assistantSessionId, type BusEvent, type SessionData } from "@valet/engine";
 import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import { assistantSessionId, type BusEvent, type SessionData } from "@valet/engine";
+import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { notifications, userNotificationPreferences, workflowDefinitions } from "../schema/index.js";
+import { ensureAssistantExecution } from "../assistants/service.js";
+import { addMember, createTeam } from "../services/teams.js";
 import { wireAttentionRouter } from "./attention-wiring.js";
 import type { AttentionEvent } from "./attention.js";
-import { notifications } from "../schema/index.js";
 
 let api: TestApi | undefined;
 let unsub: (() => void) | undefined;
@@ -231,6 +233,51 @@ describe("wireAttentionRouter", () => {
     expect(delivered[0]?.sessionId).toBe(sessionId);
   });
 
+  it("workflow approval notifications inherit a private execution's audience", async () => {
+    api = await bootTestApi();
+    const { db, engineStore, eventStream, workflowStore } = api.providers;
+    const team = await createTeam(db, { orgId: "local-org", name: "Private approvals", creatorUserId: "local-user" });
+    await addMember(db, { teamId: team.id, userId: "test-member", role: "member" });
+    await db.insert(userNotificationPreferences).values({ userId: "local-user", kind: "approval", teamDm: true });
+    const owner = { type: "team", id: team.id } as const;
+    const execution = await ensureAssistantExecution(api.providers, owner,
+      { orgId: "local-org", actorUserId: "local-user" }, "app-assistant:local-user");
+    const thread = await execution.session.ensureDefaultThread();
+    const seen: AttentionEvent[] = [];
+    unsub = wireAttentionRouter({ db, engineStore, eventStream, channels: [{ deliver: async (_userId, event) => { seen.push(event); } }] });
+    const runId = `run-${randomUUID()}`;
+    await db.insert(workflowDefinitions).values({ id: "wf-private", orgId: "local-org", ownerType: "team", ownerId: team.id,
+      name: "Private workflow", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: Date.now(), updatedAt: Date.now() });
+    await workflowStore.createRun(runId, { workflowId: "wf-private", definitionVersionId: "v1",
+      origin: { assistantSessionId: execution.sessionId, threadId: thread.id } },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id });
+    const sessionId = `wf:${runId}:approve`;
+    await engineStore.saveSession(baseSession({ id: sessionId, owner }));
+    await eventStream.append(gateEvent(sessionId, `gate-${randomUUID()}`, "Private cleanup approval"), `test-private-${randomUUID()}`);
+    await waitFor(async () => seen.length > 0);
+    expect(seen[0]?.audienceKey).toBe("app-assistant:local-user");
+    expect((await db.select().from(notifications)).map((row) => row.userId)).toEqual(["local-user"]);
+  });
+
+  it("decision_gate on a workflow run a Slack channel's event started names that channel's audience", async () => {
+    api = await bootTestApi();
+    const { db, engineStore, eventStream, workflowStore } = api.providers;
+    const seen: AttentionEvent[] = [];
+    unsub = wireAttentionRouter({ db, engineStore, eventStream, channels: [{ deliver: async (_userId, event) => { seen.push(event); } }] });
+    const runId = `run-${randomUUID()}`;
+    await db.insert(workflowDefinitions).values({ id: "wf-x", orgId: "local-org", ownerType: "user", ownerId: "local-user",
+      name: "Slack event workflow", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: Date.now(), updatedAt: Date.now() });
+    await workflowStore.createRun(runId, {
+      workflowId: "wf-x", definitionVersionId: "v1",
+      input: { type: "event", timestamp: "2026-10-04T00:00:00.000Z", data: { key: "slack.message", refs: { channel: "CPRIV" }, payload: { channel: "CPRIV" } }, metadata: {} },
+    }, { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "user", ownerId: "local-user" });
+    const sessionId = `wf:${runId}:triage`;
+    await engineStore.saveSession(baseSession({ id: sessionId }));
+    await eventStream.append(gateEvent(sessionId, `gate-${randomUUID()}`, "Approve?"), `test-gate-${randomUUID()}`);
+    await waitFor(async () => seen.length > 0);
+    expect(seen[0]?.audienceKey).toBe("slack-events:CPRIV");
+  });
+
   it("decision_gate with tool context delivers a digested body and labeled fields, not raw JSON", async () => {
     api = await bootTestApi();
     const { db, engineStore, eventStream } = api.providers;
@@ -332,7 +379,7 @@ describe("wireAttentionRouter", () => {
     // that does not list it. The `?assistant=` form also carries the owner
     // implicitly, so the reader lands in the right context instead of
     // looking at a conversation their current scope excludes.
-    expect(rows[0]?.href).toBe("/chat?assistant=asst_attention&thread=th-1");
+    expect(rows[0]?.href).toBe("/chat?workspace=user&thread=th-1");
   });
 
   it("marks a gate's notification read when the gate resolves, and only that gate's", async () => {

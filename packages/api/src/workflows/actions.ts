@@ -5,17 +5,32 @@
  * create, inspect, and run dag/v1 workflows conversationally. Every result
  * carries the ids (`workflowId`/`runId`) the web chat renderer fetches by.
  */
-import { ValetError } from "@valet/shared";
-import { and, eq } from "drizzle-orm";
-import { assistants } from "../schema/index.js";
-import { Type } from "typebox";
-import type { Static, TSchema } from "typebox";
 import type {
   ActionPlugin,
   PluginAction,
   PluginActionContext,
   PluginActionResult,
 } from "@valet/engine";
+import { TeamAdminRequiredError } from "../services/team-deletion-access.js";
+import { submitDeletionRequest } from "../services/team-deletion-requests.js";
+import { proposalResult } from "../events/proposals.js";
+import { ValetError } from "@valet/shared";
+import { WorkflowCursorError, type WorkflowDefinition, type WorkflowEdge } from "@valet/workflow";
+import type { Static, TSchema } from "typebox";
+import { Type } from "typebox";
+import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
+import {
+  appendRemovedEdgeHint,
+  applyWorkflowModelPatch,
+  applyWorkflowPatch,
+  type WorkflowEdgeRef,
+} from "./patch.js";
+import {
+  createWorkflowSchedule,
+  deleteWorkflowSchedule,
+  listWorkflowSchedules,
+  updateWorkflowSchedule,
+} from "./schedule-service.js";
 import {
   addAggregateNode,
   cancelWorkflowRun,
@@ -30,20 +45,13 @@ import {
   resolveWorkflowApproval,
   RUN_STATUS_VALUES,
   startWorkflowRun,
+  workflowActionOrigin,
   updateWorkflowDefinition,
   validateDefinitionInput,
   type WorkflowOwner,
   type WorkflowServiceDeps,
 } from "./service.js";
 import type { TeamServiceReadinessDeps } from "./team-service-readiness.js";
-import { buildValidateEnvironment, buildOrgValidateEnvironment } from "./validation-env.js";
-import {
-  appendRemovedEdgeHint,
-  applyWorkflowModelPatch,
-  applyWorkflowPatch,
-  type WorkflowEdgeRef,
-} from "./patch.js";
-import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import {
   createWorkflowTrigger,
   deleteWorkflowTrigger,
@@ -51,20 +59,13 @@ import {
   listWorkflowTriggers,
   updateWorkflowTrigger,
 } from "./trigger-service.js";
-import {
-  createWorkflowSchedule,
-  deleteWorkflowSchedule,
-  listWorkflowSchedules,
-  updateWorkflowSchedule,
-} from "./schedule-service.js";
+import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
 import {
   deleteWorkflowWebhook,
   getWorkflowWebhook,
   mintOrRotateWorkflowWebhook,
   workflowWebhookUrl,
 } from "./webhook-service.js";
-import { publicUrlFromEnv } from "../channels/host.js";
-import { WorkflowCursorError, type WorkflowDefinition, type WorkflowEdge } from "@valet/workflow";
 
 /** Cap + bullet the validator's lint output for the LLM. The validator can
  * emit dozens of errors on a badly-shaped definition; the first ~20 are
@@ -146,6 +147,9 @@ export function formatEditLintErrors(blocking: string[], preExisting: string[], 
 }
 
 export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null {
+  // A channel sender with no Valet account runs as the rule's creator, but is
+  // not that person: they may not manage the workspace's workflows.
+  if (ctx.externalSender) return null;
   const { userId, orgId } = ctx as { userId?: unknown; orgId?: unknown };
   if (typeof userId !== "string" || userId.length === 0) return null;
   if (typeof orgId !== "string" || orgId.length === 0) return null;
@@ -313,7 +317,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     description:
       "Create a workflow for the assistant owner (omit workflow_id) or update one (pass workflow_id). " +
       "`definition` MUST be a dag/v1 object: { version: 'dag/v1', nodes: [...], edges: [...] } " +
-      "using node types trigger|set|if|wait|approval|session|orchestrator|tool|llm|stop|foreach. " +
+      "using node types trigger|set|if|wait|approval|session|orchestrator|tool|llm|stop|foreach|workflow. " +
+      "The app labels an `orchestrator` step \"Thread\"; its stored type is still `orchestrator`. " +
       "The definition is validated before saving; validation errors come back in `error`. " +
       "Returns { workflowId } — always surface it to the user.",
     riskLevel: "medium",
@@ -353,15 +358,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         };
       }
 
-      let routedDefinition: unknown = definition;
-      if (!validation.definition.assistantId && ctx.sessionId) {
-        const [creatingAssistant] = await getDeps().db.select().from(assistants)
-          .where(and(eq(assistants.sessionId, ctx.sessionId), eq(assistants.orgId, owner.orgId))).limit(1);
-        if (creatingAssistant) routedDefinition = { ...validation.definition, assistantId: creatingAssistant.id };
-      }
       const created = await createWorkflowDefinition(getDeps(), owner, {
         name: name ?? "Untitled workflow",
-        definition: routedDefinition,
+        definition,
         ...(owner.principal?.type === "team" ? { teamId: owner.principal.id } : {}),
       });
       return {
@@ -381,19 +380,15 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Start workflow run",
     description:
       "Start a run of a workflow. Optional `input` becomes the trigger payload data. " +
-      "Returns { runId, workflowId } — always surface the runId to the user.",
+      "Returns { runId, workflowId } — always surface the runId to the user. " +
+      "When the run completes, fails, or is cancelled, a workflow.settled signal reports the result in this thread. " +
+      "End your turn after starting a run and continue from that signal; do not poll.",
     riskLevel: "medium",
     execute: async ({ workflow_id, input }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
-      // The calling conversation, as-is. `startWorkflowRun` is the one
-      // validator: it drops a session that is no assistant's, an assistant
-      // that belongs to neither the caller nor the run, and a thread that
-      // is archived or gone.
-      const origin = ctx.sessionId && ctx.threadId
-        ? { assistantSessionId: ctx.sessionId, threadId: ctx.threadId }
-        : undefined;
+      const origin = await workflowActionOrigin(deps, owner, ctx.sessionId, ctx.threadId, ctx.owner);
       const started = await startWorkflowRun(deps, owner, workflow_id, input, origin);
       if (!started) return { success: false, error: `workflow not found: ${workflow_id}` };
       if ("invalidInput" in started) {
@@ -416,12 +411,30 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Delete workflow",
     description:
       "Permanently delete a workflow definition. Refused (with an error) while the workflow " +
-      "has non-settled runs — cancel them first. Settled run history is kept.",
+      "has non-settled runs — cancel them first. Settled run history is kept. Team deletion requires " +
+      "a current admin in direct web chat. Members can use request_workflow_deletion for admin review.",
     riskLevel: "medium",
     execute: async ({ workflow_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const result = await deleteWorkflowDefinition(getDeps(), owner, workflow_id);
+      const directActor = ctx.interactiveActor?.id === owner.userId &&
+        ctx.sessionPurpose !== "workflow" && ctx.sessionPurpose !== "child";
+      let result;
+      try {
+        result = await deleteWorkflowDefinition(getDeps(), { ...owner, deletionAuthority: directActor ? { type: "interactive", userId: owner.userId } : { type: "automated" } }, workflow_id);
+      } catch (error) {
+        if (!(error instanceof TeamAdminRequiredError)) throw error;
+        return {
+          success: false,
+          error: directActor
+            ? "Only a team admin can delete this workflow. Use workflows.request_workflow_deletion to request admin review."
+            : "Team workflow deletion requires a signed-in person in direct web chat. Ask a team admin there or open team settings.",
+          data: { code: error.code, teamId: error.teamId,
+            reviewUrl: `/settings/organization/teams?teamId=${encodeURIComponent(error.teamId)}`,
+            ...(directActor ? { nextAction: "workflows.request_workflow_deletion" } : {}),
+          },
+        };
+      }
       if (result === "not_found") {
         return { success: false, error: `workflow not found: ${workflow_id}` };
       }
@@ -432,6 +445,33 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         };
       }
       return { success: true, data: { workflowId: workflow_id, deleted: true } };
+    },
+  });
+
+  const requestWorkflowDeletion = action(Type.Object({
+    workflow_id: Type.String(),
+    reason: Type.Optional(Type.String({ maxLength: 2000 })),
+  }))({
+    id: "workflows.request_workflow_deletion",
+    name: "Request workflow deletion",
+    description: "Open or reuse a team workflow deletion request for an admin to review. This does not delete the workflow. Requires a signed-in person in direct web chat.",
+    riskLevel: "medium",
+    execute: async ({ workflow_id, reason }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      if (ctx.interactiveActor?.id !== owner.userId || ctx.sessionPurpose === "workflow" || ctx.sessionPurpose === "child") {
+        return { success: false, error: "Open a deletion request from signed-in web chat or team settings. Automated turns cannot submit requests for a person." };
+      }
+      const deps = getDeps();
+      const workflow = await getWorkflowDefinition(deps, owner, workflow_id);
+      if (!workflow) return { success: false, error: `workflow not found: ${workflow_id}` };
+      if (workflow.ownerType !== "team") return { success: false, error: "Deletion requests are for team workflows. Use workflows.delete_workflow for your personal workflow." };
+      const { request, created } = await submitDeletionRequest(deps.db,
+        { orgId: owner.orgId, userId: owner.userId, teamId: workflow.ownerId }, "workflow", workflow_id, reason);
+      return { success: true, data: {
+        workflowId: workflow_id, deleted: false, requestId: request.id, status: request.status, created,
+        reviewUrl: `/settings/organization/teams?teamId=${encodeURIComponent(workflow.ownerId)}`,
+      } };
     },
   });
 
@@ -578,6 +618,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (result === "already_resolved") return { success: false, error: `approval gate ${node_id} on run ${run_id} has already been resolved` };
       if (result === "timed_out") return { success: false, error: `approval gate ${node_id} on run ${run_id} has timed out` };
       if (result === "human_only") return { success: false, error: "A human must resolve this policy gate from the run page." };
+      if (result === "not_approver") return { success: false, error: "This step would use another member's shared account. Only that member can answer it." };
       if (result === "forbidden_always") return { success: false, error: "scope=always requires an org admin" };
       if (result === "org_mismatch") return { success: false, error: "not a member of this workflow's org" };
       return { success: true, data: { runId: run_id, nodeId: node_id, approved } };
@@ -588,6 +629,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     Type.Object({
       workflow_id: Type.String(),
       name: Type.Optional(Type.String()),
+      presence: Type.Optional(Type.Union([Type.Object({
+        displayName: Type.Optional(Type.String()),
+        avatarUrl: Type.Optional(Type.String()),
+      }), Type.Null()])),
       upsert_nodes: Type.Optional(Type.Array(Type.Unknown())),
       remove_node_ids: Type.Optional(Type.Array(Type.String())),
       add_edges: Type.Optional(
@@ -615,13 +660,14 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Patch workflow",
     description:
       "Edit a workflow WITHOUT re-sending the whole definition: rename, upsert single nodes " +
-      "(replace-by-id or append), remove nodes (their edges go too), add/remove edges. " +
+      "(replace-by-id or append), remove nodes (their edges go too), add/remove edges, or set presence. " +
+      "Presence replaces the channel identity; null clears it. " +
       "Prefer this over save_workflow for small edits — the patched result runs the full " +
       "linter, so a bad patch returns lint errors instead of saving. The linter reads the " +
       "WHOLE merged definition, so an error in a node you did not touch also blocks the " +
       "patch; the reply names those errors as pre-existing.",
     riskLevel: "medium",
-    execute: async ({ workflow_id, name, upsert_nodes, remove_node_ids, add_edges, remove_edges }, ctx) => {
+    execute: async ({ workflow_id, name, presence, upsert_nodes, remove_node_ids, add_edges, remove_edges }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
@@ -639,6 +685,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       }
 
       const patched = applyWorkflowPatch(stored as WorkflowDefinition, {
+        presence,
         upsertNodes: upsert_nodes,
         removeNodeIds: remove_node_ids,
         addEdges: add_edges as WorkflowEdge[] | undefined,
@@ -879,6 +926,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     Type.Object({
       workflow_id: Type.String(),
       name: Type.String(),
+      presence: Type.Optional(Type.Object({ displayName: Type.Optional(Type.String()), avatarUrl: Type.Optional(Type.String()) })),
       event_keys: Type.Array(Type.String(), {
         description: 'Event key patterns; trailing ".*" wildcard supported (e.g. "github.pull_request.*").',
       }),
@@ -913,14 +961,14 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "{{trigger.data.payload...}} plus {{trigger.data.key}}/{{trigger.data.refs...}}. " +
       "Returns { triggerId }.",
     riskLevel: "medium",
-    execute: async ({ workflow_id, name, event_keys, filters, any_channel }, ctx) => {
+    execute: async ({ workflow_id, name, event_keys, filters, any_channel, presence }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
       const result = await createWorkflowTrigger(
         armDepsFrom(deps),
         owner,
-        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel },
+        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, presence },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.trigger };
@@ -950,9 +998,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       prompt: Type.Optional(
         Type.String({
           description:
-            "Target the orchestrator instead: this prompt is delivered to you (the " +
-            "orchestrator) each fire, on a dedicated thread. Provide exactly one of " +
-            "workflow_id or prompt.",
+            "Target the workspace assistant instead: this prompt is delivered to you " +
+            "each fire, on a dedicated thread. Provide exactly one of workflow_id or prompt.",
         }),
       ),
       name: Type.String(),
@@ -973,7 +1020,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Create schedule",
     description:
       "Run something on a cron schedule: a WORKFLOW (workflow_id → a run starts each fire) " +
-      "or the ORCHESTRATOR (prompt → you receive the prompt each fire, e.g. 'check my PRs " +
+      "or the ASSISTANT (prompt → you receive the prompt each fire, e.g. 'check my PRs " +
       "every morning'). Fires are accurate to ~30s; missed fires during downtime collapse " +
       "into one catch-up. Returns { scheduleId, nextFireAt }.",
     riskLevel: "medium",
@@ -995,6 +1042,45 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.schedule };
+    },
+  });
+
+  const proposalKeySchema = Type.Object({
+    proposal_key: Type.String({ minLength: 1, maxLength: 200, description: "Stable key for this proposal. Reuse on retries; use a new key for a different proposal." }),
+  });
+  const proposeTrigger = action(Type.Intersect([createTrigger.parameters, proposalKeySchema]))({
+    id: "workflows.propose_trigger",
+    name: "Propose workflow event trigger",
+    description: "Save a disabled event trigger for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and enable it in Events.",
+    riskLevel: "low",
+    execute: async ({ workflow_id, name, event_keys, filters, any_channel, proposal_key, presence }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await createWorkflowTrigger(armDepsFrom(getDeps()), owner, {
+        workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, proposalKey: proposal_key, presence,
+      });
+      if (!result.ok) return { success: false, error: result.error };
+      return { success: true, data: proposalResult("subscription", result.trigger.triggerId, result.trigger.enabled, {
+        ...result.trigger, target: { kind: "workflow", workflowId: result.trigger.workflowId,
+          ...(result.trigger.presence ? { presence: result.trigger.presence } : {}),
+        },
+      }) };
+    },
+  });
+  const proposeSchedule = action(Type.Intersect([createSchedule.parameters, proposalKeySchema]))({
+    id: "workflows.propose_schedule",
+    name: "Propose schedule",
+    description: "Save a disabled cron schedule for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and enable it in Scheduled.",
+    riskLevel: "low",
+    execute: async ({ workflow_id, prompt, name, cron, timezone, input, proposal_key }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const result = await createWorkflowSchedule(armDepsFrom(getDeps()), owner, {
+        workflowId: workflow_id, prompt, name, cron, timezone, input, proposalKey: proposal_key,
+        teamId: owner.principal?.type === "team" ? owner.principal.id : undefined,
+      });
+      if (!result.ok) return { success: false, error: result.error };
+      return { success: true, data: proposalResult("schedule", result.schedule.scheduleId, result.schedule.enabled, result.schedule) };
     },
   });
 
@@ -1056,7 +1142,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       enabled: Type.Optional(
         Type.Boolean({ description: "false pauses the schedule; re-enabling recomputes next fire time." }),
       ),
-      prompt: Type.Optional(Type.String({ description: "Orchestrator-target schedules only." })),
+      prompt: Type.Optional(Type.String({ description: "Assistant-prompt schedules only." })),
       input: Type.Optional(
         Type.Record(Type.String(), Type.Unknown(), {
           description: "Workflow-target schedules only. Pass null to clear a previously set input.",
@@ -1129,8 +1215,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!owner) return NO_OWNER;
       const deps = getDeps();
       const result = await updateWorkflowTrigger(
-        deps.db,
-        deps.plugins ?? [],
+        armDepsFrom(deps),
         owner,
         trigger_id,
         { name, eventKeys: event_keys, filters, enabled, anyChannel: any_channel },
@@ -1211,6 +1296,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       updateModel,
       addAggregate,
       deleteWorkflow,
+      requestWorkflowDeletion,
       startRun,
       getRun,
       getNodeResult,
@@ -1219,10 +1305,12 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       resolveApproval,
       listEventTypesAction,
       createTrigger,
+      proposeTrigger,
       listTriggers,
       deleteTrigger,
       updateTrigger,
       createSchedule,
+      proposeSchedule,
       listSchedules,
       deleteSchedule,
       updateSchedule,

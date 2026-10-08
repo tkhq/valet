@@ -1,36 +1,57 @@
-import { useCallback } from "react";
-import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Menu, PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
-import { useSidebarControls } from "./app-shell";
-import { useOrchestratorInfo } from "~/api/orchestrator";
-import { useAssistants, useCreateAssistant } from "~/api/assistants";
-import { useSession } from "~/api/queries";
+import { useEffect, useRef, useState } from "react";
+import { useWorkspaceAssistant, WorkspaceAssistantButton } from "./workspace-assistant";
+import { Link, useRouterState } from "@tanstack/react-router";
+import { ChevronDown, Menu, Sparkles, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
 import { useChangelog } from "~/api/changelog";
+import { useSession } from "~/api/queries";
 import { pluginEnabledForCaller, useMe, useOrg, useTeams } from "~/api/settings";
-import { eligibleTeams } from "~/components/session/assistant-rail";
 import {
   WorkspaceSwitcher,
   workspaceOptions,
-  type WorkspaceOption,
 } from "~/components/layout/workspace-switcher";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
-import { useLastSeenCheckpoint } from "~/lib/changelog-read-state";
-import { PresenceMark } from "~/components/assistant/presence-mark";
-import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "~/components/primitives";
+import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, StatusDot } from "~/components/primitives";
+import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
+import { useLastSeenCheckpoint } from "~/lib/changelog-read-state";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { useSidebarControls } from "./app-shell";
 import { NotificationsBell } from "./notifications-bell";
 
-/**
- * App-wide top navigation, assistant-first (assistant-centered web UI,
- * decision 9/10). Left: the presence mark (◈ {name}) linking to the
- * dashboard — the assistant is the app's anchor, so it lives in the nav on
- * every page. Right: a plain "Sessions" link to the standalone-sessions
- * area, and the notifications bell.
- *
- * The old session-picker dropdown and "New session" button are gone —
- * sessions are reached via `/sessions` now (its stub page hosts "New
- * session" until Task 4 builds the full dashboard/sessions split).
- */
+/** One navigation link with a hover menu; clicking still opens Artifacts. */
+function ArtifactsNav() {
+  const [open, setOpen] = useState(false);
+  const hover = useRef(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const cancelClose = () => clearTimeout(closeTimer.current);
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
+  const leave = () => { closeTimer.current = setTimeout(() => setOpen(false), 150); };
+  return <DropdownMenu open={open} onOpenChange={setOpen} modal={false}>
+    <DropdownMenuTrigger asChild>
+      <Link to="/artifacts" search={{ page: undefined, pageOwner: undefined }}
+        className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-2 py-1 text-sm hover:bg-ink-wash"
+        activeProps={{ className: NAV_ACTIVE }} inactiveProps={{ className: NAV_INACTIVE }}
+        onPointerEnter={(event) => {
+          if (event.pointerType !== "mouse") return;
+          cancelClose(); hover.current = true; setOpen(true);
+        }}
+        onPointerLeave={leave}
+        onPointerDown={(event) => { if (event.button === 0) event.preventDefault(); }}
+        onClick={() => { cancelClose(); setOpen(false); }}
+        onKeyDown={(event) => {
+          hover.current = false;
+          if (event.key === "Enter") { event.preventDefault(); event.currentTarget.click(); }
+        }}
+      >Artifacts<ChevronDown className="h-3 w-3" aria-hidden /></Link>
+    </DropdownMenuTrigger>
+    <DropdownMenuContent align="start" aria-label="Artifacts and memory"
+      onPointerEnter={cancelClose} onPointerLeave={leave}
+      onCloseAutoFocus={(event) => { if (hover.current) event.preventDefault(); }}>
+      <DropdownMenuItem asChild><Link to="/artifacts" search={{ page: undefined, pageOwner: undefined }}>Artifacts</Link></DropdownMenuItem>
+      <DropdownMenuItem asChild><Link to="/memory">Memory</Link></DropdownMenuItem>
+    </DropdownMenuContent>
+  </DropdownMenu>;
+}
+
 /**
  * Top-nav link with a working active state. Text color lives in
  * `activeProps`/`inactiveProps` — NOT the base className — because TanStack
@@ -50,7 +71,7 @@ function NavLink({
   to: string;
   children: React.ReactNode;
   /** Force the active state instead of the URL-match default. Used so a
-   * `/sessions/:id` security session lights "Security", not "Sessions" —
+   * `/sessions/:id` security session lights "Security" —
    * the URL alone cannot tell the two apart (both live under /sessions). */
   active?: boolean;
 }) {
@@ -129,13 +150,12 @@ function SidebarToggle() {
 }
 
 export function TopNav() {
+  const assistant = useWorkspaceAssistant();
   const mobileNav = useResponsiveOverlay("md");
-  const info = useOrchestratorInfo();
-  const presence = info.data?.presence ?? "idle";
+  const scope = useWorkspaceScope();
 
   // The switcher reads the same three queries the rail does, so switching
   // costs no extra request — react-query serves all three from cache.
-  const assistantsQ = useAssistants();
   const teamsQ = useTeams();
   const orgQ = useOrg();
   const meQ = useMe();
@@ -144,16 +164,15 @@ export function TopNav() {
   const seenCheckpoint = useLastSeenCheckpoint(meQ.data?.id);
   const changelogUnread = !!meQ.data && !!newestCheckpoint && seenCheckpoint !== newestCheckpoint.id;
   const teams = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations);
-  const options = workspaceOptions(assistantsQ.data?.assistants, teams);
+  const options = workspaceOptions(teams);
   // The active workspace is no longer derived here from `?assistant=`. That
   // only ever resolved on `/chat`, so every other page read "Personal"
   // regardless of the workspace the reader was in. The scope owns it now and
   // still lets the open assistant win — see `workspace-scope.tsx`.
-  const scope = useWorkspaceScope();
   const onChat = useRouterState({ select: (st) => st.location.pathname === "/chat" });
   // A security session lives at /sessions/:id like any other, so the URL
   // cannot distinguish it — read the id off the path and check its kind so
-  // the nav lights "Security" instead of "Sessions". The query is shared
+  // the nav lights "Security". The query is shared
   // with the session page's own read, so it costs no extra request.
   const sessionRouteId = useRouterState({
     select: (st) => {
@@ -163,53 +182,15 @@ export function TopNav() {
   });
   const routeSession = useSession(sessionRouteId ?? "");
   const onSecuritySession = routeSession.data?.kind === "security";
+  const onSecurityPage = useRouterState({ select: (st) => st.location.pathname.startsWith("/security") });
   // Gate the Security link on the `security` plugin's entitlement for this
   // caller. `undefined` (org not yet loaded) hides the link — no flash of a
   // link the caller may not have, matching the settings rail's no-flash rule.
   const securityEnabled = pluginEnabledForCaller(orgQ.data, "security") === true;
-  const navigate = useNavigate();
-  const createAssistant = useCreateAssistant();
-
-  /**
-   * Opens a workspace on `/chat` that owns no assistant yet, by creating one.
-   *
-   * On `/chat` the open assistant defines the workspace, so a selection the
-   * conversation cannot follow is a selection that does not happen: the scope
-   * is re-derived from the assistant still on screen and written back over
-   * the choice. A team a person belongs to should have an assistant, so this
-   * creates it rather than refusing.
-   *
-   * Failure is not silent: the strip beside the switcher reports it (the
-   * dropdown itself is closed by then, so it cannot). Without that report,
-   * a failed create left `/chat` on the previous conversation, the scope
-   * re-derived from it and overwrote the selection — the switcher looked
-   * broken and said nothing.
-   */
-  const createWorkspaceAssistant = useCallback(
-    (workspace: WorkspaceOption) => {
-      if (!workspace.isTeam) return;
-      createAssistant.mutate(
-        { owner: { type: "team", id: workspace.key } },
-        {
-          onSuccess: (assistant) => {
-            void navigate({
-              to: "/chat",
-              search: { assistant: assistant.id, thread: undefined, child: undefined },
-            });
-          },
-        },
-      );
-    },
-    [createAssistant, navigate],
-  );
-
-  const destinations = [
-    { to: "/chat", label: "Chat" },
-    { to: "/memory", label: "Memory" },
+  const destinations: Array<{ to: string; label: string; active?: boolean }> = [
+    { to: "/chat", label: "Threads" },
     { to: "/artifacts", label: "Artifacts" },
-    { to: "/sessions", label: "Sessions", active: onSecuritySession ? false : undefined },
-    { to: "/workflows", label: "Workflows" },
-    ...(securityEnabled ? [{ to: "/security", label: "Security", active: onSecuritySession ? true : undefined }] : []),
+    { to: "/workflows", label: "Automation" },
     { to: "/events", label: "Events" },
     { to: "/usage", label: "Usage" },
     { to: "/skills", label: "Skills" },
@@ -220,15 +201,11 @@ export function TopNav() {
     <span className="inline-flex items-center gap-1.5">
       {label}
       {label === "Changelog" && changelogUnread && (
-        <span className="h-1.5 w-1.5 rounded-full bg-accent-500" aria-label="New releases" />
+        <StatusDot tone="accent" size="sm" label="New releases" />
       )}
     </span>
   );
 
-  // The logo is the PRODUCT (Valet), not the orchestrator — the
-  // orchestrator's chosen name shows up in its own title card (session
-  // header) instead. The presence dot stays: it still reflects the
-  // orchestrator's live state at a glance from anywhere in the app.
   return (
     <header className="max-sm:[--nav-height:3rem] h-[--nav-height] shrink-0 border-b border-line bg-paper flex items-center gap-1 px-2 md:gap-4 md:px-3">
       <SidebarToggle />
@@ -241,7 +218,7 @@ export function TopNav() {
         <span className="text-moss text-base leading-none" aria-hidden>
           ◈
         </span>
-        <span className="hidden md:inline-flex"><PresenceMark name="Valet" state={presence} size="nav" /></span>
+        <span className="hidden font-display text-sm font-medium text-ink md:inline">Valet</span>
       </Link>
 
       {/* Beside the logo, not in the sidebar: it scopes the surfaces below
@@ -249,31 +226,30 @@ export function TopNav() {
       <WorkspaceSwitcher
         options={options}
         activeKey={scope.key}
-        onSelect={(key) => {
-          // Any new selection retires the previous failure. Without this a
-          // single failed create pinned "Cannot open that workspace" beside
-          // the switcher for the rest of the visit — no later selection
-          // mutates (and so clears) the error unless it also needs a create.
-          createAssistant.reset();
-          scope.setKey(key);
-        }}
+        onSelect={scope.setKey}
         navigateOnSelect={onChat}
-        onCreateAssistant={createWorkspaceAssistant}
       />
-      {createAssistant.error != null && (
-        <span role="status" className="absolute left-2 right-2 top-[--nav-height] z-30 border border-line bg-paper p-2 text-xs text-danger-500 md:static md:max-w-[18rem] md:shrink md:border-0 md:p-0">
-          Cannot open that workspace. Select it again to retry.
-        </span>
-      )}
 
       <nav
         aria-label="Primary"
         className="hidden min-w-0 flex-1 items-center gap-2 overflow-x-auto md:flex xl:justify-end [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
         {destinations.map(({ to, label, active }) => (
-          <NavLink key={to} to={to} active={active}>{destinationLabel(label)}</NavLink>
+          to === "/artifacts" ? <ArtifactsNav key={to} /> : <NavLink key={to} to={to} active={active}>{destinationLabel(label)}</NavLink>
         ))}
       </nav>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="sm" className={`hidden shrink-0 gap-1 md:inline-flex ${onSecurityPage || onSecuritySession ? NAV_ACTIVE : NAV_INACTIVE}`}>
+            Plugins <ChevronDown className="h-3 w-3" aria-hidden />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" aria-label="Plugins" className="w-56">
+          {securityEnabled ? <DropdownMenuItem asChild>
+            <Link to="/security"><ShieldCheck className="h-4 w-4" aria-hidden />Valet Security</Link>
+          </DropdownMenuItem> : <div className="px-2 py-3 text-xs text-muted">No plugins available.</div>}
+        </DropdownMenuContent>
+      </DropdownMenu>
       <div className="ml-auto shrink-0 md:hidden">
         <DropdownMenu open={mobileNav.open} onOpenChange={mobileNav.setOpen}>
           <DropdownMenuTrigger asChild>
@@ -281,7 +257,9 @@ export function TopNav() {
               <Menu className="h-5 w-5" aria-hidden />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" aria-label="Navigation" className="w-64">
+          <DropdownMenuContent align="end" aria-label="Navigation" className="w-64 max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto">
+            <DropdownMenuItem onSelect={() => assistant.open()}><Sparkles className="h-4 w-4" aria-hidden />Ask Valet</DropdownMenuItem>
+            <DropdownMenuSeparator />
             {destinations.map(({ to, label, active }) => (
               <DropdownMenuItem key={to} asChild>
                 <Link
@@ -294,17 +272,30 @@ export function TopNav() {
                 </Link>
               </DropdownMenuItem>
             ))}
+            <DropdownMenuItem asChild><Link to="/memory">Memory</Link></DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem asChild>
+              <Link to="/settings"><Settings className="h-4 w-4" aria-hidden />Settings</Link>
+            </DropdownMenuItem>
+            {securityEnabled && <>
+              <DropdownMenuSeparator />
+              <div className="px-2 py-1 text-xs text-muted">Plugins</div>
+              <DropdownMenuItem asChild>
+                <Link to="/security"><ShieldCheck className="h-4 w-4" aria-hidden />Valet Security</Link>
+              </DropdownMenuItem>
+            </>}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
 
-      <div className="shrink-0">
+      <div className="flex shrink-0 items-center">
+        <div className="hidden md:block"><WorkspaceAssistantButton /></div>
         <NotificationsBell />
       </div>
 
       <Link
         to="/settings"
-        className="inline-flex shrink-0 min-h-11 min-w-11 md:min-h-0 md:min-w-0 items-center justify-center rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink"
+        className="hidden shrink-0 md:inline-flex items-center justify-center rounded p-1.5 text-muted hover:bg-ink-wash hover:text-ink"
         activeProps={{ className: "text-ink" }}
         aria-label="Settings"
       >

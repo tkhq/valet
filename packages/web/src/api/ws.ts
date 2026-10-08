@@ -9,7 +9,7 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { ListThreadsResponse, WireEvent } from "@valet/api/wire";
 import { useStreamStore } from "~/stores/stream";
-import { qk } from "./queries";
+import { qk, threadListFilters } from "./queries";
 
 const MAX_RETRY_MS = 8_000;
 const INITIAL_RETRY_MS = 500;
@@ -74,7 +74,7 @@ function invalidatePersistedTitles(
     });
   }
   if (includeThread) {
-    void qc.invalidateQueries({ queryKey: qk.threads(sessionId), exact: true });
+    void qc.invalidateQueries(threadListFilters(sessionId));
   }
 }
 
@@ -135,8 +135,13 @@ export function useSessionWebSocket(sessionId: string) {
           if (wire.type === "title.updated") {
             invalidatePersistedTitles(qc, sessionId, Boolean(wire.sessionTitle), Boolean(wire.threadTitle));
           }
+          // A finished turn can add an unread reply or a pull request to any thread
+          // in the session. The list query carries both, so refresh it.
+          if (wire.type === "turn_end") {
+            void qc.invalidateQueries(threadListFilters(sessionId));
+          }
           if (wire.type === "thread.activity") {
-            qc.setQueryData<ListThreadsResponse>(qk.threads(sessionId), (current) => current && ({
+            qc.setQueriesData<ListThreadsResponse>(threadListFilters(sessionId), (current) => current && ({
               ...current,
               threads: current.threads.map((thread) =>
                 thread.id === wire.threadId

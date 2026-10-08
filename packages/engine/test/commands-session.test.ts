@@ -1,5 +1,8 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import type { Context } from "@earendil-works/pi-ai/compat";
+import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
+import { Type } from "typebox";
 import {
   Engine,
   InMemoryEventStream,
@@ -7,7 +10,9 @@ import {
   VirtualSandboxProvider,
   type BusEvent,
   type CommandContext,
+  type Session,
   type SkillSource,
+  type ToolDef,
 } from "../src/index.js";
 
 const cleanups: Array<() => void> = [];
@@ -275,7 +280,7 @@ describe("Session.commandRegistry — workspace skills provider", () => {
           description: "user copy",
           content: "USER $1",
           invocation: "prompt",
-          source: "db",
+          source: "user",
         },
       ],
       workspaceSkillsProvider: async () => [
@@ -314,7 +319,7 @@ describe("Session.commandRegistry — skills provider", () => {
     // existed at build; a second was created (and the first renamed away)
     // while the session sat in the host cache.
     let stored: SkillSource[] = [
-      { name: "old-skill", description: "at build", content: "OLD", source: "db" },
+      { name: "old-skill", description: "at build", content: "OLD", source: "user" },
     ];
     const session = await engine.createSession({
       userId: "u1",
@@ -331,7 +336,7 @@ describe("Session.commandRegistry — skills provider", () => {
     expect(session.commandRegistry().resolve("skill:old-skill")).toBeDefined();
 
     stored = [
-      { name: "new-skill", description: "created later", content: "NEW", source: "db" },
+      { name: "new-skill", description: "created later", content: "NEW", source: "user" },
     ];
     await session.refreshCommandRegistry();
     const reg = session.commandRegistry();
@@ -354,7 +359,7 @@ describe("Session.commandRegistry — skills provider", () => {
       sandbox: {},
       model: faux.getModel(),
       commandContext: ctx,
-      skills: [{ name: "kept", description: "still here", content: "KEPT", source: "db" }],
+      skills: [{ name: "kept", description: "still here", content: "KEPT", source: "user" }],
       skillsProvider: async () => {
         throw new Error("db unavailable");
       },
@@ -363,5 +368,80 @@ describe("Session.commandRegistry — skills provider", () => {
     await expect(session.refreshCommandRegistry()).rejects.toThrow("db unavailable");
     expect(session.commandRegistry().resolve("skill:kept")).toBeDefined();
     expect(session.skills.get("kept")?.content).toBe("KEPT");
+  });
+
+  // The host's `skill` tool describes `session.skills` through a getter, and
+  // the engine rebuilds its tool list each turn. This pins both halves: the
+  // turn re-reads the provider first, and the model gets the new description.
+  it("each turn re-reads skillsProvider before the model sees the tools", async () => {
+    const faux = registerFauxProvider({ provider: "s-msp3" });
+    cleanups.push(() => faux.unregister());
+    const seen: string[] = [];
+    const capture = async (context: Context) => {
+      // Tools travel as transcript deltas; replaying them gives what the model sees.
+      seen.push(getCurrentTools(context.messages).find((tool) => tool.name === "list_skills")?.description ?? "(no tool)");
+      return fauxAssistantMessage("ok");
+    };
+    faux.setResponses([capture, capture]);
+    let stored: SkillSource[] = [{ name: "old-skill", description: "at build", content: "OLD", source: "user" }];
+    let session: Session | undefined;
+    const listSkills: ToolDef = {
+      name: "list_skills",
+      get description() {
+        return [...(session?.skills.keys() ?? [])].join(",");
+      },
+      parameters: Type.Object({}),
+      execute: async () => ({ text: "" }),
+    };
+    const { engine } = makeEngine();
+    session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      tools: [listSkills],
+      skills: stored,
+      skillsProvider: async () => stored,
+    });
+
+    await session.prompt("first");
+    await vi.waitFor(() => expect(seen).toHaveLength(1));
+    stored = [{ name: "new-skill", description: "saved later", content: "NEW", source: "user" }];
+    await session.prompt("second");
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+
+    expect(seen).toEqual(["old-skill", "new-skill"]);
+  });
+
+  it("a turn runs on the previous skills when skillsProvider throws", async () => {
+    const faux = registerFauxProvider({ provider: "s-msp4" });
+    cleanups.push(() => faux.unregister());
+    let replied = false;
+    faux.setResponses([
+      async () => {
+        replied = true;
+        return fauxAssistantMessage("ok");
+      },
+    ]);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    cleanups.push(() => error.mockRestore());
+    const { engine } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      skills: [{ name: "kept", description: "still here", content: "KEPT", source: "user" }],
+      skillsProvider: async () => {
+        throw new Error("db unavailable");
+      },
+    });
+
+    await session.prompt("hello");
+    await vi.waitFor(() => expect(replied).toBe(true));
+    expect(session.skills.get("kept")?.content).toBe("KEPT");
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("skill refresh failed"), expect.any(Error));
   });
 });

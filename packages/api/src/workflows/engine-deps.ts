@@ -1,3 +1,4 @@
+import { mergePresence, readPresence, type Presence } from "@valet/shared";
 /**
  * `WorkflowEngineDeps` (Phase 5 plan decision 15) implemented over
  * `EngineHost`. Node executors and the interpreter only see this narrow
@@ -31,16 +32,10 @@
  * than assuming the session `createSession` warmed is still cached.
  */
 
-import { mkdir } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { eq } from "drizzle-orm";
-import { definitionVersionId } from "./definition-version.js";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import type { Usage } from "@earendil-works/pi-ai/compat";
-import { bundledModel } from "@valet/engine/model-catalog";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
-  parseAssistantSessionId,
   parsePrincipal,
   type ActionPlugin,
   type CredentialStore,
@@ -49,6 +44,7 @@ import {
   type SignalContent,
   type ValetPlugin,
 } from "@valet/engine";
+import { bundledModel } from "@valet/engine/model-catalog";
 import type {
   WorkflowAwaitResultOptions,
   WorkflowCreateSessionOptions,
@@ -65,20 +61,27 @@ import type {
   WorkflowRunOrigin,
   WorkflowStore,
 } from "@valet/workflow";
-import { isTeamMember } from "../services/teams.js";
-import type { AppDb } from "../lib/drizzle.js";
-import type { EngineHost } from "../engine/host.js";
-import { buildActionInvoker, type ActionInvokerOpts } from "../plugins/action-invoker.js";
-import { workflowDefinitions } from "../schema/index.js";
+import { and, eq } from "drizzle-orm";
+import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   ArchivedAssistantError,
-  loadAssistant,
+  ensureAssistantRuntime, ensureAssistantExecution,
   loadAssistantBySessionId,
   resolveDefaultAssistant,
 } from "../assistants/service.js";
-import type { OnePasswordService } from "../services/onepassword.js";
-import { workflowAssistantId } from "./service.js";
+import type { EngineHost } from "../engine/host.js";
+import type { AppDb } from "../lib/drizzle.js";
+import { buildActionInvoker, type ActionInvokerOpts } from "../plugins/action-invoker.js";
+import { legacyWorkflowRunRuntime, legacyWorkflowAdmission, isLegacyAssistantRuntime, legacyWorkflowRuntime } from "../services/legacy-runtime.js";
+import { legacyWorkflowRuntimes, legacyWorkflowRunRuntimes, assistants, assistantExecutions, workflowDefinitions } from "../schema/index.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
+import { workflowReasoningLevel } from "../services/reasoning.js";
+import type { OnePasswordService } from "../services/onepassword.js";
+import { isTeamMember } from "../services/teams.js";
+import { resolveWorkflowReportTarget } from "./report-target.js";
+import { definitionVersionId } from "./definition-version.js";
 
 export interface WorkflowEngineDepsOpts {
   host: EngineHost;
@@ -172,16 +175,20 @@ export function parseWorkflowSessionId(sessionId: string): WorkflowSessionIdPart
  * as a whole, so runs of one workflow must not share one. Read back by
  * `run-attention.ts`, which archives the thread at settlement.
  */
-export function workflowRunThreadKey(runId: string): string {
-  return `signal:workflow:${runId}`;
+export function workflowRunThreadKey(runId: string, slackChannel?: string): string {
+  // A run a Slack channel's event started is that channel's audience's.
+  return slackChannel ? slackEventsThreadKey(slackChannel, `workflow:${runId}`) : `signal:workflow:${runId}`;
 }
 
 interface RunContext {
+  presence?: Presence;
+  legacyRuntimeId?: string;
   orgId: string;
   actorUserId: string;
   owner: Principal;
-  assistantId?: string;
   origin?: WorkflowRunOrigin;
+  /** The Slack channel whose event started the run (`runEventChannel`). */
+  slackChannel?: string;
 }
 
 async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): Promise<RunContext> {
@@ -206,8 +213,29 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     );
   }
 
-  return { orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
-    assistantId: workflowAssistantId(run.definition), origin: run.params.origin };
+  const [retainedRun] = await opts.db.select({ id: legacyWorkflowRunRuntimes.runId }).from(legacyWorkflowRunRuntimes)
+    .where(eq(legacyWorkflowRunRuntimes.runId, runId)).limit(1);
+  const [retainedDefinition] = await opts.db.select({ id: legacyWorkflowRuntimes.workflowId }).from(legacyWorkflowRuntimes)
+    .where(eq(legacyWorkflowRuntimes.workflowId, run.params.workflowId)).limit(1);
+  const legacyRuntimeId = retainedRun
+    ? await legacyWorkflowRunRuntime(opts.db, runId, defRow.orgId)
+    : await legacyWorkflowRuntime(opts.db, run.params.workflowId, defRow.orgId);
+  if ((retainedRun || retainedDefinition) && !legacyRuntimeId) {
+    throw new Error("The workflow's original assistant is unavailable. Restore its authorized runtime before starting this workflow.");
+  }
+  const slackChannel = runEventChannel(run.params);
+  const input = run.params.input;
+  const data = input && typeof input === "object" && "type" in input && input.type === "event" && "data" in input
+    ? input.data : undefined;
+  if (!legacyRuntimeId && !slackChannel && data && typeof data === "object" && "key" in data
+    && typeof data.key === "string" && data.key.startsWith("slack.")) {
+    throw new Error("The Slack workflow event has no channel audience.");
+  }
+  const definitionPresence = run.definition && typeof run.definition === "object" && "presence" in run.definition
+    ? readPresence(run.definition.presence) : undefined;
+  const presence = mergePresence(definitionPresence, readPresence(run.params.presence));
+  return { presence, legacyRuntimeId, orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
+    origin: run.params.origin, ...(slackChannel ? { slackChannel } : {}) };
 }
 
 /**
@@ -283,12 +311,27 @@ async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, ti
   // its own chokepoint — an assistant id fed to `workflowSessionFor` would
   // rebuild it without persona/memory (the Phase 4 cache-poisoning class),
   // and a `wf:` id has no assistant row.
-  const assistantId = parseAssistantSessionId(sessionId);
-  if (assistantId) {
-    return ensureAssistantSession(opts, sessionId, assistantId);
+  const assistant = await loadAssistantBySessionId(opts.db, sessionId);
+  if (assistant) {
+    return (await ensureAssistantRuntime({ db: opts.db, engineHost: opts.host }, assistant,
+      { actorUserId: actorUserIdFor({ type: assistant.ownerType, id: assistant.ownerId }), orgId: assistant.orgId })).session;
   }
   const parts = parseWorkflowSessionId(sessionId);
   const ctx = await resolveRunContext(opts, parts.runId);
+  if (ctx.owner.type === "team" && ctx.origin) {
+    const [root] = await opts.db.select().from(assistants)
+      .where(eq(assistants.sessionId, ctx.origin.assistantSessionId)).limit(1);
+    if (root?.ownerType === "team" && root.ownerId === ctx.owner.id) {
+      const thread = await opts.engineStore.getThread(root.sessionId, ctx.origin.threadId);
+      if (root.orgId !== ctx.orgId || root.archivedAt !== null || !thread) {
+        throw new Error("The workflow origin is unavailable.");
+      }
+      // Establish the same durable execution a later thread node/report uses,
+      // before a session node can write any memory for a legacy origin.
+      await ensureAssistantExecution({ db: opts.db, engineHost: opts.host }, ctx.owner,
+        { orgId: ctx.orgId, actorUserId: ctx.actorUserId }, thread.key);
+    }
+  }
   const workspace = workspaceFor(parts);
   await mkdir(workspace, { recursive: true });
   return opts.host.workflowSessionFor(sessionId, {
@@ -298,33 +341,6 @@ async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, ti
     workspace,
     title,
   });
-}
-
-/**
- * Wake the assistant for the settle-side of an `orchestrator` node
- * (`awaitResult`/`abort`/re-entry after restart). `orgId` isn't in the
- * session id, but the assistant row carries it, and `promptOrchestrator`'s
- * dispatch-side resolve created that row — so the whole context is
- * recoverable from the id alone.
- */
-async function ensureAssistantSession(
-  opts: WorkflowEngineDepsOpts,
-  sessionId: string,
-  assistantId: string,
-) {
-  const assistant = await loadAssistant(opts.db, assistantId);
-  if (!assistant) {
-    throw new Error(
-      `workflow engine-deps: no assistant recorded for ${sessionId} — ` +
-        `the dispatch that produced this receipt should have created one`,
-    );
-  }
-  const principal: Principal = { type: assistant.ownerType, id: assistant.ownerId };
-  return opts.host.assistantSessionFor(
-    assistant.id,
-    { actorUserId: actorUserIdFor(principal), orgId: assistant.orgId },
-    { sessionId: assistant.sessionId },
-  );
 }
 
 export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowEngineDeps {
@@ -350,9 +366,18 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
     ): Promise<WorkflowPromptReceipt> {
       const session = await ensureSession(opts, sessionId);
       const thread = session.thread();
+      const context = await resolveRunContext(opts, parseWorkflowDispatchId(promptOpts.dispatchId));
+      const previous = await legacyWorkflowAdmission(opts.db, promptOpts.dispatchId, context.orgId);
+      if (previous) {
+        if (previous.sessionId !== session.id || previous.threadId !== thread.id) {
+          throw new Error("The workflow dispatch belongs to another session. Restore its original workflow checkpoint.");
+        }
+        return { threadId: previous.threadId, queueItemId: previous.queueItemId };
+      }
       const receipt = await thread.submitPrompt(text, {
         dispatchId: promptOpts.dispatchId,
         model: promptOpts.model,
+        ...(context.presence ? { metadata: { presence: context.presence } } : {}),
         queueMode: promptOpts.queueMode,
       });
       return { threadId: thread.id, queueItemId: receipt.queueItemId };
@@ -430,6 +455,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       if (!resolved) {
         throw new Error(`workflow engine-deps: unknown or unavailable model "${req.model}"`);
       }
+      // Without a level, a reasoning model runs with reasoning off, so a review
+      // step reasoned less than the same model does in a chat thread.
+      const reasoning = await workflowReasoningLevel(opts.db, ctx.orgId, ctx.owner, req.reasoning);
       const result = await completeSimple(
         resolved.model,
         {
@@ -440,8 +468,12 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
           apiKey: resolved.apiKey,
           temperature: req.temperature,
           maxTokens: req.maxOutputTokens,
+          ...(reasoning ? { reasoning } : {}),
         },
       );
+      if (result.stopReason === "error" || result.stopReason === "aborted") {
+        throw new Error(`Workflow model "${req.model}" ${result.stopReason}: ${result.errorMessage || "The provider did not complete the request."}`);
+      }
       const text = result.content
         .filter((b): b is { type: "text"; text: string } => b.type === "text")
         .map((b) => b.text)
@@ -479,6 +511,13 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         );
       }
       const ctx = await resolveRunContext(opts, runId);
+      // An origin runtime cannot represent the intersection of a conversation
+      // and a Slack-event audience. Reusing it could publish channel-private
+      // inputs through shared memory. Do not dispatch until both can be carried.
+      if (principal.type === "team" && ctx.slackChannel && ctx.origin &&
+          !ctx.legacyRuntimeId && !await isLegacyAssistantRuntime(opts.db, ctx.origin.assistantSessionId, ctx.orgId)) {
+        throw new Error("A Slack-event workflow cannot dispatch a thread step into a separate origin conversation. Run it without a conversation origin.");
+      }
 
       // An explicit conversation origin takes precedence over definition
       // routing. Older and unattended runs keep the snapshot/default route.
@@ -490,27 +529,47 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // here failed every orchestrator node of every run such a thread
       // started. The lookup is by session id, so the loaded row always
       // carries the origin's own session id.
-      const assistant = ctx.origin
+      //
+      // An unavailable explicit origin must not fall back to a broader team audience.
+      const originAssistant = ctx.origin
         ? await loadAssistantBySessionId(opts.db, ctx.origin.assistantSessionId)
-        : ctx.assistantId
-          ? await loadAssistant(opts.db, ctx.assistantId)
-          : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
+        : undefined;
+      if (ctx.origin && (!originAssistant || originAssistant.archivedAt !== null)) {
+        throw new Error("The workflow origin assistant is unavailable. Start a new run from an active assistant thread.");
+      }
+      const previous = await legacyWorkflowAdmission(opts.db, promptOpts.dispatchId, ctx.orgId);
+      const previousAssistant = previous ? await loadAssistantBySessionId(opts.db, previous.sessionId) : undefined;
+      const origin = ctx.origin;
+      const assistant = previous ? previousAssistant : origin ? originAssistant : ctx.legacyRuntimeId
+        ? await loadAssistantBySessionId(opts.db, ctx.legacyRuntimeId)
+        : await resolveDefaultAssistant(opts.db, ctx.orgId, principal);
       const assistantOwnsRun = assistant?.ownerType === principal.type && assistant.ownerId === principal.id;
       const assistantOwnsActor = assistant?.ownerType === "user" && assistant.ownerId === ctx.actorUserId;
       if (!assistant || assistant.orgId !== ctx.orgId ||
-          (!assistantOwnsRun && !(ctx.origin && assistantOwnsActor))) {
-        throw new Error("Workflow orchestrator is unavailable. Select an orchestrator owned by this workflow's workspace.");
+          (!assistantOwnsRun && !(origin && assistantOwnsActor))) {
+        throw new Error("The workspace assistant is unavailable. Open the workflow from its owning workspace and retry.");
       }
       if (assistant.archivedAt !== null) throw new ArchivedAssistantError();
-      if (ctx.origin && assistantOwnsActor && !assistantOwnsRun && principal.type === "team" &&
+      if (origin && assistantOwnsActor && !assistantOwnsRun && principal.type === "team" &&
           !(await isTeamMember(opts.db, principal.id, ctx.actorUserId))) {
         throw new Error("Workflow origin owner is no longer a team member. Start a new run from an authorized assistant.");
       }
-      const session = await opts.host.assistantSessionFor(
-        assistant.id,
-        { actorUserId: ctx.actorUserId, orgId: ctx.orgId },
-        { sessionId: assistant.sessionId },
-      );
+      if (previous) {
+        return { sessionId: previous.sessionId, threadId: previous.threadId, queueItemId: previous.queueItemId };
+      }
+      // Through the shared helper, so a runtime first woken by a workflow
+      // gets the same API session record as one opened by a person. Without
+      // it, the run's threads and artifact publishing report "not found".
+      const deps = { db: opts.db, engineHost: opts.host };
+      const meta = { actorUserId: ctx.actorUserId, orgId: ctx.orgId };
+      const runKey = workflowRunThreadKey(runId, ctx.slackChannel);
+      const [existingExecution] = await opts.db.select({ id: assistantExecutions.sessionId }).from(assistantExecutions)
+        .where(and(eq(assistantExecutions.assistantId, assistant.id), eq(assistantExecutions.conversationKey, runKey))).limit(1);
+      let { session } = origin
+        ? await ensureAssistantRuntime(deps, assistant, meta)
+        : ctx.legacyRuntimeId === assistant.sessionId && !existingExecution
+          ? await ensureAssistantRuntime(deps, assistant, meta)
+          : await ensureAssistantExecution(deps, principal, meta, runKey);
       // One thread per run. A thread is the engine's unit of serial
       // execution and of abort: a shared thread makes one run's approval
       // gate hold every other run of the same workflow, and makes the
@@ -518,14 +577,28 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // archives the thread when the run settles, so the sidebar does not
       // fill up. An attended run reports into the thread it was started
       // from instead.
-      const thread = ctx.origin
-        ? session.threadById(ctx.origin.threadId)
-        : session.thread(workflowRunThreadKey(runId));
+      let thread = origin
+        ? session.threadById(origin.threadId)
+        : session.thread(workflowRunThreadKey(runId, ctx.slackChannel));
       if (!thread) {
         throw new Error(
-          `Workflow origin thread ${ctx.origin?.threadId} is missing from session ${session.id}. ` +
+          `Workflow origin thread ${origin?.threadId} is missing from session ${session.id}. ` +
             "Start a new run from an active assistant thread.",
         );
+      }
+      if (origin) {
+        const target = await resolveWorkflowReportTarget(deps,
+          { type: assistant.ownerType, id: assistant.ownerId }, meta, session, thread, promptOpts.dispatchId);
+        if (target.priorQueueItemId) {
+          const item = await opts.engineStore.getQueueItem(session.id, target.priorQueueItemId);
+          const content = item?.content;
+          if (!content || typeof content === "string" || !("kind" in content) || content.kind !== "signal" ||
+              content.signalType !== "workflow.request" || content.body !== promptText || content.attributes?.runId !== runId) {
+            throw new Error("The legacy workflow dispatch has different content. Start a new workflow run.");
+          }
+          return { sessionId: session.id, threadId: thread.id, queueItemId: target.priorQueueItemId };
+        }
+        ({ session, thread } = target);
       }
       // `runId` as an attribute, so the client can render a link back to the
       // run instead of the bare signal type. `attributes` is flat and
@@ -539,6 +612,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         attributes: { runId },
       };
       const receipt = await thread.submitPrompt(content, {
+        ...(ctx.presence ? { metadata: { presence: ctx.presence } } : {}),
         dispatchId: promptOpts.dispatchId,
         queueMode: promptOpts.queueMode,
       });
@@ -567,6 +641,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         orgId: ctx.orgId,
         owner: ctx.owner,
         workflowExecutionId: runId,
+        presence: ctx.presence,
       });
     },
 

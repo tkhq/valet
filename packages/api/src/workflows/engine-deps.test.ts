@@ -1,3 +1,5 @@
+import type { Presence } from "@valet/shared";
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Unit tests for `buildWorkflowEngineDeps`'s Task 7/Task 6 seams:
  * `invokeAction` (now a real headless `ActionInvoker` with durable dedup —
@@ -15,11 +17,12 @@ import type { Usage } from "@earendil-works/pi-ai/compat";
 import * as piAi from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { buildWorkflowEngineDeps, mapPiAiUsage } from "./engine-deps.js";
-import { assistants, workflowDefinitions } from "../schema/index.js";
+import { buildWorkflowEngineDeps, mapPiAiUsage, workflowRunThreadKey } from "./engine-deps.js";
+import { eq } from "drizzle-orm";
+import { legacyWorkflowAdmissions, assistants, orgs, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
-import { resolveDefaultAssistant } from "../assistants/service.js";
+import { ensureDefaultAssistantSession, loadAssistantBySessionId, resolveDefaultAssistant } from "../assistants/service.js";
 
 let api: TestApi | undefined;
 
@@ -34,6 +37,7 @@ async function seedRun(
   runId: string,
   workflowId: string,
   origin?: WorkflowRunOrigin,
+  presence?: { definition?: Presence; run?: Presence },
 ): Promise<void> {
   const { db, workflowStore } = a.providers;
   const now = Date.now();
@@ -51,8 +55,8 @@ async function seedRun(
     });
   await workflowStore.createRun(
     runId,
-    { workflowId, definitionVersionId: "v1", ...(origin ? { origin } : {}) },
-    { version: "dag/v1", nodes: [], edges: [] },
+    { workflowId, definitionVersionId: "v1", ...(origin ? { origin } : {}), ...(presence?.run ? { presence: presence.run } : {}) },
+    { version: "dag/v1", nodes: [], edges: [], ...(presence?.definition ? { presence: presence.definition } : {}) },
     "v1",
     { ownerType: "user", ownerId: LOCAL_USER.id },
   );
@@ -80,6 +84,36 @@ function makeFixturePlugin(): { plugin: ValetPlugin; actionPlugin: ActionPlugin;
   const plugin: ValetPlugin = { name: "demo", version: "0.0.1", actions: [actionPlugin] };
   return { plugin, actionPlugin, calls: () => count };
 }
+
+describe("workflow presence snapshots", () => {
+  it("uses the persisted snapshot for both queue paths and direct actions after definition edits", async () => {
+    const action: PluginAction = {
+      id: "demo.identity", name: "identity", description: "Read sender", riskLevel: "low", parameters: Type.Object({}),
+      execute: async (_args, ctx) => ({ success: true, data: await ctx.resolveOutboundSender?.() }),
+    };
+    const actionPlugin: ActionPlugin = { service: "demo", actions: [action] };
+    api = await bootTestApi({ plugins: [{ name: "demo", version: "1", actions: [actionPlugin] }] });
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const build = () => buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    await seedRun(api, "presence-run", "presence-workflow", undefined, {
+      definition: { displayName: "Snapshot", avatarUrl: "https://example.com/snapshot.png" },
+      run: { displayName: "Subscription" },
+    });
+    await db.update(workflowDefinitions).set({ definition: { version: "dag/v1", nodes: [], edges: [], presence: { displayName: "Edited" } } })
+      .where(eq(workflowDefinitions.id, "presence-workflow"));
+    const expected = { displayName: "Subscription", avatarUrl: "https://example.com/snapshot.png" };
+    const sessionId = "wf:presence-run:session";
+    const sessionReceipt = await build().prompt(sessionId, "read sender", { dispatchId: "workflow:presence-run:session" });
+    expect((await engineStore.getQueueItem(sessionId, sessionReceipt.queueItemId))?.metadata?.presence).toEqual(expected);
+    const reportReceipt = await build().promptOrchestrator("report", { dispatchId: "workflow:presence-run:report", queueMode: "followup", ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id } });
+    expect((await engineStore.getQueueItem(reportReceipt.sessionId, reportReceipt.queueItemId))?.metadata?.presence).toEqual(expected);
+    expect(await build().invokeAction({ service: "demo", action: "identity", params: {}, invocationId: "workflow:presence-run:identity" }))
+      .toEqual({ ok: true, result: expected });
+    await seedRun(api, "plain-run", "plain-workflow");
+    expect(await build().invokeAction({ service: "demo", action: "identity", params: {}, invocationId: "workflow:plain-run:identity" }))
+      .toEqual({ ok: true, result: undefined });
+  });
+});
 
 describe("buildWorkflowEngineDeps: invokeAction", () => {
   it("happy path: resolves the fixture action and returns {ok:true, result}", async () => {
@@ -303,7 +337,7 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     // owner's default assistant — the row `resolveDefaultAssistant` created.
     const defaultAssistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: LOCAL_USER.id });
     expect(receipt.sessionId).toBe(defaultAssistant.sessionId);
-    expect(defaultAssistant.isDefault).toBe(true);
+    expect(defaultAssistant).toBeDefined();
     expect(receipt.threadId).toBeTruthy();
     expect(receipt.queueItemId).toBeTruthy();
 
@@ -373,8 +407,57 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
 
     const teamDefault = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "team", id: team.id });
     const personalDefault = await resolveDefaultAssistant(db, LOCAL_ORG.id, { type: "user", id: LOCAL_USER.id });
-    expect(receipt.sessionId).toBe(teamDefault.sessionId);
+    expect(receipt.sessionId).not.toBe(teamDefault.sessionId);
+    expect((await loadAssistantBySessionId(db, receipt.sessionId))?.id).toBe(teamDefault.id);
+    engineHost.evictCache(receipt.sessionId);
+    await expect(deps.abort(receipt.sessionId, receipt.threadId, receipt.queueItemId)).resolves.toBeUndefined();
     expect(receipt.sessionId).not.toBe(personalDefault.sessionId);
+  });
+
+  it.each(["app-assistant:local-user", "slack:C_PRIVATE:1.2"])("moves legacy team workflow origin %s into its isolated audience", async (key) => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { createTeam } = await import("../services/teams.js");
+    const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "Legacy origin", creatorUserId: LOCAL_USER.id });
+    const owner = { type: "team", id: team.id } as const;
+    const root = await ensureDefaultAssistantSession(api.providers, owner, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+    const originThread = await root.session.createThread(key);
+    const runId = "legacy-team-origin-run", workflowId = "legacy-team-origin-workflow", now = Date.now();
+    await db.insert(workflowDefinitions).values({ id: workflowId, orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "Legacy", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: now, updatedAt: now });
+    await workflowStore.createRun(runId, { workflowId, definitionVersionId: "v1",
+      origin: { assistantSessionId: root.sessionId, threadId: originThread.id } },
+    { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    const options = { dispatchId: `workflow:${runId}:report`, queueMode: "followup", ownerHint: { ownerType: "team", ownerId: team.id } } as const;
+    const receipt = await deps.promptOrchestrator("report into the original audience", options);
+    expect(receipt.sessionId).not.toBe(root.sessionId);
+    expect(await engineStore.getSession(receipt.sessionId)).toMatchObject({ parentSessionId: root.sessionId, parentThreadId: originThread.id });
+    expect(await engineStore.getThread(receipt.sessionId, receipt.threadId)).toMatchObject({ key });
+    expect(await deps.promptOrchestrator("report into the original audience", options)).toEqual(receipt);
+    expect(await engineStore.listUnsettledSubmissions(root.sessionId)).toEqual([]);
+    // A pre-cutover admission whose workflow checkpoint was lost must not run again.
+    await engineStore.admitSubmission(root.sessionId, originThread.id, { id: "old-admission", threadId: originThread.id,
+      dispatchId: `workflow:${runId}:old-report`, content: { kind: "signal", signalType: "workflow.request", body: "old report", attributes: { runId } },
+      status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now });
+    engineHost.evictCache(root.sessionId);
+    const oldReceipt = await deps.promptOrchestrator("old report", { ...options, dispatchId: `workflow:${runId}:old-report` });
+    expect(oldReceipt).toEqual({ sessionId: root.sessionId, threadId: originThread.id, queueItemId: "old-admission" });
+    expect(await deps.awaitResult(oldReceipt.sessionId, oldReceipt.threadId, oldReceipt.queueItemId)).toMatchObject({ outcome: "aborted" });
+  });
+
+  it.each(["archived", "missing"])("fails closed for a supplied %s origin instead of using the default audience", async (state) => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const root = await ensureDefaultAssistantSession(api.providers, { type: "user", id: LOCAL_USER.id }, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+    const origin = await root.session.createThread("app-assistant:local-user");
+    const runId = "unavailable-origin";
+    await seedRun(api, runId, "unavailable-workflow", { assistantSessionId: state === "missing" ? "gone-session" : root.sessionId, threadId: origin.id });
+    if (state === "archived") await db.update(assistants).set({ archivedAt: Date.now() }).where(eq(assistants.id, root.assistant.id));
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    await expect(deps.promptOrchestrator("private report", { dispatchId: `workflow:${runId}:node`, queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id } })).rejects.toThrow("origin assistant is unavailable");
+    expect(await engineStore.listUnsettledSubmissions(root.sessionId)).toEqual([]);
   });
 
   it("reuses the exact assistant thread recorded as the run origin", async () => {
@@ -417,7 +500,6 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       ownerType: "user",
       ownerId: LOCAL_USER.id,
       sessionId: legacySessionId,
-      isDefault: false,
       createdAt: Date.now(),
     });
     const session = await engineHost.assistantSessionFor(
@@ -645,6 +727,29 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     }
   });
 
+  it.each(["", ":repair"])("retains the original upgrade admission when a rendered workflow prompt changes%s", async (suffix) => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore,
+      actionPluginByService, credentials: engineCredentials });
+    await seedRun(api, "old_render", "old_render_workflow");
+    const root = await ensureDefaultAssistantSession(api.providers, { type: "user", id: LOCAL_USER.id },
+      { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+    const thread = await root.session.createThread("signal:workflow:old_render");
+    const dispatchId = `workflow:old_render:node${suffix}`;
+    const id = `old-admission${suffix}`, now = Date.now();
+    await engineStore.admitSubmission(root.sessionId, thread.id, { id, threadId: thread.id, dispatchId,
+      content: { kind: "signal", signalType: "workflow.request", body: "Original rendered prompt", attributes: { runId: "old_render" } },
+      status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now });
+    await db.insert(legacyWorkflowAdmissions).values({ queueItemId: id, sessionId: root.sessionId,
+      threadId: thread.id, dispatchId, orgId: LOCAL_ORG.id });
+    const receipt = await deps.promptOrchestrator("Original rendered prompt with a newly appended output schema", {
+      dispatchId, queueMode: "followup", ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id } });
+    expect(receipt).toEqual({ sessionId: root.sessionId, threadId: thread.id, queueItemId: id });
+    expect((await engineStore.getQueueItem(root.sessionId, id))?.content).toMatchObject({ body: "Original rendered prompt" });
+    expect(await engineStore.listUnsettledSubmissions(root.sessionId)).toHaveLength(1);
+  });
+
   it("keeps an existing per-run thread for retries after an upgrade", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
@@ -710,7 +815,7 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
 
 describe("buildWorkflowEngineDeps: llmComplete", () => {
   it.each([
-    ["openai/gpt-6-astra", false], ["gpt-6-astra", false], ["gpt-6-astra", true],
+    ["openai/gpt-6.1-sol", false], ["gpt-6.1-sol", false], ["gpt-6.1-sol", true],
   ] as const)("completes with supplemental model %s (Anthropic disabled: %s)", async (model, disableAnthropic) => {
     vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
     const original = piAi.getApiProvider("openai-responses");
@@ -741,12 +846,55 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
       const result = await deps.llmComplete({ runId, model, prompt: "hi" });
       expect(result.text).toBe("ok");
       expect(stream).toHaveBeenCalledWith(expect.objectContaining({
-        id: "gpt-6-astra", provider: "openai", contextWindow: 272_000,
-        compat: expect.objectContaining({ supportsToolSearch: true }),
+        id: "gpt-6.1-sol", provider: "openai", contextWindow: 272_000,
+        thinkingLevelMap: expect.objectContaining({ high: "high" }),
       }), expect.anything(), expect.anything());
     } finally {
       piAi.registerApiProvider(original);
     }
+  });
+
+  it("sends the owner's default reasoning level, and a step's own level wins", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    const original = piAi.getApiProvider("openai-responses");
+    if (!original) throw new Error("OpenAI transport is required");
+    const stream = vi.fn<piAi.ApiStreamSimpleFunction>(() => {
+      const events = piAi.createAssistantMessageEventStream();
+      events.end(fauxAssistantMessage("ok"));
+      return events;
+    });
+    piAi.registerApiProvider({ api: "openai-responses", stream, streamSimple: stream });
+    try {
+      api = await bootTestApi();
+      const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+      await db.update(orgs).set({ reasoningSettings: { default: "medium" } }).where(eq(orgs.id, LOCAL_ORG.id));
+      const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+      await seedRun(api, "wfrun_reasoning", "wf_reasoning");
+      await deps.llmComplete({ runId: "wfrun_reasoning", model: "openai/gpt-6.1-sol", prompt: "hi" });
+      expect(stream.mock.calls[0]![2]).toMatchObject({ reasoning: "medium" });
+      await deps.llmComplete({ runId: "wfrun_reasoning", model: "openai/gpt-6.1-sol", prompt: "hi", reasoning: "high" });
+      expect(stream.mock.calls[1]![2]).toMatchObject({ reasoning: "high" });
+    } finally { piAi.registerApiProvider(original); }
+  });
+
+  it.each(["error", "aborted"] as const)("rejects a provider %s response instead of returning empty success", async (stopReason) => {
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    const original = piAi.getApiProvider("openai-responses");
+    if (!original) throw new Error("OpenAI transport is required");
+    const stream = vi.fn<piAi.ApiStreamSimpleFunction>(() => {
+      const events = piAi.createAssistantMessageEventStream();
+      events.end({ ...fauxAssistantMessage(""), stopReason, errorMessage: "Provider rejected this model" });
+      return events;
+    });
+    piAi.registerApiProvider({ api: "openai-responses", stream, streamSimple: stream });
+    try {
+      api = await bootTestApi();
+      const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+      const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+      const runId = `wfrun_provider_${stopReason}`;
+      await seedRun(api, runId, `wf_provider_${stopReason}`);
+      await expect(deps.llmComplete({ runId, model: "openai/gpt-6.1-sol", prompt: "hi" })).rejects.toThrow('Provider rejected this model');
+    } finally { piAi.registerApiProvider(original); }
   });
 
   it("throws descriptively for an unknown model id, without any network call", async () => {
@@ -809,4 +957,9 @@ describe("mapPiAiUsage", () => {
       costUsd: 0,
     });
   });
+});
+
+it("keys a run a Slack channel's event started by that channel", () => {
+  expect(workflowRunThreadKey("run_1")).toBe("signal:workflow:run_1");
+  expect(workflowRunThreadKey("run_1", "CPRIV")).toBe("slack-events:CPRIV:workflow:run_1");
 });

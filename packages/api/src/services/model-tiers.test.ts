@@ -42,6 +42,29 @@ describe("model-tiers", () => {
     await credentials.save({ type: "org", id: orgId }, `llm:${rowId}`, { type: "api_key", apiKey });
   }
 
+  it("skips Astra in persisted tier fallback lists", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "env-openai");
+    await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, l: ["openai/gpt-6-astra", "openai/gpt-6.1-sol"] });
+    expect(await resolveTier(db, credentials, orgId, "l")).toBe("openai/gpt-6.1-sol");
+    expect((await resolvableTiers(db, credentials, orgId)).get("l")).toBe("openai/gpt-6.1-sol");
+  });
+
+  it("upgrades saved Sol recommendations without changing explicit model IDs or other tiers", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "env-openai");
+    await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, l: ["openai/gpt-5.6-sol", "anthropic/claude-opus-4-7"] });
+    expect((await getOrgTierMap(db, orgId)).l).toEqual(["openai/gpt-6.1-sol", "anthropic/claude-opus-4-7"]);
+    expect(await resolveTier(db, credentials, orgId, "l")).toBe("openai/gpt-6.1-sol");
+    expect((await getOrgTierMap(db, orgId)).s).toEqual(DEFAULT_TIER_MAP.s);
+  });
+
+  it("does not bypass an org allowlist when upgrading a saved recommendation", async () => {
+    await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, l: ["openai/gpt-5.6-sol"] });
+    await setApprovedModels(db, orgId, ["openai/gpt-5.6-sol"]);
+    expect((await getOrgTierMap(db, orgId)).l).toEqual(["openai/gpt-5.6-sol"]);
+    await setApprovedModels(db, orgId, ["openai/gpt-6.1-sol"]);
+    expect((await getOrgTierMap(db, orgId)).l).toEqual(["openai/gpt-6.1-sol"]);
+  });
+
   describe("getOrgTierMap", () => {
     it("returns defaults when no model_tiers is stored", async () => {
       const map = await getOrgTierMap(db, orgId);
@@ -206,7 +229,7 @@ describe("model-tiers", () => {
       vi.stubEnv("OPENAI_API_KEY", "env-openai");
       await setOrgTierMap(db, orgId, {
         ...DEFAULT_TIER_MAP,
-        m: ["anthropic/claude-sonnet-4-6", "openai/gpt-6-astra"],
+        m: ["anthropic/claude-sonnet-4-6", "openai/gpt-6.1-sol"],
       });
       expect(await resolveTier(db, credentials, orgId, "m")).toBe("anthropic/claude-sonnet-4-6");
       const usable = await resolvableTiers(db, credentials, orgId);
@@ -228,10 +251,10 @@ describe("model-tiers", () => {
       await updateLlmProvider(db, orgId, row.id, { enabled: false });
       await setOrgTierMap(db, orgId, {
         ...DEFAULT_TIER_MAP,
-        m: [`${row.id}/m1`, "openai/gpt-6-astra"],
+        m: [`${row.id}/m1`, "openai/gpt-6.1-sol"],
       });
-      expect(await resolveTier(db, credentials, orgId, "m")).toBe("openai/gpt-6-astra");
-      expect((await resolvableTiers(db, credentials, orgId)).get("m")).toBe("openai/gpt-6-astra");
+      expect(await resolveTier(db, credentials, orgId, "m")).toBe("openai/gpt-6.1-sol");
+      expect((await resolvableTiers(db, credentials, orgId)).get("m")).toBe("openai/gpt-6.1-sol");
     });
 
     it("skips a tier whose target provider the org disabled", async () => {

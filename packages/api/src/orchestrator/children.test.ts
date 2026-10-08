@@ -39,9 +39,10 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
-import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos } from "../schema/index.js";
+import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos, teams, teamMembers } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { SignalEdgeDeniedError } from "./signals.js";
+import { shareCredential } from "../services/credential-shares.js";
 import { eventsActionPlugin } from "../events/actions.js";
 
 let api: TestApi | undefined;
@@ -1722,6 +1723,40 @@ describe("resultBody", () => {
 // gets a truncated result has no other way to reach the rest, because
 // `thread_read` stays inside one session.
 describe("buildChildReader", () => {
+  it("reads a child of a private team thread only from that thread", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    const reader = buildChildReader(childrenDeps(api));
+    await db.execute(sql`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, parent_session_id, parent_thread_id, created_at, updated_at) VALUES
+      ('team-runtime', 'team', 'team-1', 'local-user', 'local-org', '/', 'interactive', 'running', NULL, NULL, 1, 1),
+      ('private-child', 'team', 'team-1', 'local-user', 'local-org', '/', 'child', 'running', 'team-runtime', 'thr-helper', 1, 1),
+      ('shared-child', 'team', 'team-1', 'local-user', 'local-org', '/', 'child', 'running', 'team-runtime', 'thr-shared', 1, 1)`);
+    await db.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at) VALUES
+      ('thr-helper', 'team-runtime', 'app-assistant:local-user', 'idle', 'steer', 1, 1),
+      ('thr-shared', 'team-runtime', 'web:default', 'idle', 'steer', 1, 1),
+      ('thr-slack', 'team-runtime', 'slack:CPUB:1.1', 'idle', 'steer', 1, 1)`);
+    for (const [child, parentThreadId] of [["private-child", "thr-helper"], ["shared-child", "thr-shared"]] as const) {
+      await db.insert(agentSessions).values({ id: child, userId: "local-user", orgId: "local-org", workspace: "/", ownerType: "team", ownerId: "team-1", createdAt: 1, updatedAt: 1 });
+      await db.insert(childWatches).values({ childSessionId: child, queueItemId: `q-${child}`, parentSessionId: "team-runtime", parentThreadId,
+        actorUserId: "local-user", orgId: "local-org", createdAt: 1 });
+    }
+    // The helper thread that started it reads it; a shared thread does not.
+    expect(await reader({ childSessionId: "private-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-helper" })).toEqual([]);
+    expect(await reader({ childSessionId: "private-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-shared" })).toBeNull();
+    // A child of a shared thread is readable from any of the team's own threads.
+    expect(await reader({ childSessionId: "shared-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-helper" })).toEqual([]);
+    // A Slack conversation has readers outside the team, so it reaches only
+    // what `thread_read` lets it read: not a team web thread's child.
+    expect(await reader({ childSessionId: "shared-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-slack" })).toBeNull();
+    // child_status and child_send apply the same rule.
+    const status = buildChildStatusReader(childrenDeps(api));
+    expect(await status({ childSessionId: "private-child" }, { parentSessionId: "team-runtime", readerThreadId: "thr-shared" })).toBeNull();
+    const deps = childrenDeps(api);
+    const sender = buildChildSender(deps, new ChildWatcher(deps));
+    expect(await sender({ childSessionId: "private-child", message: "redirect" },
+      { parentSessionId: "team-runtime", parentThreadId: "thr-shared", actorUserId: "local-user" })).toBeNull();
+  });
+
   it("returns the child's messages to the parent that spawned it", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
@@ -2148,12 +2183,13 @@ describe("parseTaskRepo", () => {
 // a send is the NEW submission's, never the superseded original's.
 describe("buildChildSender", () => {
   /** Hand-built child + watch row (watcher-test idiom): no LLM turn runs. */
-  async function seedChild(a: TestApi, opts: { childId: string; parentId: string; settled: boolean; queueItemId: string }) {
+  async function seedChild(a: TestApi, opts: { childId: string; parentId: string; settled: boolean; queueItemId: string; teamId?: string; credentialOwnerMode?: "owner" | "actor" }) {
     const { engineHost, engineStore, db } = a.providers;
     const parent = await engineHost.sessionFor(opts.parentId, {
       userId: "local-user",
       orgId: "local-org",
       workspace: "/tmp",
+      ...(opts.teamId ? { ownerType: "team", ownerTeamId: opts.teamId } : {}),
     });
     const parentThread = parent.thread("web:default");
     await parent.pause();
@@ -2163,7 +2199,8 @@ describe("buildChildSender", () => {
       parentThreadId: parentThread.id,
       actorUserId: "local-user",
       orgId: "local-org",
-      owner: { type: "user", id: "local-user" },
+      owner: opts.teamId ? { type: "team", id: opts.teamId } : { type: "user", id: "local-user" },
+      credentialOwnerMode: opts.credentialOwnerMode,
       workspace: "/tmp",
     });
     const childThread = child.thread("web:default");
@@ -2181,8 +2218,9 @@ describe("buildChildSender", () => {
       orgId: "local-org",
       workspace: "/tmp",
       status: "active",
-      ownerType: "user",
-      ownerId: "local-user",
+      ownerType: opts.teamId ? "team" : "user",
+      ownerId: opts.teamId ?? "local-user",
+      credentialOwnerMode: opts.credentialOwnerMode,
       createdAt: now,
       updatedAt: now,
     });
@@ -2209,6 +2247,30 @@ describe("buildChildSender", () => {
         (i.content as SignalContent).signalType === "child.settled",
     );
   }
+
+  it.each(["owner", "actor"] as const)("persists the steering teammate as actor in %s credential mode", async (credentialOwnerMode) => {
+    api = await bootTestApi();
+    const { db, engineStore, engineCredentials } = api.providers;
+    await db.insert(teams).values({ id: "steer-team", orgId: "local-org", name: "Steering", createdAt: 1 });
+    await db.insert(teamMembers).values([
+      { teamId: "steer-team", userId: "local-user", role: "member" },
+      { teamId: "steer-team", userId: "test-member", role: "member" },
+    ]);
+    await engineCredentials.save({ type: "user", id: "local-user" }, "linear", { type: "api_key", apiKey: "spawner-key" });
+    await shareCredential(db, { teamId: "steer-team", userId: "local-user", service: "linear", createdAt: 1 });
+    const { child, parentThread } = await seedChild(api, {
+      childId: "actor-child", parentId: "actor-parent", settled: false, queueItemId: "original-actor",
+      teamId: "steer-team", credentialOwnerMode,
+    });
+    const deps = childrenDeps(api);
+    const receipt = await buildChildSender(deps, new ChildWatcher(deps))(
+      { childSessionId: child.id, message: "Check Linear" },
+      { parentSessionId: "actor-parent", parentThreadId: parentThread.id, actorUserId: "test-member" },
+    );
+    const submission = (await engineStore.listUnsettledSubmissions(child.id)).find(item => item.id === receipt?.queueItemId);
+    expect(submission?.author).toEqual({ id: "test-member", name: "Valet" });
+    expect(await child.credentialProvider({ actorId: submission?.author?.id }).get("linear")).toBeNull();
+  });
 
   it("answers null for a session that is not this parent's child", async () => {
     api = await bootTestApi();

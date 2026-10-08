@@ -23,13 +23,4 @@ describe("qkUsage", () => {
     ]);
   });
 
-  it("sessions key includes window and useCase", () => {
-    expect(qkUsage.sessions("7d", "orchestrator")).toEqual([
-      "usage", "sessions", "7d", "orchestrator",
-    ]);
-  });
-
-  it("sessions key with no useCase omits it", () => {
-    expect(qkUsage.sessions("7d")).toEqual(["usage", "sessions", "7d", undefined]);
-  });
 });

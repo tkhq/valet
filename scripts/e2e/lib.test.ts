@@ -34,6 +34,18 @@ const ALL_TRUE: Probes = {
 };
 
 describe("STEPS", () => {
+  it("keeps excluded Docker files assigned to another row with no stronger prerequisites", () => {
+    const docker = STEPS.find((s) => s.id === "sandbox-docker")!;
+    const exclusions = docker.command.flatMap((arg, i) => arg === "--exclude" ? [docker.command[i + 1]] : []);
+    expect(exclusions.length).toBeGreaterThan(0);
+    for (const file of exclusions) {
+      const owners = STEPS.filter((s) => s.id !== docker.id && s.command.includes("@valet/sandbox-docker")
+        && s.command.includes(file) && !s.command.includes("--exclude"));
+      expect(owners, file).toHaveLength(1);
+      expect(owners[0].needs.every((need) => docker.needs.includes(need)), file).toBe(true);
+    }
+  });
+
   it("has the spec's 37 unique rows", () => {
     expect(STEPS).toHaveLength(37);
     expect(new Set(STEPS.map((s) => s.id)).size).toBe(37);

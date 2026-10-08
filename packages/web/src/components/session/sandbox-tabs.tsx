@@ -1,3 +1,5 @@
+import { Info } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "~/components/primitives/popover";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SandboxProfile } from "@valet/api/wire";
 import { useSandboxJwt } from "~/api/queries";
@@ -34,8 +36,7 @@ export interface SandboxTabsProps {
   activeTab: SandboxTabId;
   onTabChange: (tab: SandboxTabId) => void;
   sandbox?: { state: string; epoch: number };
-  onWatchBrowser?: () => void;
-  browserPreviewOpen?: boolean;
+  notice?: string;
 }
 
 export function SandboxTabs({
@@ -44,8 +45,7 @@ export function SandboxTabs({
   activeTab,
   onTabChange,
   sandbox,
-  onWatchBrowser,
-  browserPreviewOpen,
+  notice,
 }: SandboxTabsProps) {
   // Chat renders its body in a sibling. Keep this wrapper at the tab strip's
   // height so MessageList can use the remaining space.
@@ -54,7 +54,7 @@ export function SandboxTabs({
   return (
     <div className={cn("flex min-h-0 flex-col", showsPane ? "flex-1" : "shrink-0")}>
       <div className="flex shrink-0 items-center border-b border-line px-3 sm:px-4">
-        <div role="tablist" aria-label="Session view" className="flex min-w-0 items-center gap-1 overflow-x-auto">
+        <div role="tablist" aria-label="Thread view" className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
           {tabs.map((t) => (
             <button
               key={t.id}
@@ -73,18 +73,17 @@ export function SandboxTabs({
             </button>
           ))}
         </div>
-        {activeTab === "chat" && onWatchBrowser && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="ml-auto shrink-0 text-muted"
-            aria-label="Watch browser"
-            aria-pressed={browserPreviewOpen}
-            onClick={onWatchBrowser}
-          >
-            Watch browser
-          </Button>
-        )}
+        {notice && <>
+          <span role="status" title={notice} className="hidden lg:block max-w-[50%] truncate pl-3 text-xs text-muted">{notice}</span>
+          <Popover>
+            <PopoverTrigger asChild><button type="button" aria-label="Conversation sharing details"
+              className="ml-2 flex h-11 w-11 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash focus-visible:outline focus-visible:outline-moss lg:hidden">
+              <Info className="h-4 w-4" aria-hidden />
+            </button></PopoverTrigger>
+            <PopoverContent align="end" className="w-72 max-w-[calc(100vw-2rem)] text-sm">{notice}</PopoverContent>
+          </Popover>
+        </>}
+
       </div>
       {activeTab === "browser" && <BrowserPane key={sessionId} sessionId={sessionId} />}
       {(activeTab === "terminal" || activeTab === "vscode") && (

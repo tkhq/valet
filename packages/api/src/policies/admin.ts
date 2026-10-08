@@ -507,7 +507,7 @@ export async function upsertOverride(
   if (existing[0]) {
     const [updated] = await db
       .update(actionPolicyOverrides)
-      .set({ mode: input.mode, paramMatchers: input.paramMatchers ?? [], updatedAt: input.now })
+      .set({ mode: input.mode, paramMatchers: input.paramMatchers ?? [], legacyUnscoped: false, updatedAt: input.now })
       .where(eq(actionPolicyOverrides.id, existing[0].id))
       .returning();
     return { ok: true, row: updated };

@@ -1,9 +1,16 @@
+import { validatePresence } from "@valet/shared";
+import { isDeepStrictEqual } from "node:util";
 import { and, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
-import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResult } from "@valet/engine";
+import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResult, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { eventDropLog, orgMembers, type EventDropLogRow } from "../schema/index.js";
+import { eventDropLog, eventReceipts, eventSubscriptions, orgMembers, type EventDropLogRow } from "../schema/index.js";
+
+import { withAuthorizedTeamOwnership } from "../services/teams.js";
+import { validateSubscriptionWrite } from "./subscription-write.js";
+import { proposalId, proposalResult } from "./proposals.js";
+import { receiptWire, RECEIPT_RETENTION_DAYS } from "./receipts.js";
 
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
@@ -32,6 +39,13 @@ function timestampIsSafe(value: number | undefined): boolean {
   return value === undefined || (Number.isSafeInteger(value) && value >= MIN_TIMESTAMP && value <= MAX_TIMESTAMP);
 }
 
+/** A channel sender with no Valet account runs as the rule's creator, but is
+ * not that person: they may not manage or inspect the workspace's events. */
+const EXTERNAL_SENDER = {
+  success: false as const,
+  error: "Only a teammate with a linked Valet account can manage events. Ask them, or link your Slack account in Valet.",
+};
+
 function transcriptIsShared(ctx: PluginActionContext): boolean {
   // A missing owner cannot prove that the transcript is private. A channel
   // origin also makes this turn member-visible, even in a user-owned session.
@@ -52,7 +66,159 @@ function matchOutcome(reason: string): "excluded_by_filter" | null {
 /** Agent-facing counterpart of the Problems page. The drop log remains the
  * only store: it retains a small, redacted event identity for filter misses,
  * never the source payload. */
-export function eventsActionPlugin(db: AppDb): ActionPlugin {
+export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => ValetPlugin[]) = []): ActionPlugin {
+  async function withSubscriptionScope(
+    ctx: PluginActionContext,
+    operation: (tx: Parameters<Parameters<typeof withAuthorizedTeamOwnership>[2]>[0], scope: { orgId: string; ownerType: "user" | "team"; ownerId: string }) => Promise<PluginActionResult>,
+  ): Promise<PluginActionResult> {
+    if (ctx.externalSender) return EXTERNAL_SENDER;
+    const userId = ctx.actor?.id ?? ctx.userId;
+    if (!userId || !ctx.orgId || (ctx.owner && ctx.owner.type !== "user" && ctx.owner.type !== "team") ||
+        (ctx.owner?.type === "user" && ctx.owner.id !== userId)) {
+      return { success: false, error: "Open your personal or team assistant to manage its subscriptions." };
+    }
+    const [membership] = await db.select({ userId: orgMembers.userId }).from(orgMembers)
+      .where(and(eq(orgMembers.orgId, ctx.orgId), eq(orgMembers.userId, userId))).limit(1);
+    if (!membership) return { success: false, error: "Sign in as an organization member to manage subscriptions." };
+    const ownerType = ctx.owner?.type === "team" ? "team" as const : "user" as const;
+    const scope = { orgId: ctx.orgId, ownerType, ownerId: ownerType === "team" ? ctx.owner!.id : userId };
+    const result = ownerType === "team"
+      ? await withAuthorizedTeamOwnership(db, { teamId: scope.ownerId, orgId: scope.orgId, userId, principalTeamId: scope.ownerId, requireMembership: true }, (tx) => operation(tx, scope))
+      : await operation(db, scope);
+    return result ?? { success: false, error: "Team is no longer available. Open a team you belong to and retry." };
+  }
+
+  const listSubscriptions = action(Type.Object({
+    name: Type.Optional(Type.String({ description: "Exact subscription name." })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LIMIT })),
+    offset: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+  }))({
+    id: "events.list_subscriptions",
+    name: "List workspace event subscriptions",
+    description: "List event subscriptions owned by the current personal or team workspace, including IDs and configured presence. Uses exact name matching. Defaults to 25 records; use nextOffset for the next page.",
+    riskLevel: "low",
+    execute: async ({ name, limit, offset }, ctx) => withSubscriptionScope(ctx, async (tx, scope) => {
+      const pageLimit = limit ?? DEFAULT_LIMIT;
+      const pageOffset = offset ?? 0;
+      if (!Number.isSafeInteger(pageLimit) || pageLimit < 1 || pageLimit > MAX_LIMIT || !Number.isSafeInteger(pageOffset) || pageOffset < 0) {
+        return { success: false, error: "Use a limit from 1 to 100 and a nonnegative integer offset." };
+      }
+      const rows = await tx.select().from(eventSubscriptions).where(and(
+        eq(eventSubscriptions.orgId, scope.orgId), eq(eventSubscriptions.ownerType, scope.ownerType), eq(eventSubscriptions.ownerId, scope.ownerId),
+        name !== undefined ? eq(eventSubscriptions.name, name) : undefined,
+      )).orderBy(eventSubscriptions.id).limit(pageLimit + 1).offset(pageOffset);
+      return { success: true, data: { subscriptions: rows.slice(0, pageLimit), nextOffset: rows.length > pageLimit ? pageOffset + pageLimit : null } };
+    }),
+  });
+
+  const setSubscriptionPresence = action(Type.Object({
+    subscription_id: Type.String({ minLength: 1 }),
+    presence: Type.Union([Type.Object({ displayName: Type.Optional(Type.String()), avatarUrl: Type.Optional(Type.String()) }), Type.Null()]),
+  }))({
+    id: "events.set_subscription_presence",
+    name: "Set event subscription presence",
+    description: "Replace the channel display name and avatar for an existing subscription in the current personal or team workspace. Use null to clear the override. Does not enable the subscription or change its target, prompts, or matching rules.",
+    riskLevel: "low",
+    execute: async ({ subscription_id, presence }, ctx) => withSubscriptionScope(ctx, async (tx, scope) => {
+      if (presence !== null) {
+        const error = validatePresence(presence);
+        if (error) return { success: false, error };
+      }
+      const [row] = await tx.update(eventSubscriptions).set({
+        target: presence === null
+          ? sql`${eventSubscriptions.target} - 'presence'`
+          : sql`jsonb_set(${eventSubscriptions.target}, '{presence}', ${JSON.stringify(presence)}::jsonb, true)`,
+        updatedAt: sql`greatest(${eventSubscriptions.updatedAt} + 1, ${Date.now()})`,
+      }).where(and(eq(eventSubscriptions.id, subscription_id), eq(eventSubscriptions.orgId, scope.orgId),
+        eq(eventSubscriptions.ownerType, scope.ownerType), eq(eventSubscriptions.ownerId, scope.ownerId))).returning();
+      return row ? { success: true, data: { subscription: row } }
+        : { success: false, error: "Subscription not found in this workspace. Use events.list_subscriptions to select one." };
+    }),
+  });
+
+  const proposeSubscription = action(Type.Object({
+    proposal_key: Type.String({ minLength: 1, maxLength: 200, description: "Stable proposal key. Reuse on retries; use a new key for a different proposal." }),
+    name: Type.String({ minLength: 1 }),
+    event_keys: Type.Array(Type.String(), { minItems: 1 }),
+    filters: Type.Optional(Type.Array(Type.Object({
+      field: Type.String(), op: Type.Union([Type.Literal("eq"), Type.Literal("in"), Type.Literal("prefix"), Type.Literal("contains"), Type.Literal("regex")]),
+      value: Type.Unknown(),
+    }))),
+    any_channel: Type.Optional(Type.Boolean()),
+    follow: Type.Optional(Type.Boolean({ description: "For slack.app_mention only: also deliver later replies from the source thread. Defaults to true for a slack.app_mention rule." })),
+    delivery_policy: Type.Optional(Type.Union([
+      Type.Literal("always"), Type.Literal("ignoreIfMyTeamSubscribed"), Type.Literal("ignoreIfAnyTeamSubscribed"),
+    ], { description: "Personal target only: choose whether matching team subscriptions suppress delivery." })),
+    pause_on_overlap: Type.Optional(Type.Boolean({ description: "Personal target only: pause following when a team subscription covers the thread." })),
+    presence: Type.Optional(Type.Object({
+      displayName: Type.Optional(Type.String()),
+      avatarUrl: Type.Optional(Type.String()),
+    })),
+    user_prompt_template: Type.Optional(Type.String()),
+    system_prompt: Type.Optional(Type.String()),
+    audience: Type.Optional(Type.Union([Type.Literal("team"), Type.Literal("organization")])),
+  }))({
+    id: "events.propose_subscription",
+    name: "Propose assistant event subscription",
+    description: "Save a disabled event subscription for the current personal or team assistant. Pick event keys from workflows.list_event_types. Returns the stored configuration and an Events review link. The user must review and enable it. Repeated proposal keys do not change the existing record.",
+    riskLevel: "low",
+    execute: async (input, ctx) => {
+      if (ctx.externalSender) return EXTERNAL_SENDER;
+      const userId = ctx.actor?.id ?? ctx.userId;
+      if (!userId || !ctx.orgId || (ctx.owner && ctx.owner.type !== "user" && ctx.owner.type !== "team") ||
+          (ctx.owner?.type === "user" && ctx.owner.id !== userId)) {
+        return { success: false, error: "Open your personal or team assistant to propose a subscription." };
+      }
+      const [member] = await db.select().from(orgMembers).where(and(eq(orgMembers.orgId, ctx.orgId), eq(orgMembers.userId, userId))).limit(1);
+      if (!member) return { success: false, error: "Sign in as an organization member to propose a subscription." };
+      const ownerType = ctx.owner?.type === "team" ? "team" as const : "user" as const;
+      const ownerId = ownerType === "team" ? ctx.owner!.id : userId;
+      if (ownerType === "team" && (input.delivery_policy !== undefined || input.pause_on_overlap !== undefined)) {
+        return { success: false, error: "These delivery preferences apply only to personal subscriptions. Open your personal assistant or omit these fields." };
+      }
+      if (input.follow === true && (input.event_keys.length !== 1 || input.event_keys[0] !== "slack.app_mention")) {
+        return { success: false, error: "Follow is only available for slack.app_mention. Message subscriptions already deliver matching replies." };
+      }
+      // A mention rule follows its thread by default, as the setup wizard
+      // does: Valet answers follow-ups meant for it without a fresh mention.
+      const mentionOnly = input.event_keys.length === 1 && input.event_keys[0] === "slack.app_mention";
+      const follow = input.follow ?? (mentionOnly ? true : undefined);
+      const target = {
+        kind: "orchestrator" as const, orchestrator: ownerType,
+        ...(ownerType === "team" ? { teamId: ownerId } : {}),
+        ...(follow !== undefined ? { follow } : {}),
+        ...(input.delivery_policy !== undefined ? { deliveryPolicy: input.delivery_policy } : {}),
+        ...(input.pause_on_overlap !== undefined ? { pauseOnOverlap: input.pause_on_overlap } : {}),
+        ...(input.presence !== undefined ? { presence: input.presence } : {}),
+        ...(input.user_prompt_template !== undefined ? { userPromptTemplate: input.user_prompt_template } : {}),
+        ...(input.system_prompt !== undefined ? { systemPrompt: input.system_prompt } : {}),
+      };
+      const write = await validateSubscriptionWrite(db, typeof plugins === "function" ? plugins() : plugins, {
+        name: input.name, eventKeys: input.event_keys, filters: input.filters ?? [], target, audience: input.audience,
+      }, { creatorUserId: userId, ownerType, anyChannel: input.any_channel === true, matchChanged: true });
+      if (!write.ok) return { success: false, error: write.error };
+      const now = Date.now();
+      const values = {
+        id: proposalId("subscription", ctx.orgId, ownerType, ownerId, input.proposal_key),
+        orgId: ctx.orgId, ownerType, ownerId, name: input.name, eventKeys: input.event_keys,
+        filters: write.filters, target, audience: write.audience ?? null, enabled: false,
+        createdBy: userId, createdAt: now, updatedAt: now,
+      };
+      const insert = async (tx: Parameters<Parameters<typeof withAuthorizedTeamOwnership>[2]>[0]) => {
+        const rows = await tx.insert(eventSubscriptions).values(values).onConflictDoNothing().returning();
+        return rows[0] ?? (await tx.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, values.id)))[0];
+      };
+      const row = ownerType === "team"
+        ? await withAuthorizedTeamOwnership(db, { teamId: ownerId, orgId: ctx.orgId, userId, principalTeamId: ownerId, requireMembership: true }, insert)
+        : await insert(db);
+      if (!row) return { success: false, error: "Team is no longer available. Open an active team and retry." };
+      if (!isDeepStrictEqual(
+        [row.name, row.eventKeys, row.filters, row.target, row.audience, row.createdBy],
+        [values.name, values.eventKeys, values.filters, values.target, values.audience, values.createdBy],
+      )) return { success: false, error: "This proposal key already names a different subscription. Use a new proposal_key." };
+      return { success: true, data: proposalResult("subscription", row.id, row.enabled, row) };
+    },
+  });
   const listProblems = action(
     Type.Object({
       event_key: Type.Optional(Type.String({ description: "Normalized event key, such as slack.message." })),
@@ -71,6 +237,7 @@ export function eventsActionPlugin(db: AppDb): ActionPlugin {
       "Returns the received time, normalized key, raw event metadata, match outcome, and reason. Results are newest first.",
     riskLevel: "low",
     execute: async ({ event_key, channel, text, bot_id, since, until, limit }, ctx) => {
+      if (ctx.externalSender) return EXTERNAL_SENDER;
       const userId = ctx.actor?.id ?? ctx.userId;
       if (!userId || !ctx.orgId) return { success: false, error: "No authenticated organization member is available for this event query." };
       if (!timestampIsSafe(since) || !timestampIsSafe(until)) {
@@ -87,7 +254,7 @@ export function eventsActionPlugin(db: AppDb): ActionPlugin {
         return { success: false, error: "Text and bot ID filters require an organization admin in a private session that did not originate from a channel." };
       }
       const conditions = [eq(eventDropLog.orgId, ctx.orgId)];
-      if (!canReadAdminMetadata) conditions.push(ne(eventDropLog.reason, "slack_interaction_unmatched"));
+      if (!canReadAdminMetadata) conditions.push(ne(eventDropLog.reason, "slack_interaction_unmatched"), ne(eventDropLog.reason, "slack_classifier_rejected"));
       if (event_key !== undefined) conditions.push(eq(eventDropLog.eventKey, event_key));
       if (since !== undefined) conditions.push(gte(eventDropLog.createdAt, since));
       if (until !== undefined) conditions.push(lte(eventDropLog.createdAt, until));
@@ -119,5 +286,41 @@ export function eventsActionPlugin(db: AppDb): ActionPlugin {
       };
     },
   });
-  return { service: "events", description: "Inspect received event problems without changing event records.", actions: [listProblems] };
+  const listLogs = action(Type.Object({
+    receipt_id: Type.Optional(Type.String({ description: "Exact receipt reference from Event Logs." })),
+    event_key: Type.Optional(Type.String({ description: "Normalized event key, for example slack.message." })),
+    channel: Type.Optional(Type.String({ description: "Provider channel ID." })),
+    since: Type.Optional(Type.Integer({ minimum: MIN_TIMESTAMP, maximum: MAX_TIMESTAMP })),
+    until: Type.Optional(Type.Integer({ minimum: MIN_TIMESTAMP, maximum: MAX_TIMESTAMP })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LIMIT })),
+  }))({
+    id: "events.list_event_logs",
+    name: "Inspect event processing logs",
+    description: "Read incoming event metadata, classification stages, subscription decisions, and linked event IDs. " +
+      "Use events.list_problems for failures before receipt creation. Use workflows.get_run and workflows.get_node_result for workflow execution failures. " +
+      "Receipts are retained for up to 7 days; an absent receipt does not prove the provider sent an event. Requires an organization admin in a private, non-channel session.",
+    riskLevel: "low",
+    execute: async ({ receipt_id, event_key, channel, since, until, limit }, ctx) => {
+      if (ctx.externalSender) return EXTERNAL_SENDER;
+      const userId = ctx.actor?.id ?? ctx.userId;
+      if (!userId || !ctx.orgId || transcriptIsShared(ctx)) return { success: false, error: "Event receipt logs require an organization admin in a private, non-channel session." };
+      const [membership] = await db.select({ role: orgMembers.role }).from(orgMembers)
+        .where(and(eq(orgMembers.orgId, ctx.orgId), eq(orgMembers.userId, userId))).limit(1);
+      if (membership?.role !== "admin") return { success: false, error: "Organization admin required." };
+      if (!timestampIsSafe(since) || !timestampIsSafe(until) || (since !== undefined && until !== undefined && since > until)) {
+        return { success: false, error: "Use safe epoch-millisecond timestamps with since earlier than or equal to until." };
+      }
+      const conditions = [eq(eventReceipts.orgId, ctx.orgId), gte(eventReceipts.createdAt, Date.now() - RECEIPT_RETENTION_DAYS * 86400000)];
+      if (receipt_id !== undefined) conditions.push(eq(eventReceipts.id, receipt_id));
+      if (event_key !== undefined) conditions.push(eq(eventReceipts.eventKey, event_key));
+      if (channel !== undefined) conditions.push(sql`${eventReceipts.metadata}->>'channelId' = ${channel}`);
+      if (since !== undefined) conditions.push(gte(eventReceipts.createdAt, since));
+      if (until !== undefined) conditions.push(lte(eventReceipts.createdAt, until));
+      const pageLimit = Math.min(MAX_LIMIT, Math.max(1, Math.trunc(limit ?? DEFAULT_LIMIT)));
+      const rows = await db.select().from(eventReceipts).where(and(...conditions))
+        .orderBy(desc(eventReceipts.createdAt), desc(eventReceipts.id)).limit(pageLimit + 1);
+      return { success: true, data: { receipts: rows.slice(0, pageLimit).map(receiptWire), hasMore: rows.length > pageLimit, retentionDays: RECEIPT_RETENTION_DAYS } };
+    },
+  });
+  return { service: "events", description: "Diagnose event delivery, propose disabled subscriptions, and configure presence on existing workspace subscriptions.", actions: [listProblems, listLogs, proposeSubscription, listSubscriptions, setSubscriptionPresence] };
 }

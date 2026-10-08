@@ -400,3 +400,5 @@ place). Run `make dev-clean` and restart the stack.
    only for tool-node (policy gate) resolutions. Approval-node resolutions use
    the signal as the authorization for that one invocation; no grant row is
    written.
+
+The notification decision inbox scans at most 100 pending gates per page. An indexed creation-time/ID cursor advances past hidden gates. Cursors are encrypted and bound to the caller and organization. Authorization and private-thread checks still apply. The bell offers Next approvals and First approvals; a plus sign marks a partial count.

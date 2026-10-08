@@ -1,3 +1,4 @@
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Unit tests for `buildActionInvoker` (plugin-system-v2 plan Task 6) — the
  * headless dispatch primitive behind the workflow `tool` node's
@@ -25,7 +26,9 @@ import { InMemorySessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs, teams, workflowDefinitions } from "../schema/index.js";
+import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { shareCredential } from "../services/credential-shares.js";
+import { shareGeneration, writeBorrowGrant } from "../services/credential-borrow.js";
 import { grantPolicyKey } from "../policies/resolution.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { linkIdentity } from "../channels/identity-links.js";
@@ -35,7 +38,7 @@ import type { OnePasswordCtx, OnePasswordService } from "../services/onepassword
 import { buildActionInvoker, type ActionInvocationContext } from "./action-invoker.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { InMemoryWorkflowStore } from "@valet/workflow";
-import { createAssistant } from "../assistants/service.js";
+
 import { slackPlugin } from "@valet/plugin-slack/actions";
 
 /** Fake `OnePasswordService` — only `resolveCredential` is exercised by the invoker's credential providers. */
@@ -142,6 +145,21 @@ describe("buildActionInvoker", () => {
 
     expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: false } });
     expect(fixture.calls()).toBe(1);
+  });
+
+  it("merges invocation presence over the workspace identity without changing later invocations", async () => {
+    const db = await makeDb();
+    await db.insert(orgs).values({ id: "org1", name: "Workspace", createdAt: 1 });
+    const fixture = countingAction({ execute: async (_args, ctx) => ({ success: true, data: await ctx.resolveOutboundSender?.() }) });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] }) });
+    const owner: ActionInvocationContext = { userId: "u1", orgId: "org1", owner: { type: "org", id: "org1" } };
+    const request = { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "presence" };
+    expect(await invoke(request, { ...owner, presence: { avatarUrl: "https://example.com/run.png" } }))
+      .toEqual({ ok: true, result: { displayName: "Workspace", avatarUrl: "https://example.com/run.png" } });
+    expect(await invoke({ ...request, invocationId: "presence-name" }, { ...owner, presence: { displayName: "Automation" } }))
+      .toEqual({ ok: true, result: { displayName: "Automation" } });
+    expect(await invoke({ ...request, invocationId: "presence-unset" }, owner))
+      .toEqual({ ok: true, result: { displayName: "Workspace" } });
   });
 
   it("a workflow tool action can extract a document, the same as a session action", async () => {
@@ -544,13 +562,90 @@ describe("buildActionInvoker", () => {
     }
   });
 
-  it("workflow slack.send_message posts as the owner's configured assistant", async () => {
+  it.each([
+    { userId: "u1", senderName: undefined, expectedName: "Hestia" },
+    { userId: "team:t1", senderName: undefined, expectedName: "Hestia" },
+    { userId: "team:t1", senderName: "Hestia · People", expectedName: "Hestia · People" },
+  ])("team workflow DM uses $expectedName when actor is $userId", async ({ userId, senderName, expectedName }) => {
     const db = await makeDb();
-    const assistant = await createAssistant(db, "org1", { type: "user", id: "u1" }, "Release bot");
-    await db
-      .update(assistants)
-      .set({ avatarUrl: "https://cdn.example.com/release-bot.png" })
-      .where(eq(assistants.id, assistant.id));
+    await db.insert(orgs).values({ id: "org1", name: "Organization", createdAt: 1 });
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Hestia", createdAt: 1 });
+    await linkIdentity(db, { provider: "slack", externalId: "UMEMBER", userId: "u1" });
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
+    const plugin: ValetPlugin = {
+      name: "slack", version: "0.0.1", actions: [slackPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]) });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, channel: { id: "DRECIPIENT" } })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, ts: "1.2", channel: "DRECIPIENT" })));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await invoke(
+        { service: "slack", action: "dm_user", params: { user: "URECIPIENT", text: "Hello", ...(senderName ? { sender_name: senderName, sender_avatar_url: "https://example.com/hestia.png" } : {}) }, invocationId: "team-explicit-dm" },
+        { userId, orgId: "org1", owner: { type: "team", id: "t1" } },
+      );
+      expect(result).toEqual({ ok: true, result: { ts: "1.2", channel: "DRECIPIENT" } });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[0][0]).toContain("conversations.open");
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ users: "URECIPIENT" });
+      expect(fetchMock.mock.calls[1][0]).toContain("chat.postMessage");
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({ channel: "DRECIPIENT", text: "Hello", username: expectedName });
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body).icon_url).toBe(senderName ? "https://example.com/hestia.png" : undefined);
+      for (const [, init] of fetchMock.mock.calls) {
+        expect(init.headers).toMatchObject({ Authorization: "Bearer org-bot" });
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each((["team", "org"] as const).flatMap((ownerType) =>
+    (["read_history", "read_thread"] as const).flatMap((action) => [
+      { channel: "CPUBLIC", isPrivate: false, isIm: false, isMpim: false, allowed: true },
+      { channel: "DDIRECT", isPrivate: true, isIm: true, isMpim: false, allowed: false },
+      { channel: "GMPIM", isPrivate: true, isIm: false, isMpim: true, allowed: false },
+      { channel: "CPRIVATE", isPrivate: true, isIm: false, isMpim: false, allowed: true },
+      { channel: "CUNJOINED", isPrivate: true, isIm: false, isMpim: false, allowed: false },
+    ].map((conversation) => ({ ...conversation, ownerType, action }))
+  )))("$ownerType workflow $action enforces access for $channel without a personal identity", async ({ channel, isPrivate, isIm, isMpim, allowed, ownerType, action }) => {
+    const db = await makeDb();
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
+    const plugin: ValetPlugin = {
+      name: "slack", version: "0.0.1", actions: [slackPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: new Map([["slack", { plugin, actionPlugin: slackPlugin }]]) });
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, channel: { id: channel, is_private: isPrivate, is_im: isIm, is_mpim: isMpim, is_member: channel === "CPRIVATE" } })));
+    if (allowed) fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, messages: [{ text: "Visible message", ts: "1.2" }], has_more: false })));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await invoke(
+        { service: "slack", action, params: { channel, ...(action === "read_thread" ? { thread_ts: "1.2" } : {}) }, invocationId: `${ownerType}-${action}-${channel}` },
+        { userId: "team:t1", orgId: "org1", owner: { type: ownerType, id: ownerType === "org" ? "org1" : "t1" } },
+      );
+      if (allowed) {
+        expect(result).toMatchObject({ ok: true, result: { channel, messages: [{ text: "Visible message", ts: "1.2" }] } });
+        expect(fetchMock.mock.calls[1][0]).toContain(action === "read_thread" ? "conversations.replies" : "conversations.history");
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      } else {
+        expect(result).toEqual({ ok: false, error: isIm || isMpim
+          ? "Shared runs cannot read direct messages. Use a personal run owned by a linked conversation member."
+          : "Valet is not a verified member of this private channel. Invite Valet to the channel, then retry." });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("workflow slack.send_message uses org credentials and the bot identity for a personal owner", async () => {
+    const db = await makeDb();
+    const assistant = await seedWorkspaceAssistant(db, "org1", { type: "user", id: "u1" });
+
 
     const store = new FakeCredentialStore();
     store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
@@ -580,9 +675,10 @@ describe("buildActionInvoker", () => {
       expect(JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string)).toMatchObject({
         channel: "C1",
         text: "Deploy complete",
-        username: "Release bot",
-        icon_url: "https://cdn.example.com/release-bot.png",
       });
+      const sent = JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string) as Record<string, unknown>;
+      expect(sent.username).toBeUndefined();
+      expect(sent.icon_url).toBeUndefined();
     } finally {
       vi.unstubAllGlobals();
     }
@@ -674,19 +770,14 @@ describe("buildActionInvoker", () => {
     expect(fixture.calls()).toBe(1);
   });
 
-  it("team-owned run: a broken delegated reference returns the typed error", async () => {
-    const { TeamCredentialStore, CredentialReferenceBrokenError } = await import(
-      "./team-credential-store.js"
-    );
-    const inner = new FakeCredentialStore();
-    inner.seed({ type: "team", id: "t1" }, "demo", {
-      type: "oauth2",
-      metadata: { delegatedFrom: "u1" },
-    });
-    const store = new TeamCredentialStore(inner, { isMember: async () => true });
+  it("team-owned run: a share whose account is gone returns the typed error", async () => {
+    const { CredentialReferenceBrokenError } = await import("./team-credential-store.js");
+    const db = await makeDb();
+    await db.insert(teamMembers).values({ teamId: "t1", userId: "u1", role: "member" });
+    await shareCredential(db, { teamId: "t1", service: "demo", userId: "u1", createdAt: 1 });
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService });
 
     const result = await invoke(
       { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-broken" },
@@ -694,12 +785,60 @@ describe("buildActionInvoker", () => {
     );
 
     expect(result.ok).toBe(false);
-    expect(result.ok === false && "error" in result ? result.error : "").toMatch(
-      /Reconnect demo|share it with the team again/,
-    );
+    expect(result.ok === false && "error" in result ? result.error : "").toMatch(/should reconnect demo/);
     expect(result.ok === false && "error" in result ? result.error : "").toBe(
       new CredentialReferenceBrokenError("demo").message,
     );
+  });
+
+  it("team-owned run: asks the member whose shared account a step would use, then uses it once they allow it", async () => {
+    const db = await makeDb();
+    // A borrow needs the actor to be a current member of a team in the run's organization.
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });
+    await db.insert(teamMembers).values([{ teamId: "t1", userId: "bea", role: "member" }, { teamId: "t1", userId: "al", role: "member" }]);
+    await shareCredential(db, { teamId: "t1", service: "demo", userId: "bea", createdAt: 1 });
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "bea" }, "demo", { type: "api_key", apiKey: "bea-key" });
+    const fixture = countingAction();
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] }) });
+    const ctx = { userId: "al", orgId: "org1", owner: { type: "team" as const, id: "t1" }, workflowExecutionId: "run1" };
+    const req = { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:run1:step" };
+
+    expect(await invoke(req, ctx)).toMatchObject({ ok: false, requiresApproval: true, provenance: "shared_account", approver: { userId: "bea" } });
+    expect(fixture.calls()).toBe(0);
+
+    await writeBorrowGrant(db, "org1", { teamId: "t1", shareGeneration: (await shareGeneration(db, "t1", "demo", "bea"))!, sessionId: "wf:run1", service: "demo", memberId: "bea" });
+    expect((await invoke({ ...req, invocationId: "workflow:run1:step:again" }, ctx)).ok).toBe(true);
+    expect(fixture.calls()).toBe(1);
+    const outsider = await invoke({ ...req, invocationId: "workflow:run1:outsider" }, { ...ctx, userId: "outsider" });
+    expect(outsider.ok).toBe(false);
+    expect(fixture.calls()).toBe(1);
+  });
+
+  it("does not borrow a second service's member account during dynamic discovery", async () => {
+    const db = await makeDb();
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });
+    await db.insert(teamMembers).values([{ teamId: "t1", userId: "bea", role: "member" }, { teamId: "t1", userId: "al", role: "member" }]);
+    await shareCredential(db, { teamId: "t1", service: "linear", userId: "bea", createdAt: 1 });
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "bea" }, "linear", { type: "api_key", apiKey: "bea-key" });
+    const discovered = vi.fn();
+    const fixture = countingAction({ id: "demo.dyn" });
+    const plugin: ActionPlugin = {
+      service: "demo", actions: [],
+      resolveActions: async ({ credentials }) => {
+        discovered(await credentials.get("linear"));
+        return [fixture.action];
+      },
+    };
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: actionPluginByServiceOf("demo", plugin) });
+    const ctx = { userId: "al", orgId: "org1", owner: { type: "team" as const, id: "t1" }, workflowExecutionId: "discovery-run" };
+    const request = { service: "demo", action: "dyn", params: { msg: "hello" }, invocationId: "workflow:discovery-run:step" };
+    await invoke(request, ctx);
+    expect(discovered).toHaveBeenLastCalledWith(null);
+    await writeBorrowGrant(db, "org1", { teamId: "t1", shareGeneration: (await shareGeneration(db, "t1", "linear", "bea"))!, sessionId: "wf:discovery-run", service: "linear", memberId: "bea" });
+    await invoke({ ...request, invocationId: "workflow:discovery-run:approved" }, ctx);
+    expect(discovered).toHaveBeenLastCalledWith(expect.objectContaining({ accessToken: "bea-key" }));
   });
 
   // Discovery reads the credential before any try/catch the invoker has. A
@@ -1187,7 +1326,7 @@ describe("buildActionInvoker", () => {
 
       expect(result).toEqual({
         ok: false,
-        error: "Owner has not linked their Slack identity. Ask them to link it in Settings > Integrations > Slack.",
+        error: "This run has no personal Slack recipient. Use slack.dm_user with the intended recipient’s Slack user ID.",
       });
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {
@@ -1491,14 +1630,14 @@ describe("buildActionInvoker: github service resolution", () => {
     expect(result).toEqual({ ok: true, result: { token: "team-tok" } });
   });
 
-  // A delegated row follows to the member's live github row. When that row
-  // is one the member's own runs would refuse (identity-only scopes here),
-  // the team run must not act on it either: it falls to the App path the
-  // same way a team with no row does.
-  it("team-owned: an unhealthy delegated github row falls through to the installation token", async () => {
+  // A share follows to the member's live github row. When that row is one
+  // the member's own runs would refuse (identity-only scopes here), the team
+  // run must not act on it either: it falls to the App path the same way a
+  // team with no row does.
+  it("team-owned: an unhealthy shared github row falls through to the installation token", async () => {
     const { TeamCredentialStore } = await import("./team-credential-store.js");
     const { appDb, credentials: inner } = await harness();
-    const credentials = new TeamCredentialStore(inner, { isMember: async () => true });
+    const credentials = new TeamCredentialStore(inner);
     await saveAppConfig({ credentials }, orgId, appConfig);
     await appDb.insert(githubInstallations).values({
       id: "ghi_team_2",
@@ -1518,10 +1657,8 @@ describe("buildActionInvoker: github service resolution", () => {
       accessToken: "identity-tok",
       metadata: { login: "octocat", identityOnly: true },
     });
-    await credentials.save({ type: "team", id: "gh-team" }, "github", {
-      type: "oauth2",
-      metadata: { delegatedFrom: userId, sourceType: "oauth2" },
-    });
+    await appDb.insert(teamMembers).values({ teamId: "gh-team", userId, role: "member" });
+    await shareCredential(appDb, { teamId: "gh-team", service: "github", userId, createdAt: 1 });
     fixture = startGithubFixture({
       createInstallationToken: (id) => ({
         body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },

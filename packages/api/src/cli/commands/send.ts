@@ -17,7 +17,7 @@ import { streamSession, type StreamSessionOpts } from "../stream.js";
 import type { CliContext } from "../types.js";
 import type {
   DecisionGate,
-  EnsureOrchestratorResponse,
+  EnsureWorkspaceRuntimeResponse,
   SendPromptRequest,
   SendPromptResponse,
   WireEvent,
@@ -25,7 +25,8 @@ import type {
 
 /** The subset of `InstanceClient` the `send` command needs. */
 export interface SendClient {
-  ensureOrchestrator(): Promise<EnsureOrchestratorResponse>;
+  getThread(id: string): Promise<{ sessionId: string }>;
+  ensureOrchestrator(): Promise<EnsureWorkspaceRuntimeResponse>;
   sendPrompt(id: string, body: SendPromptRequest): Promise<SendPromptResponse>;
 }
 
@@ -76,7 +77,7 @@ export function renderGate(gate: DecisionGate): string {
   const lines = [`decision required: ${gate.title} [${gate.type}]`];
   if (gate.body) lines.push(gate.body);
   for (const a of gate.actions) lines.push(`  - ${a.id}: ${a.label}`);
-  lines.push(`resolve with: valet gates resolve ${gate.id} <actionId>`);
+  lines.push(`resolve with: valet gates resolve ${gate.id} <actionId> --thread ${gate.threadId}`);
   return lines.join("\n");
 }
 
@@ -190,6 +191,10 @@ export async function consumeSend(deps: Omit<SendDeps, "client">, ctx: ConsumeCt
 
 /** Pure entry: resolve target + prompt, send, then follow the turn. */
 export async function runSend(deps: SendDeps, flags: ParsedFlags): Promise<number> {
+  if (flags.flags.thread === true || flags.flags.session === true || flags.flags.thread === "" || flags.flags.session === "") {
+    printErr("Provide an id after --thread or --session.");
+    return ExitCode.Usage;
+  }
   const text = resolvePromptText(flags);
   if (text === undefined) {
     printErr("valet send: a prompt is required (positional text or --text <t>)");
@@ -197,9 +202,13 @@ export async function runSend(deps: SendDeps, flags: ParsedFlags): Promise<numbe
   }
 
   const sessionOverride = flags.flags.session;
-  const sessionId =
-    typeof sessionOverride === "string" ? sessionOverride : (await deps.client.ensureOrchestrator()).sessionId;
   const threadOverride = typeof flags.flags.thread === "string" ? flags.flags.thread : undefined;
+  const resolved = threadOverride ? await deps.client.getThread(threadOverride) : undefined;
+  if (resolved && typeof sessionOverride === "string" && sessionOverride !== resolved.sessionId) {
+    printErr("The thread does not belong to the specified runtime. Use its runtime or omit --session.");
+    return ExitCode.Usage;
+  }
+  const sessionId = resolved?.sessionId ?? (typeof sessionOverride === "string" ? sessionOverride : (await deps.client.ensureOrchestrator()).sessionId);
 
   const sent = await deps.client.sendPrompt(sessionId, { text, threadId: threadOverride });
   // A null messageId means the text ran as a slash command: it executed

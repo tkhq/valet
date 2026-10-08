@@ -54,7 +54,7 @@ function makeVerify(eventTypes: readonly string[], botMessages = false): Trigger
     const headers: Record<string, string> = {};
     for (const [key, value] of Object.entries(req.headers)) headers[key.toLowerCase()] = value;
     const bodyText = new TextDecoder().decode(req.rawBody);
-    if (!(await verifySlackSignature(headers, bodyText, secret))) return null;
+    if (!(await verifySlackSignature(headers, bodyText, secret, secrets.verifiedReceivedAt === undefined ? undefined : Number(secrets.verifiedReceivedAt)))) return null;
     let body: Record<string, unknown> | undefined;
     try { body = rec(JSON.parse(bodyText)); } catch { return null; }
     if (!body || body.type !== "event_callback") return null;
@@ -221,6 +221,7 @@ const triggerSpecs: TriggerSpec[] = [
             options: { source: "slack.channels" },
           },
           { field: "channel_type", path: "channel_type", description: "Conversation type (channel, group, im, mpim)" },
+          { field: "thread_ts", path: "thread_ts", description: "Parent message timestamp, to match replies in one thread" },
           {
             field: "user",
             path: "user",

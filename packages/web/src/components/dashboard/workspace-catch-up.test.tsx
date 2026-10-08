@@ -1,0 +1,166 @@
+// @vitest-environment jsdom
+import { beforeEach, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactNode } from "react";
+import type { WorkspaceBriefing } from "@valet/api/wire";
+import { api, type OwnerFilter } from "~/api/client";
+import { WorkspaceCatchUp } from "./workspace-catch-up";
+let owner: OwnerFilter | undefined;
+vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => owner }));
+vi.mock("~/api/settings", () => ({ useMe: () => ({ error: null }) }));
+vi.mock("@tanstack/react-router", () => ({ Link: ({ children, to, params, search }: { children: ReactNode; to: string; params?: Record<string, string>; search?: { thread?: string } }) => <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to) + (search?.thread ? `?thread=${search.thread}` : "")}>{children}</a> }));
+vi.mock("~/api/client", () => ({ api: { getWorkspaceBriefings: vi.fn(), dismissWorkspaceBriefing: vi.fn() } }));
+vi.mock("./workspace-activity", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./workspace-activity")>(),
+  WorkspaceActivity: () => <div>Detailed activity</div>,
+}));
+const briefing: WorkspaceBriefing = {
+  id: "goal-routing", title: "Make event routing reliable",
+  summary: "The routing change and replay checks are ready. The PR and report cover the implementation; rollout awaits your review.",
+  nextAction: "Review the rollout thread before release.",
+  status: "needs_attention", updatedAt: 100,
+  latestThread: { sessionId: "runtime", threadId: "rollout-review", title: "Review routing rollout" },
+  sources: [
+    { id: "planning", kind: "thread", title: "Routing design", updatedAt: 10, sessionId: "runtime", threadId: "design" },
+    { id: "pr", kind: "pull_request", title: "TKAI-42 routing PR", updatedAt: 50, url: "https://github.com/acme/app/pull/42", runId: "run-implementation" },
+    { id: "report", kind: "artifact", title: "Replay report", updatedAt: 60, token: "replay-report" },
+    { id: "verification", kind: "workflow", title: "Replay verification", updatedAt: 70, runId: "run-verification" },
+  ],
+};
+beforeEach(() => {
+  vi.clearAllMocks(); owner = { ownerType: "user", ownerId: "u" };
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [briefing], generatedAt: 100, coverage: "recent" });
+});
+function setup() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(<QueryClientProvider client={client}><WorkspaceCatchUp /></QueryClientProvider>);
+  return { client, ...view };
+}
+it("links a brief back to the Slack thread that started it, and only over http(s)", async () => {
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [
+    { ...briefing, originUrl: "https://slack.com/archives/C1/p1700000000000100" },
+    { ...briefing, id: "brief:unsafe", title: "Unsafe origin", originUrl: "javascript:alert(1)" },
+  ], generatedAt: 100, coverage: "recent" });
+  setup();
+  const article = await screen.findByRole("article", { name: briefing.title });
+  expect(within(article).getByRole("link", { name: "Open in Slack" }).getAttribute("href")).toBe("https://slack.com/archives/C1/p1700000000000100");
+  const unsafe = await screen.findByRole("article", { name: "Unsafe origin" });
+  expect(within(unsafe).queryByRole("link", { name: "Open in Slack" })).toBeNull();
+});
+it("dismisses a brief with its threads and reports what stayed open", async () => {
+  vi.mocked(api.dismissWorkspaceBriefing).mockResolvedValue({ dismissed: true, archived: 1, keptWaiting: 1 });
+  setup();
+  fireEvent.click(await screen.findByRole("button", { name: `Dismiss ${briefing.title}` }));
+  // The server archives the threads its own copy of the brief names.
+  await waitFor(() => expect(api.dismissWorkspaceBriefing).toHaveBeenCalledWith(owner, briefing.id));
+  expect(await screen.findByRole("status")).toHaveProperty("textContent",
+    `Dismissed "${briefing.title}". Archived 1 thread. 1 waiting on an approval stays open.`);
+});
+it("briefs one goal across conversations and runs with one concise summary", async () => {
+  setup();
+  const article = await screen.findByRole("article", { name: briefing.title });
+  expect(screen.getAllByRole("article")).toHaveLength(1);
+  expect(within(article).getByText(briefing.summary)).toBeTruthy();
+  expect(within(article).queryByText("Next step")).toBeNull();
+  expect(within(article).getByRole("link", { name: "Open thread" }).getAttribute("href")).toBe("/threads/rollout-review");
+  expect(within(article).getByRole("link", { name: "Routing design" }).getAttribute("href")).toBe("/threads/design");
+  expect(within(article).getByRole("link", { name: "TKAI-42 routing PR" }).getAttribute("href")).toBe("https://github.com/acme/app/pull/42");
+  expect(within(article).getByRole("link", { name: "Replay report" }).getAttribute("href")).toBe("/a/replay-report");
+  expect(within(article).getByRole("list", { name: "Sources" }).querySelector("a")?.textContent).toBe("TKAI-42 routing PR");
+  expect(screen.getByText("Detailed activity")).toBeTruthy();
+  expect(screen.queryByText("Activity details")).toBeNull();
+  expect(within(article).getByText("Review the rollout thread before release.")).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Replay verification" }).closest("details")?.open).toBe(false);
+  fireEvent.click(screen.getByText("Details · 4 sources"));
+  expect(screen.getByRole("link", { name: "Replay verification" }).closest("details")?.open).toBe(true);
+  expect(screen.getByRole("link", { name: "Replay verification" }).getAttribute("href")).toBe("/workflows/runs/run-verification");
+});
+it("links the run, not an invented conversation, when only workflow evidence exists", async () => {
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [{ ...briefing, latestThread: null, status: "updated", sources: [{ id: "run", kind: "workflow", title: "Verification run", updatedAt: 1, runId: "run" }, { id: "unknown", kind: "message", title: "Imported note", updatedAt: 1, url: "javascript:alert(1)" }] }], generatedAt: 100, coverage: "recent" });
+  setup();
+  expect(await screen.findByRole("link", { name: "Open run" })).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/workflows/runs/run");
+  expect(screen.queryByText("No linked conversation")).toBeNull();
+  expect(screen.queryByRole("link", { name: "Open thread" })).toBeNull();
+  expect(screen.getByRole("link", { name: "Verification run" }).getAttribute("href")).toBe("/workflows/runs/run");
+  expect(screen.queryByRole("link", { name: "Imported note" })).toBeNull();
+  expect(screen.getByText("Imported note")).toBeTruthy();
+  expect(screen.queryByText("Next step")).toBeNull();
+  expect(screen.queryByText("Completed")).toBeNull();
+});
+it("never pairs a needs-attention badge with nothing to do", async () => {
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [{ ...briefing, nextAction: undefined }], generatedAt: 100, coverage: "recent" });
+  setup();
+  expect(await screen.findByText("Review the linked sources for details.")).toBeTruthy();
+  expect(screen.queryByText("Nothing waits on you.")).toBeNull();
+});
+it("prepares without an unscoped request while identity is unresolved", () => {
+  owner = undefined;
+  setup();
+  expect(screen.getByText("Preparing your briefing…")).toBeTruthy();
+  expect(api.getWorkspaceBriefings).not.toHaveBeenCalled();
+});
+it("hides cached briefs on refresh failure and retries explicitly", async () => {
+  const { client } = setup();
+  expect(await screen.findByText(briefing.summary)).toBeTruthy();
+  vi.mocked(api.getWorkspaceBriefings).mockRejectedValue(new Error("denied"));
+  await act(async () => { await client.refetchQueries({ queryKey: ["workspace-briefings"] }); });
+  expect(await screen.findByText("Could not prepare your briefing.")).toBeTruthy();
+  expect(screen.queryByText(briefing.summary)).toBeNull();
+  expect(screen.queryByRole("link", { name: "Open thread" })).toBeNull();
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [briefing], generatedAt: 100, coverage: "recent" });
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findByText(briefing.summary)).toBeTruthy();
+});
+it("hides personal context immediately when switching to a team", async () => {
+  const { client, rerender } = setup();
+  expect(await screen.findByText(briefing.summary)).toBeTruthy();
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [{ ...briefing, id: "team-goal", title: "Team goal", summary: "Team conclusion" }], generatedAt: 100, coverage: "recent" });
+  owner = { ownerType: "team", ownerId: "team" };
+  rerender(<QueryClientProvider client={client}><WorkspaceCatchUp /></QueryClientProvider>);
+  expect(screen.queryByText(briefing.summary)).toBeNull();
+  expect(await screen.findByText("Team conclusion")).toBeTruthy();
+  expect(api.getWorkspaceBriefings).toHaveBeenCalledWith(owner);
+});
+it("shows a retry state when generation is unavailable without inventing context", async () => {
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [], generatedAt: null, coverage: "recent", unavailable: true });
+  setup();
+  expect(await screen.findByRole("heading", { name: "Could not prepare your briefing" })).toBeTruthy();
+  expect(screen.getByRole("alert").textContent).toContain("Select Retry to prepare it again.");
+  expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  expect(screen.getByText("One outcome from recent conversations and workflow runs.")).toBeTruthy();
+  expect(screen.queryByRole("article")).toBeNull();
+});
+
+it("shows an honest briefing when no source links are available", async () => {
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [{ ...briefing, latestThread: null, sources: [] }], generatedAt: 100, coverage: "recent" });
+  setup();
+  expect(await screen.findByText(briefing.summary)).toBeTruthy();
+  expect(screen.getByText("No linked conversation")).toBeTruthy();
+  expect(screen.queryByRole("list", { name: "Sources" })).toBeNull();
+  expect(screen.queryByRole("link")).toBeNull();
+});
+it("distinguishes an empty workspace from unavailable generation", async () => {
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [], generatedAt: null, coverage: "recent" });
+  setup();
+  expect(await screen.findByRole("heading", { name: "Nothing to brief yet" })).toBeTruthy();
+  expect(screen.getByText("Briefings appear after conversations or workflow runs exist in this workspace.")).toBeTruthy();
+  expect(screen.getByText("The latest thread, pull request, or run.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+});
+
+it("shows pending shared generation as loading rather than an error", async () => {
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [], generatedAt: null, coverage: "recent", refreshing: true });
+  setup();
+  expect(await screen.findByText("Updating your briefing…")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+});
+
+it("does not claim an update needs a reply when no next step is provided", async () => {
+  vi.mocked(api.getWorkspaceBriefings).mockResolvedValue({ briefings: [{ ...briefing, status: "updated", nextAction: undefined }], generatedAt: 100, coverage: "recent" });
+  setup();
+  expect(await screen.findByText("No next step listed.")).toBeTruthy();
+  expect(screen.queryByText("Next:")).toBeNull();
+  expect(screen.queryByText("Nothing waits on you.")).toBeNull();
+});

@@ -1,77 +1,48 @@
 /**
- * `/api/org/linear` — org-level Linear workspace connection (event-system
- * plan, Task 9). Mirrors the `github-app.ts` admin routes + the
- * `github-connect.ts` OAuth-callback shape: an org admin authorizes Valet
- * against a Linear workspace (`actor=app`), the callback exchanges the code,
- * auto-creates a workspace webhook pointed at the generic event ingress
- * (`/webhooks/events/linear`, `routes/event-webhooks.ts`), stores the org
- * `linear` credential (with the webhook signing secret in `metadata` —
- * exactly where the ingest route reads it from), and upserts
- * `linear_installations` (the `workspaceId -> orgId` mapping the ingest
- * route resolves against).
+ * `/api/org/linear` — the organization's native Linear integration. It
+ * follows the Slack model: paste, verify, store.
  *
- * OAuth app credentials come from env (`LINEAR_CLIENT_ID` /
- * `LINEAR_CLIENT_SECRET`) — deployment-level config, unlike the GitHub App's
- * per-org manifest flow, because Linear OAuth apps are created once by the
- * operator. State signing reuses `lib/oauth-state.ts` with the same
- * `{ userId, orgId, nonce, exp }` payload as `github-connect.ts` — the
- * callback rejects a state minted for a different signed-in user.
+ *   1. The admin creates a Linear OAuth app from a prefilled form. The form
+ *      turns on the `client_credentials` grant and points the app's own
+ *      webhook at `/webhooks/events/linear`.
+ *   2. `PUT /` takes the app's client ID, client secret, and webhook signing
+ *      secret. The server mints an app-actor token with `client_credentials`
+ *      and reads the Linear workspace with it BEFORE it stores anything, the
+ *      way the Slack save runs `auth.test`.
  *
- * Every route (callback included — the admin's own browser lands there with
- * their session cookie, same model as `github-connect.ts`'s callback) is
- * behind `requireOrgAdmin`.
+ * There is no browser approval. Linear installs a private app in its own
+ * workspace when it issues the `client_credentials` token, and an approval
+ * screen for an installed app has no way back to Valet. The token is renewed
+ * by `LinearAppTokenStore`. No `admin` scope is requested and no webhook is
+ * created through the API: the app's webhook belongs to Linear. `DELETE /`
+ * still removes webhooks that older connections created through
+ * `webhookCreate`, best effort.
+ *
+ * Every route is behind `requireOrgAdmin`.
  */
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { publicUrlFromEnv } from "../channels/host.js";
-import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { isRecord, signState, verifyState, STATE_TTL_MS } from "../lib/oauth-state.js";
-import { resolveReturnOrigin } from "./credential-connect.js";
-import { createLinearService, resolveLinearOauthUrl, type LinearService } from "../services/linear.js";
-import { linearInstallations } from "../schema/index.js";
+import { isRecord } from "../lib/oauth-state.js";
+import {
+  createLinearService,
+  LinearTokenError,
+  LINEAR_WEBHOOK_RESOURCE_TYPES,
+} from "../services/linear.js";
+import {
+  loadLinearAppConfig,
+  LINEAR_APP_SERVICE,
+  LINEAR_CLIENT_CREDENTIALS_GRANT,
+  LINEAR_CREDENTIAL_SERVICE,
+} from "../services/linear-app.js";
+import { getLinearIngressStatus } from "../services/linear-ingress.js";
+import { replaceCredential } from "../services/credential-insert.js";
+import { orgs, linearInstallations } from "../schema/index.js";
 
 export const linearConnectRouter = new Hono<AppEnv>();
-
-const LINEAR_CREDENTIAL_SERVICE = "linear";
-const OAUTH_SCOPES = "read,write,admin";
-
-interface ConnectState {
-  userId: string;
-  orgId: string;
-  nonce: string;
-  exp: number;
-  /** Origin to return the browser to. Captured at mint time, because the
-   * callback's referer is the provider. Empty when same-origin, which is
-   * the deployed shape. */
-  returnTo?: string;
-}
-
-function verifyConnectState(state: string, key: Buffer, nowMs: number): ConnectState | null {
-  return verifyState<ConnectState>(state, key, (payload) => {
-    if (!isRecord(payload)) return null;
-    const { userId, orgId, nonce, exp, returnTo } = payload;
-    if (typeof userId !== "string" || typeof orgId !== "string") return null;
-    if (typeof nonce !== "string" || typeof exp !== "number") return null;
-    if (exp < nowMs) return null;
-    return { userId, orgId, nonce, exp, returnTo: typeof returnTo === "string" ? returnTo : "" };
-  });
-}
-
-interface OauthAppConfig {
-  clientId: string;
-  clientSecret: string;
-}
-
-/** `null` when the deployment has no Linear OAuth app configured. */
-function loadOauthAppConfig(env: NodeJS.ProcessEnv): OauthAppConfig | null {
-  const clientId = env.LINEAR_CLIENT_ID;
-  const clientSecret = env.LINEAR_CLIENT_SECRET;
-  if (!clientId || !clientSecret) return null;
-  return { clientId, clientSecret };
-}
 
 /** Same fallback `github-app.ts`'s manifest route uses: the configured
  * public URL when there is one, else the request's own origin (local dev /
@@ -80,182 +51,141 @@ function apiBase(c: Context<AppEnv>): string {
   return publicUrlFromEnv(process.env) ?? new URL(c.req.url).origin;
 }
 
+/** Linear requires every app to list a redirect URI, because the
+ * authorization-code grant is mandatory on all apps. The prefilled form
+ * registers this one. Valet never sends a browser to it. */
 function callbackUrl(c: Context<AppEnv>): string {
   return `${apiBase(c)}/api/org/linear/callback`;
 }
 
-function linearService(config: OauthAppConfig): LinearService {
-  return createLinearService(config, process.env);
+/** Linear only accepts a public `https://` webhook URL on an app, so there is
+ * no URL to prefill without a configured public URL. */
+function webhookUrl(): string | undefined {
+  const base = publicUrlFromEnv(process.env);
+  if (!base) return undefined;
+  try {
+    if (new URL(base).protocol !== "https:") return undefined;
+  } catch {
+    return undefined;
+  }
+  return `${base.replace(/\/+$/, "")}/webhooks/events/linear`;
 }
 
-linearConnectRouter.post("/connect", async (c) => {
-  const gate = await requireOrgAdmin(c);
-  if (gate) return gate;
-
-  const config = loadOauthAppConfig(process.env);
-  if (!config) {
-    return c.json({ error: "Linear OAuth is not configured: set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET" }, 503);
-  }
-
-  const user = c.var.user;
-  const key = deriveSecretKey(c.var.providers.encryptionKey);
-  const returnTo = resolveReturnOrigin(c.req.url, c.req.header("referer"), process.env);
-  const statePayload: ConnectState = {
-    userId: user.id,
-    orgId: user.orgId,
-    nonce: randomBytes(16).toString("hex"),
-    exp: Date.now() + STATE_TTL_MS,
-    ...(returnTo ? { returnTo } : {}),
+async function statusBody(c: Context<AppEnv>) {
+  const { db, engineCredentials } = c.var.providers;
+  const hook = webhookUrl();
+  return {
+    ...await getLinearIngressStatus(db, engineCredentials, c.var.user.orgId),
+    redirectUri: callbackUrl(c),
+    ...(hook ? { webhookUrl: hook } : {}),
+    webhookResourceTypes: [...LINEAR_WEBHOOK_RESOURCE_TYPES],
   };
-  const state = signState(statePayload, key);
+}
 
-  const params = new URLSearchParams({
-    client_id: config.clientId,
-    redirect_uri: callbackUrl(c),
-    response_type: "code",
-    scope: OAUTH_SCOPES,
-    state,
-    actor: "app",
-  });
-  const url = `${resolveLinearOauthUrl(process.env)}/oauth/authorize?${params.toString()}`;
-  return c.json({ url });
-});
+function readSecretField(body: Record<string, unknown>, field: string, max: number): string | null {
+  const value = body[field];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed && trimmed.length <= max ? trimmed : null;
+}
 
-linearConnectRouter.get("/callback", async (c) => {
+/** Names the fix for a refused `client_credentials` request and quotes
+ * Linear's own reason, so a mismatch is visible instead of guessed. */
+function tokenRefusalMessage(err: LinearTokenError): string {
+  const fix = /does not support the client_credentials grant/i.test(err.detail ?? "")
+    ? "In Linear, open the app's settings, turn on Client credentials, and save. Then connect again."
+    : "Copy the client ID and client secret again from the app in Linear. Then connect again.";
+  return err.detail ? `${fix} Linear said: ${err.detail}` : fix;
+}
+
+linearConnectRouter.put("/", async (c) => {
   const gate = await requireOrgAdmin(c);
   if (gate) return gate;
+  const body: unknown = await c.req.json().catch(() => null);
+  const clientId = isRecord(body) ? readSecretField(body, "clientId", 512) : null;
+  const clientSecret = isRecord(body) ? readSecretField(body, "clientSecret", 4096) : null;
+  const webhookSecret = isRecord(body) ? readSecretField(body, "webhookSecret", 4096) : null;
+  if (!clientId || !clientSecret || !webhookSecret) {
+    return c.json({ error: "Enter the Linear app's client ID, client secret, and webhook signing secret." }, 400);
+  }
 
-  const code = c.req.query("code");
-  const state = c.req.query("state");
-  if (!code || !state) return c.json({ error: "missing code or state" }, 400);
-
-  const config = loadOauthAppConfig(process.env);
-  if (!config) {
-    return c.json({ error: "Linear OAuth is not configured: set LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET" }, 503);
+  // Verify with Linear before storing anything, the way the Slack save runs
+  // auth.test: mint the app-actor token, then read the workspace with it.
+  const service = createLinearService({ clientId, clientSecret }, process.env);
+  let token: { accessToken: string; expiresAt: number };
+  let workspace: { workspaceId: string; workspaceName: string };
+  try {
+    token = await service.clientCredentialsToken();
+  } catch (err) {
+    if (err instanceof LinearTokenError && err.status >= 400 && err.status < 500) {
+      console.warn("linear connect: Linear refused the client credentials grant:", err.message);
+      return c.json({ error: tokenRefusalMessage(err) }, 400);
+    }
+    console.error("linear connect: client credentials request failed:", err);
+    return c.json({ error: "Could not reach Linear to check the app. Try again." }, 502);
+  }
+  try {
+    workspace = await service.fetchWorkspace(token.accessToken);
+  } catch (err) {
+    console.error("linear connect: workspace lookup failed:", err);
+    return c.json({ error: "Linear issued a token but the workspace lookup failed. Try again." }, 502);
   }
 
   const user = c.var.user;
-  const { db, engineCredentials, encryptionKey } = c.var.providers;
-  const key = deriveSecretKey(encryptionKey);
-  const verified = verifyConnectState(state, key, Date.now());
-  if (!verified) return c.json({ error: "invalid or expired state" }, 400);
-  if (verified.userId !== user.id) {
-    return c.json({ error: "this authorization was not started by the signed-in user" }, 400);
-  }
-
-  const service = linearService(config);
-  let accessToken: string;
-  let workspaceId: string;
-  let workspaceName: string;
-  let webhookId: string;
-  const webhookSecret = randomBytes(32).toString("hex");
-  try {
-    ({ accessToken } = await service.exchangeCode(code, callbackUrl(c)));
-    ({ workspaceId, workspaceName } = await service.fetchWorkspace(accessToken));
-  } catch (err) {
-    console.error("linear connect callback failed:", err);
-    return c.json({ error: "failed to complete the Linear connection" }, 502);
-  }
-
-  // One workspace per org: the org `linear` credential holds exactly one
-  // access token, so a second workspace's install rows would be orphaned the
-  // moment the credential is overwritten (its webhook could never be deleted
-  // again — the stored token isn't scoped to it). Reject instead of silently
-  // wedging; the admin disconnects first.
-  const orgInstalls = await db
-    .select()
-    .from(linearInstallations)
-    .where(eq(linearInstallations.orgId, verified.orgId));
-  const foreign = orgInstalls.find((i) => i.workspaceId !== workspaceId);
-  if (foreign) {
-    return c.json(
-      { error: `another Linear workspace (${foreign.workspaceName}) is already connected — disconnect it first` },
-      409,
-    );
-  }
-  const existing = orgInstalls.find((i) => i.workspaceId === workspaceId);
-
-  if (existing?.webhookId) {
-    // Reconnect: clean up the old webhook so it doesn't keep delivering with
-    // a dead secret.
-    try {
-      await service.deleteWebhook(accessToken, existing.webhookId);
-    } catch (err) {
-      console.error("linear reconnect: best-effort old webhookDelete failed:", err);
+  const { db, encryptionKey } = c.var.providers;
+  const saved = await db.transaction(async (tx) => {
+    await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, user.orgId)).for("update");
+    // One workspace per org: the org credential holds exactly one token.
+    const installs = await tx.select().from(linearInstallations).where(eq(linearInstallations.orgId, user.orgId));
+    const foreign = installs.find((i) => i.workspaceId !== workspace.workspaceId);
+    if (foreign) {
+      return c.json({ error: `Another Linear workspace (${foreign.workspaceName}) is connected. Disconnect it first.` }, 409);
     }
-  }
+    const existing = installs.find((i) => i.workspaceId === workspace.workspaceId);
 
-  // Persist the credential (with the signing secret) and the installation
-  // row BEFORE creating the webhook: Linear can start delivering the moment
-  // `webhookCreate` returns, and a delivery that arrives before the ingress
-  // can resolve the install + secret is 204'd and never retried — permanent
-  // loss. `webhookId` is patched in after creation succeeds.
-  await engineCredentials.save({ type: "org", id: verified.orgId }, LINEAR_CREDENTIAL_SERVICE, {
-    type: "oauth2",
-    accessToken,
-    metadata: { webhookSecret, workspaceId },
-  });
-
-  const now = Date.now();
-  let installId: string;
-  if (existing) {
-    installId = existing.id;
-    await db
-      .update(linearInstallations)
-      .set({ workspaceName, webhookId: null, connectedBy: user.id, updatedAt: now })
-      .where(eq(linearInstallations.id, existing.id));
-  } else {
-    installId = `lin_${randomUUID()}`;
-    await db.insert(linearInstallations).values({
-      id: installId,
-      orgId: verified.orgId,
-      workspaceId,
-      workspaceName,
-      webhookId: null,
-      connectedBy: user.id,
-      createdAt: now,
-      updatedAt: now,
+    // One id for this connection on both rows (`LinearAppConfig.connectionId`).
+    const connectionId = randomUUID();
+    await replaceCredential(tx, encryptionKey, { type: "org", id: user.orgId }, LINEAR_APP_SERVICE, {
+      type: "service_account", apiKey: clientSecret, metadata: { clientId, connectionId },
     });
-  }
-
-  try {
-    ({ webhookId } = await service.createWebhook(accessToken, {
-      url: `${apiBase(c)}/webhooks/events/linear`,
-      secret: webhookSecret,
-    }));
-  } catch (err) {
-    // Credential + install row stay (the status route reports
-    // webhookConfigured: false); a re-run of the connect flow repairs this.
-    console.error("linear connect callback failed:", err);
-    return c.json({ error: "failed to complete the Linear connection" }, 502);
-  }
-
-  await db
-    .update(linearInstallations)
-    .set({ webhookId, updatedAt: Date.now() })
-    .where(eq(linearInstallations.id, installId));
-
-  return c.redirect(`${verified.returnTo ?? ""}/settings/organization/linear?setup=ok`, 302);
+    await replaceCredential(tx, encryptionKey, { type: "org", id: user.orgId }, LINEAR_CREDENTIAL_SERVICE, {
+      type: "oauth2",
+      accessToken: token.accessToken,
+      metadata: {
+        webhookSecret,
+        workspaceId: workspace.workspaceId,
+        grant: LINEAR_CLIENT_CREDENTIALS_GRANT,
+        tokenExpiresAt: token.expiresAt,
+        connectionId,
+      },
+    });
+    const now = Date.now();
+    if (existing) {
+      await tx.update(linearInstallations)
+        .set({ workspaceName: workspace.workspaceName, connectedBy: user.id, updatedAt: now })
+        .where(eq(linearInstallations.id, existing.id));
+    } else {
+      await tx.insert(linearInstallations).values({
+        id: `lin_${randomUUID()}`,
+        orgId: user.orgId,
+        workspaceId: workspace.workspaceId,
+        workspaceName: workspace.workspaceName,
+        webhookId: null,
+        connectedBy: user.id,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    return null;
+  });
+  if (saved) return saved;
+  return c.json(await statusBody(c));
 });
 
 linearConnectRouter.get("/", async (c) => {
   const gate = await requireOrgAdmin(c);
   if (gate) return gate;
-
-  const orgId = c.var.user.orgId;
-  const { db, engineCredentials } = c.var.providers;
-  const cred = await engineCredentials.get({ type: "org", id: orgId }, LINEAR_CREDENTIAL_SERVICE);
-  const [install] = await db
-    .select()
-    .from(linearInstallations)
-    .where(eq(linearInstallations.orgId, orgId))
-    .limit(1);
-
-  return c.json({
-    connected: cred !== null && install !== undefined,
-    workspaceName: install?.workspaceName,
-    webhookConfigured: typeof install?.webhookId === "string",
-  });
+  return c.json(await statusBody(c));
 });
 
 linearConnectRouter.delete("/", async (c) => {
@@ -265,37 +195,30 @@ linearConnectRouter.delete("/", async (c) => {
   const orgId = c.var.user.orgId;
   const { db, engineCredentials } = c.var.providers;
 
-  // Best-effort webhook cleanup: a transient Linear failure shouldn't block
-  // disconnecting — an orphaned webhook just delivers to an ingress that no
-  // longer resolves the workspace (204 no-op). The token is only scoped to
-  // the workspace it was minted for (the connect flow enforces one workspace
-  // per org, so normally that's every install); a drifted row from another
-  // workspace can't be cleaned with this token — log it loudly instead of
-  // issuing a call Linear will reject.
-  const config = loadOauthAppConfig(process.env);
-  const cred = await engineCredentials.get({ type: "org", id: orgId }, LINEAR_CREDENTIAL_SERVICE);
-  if (config && cred?.accessToken) {
-    const tokenWorkspaceId =
-      isRecord(cred.metadata) && typeof cred.metadata.workspaceId === "string" ? cred.metadata.workspaceId : null;
-    const installs = await db.select().from(linearInstallations).where(eq(linearInstallations.orgId, orgId));
-    const service = linearService(config);
-    for (const install of installs) {
-      if (!install.webhookId) continue;
-      if (tokenWorkspaceId !== null && install.workspaceId !== tokenWorkspaceId) {
-        console.error(
-          `linear disconnect: webhook ${install.webhookId} in workspace ${install.workspaceId} cannot be deleted ` +
-            `with the stored token (scoped to ${tokenWorkspaceId}) — remove it in Linear's settings manually`,
-        );
-        continue;
-      }
-      try {
-        await service.deleteWebhook(cred.accessToken, install.webhookId);
-      } catch (err) {
-        console.error("linear disconnect: best-effort webhookDelete failed:", err);
+  // Connections made before the app-webhook model created their webhook
+  // through `webhookCreate`. Remove those best effort: a failure must not
+  // block disconnecting, and an orphaned webhook only reaches an ingress that
+  // no longer resolves the workspace (204 no-op).
+  const installs = await db.select().from(linearInstallations).where(eq(linearInstallations.orgId, orgId));
+  const legacy = installs.filter((install) => install.webhookId);
+  if (legacy.length > 0) {
+    const config = await loadLinearAppConfig(engineCredentials, orgId);
+    const cred = await engineCredentials.get({ type: "org", id: orgId }, LINEAR_CREDENTIAL_SERVICE);
+    if (config && cred?.accessToken) {
+      const service = createLinearService(config, process.env);
+      for (const install of legacy) {
+        try {
+          await service.deleteWebhook(cred.accessToken, install.webhookId!);
+        } catch (err) {
+          console.error(`linear disconnect: remove webhook ${install.webhookId} in Linear's settings; delete failed:`, err);
+        }
       }
     }
   }
 
+  // The app config goes first: a token renewal in flight checks it after its
+  // save and removes the token it wrote (linear-app-token-store.ts).
+  await engineCredentials.delete({ type: "org", id: orgId }, LINEAR_APP_SERVICE);
   await db.delete(linearInstallations).where(eq(linearInstallations.orgId, orgId));
   await engineCredentials.delete({ type: "org", id: orgId }, LINEAR_CREDENTIAL_SERVICE);
   return c.body(null, 204);

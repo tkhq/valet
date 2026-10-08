@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { SandboxListing } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, assistants } from "../schema/index.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { SandboxReconcileSweep, type SandboxReconcileSweepDeps } from "./sandbox-reconcile-sweep.js";
 
@@ -71,6 +71,15 @@ describe("SandboxReconcileSweep", () => {
     };
     return { deps, destroyedSandboxes };
   }
+
+  it("retains a cutover assistant's working directory until operator recovery", async () => {
+    await db.insert(assistants).values({ id: "old", orgId: "org", ownerType: "team", ownerId: "team:retired:old",
+      sessionId: "retained", createdAt: 1, archivedAt: 2 });
+    const { deps, destroyedSandboxes } = fakeDeps({ listed: [listing("retained-sandbox", "retained", OVER_AGE)] });
+    const report = await new SandboxReconcileSweep(deps).sweep(NOW);
+    expect(destroyedSandboxes).toEqual([]);
+    expect(report.overAge).toBe(1);
+  });
 
   it("no-ops on providers without a list() seam", async () => {
     const { deps, destroyedSandboxes } = fakeDeps({ noList: true });

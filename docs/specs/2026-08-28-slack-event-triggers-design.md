@@ -139,6 +139,11 @@ test, so an event a subscription excludes by filter is dropped the same as one
 no subscription names at all: the filter is a privacy boundary, not only a
 delivery boundary.
 
+One record is kept for every verified delivery: the diagnostic receipt. It holds
+routing metadata, such as the channel, actor, and message ids, and the stage
+outcomes. It never holds the message text. Receipts are kept for 7 days, and
+only organization admins can read them.
+
 This changed the prior behavior, where only the `ephemeral` `slack.message` key
 was gated and every other event (GitHub, Linear, and the rest of Slack)
 persisted on arrival. The rule now holds across all services. The `ephemeral`
@@ -416,3 +421,7 @@ Before the catalog exposes this key, startup expands existing `slack.*` subscrip
 
 
 Accepting subtype-less posts intentionally expands the events delivered to existing `slack.bot_message` subscriptions. An unfiltered subscription receives every eligible third-party bot post. Before rollout, inspect enabled bot subscriptions and add channel or bot ID filters where that broader behavior is unwanted. No subtype compatibility guard is applied: both Slack payload forms represent bot posts. Production subscription rows have not been inspected as part of this change.
+
+### Receipt diagnostics and legacy bot identity
+
+Resolve the saved bot identity before classifying a bot message. Keep classification stages in the event receipt. If identity resolution fails, emit only the subscription-scoped identity diagnostic. Do not add a duplicate generic rejection to the drop log.

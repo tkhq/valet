@@ -135,6 +135,12 @@ notice instead of silently clobbering either side.
 
 ## 4. Run overlay + approvals
 
+The run page shows results, pending approvals, and compact expandable step rows.
+Running and waiting steps show their current state. Failed steps open their output.
+Steps follow the saved definition order. Repeated iterations keep separate rows. Each row links to its agent logs or child run.
+Expanded output stays complete; it is not a truncated preview.
+The optional Workflow diagram follows the steps and mounts only when expanded.
+
 - Per-node run states derived from the run row + checkpoints:
   `pending / running / succeeded / failed / skipped / waiting`.
 - Approval nodes in `waiting` render Approve/Reject actions in both the inline
@@ -221,3 +227,13 @@ UI. They are repurposed as the V2 surface:
   what the orchestrator did at a glance.
 - Rendering V1 step-array workflows as diagrams.
 - Retiring or modifying the V1 `/automation` UI.
+
+
+### October 5: large structured replies
+
+A completed assistant reply can contain a JSON result for the next workflow step. The transcript previously rendered that result as ordinary prose.
+Large, complete JSON objects and arrays now use the existing disclosure-card style and shared JSON code display.
+The card shows the result's summary, when supplied, and its item or field count. The user can expand the complete result.
+Message copying preserves the original reply. The code display mounts only when expanded.
+User messages, streaming replies, failed replies, diagnostic objects, malformed JSON, and prose remain visible.
+This is presentation only. It does not change schema validation, approval decisions, stored history, or workflow data.

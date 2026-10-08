@@ -16,7 +16,8 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 - `workflows.save_workflow` — create (omit `workflow_id`) or update (pass it)
 - `workflows.patch_workflow` — small edits without re-sending the definition: rename, upsert/remove single nodes, add/remove edges (result is fully linted)
 - `workflows.update_model` — set an approved model or org size tier on selected `llm` and `session` nodes
-- `workflows.delete_workflow` — permanently delete a definition (refused while runs are active; settled history is kept)
+- `workflows.delete_workflow` — permanently delete a definition (refused while runs are active; settled history is kept). Team deletion requires a current admin in direct web chat.
+- `workflows.request_workflow_deletion` — open or reuse a team workflow deletion request for admin review. Requires a signed-in person in direct web chat. This does not delete the workflow.
 - `workflows.start_run` — start a run; returns `runId`
 - `workflows.get_run` — run status, per-node checkpoints, pending waits
 - `workflows.get_node_result` — a node's FULL checkpoint output, for debugging failures
@@ -58,7 +59,7 @@ Node types:
 - `wait` — pause for a duration (`{ "mode": "duration", "duration": "5m" }`)
 - `approval` — park until a human approves/denies (`prompt`, optional `summary`, `details`, `timeout`, `onDeny`)
 - `session` — start an agent session with a `prompt` (optional `title`, `model`, `outputSchema`, `wait`)
-- `orchestrator` — prompt the user's orchestrator (optional `outputSchema`, `wait`)
+- `orchestrator` — prompt the workspace assistant in a durable workflow thread (optional `outputSchema`, `wait`). The app labels this step "Thread".
 - `tool` — invoke a plugin action (`service`, `action`, `params`)
 - `llm` — one-shot LLM call (`model`, `prompt`, optional `system`, `outputSchema`)
 - `foreach` — iterate `items` over `body` nodes (optional `maxItems`, `concurrency`)
@@ -68,7 +69,7 @@ Edges may carry `"when"` (an expression) to gate a branch.
 
 ## Model selection
 
-Use a size tier (`xs`, `s`, `m`, `l`, or `xl`) when the org should control the concrete model. Use an approved catalog id when the workflow needs a fixed model. An `llm` node requires `model`. A `session` node uses its `model` when set and otherwise uses the session default. An `orchestrator` node has no model field. It uses the selected assistant's saved model. `update_model` changes `llm` and `session` nodes only, including a `foreach` body.
+Use a size tier (`xs`, `s`, `m`, `l`, or `xl`) when the org should control the concrete model. Use an approved catalog id when the workflow needs a fixed model. An `llm` node requires `model`. A `session` node uses its `model` when set and otherwise uses the session default. An `orchestrator` node has no model field. It uses the workspace assistant's saved model. Its result includes `threadId` in both dispatch-only and settled modes. `update_model` changes `llm` and `session` nodes only, including a `foreach` body.
 
 ## Templates: reading data between nodes
 
@@ -104,6 +105,8 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 
 **Structured LLM output.** Give `llm` (and `session`/`orchestrator`) nodes an `outputSchema` (JSON Schema object). The runtime parses and validates the response, retries once with a repair prompt on mismatch, and puts the parsed object at `result.output`. Use this instead of prompt-engineering JSON or chaining a second extraction LLM node.
 
+**Distinguish empty inventory from failed inspection.** A schema-valid empty array does not prove that inspection succeeded. If that distinction matters, require an explicit inspection status and evidence, such as inspected sources and failures. Branch incomplete or failed inspection to review or failure before consuming candidates. Never use `candidates: []` as a fallback for failed inspection. Format repair must reuse successful tool results without repeating actions with side effects.
+
 **Let the model abstain.** When an `outputSchema` field feeds a tool param, a required plain string forces the model to invent a value it does not have ("Unable to determine…" as a GitHub username) — and the invented value fails nodes later, at the tool, with a confusing API error. Give the field an explicit abstain value (`""`, or an enum member like `"none"`), tell the prompt when to return it, and branch on it with `when`-guarded edges to a stop node:
 
 ```json
@@ -131,3 +134,33 @@ For list-shaped output, abstain with an empty array and gate on `if` with `lengt
 - `tool` nodes can park WITHOUT an approval node in the definition: when org policy resolves the action to require_approval, the node raises a policy gate and parks on `approval:<nodeId>` until a human resolves it (optional `approvalTimeout`, `onDeny` on the tool node). `list_runs` shows each parked run's `waitingOn`.
 - Debug a surprising node with `get_node_result` — it returns the checkpoint result verbatim, the same value templates read via `nodes.<id>.result` (oversized results come back as `{ truncated: true, jsonPrefix }`).
 - A run is finished when `status: "settled"`; report the `outcome`.
+
+
+### Team workflow deletion
+
+An ordinary tool approval does not grant team administration rights. In direct web
+chat, `delete_workflow` checks the authenticated author's current admin role.
+Members use `request_workflow_deletion` with the exact `workflow_id` and an optional
+`reason`. Report its `deleted: false` and pending status accurately. The returned
+`reviewUrl` opens team settings, where an admin decides the request.
+
+Automated workflows, child sessions, signals, and unlinked channel senders cannot
+borrow a creator's admin role or submit a deletion request as that person. Ask a
+signed-in person to continue in web chat or team settings. Do not repeat an
+ordinary tool approval as a substitute for the resource's admin check.
+
+### Slack sender identity
+
+Set top-level `definition.presence: { displayName: "Hestia · People", avatarUrl: "<supplied HTTPS URL>" }`.
+Omit `avatarUrl` if no image was supplied. `patch_workflow` accepts `presence` directly; `null` clears it.
+For an uploaded photo, call `profile_pictures.publish_avatar` in its chat and save the returned `avatar_url` as `presence.avatarUrl`.
+An event subscription's `target.presence` overrides individual workflow fields. Unset fields inherit the workflow, then workspace default.
+Tool steps, agent tool calls, automatic replies, and approval cards inherit this identity without extra prompt instructions or `set` nodes.
+Explicit Slack `sender_name` / `sender_avatar_url` arguments still override one message; use them only for deliberate exceptions.
+These settings customize messages, not the Slack account or DM conversation. See the `slack-tools` skill.
+
+For an existing event subscription, call `events.list_subscriptions` in its personal or team workspace.
+Use the exact `name` filter or follow `nextOffset` with `offset` to find its ID.
+Call `events.set_subscription_presence` with `subscription_id` and `presence: { displayName?, avatarUrl? }`.
+This replaces the override. Send `presence: null` to clear it. The tool preserves matching rules, target, and enabled state.
+`workflows.create_trigger` and `workflows.propose_trigger` also accept optional `presence`.

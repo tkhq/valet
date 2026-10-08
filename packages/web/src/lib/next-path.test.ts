@@ -14,6 +14,9 @@ describe("safeNextPath", () => {
     // Browsers normalize backslashes: "/\evil.example" navigates off-origin.
     expect(safeNextPath("/\\evil.example")).toBeUndefined();
     expect(safeNextPath("javascript:alert(1)")).toBeUndefined();
+    for (const control of ["\n", "\r", "\t", "\u0000", "\u007f"]) {
+      expect(safeNextPath(`/${control}/evil.example`)).toBeUndefined();
+    }
   });
 
   it("rejects non-strings and empty values", () => {

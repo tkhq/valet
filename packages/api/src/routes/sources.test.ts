@@ -2,9 +2,8 @@
  * `/api/org/sources` — org-admin CRUD for all image sources + bake lifecycle.
  * Replaces prebuilds.test.ts and image-catalog.test.ts.
  *
- * Auth gates: admin CRUD on /api/org/sources, member badge on
- * /api/sources/for-repo. All original prebuilds + image-catalog pins are
- * preserved; new tests cover: base one-per-org 409, kind='repo' POST 400,
+ * Auth gate: admin CRUD on /api/org/sources. All original prebuilds +
+ * image-catalog pins are preserved; new tests cover: base one-per-org 409, kind='repo' POST 400,
  * newline setup command 400, PATCH kind-scoped field 400s.
  */
 import { RegistryCapacityError } from "../bakes/registry-health.js";
@@ -749,93 +748,6 @@ describe("GET /api/org/sources/:id/bakes", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { bakes: unknown[] };
     expect(body.bakes).toEqual([]);
-  });
-});
-
-// ── GET /api/sources/for-repo ─────────────────────────────────────────────────
-
-describe("GET /api/sources/for-repo", () => {
-  it("400s when fullName is missing", async () => {
-    api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/sources/for-repo`, { headers: HEADERS });
-    expect(res.status).toBe(400);
-  });
-
-  it("is reachable by a non-admin org member (no requireOrgAdmin gate)", async () => {
-    api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/sources/for-repo?fullName=acme/widgets`, {
-      headers: MEMBER_HEADERS,
-    });
-    expect(res.status).toBe(200);
-  });
-
-  it("returns prebuild: null when no repo source exists for the fullName", async () => {
-    api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/sources/for-repo?fullName=acme/widgets`, { headers: HEADERS });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ prebuild: null });
-  });
-
-  it("returns prebuild: null when the source has no pushed bake", async () => {
-    api = await bootTestApi();
-    await seedRepoSource(api);
-    const res = await fetch(`${api.baseUrl}/api/sources/for-repo?fullName=acme/widgets`, { headers: HEADERS });
-    expect(await res.json()).toEqual({ prebuild: null });
-  });
-
-  it("returns the newest pushed bake's commitSha + finishedAt, and no other fields", async () => {
-    api = await bootTestApi();
-    const source = await seedRepoSource(api);
-    const { db } = api.providers;
-    await db.insert(bakes).values([
-      {
-        id: `pb_${randomUUID()}`,
-        sourceId: source.id,
-        identityHash: "",
-        commitSha: "olderc1",
-        imageRef: "registry.local/acme-widgets:olderc1",
-        status: "pushed",
-        builderBackend: "docker",
-        recipe: [],
-        startedAt: 1_000,
-        finishedAt: 2_000,
-        createdAt: 1_000,
-      },
-      {
-        id: `pb_${randomUUID()}`,
-        sourceId: source.id,
-        identityHash: "",
-        commitSha: "newestc2",
-        imageRef: "registry.local/acme-widgets:newestc2",
-        status: "pushed",
-        builderBackend: "docker",
-        recipe: [],
-        startedAt: 3_000,
-        finishedAt: 4_000,
-        createdAt: 3_000,
-      },
-      {
-        id: `pb_${randomUUID()}`,
-        sourceId: source.id,
-        identityHash: "",
-        commitSha: "failedc3",
-        imageRef: "registry.local/acme-widgets:failedc3",
-        status: "failed",
-        builderBackend: "docker",
-        recipe: [],
-        error: "boom",
-        startedAt: 5_000,
-        finishedAt: 6_000,
-        createdAt: 5_000,
-      },
-    ]);
-
-    const res = await fetch(`${api.baseUrl}/api/sources/for-repo?fullName=acme/widgets`, { headers: HEADERS });
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual({ prebuild: { commitSha: "newestc2", finishedAt: 4_000 } });
-    expect(JSON.stringify(body)).not.toContain("imageRef");
-    expect(JSON.stringify(body)).not.toContain("registry.local");
   });
 });
 

@@ -236,10 +236,11 @@ export async function readResponseText(response: Response, maxBytes: number, sig
   return result.ok ? { ok: true, text: new TextDecoder().decode(result.data) } : result;
 }
 
-type DocumentExtractor = (doc: {
+export type DocumentExtractor = (doc: {
   data: Uint8Array;
   mimeType: string;
   name?: string;
+  signal?: AbortSignal;
 }) => Promise<{ markdown: string } | null>;
 
 export async function extractDownloadedPdf(input: {
@@ -277,5 +278,32 @@ export async function extractDownloadedPdf(input: {
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     return { ok: false, error: `Could not read ${name}: ${detail}` };
+  }
+}
+
+/** DOCX candidates require a ZIP signature; the host validates the Word parts. */
+export const DOCX_DOCUMENT_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+export function isDocxDocumentMime(mimeType: string | undefined, name?: string): boolean {
+  const mime = normalizeDocumentMime(mimeType);
+  return mime === DOCX_DOCUMENT_MIME || ((mime === "" || mime === "application/octet-stream" || mime === "application/zip") && /\.docx$/i.test(name ?? ""));
+}
+export function isDocxDocument(data: Uint8Array): boolean {
+  return data.length >= 4 && data[0] === 0x50 && data[1] === 0x4b && data[2] === 3 && data[3] === 4;
+}
+export async function extractDownloadedDocx(input: {
+  data: Uint8Array;
+  name?: string;
+  extractDocument?: DocumentExtractor;
+  signal?: AbortSignal;
+}): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
+  const name = input.name || "document.docx";
+  if (!input.extractDocument) return { ok: false, error: "DOCX text extraction is not available on this deployment. Ask the user to paste the relevant text or export the document as PDF." };
+  try {
+    const extracted = await withSignal(() => input.extractDocument!({ data: input.data, mimeType: DOCX_DOCUMENT_MIME, name, signal: input.signal }), input.signal);
+    if (!extracted?.markdown.trim()) return { ok: false, error: `${name} has no extractable text. Ask for a text version or export the document as PDF.` };
+    if (extracted.markdown.length > MAX_EXTRACTED_DOCUMENT_CHARS) return { ok: false, error: `${name} exceeds the extracted text limit. Ask for a smaller document.` };
+    return { ok: true, content: extracted.markdown };
+  } catch (error) {
+    return { ok: false, error: `Could not read ${name}: ${error instanceof Error ? error.message : String(error)}` };
   }
 }

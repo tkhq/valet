@@ -30,7 +30,8 @@ export async function invalidateWorkflowSources(
 }
 
 /** Suffix for a credential mutation CTE named `written`. One SQL statement
- * commits the credential and its invalidation, including personal delegates.
+ * commits the credential and its invalidation, including the teams a member
+ * shares the written account with.
  * Used by the raw PostgreSQL credential store so refreshes and specialized
  * connection routes cannot omit the durable request. */
 export const CREDENTIAL_INVALIDATION_SQL = `
@@ -48,9 +49,8 @@ WHERE source.owner_type = 'team' AND source.enabled = true
     (written.owner_type = 'team' AND source.owner_id = written.owner_id)
     OR (written.owner_type = 'org' AND source.org_id = written.owner_id)
     OR (written.owner_type = 'user' AND EXISTS (
-      SELECT 1 FROM credentials AS delegation
-      WHERE delegation.owner_type = 'team' AND delegation.owner_id = source.owner_id
-        AND delegation.service = written.service
-        AND delegation.metadata->>'delegatedFrom' = written.owner_id
+      SELECT 1 FROM credential_shares AS share
+      WHERE share.team_id = source.owner_id AND share.service = written.service
+        AND share.user_id = written.owner_id
     ))
   )`;

@@ -211,7 +211,10 @@ export class TelegramTransport implements ChannelTransport {
       text: `${ACTION_EMOJI[a.id] ?? ""}${a.label}`,
       callback_data: `g|${a.id}`,
     }));
-    const res = await this.api.sendMessage({ chatId, html, replyMarkup: { inline_keyboard: [buttons] } });
+    // An open question has no buttons; send no keyboard rather than an empty row.
+    const res = await this.api.sendMessage({
+      chatId, html, ...(buttons.length > 0 ? { replyMarkup: { inline_keyboard: [buttons] } } : {}),
+    });
     return { conversationKey, messageId: String(res.messageId) };
   }
 

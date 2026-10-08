@@ -1,3 +1,4 @@
+export * from './presence.js';
 export * from './types/index.js';
 export * from './types/message-parts.js';
 export * from './types/plugin-entitlements.js';
@@ -15,3 +16,4 @@ export * from './upload-limits.js';
 
 export * from "./browser.js";
 export * from './browser-policy.js';
+export * from './event-match.js';

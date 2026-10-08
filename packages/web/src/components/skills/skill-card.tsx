@@ -24,11 +24,12 @@
  */
 import { Link } from "@tanstack/react-router";
 import type { SkillSummary, StoredSkillSummary } from "@valet/api/wire";
-import { Badge } from "~/components/primitives";
+import { Badge, cardClass } from "~/components/primitives";
 import { OwnerBadge } from "~/components/owner-badge";
 import { ServiceIcon } from "~/components/service-icon";
 import { displayName } from "~/components/integrations/display-name";
 import { ScopeBadge, scopeForSkill } from "./scope-badge";
+import { cn } from "~/lib/cn";
 
 /**
  * What to do about a skill another skill of the same name keeps out of every
@@ -115,7 +116,7 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
   );
 
   const shell =
-    "group relative flex flex-col rounded-lg border border-line bg-paper p-4 text-left transition-shadow hover:shadow-sm";
+    cn(cardClass, "group relative flex flex-col p-5 text-left transition-shadow hover:shadow-sm");
   // The card's own link, stretched over the card. It carries the name a
   // reader hears, because it holds no text of its own.
   const cover = "absolute inset-0 rounded-lg";

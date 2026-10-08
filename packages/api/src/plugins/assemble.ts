@@ -43,7 +43,7 @@ import type {
   SkillSource,
   ToolDef,
 } from "@valet/engine";
-import { buildSkillTool, SKILL_TOOL_NAME } from "./skill-tool.js";
+import { buildSkillTool, SKILL_TOOL_NAME, type SkillToolSession } from "./skill-tool.js";
 
 export interface AssembledPlugins {
   plugins: ValetPlugin[];
@@ -115,6 +115,10 @@ export interface PluginSessionExtras {
    * a plugin-only call. `/api/skills` reports these rows as shadowed, so a
    * person can see why a skill they wrote never reaches a session. */
   shadowedSkills: SkillSource[];
+  /** Points the `skill` tool at the session built from these extras, so it
+   * describes and serves that session's refreshed skills. Each session
+   * builder calls it once the session exists. */
+  bindSession: (session: SkillToolSession) => void;
 }
 
 /**
@@ -207,10 +211,16 @@ export function pluginSessionExtras(
   // The `skill` tool is what makes these skills reachable — without it the
   // markdown is inert. Appended after the catalog tools so `list_tools`/
   // `call_tool` keep their positions.
-  const skillTool = buildSkillTool(skills);
+  let session: SkillToolSession | undefined;
+  const skillTool = buildSkillTool(skills, () => session);
   if (skillTool) tools.push(skillTool);
 
-  return { tools, skills, roles, pluginCatalog, shadowedSkills: shadowed };
+  return {
+    tools, skills, roles, pluginCatalog, shadowedSkills: shadowed,
+    bindSession: (built) => {
+      session = built;
+    },
+  };
 }
 
 /**

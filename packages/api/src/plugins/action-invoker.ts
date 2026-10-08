@@ -1,3 +1,4 @@
+import { mergePresence, readPresence, type Presence } from "@valet/shared";
 /**
  * Headless ActionInvoker (plugin-system-v2 plan Task 6) — the real
  * implementation behind the workflow `tool` node's `engine.invokeAction`
@@ -44,10 +45,10 @@ import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@v
 import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
 import { qualifiedActionId } from "./action-id.js";
-import { assistantSenderIdentity, findDefaultAssistant } from "../assistants/service.js";
+import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { withSlackOwnerMetadata } from "../channels/identity-links.js";
 import { type ConnectMode, connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
-import { actionInvocations } from "../schema/index.js";
+import { actionInvocations, users } from "../schema/index.js";
 import {
   GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
   isUsableGithubUserRow,
@@ -57,6 +58,7 @@ import {
 import {
   orgFallbackPolicy,
   resolveOrgCredentialRead,
+  readTeamCredential,
   resolveTeamCredentialRead,
   resolveUserCredentialRead,
   onePasswordScopesFor,
@@ -65,6 +67,8 @@ import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
+import { shareGeneration, canBorrowCredential } from "../services/credential-borrow.js";
+import { membersSharing } from "../services/credential-shares.js";
 
 /** `PluginActionContext.signal` timeout for a headless invocation — no live turn to bound it otherwise. */
 const ACTION_TIMEOUT_MS = 120_000;
@@ -80,6 +84,7 @@ const ACTION_TIMEOUT_MS = 120_000;
  * resolves this from the run and passes it in.
  */
 export interface ActionInvocationContext {
+  presence?: Presence;
   userId: string;
   orgId: string;
   owner: Principal;
@@ -336,18 +341,26 @@ async function computeResult(
   // before discovery: discovery would only echo the plugin's own generic
   // "no credential connected" message, which names no fix.
   const teamGated = ctx.owner.type === "team" && declared !== null && mode !== "org";
+  // A team run that would use another member's shared account parks until
+  // that member approves (`services/credential-borrow.ts`).
+  if (ctx.owner.type === "team" && !req.approval) {
+    const approver = await sharedAccountApprover(opts, ctx, ctx.owner.id, credentialService);
+    if (approver) return { ok: false, requiresApproval: true, provenance: "shared_account", approver };
+  }
   let action = findAction(entry.actionPlugin.actions, req.service, req.action);
   if (!action && entry.actionPlugin.resolveActions) {
     if (teamGated) {
       const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
       if (refusal) return refusal;
     }
-    // A credential read can throw a typed refusal (a broken delegation, a
+    // A credential read can throw a typed refusal (a broken share, a
     // ref outside the team's 1Password lease). That message names the fix,
     // so it comes back as a failed result, the same way execute reports.
     let resolved: PluginAction[];
     try {
-      resolved = await entry.actionPlugin.resolveActions({ credentials });
+      resolved = await entry.actionPlugin.resolveActions({
+        credentials,
+      });
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -674,7 +687,11 @@ function buildCredentialProvider(
   owner: CredentialOwner,
   defaultService: string,
 ): CredentialProvider {
-  const deps = { credentials: opts.credentials, onePassword: opts.onePassword };
+  const deps = { credentials: opts.credentials, onePassword: opts.onePassword, shares: (teamId: string, svc: string) => membersSharing(opts.db, teamId, svc) };
+  // A run borrows another member's account only once that member approved it
+  // for this run (`services/credential-borrow.ts`).
+  const mayBorrow = (svc: string) => async (memberId: string) =>
+    ctx.workflowExecutionId && owner.type === "team" ? canBorrowCredential(opts.db, { orgId: ctx.orgId, teamId: owner.id, actorId: ctx.userId, sessionId: `wf:${ctx.workflowExecutionId}`, service: svc, memberId }) : false;
   return {
     async get(service?: string): Promise<Credential | null> {
       const svc = service ?? defaultService;
@@ -700,7 +717,11 @@ function buildCredentialProvider(
           : owner.type === "team"
             ? await resolveTeamCredentialRead(
                 deps,
-                { orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id) },
+                {
+                  orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id),
+                  // Discovery can contact the provider, so it requires the same approval.
+                  mayBorrow: mayBorrow(svc),
+                },
                 svc,
                 fallback,
               )
@@ -720,6 +741,41 @@ function buildCredentialProvider(
       return Promise.reject(new Error("credential requests are not supported in workflow action invocation"));
     },
   };
+}
+
+/** The member whose shared account a team run would use for `service`, when
+ * no account of the run's actor or the team's own answers and that member
+ * has not yet approved this run. GitHub has the organization App behind the
+ * team's row, so it never borrows. */
+async function sharedAccountApprover(
+  opts: ActionInvokerOpts,
+  ctx: ActionInvocationContext,
+  teamId: string,
+  service: string,
+): Promise<{ userId: string; name?: string; shareGeneration: string } | undefined> {
+  if (service === "github" || !ctx.workflowExecutionId) return undefined;
+  const sharers = await membersSharing(opts.db, teamId, service);
+  if (sharers.length === 0) return undefined;
+  let approvalFrom: string | undefined;
+  try {
+    ({ approvalFrom } = await readTeamCredential(
+      { credentials: opts.credentials, onePassword: opts.onePassword, shares: async () => sharers },
+      {
+        orgId: ctx.orgId, teamId, userId: ctx.userId, scopes: onePasswordScopesFor("team", teamId),
+        mayBorrow: (memberId) => canBorrowCredential(opts.db, { orgId: ctx.orgId, teamId, actorId: ctx.userId, sessionId: `wf:${ctx.workflowExecutionId}`, service, memberId }),
+      },
+      service,
+      orgFallbackPolicy(registryOf(opts), service),
+    ));
+  } catch {
+    // A share that no longer resolves: the action itself reports that.
+    return undefined;
+  }
+  if (!approvalFrom) return undefined;
+  const [member] = await opts.db.select({ name: users.name }).from(users).where(eq(users.id, approvalFrom)).limit(1);
+  const generation = await shareGeneration(opts.db, teamId, service, approvalFrom);
+  if (!generation) return undefined;
+  return { shareGeneration: generation, userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
 }
 
 /**
@@ -896,6 +952,7 @@ function buildActionContext(
   db: AppDb,
 ): PluginActionContext {
   const sessionId = `wf:invoke:${req.invocationId}`;
+  const presence = mergePresence(readPresence(ctx.presence));
   return {
     userId: ctx.userId,
     orgId: ctx.orgId,
@@ -910,14 +967,8 @@ function buildActionContext(
     // undefined rather than guessing at a value the type doesn't offer.
     summary: undefined,
     credentials,
-    // Workflow tool nodes have no live agent session. Resolve the run
-    // owner's configured default assistant at post time so Slack actions use
-    // the same identity as session-backed agent actions. No assistant, name,
-    // or avatar leaves Slack's bot identity unchanged.
-    resolveOutboundSender: async () => {
-      const assistant = await findDefaultAssistant(db, ctx.orgId, ctx.owner);
-      return assistant ? assistantSenderIdentity(assistant) : undefined;
-    },
+    // Workflow actions use the same owner identity as session-backed actions.
+    resolveOutboundSender: async () => mergePresence(await workspaceSenderIdentity(db, ctx.orgId, ctx.owner), presence),
     sandbox: throwingSandbox(sessionId),
     // Unlike the capabilities stubbed out below, document extraction is
     // genuinely available here: it is a pure call over bytes against the

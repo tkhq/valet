@@ -6,9 +6,15 @@
  * clickable); any other signalType gets a generic envelope (chip + body).
  */
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import type { Message } from "@valet/api/wire";
-import { SignalCard, childCardTitle, truncateBody } from "./signal-card";
+import { SignalCard, childCardTitle, isLongBody, truncateBody } from "./signal-card";
+
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ children, to, params }: { children: ReactNode; to: string; params: Record<string, string> }) =>
+    <a href={Object.entries(params).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a>,
+}));
 
 function baseMessage(overrides: Partial<Message> = {}): Message {
   return {
@@ -79,6 +85,25 @@ describe("SignalCard — other signal types", () => {
   });
 });
 
+describe("SignalCard — long bodies", () => {
+  it("starts a long message collapsed, and expands it on request", () => {
+    const content = Array.from({ length: 20 }, (_, i) => `Source line ${i}`).join("\n");
+    const message = baseMessage({ content, signal: { signalType: "reminder.due" } });
+    render(<SignalCard message={message} />);
+    const toggle = screen.getByRole("button", { name: "Show full message" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Show less" }).getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("shows a short message whole, with no toggle", () => {
+    render(<SignalCard message={baseMessage({ content: "Reminder: standup at 10am.", signal: { signalType: "reminder.due" } })} />);
+    expect(screen.queryByRole("button", { name: "Show full message" })).toBeNull();
+    expect(isLongBody("x".repeat(601))).toBe(true);
+    expect(isLongBody("short")).toBe(false);
+  });
+});
+
 describe("childCardTitle", () => {
   it("prefers attributes.title", () => {
     expect(
@@ -91,7 +116,7 @@ describe("childCardTitle", () => {
   });
 
   it("falls back to a generic label when neither is present", () => {
-    expect(childCardTitle({ signalType: "child.settled" })).toBe("child session");
+    expect(childCardTitle({ signalType: "child.settled" })).toBe("child runtime");
   });
 });
 
@@ -105,5 +130,31 @@ describe("truncateBody", () => {
     const result = truncateBody(long, 200);
     expect(result.length).toBeLessThanOrEqual(201);
     expect(result.endsWith("…")).toBe(true);
+  });
+});
+
+describe("workflow operations", () => {
+  it.each(["workflow.request", "workflow.settled"])("collapses %s without losing the full report or run link", (signalType) => {
+    const content = Array.from({ length: 40 }, (_, i) => `Workflow source ${i}`).join("\n\n");
+    const { container } = render(<SignalCard message={baseMessage({ content,
+      signal: { signalType, attributes: { runId: "run-1", outcome: "completed" } },
+    })} />);
+    const details = container.querySelector("details")!;
+    expect(details.open).toBe(false);
+    expect(screen.getByText("completed")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/workflows/runs/run-1");
+    fireEvent.click(container.querySelector("summary")!);
+    expect(details.open).toBe(true);
+    expect(screen.getByText("Workflow source 39")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Show full message" })).toBeNull();
+    fireEvent.click(container.querySelector("summary")!);
+    expect(details.open).toBe(false);
+  });
+
+  it("keeps legacy workflow reports compact without inventing a run link", () => {
+    const { container } = render(<SignalCard message={baseMessage({ signal: { signalType: "workflow.request" } })} />);
+    expect(container.querySelector("details")?.open).toBe(false);
+    expect(screen.getByText("Workflow request")).toBeTruthy();
+    expect(screen.queryByRole("link")).toBeNull();
   });
 });

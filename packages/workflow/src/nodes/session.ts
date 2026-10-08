@@ -31,7 +31,7 @@
 import { renderTemplate, type TemplateContext } from '../dag/expression.js';
 import type { SessionNode } from '../dag/nodes.js';
 import type { WorkflowPromptReceipt } from '../engine-deps.js';
-import { executeSubmissionNode, type SubmissionDispatch } from './submission-node.js';
+import { executeSubmissionNode, withOutputSchemaPrompt, type SubmissionDispatch } from './submission-node.js';
 import { iterationSuffix, resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
 export interface SessionDispatchedResult {
@@ -63,7 +63,7 @@ export async function executeSession(args: NodeExecutorArgs<SessionNode>): Promi
       outputSchema: node.outputSchema,
       dispatch: async (id): Promise<SubmissionDispatch> => {
         await engine.createSession({ id: sessionId, title: node.title, purpose: 'workflow' });
-        const promptText = renderText(node.prompt, templateContext);
+        const promptText = withOutputSchemaPrompt(renderText(node.prompt, templateContext), node.outputSchema);
         const receipt = await engine.prompt(sessionId, promptText, { dispatchId: id, model: node.model });
         return { sessionId, receipt };
       },

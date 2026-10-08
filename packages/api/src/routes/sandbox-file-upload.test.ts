@@ -370,6 +370,29 @@ describe("POST /api/sessions/:id/files", () => {
     expect(replay.status).toBe(400);
   });
 
+  it("treats a byte-identical re-upload as uploaded and still refuses different content", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const send = (text: string) => {
+      const form = new FormData();
+      form.append("file", new Blob([text], { type: "application/yaml" }), "workflow.yaml");
+      return fetch(`${api!.baseUrl}/api/sessions/${sessionId}/files`, { method: "POST", body: form });
+    };
+    const first = await send("name: review\n");
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as { attachmentRef: string; sha256: string };
+
+    // The composer re-sends a file when a person attaches it again. The same
+    // bytes are already there, so this is a success with a fresh ref.
+    const again = await send("name: review\n");
+    expect(again.status).toBe(200);
+    const againBody = (await again.json()) as { attachmentRef: string; sha256: string };
+    expect(againBody.sha256).toBe(firstBody.sha256);
+    expect(againBody.attachmentRef).not.toBe(firstBody.attachmentRef);
+
+    expect((await send("name: other\n")).status).toBe(409);
+  });
+
   it("refuses to clobber an existing PDF sidecar with extract=true and overwrite unset", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
@@ -430,6 +453,38 @@ describe("POST /api/sessions/:id/files", () => {
   // MessageEntry type:"file" → agent note) is covered by
   // packages/engine/test/prompt-file-attachments.test.ts — this harness
   // runs keyless, so no turn ever starts and no user entry persists here.
+});
+
+describe("GET /api/sessions/:id/threads/:threadId/files", () => {
+  it("downloads a file attached to the thread and nothing else", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl, "");
+    const form = new FormData();
+    form.append("file", new Blob(["quarterly numbers"], { type: "text/plain" }), "Q3 report.txt");
+    const uploaded = (await (await fetch(`${api.baseUrl}/api/sessions/${sessionId}/files`, { method: "POST", body: form })).json()) as PostSessionFileUploadResponse;
+    // A stray sandbox file that no message attaches.
+    const stray = new FormData();
+    stray.append("file", new Blob(["secret"]), "stray.txt");
+    expect((await fetch(`${api.baseUrl}/api/sessions/${sessionId}/files`, { method: "POST", body: stray })).status).toBe(200);
+
+    // This harness runs keyless, so seed the user entry the send would write.
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const thread = await engineSession.ensureDefaultThread();
+    await api.providers.engineStore.appendEntries(sessionId, thread.id, [{
+      id: "m1", sessionId, threadId: thread.id, parentId: null, type: "message", role: "user", content: "read this", createdAt: 1,
+      attachments: [{ type: "file", path: uploaded.path, bytes: uploaded.bytes, sha256: uploaded.sha256, mimeType: "text/plain", name: "Q3 report.txt" }],
+    }]);
+    const download = (path: string, threadId = thread.id) =>
+      fetch(`${api!.baseUrl}/api/sessions/${sessionId}/threads/${threadId}/files?path=${encodeURIComponent(path)}`);
+
+    const res = await download(uploaded.path);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("quarterly numbers");
+    expect(res.headers.get("content-type")).toBe("text/plain");
+    expect(res.headers.get("content-disposition")).toBe(`attachment; filename="Q3_report.txt"; filename*=UTF-8''Q3%20report.txt`);
+    expect((await download("/workspace/uploads/stray.txt")).status).toBe(404);
+    expect((await download(uploaded.path, "no-such-thread")).status).toBe(404);
+  });
 });
 
 describe("sandboxReadyError", () => {

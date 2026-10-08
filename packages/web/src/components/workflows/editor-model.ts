@@ -1,32 +1,5 @@
-/**
- * Pure editor model for the visual workflow editor.
- *
- * Lifted from main's `packages/client/src/components/workflows/workflow-editor-model.ts`
- * (1503 lines) and trimmed hard per the node-completion-plan decision 9:
- *
- *   KEPT: definition<->flow conversion (with fromOutput-labeled source
- *   handles on if/approval sources), add/remove/duplicate/update node,
- *   connect rules (single trigger root, no self-edges, fromOutput only
- *   from if/approval), position persistence into `definition.ui`, viewport
- *   persistence, dirty tracking, unique id generation, BFS-depth layered
- *   auto-layout.
- *
- *   DROPPED (out of scope for the v2 node set / this task): NODE_DOCS
- *   (replaced by a small local `NODE_META` table — v2 has no docs
- *   package), the tool-catalog/data-flow-source machinery
- *   (`deriveWorkflowOutputSources`, `buildWorkflowEdgeInspection`,
- *   `applyDefaultDataFlowForConnection`, JSON-schema<->input-definition
- *   conversion, the node palette filter/search helpers) — none of that is
- *   part of decision 9's deliverable list, and main's edge/node CSS
- *   styling (colors, stroke widths, edge `type`) which belongs to the
- *   presentation layer (Tasks 9-10), not the pure model. Legacy node
- *   types and `session.workspace`/prompt-mode are gone because the v2
- *   `SessionNode` (see `@valet/workflow`'s `dag/nodes.ts`) trims to
- *   start-mode only.
- *
- * This module has no React dependency — Tasks 9-10 build the xyflow
- * presentation on top of it.
- */
+/** Canonical workflow definition edits and their canvas projection.
+ * React-free reducers preserve node payloads, layout, and branching rules. */
 
 import {
   validateWorkflowDefinition,
@@ -35,7 +8,7 @@ import {
   type ForeachNode,
   type IfNode,
   type LlmNode,
-  type OrchestratorNode,
+  type ThreadNode,
   type SessionNode,
   type SetNode,
   type StopNode,
@@ -44,7 +17,6 @@ import {
   type WaitNode,
   type WorkflowCallNode,
   type WorkflowDefinition,
-  type WorkflowEditorState,
   type WorkflowEdge,
   type WorkflowNode,
 } from '@valet/workflow';
@@ -157,8 +129,8 @@ export const NODE_META: Record<DagNodeType, NodeMeta> = {
     defaultNode: (id): ApprovalNode => ({ id, type: 'approval', prompt: '' }),
   },
   session: {
-    label: 'Session',
-    description: 'Start a coding session',
+    label: 'Runtime',
+    description: 'Start a coding runtime',
     defaultNode: (id): SessionNode => ({ id, type: 'session', mode: 'start', prompt: '' }),
   },
   stop: {
@@ -182,9 +154,9 @@ export const NODE_META: Record<DagNodeType, NodeMeta> = {
     defaultNode: (id): LlmNode => ({ id, type: 'llm', model: '', prompt: '' }),
   },
   orchestrator: {
-    label: 'Orchestrator',
-    description: 'Ask the workflow’s selected orchestrator to do work',
-    defaultNode: (id): OrchestratorNode => ({ id, type: 'orchestrator', prompt: '' }),
+    label: 'Thread',
+    description: 'Ask the workspace assistant to work in this workflow’s thread',
+    defaultNode: (id): ThreadNode => ({ id, type: 'orchestrator', prompt: '' }),
   },
   tool: {
     label: 'Tool',
@@ -225,7 +197,7 @@ export function createNodeId(type: DagNodeType, existingIds: Iterable<string>): 
   return candidate;
 }
 
-// ─── definition <-> flow conversion ───────────────────────────────────────────
+// ─── definition -> flow projection ───────────────────────────────────────────
 
 export function toFlow(definition: WorkflowDefinition): WorkflowFlowState {
   // Initial loads and previews need the same reconciliation as live patches.
@@ -242,26 +214,6 @@ export function toFlow(definition: WorkflowDefinition): WorkflowFlowState {
     })),
     edges: definition.edges.map(workflowEdgeToFlowEdge),
     viewport: definition.ui?.viewport,
-  };
-}
-
-export function fromFlow(
-  flow: WorkflowFlowState,
-  previous?: Pick<WorkflowDefinition, 'policy' | 'assistantId' | 'ui'>,
-): WorkflowDefinition {
-  const ui: WorkflowEditorState = {
-    nodes: Object.fromEntries(flow.nodes.map((node) => [node.id, { position: node.position }])),
-    ...(flow.viewport ? { viewport: flow.viewport } : {}),
-    ...(previous?.ui?.defaultModel ? { defaultModel: previous.ui.defaultModel } : {}),
-  };
-
-  return {
-    version: 'dag/v1',
-    nodes: flow.nodes.map((node) => node.data.node),
-    edges: flow.edges.map(flowEdgeToWorkflowEdge),
-    ...(previous?.policy ? { policy: previous.policy } : {}),
-    ...(previous?.assistantId ? { assistantId: previous.assistantId } : {}),
-    ui,
   };
 }
 
@@ -300,7 +252,7 @@ export function graphSignature(definition: WorkflowDefinition): string {
     nodes: definition.nodes,
     edges: definition.edges,
     policy: definition.policy ?? null,
-    assistantId: definition.assistantId ?? null,
+    presence: definition.presence ?? null,
   });
 }
 
@@ -335,16 +287,6 @@ export function workflowEdgeToFlowEdge(edge: WorkflowEdge): WorkflowFlowEdge {
       ...(edge.fromOutput ? { fromOutput: edge.fromOutput } : {}),
       ...(edge.when ? { when: edge.when } : {}),
     },
-  };
-}
-
-export function flowEdgeToWorkflowEdge(edge: WorkflowFlowEdge): WorkflowEdge {
-  const fromOutput = edge.data.fromOutput ?? edge.sourceHandle;
-  return {
-    from: edge.source,
-    to: edge.target,
-    ...(fromOutput ? { fromOutput } : {}),
-    ...(edge.data.when ? { when: edge.data.when } : {}),
   };
 }
 
@@ -783,8 +725,7 @@ export interface ConcurrencyModel {
 
 /**
  * Which output an edge leaves its source on. An empty string is the single
- * unlabeled output that every node except `if` and `approval` has. The
- * precedence matches `flowEdgeToWorkflowEdge`.
+ * unlabeled output that every node except `if` and `approval` has.
  */
 function edgeOutput(edge: WorkflowFlowEdge): string {
   return edge.data.fromOutput ?? edge.sourceHandle ?? '';

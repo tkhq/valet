@@ -76,6 +76,7 @@ async function seedLinearOrg(a: TestApi): Promise<void> {
     orgId: "local-org",
     workspaceId: "lin-org-1",
     workspaceName: "Linear Test Workspace",
+    webhookId: "linear-test-webhook",
     connectedBy: "local-user",
     createdAt: now,
     updatedAt: now,
@@ -149,7 +150,7 @@ describe("event system e2e: signed webhook → subscription match → workflow r
 
     // ── Signed webhook, team TKAI → 204 ─────────────────────────────────
     const res = await postLinear(api.baseUrl, issueCreateBody("TKAI", "iss-1"), "del-1");
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(200);
 
     // Deterministic drive: if the ingest nudge's poll is still in flight,
     // this is a no-op (draining guard) and expect.poll below covers it; if
@@ -188,7 +189,7 @@ describe("event system e2e: signed webhook → subscription match → workflow r
     // filter excludes it) is never persisted. This is the privacy rule — the
     // events table keeps only what a subscription asked for.
     const negRes = await postLinear(api.baseUrl, issueCreateBody("OTHER", "iss-2"), "del-2");
-    expect(negRes.status).toBe(204);
+    expect(negRes.status).toBe(200);
 
     const allEvents = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
     expect(allEvents).toHaveLength(1);
@@ -228,7 +229,7 @@ describe("event system e2e: redelivery starts a SECOND workflow run", () => {
     expect(subRes.status).toBe(201);
 
     // ── First pass: the event arrives and runs once ─────────────────────
-    expect((await postLinear(api.baseUrl, issueCreateBody("TKAI", "iss-1"), "del-1")).status).toBe(204);
+    expect((await postLinear(api.baseUrl, issueCreateBody("TKAI", "iss-1"), "del-1")).status).toBe(200);
     await api.providers.eventDispatcher.pollOnce();
 
     const eventRows = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));

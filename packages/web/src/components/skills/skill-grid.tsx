@@ -19,7 +19,7 @@
  */
 import type { SkillSummary } from "@valet/api/wire";
 import type { SkillListQuery } from "~/api/client";
-import { cn } from "~/lib/cn";
+import { FilterChips } from "~/components/primitives";
 import { SkillCard } from "~/components/skills/skill-card";
 import { type Scope } from "~/components/skills/scope-badge";
 import { SearchInput } from "~/components/search-input";
@@ -50,8 +50,6 @@ export interface SkillGridFilters {
   scope: ScopeFilter;
   query: string;
 }
-
-export const NO_SKILL_FILTERS: SkillGridFilters = { filter: "all", scope: "all", query: "" };
 
 /** True when any control is narrowing the catalog. An empty page means
  * "nothing matched" then, and "nothing here yet" otherwise. */
@@ -90,25 +88,12 @@ export function SkillGrid({
     <div>
       {showControls && (
         <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-2" role="tablist" aria-label="Filter skills">
-            {FILTER_CHIPS.map((chip) => (
-              <button
-                key={chip.id}
-                type="button"
-                role="tab"
-                aria-selected={filters.filter === chip.id}
-                onClick={() => onFiltersChange({ ...filters, filter: chip.id })}
-                className={cn(
-                  "max-sm:min-h-11 rounded-full border px-3 py-1 text-xs transition-colors",
-                  filters.filter === chip.id
-                    ? "border-moss bg-moss text-white"
-                    : "border-line bg-paper text-muted hover:text-ink",
-                )}
-              >
-                {chip.label}
-              </button>
-            ))}
-          </div>
+          <FilterChips
+            label="Filter skills"
+            value={filters.filter}
+            onChange={(filter) => onFiltersChange({ ...filters, filter })}
+            options={FILTER_CHIPS.map((chip) => ({ value: chip.id, label: chip.label }))}
+          />
 
           {showScopeFilter && (
             <select

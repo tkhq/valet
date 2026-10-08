@@ -12,7 +12,7 @@
  * for rows hibernated before that column existed. Race rules mirror
  * `ChildWatcher.sweepRetention`.
  */
-import { and, eq, isNull, lte } from "drizzle-orm";
+import { and, eq, isNull, lte, sql } from "drizzle-orm";
 import { recordSandboxDestroyed, type AttachmentState } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
@@ -67,6 +67,9 @@ export class HibernationReaper {
       .where(
         and(
           eq(agentSessions.status, "hibernated"),
+          // Legacy team roots retain mixed-audience files for explicit recovery.
+          // Only isolated executions resume normal destructive retention.
+          sql`NOT EXISTS (SELECT 1 FROM assistants a WHERE a.session_id=${agentSessions.id} AND a.owner_type='team')`,
           isNull(agentSessions.sandboxReclaimedAt),
           lte(agentSessions.updatedAt, cutoff),
         ),
