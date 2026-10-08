@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { Download, MessageSquare, MessageSquarePlus } from "lucide-react";
+import { ArrowLeft, Download, MessageSquare, MessageSquarePlus } from "lucide-react";
 import { buildArtifactDocument, type ArtifactAnchorRect } from "@valet/shared";
 import {
   useAddArtifactComment,
@@ -39,6 +39,13 @@ import { useThemeAttribute } from "~/lib/use-theme-attribute";
 export const Route = createFileRoute("/a/$token")({
   component: ArtifactPage,
 });
+
+function ArtifactHomeLink() {
+  return <a href="/" className="inline-flex min-h-11 shrink-0 items-center gap-1.5 text-sm text-moss hover:underline">
+    <ArrowLeft className="h-4 w-4" aria-hidden />
+    Back to Valet
+  </a>;
+}
 
 export function ArtifactPage() {
   const { token } = Route.useParams();
@@ -85,14 +92,15 @@ export function ArtifactPage() {
 
   if (revokedToken === token) {
     return <div className="flex min-h-screen items-center justify-center p-8 text-center">
-      <div className="space-y-2"><h1 className="font-display text-xl">This link is revoked.</h1><p className="text-sm text-muted">Publish the artifact again to get a new link.</p></div>
+      <div className="space-y-2"><h1 className="font-display text-xl">This link is revoked.</h1><p className="text-sm text-muted">Publish the artifact again to get a new link.</p><ArtifactHomeLink /></div>
     </div>;
   }
 
   if (artifactQ.isLoading) {
     return (
-      <div className="flex min-h-screen items-center justify-center gap-2 text-sm text-muted">
-        <Spinner /> Loading…
+      <div className="flex min-h-screen flex-col items-center justify-center gap-2 text-sm text-muted">
+        <div className="flex items-center gap-2"><Spinner /> Loading…</div>
+        <ArtifactHomeLink />
       </div>
     );
   }
@@ -118,13 +126,14 @@ export function ArtifactPage() {
               Go to login
             </a>
           )}
+          <div><ArtifactHomeLink /></div>
         </div>
       </div>
     );
   }
 
   const doc = artifactQ.data;
-  if (!doc) return null;
+  if (!doc) return <div className="p-4"><ArtifactHomeLink /></div>;
 
   const download = () => {
     if (doc.format === "html") {
@@ -165,20 +174,23 @@ export function ArtifactPage() {
       {/* One compact bar — the page below is the point; the chrome is not.
           The title/byline collapse to a single truncating row, and the
           description rides in the tooltip instead of a second line. */}
-      <header className="flex items-center justify-between gap-4 border-b border-line px-4 py-2">
-        <div className="flex min-w-0 items-baseline gap-2" title={doc.description || undefined}>
-          <h1 className="truncate font-display text-sm font-medium leading-tight text-ink">
-            {doc.icon ? `${doc.icon} ` : ""}
-            {doc.title}
-          </h1>
-          {doc.ownerType === "team" && (
-            <span className="shrink-0 text-[11px] text-muted" title="Only current members of the owning team can open this link.">Team-only</span>
-          )}
-          <p className="hidden shrink-0 text-[11px] text-muted sm:block">
-            {doc.sharedBy ? `${doc.sharedBy} · ` : ""}v{doc.version} · {relativeTime(doc.updatedAt)}
-          </p>
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-line px-4 py-2">
+        <div className="flex w-full min-w-0 max-w-full items-center gap-3 sm:w-auto sm:min-w-48 sm:flex-1">
+          <ArtifactHomeLink />
+          <div className="flex min-w-0 items-baseline gap-2" title={doc.description || undefined}>
+            <h1 className="truncate font-display text-sm font-medium leading-tight text-ink">
+              {doc.icon ? `${doc.icon} ` : ""}
+              {doc.title}
+            </h1>
+            {doc.ownerType === "team" && (
+              <span className="shrink-0 text-[11px] text-muted" title="Only current members of the owning team can open this link.">Team-only</span>
+            )}
+            <p className="hidden shrink-0 text-[11px] text-muted sm:block">
+              {doc.sharedBy ? `${doc.sharedBy} · ` : ""}v{doc.version} · {relativeTime(doc.updatedAt)}
+            </p>
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-3">
+        <div className="flex max-w-full shrink-0 flex-wrap items-center gap-3">
             {doc.management && !meQ.error && <RevokeArtifact key={doc.management.id} id={doc.management.id} title={doc.title} token={token} onRevoked={() => setRevokedToken(token)} />}
             {canComment && (
               <button

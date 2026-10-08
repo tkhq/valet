@@ -3,7 +3,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { GetArtifactResponse } from "@valet/api/wire";
-import { api } from "~/api/client";
+import { api, ApiError } from "~/api/client";
 import { ArtifactPage } from "./a.$token";
 let token = "published-token";
 const doc: GetArtifactResponse = {
@@ -34,6 +34,14 @@ it("keeps public and non-manager readers read-only", async () => {
   expect(screen.getByRole("button", { name: "Download" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
   expect(api.revokeArtifact).not.toHaveBeenCalled();
+  expect(screen.getByRole("link", { name: "Back to Valet" }).getAttribute("href")).toBe("/");
+});
+it("keeps a homepage link available while loading and after a failed read", async () => {
+  vi.mocked(api.getArtifact).mockRejectedValue(new ApiError(404, "Unavailable"));
+  setup();
+  expect(screen.getByRole("link", { name: "Back to Valet" }).getAttribute("href")).toBe("/");
+  await screen.findByText("This page is unavailable.");
+  expect(screen.getByRole("link", { name: "Back to Valet" }).getAttribute("href")).toBe("/");
 });
 it("requires confirmation before revoking the granted artifact and hides the reader after success", async () => {
   vi.mocked(api.getArtifact).mockResolvedValue({ ...doc, management: { id: "artifact-id" } });
@@ -48,6 +56,7 @@ it("requires confirmation before revoking the granted artifact and hides the rea
   await waitFor(() => expect(api.revokeArtifact).toHaveBeenCalledWith("artifact-id"));
   expect(await screen.findByText("This link is revoked.")).toBeTruthy();
   expect(screen.queryByText("Artifact content")).toBeNull();
+  expect(screen.getByRole("link", { name: "Back to Valet" }).getAttribute("href")).toBe("/");
 });
 it("keeps a failed revoke visible and allows retry", async () => {
   vi.mocked(api.getArtifact).mockResolvedValue({ ...doc, management: { id: "artifact-id" } });
