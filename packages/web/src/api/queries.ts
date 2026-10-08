@@ -4,14 +4,18 @@
  * historical-state side of the picture (initial fetch + cache-invalidation
  * on mutations).
  */
+import { threadOriginBucket } from "~/lib/thread-origin";
+import { isAppAssistantThread } from "~/lib/thread-default";
 import {
   useInfiniteQuery,
+  isCancelledError,
   type InfiniteData,
   useMutation,
   useQuery,
   useQueryClient,
   type UseQueryOptions,
   type Query,
+  type QueryClient,
 } from "@tanstack/react-query";
 import type {
   CreateSessionRequest,
@@ -152,7 +156,7 @@ export function useSidebarThreads(id: string, options: { sort: string; origin: s
   return { ...query, fixedReady: !fixed.isFetching && !fixed.isError,
     fixedError: fixed.error, refetchFixed: fixed.refetch,
     data: pages ? {
-      ...pages[0], threads: [...new Map([...pages.flatMap(page => page.threads), ...(fixed.data?.threads ?? [])].map(thread => [thread.id, thread])).values()],
+      ...pages[0], threads: [...new Map([...pages.flatMap(page => page.threads), ...(fixed.data?.threads.filter(thread => fixedIds.includes(thread.id) || thread.id === threadId) ?? [])].map(thread => [thread.id, thread])).values()],
     } : undefined };
 }
 
@@ -415,7 +419,10 @@ export function useSetThreadArchived(sessionId: string) {
   return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean }>({
     mutationFn: ({ threadId, archived }) =>
       api.patchThread(threadId, { archived }),
-    onSuccess: () => {
+    onSuccess: async (_saved, { threadId }) => {
+      // An older supplemental activity read must not reinsert the archived row.
+      await qc.cancelQueries({ predicate: query => query.queryKey[0] === "sessions"
+        && query.queryKey[2] === "threads" && query.queryKey[3] === "activity" && query.queryKey[4] === threadId });
       qc.invalidateQueries(threadListFilters(sessionId));
       qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
     },
@@ -649,4 +656,44 @@ export function useUnlinkIdentity(provider: string) {
       qc.invalidateQueries({ queryKey: qk.identityLinks() });
     },
   });
+}
+
+/** Read only the promoted row; keep loaded pages and their cursor chain. */
+export async function refreshMissingActivityThread(client: QueryClient, threadId: string) {
+  // An execution socket may name a row absent from its root workspace cache.
+  // Let each active runtime's authorized fixed-row endpoint resolve membership.
+  const queries = client.getQueryCache().findAll({ type: "active", predicate: query =>
+    query.queryKey[0] === "sessions" && query.queryKey[2] === "threads" && query.queryKey[3] === "pages",
+  });
+  await Promise.all(queries.map(async query => {
+    const options = query.queryKey[4] as { sort?: string; origin?: string } | undefined;
+    const data = query.state.data as InfiniteData<ListThreadsResponse> | undefined;
+    if (!data || options?.sort === "created" || data.pages.some(page => page.threads.some(thread => thread.id === threadId))) return;
+    const runtimeId = query.queryKey[1] as string;
+    let response: ListThreadsResponse;
+    try {
+      response = await client.fetchQuery({
+        queryKey: [...qk.threads(runtimeId), "activity", threadId],
+        queryFn: () => api.listThreads(runtimeId, { fixedOnly: true, fixedIds: [threadId] }),
+        staleTime: 0,
+      });
+    } catch (error) {
+      if (!isCancelledError(error) && query.isActive()) {
+        // The list owns retry/error UI; do not refresh other cached workspaces.
+        await client.invalidateQueries({ queryKey: query.queryKey, exact: true });
+      }
+      return;
+    }
+    if (!query.isActive()) return;
+    const rows = response.threads.filter(thread => thread.archivedAt === undefined && !isAppAssistantThread(thread)
+      && (!options?.origin || options.origin === "all" || threadOriginBucket(thread) === options.origin));
+    if (!rows.length) return;
+    // A pending next-page response must not overwrite the inserted row.
+    await client.cancelQueries({ queryKey: query.queryKey, exact: true });
+    client.setQueryData<InfiniteData<ListThreadsResponse>>(query.queryKey, current => current && ({
+      ...current, pages: current.pages.map((page, index) => index ? page : ({
+        ...page, threads: [...new Map([...rows, ...page.threads].map(thread => [thread.id, thread])).values()],
+      })),
+    }));
+  }));
 }

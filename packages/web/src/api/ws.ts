@@ -9,7 +9,7 @@ import { useEffect } from "react";
 import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import type { ListThreadsResponse, WireEvent } from "@valet/api/wire";
 import { useStreamStore } from "~/stores/stream";
-import { qk, threadListFilters, mapThreadData } from "./queries";
+import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread } from "./queries";
 
 const MAX_RETRY_MS = 8_000;
 const INITIAL_RETRY_MS = 500;
@@ -143,7 +143,8 @@ export function useSessionWebSocket(sessionId: string) {
           if (wire.type === "thread.activity") {
             qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), current => mapThreadData(current, thread =>
               thread.id === wire.threadId ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, wire.lastUserActivityAt) } : thread));
-            // Activity reorders cached rows locally. Do not refetch every loaded page per frame.
+            // Unloaded rows can move above the saved cursor. Fetch just that row.
+            void refreshMissingActivityThread(qc, wire.threadId);
           }
           // Reset backoff only after receiving init — confirms the session
           // is valid and the connection is healthy. Resetting in onopen

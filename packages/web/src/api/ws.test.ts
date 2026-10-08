@@ -10,7 +10,9 @@ import { createElement, type PropsWithChildren } from "react";
 import type { ListThreadsResponse } from "@valet/api/wire";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, renderHook } from "@testing-library/react";
+import { api } from "./client";
+import { useSidebarThreads } from "./queries";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { useSessionWebSocket } from "./ws";
 import { useStreamStore } from "~/stores/stream";
 
@@ -238,4 +240,25 @@ describe("useSessionWebSocket", () => {
     expect(FakeWebSocket.instances).toHaveLength(2);
     unmount();
   });
+});
+
+
+it("makes an unloaded execution thread reachable in its root workspace without reloading pages", async () => {
+  const row = { id: "recent", sessionId: "s1", createdAt: 10, lastUserActivityAt: 10 };
+  const list = vi.spyOn(api, "listThreads").mockImplementation(async (_id, opts) => ({
+    threads: [opts?.fixedOnly ? { ...row, id: "old", createdAt: 1, lastUserActivityAt: 20 } : row],
+    nextCursor: opts?.fixedOnly ? undefined : "older",
+  }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: PropsWithChildren) => createElement(QueryClientProvider, { client }, children);
+  const { result, unmount } = renderHook(() => {
+    useSessionWebSocket("execution:old");
+    return useSidebarThreads("s1", { sort: "last-user-activity", origin: "all", fixedIds: [] });
+  }, { wrapper });
+  await waitFor(() => expect(result.current.data?.threads).toHaveLength(1));
+  act(() => FakeWebSocket.instances[0]?.onmessage?.({ data: JSON.stringify({ type: "thread.activity", threadId: "old", lastUserActivityAt: 20, seq: 1, ts: 20 }) }));
+  await waitFor(() => expect(result.current.data?.threads.some(thread => thread.id === "old")).toBe(true));
+  expect(list.mock.calls.filter(([, opts]) => opts?.limit)).toHaveLength(1);
+  expect(list).toHaveBeenLastCalledWith("s1", { fixedOnly: true, fixedIds: ["old"] });
+  unmount(); client.clear(); vi.restoreAllMocks();
 });

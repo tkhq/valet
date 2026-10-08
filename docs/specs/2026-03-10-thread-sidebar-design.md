@@ -113,7 +113,11 @@ ChatContainer (orchestrator)
 - The archived approval marker waits for supplemental reads. An active row outside the origin filter does not imply archived history.
 - Workspace switches do not reuse another workspace's rows. The selected thread is requested explicitly when opening its conversation.
 - The server and client break equal creation timestamps by ascending thread ID.
-- Live activity updates loaded rows without refetching pages. Completed turns and normal list invalidations still refresh the list.
+- Live activity updates loaded rows without refetching pages. An unloaded row gets one authorized fixed-row read per active activity-sorted list.
+- Promoted rows enter the first cached page without changing its cursor. Pending page reads are cancelled before insertion to prevent stale overwrites.
+- Supplemental placeholders contain only current pins, project assignments, approvals, and selection. Clearing selection removes its old supplemental row immediately.
+- Successful archiving cancels pending activity reads for that thread before refreshing lists. A late response cannot restore the archived row.
+- Completed turns and normal list invalidations still refresh the list. A failed activity read uses the existing list retry path.
 - Existing mutation updates support both single-page and infinite-query cache shapes.
 
 The first version scans authorized candidate metadata before paging. Activity and pull-request enrichment runs only for returned rows.

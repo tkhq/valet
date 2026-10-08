@@ -192,3 +192,60 @@ it("batches hundreds of fixed IDs into bounded requests without dropping rows", 
   client.clear();
   vi.restoreAllMocks();
 });
+
+it("drops supplemental selection rows when selection clears during archive", async () => {
+  const { useSidebarThreads, useSetThreadArchived } = await import("./queries");
+  const row = { id: "old", sessionId, createdAt: 1, lastUserActivityAt: 1 };
+  vi.spyOn(api, "listThreads").mockImplementation(async (_id, opts) => ({ threads: opts?.fixedOnly ? [row] : [{ ...row, id: "recent" }] }));
+  vi.spyOn(api, "patchThread").mockResolvedValue({ ...row, archivedAt: 2 });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, rerender, unmount } = renderHook(({ threadId }) => ({
+    sidebar: useSidebarThreads(sessionId, { sort: "last-user-activity", origin: "all", fixedIds: [], threadId }),
+    archive: useSetThreadArchived(sessionId),
+  }), { wrapper, initialProps: { threadId: "old" as string | undefined } });
+  await waitFor(() => expect(result.current.sidebar.data?.threads).toHaveLength(2));
+  rerender({ threadId: undefined });
+  await act(() => result.current.archive.mutateAsync({ threadId: "old", archived: true }));
+  await waitFor(() => expect(result.current.sidebar.data?.threads.map(t => t.id)).toEqual(["recent"]));
+  unmount(); client.clear(); vi.restoreAllMocks();
+});
+
+it("inserts promoted unloaded rows with one bounded read and preserves loaded cursors", async () => {
+  const { useSidebarThreads, refreshMissingActivityThread } = await import("./queries");
+  const row = { id: "recent", sessionId, createdAt: 10, lastUserActivityAt: 10 };
+  const list = vi.spyOn(api, "listThreads").mockImplementation(async (_id, opts) => opts?.fixedOnly
+    ? { threads: [{ ...row, id: "promoted", createdAt: 1, lastUserActivityAt: 20 }] }
+    : { threads: [{ ...row, id: opts?.cursor ? "older" : "recent" }], nextCursor: opts?.cursor ? "last" : "next" });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, unmount } = renderHook(() => useSidebarThreads(sessionId, { sort: "last-user-activity", origin: "all", fixedIds: [] }), { wrapper });
+  await waitFor(() => expect(result.current.data?.threads).toHaveLength(1));
+  await act(() => result.current.fetchNextPage());
+  await act(() => refreshMissingActivityThread(client, "promoted"));
+  await waitFor(() => expect(result.current.data?.threads.map(t => t.id)).toContain("promoted"));
+  await act(() => refreshMissingActivityThread(client, "promoted"));
+  expect(list.mock.calls.filter(([, opts]) => opts?.limit)).toHaveLength(2);
+  expect(list.mock.calls.filter(([, opts]) => opts?.fixedOnly)).toHaveLength(1);
+  expect(client.getQueryData<InfiniteData<ListThreadsResponse>>(qk.threadPages(sessionId, { sort: "last-user-activity", origin: "all" }))?.pages[1]?.nextCursor).toBe("last");
+  unmount(); client.clear(); vi.restoreAllMocks();
+});
+
+it("does not resurrect an archived thread from a pending activity read", async () => {
+  const { useSidebarThreads, useSetThreadArchived, refreshMissingActivityThread } = await import("./queries");
+  const row = { id: "old", sessionId, createdAt: 1, lastUserActivityAt: 20 };
+  let complete!: (response: ListThreadsResponse) => void;
+  vi.spyOn(api, "listThreads").mockImplementation(async (_id, opts) => opts?.fixedOnly
+    ? new Promise<ListThreadsResponse>(resolve => { complete = resolve; }) : { threads: [{ ...row, id: "recent" }] });
+  vi.spyOn(api, "patchThread").mockResolvedValue({ ...row, archivedAt: 21 });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result, unmount } = renderHook(() => ({ sidebar: useSidebarThreads(sessionId, { sort: "last-user-activity", origin: "all", fixedIds: [] }), archive: useSetThreadArchived(sessionId) }), { wrapper });
+  await waitFor(() => expect(result.current.sidebar.data?.threads).toHaveLength(1));
+  const pending = refreshMissingActivityThread(client, "old").catch(() => undefined);
+  await waitFor(() => expect(complete).toBeDefined());
+  await act(() => result.current.archive.mutateAsync({ threadId: "old", archived: true }));
+  await act(async () => { complete({ threads: [row] }); await pending; });
+  expect(result.current.sidebar.data?.threads.map(thread => thread.id)).toEqual(["recent"]);
+  unmount(); client.clear(); vi.restoreAllMocks();
+});
