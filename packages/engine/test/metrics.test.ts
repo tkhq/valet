@@ -113,6 +113,26 @@ describe("wakeup metrics", () => {
       attributes: { kind: "watch" },
     });
   });
+
+  it("reports two kinds as independent label sets on the same gauge", () => {
+    recordWakeupsActive("process", 2);
+    recordWakeupsActive("timer", 5);
+
+    const before = metricState.points.length;
+    metricState.collect();
+    const added = metricState.points.slice(before);
+
+    expect(added).toContainEqual({
+      name: "valet.wakeups.active",
+      value: 2,
+      attributes: { kind: "process" },
+    });
+    expect(added).toContainEqual({
+      name: "valet.wakeups.active",
+      value: 5,
+      attributes: { kind: "timer" },
+    });
+  });
 });
 
 describe("lease metrics", () => {
@@ -125,6 +145,22 @@ describe("lease metrics", () => {
       value: 2,
       attributes: { ownerKind: "hold" },
     });
+  });
+
+  it("keeps only the last-set value for a given label set", () => {
+    recordLeasesActive("hold", 3);
+    recordLeasesActive("hold", 1);
+
+    const before = metricState.points.length;
+    metricState.collect();
+    const added = metricState.points.slice(before);
+    const holdPoints = added.filter(
+      (point) => point.name === "valet.leases.active" && point.attributes?.ownerKind === "hold",
+    );
+
+    expect(holdPoints).toEqual([
+      { name: "valet.leases.active", value: 1, attributes: { ownerKind: "hold" } },
+    ]);
   });
 
   it("counts node-seconds consumed by a lease, by owner kind", () => {
@@ -147,6 +183,21 @@ describe("lease metrics", () => {
     expect(metricState.points).toContainEqual({
       name: "valet.leases.over_deadline",
       value: 1,
+      attributes: {},
+    });
+  });
+
+  it("keeps reporting a zero count instead of dropping the series", () => {
+    recordLeasesOverDeadline(2);
+    recordLeasesOverDeadline(0);
+
+    const before = metricState.points.length;
+    metricState.collect();
+    const added = metricState.points.slice(before);
+
+    expect(added).toContainEqual({
+      name: "valet.leases.over_deadline",
+      value: 0,
       attributes: {},
     });
   });
