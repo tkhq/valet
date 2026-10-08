@@ -8,8 +8,8 @@
  * `routes/messages.ts` 403) and enabled for an admin, and that all of the
  * gate's actions render regardless. `useMe` comes from `~/api/settings`.
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { DecisionGate, MeResponse } from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
@@ -59,6 +59,11 @@ function renderCard(g: DecisionGate = gate()) {
     </TooltipProvider>,
   );
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -264,17 +269,29 @@ describe("question image answers", () => {
 });
 
 describe("DecisionGateCard — long request layout", () => {
+  function mockTitleLayout({ scrollHeight, clientHeight }: { scrollHeight: number; clientHeight: number }) {
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.tagName === "H3" ? scrollHeight : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.tagName === "H3" ? clientHeight : 0;
+    });
+  }
+
   it("bounds only the named request-details region so actions remain reachable", () => {
+    mockTitleLayout({ scrollHeight: 204, clientHeight: 68 });
     const body = "https://example.com/" + "a".repeat(10_000);
-    const { container } = renderCard(gate({ body, title: "A title ".repeat(100) }));
+    const title = "A title ".repeat(100);
+    const { container } = renderCard(gate({ body, title }));
 
     const card = container.querySelector('[role="dialog"]');
-    const title = screen.getByRole("heading");
+    const heading = screen.getByRole("heading");
     const request = screen.getByRole("region", { name: "Request details" });
     expect(card?.className).not.toContain("max-h-");
-    expect(title.className).toContain("line-clamp-3");
-    expect(title.className).toContain("[overflow-wrap:anywhere]");
-    expect(title.getAttribute("title")).toBe("A title ".repeat(100));
+    expect(heading.className).toContain("line-clamp-3");
+    expect(heading.className).toContain("[overflow-wrap:anywhere]");
+    expect(screen.getByRole("dialog").getAttribute("aria-labelledby")).toBe(heading.id);
+    expect(screen.getByRole("button", { name: "Show more" }).getAttribute("aria-controls")).toBe(heading.id);
     expect(request.id).toBe("gate-gate_1-body");
     expect(request.getAttribute("tabindex")).toBe("0");
     expect(request.className).toContain("max-h-[min(14rem,25dvh)]");
@@ -288,15 +305,68 @@ describe("DecisionGateCard — long request layout", () => {
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
   });
 
-  it("clamps a long title and preserves it in a native tooltip", () => {
-    const title = "https://example.com/" + "a".repeat(300);
-    renderCard(gate({ title }));
+  it("does not add a title control when the title fits", () => {
+    mockTitleLayout({ scrollHeight: 68, clientHeight: 68 });
+    renderCard(gate({ title: "Which workflow should run first?", type: "question" }));
+
+    expect(screen.queryByRole("button", { name: /Show (more|less)/ })).toBeNull();
+  });
+
+  it("lets keyboard users expand and collapse a truncated 300-character question", async () => {
+    mockTitleLayout({ scrollHeight: 205, clientHeight: 68 });
+    const user = userEvent.setup();
+    const title = "q".repeat(300);
+    renderCard(gate({ type: "question", title, actions: [] }));
 
     const heading = screen.getByRole("heading", { name: title });
+    const control = screen.getByRole("button", { name: "Show more" });
+    expect(screen.getByRole("dialog", { name: title })).toBeTruthy();
     expect(heading.className).toContain("line-clamp-3");
-    expect(heading.className).toContain("[overflow-wrap:anywhere]");
-    expect(heading.getAttribute("title")).toBe(title);
-    expect(screen.getByRole("button", { name: "Approve for session" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+    expect(control.getAttribute("aria-expanded")).toBe("false");
+    await user.tab();
+    expect(document.activeElement).toBe(control);
+    await user.keyboard("{Enter}");
+    expect(heading.className).not.toContain("line-clamp-3");
+    expect(screen.getByRole("button", { name: "Show less" }).getAttribute("aria-expanded")).toBe("true");
+    await user.keyboard("{Enter}");
+    expect(heading.className).toContain("line-clamp-3");
+  });
+
+  it("offers full-title recovery for an unconstrained approval title", async () => {
+    mockTitleLayout({ scrollHeight: 205, clientHeight: 68 });
+    const user = userEvent.setup();
+    const title = "Approve " + "a".repeat(10_000);
+    renderCard(gate({ title, body: undefined }));
+
+    const heading = screen.getByRole("heading", { name: title });
+    expect(screen.getByRole("dialog", { name: title })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Show more" }));
+    expect(heading.className).not.toContain("line-clamp-3");
+    expect(screen.getByRole("button", { name: "Show less" })).toBeTruthy();
+  });
+
+  it("updates the title control when a resize removes overflow", () => {
+    let callback: ResizeObserverCallback | undefined;
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(next: ResizeObserverCallback) { callback = next; }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    });
+    mockTitleLayout({ scrollHeight: 205, clientHeight: 68 });
+    renderCard(gate({ title: "a".repeat(300) }));
+    const heading = screen.getByRole("heading");
+    expect(screen.getByRole("button", { name: "Show more" })).toBeTruthy();
+    mockTitleLayout({ scrollHeight: 68, clientHeight: 68 });
+    const entry: ResizeObserverEntry = {
+      target: heading,
+      contentRect: new DOMRect(),
+      borderBoxSize: [],
+      contentBoxSize: [],
+      devicePixelContentBoxSize: [],
+    };
+    const observer: ResizeObserver = { observe() {}, unobserve() {}, disconnect() {} };
+    act(() => callback?.([entry], observer));
+    expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
   });
 });

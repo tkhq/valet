@@ -10,7 +10,7 @@
  * pending in the store and the agent stays blocked until the user comes
  * back and answers — matching the engine's per-thread suspend model.
  */
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Hand, HelpCircle, KeyRound, Paperclip, X } from "lucide-react";
 import type { DecisionGate } from "@valet/api/wire";
 import { Badge, Button, Spinner, Textarea, Tooltip, cardClass } from "~/components/primitives";
@@ -140,9 +140,7 @@ function DecisionGateResponse({
           <Icon aria-hidden className="mt-1 h-4 w-4 shrink-0 text-muted" />
           <div className="min-w-0 flex-1">
             <Badge variant={kind.variant}>{kind.label}</Badge>
-            <h3 id={`gate-${gate.id}-title`} className="mt-1.5 line-clamp-3 break-words text-sm font-medium leading-relaxed text-ink [overflow-wrap:anywhere]" title={gate.title}>
-              {gate.title}
-            </h3>
+            <DecisionGateTitle key={`${gate.id}:${gate.title}`} id={`gate-${gate.id}-title`} title={gate.title} />
           </div>
           <Button variant="ghost" size="icon" onClick={cancel} disabled={busy} aria-label="Cancel and dismiss" className="-mr-1">
             <X aria-hidden className="h-3.5 w-3.5" />
@@ -260,6 +258,52 @@ function DecisionGateResponse({
         )}
       </div>
     </div>
+  );
+}
+
+function DecisionGateTitle({ id, title }: { id: string; title: string }) {
+  const heading = useRef<HTMLHeadingElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [truncated, setTruncated] = useState(false);
+
+  useLayoutEffect(() => {
+    if (expanded) return;
+    const measure = () => {
+      const element = heading.current;
+      setTruncated(Boolean(element && element.scrollHeight > element.clientHeight));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(heading.current!);
+    return () => observer.disconnect();
+  }, [expanded, title]);
+
+  return (
+    <>
+      <h3
+        ref={heading}
+        id={id}
+        className={cn(
+          "mt-1.5 break-words text-sm font-medium leading-relaxed text-ink [overflow-wrap:anywhere]",
+          !expanded && "line-clamp-3",
+        )}
+      >
+        {title}
+      </h3>
+      {truncated && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="-ml-2 mt-0.5"
+          aria-controls={id}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "Show less" : "Show more"}
+        </Button>
+      )}
+    </>
   );
 }
 
