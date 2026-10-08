@@ -271,12 +271,13 @@ function DecisionGateTitle({ id, title }: { id: string; title: string }) {
     if (expanded) return;
     let active = true;
     const measure = () => {
+      if (!active) return;
       const element = heading.current;
       const next = Boolean(element && element.scrollHeight > element.clientHeight + 1);
       if (!next && document.activeElement === toggle.current) {
         queueMicrotask(() => heading.current?.focus({ preventScroll: true }));
       }
-      if (active) setTruncated(next);
+      setTruncated(next);
     };
     measure();
     const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);

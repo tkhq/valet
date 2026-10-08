@@ -358,6 +358,36 @@ describe("DecisionGateCard — long request layout", () => {
     expect(heading.closest("header")?.contains(action)).toBe(false);
   });
 
+  it("keeps focus on Show less after a stale font measurement", async () => {
+    let resolveFonts!: () => void;
+    const fonts = Object.getOwnPropertyDescriptor(document, "fonts");
+    Object.defineProperty(document, "fonts", {
+      configurable: true,
+      value: { ready: new Promise<void>((resolve) => { resolveFonts = resolve; }) },
+    });
+
+    try {
+      mockTitleLayout({ scrollHeight: 205, clientHeight: 68 });
+      const user = userEvent.setup();
+      renderCard(gate({ title: "a".repeat(300) }));
+      await user.click(screen.getByRole("button", { name: "Show more" }));
+      const control = screen.getByRole("button", { name: "Show less" });
+      control.focus();
+      mockTitleLayout({ scrollHeight: 68, clientHeight: 68 });
+
+      await act(async () => {
+        resolveFonts();
+        await Promise.resolve();
+      });
+
+      expect(document.activeElement).toBe(control);
+      expect(screen.getByRole("button", { name: "Show less" })).toBe(control);
+    } finally {
+      if (fonts) Object.defineProperty(document, "fonts", fonts);
+      else Reflect.deleteProperty(document, "fonts");
+    }
+  });
+
   it("moves focus to the heading when resize removes the focused title control", async () => {
     let callback: ResizeObserverCallback | undefined;
     vi.stubGlobal("ResizeObserver", class {
