@@ -66,7 +66,7 @@ import {
 import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
-import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
+import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome, type AuditInvocationRow } from "../policies/service.js";
 import { shareGeneration, canBorrowCredential } from "../services/credential-borrow.js";
 import { membersSharing } from "../services/credential-shares.js";
 
@@ -202,7 +202,20 @@ export function buildActionInvoker(opts: ActionInvokerOpts): ActionInvoker {
     const existing = await selectStoredResult(opts.db, req.invocationId);
     if (existing) return existing;
 
-    const result = await computeResult(opts, req, ctx);
+    // `computeResult` returns early on many paths before policy enforcement
+    // writes the audit row. The wrapper writes the row for those paths, so
+    // each attempt with an audit key gets exactly one row.
+    const audit: AuditTrack = { written: false };
+    let result: WorkflowInvokeActionResult;
+    try {
+      result = await computeResult(opts, req, ctx, audit);
+    } catch (err) {
+      if (!audit.written) {
+        await recordAttemptAudit(opts, req, ctx, { ok: false, error: err instanceof Error ? err.message : String(err) }, audit.actionId);
+      }
+      throw err;
+    }
+    if (!audit.written) await recordAttemptAudit(opts, req, ctx, result, audit.actionId);
 
     // Gate outcomes must not be stored: the approved retry must reach
     // enforcement fresh (re-evaluating the current policy state) rather than
@@ -258,10 +271,53 @@ function parseStoredResult(value: unknown): WorkflowInvokeActionResult {
   throw new Error(`action-invoker: corrupt stored result: ${JSON.stringify(value)}`);
 }
 
+/**
+ * Whether this attempt wrote its audit row. `enforceWorkflowPolicy` sets
+ * `written` when it writes the decision row. `actionId` is the resolved
+ * policy-facing id, when the action was found.
+ */
+interface AuditTrack {
+  written: boolean;
+  actionId?: string;
+}
+
+/**
+ * Write the audit row for an attempt that returned before policy enforcement
+ * wrote one: an unknown action, a refusal, a credential or discovery error,
+ * or a shared-account park. A no-op when the invocation has no audit key.
+ * Exported for the route that refuses a call before it reaches the invoker.
+ */
+export async function recordAttemptAudit(
+  opts: Pick<ActionInvokerOpts, "db" | "clock">,
+  req: WorkflowInvokeActionRequest,
+  ctx: ActionInvocationContext,
+  result: WorkflowInvokeActionResult,
+  actionId?: string,
+): Promise<void> {
+  const key = auditKey(req, ctx);
+  if (!key) return;
+  const parked = !result.ok && "requiresApproval" in result;
+  await persistInvocationAudit(opts.db, {
+    invocationId: key,
+    service: req.service,
+    actionId: actionId ?? (req.action.includes(".") ? req.action : `${req.service}.${req.action}`),
+    ...(parked ? { resolvedMode: "require_approval" as const } : {}),
+    status: result.ok ? "completed" : parked ? "pending" : "error",
+    ...(!result.ok && "error" in result ? { error: result.error } : {}),
+    workflowExecutionId: ctx.workflowExecutionId,
+    caller: ctx.external?.client,
+    userId: ctx.userId,
+    orgId: ctx.orgId,
+    params: req.params,
+    createdAt: (opts.clock ?? Date.now)(),
+  });
+}
+
 async function computeResult(
   opts: ActionInvokerOpts,
   req: WorkflowInvokeActionRequest,
   ctx: ActionInvocationContext,
+  audit: AuditTrack,
 ): Promise<WorkflowInvokeActionResult> {
   const entry = opts.actionPluginByService.get(req.service);
   if (!entry) return unknownAction(req);
@@ -408,6 +464,7 @@ async function computeResult(
   // is the fully-qualified fqid (spec Deviations T6 #3, fixed): one
   // canonical id matches both the session and workflow paths.
   const policyActionId = qualifiedActionId(req.service, action);
+  audit.actionId = policyActionId;
   // Set only when enforceWorkflowPolicy wrote a decision row (org + run
   // context present); also the org scope for the outcome-stamp UPDATE.
   const auditOrgId = auditKey(req, ctx) ? ctx.orgId : undefined;
@@ -419,6 +476,7 @@ async function computeResult(
     action.riskLevel,
     entry.actionPlugin.defaultApprovalMode,
     policyActionId,
+    audit,
   );
   if (denial) return denial;
 
@@ -535,9 +593,17 @@ async function enforceWorkflowPolicy(
   riskLevel: RiskLevel,
   pluginDefault: ApprovalMode | undefined,
   policyActionId: string,
+  audit: AuditTrack,
 ): Promise<WorkflowInvokeActionResult | null> {
   const key = auditKey(req, ctx);
   if (!ctx.orgId || !key) return null;
+  // Every row this function writes goes through `persist`, which marks the
+  // attempt as audited. The resolver-error park writes no row here, so the
+  // wrapper in `buildActionInvoker` writes it.
+  const persist = async (row: AuditInvocationRow): Promise<void> => {
+    audit.written = true;
+    await persistInvocationAudit(opts.db, row);
+  };
   const now = (opts.clock ?? Date.now)();
   // A workflow run resolves in its own scope. An external harness acts for
   // the person interactively, so it resolves exactly as their Valet agent does.
@@ -567,7 +633,7 @@ async function enforceWorkflowPolicy(
       // resolver could not be consulted. The signal is the authority.
       // Write a best-effort audit row so the approved execution is
       // auditable even when the policy store was unreachable.
-      await persistInvocationAudit(opts.db, {
+      await persist({
         invocationId: key,
         service: req.service,
         actionId: policyActionId,
@@ -591,7 +657,7 @@ async function enforceWorkflowPolicy(
   }
 
   if (decision.mode === "allow") {
-    await persistInvocationAudit(opts.db, {
+    await persist({
       invocationId: key,
       service: req.service,
       actionId: policyActionId,
@@ -613,7 +679,7 @@ async function enforceWorkflowPolicy(
   }
 
   if (decision.mode === "deny") {
-    await persistInvocationAudit(opts.db, {
+    await persist({
       invocationId: key,
       service: req.service,
       actionId: policyActionId,
@@ -637,7 +703,7 @@ async function enforceWorkflowPolicy(
   // decision.mode === "require_approval"
   if (req.approval) {
     // The tool executor holds an approved, unconsumed signal — treat as authorized.
-    await persistInvocationAudit(opts.db, {
+    await persist({
       invocationId: key,
       service: req.service,
       actionId: policyActionId,
@@ -661,7 +727,7 @@ async function enforceWorkflowPolicy(
   // Park: write a "pending" audit row so the gate is visible in the audit log,
   // then return the requiresApproval signal. This row must NOT live in the
   // dedup table — the approved retry must reach enforcement fresh.
-  await persistInvocationAudit(opts.db, {
+  await persist({
     invocationId: key,
     service: req.service,
     actionId: policyActionId,

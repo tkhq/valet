@@ -14,7 +14,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
 import { clearDiscoveryCache } from "../routes/actions.js";
-import { actionInvocations, actionPolicies, oauthAccessToken, oauthApplication, orgMembers, orgs, users } from "../schema/index.js";
+import { actionInvocations, actionPolicies, oauthAccessToken, oauthApplication, orgMembers, orgs, teamMembers, teams, users } from "../schema/index.js";
+import { shareCredential } from "../services/credential-shares.js";
 
 let api: TestApi | undefined;
 
@@ -74,13 +75,26 @@ function demoPlugin() {
       },
     }],
   };
+  // A remote service that cannot list its tools without a credential.
+  const locked: ValetPlugin = {
+    name: "locked",
+    version: "0.0.1",
+    actions: [{
+      service: "locked", actions: [],
+      resolveActions: async ({ credentials }) => {
+        if ((await credentials.get()) === null) throw new Error("locked: no credential connected. Connect Locked in Integrations.");
+        return [{ id: "locked.read", name: "Read", description: "Needs a credential to list.", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true, data: {} }) }];
+      },
+    }],
+    credentials: [{ service: "locked", type: "api_key", configKeys: ["apiKey"], connectLabel: "Locked" }],
+  };
   const plugin: ValetPlugin = {
     name: "demo",
     version: "0.0.1",
     actions: [{ service: "demo", actions: [action("demo.ping", "Ping"), action("demo.pong", "Pong"), action("demo.blocked", "Blocked"), action("demo.risky", "Risky"), ...extra] }],
     credentials: [{ service: "demo", type: "api_key", configKeys: ["apiKey"], connectLabel: "Demo" }],
   };
-  return { plugin, dynamic, dyn, calls, releaseSlow: () => releaseSlow(), slowStarted: slowStartedP };
+  return { plugin, dynamic, locked, dyn, calls, releaseSlow: () => releaseSlow(), slowStarted: slowStartedP };
 }
 
 async function seedUser(testApi: TestApi, id: string): Promise<string> {
@@ -114,7 +128,7 @@ async function tool(baseUrl: string, token: string, name: string, args: Record<s
 
 async function setup() {
   const demo = demoPlugin();
-  const testApi = await bootTestApi({ auth: true, plugins: [demo.plugin, demo.dynamic] });
+  const testApi = await bootTestApi({ auth: true, plugins: [demo.plugin, demo.dynamic, demo.locked] });
   clearDiscoveryCache();
   api = testApi;
   const alice = await seedUser(testApi, "alice");
@@ -288,5 +302,59 @@ describe("MCP tool broker", () => {
     const after = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.slow", idempotency_key: "slow-1" });
     expect(after.data).toMatchObject({ status: "completed", result: { done: true } });
     expect(demo.calls["demo.slow"]).toBe(1);
+  });
+
+  describe("audit rows for calls that return before the policy check", () => {
+    /** Alice and Bob share one team. Alice holds demo and locked credentials. */
+    async function teamSetup(opts: { aliceShares: string[] }) {
+      const base = await setup();
+      const { db, engineCredentials } = base.testApi.providers;
+      await db.insert(teams).values({ id: "team-1", orgId: "broker-org", name: "Team", createdAt: 1 });
+      await db.insert(teamMembers).values([{ teamId: "team-1", userId: "alice", role: "member" }, { teamId: "team-1", userId: "bob", role: "member" }]);
+      await engineCredentials.save({ type: "user", id: "alice" }, "locked", { type: "api_key", apiKey: SECRET });
+      for (const service of opts.aliceShares) await shareCredential(db, { teamId: "team-1", service, userId: "alice", createdAt: 1 });
+      return base;
+    }
+    const auditRows = (api: TestApi) => api.providers.db.select().from(actionInvocations).where(like(actionInvocations.invocationId, "pol:ext:%"));
+
+    it("a team call that needs a member's shared account writes a pending row", async () => {
+      const { testApi, demo, bob } = await teamSetup({ aliceShares: ["demo"] });
+      const res = await tool(testApi.baseUrl, bob, "call_tool", { tool_id: "demo.ping", workspace: "team-1" });
+      expect(res.data).toMatchObject({ status: "approval_required", approver: { userId: "alice" } });
+      expect(demo.calls["demo.ping"]).toBeUndefined();
+      const rows = await auditRows(testApi);
+      expect(rows.map((r) => [r.actionId, r.status, r.resolvedMode, r.userId, r.caller])).toEqual([
+        ["demo.ping", "pending", "require_approval", "bob", "mcp:client-bob"],
+      ]);
+    });
+
+    it("a team call with no credential writes an error row", async () => {
+      const { testApi, bob } = await teamSetup({ aliceShares: [] });
+      const res = await tool(testApi.baseUrl, bob, "call_tool", { tool_id: "demo.ping", workspace: "team-1" });
+      expect(res.data).toMatchObject({ status: "failed", error: expect.stringContaining("This team has no demo credential") });
+      const rows = await auditRows(testApi);
+      expect(rows.map((r) => [r.actionId, r.status, r.userId, r.caller])).toEqual([["demo.ping", "error", "bob", "mcp:client-bob"]]);
+      expect(rows[0].error).toContain("This team has no demo credential");
+    });
+
+    it("a team call to a service that only a member's shared account can list writes a pending row", async () => {
+      const { testApi, bob } = await teamSetup({ aliceShares: ["locked"] });
+      const res = await tool(testApi.baseUrl, bob, "call_tool", { tool_id: "locked.read", workspace: "team-1", params: { q: "x" } });
+      expect(res.data).toMatchObject({ status: "approval_required", approver: { userId: "alice" } });
+      const rows = await auditRows(testApi);
+      expect(rows.map((r) => [r.service, r.actionId, r.status, r.resolvedMode, r.userId, r.caller, r.params])).toEqual([
+        ["locked", "locked.read", "pending", "require_approval", "bob", "mcp:client-bob", { q: "x" }],
+      ]);
+    });
+
+    it("a call to a service that cannot list its tools writes an error row", async () => {
+      const { testApi, bob } = await setup();
+      const res = await tool(testApi.baseUrl, bob, "call_tool", { tool_id: "locked.read" });
+      expect(res.isError).toBe(true);
+      const rows = await auditRows(testApi);
+      expect(rows.map((r) => [r.actionId, r.status, r.error, r.userId, r.caller])).toEqual([
+        ["locked.read", "error", "locked: no credential connected. Connect Locked in Integrations.", "bob", "mcp:client-bob"],
+      ]);
+    });
   });
 });

@@ -11,7 +11,7 @@ import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { eq } from "drizzle-orm";
+import { eq, like } from "drizzle-orm";
 import { Type } from "typebox";
 import type {
   ActionPlugin,
@@ -2380,5 +2380,95 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     await expect(
       invoke({ service: "demo", action: "deploy", params: { msg: "x" }, invocationId: "corrupt:n9" }, wfCtx),
     ).rejects.toThrow("stored requiresApproval outcome should never exist for");
+  });
+});
+
+describe.each([
+  { kind: "workflow", extra: { workflowExecutionId: "run_audit" }, key: (id: string) => `pol:wf:${id}`, caller: null },
+  { kind: "external", extra: { external: { client: "mcp:c1", attempt: "a1" } }, key: (id: string) => `pol:ext:${id}:a1`, caller: "mcp:c1" },
+])("buildActionInvoker: one audit row per $kind attempt", ({ extra, key, caller }) => {
+  const declaredDemo = (actionPlugin: ActionPlugin) => {
+    const plugin: ValetPlugin = { name: "demo", version: "0.0.1", actions: [actionPlugin], credentials: [{ type: "api_key", configKeys: ["apiKey"] }] };
+    return new Map([["demo", { plugin, actionPlugin }]]);
+  };
+  const auditRows = (db: AppDb) => db.select().from(actionInvocations).where(like(actionInvocations.invocationId, "pol:%"));
+  const userCtx: ActionInvocationContext = { userId: "u1", orgId: "org1", owner: { type: "user", id: "u1" }, ...extra };
+  const teamCtx: ActionInvocationContext = { userId: "al", orgId: "org1", owner: { type: "team", id: "t1" }, ...extra };
+
+  it("an unknown action writes an error row", async () => {
+    const db = await makeDb();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [countingAction().action] }) });
+    const res = await invoke({ service: "demo", action: "nope", params: { msg: "x" }, invocationId: "inv-unknown" }, userCtx);
+    expect(res).toEqual({ ok: false, error: "unknown action: demo.nope" });
+    const rows = await auditRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      invocationId: key("inv-unknown"), service: "demo", actionId: "demo.nope", status: "error",
+      error: "unknown action: demo.nope", userId: "u1", orgId: "org1", caller, params: { msg: "x" },
+    });
+  });
+
+  it("a dynamic discovery error writes an error row", async () => {
+    const db = await makeDb();
+    const plugin: ActionPlugin = { service: "demo", actions: [], resolveActions: async () => { throw new Error("upstream is down"); } };
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("demo", plugin) });
+    const res = await invoke({ service: "demo", action: "dyn", params: {}, invocationId: "inv-discovery" }, userCtx);
+    expect(res).toEqual({ ok: false, error: "upstream is down" });
+    const rows = await auditRows(db);
+    expect(rows.map((r) => [r.invocationId, r.status, r.error, r.caller])).toEqual([[key("inv-discovery"), "error", "upstream is down", caller]]);
+  });
+
+  it("a team run without a credential writes an error row", async () => {
+    const db = await makeDb();
+    const fixture = countingAction();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: declaredDemo({ service: "demo", actions: [fixture.action] }) });
+    const res = await invoke({ service: "demo", action: "ping", params: { msg: "x" }, invocationId: "inv-team" }, teamCtx);
+    expect(res.ok).toBe(false);
+    expect(fixture.calls()).toBe(0);
+    const rows = await auditRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ invocationId: key("inv-team"), actionId: "demo.ping", status: "error", userId: "al", caller });
+    expect(rows[0].error).toContain("This team has no demo credential");
+  });
+
+  it("a credential read refusal writes an error row with the typed message", async () => {
+    const db = await makeDb();
+    await db.insert(teamMembers).values({ teamId: "t1", userId: "al", role: "member" });
+    // The share points at an account that no longer exists.
+    await shareCredential(db, { teamId: "t1", service: "demo", userId: "al", createdAt: 1 });
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: declaredDemo({ service: "demo", actions: [countingAction().action] }) });
+    const res = await invoke({ service: "demo", action: "ping", params: { msg: "x" }, invocationId: "inv-broken" }, teamCtx);
+    expect(res.ok).toBe(false);
+    const rows = await auditRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ invocationId: key("inv-broken"), status: "error", caller });
+    expect(rows[0].error).toMatch(/should reconnect demo/);
+  });
+
+  it("a shared-account park writes a pending require_approval row", async () => {
+    const db = await makeDb();
+    await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });
+    await db.insert(teamMembers).values([{ teamId: "t1", userId: "bea", role: "member" }, { teamId: "t1", userId: "al", role: "member" }]);
+    await shareCredential(db, { teamId: "t1", service: "demo", userId: "bea", createdAt: 1 });
+    const store = new FakeCredentialStore();
+    store.seed({ type: "user", id: "bea" }, "demo", { type: "api_key", apiKey: "bea-key" });
+    const invoke = buildActionInvoker({ db, credentials: store, actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [countingAction().action] }) });
+    const res = await invoke({ service: "demo", action: "ping", params: { msg: "x" }, invocationId: "inv-shared" }, teamCtx);
+    expect(res).toMatchObject({ ok: false, requiresApproval: true, provenance: "shared_account" });
+    const rows = await auditRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      invocationId: key("inv-shared"), service: "demo", actionId: "demo.ping", status: "pending",
+      resolvedMode: "require_approval", userId: "al", orgId: "org1", caller, error: null,
+    });
+  });
+
+  it("an enforced call writes only the policy row", async () => {
+    const db = await makeDb();
+    const invoke = buildActionInvoker({ db, credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [countingAction().action] }) });
+    const res = await invoke({ service: "demo", action: "ping", params: { msg: "x" }, invocationId: "inv-allowed" }, userCtx);
+    expect(res.ok).toBe(true);
+    const rows = await auditRows(db);
+    expect(rows.map((r) => [r.invocationId, r.resolvedMode, r.status])).toEqual([[key("inv-allowed"), "allow", "completed"]]);
   });
 });

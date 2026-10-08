@@ -26,6 +26,7 @@ import {
   externalActionMode,
   findAction,
   qualifiedActionId,
+  recordAttemptAudit,
   sharedAccountApprover,
   type ActionInvocationContext,
   type ActionInvokerOpts,
@@ -198,28 +199,38 @@ actionsRouter.post("/:toolId/invoke", async (c) => {
   const ctx = await callerContext(c, workspace);
   if (!ctx) return c.json({ error: "Workspace not found. Use \"user\" or a team id you belong to." }, 404);
   const tool = await loadTool(c, ctx, c.req.param("toolId"));
+  // The dedup table is global. A key is namespaced by caller, owner, tool, and
+  // params: one person's key never returns another's result, and reusing a
+  // key for another tool or other params runs that call.
+  const invocationIdFor = (toolId: string) => typeof key === "string"
+    ? `ext:${ctx.userId}:${ctx.owner.type}:${ctx.owner.id}:${toolId}:${paramsDigest(params)}:${key}`
+    : `ext:${ctx.userId}:${ctx.owner.type}:${ctx.owner.id}:${randomUUID()}`;
   if ("error" in tool) {
-    // A team service that lists its tools over MCP cannot list them without
-    // a credential. When only a member's shared account has one, the invoker
-    // names that member, so the caller hears to delegate instead of "no
-    // credential". The invoker never borrows the account for an external call.
-    if (tool.unavailable && ctx.owner.type === "team") {
-      const approver = await sharedAccountApprover(tool.unavailable.opts, ctx, ctx.owner.id, tool.unavailable.service);
+    if (tool.unavailable) {
+      // The service could not list its tools, so the call never reaches the
+      // invoker. Write the attempt's audit row here instead.
+      const { service, action } = tool.unavailable;
+      const req = { service, action, params: params as Record<string, unknown>, invocationId: invocationIdFor(`${service}.${action}`) };
+      // A team service that lists its tools over MCP cannot list them without
+      // a credential. When only a member's shared account has one, the invoker
+      // names that member, so the caller hears to delegate instead of "no
+      // credential". The invoker never borrows the account for an external call.
+      const approver = ctx.owner.type === "team"
+        ? await sharedAccountApprover(tool.unavailable.opts, ctx, ctx.owner.id, service)
+        : undefined;
       if (approver) {
-        return c.json(approvalRequired(`${tool.unavailable.service}.${tool.unavailable.action}`, { ok: false, requiresApproval: true, provenance: "shared_account", approver }));
+        const parked = { ok: false, requiresApproval: true, provenance: "shared_account", approver } as const;
+        await recordAttemptAudit(tool.unavailable.opts, req, ctx, parked);
+        return c.json(approvalRequired(`${service}.${action}`, parked));
       }
+      await recordAttemptAudit(tool.unavailable.opts, req, ctx, { ok: false, error: tool.error });
     }
     return c.json({ error: tool.error }, 404);
   }
 
   const toolId = qualifiedActionId(tool.service, tool.action);
   const db = c.var.providers.db;
-  // The dedup table is global. A key is namespaced by caller, owner, tool, and
-  // params: one person's key never returns another's result, and reusing a
-  // key for another tool or other params runs that call.
-  const invocationId = typeof key === "string"
-    ? `ext:${ctx.userId}:${ctx.owner.type}:${ctx.owner.id}:${toolId}:${paramsDigest(params)}:${key}`
-    : `ext:${ctx.userId}:${ctx.owner.type}:${ctx.owner.id}:${randomUUID()}`;
+  const invocationId = invocationIdFor(toolId);
   const claimId = `claim:${invocationId}`;
   const keyed = typeof key === "string";
 
