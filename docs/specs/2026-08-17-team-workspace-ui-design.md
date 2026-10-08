@@ -261,3 +261,10 @@ The client resolves the assistant from lists these pages already load. A workflo
 A personal row stays quiet while the reader's own default assistant owns it. It gets a badge when a persona owns it instead.
 
 Skills and skill repositories keep `OwnerBadge`. A skill has no owning assistant, so the team name remains the complete answer for those rows.
+
+## Automation detail workspace changes (2026-10-08)
+
+Switching workspace from a channel, workflow, run, or Automation list returns to `/workflows`.
+The destination carries the selected workspace and clears the previous detail parameters.
+An old URL workspace must not override the new selection during navigation.
+Selecting the current workspace leaves the page unchanged. Other list pages retain their existing behavior.
