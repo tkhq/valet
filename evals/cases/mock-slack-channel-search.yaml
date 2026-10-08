@@ -3,18 +3,18 @@ description: Find a channel by a keyword that is not its prefix.
 profile: mock
 turns:
   - role: user
-    content: Find the XSET channel in Slack and tell me its name. Do not send a message.
+    content: Find the ACME channel in Slack and tell me its name. Do not send a message.
 timeout_ms: 120000
 mock_tools:
   slack.search_channels:
-    response: '{"channels":[{"id":"C1","name":"lead-xset"}],"total":1,"search_complete":true,"match_status":"matched","ambiguous":false}'
+    response: '{"channels":[{"id":"C1","name":"lead-acme"}],"total":1,"search_complete":true,"match_status":"matched","ambiguous":false}'
 checks:
   - type: tool_called
     tool: slack.search_channels
   - type: judge_trajectory
-    rubric: The agent searches with the original XSET keyword, allowing case changes or a leading hash. It does not invent a channel name before seeing search results.
+    rubric: The agent searches with the original ACME keyword, allowing case changes or a leading hash. It does not invent a channel name before seeing search results.
   - type: output_contains
-    value: lead-xset
+    value: lead-acme
   - type: tool_not_called
     tool: slack.send_message
   - type: no_errors

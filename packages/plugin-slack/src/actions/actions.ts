@@ -480,8 +480,8 @@ const listChannels = action(Type.Object({
     scope: Type.Optional(Type.Union([Type.Literal('joined'), Type.Literal('all')], {
       description: 'Which channels to list: "joined" (default) = bot member channels, "all" = all public channels',
     })),
-    query: Type.Optional(Type.String({ minLength: 1, description: 'Channel name or part of it, such as lead-xset, #lead-xset, or XSET. Case-insensitive substring search; exact matches rank first.' })),
-    prefix: Type.Optional(Type.String({ description: 'Legacy case-insensitive starts-with filter. XSET does not match lead-xset. Prefer query for finding a channel by name.' })),
+    query: Type.Optional(Type.String({ minLength: 1, description: 'Channel name or part of it, such as lead-acme, #lead-acme, or ACME. Case-insensitive substring search; exact matches rank first.' })),
+    prefix: Type.Optional(Type.String({ description: 'Legacy case-insensitive starts-with filter. ACME does not match lead-acme. Prefer query for finding a channel by name.' })),
   }))({
   id: 'slack.list_channels',
   name: 'List Channels',
@@ -715,7 +715,7 @@ const listUsers = action(Type.Object({}))({
 });
 
 const searchChannels = action(Type.Object({
-  query: Type.String({ minLength: 1, description: 'Original channel name or keyword, such as #lead-xset or XSET. Exact matches rank first, followed by substring matches.' }),
+  query: Type.String({ minLength: 1, description: 'Original channel name or keyword, such as #lead-acme or ACME. Exact matches rank first, followed by substring matches.' }),
   scope: Type.Optional(Type.Union([Type.Literal('joined'), Type.Literal('all')], {
     description: 'joined (default) includes authorized private channels. all searches public channels only.',
   })),

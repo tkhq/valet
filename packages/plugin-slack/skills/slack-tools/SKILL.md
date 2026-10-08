@@ -9,7 +9,7 @@ description: How to effectively use Slack tools to read, understand, and interac
 
 Use `slack.search_channels` with `query` to find channel IDs. Pass the original channel name or keyword.
 Search normalizes casing and a leading `#`. Exact names rank before substring matches.
-For example, `query="XSET"` can find `lead-xset`; the legacy `prefix="XSET"` cannot.
+For example, `query="ACME"` can find `lead-acme`; the legacy `prefix="ACME"` cannot.
 Resolve ambiguous matches before posting. An empty search does not establish a permissions problem.
 Use `slack.list_channels` to browse channels. Read its `access_note` before concluding that a channel is missing.
 `scope="all"` lists public channels only. Use `scope="joined"` (the default) to find private channels where Valet is a member.

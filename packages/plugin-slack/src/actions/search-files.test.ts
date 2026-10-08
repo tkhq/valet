@@ -89,17 +89,17 @@ describe('Slack search and authorized files', () => {
       id: 'F1', name: 'scope.docx', url_private: url, channels: ['C1'], ...extra,
     } }));
   }
-  it('finds XSET anywhere in names and ranks exact matches first across pages', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channels: [{ id: 'C1', name: 'lead-xset' }], response_metadata: { next_cursor: 'next' } }));
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channels: [{ id: 'C2', name: 'xset' }, { id: 'C3', name: 'other' }] }));
-    const result = await action('slack.search_channels').execute({ query: '#XSET' }, pluginCtx());
+  it('finds ACME anywhere in names and ranks exact matches first across pages', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channels: [{ id: 'C1', name: 'lead-acme' }], response_metadata: { next_cursor: 'next' } }));
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channels: [{ id: 'C2', name: 'acme' }, { id: 'C3', name: 'other' }] }));
+    const result = await action('slack.search_channels').execute({ query: '#ACME' }, pluginCtx());
     expect(result.success).toBe(true);
     expect(result.data).toMatchObject({ channels: [{ id: 'C2' }, { id: 'C1' }], search_complete: true, ambiguous: true });
     expect(String(fetchMock.mock.calls[1][0])).toContain('cursor=next');
   });
   it('does not describe an empty search as denied access', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channels: [] }));
-    const result = await action('slack.search_channels').execute({ query: 'xset' }, pluginCtx());
+    const result = await action('slack.search_channels').execute({ query: 'acme' }, pluginCtx());
     expect(result.data).toMatchObject({ total: 0, search_complete: true, match_status: 'no_match' });
     expect(JSON.stringify(result.data)).toContain('not proof');
   });

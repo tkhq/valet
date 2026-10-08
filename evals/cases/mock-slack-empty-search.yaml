@@ -3,7 +3,7 @@ description: An empty channel search must not become an invented permissions dia
 profile: mock
 turns:
   - role: user
-    content: Find the XSET channel in Slack. If you cannot find it, tell me what you know.
+    content: Find the ACME channel in Slack. If you cannot find it, tell me what you know.
 timeout_ms: 120000
 mock_tools:
   slack.search_channels:
