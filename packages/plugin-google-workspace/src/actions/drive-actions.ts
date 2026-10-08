@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Type } from 'typebox';
 import type { Static, TSchema } from 'typebox';
 import {
@@ -26,6 +27,7 @@ const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DOCS_API = 'https://docs.googleapis.com/v1';
 const MAX_SUBTREE_FOLDERS = 100;
 const MAX_SUBTREE_PAGES = 100;
+const MAX_SUBTREE_REQUESTS_PER_CALL = 10;
 
 const MIME_TYPE_SHORTCUTS: Record<string, string> = {
   document: 'application/vnd.google-apps.document',
@@ -89,49 +91,79 @@ function getExportMimeType(googleMimeType: string | undefined): string | null {
   return googleMimeType ? WORKSPACE_EXPORT_DEFAULTS[googleMimeType] || null : null;
 }
 
-/** Discover folder IDs before searching, so Drive retains global ordering and pagination. */
-async function subtreeParentsQuery(rootId: string, token: string): Promise<string> {
-  const folders = [rootId];
-  const seen = new Set(folders);
-  let pages = 0;
-  for (const folderId of folders) {
-    let pageToken: string | undefined;
-    do {
-      if (pages >= MAX_SUBTREE_PAGES) {
-        throw new Error('Folder search exceeded 100 discovery pages. Search a smaller folder subtree.');
+interface SubtreeCursor {
+  folders: string[];
+  index: number;
+  phase: 'discover' | 'search';
+  pageToken?: string;
+  discoveryPages: number;
+  expires: number;
+}
+
+/** Bind continuations to the account, caller, thread, and complete search criteria. */
+function cursorSignature(payload: string, token: string, binding: string): Buffer {
+  return createHmac('sha256', token).update(binding).update('\0').update(payload).digest();
+}
+
+function readSubtreeCursor(cursor: string, token: string, binding: string): SubtreeCursor {
+  const invalid = 'Invalid or expired folder search cursor. Restart the search without pageToken.';
+  if (cursor.length > 32_000) throw new Error(invalid);
+  const [payload, signature, extra] = cursor.split('.');
+  if (!payload || !signature || extra) throw new Error(invalid);
+  const supplied = Buffer.from(signature, 'base64url');
+  const expected = cursorSignature(payload, token, binding);
+  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new Error(invalid);
+  const state = JSON.parse(Buffer.from(payload, 'base64url').toString()) as SubtreeCursor;
+  if (state.expires < Date.now()) throw new Error(invalid);
+  return state;
+}
+
+async function searchSubtree(qs: URLSearchParams, rootId: string, token: string,
+  cursor: string | undefined, binding: string, signal: AbortSignal) {
+  const state: SubtreeCursor = cursor ? readSubtreeCursor(cursor, token, binding) : {
+    folders: [rootId], index: 0, phase: 'discover', discoveryPages: 0, expires: Date.now() + 3_600_000,
+  };
+  let files: DriveFile[] = [];
+  for (let requests = 0; requests < MAX_SUBTREE_REQUESTS_PER_CALL && state.index < state.folders.length; requests++) {
+    const parent = `'${escapeDriveQuery(state.folders[state.index])}' in parents`;
+    const request = new URLSearchParams(qs);
+    if (state.phase === 'discover') {
+      if (state.discoveryPages >= MAX_SUBTREE_PAGES) throw new Error('Folder search exceeded 100 discovery pages. Search a smaller folder subtree.');
+      request.set('q', `trashed=false and mimeType='application/vnd.google-apps.folder' and ${parent}`);
+      request.set('fields', 'nextPageToken,incompleteSearch,files(id)');
+      request.set('pageSize', '1000');
+      request.delete('orderBy');
+    } else {
+      request.set('q', `(${qs.get('q')}) and ${parent}`);
+    }
+    if (state.pageToken) request.set('pageToken', state.pageToken);
+    const response = await fetch(`${DRIVE_API}/files?${request}`, {
+      headers: { Authorization: `Bearer ${token}` }, signal,
+    });
+    if (!response.ok) throw new Error((await driveError(response)).error);
+    const data = await response.json() as { files?: DriveFile[]; nextPageToken?: string; incompleteSearch?: boolean };
+    if (data.incompleteSearch) throw new Error('Drive returned an incomplete folder search. Search a smaller folder subtree.');
+    state.pageToken = data.nextPageToken;
+    if (state.phase === 'discover') {
+      state.discoveryPages++;
+      for (const folder of data.files ?? []) {
+        if (state.folders.includes(folder.id)) continue;
+        if (state.folders.length >= MAX_SUBTREE_FOLDERS) throw new Error('Folder search exceeded 100 folders. Search a smaller folder subtree.');
+        state.folders.push(folder.id);
       }
-      const qs = new URLSearchParams({
-        q: `trashed=false and mimeType='application/vnd.google-apps.folder' and '${escapeDriveQuery(folderId)}' in parents`,
-        fields: 'nextPageToken,incompleteSearch,files(id)',
-        pageSize: '1000',
-        supportsAllDrives: 'true',
-        includeItemsFromAllDrives: 'true',
-      });
-      if (pageToken) qs.set('pageToken', pageToken);
-      const res = await driveFetch(`/files?${qs}`, token);
-      pages++;
-      if (!res.ok) throw new Error((await driveError(res)).error);
-      const data = (await res.json()) as {
-        files?: Array<{ id: string }>;
-        nextPageToken?: string;
-        incompleteSearch?: boolean;
-      };
-      if (data.incompleteSearch) {
-        throw new Error('Drive returned an incomplete folder search. Search a smaller folder subtree.');
-      }
-      for (const folder of data.files || []) {
-        if (seen.has(folder.id)) continue;
-        if (folders.length >= MAX_SUBTREE_FOLDERS) {
-          throw new Error('Folder search exceeded 100 folders. Search a smaller folder subtree.');
-        }
-        seen.add(folder.id);
-        folders.push(folder.id);
-      }
-      pageToken = data.nextPageToken;
-    } while (pageToken);
+      if (!state.pageToken) state.phase = 'search';
+    } else {
+      files = data.files ?? [];
+      if (!state.pageToken) { state.index++; state.phase = 'discover'; }
+      break;
+    }
   }
-  // Stable query order keeps native page tokens usable across calls on an unchanged subtree.
-  return `(${folders.sort().map((id) => `'${escapeDriveQuery(id)}' in parents`).join(' or ')})`;
+  let nextPageToken: string | undefined;
+  if (state.index < state.folders.length) {
+    const payload = Buffer.from(JSON.stringify(state)).toString('base64url');
+    nextPageToken = `${payload}.${cursorSignature(payload, token, binding).toString('base64url')}`;
+  }
+  return { files, nextPageToken };
 }
 
 /** Resolve a MIME type shortcut or return the value as-is. */
@@ -317,7 +349,7 @@ const searchFiles = action(
     mimeType: Type.Optional(
       Type.String({ description: 'Restrict to a specific file type (shortcuts or full MIME type)' }),
     ),
-    folderId: Type.Optional(Type.String({ description: 'Restrict to this folder subtree (at most 100 folders and 100 discovery pages)' })),
+    folderId: Type.Optional(Type.String({ description: 'Search this folder subtree. Results are ordered within each folder, not globally. Follow pageToken even on empty pages. Maximum 100 folders and 100 discovery pages per search.' })),
     orderBy: Type.Optional(
       Type.Union([Type.Literal('name'), Type.Literal('modifiedTime'), Type.Literal('createdTime')]),
     ),
@@ -354,7 +386,7 @@ const searchFiles = action(
       }
 
       if (p.mimeType) queryParts.push(`mimeType='${escapeDriveQuery(resolveMimeType(p.mimeType))}'`);
-      if (p.folderId) queryParts.push(await subtreeParentsQuery(p.folderId, token));
+
       if (p.modifiedAfter) {
         const cutoff = new Date(p.modifiedAfter).toISOString();
         queryParts.push(`modifiedTime > '${escapeDriveQuery(cutoff)}'`);
@@ -375,17 +407,18 @@ const searchFiles = action(
         includeItemsFromAllDrives: 'true',
         orderBy: orderByParam,
       });
-      if (p.pageToken) qs.set('pageToken', p.pageToken);
-
-      const res = await driveFetch(`/files?${qs}`, token);
-      if (!res.ok) return driveError(res);
-      const data = (await res.json()) as {
-        files: DriveFile[];
-        nextPageToken?: string;
-        incompleteSearch?: boolean;
-      };
-      if (data.incompleteSearch) {
-        return { success: false, error: 'Drive returned an incomplete search. Narrow the search to a smaller folder subtree.' };
+      let data: { files?: DriveFile[]; nextPageToken?: string; incompleteSearch?: boolean };
+      if (p.folderId) {
+        const binding = JSON.stringify([ctx.orgId, ctx.userId, ctx.sessionId, ctx.threadId, p.folderId, qs.toString()]);
+        data = await searchSubtree(qs, p.folderId, token, p.pageToken, binding, ctx.signal);
+      } else {
+        if (p.pageToken) qs.set('pageToken', p.pageToken);
+        const res = await driveFetch(`/files?${qs}`, token);
+        if (!res.ok) return driveError(res);
+        data = await res.json() as typeof data;
+        if (data.incompleteSearch) {
+          return { success: false, error: 'Drive returned an incomplete search. Add a folderId or use more restrictive search criteria.' };
+        }
       }
       const files = (data.files || []).map((f) => ({
         id: f.id,

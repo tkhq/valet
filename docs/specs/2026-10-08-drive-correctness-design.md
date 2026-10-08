@@ -20,25 +20,25 @@ A generic access error does not establish that a Drive label is missing.
 Google documents `parents` as the supported parent membership query term.
 See the [Drive search reference](https://developers.google.com/workspace/drive/api/guides/ref-search-terms).
 
-`drive.search_files` discovers the root folder and its accessible descendant folders before searching for matching files.
-Each discovery request lists non-trashed child folders with a valid `in parents` clause.
-Discovery follows page tokens, including tokens on empty pages. A set prevents duplicate traversal and cycles.
-Folder shortcuts are not traversed.
+`drive.search_files` visits the root and accessible descendant folders in breadth-first discovery order.
+Each request contains one parent predicate. Multi-parent OR queries are not used.
+For each folder, discovery reads child folder IDs without content or label filters; result queries retain all requested filters.
+Folder shortcuts are not traversed. A set of visited IDs prevents cycles.
 
-The discovery phase allows at most 100 folders, including the root, and 100 response pages per call.
-Exceeding either bound returns an error that asks for a smaller subtree. It never returns a partial success.
-HTTP errors and incomplete searches also return errors.
+A continuation stores discovered folder IDs, the current folder, phase, and native Drive page token.
+It is authenticated with the account credential and bound to the caller, thread, root, and complete search criteria.
+It expires after one hour. Invalid, changed, or expired cursors require a fresh search.
+No process-local cache or database migration is required.
 
-Discovery reads only folder IDs. It does not apply result filters to intermediate folders.
-This lets searches find a matching file beneath an unlabeled folder or a folder with an unrelated name.
-The final search combines escaped parent clauses with content, MIME type, date, trash, and label filters.
-The existing label filter still limits returned files. This change does not enable the currently inactive v2 guard wrapper.
+Each call makes at most ten HTTP requests and returns at most one native result page.
+Empty pages can carry a continuation; callers must follow it to finish the search.
+Later pages resume rather than rediscovering folders. Across the complete search, discovery allows 100 folders and 100 pages.
+Exceeding a bound returns an error; earlier pages are not a complete search.
+HTTP errors and Drive incomplete-search responses return errors with corrective guidance.
 
-One final Drive request retains native ordering, page size, and page tokens across the whole subtree.
-Folder IDs are sorted to keep the query stable when discovery order changes.
-Each pagination call repeats discovery. Changes to the folder tree can change the query between calls.
-Callers must restart pagination if the tree changes or Drive rejects a page token.
-Search results remain limited to files visible to the connected account.
+Ordering applies within each folder, not globally across descendants.
+The results are not a snapshot: concurrent Drive changes and account visibility can affect pagination.
+The existing label filter limits returned files. This does not enable the inactive v2 guard wrapper.
 
 ## Validation
 

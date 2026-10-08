@@ -51,8 +51,12 @@ Stop after five pages per query unless the user requests an exhaustive search.
 If you stop before the last page, report that the results are partial.
 If a query fails, report the error instead of treating it as an empty result.
 
-A folder subtree search supports at most 100 folders and 100 discovery pages per call.
-If traversal exceeds either limit, the tool returns an error without partial results.
+A folder subtree search supports at most 100 folders and 100 discovery pages across all pages.
+Each call makes at most ten requests. Follow continuations even when a page has no files.
+Results are ordered within each folder, not globally across the subtree.
+Continuations expire after one hour and require unchanged search arguments. Restart if the cursor expires.
+If traversal exceeds either limit, the tool returns an error. Report earlier pages as partial.
+Drive changes during pagination can affect results; this is not a snapshot.
 Narrow the folder scope before retrying.
 Folder shortcuts are not traversed.
 
