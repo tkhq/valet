@@ -372,10 +372,14 @@ export const bashTool = defineTool({
     }
 
     const result = await ctx.sandbox.exec(args.command, { signal: ctx.signal, timeout: timeoutMs });
-    const exitNote = result.exitCode === 0 ? "" : `\n[exit ${result.exitCode}]`;
     const truncNote = result.truncated ? BASH_TRUNCATION_NOTE : "";
+    const timeoutNote = result.timedOut
+      ? `\n[timed out after ${Math.round(timeoutMs / 1000)}s] ` +
+        "For work longer than an hour, rerun with background: true and a deadline_hours."
+      : "";
+    const exitNote = !result.timedOut && result.exitCode !== 0 ? `\n[exit ${result.exitCode}]` : "";
     const outcome = terminalOutcome(args.command, result.stdout, result.exitCode);
-    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}`, ...(outcome ? { outcome } : {}) };
+    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}${timeoutNote}`, ...(outcome ? { outcome } : {}) };
   },
 });
 
