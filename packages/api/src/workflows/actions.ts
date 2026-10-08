@@ -970,7 +970,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "schedules are not supported yet). The event arrives in templates as " +
       "{{trigger.data.payload...}} plus {{trigger.data.key}}/{{trigger.data.refs...}}. " +
       "Returns { triggerId }.",
-    riskLevel: "medium",
+    // A schedule or event trigger keeps prompting the assistant after the
+    // conversation ends, so a person approves it by default (risk default
+    // for "high"). Agents can steer the assistant through threads.
+    riskLevel: "high",
     execute: async ({ workflow_id, name, event_keys, filters, any_channel, presence }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
@@ -1033,7 +1036,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "or the ASSISTANT (prompt → you receive the prompt each fire, e.g. 'check my PRs " +
       "every morning'). Fires are accurate to ~30s; missed fires during downtime collapse " +
       "into one catch-up. Returns { scheduleId, nextFireAt }.",
-    riskLevel: "medium",
+    // A schedule or event trigger keeps prompting the assistant after the
+    // conversation ends, so a person approves it by default (risk default
+    // for "high"). Agents can steer the assistant through threads.
+    riskLevel: "high",
     execute: async ({ workflow_id, prompt, name, cron, timezone, input }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
@@ -1166,7 +1172,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Update a cron schedule by id. Changing cron or timezone recomputes next fire time. " +
       "Setting enabled=false pauses the schedule; re-enabling recomputes next fire time so a stale slot does not fire at once. " +
       "Target kind (workflow vs orchestrator) cannot change — delete and recreate to switch.",
-    riskLevel: "medium",
+    // A schedule or event trigger keeps prompting the assistant after the
+    // conversation ends, so a person approves it by default (risk default
+    // for "high"). Agents can steer the assistant through threads.
+    riskLevel: "high",
     execute: async ({ schedule_id, name, cron, timezone, enabled, prompt, input }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
@@ -1219,7 +1228,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     description:
       "Update a workflow event trigger by id. All fields are optional; only supplied fields change. " +
       "Changing event_keys or filters re-validates against the event catalog.",
-    riskLevel: "medium",
+    // A schedule or event trigger keeps prompting the assistant after the
+    // conversation ends, so a person approves it by default (risk default
+    // for "high"). Agents can steer the assistant through threads.
+    riskLevel: "high",
     execute: async ({ trigger_id, name, event_keys, filters, enabled, any_channel }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;

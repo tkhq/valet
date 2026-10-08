@@ -1359,3 +1359,20 @@ describe("update actions", () => {
     expect(result.error).toContain("not found");
   });
 });
+
+describe("standing automations need a person by default", () => {
+  it("rates schedule and event-trigger creation and updates high, so the risk default requires approval", async () => {
+    // A schedule or trigger keeps prompting the assistant after the thread
+    // ends, and an agent can steer the assistant through a thread.
+    const { workflowsActionPlugin } = await import("./actions.js");
+    const plugin = workflowsActionPlugin(() => {
+      throw new Error("not called when listing actions");
+    });
+    const risk = (id: string) => plugin.actions.find((a) => a.id === id)?.riskLevel;
+    for (const id of ["workflows.create_schedule", "workflows.update_schedule", "workflows.create_trigger", "workflows.update_trigger", "workflows.create_webhook"]) {
+      expect(risk(id), id).toBe("high");
+    }
+    // A proposal does nothing until a person accepts it.
+    expect(risk("workflows.propose_schedule")).toBe("low");
+  });
+});
