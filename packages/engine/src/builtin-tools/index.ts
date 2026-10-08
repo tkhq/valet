@@ -1,9 +1,27 @@
 import { Type } from "typebox";
-import type { TSchema } from "typebox";
 import { isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange } from "@valet/shared";
 import { storedToolResultText } from "../compaction.js";
 import { isDecisionGateExpired } from "../decision-gate.js";
 import { terminalOutcome } from "./terminal-outcome.js";
+import { defineTool } from "./define.js";
+export { defineTool } from "./define.js";
+import {
+  watchTool,
+  wakeAtTool,
+  holdSandboxTool,
+  processReadTool,
+  wakeupListTool,
+  wakeupCancelTool,
+} from "./wakeups.js";
+export {
+  watchTool,
+  wakeAtTool,
+  holdSandboxTool,
+  processReadTool,
+  wakeupListTool,
+  wakeupCancelTool,
+  startBackgroundProcess,
+} from "./wakeups.js";
 import type {
   ChildReader,
   ChildSender,
@@ -159,14 +177,6 @@ async function pollJobToCompletion(
     const waitMs = JOB_POLL_WARMUP_MS[pollCount - 1] ?? JOB_POLL_INTERVAL_MS;
     await sleep(waitMs, ctx.signal);
   }
-}
-
-/**
- * Helper that preserves the schema's static type through the ToolDef so
- * `args` in `execute` is typed precisely instead of `unknown`.
- */
-export function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
-  return def;
 }
 
 /**
@@ -920,6 +930,12 @@ export const builtinTools: ToolDef[] = [
   writeTool,
   editTool,
   bashTool,
+  watchTool,
+  wakeAtTool,
+  holdSandboxTool,
+  processReadTool,
+  wakeupListTool,
+  wakeupCancelTool,
   threadReadTool,
   listThreadsTool,
   switchModelTool,
