@@ -1,7 +1,8 @@
+import { cardId } from "~/lib/card-context";
 import { useEffect, useRef, useState } from "react";
 import { useWorkspaceAssistant, WorkspaceAssistantButton } from "./workspace-assistant";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { ChevronDown, Menu, Sparkles, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
+import { ChevronDown, PanelsTopLeft, Menu, Sparkles, PanelLeftClose, PanelLeftOpen, Settings, ShieldCheck } from "lucide-react";
 import { useChangelog } from "~/api/changelog";
 import { useSession } from "~/api/queries";
 import { pluginEnabledForCaller, useMe, useOrg, useTeams } from "~/api/settings";
@@ -288,6 +289,11 @@ export function TopNav() {
         </DropdownMenu>
       </div>
 
+      {!cardId() && <button type="button" onClick={() => window.dispatchEvent(new Event("valet:open-deck"))}
+        aria-label="Open tabs" title="Open your page cards"
+        className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded px-2 py-1 text-sm text-muted hover:bg-ink-wash hover:text-ink md:min-h-0">
+        <PanelsTopLeft className="h-4 w-4" /><span>Tabs</span>
+      </button>}
       <div className="flex shrink-0 items-center">
         <div className="hidden md:block"><WorkspaceAssistantButton /></div>
         <NotificationsBell />
