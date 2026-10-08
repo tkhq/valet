@@ -387,13 +387,26 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  async function createAndNavigate() {
-    // A new top-level thread uses current defaults, not the active thread's settings.
-    const thread = await createThread.mutateAsync();
-    navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
-    // Land the cursor in the composer — a fresh thread exists to be
-    // typed into.
-    useComposerPrefillStore.getState().requestFocus();
+  const [creationError, setCreationError] = useState<string>();
+  const currentSession = useRef<string | undefined>(sessionId);
+  useEffect(() => {
+    currentSession.current = sessionId;
+    return () => { currentSession.current = undefined; };
+  }, [sessionId]);
+
+  async function createAndNavigate(projectId?: string) {
+    setCreationError(undefined);
+    try {
+      // A new thread uses the workspace defaults, not the active thread's settings.
+      const thread = await createThread.mutateAsync();
+      if (projectId) moveThread(thread.id, projectId);
+      // A workspace switch during creation must not open the old workspace's thread.
+      if (currentSession.current !== sessionId) return;
+      navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
+      useComposerPrefillStore.getState().requestFocus();
+    } catch {
+      if (currentSession.current === sessionId) setCreationError("Could not create the thread. Try again.");
+    }
   }
 
   const archiveActive = useCallback(() => {
@@ -501,6 +514,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
         </button>
         <button type="button" aria-label="Search threads" title="Search threads" onClick={openSearch} className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><Search className="h-4 w-4" /></button>
       </div>
+      {creationError && <p role="alert" className="px-4 py-2 text-xs text-danger-500">{creationError}</p>}
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
         <DialogContent hideClose className="max-w-2xl rounded-2xl p-2 gap-1" onOpenAutoFocus={(event) => { event.preventDefault(); searchInputRef.current?.focus(); }}>
           <DialogTitle className="sr-only">Search threads</DialogTitle>
@@ -594,11 +608,18 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
           {projects.value.grouped && !projects.value.collapsed && projects.value.projects.map((project) => {
             const members = visible.filter((thread) => !projects.value.pinned.includes(thread.id) && projects.value.assignments[thread.id] === project.id);
             return <section key={project.id} aria-label={`Project: ${project.name}`} {...dropHandlers(project.id)} className={cn("mb-1 rounded-lg transition-colors", dropTarget === project.id && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}>
-              <button type="button" aria-expanded={!project.collapsed} onClick={() => projects.update((current) => ({ ...current, projects: current.projects.map((item) => item.id === project.id ? { ...item, collapsed: !item.collapsed } : item) }))} className="flex w-full items-center gap-2 rounded-lg px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
+              <div className="flex items-center pr-2">
+              <button type="button" aria-expanded={!project.collapsed} onClick={() => projects.update((current) => ({ ...current, projects: current.projects.map((item) => item.id === project.id ? { ...item, collapsed: !item.collapsed } : item) }))} className="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
                 {project.collapsed ? <Folder className="h-4 w-4 shrink-0" /> : <FolderOpen className="h-4 w-4 shrink-0" />}
                 <span className="truncate">{project.name}</span>{members.some((thread) => gatedThreadIds.has(thread.id)) && <Bell aria-label="Needs approval" className="ml-auto h-3.5 w-3.5 shrink-0 text-amber-500" />}
               </button>
-              {!project.collapsed && <div className="ml-4 border-l border-line/50">{members.map(renderThread)}{members.length === 0 && <p className="px-4 py-2 text-xs text-muted">Move a thread here</p>}</div>}
+                <button type="button" aria-label={`New thread in ${project.name}`} title={`New thread in ${project.name}`} disabled={createThread.isPending}
+                  onClick={() => void createAndNavigate(project.id)}
+                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss disabled:opacity-50 sm:h-8 sm:w-8">
+                  <Plus className="h-4 w-4" aria-hidden />
+                </button>
+              </div>
+              {!project.collapsed && <div className="ml-4 border-l border-line/50">{members.map(renderThread)}{members.length === 0 && <p className="px-4 py-2 text-xs text-muted">Start a thread with + or move one here</p>}</div>}
             </section>;
           })}
           <section aria-label="Recents" {...dropHandlers()} className={cn("min-h-16 rounded-lg transition-colors", dropTarget === "recents" && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}><h2 className="px-4 pb-1 pt-4 text-xs font-medium text-muted">Recents</h2>
