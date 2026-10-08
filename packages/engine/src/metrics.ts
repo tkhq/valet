@@ -16,9 +16,45 @@
  * `valet_tokens_total`). The bundled Grafana dashboard queries those
  * rendered names.
  */
-import { metrics, type Counter, type Histogram } from "@opentelemetry/api";
+import { metrics, type Counter, type Histogram, type ObservableGauge } from "@opentelemetry/api";
+import type { LeaseOwnerKind, WakeupCause, WakeupKind } from "./wakeups/types.js";
 
 const METER_NAME = "@valet/engine";
+
+/**
+ * Last-set value for one observable gauge's one label set. The engine has no
+ * push-gauge instrument (OTel only offers synchronous Counter/UpDownCounter/
+ * Histogram plus async Observable*), so each gauge keeps its latest value
+ * here, keyed by its serialized attributes, and an `addCallback` on the
+ * matching `createObservableGauge` reports every entry at each collection.
+ */
+interface GaugeEntry {
+  value: number;
+  attributes: Record<string, string>;
+}
+
+function attributeKey(attributes: Record<string, string>): string {
+  return Object.keys(attributes)
+    .sort()
+    .map((key) => `${key}=${attributes[key]}`)
+    .join(",");
+}
+
+function setGauge(state: Map<string, GaugeEntry>, attributes: Record<string, string>, value: number): void {
+  state.set(attributeKey(attributes), { value, attributes });
+}
+
+function observeGauge(gauge: ObservableGauge, state: Map<string, GaugeEntry>): void {
+  gauge.addCallback((result) => {
+    for (const entry of state.values()) result.observe(entry.value, entry.attributes);
+  });
+}
+
+const wakeupsActiveState = new Map<string, GaugeEntry>();
+const leasesActiveState = new Map<string, GaugeEntry>();
+const leasesOverDeadlineState = new Map<string, GaugeEntry>();
+const leasesUnannotatedState = new Map<string, GaugeEntry>();
+const scratchRequestedState = new Map<string, GaugeEntry>();
 
 interface Instruments {
   turns: Counter;
@@ -39,6 +75,14 @@ interface Instruments {
   sandboxWorkspaceGrow: Counter;
   cacheBreaks: Counter;
   compactionCoverageGaps: Counter;
+  wakeupsTotal: Counter;
+  wakeupsActive: ObservableGauge;
+  leasesActive: ObservableGauge;
+  leaseNodeSeconds: Counter;
+  leasesOverDeadline: ObservableGauge;
+  leasesUnannotated: ObservableGauge;
+  scratchRequestedBytes: ObservableGauge;
+  scratchRefused: Counter;
 }
 
 let instruments: Instruments | null = null;
@@ -113,7 +157,43 @@ function inst(): Instruments {
       description:
         "Compaction passes that refused to write a checkpoint because the summarizer input carried none of the history the checkpoint would replace. This is an invariant violation, not a workload property: any sustained rate means threads stop compacting (TKAI-461).",
     }),
+    wakeupsTotal: meter.createCounter("valet.wakeups.total", {
+      description: "Wakeups that ended, by kind (process/watch/timer) and cause. See WakeupCause.",
+    }),
+    wakeupsActive: meter.createObservableGauge("valet.wakeups.active", {
+      description:
+        "Wakeups currently pending or running, by kind. Reported by the host's WakeWatcher sweep; a count that only grows means wakeups are not reaching a terminal status.",
+    }),
+    leasesActive: meter.createObservableGauge("valet.leases.active", {
+      description:
+        "Sandbox leases currently held open, by owner kind (process/watch/hold). A lease keeps a sandbox alive independent of session activity.",
+    }),
+    leaseNodeSeconds: meter.createCounter("valet.leases.node_seconds", {
+      description:
+        "Sandbox node-seconds held open by a lease, by owner kind. The capacity cost of durable background work; a sustained rise on one owner kind means that kind is pinning sandboxes.",
+    }),
+    leasesOverDeadline: meter.createObservableGauge("valet.leases.over_deadline", {
+      description:
+        "A lease active past its deadline means the WakeWatcher failed to release it. This is the alert signal for the alert-don't-auto-repair rule; nothing else releases it.",
+    }),
+    leasesUnannotated: meter.createObservableGauge("valet.leases.unannotated", {
+      description:
+        "A lease with no owning wakeup or hold record. This should not happen; a non-zero count means a lease outlived or never got its owner annotation.",
+    }),
+    scratchRequestedBytes: meter.createObservableGauge("valet.sandbox.scratch.requested_bytes", {
+      description:
+        "Most recently requested /scratch volume size, by session class. Tracks demand for scratch capacity, not allocated size.",
+    }),
+    scratchRefused: meter.createCounter("valet.sandbox.scratch.refused", {
+      description:
+        "Scratch volume requests the host refused, by source and reason. A sustained rate means sessions of that class cannot get the scratch space they ask for.",
+    }),
   };
+  observeGauge(instruments.wakeupsActive, wakeupsActiveState);
+  observeGauge(instruments.leasesActive, leasesActiveState);
+  observeGauge(instruments.leasesOverDeadline, leasesOverDeadlineState);
+  observeGauge(instruments.leasesUnannotated, leasesUnannotatedState);
+  observeGauge(instruments.scratchRequestedBytes, scratchRequestedState);
   return instruments;
 }
 
@@ -230,4 +310,59 @@ export function recordSandboxCapacityWait(waitedMs: number, outcome: "admitted" 
 
 export function recordGateUnownedExpired(gateType: string): void {
   inst().gatesUnownedExpired.add(1, { type: gateType });
+}
+
+/** A wakeup that reached a terminal status. Record once per wakeup, at the
+ * transition into done/cancelled/expired/lost. */
+export function recordWakeupEnded(kind: WakeupKind, cause: WakeupCause): void {
+  inst().wakeupsTotal.add(1, { kind, cause });
+}
+
+/** Wakeups currently pending or running, by kind. The caller (the host's
+ * WakeWatcher sweep) owns re-setting this every pass. A stale value just
+ * means the sweep stopped running, which has its own liveness check. */
+export function recordWakeupsActive(kind: WakeupKind, count: number): void {
+  inst(); // ensure the gauge and its callback exist before the first set
+  setGauge(wakeupsActiveState, { kind }, count);
+}
+
+/** Sandbox leases currently held open, by owner kind. Set by the WakeWatcher
+ * sweep alongside `recordWakeupsActive`. */
+export function recordLeasesActive(ownerKind: LeaseOwnerKind, count: number): void {
+  inst();
+  setGauge(leasesActiveState, { ownerKind }, count);
+}
+
+/** Node-seconds a lease held a sandbox open, by owner kind. Record on
+ * release (or periodically for a long-lived lease) so the total tracks
+ * actual capacity consumed, not just lease count. */
+export function recordLeaseNodeSeconds(ownerKind: LeaseOwnerKind, seconds: number): void {
+  inst().leaseNodeSeconds.add(seconds, { ownerKind });
+}
+
+/** Leases active past their deadline. The WakeWatcher is the only releaser;
+ * this is the alert-don't-auto-repair signal for that invariant, re-set
+ * every sweep pass while the condition persists. */
+export function recordLeasesOverDeadline(count: number): void {
+  inst();
+  setGauge(leasesOverDeadlineState, {}, count);
+}
+
+/** Leases with no owning wakeup or hold record. Should stay at zero; a
+ * non-zero count means a lease lost its owner annotation. */
+export function recordLeasesUnannotated(count: number): void {
+  inst();
+  setGauge(leasesUnannotatedState, {}, count);
+}
+
+/** Most recently requested `/scratch` volume size, by session class. */
+export function recordScratchRequested(sessionClass: string, bytes: number): void {
+  inst();
+  setGauge(scratchRequestedState, { sessionClass }, bytes);
+}
+
+/** A scratch volume request the host refused, by source (the caller that
+ * asked) and reason. */
+export function recordScratchRefused(source: string, reason: string): void {
+  inst().scratchRefused.add(1, { source, reason });
 }
