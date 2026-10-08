@@ -76,7 +76,7 @@ export function threadListFilters(sessionId: string) {
     const data = state.data;
     if (data && typeof data === "object" && "pages" in data && Array.isArray(data.pages)) {
       return data.pages.some(page => page && typeof page === "object" && "threads" in page && Array.isArray(page.threads)
-        && page.threads.some(thread => thread && typeof thread === "object" && "sessionId" in thread && thread.sessionId === sessionId));
+        && page.threads.some((thread: unknown) => thread && typeof thread === "object" && "sessionId" in thread && thread.sessionId === sessionId));
     }
     return Boolean(data && typeof data === "object" && "threads" in data && Array.isArray(data.threads)
       && data.threads.some(thread => thread && typeof thread === "object" && "sessionId" in thread && thread.sessionId === sessionId));
