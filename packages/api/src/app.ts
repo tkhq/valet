@@ -86,7 +86,7 @@ import { channelsRouter } from "./routes/channels.js";
 import { slackWebhookRouter } from "./routes/slack-webhook.js";
 import { slackAppRouter } from "./routes/slack-app.js";
 import { SLACK_WEBHOOK_MOUNT } from "./services/slack-app.js";
-import { eventWebhooksRouter } from "./routes/event-webhooks.js";
+import { mountPluginHttpRoutes } from "./plugins/http-routes.js";
 import { workflowHooksRouter } from "./routes/workflow-hooks.js";
 import { artifactsRouter, buildArtifactsPublicRouter } from "./routes/artifacts.js";
 import { eventReceiptsRouter } from "./routes/event-receipts.js";
@@ -213,11 +213,10 @@ export function createApp(
   // for the same reason `channelsRouter` is.
   app.route("/webhooks/github-app", githubAppWebhookRouter);
 
-  // PUBLIC generic event-webhook ingress — same reasoning as the mounts
-  // above: the caller is the provider (Linear etc.), not a logged-in Valet
-  // user; verification is signature-level (plugin `TriggerDef.verify` over
-  // the raw bytes) inside the router itself, not the auth gate below.
-  app.route("/webhooks/events", eventWebhooksRouter);
+  // Public plugin routes include signed event ingress and host-owned legacy aliases.
+  // Authenticated plugin routes mount below the normal authentication middleware.
+  mountPluginHttpRoutes(app, providers.plugins, "public");
+  app.post("/webhooks/events/:service", (c) => c.json({ error: "unknown service" }, 404));
 
   // PUBLIC arbitrary-URL workflow trigger ingress (overhaul design decision
   // 5) — same reasoning as the mounts above: the hookId in the URL IS the
@@ -311,6 +310,7 @@ export function createApp(
   // Everything under /api/* requires auth (stub in dev; 401 otherwise).
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
   app.use("/api/*", refuseTeamKeyOutsideScope());
+  mountPluginHttpRoutes(app, providers.plugins, "authenticated");
 
   app.route("/api/threads", threadsRouter);
   app.route("/api/sessions", childWorkRouter);

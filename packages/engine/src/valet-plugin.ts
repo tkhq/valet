@@ -12,6 +12,7 @@
  * See the "Channel transports" section below for the v2 ChannelTransport
  * contract (Telegram, Phase 7).
  */
+import { validatePluginHttpRoutes, type PluginHttpRoute } from "./plugin-http.js";
 import type { ActionPlugin } from "./plugin-catalog.js";
 import type { RiskLevel, SkillSource, RoleSpec, StoredCredential } from "./types.js";
 import { BUILTIN_COMMAND_NAMES, type CommandDef } from "./commands/types.js";
@@ -584,6 +585,8 @@ export interface ValetPlugin {
   description?: string;
   actions?: ActionPlugin[];
   triggers?: TriggerDef[];
+  /** Portable HTTP handlers mounted and authorized by the host. */
+  httpRoutes?: PluginHttpRoute[];
   skills?: SkillSource[];
   roles?: RoleSpec[];
   credentials?: CredentialDeclaration[];
@@ -674,6 +677,8 @@ export function validateValetPlugin(
   if (v.description !== undefined && typeof v.description !== "string") {
     issues.push({ path: "description", message: "must be a string when present" });
   }
+
+  issues.push(...validatePluginHttpRoutes(v.httpRoutes));
 
   checkArray(v.actions, "actions", issues, (p, path) => {
     const plugin = asRecord(p, path, issues);

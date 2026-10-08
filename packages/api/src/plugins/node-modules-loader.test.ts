@@ -3,6 +3,9 @@ import { mkdtemp, mkdir, writeFile, rm, copyFile, symlink } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Hono } from "hono";
+import type { AppEnv } from "../env.js";
+import { mountPluginHttpRoutes } from "./http-routes.js";
 import { loadNodeModulesPlugins } from "./node-modules-loader.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -56,6 +59,29 @@ describe("loadNodeModulesPlugins", () => {
     expect(result.quarantined).toHaveLength(1);
     expect(result.quarantined[0]?.pkg).toBe("bad-plugin");
     expect(result.quarantined[0]?.reason).toMatch(/boom during import/);
+  });
+
+  it("quarantines signed routes without a host installation resolver", async () => {
+    await writePackage(root, "signed-plugin", {
+      entryContent: `export default { name: "signed-plugin", version: "1", httpRoutes: [{
+        id: "events", method: "POST", path: "/events", auth: "signature",
+        maxBodyBytes: 1024, acknowledgementStatus: 200,
+        installationKey: () => "installation", verify: () => ({ accepted: true, events: [] }),
+      }] };`,
+    });
+    await writePackage(root, "healthy-plugin", {
+      entryContent: `export default { name: "healthy-plugin", version: "1", httpRoutes: [{
+        id: "status", path: "/status", method: "GET", auth: "public", maxBodyBytes: 0,
+        handle: () => new Response("healthy"),
+      }] };`,
+    });
+    const result = await loadNodeModulesPlugins({ searchPaths: [root] });
+    expect(result.plugins.map((plugin) => plugin.name)).toEqual(["healthy-plugin"]);
+    expect(result.quarantined).toEqual([{ pkg: "signed-plugin", reason: expect.stringContaining("No installation resolver") }]);
+    const app = new Hono<AppEnv>();
+    mountPluginHttpRoutes(app, result.plugins, "public");
+    expect(await (await app.request("/plugins/healthy-plugin/http/status")).text()).toBe("healthy");
+    expect((await app.request("/plugins/signed-plugin/http/events", { method: "POST" })).status).toBe(404);
   });
 
   it("skips a denylisted package even though it is otherwise valid", async () => {
