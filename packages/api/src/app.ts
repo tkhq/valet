@@ -50,7 +50,7 @@ import { workflowConversationRouter } from "./routes/workflow-conversation.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
 import { actionsRouter } from "./routes/actions.js";
-import { forceMcpConsent, oauthConsentRouter } from "./routes/oauth-consent.js";
+import { mcpAuthorizeGate, oauthConsentRouter } from "./routes/oauth-consent.js";
 import { mountOnboardingRoutes } from "./onboarding/routes.js";
 import { templatesRouter } from "./routes/templates.js";
 import { skillsRouter } from "./routes/skills.js";
@@ -279,7 +279,7 @@ export function createApp(
   if (auth) {
     // Every MCP authorization goes through Valet's consent page: a client
     // cannot skip it by leaving out prompt=consent (routes/oauth-consent.ts).
-    app.get("/api/auth/mcp/authorize", forceMcpConsent);
+    app.get("/api/auth/mcp/authorize", mcpAuthorizeGate(auth));
     app.on(["POST", "GET"], "/api/auth/*", async (c) => {
       const res = await auth.handler(c.req.raw);
       return filterTeamKeysFromPersonalApiKeyList(c.req.path, res);

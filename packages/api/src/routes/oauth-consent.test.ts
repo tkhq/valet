@@ -5,7 +5,7 @@
  * to can decide.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { verification } from "../schema/index.js";
 
@@ -13,6 +13,7 @@ let api: TestApi | undefined;
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  vi.unstubAllEnvs();
 });
 
 const REDIRECT = "http://localhost:33418/callback";
@@ -118,6 +119,39 @@ describe("MCP OAuth consent", () => {
     expect(redirect.searchParams.get("error")).toBe("access_denied");
     expect(redirect.searchParams.get("code")).toBeNull();
     expect((await exchange(testApi.baseUrl, clientId, code, verifier)).status).not.toBe(200);
+  });
+
+  it("sends a signed-out authorization to login with next, and resumes it after sign-in", async () => {
+    const { testApi, clientId, challenge } = await setup();
+    const signedOut = await fetch(authorizeUrl(testApi.baseUrl, clientId, challenge, { prompt: "consent" }), { redirect: "manual" });
+    const login = new URL(signedOut.headers.get("location") ?? "", testApi.baseUrl);
+    expect(login.pathname).toBe("/login");
+    const next = login.searchParams.get("next") ?? "";
+    expect(next.startsWith("/api/auth/mcp/authorize?")).toBe(true);
+    expect(new URLSearchParams(next.split("?")[1]).get("prompt")).toBe("consent");
+    // The login page loads `next` after sign-in. With a session, it reaches consent.
+    const signIn = await fetch(`${testApi.baseUrl}/api/auth/sign-in/email`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "consent@nowhere.test", password: "correct-horse-battery" }),
+    });
+    const fresh = sessionCookie(signIn.headers.get("set-cookie"));
+    const landed = await follow(testApi.baseUrl, `${testApi.baseUrl}${next}`, fresh);
+    expect(landed.pathname).toBe("/oauth/consent");
+  });
+
+  it("accepts a decision posted from the public HTTPS origin behind a TLS-terminating proxy", async () => {
+    // Production: the browser is on https://valet.example.com, the server
+    // listens on plain http behind the ingress.
+    vi.stubEnv("VALET_PUBLIC_URL", "https://valet.example.com");
+    const { testApi, cookie, clientId, challenge } = await setup();
+    const landed = await follow(testApi.baseUrl, authorizeUrl(testApi.baseUrl, clientId, challenge), cookie);
+    const code = landed.searchParams.get("consent_code") ?? "";
+    const res = await fetch(`${testApi.baseUrl}/api/oauth/consent`, {
+      method: "POST", headers: { cookie, "Content-Type": "application/json", Origin: "https://valet.example.com" },
+      body: JSON.stringify({ consent_code: code, accept: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(new URL(((await res.json()) as { redirect: string }).redirect).searchParams.get("code")).toBeTruthy();
   });
 
   it("refuses a code issued to another user, an API key caller, and a foreign origin", async () => {

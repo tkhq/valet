@@ -19,6 +19,8 @@
  */
 import { and, eq, gt } from "drizzle-orm";
 import { Hono, type Context } from "hono";
+import { publicUrlFromEnv } from "../channels/host.js";
+import type { ValetAuth } from "../auth/index.js";
 import type { AppEnv } from "../env.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import { oauthApplication, verification } from "../schema/index.js";
@@ -85,6 +87,26 @@ async function loadPending(c: Context<AppEnv>, code: unknown): Promise<{ code: s
   return { code, pending };
 }
 
+/**
+ * The origins a consent decision may come from: the public URL people open
+ * Valet at, and the request's own origin for a direct connection. Behind a
+ * TLS-terminating ingress the server sees `http://<pod>`, while the browser
+ * sends `Origin: https://<public host>`, so the request origin alone would
+ * refuse every real decision.
+ */
+function allowedOrigins(c: Context<AppEnv>): Set<string> {
+  const origins = new Set([new URL(c.req.url).origin]);
+  for (const configured of [publicUrlFromEnv(process.env), process.env.BETTER_AUTH_URL]) {
+    if (!configured) continue;
+    try {
+      origins.add(new URL(configured).origin);
+    } catch {
+      // An unparseable setting adds nothing.
+    }
+  }
+  return origins;
+}
+
 function withParams(uri: string, params: Record<string, string | null>): string {
   const url = new URL(uri);
   for (const [k, v] of Object.entries(params)) if (v !== null) url.searchParams.set(k, v);
@@ -112,7 +134,7 @@ oauthConsentRouter.post("/", async (c) => {
   // The session cookie is SameSite=Lax, so a cross-site POST arrives signed
   // out. Refuse a foreign Origin anyway, before any state changes.
   const origin = c.req.header("origin");
-  if (origin && origin !== new URL(c.req.url).origin) return c.json({ error: "Approve the app from the Valet page." }, 403);
+  if (origin && !allowedOrigins(c).has(origin)) return c.json({ error: "Approve the app from the Valet page." }, 403);
   const body = await readOptionalJsonObject(c);
   if (!body || typeof body.accept !== "boolean") return c.json({ error: "Send { consent_code, accept: true | false }." }, 400);
   const loaded = await loadPending(c, body.consent_code);
@@ -127,12 +149,30 @@ oauthConsentRouter.post("/", async (c) => {
 
 /**
  * Hono handler for `GET /api/auth/mcp/authorize` that runs before
- * better-auth: a request without `prompt=consent` is redirected to the same
- * URL with it, so the plugin always sends the browser to the consent page.
+ * better-auth:
+ *
+ * - A request without `prompt=consent` is redirected to the same URL with
+ *   it, so the plugin always sends the browser to the consent page.
+ * - A signed-out request is sent to `/login?next=<this authorize URL>`. The
+ *   login page loads `next` in the browser after sign-in, which resumes the
+ *   authorization with a session. The plugin's own signed-out path replays
+ *   the authorization from a sign-in hook instead, and the login form's
+ *   background sign-in request swallows that redirect.
  */
-export function forceMcpConsent(c: Context<AppEnv>, next: () => Promise<void>): Promise<void> | Response {
-  const url = new URL(c.req.url);
-  if (url.searchParams.get("prompt") === "consent") return next();
-  url.searchParams.set("prompt", "consent");
-  return c.redirect(`${url.pathname}${url.search}`, 302);
+export function mcpAuthorizeGate(auth: Pick<ValetAuth, "api">) {
+  return async (c: Context<AppEnv>, next: () => Promise<void>): Promise<void | Response> => {
+    const url = new URL(c.req.url);
+    if (url.searchParams.get("prompt") !== "consent") {
+      url.searchParams.set("prompt", "consent");
+      return c.redirect(`${url.pathname}${url.search}`, 302);
+    }
+    let session: Awaited<ReturnType<ValetAuth["api"]["getSession"]>> = null;
+    try {
+      session = await auth.api.getSession({ headers: c.req.raw.headers });
+    } catch {
+      session = null;
+    }
+    if (!session) return c.redirect(`/login?next=${encodeURIComponent(`${url.pathname}${url.search}`)}`, 302);
+    return next();
+  };
 }
