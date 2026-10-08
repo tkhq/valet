@@ -12,6 +12,7 @@ import {
   processReadTool,
   wakeupListTool,
   wakeupCancelTool,
+  startBackgroundProcess,
 } from "./wakeups.js";
 export {
   watchTool,
@@ -22,6 +23,8 @@ export {
   wakeupCancelTool,
   startBackgroundProcess,
 } from "./wakeups.js";
+import { validateBackground, sleepRefusal } from "../wakeups/validate.js";
+import type { WakeupLimits } from "../wakeups/types.js";
 import type {
   ChildReader,
   ChildSender,
@@ -151,7 +154,11 @@ async function pollJobToCompletion(
     if (Date.now() >= deadline) {
       await bestEffortCancel(cancelJob, execId);
       const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
-      return { text: `${output}${truncNote}\n[timed out after ${Math.round(timeoutMs / 1000)}s]` };
+      return {
+        text:
+          `${output}${truncNote}\n[timed out after ${Math.round(timeoutMs / 1000)}s] ` +
+          "For work longer than an hour, rerun with background: true and a deadline_hours.",
+      };
     }
 
     const poll = await pollJob(execId, offset);
@@ -298,6 +305,8 @@ export const editTool = defineTool({
   },
 });
 
+const DEFAULT_WAKEUP_LIMITS: WakeupLimits = { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 };
+
 export const bashTool = defineTool({
   name: "bash",
   description:
@@ -305,12 +314,27 @@ export const bashTool = defineTool({
     `${BASH_DEFAULT_TIMEOUT_S}, max 3600) bounds how long the command may ` +
     "run; commands with an effective timeout beyond 60s automatically run " +
     "in job mode (poll-based, non-blocking on the transport) when the " +
-    "sandbox supports it.",
+    "sandbox supports it. `background: true` starts the command as a " +
+    "detached sandbox process and returns at once; give `deadline_hours` " +
+    "and `reason`. The thread receives a `process.exited` signal when it " +
+    "ends. Use it for work longer than an hour.",
   parameters: Type.Object({
     command: Type.String(),
     timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600 })),
+    background: Type.Optional(Type.Boolean()),
+    deadline_hours: Type.Optional(Type.Number()),
+    reason: Type.Optional(Type.String()),
   }),
   execute: async (args, ctx) => {
+    if (args.background) {
+      const limits = ctx.wakeups?.limits ?? DEFAULT_WAKEUP_LIMITS;
+      const v = validateBackground(args, limits);
+      if (!v.ok) return { text: v.text };
+      return startBackgroundProcess(ctx, args.command, v.value);
+    }
+    const sleep = sleepRefusal(args.command);
+    if (sleep) return { text: sleep };
+
     const timeoutMs = (args.timeout ?? BASH_DEFAULT_TIMEOUT_S) * 1000;
 
     // Mode selection (spec decision 10). NOTE: `ctx.sandbox` is normally a
