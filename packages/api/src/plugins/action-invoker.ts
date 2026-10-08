@@ -860,7 +860,7 @@ function buildCredentialProvider(
  * no account of the run's actor or the team's own answers and that member
  * has not yet approved this run. GitHub has the organization App behind the
  * team's row, so it never borrows. */
-async function sharedAccountApprover(
+export async function sharedAccountApprover(
   opts: ActionInvokerOpts,
   ctx: ActionInvocationContext,
   teamId: string,

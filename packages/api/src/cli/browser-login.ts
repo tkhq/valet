@@ -28,6 +28,8 @@ export interface BrowserLoginOpts {
   /** Write a line for the person (stderr in the real CLI). */
   log(line: string): void;
   timeoutMs?: number;
+  /** Loopback port to listen on. Default: a random free port. */
+  port?: number;
   /** Computer name shown on the approval page. */
   device?: string;
 }
@@ -65,12 +67,12 @@ export async function browserLogin(opts: BrowserLoginOpts): Promise<string> {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(error || !code
       ? page("Sign-in canceled", "The Valet CLI was not signed in. You can close this tab.")
-      : page("Valet CLI signed in", "You can close this tab and return to your terminal."));
+      : page("Almost done", "Return to your terminal. It finishes the sign-in and says when you are logged in. You can close this tab."));
     settle({ code, error: error ?? (code ? undefined : "missing_code") });
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve());
+    server.listen(opts.port ?? 0, "127.0.0.1", () => resolve());
   });
 
   try {
@@ -99,9 +101,9 @@ export async function browserLogin(opts: BrowserLoginOpts): Promise<string> {
     ]).finally(() => clearTimeout(timer));
 
     if (result === "timeout") {
-      throw new AuthError(`no approval within ${Math.round(timeoutMs / 60_000)} minutes. Run \`valet login\` again.`);
+      throw new AuthError(`no approval within ${Math.round(timeoutMs / 60_000)} minutes. Run \`valet login\` again, and choose Allow in the browser.`);
     }
-    if (result.error === "access_denied") throw new AuthError("the sign-in was denied in the browser.");
+    if (result.error === "access_denied") throw new AuthError("the sign-in was denied in the browser. To try again, run `valet login` again.");
     if (!result.code) throw new AuthError("the browser returned no sign-in code. Run `valet login` again.");
     return await exchange(opts.url, result.code, verifier, redirectUri);
   } finally {

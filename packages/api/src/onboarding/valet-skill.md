@@ -24,7 +24,7 @@ Valet runs at {{VALET_URL}}. It holds the organization's integration credentials
 | Save a durable decision or convention | `write_memory` | none |
 | Follow the team's playbook for a task | `list_skills`, `get_skill` | none |
 | Run a saved automation | `list_workflows`, `run_workflow`, `get_workflow_run` | none |
-| See what waits for the person | `list_inbox` | `valet gates list` |
+| See what waits for the person | `list_inbox` | none (`valet gates list --thread <id>` for one thread) |
 | Share a report or page with the organization | `publish_artifact` | none |
 
 Use your own tools for local work: files, the shell, and the local repository. Use Valet for what needs the organization's accounts, shared context, or Valet's cloud sandboxes.
@@ -57,13 +57,13 @@ If a service is listed as not connected, tell the person to connect it at {{VALE
 ## CLI reference
 
 ```sh
-valet status                                   # instance health and login
+valet status                                   # instance health (not the login; use valet threads list)
 valet tools search "<words>" [--service <s>]   # find integration tools
 valet tools describe <tool_id>                 # schema and policy
 valet tools call <tool_id> --params '<json>' [--idempotency-key <k>]
 valet threads list | new --title "<t>"         # Valet assistant threads
 valet send --thread <id> "<prompt>"            # send and stream the reply
-valet gates list                               # pending questions and approvals
+valet gates list --thread <id>                 # pending questions and approvals in a thread
 ```
 
 Add `--json` for machine-readable output. Exit codes: `0` done, `2` usage error, `3` waiting on a decision or approval, `4` failed, `5` authentication failed (the person logs in again), `6` Valet not reachable.

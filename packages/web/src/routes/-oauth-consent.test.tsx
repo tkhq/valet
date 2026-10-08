@@ -11,6 +11,11 @@ vi.mock("@tanstack/react-router", () => ({
 const oauthConsent = vi.fn<(code: string) => Promise<OAuthConsentInfo>>();
 const decideOAuthConsent = vi.fn<(code: string, accept: boolean) => Promise<{ redirect: string }>>();
 vi.mock("~/api/client", () => ({
+  ApiError: class ApiError extends Error {
+    constructor(public status: number, message: string) {
+      super(message);
+    }
+  },
   api: {
     oauthConsent: (code: string) => oauthConsent(code),
     decideOAuthConsent: (code: string, accept: boolean) => decideOAuthConsent(code, accept),

@@ -42,7 +42,7 @@ export interface LoginDeps {
   /** `GET /api/auth-config`: whether the instance runs stub auth (no credential needed). */
   authConfig(url: string): Promise<Pick<AuthConfigResponse, "stub">>;
   /** Sign in through the browser and return a new API key. Throws `AuthError` on denial or timeout. */
-  browserLogin(url: string, opts: { openBrowser: boolean }): Promise<string>;
+  browserLogin(url: string, opts: { openBrowser: boolean; port?: number }): Promise<string>;
 }
 
 /**
@@ -75,7 +75,7 @@ export function profileNameForUrl(url: string): string {
 export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: ValetConfig): Promise<number> {
   const url = flags.rest[0];
   if (url === undefined || url === "") {
-    printErr("usage: valet login <url> [--name <name>] [--no-browser] [--api-key <key> | --api-key -]");
+    printErr("usage: valet login <url> [--name <name>] [--no-browser] [--port <port>] [--api-key <key> | --api-key -]");
     return ExitCode.Usage;
   }
 
@@ -88,6 +88,18 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
       name = profileNameForUrl(url);
     } catch {
       printErr(`valet login: invalid url "${url}"`);
+      return ExitCode.Usage;
+    }
+  }
+
+  // `--port` fixes the loopback port, so a remote machine can forward it
+  // (`ssh -L <port>:127.0.0.1:<port>`) and still sign in through a browser.
+  let port: number | undefined;
+  const portFlag = flags.flags.port;
+  if (portFlag !== undefined) {
+    port = typeof portFlag === "string" ? Number(portFlag) : NaN;
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      printErr("valet login: --port must be a number from 1024 to 65535.");
       return ExitCode.Usage;
     }
   }
@@ -106,7 +118,7 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
     const { stub } = await deps.authConfig(base);
     if (!stub) {
       try {
-        apiKey = await deps.browserLogin(base, { openBrowser: flags.flags["no-browser"] !== true });
+        apiKey = await deps.browserLogin(base, { openBrowser: flags.flags["no-browser"] !== true, ...(port !== undefined ? { port } : {}) });
       } catch (err) {
         if (err instanceof AuthError) {
           printErr(`valet login: ${err.message} Profile not saved.`);
@@ -123,7 +135,7 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
     await client.me();
   } catch (err) {
     if (err instanceof AuthError) {
-      printErr(`valet login: authentication failed for ${url} — profile not saved`);
+      printErr(`valet login: authentication failed for ${url}. Profile not saved. Check the key, or run \`valet login ${url}\` to sign in through the browser.`);
       return ExitCode.AuthFailure;
     }
     throw err; // UnreachableError / ApiError propagate to the dispatcher.
@@ -207,11 +219,15 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
     readSecret,
     authConfig,
     browserLogin: (url, opts) => {
-      if (process.env.SSH_CONNECTION) {
-        printErr(`On a remote machine, the browser cannot reach this CLI. Press Ctrl-C and run \`valet login ${url} --api-key -\` instead.`);
+      if (process.env.SSH_CONNECTION && opts.port === undefined) {
+        printErr("This looks like a remote machine, so your browser cannot reach this CLI. Press Ctrl-C, then:");
+        printErr(`  1. Here, run: valet login ${url} --no-browser --port 8765`);
+        printErr("  2. On your computer, run: ssh -L 8765:127.0.0.1:8765 <this host>");
+        printErr("  3. Open the printed URL in your browser.");
       }
       return browserLogin({
         url,
+        ...(opts.port !== undefined ? { port: opts.port } : {}),
         openUrl: opts.openBrowser ? openInBrowser : () => Promise.resolve(false),
         log: printErr,
         timeoutMs: BROWSER_LOGIN_TIMEOUT_MS,

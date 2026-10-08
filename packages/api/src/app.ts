@@ -9,6 +9,7 @@ import { threadsRouter } from "./routes/threads.js";
 import { TeamAdminRequiredError, teamAdminRefusal } from "./services/team-deletion-access.js";
 import { productAnnouncementsRouter } from "./routes/product-announcements.js";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -50,7 +51,7 @@ import { workflowConversationRouter } from "./routes/workflow-conversation.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
 import { actionsRouter } from "./routes/actions.js";
-import { mcpAuthorizeGate, oauthConsentRouter } from "./routes/oauth-consent.js";
+import { mcpAuthorizeGate, mcpTokenGate, oauthConsentRouter } from "./routes/oauth-consent.js";
 import { cliLoginRouter, cliLoginTokenHandler } from "./routes/cli-login.js";
 import { mountOnboardingRoutes } from "./onboarding/routes.js";
 import { templatesRouter } from "./routes/templates.js";
@@ -281,8 +282,9 @@ export function createApp(
     // Every MCP authorization goes through Valet's consent page: a client
     // cannot skip it by leaving out prompt=consent (routes/oauth-consent.ts).
     app.get("/api/auth/mcp/authorize", mcpAuthorizeGate(auth));
+    app.post("/api/auth/mcp/token", mcpTokenGate(providers.db));
     // `valet login` exchanges its one-time code here before it has a key.
-    app.post("/api/cli/login/token", cliLoginTokenHandler({ auth, db: providers.db }));
+    app.post("/api/cli/login/token", bodyLimit({ maxSize: 16 * 1024 }), cliLoginTokenHandler({ auth, db: providers.db }));
     app.on(["POST", "GET"], "/api/auth/*", async (c) => {
       const res = await auth.handler(c.req.raw);
       return filterTeamKeysFromPersonalApiKeyList(c.req.path, res);
@@ -434,6 +436,15 @@ export function createApp(
   // Web app static serving + SPA fallback — registered LAST (decision 3):
   // every real route above must get first crack at a request. No-op unless
   // `opts.webDistDir` points at a real build (has index.html).
+  // The approval pages must not load in a frame, so another site cannot
+  // overlay them and trick a click on Allow.
+  for (const path of ["/oauth/consent", "/cli/login"]) {
+    app.use(path, async (c, next) => {
+      await next();
+      c.header("X-Frame-Options", "DENY");
+      c.header("Content-Security-Policy", "frame-ancestors 'none'");
+    });
+  }
   const webServed = mountWebStatic(app, opts.webDistDir);
 
   // Default 404 for anything no route (or the SPA fallback above) claimed —

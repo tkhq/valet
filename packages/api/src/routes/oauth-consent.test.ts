@@ -85,6 +85,24 @@ describe("MCP OAuth consent", () => {
     expect(landed.origin).toBe(new URL(testApi.baseUrl).origin);
   });
 
+  it("treats a repeated prompt parameter as one prompt=consent, so it cannot skip the page", async () => {
+    const { testApi, cookie, clientId, challenge } = await setup();
+    const url = new URL(authorizeUrl(testApi.baseUrl, clientId, challenge, { prompt: "consent" }));
+    url.searchParams.append("prompt", "consent");
+    const landed = await follow(testApi.baseUrl, url.toString(), cookie);
+    expect(landed.pathname).toBe("/oauth/consent");
+    expect(landed.origin).toBe(new URL(testApi.baseUrl).origin);
+  });
+
+  it("refuses to exchange a code the person did not accept on the consent page", async () => {
+    const { testApi, cookie, clientId, verifier, challenge } = await setup();
+    const landed = await follow(testApi.baseUrl, authorizeUrl(testApi.baseUrl, clientId, challenge), cookie);
+    const code = landed.searchParams.get("consent_code") ?? "";
+    const refused = await exchange(testApi.baseUrl, clientId, code, verifier);
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain("not approved on the Valet consent page");
+  });
+
   it("shows who is asking, then hands the code to the client only after acceptance", async () => {
     const { testApi, cookie, clientId, verifier, challenge } = await setup();
     const landed = await follow(testApi.baseUrl, authorizeUrl(testApi.baseUrl, clientId, challenge), cookie);

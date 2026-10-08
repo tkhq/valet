@@ -75,7 +75,10 @@ valet logout prod            # remove it
 browser returns a one-time code to the CLI, and the CLI exchanges it for a
 personal API key named `valet CLI (<computer>)`. You can revoke that key in
 Settings > API keys. If the browser does not open, the CLI prints the URL.
-Use `--no-browser` to only print it. Other ways to log in:
+Use `--no-browser` to only print it. On a remote machine, run
+`valet login <url> --no-browser --port 8765`, forward the port from your
+computer with `ssh -L 8765:127.0.0.1:8765 <host>`, and open the printed URL
+there. Other ways to log in:
 
 - `--api-key vlt_...` uses a key you already have, for scripts and CI.
 - `--api-key -` reads a key from a hidden prompt or stdin. Use it on a

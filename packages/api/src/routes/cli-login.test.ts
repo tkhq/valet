@@ -105,7 +105,7 @@ describe("valet login browser sign-in", () => {
         const redirect = await approveInBrowser(base, cookie, url, true);
         // The browser follows the redirect to the CLI's loopback listener.
         const landed = await fetch(redirect);
-        expect(await landed.text()).toContain("Valet CLI signed in");
+        expect(await landed.text()).toContain("Return to your terminal");
         return true;
       },
     });
@@ -217,6 +217,15 @@ describe("valet login browser sign-in", () => {
       ["PUT", "/api/me/policy-overrides"],
       ["DELETE", "/api/me/grants"],
       ["POST", "/api/workflows/runs/run-1/approvals/node-1"],
+      ["POST", "/api/workflows/wf-1/permissions/allow"],
+      ["POST", "/api/teams/team-1/policies"],
+      ["PUT", "/api/teams/team-1/policy-overrides"],
+      ["POST", "/api/teams/team-1/members"],
+      ["POST", "/api/teams/team-1/api-keys"],
+      ["PATCH", "/api/teams/team-1"],
+      ["PATCH", "/api/org/settings"],
+      ["PATCH", "/api/org/members/someone"],
+      ["POST", "/api/credentials/github/delegate"],
     ];
     for (const [method, path] of writes) {
       const asAgent = await fetch(`${base}${path}`, { method, headers: { "x-api-key": agentKey, "Content-Type": "application/json" }, body: "{}" });

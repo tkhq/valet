@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api } from "~/api/client";
+import { api, ApiError } from "~/api/client";
 import { Button, Spinner } from "~/components/primitives";
 
 /**
@@ -73,7 +73,11 @@ export function CliLoginPage({ search }: { search: CliLoginSearch }) {
           <h1 className="font-display text-2xl text-ink">Sign in to the Valet CLI</h1>
         </div>
 
-        {!valid || info.isError ? (
+        {valid && signingIn(info.error) ? (
+          <div className="flex justify-center">
+            <Spinner />
+          </div>
+        ) : !valid || info.isError ? (
           <p className="text-center text-sm text-muted">
             This sign-in link is not valid. Run <code>valet login</code> again in your terminal.
           </p>
@@ -121,4 +125,9 @@ export function CliLoginPage({ search }: { search: CliLoginSearch }) {
       </div>
     </div>
   );
+}
+
+/** A 401 means the visitor is signed out. The API client is already sending them to sign in. */
+function signingIn(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401;
 }

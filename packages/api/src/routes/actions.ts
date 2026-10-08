@@ -26,6 +26,7 @@ import {
   externalActionMode,
   findAction,
   qualifiedActionId,
+  sharedAccountApprover,
   type ActionInvocationContext,
   type ActionInvokerOpts,
   type ServiceActions,
@@ -43,17 +44,18 @@ export const actionsRouter = new Hono<AppEnv>();
  * service, so repeated searches would contact every connected server each
  * time. A listing is kept for DISCOVERY_TTL_MS per caller, owner, and
  * service. Only successful listings are kept, so a newly connected service
- * appears at once. A call never relies on this cache: the invoker resolves
- * the action and checks credentials and policy again.
+ * appears at once. A tool id missing from a cached listing triggers one fresh
+ * listing, so a tool added upstream is found at once. A call still resolves
+ * the action and checks credentials and policy again in the invoker.
  */
 const DISCOVERY_TTL_MS = 2 * 60_000;
 const DISCOVERY_CACHE_MAX = 500;
 const discoveryCache = new Map<string, { at: number; value: ServiceActions }>();
 
-async function discoverCached(opts: ActionInvokerOpts, ctx: ActionInvocationContext, service: string): Promise<ServiceActions> {
+async function discoverCached(opts: ActionInvokerOpts, ctx: ActionInvocationContext, service: string, fresh = false): Promise<ServiceActions> {
   const key = `${ctx.orgId}:${ctx.userId}:${ctx.owner.type}:${ctx.owner.id}:${service}`;
   const hit = discoveryCache.get(key);
-  if (hit && Date.now() - hit.at < DISCOVERY_TTL_MS) return hit.value;
+  if (!fresh && hit && Date.now() - hit.at < DISCOVERY_TTL_MS) return hit.value;
   const value = await discoverServiceActions(opts, ctx, service);
   if ("actions" in value) {
     discoveryCache.delete(key);
@@ -84,12 +86,6 @@ function paramsDigest(value: unknown): string {
     return v;
   };
   return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex").slice(0, 24);
-}
-
-async function storedResultExists(db: AppEnv["Variables"]["providers"]["db"], invocationId: string): Promise<boolean> {
-  const [row] = await db.select({ id: actionInvocations.invocationId }).from(actionInvocations)
-    .where(eq(actionInvocations.invocationId, invocationId)).limit(1);
-  return row !== undefined;
 }
 
 const DISCOVERY_TIMEOUT_MS = 8_000;
@@ -152,8 +148,11 @@ async function loadTool(c: Context<AppEnv>, ctx: ActionInvocationContext, toolId
   const parsed = parseToolId(c, toolId);
   if (!parsed) return { error: `Unknown tool "${toolId}". Use search_tools to find a tool_id.` };
   const opts = invokerOpts(c);
-  const listed = await discoverCached(opts, ctx, parsed.service);
-  if ("unavailable" in listed) return { error: listed.unavailable };
+  let listed = await discoverCached(opts, ctx, parsed.service);
+  if ("actions" in listed && !findAction(listed.actions, parsed.service, parsed.action)) {
+    listed = await discoverCached(opts, ctx, parsed.service, true);
+  }
+  if ("unavailable" in listed) return { error: listed.unavailable, unavailable: { opts, service: parsed.service, action: parsed.action } };
   const action = findAction(listed.actions, parsed.service, parsed.action);
   if (!action) return { error: `Unknown tool "${toolId}". Use search_tools to find a tool_id.` };
   return { opts, service: parsed.service, action };
@@ -199,7 +198,19 @@ actionsRouter.post("/:toolId/invoke", async (c) => {
   const ctx = await callerContext(c, workspace);
   if (!ctx) return c.json({ error: "Workspace not found. Use \"user\" or a team id you belong to." }, 404);
   const tool = await loadTool(c, ctx, c.req.param("toolId"));
-  if ("error" in tool) return c.json({ error: tool.error }, 404);
+  if ("error" in tool) {
+    // A team service that lists its tools over MCP cannot list them without
+    // a credential. When only a member's shared account has one, the invoker
+    // names that member, so the caller hears to delegate instead of "no
+    // credential". The invoker never borrows the account for an external call.
+    if (tool.unavailable && ctx.owner.type === "team") {
+      const approver = await sharedAccountApprover(tool.unavailable.opts, ctx, ctx.owner.id, tool.unavailable.service);
+      if (approver) {
+        return c.json(approvalRequired(`${tool.unavailable.service}.${tool.unavailable.action}`, { ok: false, requiresApproval: true, provenance: "shared_account", approver }));
+      }
+    }
+    return c.json({ error: tool.error }, 404);
+  }
 
   const toolId = qualifiedActionId(tool.service, tool.action);
   const db = c.var.providers.db;
@@ -212,9 +223,13 @@ actionsRouter.post("/:toolId/invoke", async (c) => {
   const claimId = `claim:${invocationId}`;
   const keyed = typeof key === "string";
 
-  // A keyed call that is still running holds a claim, so a retry (a client
-  // timeout, a second agent) waits for it instead of running the action twice.
-  if (keyed && !(await storedResultExists(db, invocationId))) {
+  // A keyed call holds a claim while it runs, so a retry (a client timeout,
+  // a second agent) waits for it instead of running the action twice. Every
+  // keyed call claims, even when a result is stored: the invoker returns the
+  // stored result, and a failed result can be deleted between a check and
+  // the call. Only the request that holds the claim releases it.
+  let holdsClaim = false;
+  if (keyed) {
     const claimed = await db.insert(actionInvocations).values({ invocationId: claimId, result: { claim: true }, createdAt: Date.now() })
       .onConflictDoNothing().returning({ id: actionInvocations.invocationId });
     if (claimed.length === 0) {
@@ -232,13 +247,19 @@ actionsRouter.post("/:toolId/invoke", async (c) => {
         } satisfies ActionInvokeResponse);
       }
     }
+    holdsClaim = true;
   }
 
   let result: Awaited<ReturnType<ReturnType<typeof buildActionInvoker>>>;
   try {
     result = await buildActionInvoker(tool.opts)({ service: tool.service, action: tool.action.id, params: params as Record<string, unknown>, invocationId }, ctx);
   } finally {
-    if (keyed) await db.delete(actionInvocations).where(eq(actionInvocations.invocationId, claimId));
+    // A failed release must not hide the call's own error. The claim then
+    // goes stale after CLAIM_STALE_MS and the next retry takes it over.
+    if (holdsClaim) {
+      await db.delete(actionInvocations).where(eq(actionInvocations.invocationId, claimId))
+        .catch((err: unknown) => console.error(`actions: could not release claim ${claimId}:`, err));
+    }
   }
   // The invoker keeps every outcome. A failure must not stick to the key:
   // the caller fixes the params or the connection and retries.
@@ -246,17 +267,7 @@ actionsRouter.post("/:toolId/invoke", async (c) => {
     await db.delete(actionInvocations).where(eq(actionInvocations.invocationId, invocationId));
   }
   if (result.ok) return c.json({ tool_id: toolId, status: "completed", result: result.result } satisfies ActionInvokeResponse);
-  if ("requiresApproval" in result) {
-    return c.json({
-      tool_id: toolId,
-      status: "approval_required",
-      ...(result.riskLevel ? { risk_level: result.riskLevel } : {}),
-      ...(result.approver ? { approver: result.approver } : {}),
-      next_step: result.provenance === "shared_account"
-        ? "This call would use another member's account, and that member must approve it. Ask Valet to do it with start_thread so the request reaches them."
-        : "Policy requires a person to approve this action. Ask Valet to do it with start_thread, which raises an approval in Valet, or ask an admin to change the policy.",
-    } satisfies ActionInvokeResponse);
-  }
+  if ("requiresApproval" in result) return c.json(approvalRequired(toolId, result));
   return c.json({ tool_id: toolId, status: "failed", error: result.error } satisfies ActionInvokeResponse);
 });
 
@@ -264,4 +275,18 @@ actionsRouter.post("/:toolId/invoke", async (c) => {
 function externalClient(c: Context<AppEnv>): string {
   if (c.var.authVia === "mcp") return `mcp:${c.var.mcpClientId ?? "unknown"}`;
   return c.var.authVia;
+}
+
+type ApprovalResult = Extract<Awaited<ReturnType<ReturnType<typeof buildActionInvoker>>>, { requiresApproval: true }>;
+
+function approvalRequired(toolId: string, result: ApprovalResult): ActionInvokeResponse {
+  return {
+    tool_id: toolId,
+    status: "approval_required",
+    ...(result.riskLevel ? { risk_level: result.riskLevel } : {}),
+    ...(result.approver ? { approver: result.approver } : {}),
+    next_step: result.provenance === "shared_account"
+      ? "This call would use another member's account, and that member must approve it. Ask Valet to do it with start_thread in the team workspace so the request reaches them."
+      : "Policy requires a person to approve this action. Ask Valet to do it with start_thread, which raises an approval in Valet, or ask an admin to change the policy.",
+  };
 }

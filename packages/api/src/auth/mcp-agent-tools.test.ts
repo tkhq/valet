@@ -254,6 +254,52 @@ describe("get_thread turn targeting", () => {
   });
 });
 
+describe("resolve_decision turn targeting", () => {
+  async function connect(deps: Parameters<typeof import("./mcp-tools.js")["registerAgentTools"]>[1]) {
+    const { registerAgentTools } = await import("./mcp-tools.js");
+    const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const server = new McpServer({ name: "t", version: "0" });
+    registerAgentTools(server, deps);
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    const client = new Client({ name: "test", version: "0" });
+    await client.connect(clientSide);
+    return client;
+  }
+
+  it("returns the reply of the turn the question blocked, not a follow-up queued behind it", async () => {
+    const posted: unknown[] = [];
+    const client = await connect({
+      api: async (method, path, body) => {
+        if (method === "POST") {
+          posted.push(body);
+          return { status: 200, body: {} };
+        }
+        if (path === "/api/threads/t") return { status: 200, body: { sessionId: "s" } };
+        if (path.endsWith("/decisions")) return { status: 200, body: { gates: [] } };
+        if (path.includes("queueItemId=A")) {
+          return { status: 200, body: { messages: [{ id: "m", role: "assistant", queueItemId: "A", content: "answer to A", stopReason: "end_turn", parts: [], createdAt: 1 }] } };
+        }
+        return { status: 200, body: { messages: [] } };
+      },
+      // Turn A was blocked on the question; follow-up B is queued behind it.
+      engineStore: { getQueueItem: async (_s: string, id: string) => (id === "A" ? { status: "settled", outcome: { outcome: "completed" } } : { status: "queued" }) as never },
+      latestQueueItem: async (_s, _t, status) => (status === "blocked_on_decision_gate" ? "A" : "B"),
+      origin: "https://valet.test",
+      sleep: async () => undefined,
+    });
+    // A typed answer, with no option id.
+    const res = await client.callTool({ name: "resolve_decision", arguments: { thread_id: "t", gate_id: "g", value: "staging", wait_seconds: 5 } });
+    expect(posted).toEqual([{ value: "staging" }]);
+    expect(res.structuredContent).toMatchObject({ message_id: "A", reply: "answer to A" });
+    const empty = await client.callTool({ name: "resolve_decision", arguments: { thread_id: "t", gate_id: "g" } });
+    expect(empty.isError).toBe(true);
+    await client.close();
+  });
+});
+
 describe("attachMcpCaller", () => {
   it("binds the identity to the exact Request object only", () => {
     const user = { id: "u", email: "u@x", role: "member", orgId: "o" } as const;

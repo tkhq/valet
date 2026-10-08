@@ -35,8 +35,8 @@ export type ApiCaller = (method: "GET" | "POST" | "PUT", path: string, body?: un
 export interface McpToolDeps {
   api: ApiCaller;
   engineStore: Pick<Providers["engineStore"], "getQueueItem">;
-  /** The newest queue item (turn) in a thread. Callers pass ids an authorized route returned. */
-  latestQueueItem: (sessionId: string, threadId: string) => Promise<string | undefined>;
+  /** The newest queue item (turn) in a thread, or the newest with `status`. Callers pass ids an authorized route returned. */
+  latestQueueItem: (sessionId: string, threadId: string, status?: "blocked_on_decision_gate") => Promise<string | undefined>;
   /** Public origin for thread links, e.g. `https://valet.example.com`. */
   origin: string;
   /** Injectable for tests. */
@@ -422,23 +422,30 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
     "resolve_decision",
     {
       description:
-        "Answers a pending question with one of its options, then, by default, waits for the turn to continue. " +
-        "Use the gate_id and action_id exactly as list_decisions or a waiting_for_decision result returned them. " +
+        "Answers a pending question, then, by default, waits for the turn that asked it to continue. " +
+        "Send the action_id of one of its options, or value for a typed answer. " +
+        "Use gate_id and action_id exactly as list_decisions or a waiting_for_decision result returned them. " +
         "Approvals and credential requests need a person: give them the thread url instead.",
       inputSchema: {
         thread_id: z.string().min(1).describe("Thread id."),
         gate_id: z.string().min(1).describe("The decision's gate_id."),
-        action_id: z.string().min(1).describe("The chosen option's action_id."),
-        value: z.string().optional().describe("Free-text answer, for questions that accept one."),
+        action_id: z.string().min(1).optional().describe("The chosen option's action_id. Omit it for a typed answer."),
+        value: z.string().optional().describe("A typed answer. Send it when the question has no options or accepts free text."),
         wait_seconds: waitArg,
       },
       annotations: { destructiveHint: false },
     },
-    run(async ({ thread_id, gate_id, action_id, value, wait_seconds }: { thread_id: string; gate_id: string; action_id: string; value?: string; wait_seconds?: number }) => {
+    run(async ({ thread_id, gate_id, action_id, value, wait_seconds }: { thread_id: string; gate_id: string; action_id?: string; value?: string; wait_seconds?: number }) => {
+      if (action_id === undefined && value === undefined) {
+        throw new ApiError("Send action_id for one of the question's options, or value for a typed answer.");
+      }
       const sessionId = await sessionOf(deps, thread_id);
+      // Wait on the turn the question blocked, read before the answer
+      // unblocks it. A follow-up queued behind it is newer.
+      const blocked = await deps.latestQueueItem(sessionId, thread_id, "blocked_on_decision_gate");
       await call<unknown>(deps, "POST", `/api/threads/${encodeURIComponent(thread_id)}/decisions/${encodeURIComponent(gate_id)}/resolve`, "Decision",
-        { actionId: action_id, ...(value !== undefined ? { value } : {}) });
-      const latest = await deps.latestQueueItem(sessionId, thread_id);
+        { ...(action_id !== undefined ? { actionId: action_id } : {}), ...(value !== undefined ? { value } : {}) });
+      const latest = blocked ?? await deps.latestQueueItem(sessionId, thread_id);
       if (!latest) return { thread_id, status: "idle", url: threadUrl(deps, thread_id) };
       return waitForTurn(deps, { sessionId, threadId: thread_id, queueItemId: latest, waitSeconds: wait_seconds ?? DEFAULT_WAIT_SECONDS });
     }),

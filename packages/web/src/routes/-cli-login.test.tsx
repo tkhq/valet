@@ -12,6 +12,11 @@ type Decide = { redirect_uri: string; code_challenge: string; state: string; dev
 const cliLogin = vi.fn<(p: { redirectUri: string; codeChallenge: string; device: string }) => Promise<CliLoginInfo>>();
 const decideCliLogin = vi.fn<(body: Decide) => Promise<{ redirect: string }>>();
 vi.mock("~/api/client", () => ({
+  ApiError: class ApiError extends Error {
+    constructor(public status: number, message: string) {
+      super(message);
+    }
+  },
   api: {
     cliLogin: (p: { redirectUri: string; codeChallenge: string; device: string }) => cliLogin(p),
     decideCliLogin: (body: Decide) => decideCliLogin(body),

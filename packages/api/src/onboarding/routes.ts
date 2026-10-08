@@ -28,9 +28,12 @@ export function renderOnboardingPage(template: string, valetUrl: string): string
 
 export function mountOnboardingRoutes(app: Hono<AppEnv>): void {
   const serve = (template: string) => (c: Context<AppEnv>) => {
-    const url = publicUrlFromEnv(process.env) ?? new URL(c.req.url).origin;
+    const configured = publicUrlFromEnv(process.env);
+    const url = configured ?? new URL(c.req.url).origin;
     c.header("Content-Type", "text/markdown; charset=utf-8");
-    c.header("Cache-Control", "public, max-age=300");
+    // A page filled from the request's Host header must not reach a shared
+    // cache, or one request could point other agents at another host.
+    c.header("Cache-Control", configured ? "public, max-age=300" : "no-store");
     return c.body(renderOnboardingPage(template, url));
   };
   app.get("/agent-setup.md", serve(SETUP));

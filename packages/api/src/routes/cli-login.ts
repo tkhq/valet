@@ -40,10 +40,9 @@ const MAX_STATE_LENGTH = 256;
 
 /** What a CLI key can do, shown on the web page. */
 const CLI_ACCESS = [
-  "Act as you in Valet from that computer's terminal, with the same access you have in the browser",
-  "Start and continue threads, run workflows, and use your connected integrations",
-  "Keep this access until you revoke the key in Settings > API keys",
-  "It cannot approve requests or change policies. You do that in the browser",
+  "Act as you in Valet from that computer's terminal: start and continue threads, run workflows, and use your connected integrations",
+  "Keep this access with no expiry, until you revoke the key \"valet CLI\" in Settings > API keys",
+  "It cannot approve requests, change policies, or administer your organization or teams. You do those in the browser",
 ];
 
 interface PendingLogin {

@@ -14,8 +14,13 @@ Valet is your organization's agent platform. After setup, you can:
 2. Never print, log, or commit a secret. If a command shows a secret, do not repeat it.
 3. Do not approve Valet approval requests. You can answer a question that Valet asks. An approval needs the person.
 4. Do the steps in order. If a step fails, stop and use the troubleshooting section.
+5. If your sandbox blocks a command (network access, a local port, or a write to `~/.valet` or `~/.claude`), ask the person to allow it. If they cannot, give them the command to run in their own terminal.
+
+The person needs a Valet account at {{VALET_URL}}. If they do not have one, ask them to get an invite from a Valet admin before you start.
 
 ## Step 1. Install the CLI
+
+On Windows, run these steps in WSL. The installer supports macOS and Linux only.
 
 1. Run `valet --version`.
 2. If the command is not found, install the CLI:
@@ -32,7 +37,7 @@ Valet is your organization's agent platform. After setup, you can:
 You run the login. The person approves it in their browser.
 
 1. Tell the person: "I am logging the Valet CLI in to {{VALET_URL}}. Your browser will open. Check that it names this computer, then choose Allow."
-2. Run this command. It waits up to 5 minutes for the approval, so allow a long timeout:
+2. Run this command. It waits up to 5 minutes for the approval. Set your command timeout to at least 330 seconds. If you cannot, run it in the background and wait until it prints `logged in`:
 
    ```sh
    valet login {{VALET_URL}} --name valet
@@ -40,10 +45,11 @@ You run the login. The person approves it in their browser.
 
 3. If the browser does not open, the command prints a URL. Give that URL to the person.
 4. If Valet asks the person to sign in first, they sign in, and the approval page then opens.
+5. If this computer is a remote machine (for example, you run over SSH), the person's browser cannot reach the CLI. Use the remote steps in the troubleshooting section.
 
-The CLI receives its key directly from Valet. You never see it.
+The CLI receives its key directly from Valet. You never see it. The key cannot approve requests or change policies.
 
-When the command prints `logged in`, run `valet status`. The output must show `ok: true` for {{VALET_URL}}. If `valet status` shows another instance, run `valet instance use valet`.
+When the command prints `logged in`, run `valet threads list`. It must exit with code 0. If it exits with code 5, repeat this step. If `VALET_INSTANCE` is set in the environment, it overrides the login: unset it, or set it to `valet`.
 
 ## Step 3. Connect MCP
 
@@ -61,7 +67,13 @@ This adds a `valet` server to `.mcp.json` in the current directory. The entry ho
 claude mcp add --transport http valet {{VALET_URL}}/mcp --scope user
 ```
 
-The first time Claude Code connects, it opens a browser to sign in to Valet. Ask the person to complete the sign-in. If the browser does not open, ask the person to run `/mcp` in Claude Code and choose Authenticate for `valet`.
+Claude Code loads MCP servers when it starts. Ask the person to do these steps:
+
+1. Restart Claude Code. If it asks whether to use the `valet` server from `.mcp.json`, approve it.
+2. Run `/mcp`, choose `valet`, and choose Authenticate.
+3. In the browser, check the app name and choose Allow.
+
+You can use the MCP tools only in the new session. Continue with the CLI until then.
 
 **Other agents.** Run `valet mcp setup --print`. It prints a standard MCP server entry for {{VALET_URL}}/mcp. Add that entry where your agent reads MCP servers. The server signs in with OAuth. If your agent cannot run OAuth, tell the person, and continue with the CLI only.
 
@@ -80,7 +92,7 @@ For another agent, save the same file where that agent reads skills or standing 
 
 1. Run `valet threads list`. It must exit with code 0.
 2. Run `valet tools search github`. It must exit with code 0 and list tools. A listed tool does not prove that its service is connected. Report a service as connected only after a `valet tools call` to it succeeds.
-3. If MCP is connected, call the `whoami` tool, then `list_workspaces`.
+3. If MCP is connected in this session, call the `whoami` tool, then `list_workspaces`. If the person still has to restart Claude Code, say that MCP is set up and needs that restart.
 4. Tell the person what works: the CLI login, MCP, and the skill. Name anything that failed, and its fix.
 
 ## Troubleshooting
@@ -89,7 +101,8 @@ For another agent, save the same file where that agent reads skills or standing 
 |---|---|
 | `valet login` exits with code 5 | The person chose Deny, or did not approve within 5 minutes. Ask them, then repeat step 2. |
 | `valet` exits with code 5 on another command | The CLI key was revoked. Repeat step 2. |
-| `valet login` waits, but the browser shows "This site can't be reached" for `127.0.0.1` | The browser runs on another computer than the CLI. Ask the person to run `valet login {{VALET_URL}} --name valet --api-key -` in their own terminal on this computer, with a key from {{VALET_URL}}/settings/api-keys. |
+| After Allow, the browser shows "This site can't be reached" for `127.0.0.1`, and `valet login` already stopped | Your command timeout stopped the CLI before the person chose Allow. Repeat step 2 with a longer timeout, or run it in the background. |
+| After Allow, the browser shows "This site can't be reached" for `127.0.0.1`, and `valet login` still waits | The CLI runs on a remote machine. Press Ctrl-C. Run `valet login {{VALET_URL}} --name valet --no-browser --port 8765`. Ask the person to run `ssh -L 8765:127.0.0.1:8765 <host>` on their own computer, then open the printed URL there. |
 | `valet` exits with code 6 | Valet is not reachable. Check {{VALET_URL}}/api/health in a browser or with `curl`. |
 | macOS says the binary is damaged | Run `xattr -d com.apple.quarantine ~/.local/bin/valet`. This happens only after a browser download. |
 | `valet` says `unknown command: tools` or `threads` | The CLI is too old. Repeat step 1 to reinstall it. |

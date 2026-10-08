@@ -76,9 +76,11 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
         }
         return { status: res.status, body: parsed };
       };
-      const latestQueueItem = async (sessionId: string, threadId: string) => {
+      const latestQueueItem = async (sessionId: string, threadId: string, status?: "blocked_on_decision_gate") => {
         const [item] = await db.select({ id: sql<string>`id` }).from(sql`engine_queue_items`)
-          .where(sql`session_id = ${sessionId} and thread_id = ${threadId}`)
+          .where(status
+            ? sql`session_id = ${sessionId} and thread_id = ${threadId} and status = ${status}`
+            : sql`session_id = ${sessionId} and thread_id = ${threadId}`)
           .orderBy(sql`created_at desc, id desc`).limit(1);
         return item?.id;
       };

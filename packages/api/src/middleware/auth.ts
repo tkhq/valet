@@ -408,19 +408,25 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
 }
 
 /**
- * Routes where a person decides: approvals, and the policies and grants that
- * decide what needs approval. An agent (`isAgentCaller`) gets 403 on a write
- * to any of them, so an agent cannot approve its own actions or turn a
- * `require_approval` policy into `allow`. Thread decision gates are checked
- * in `resolveDecision` instead, because an agent may answer a question gate.
+ * Writes where a person decides: approvals, the policies, grants, and
+ * workflow permissions that decide what needs approval, and organization and
+ * team administration (settings, members, roles, keys, credential sharing).
+ * An agent (`isAgentCaller`) gets 403 on each, so it cannot approve its own
+ * actions, turn `require_approval` into `allow`, or widen what it can reach
+ * through the person's admin rights. Thread decision gates are checked in
+ * `resolveDecision` instead, because an agent may answer a question gate.
  */
 const PERSON_ONLY_WRITES: ReadonlyArray<RegExp> = [
-  /^\/api\/org\/policies(?!\/preview$)(\/|$)/,
-  /^\/api\/me\/policy-overrides(\/|$)/,
-  /^\/api\/me\/grants(\/|$)/,
-  /^\/api\/workflows\/runs\/[^/]+\/approvals\//,
+  // Every organization admin write. A policy preview changes nothing.
+  /^\/api\/org(?!\/policies\/preview$)(\/|$)/,
+  /^\/api\/me\/(policy-overrides|grants)(\/|$)/,
+  // A team's settings, deletion, policies, grants, members, and keys.
+  /^\/api\/teams\/[^/]+$/,
+  /^\/api\/teams\/[^/]+\/(policies|policy-overrides|grants|members|api-keys|deletion-requests)(\/|$)/,
+  /^\/api\/workflows\/[^/]+\/permissions(\/|$)/,
+  /^\/api\/workflows\/runs\/[^/]+\/approvals(\/|$)/,
+  /^\/api\/credentials\/[^/]+\/(delegate|delegations)(\/|$)/,
   /^\/api\/sessions\/[^/]+\/security\/needs\/resolve$/,
-  /^\/api\/teams\/[^/]+\/deletion-requests\/[^/]+\/[^/]+$/,
 ];
 
 /** Whether an agent caller is refused this request. */
@@ -433,7 +439,7 @@ export function agentRefusedRoute(method: string, path: string): boolean {
 export function refuseAgentAuthority(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     if (c.var.authVia && isAgentCaller(c.var.authVia) && agentRefusedRoute(c.req.method, c.req.path)) {
-      return c.json({ error: "A person must do this in Valet. Agent credentials (MCP and `valet login` keys) cannot approve requests or change policies." }, 403);
+      return c.json({ error: "A person must do this in Valet in the browser. Agent credentials (MCP and `valet login` keys) cannot approve requests, change policies, or administer the organization or a team." }, 403);
     }
     await next();
   };

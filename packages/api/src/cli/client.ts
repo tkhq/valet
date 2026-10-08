@@ -93,7 +93,7 @@ export class InstanceClient {
     }
 
     if (res.status === 401) {
-      throw new AuthError(`authentication failed (401) for ${url}`);
+      throw new AuthError(`authentication failed (401) for ${url}. Run \`valet login ${this.base}\` to sign in again.`);
     }
     if (!res.ok) {
       throw new ApiError(res.status, await res.text());

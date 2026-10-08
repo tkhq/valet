@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api } from "~/api/client";
+import { api, ApiError } from "~/api/client";
 import { Button, Spinner } from "~/components/primitives";
 
 /**
@@ -38,6 +38,7 @@ export function ConsentPage({ code }: { code: string | undefined }) {
     retry: false,
   });
   const [deciding, setDeciding] = useState<"allow" | "deny" | null>(null);
+  const [done, setDone] = useState<"allow" | "deny" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function decide(accept: boolean) {
@@ -46,6 +47,7 @@ export function ConsentPage({ code }: { code: string | undefined }) {
     setError(null);
     try {
       const { redirect } = await api.decideOAuthConsent(code, accept);
+      setDone(accept ? "allow" : "deny");
       window.location.assign(redirect);
     } catch {
       setDeciding(null);
@@ -63,7 +65,17 @@ export function ConsentPage({ code }: { code: string | undefined }) {
           <h1 className="font-display text-2xl text-ink">Connect an app to Valet</h1>
         </div>
 
-        {!code || info.isError ? (
+        {code && info.error instanceof ApiError && info.error.status === 401 ? (
+          <div className="flex justify-center">
+            <Spinner />
+          </div>
+        ) : done ? (
+          <p className="text-center text-sm text-ink">
+            {done === "allow"
+              ? "Returning you to the app. You can close this tab when the app says it is connected."
+              : "Access denied. You can close this tab."}
+          </p>
+        ) : !code || info.isError ? (
           <p className="text-center text-sm text-muted">
             This approval request expired or does not exist. Start the connection again from your app.
           </p>
@@ -91,7 +103,6 @@ export function ConsentPage({ code }: { code: string | undefined }) {
                   <li key={line}>{line}</li>
                 ))}
               </ul>
-              <p className="text-xs text-muted">It cannot approve requests that need a person.</p>
             </div>
 
             {error && <p className="text-sm text-danger-600">{error}</p>}
