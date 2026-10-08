@@ -56,6 +56,10 @@ interface OAuthConnectState {
   /** Validated web origin to land back on, e.g. "http://localhost:5173".
    * Empty/absent → relative redirect (prod same-origin serving). */
   returnTo?: string;
+  /** "connected-accounts": a successful connect lands on Settings →
+   * Connected accounts instead of /integrations. Failures still land on
+   * /integrations, which renders the error. */
+  landing?: "connected-accounts";
   nonce: string;
   exp: number;
 }
@@ -63,14 +67,19 @@ interface OAuthConnectState {
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
   return verifyState<OAuthConnectState>(state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, service, codeVerifier, returnTo, nonce, exp, teamId, orgId } = payload;
+    const { userId, service, codeVerifier, returnTo, nonce, exp, teamId, orgId, landing } = payload;
     if (teamId !== undefined && (typeof teamId !== "string" || !teamId || typeof orgId !== "string" || !orgId)) return null;
     if (typeof userId !== "string" || typeof service !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (codeVerifier !== undefined && typeof codeVerifier !== "string") return null;
     if (returnTo !== undefined && typeof returnTo !== "string") return null;
+    if (landing !== undefined && landing !== "connected-accounts") return null;
     if (exp < nowMs) return null;
-    return { userId, service, codeVerifier, returnTo, nonce, exp, ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}) };
+    return {
+      userId, service, codeVerifier, returnTo, nonce, exp,
+      ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}),
+      ...(landing === "connected-accounts" ? { landing } : {}),
+    };
   });
 }
 
@@ -125,6 +134,11 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
     return c.json({ error: "Choose Personal or a team before connecting." }, 400);
   }
   const teamId = c.req.query("teamId");
+  // A named page only, never a URL, so the callback cannot be steered.
+  const landing = c.req.query("landing");
+  if (landing !== undefined && landing !== "connected-accounts") {
+    return c.json({ error: "Unknown landing page. Remove the landing parameter and retry." }, 400);
+  }
   if (scope === "user" && teamId !== undefined) {
     return c.json({ error: "Remove the team selection to connect a personal account." }, 400);
   }
@@ -145,6 +159,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
     ...(teamId ? { teamId, orgId: user.orgId } : {}),
     service,
     ...(returnTo ? { returnTo } : {}),
+    ...(landing === "connected-accounts" && !teamId ? { landing } : {}),
     nonce: randomBytes(16).toString("hex"),
     exp: Date.now() + STATE_TTL_MS,
   };
@@ -395,5 +410,6 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
     console.error(`oauth callback: delegated workflow resync failed for ${verified.service}:`, err);
   }
 
-  return c.redirect(`${returnTo}/integrations?connected=${encodeURIComponent(verified.service)}`, 302);
+  const page = verified.landing === "connected-accounts" ? "/settings/connected-accounts" : "/integrations";
+  return c.redirect(`${returnTo}${page}?connected=${encodeURIComponent(verified.service)}`, 302);
 });

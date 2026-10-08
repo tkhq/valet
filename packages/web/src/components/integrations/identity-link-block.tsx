@@ -61,12 +61,12 @@ export function useServiceIdentityLink(provider: string): {
   };
 }
 
-function startErrorMessage(err: unknown, title: string): string {
+function startErrorMessage(err: unknown, title: string, fallback = `Couldn't start the ${title} link. Try again.`): string {
   if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
     const message = (err.payload as Record<string, unknown>).error;
     if (typeof message === "string" && message) return message;
   }
-  return `Couldn't start the ${title} link. Try again.`;
+  return fallback;
 }
 
 function ExpiryLine({ seconds }: { seconds: number }) {
@@ -149,7 +149,11 @@ function EnterCodeForm({
           {verify.isPending ? "Linking…" : "Link"}
         </Button>
       </div>
-      {verify.error && <p className="text-xs text-danger-500">{startErrorMessage(verify.error, title)}</p>}
+      {verify.error && (
+        <p className="text-xs text-danger-500">
+          {startErrorMessage(verify.error, title, "Couldn't check the code. Submit it again.")}
+        </p>
+      )}
       <ExpiryLine seconds={expiresInSeconds} />
     </form>
   );
@@ -370,6 +374,12 @@ export function IdentityLinkBlock({
       <p className="text-xs leading-relaxed text-muted">
         Link your {title} account to chat with your assistant there.
       </p>
+      {oauthService && !searching && (
+        <p className="text-xs leading-relaxed text-muted">
+          Sign in with {title} also lets Valet search, read, and post in {title} as you. The code options link
+          your account only.
+        </p>
+      )}
       {searching ? (
         <MemberSearch
           provider={link.provider}
@@ -385,7 +395,7 @@ export function IdentityLinkBlock({
               size="sm"
               disabled={busy}
               onClick={() => {
-                window.location.href = `/api/credentials/${encodeURIComponent(oauthService)}/connect`;
+                window.location.href = `/api/credentials/${encodeURIComponent(oauthService)}/connect?landing=connected-accounts`;
               }}
             >
               Sign in with {title}

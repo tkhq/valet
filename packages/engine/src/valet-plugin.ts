@@ -545,11 +545,10 @@ export interface IdentityLinkDeclaration {
    */
   deliveryDm?: (ctx: { code: string }) => string;
   /**
-   * Build the exact reply the user sends back after the anchor DM (Slack:
-   * `link ${code}`). Shown ONLY in the authenticated web response — never
-   * sent to the provider — so embedding the code here is safe and is the
-   * point: the card renders one copyable line the transport's parser
-   * accepts verbatim.
+   * Build the line the show-code card asks the person to send the bot
+   * (Slack: `link ${code}`). Shown only in the authenticated web response,
+   * never sent to the provider. The card renders one copyable line the
+   * transport's parser accepts verbatim. The DM flow does not use it.
    */
   deliveryReply?: (ctx: { code: string }) => string;
   /**
@@ -952,7 +951,10 @@ export function validateValetPlugin(
       if (link.deepLink !== undefined && typeof link.deepLink !== "function") {
         issues.push({ path: "identityLink.deepLink", message: "must be a function when present" });
       }
-      if (link.deliveryDm !== undefined && typeof link.deliveryDm !== "function") {
+      // A string is the pre-v1-flow shape (a codeless DM). It is not an issue:
+      // an issue rejects the whole plugin. The host offers code delivery only
+      // for a function, so such a plugin keeps everything except "DM me".
+      if (link.deliveryDm !== undefined && typeof link.deliveryDm !== "function" && typeof link.deliveryDm !== "string") {
         issues.push({ path: "identityLink.deliveryDm", message: "must be a function when present" });
       }
       if (link.deliveryReply !== undefined && typeof link.deliveryReply !== "function") {

@@ -624,8 +624,19 @@ describe("validateValetPlugin identityLink", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("rejects a string deliveryDm (the DM must carry the code)", () => {
-    for (const deliveryDm of ["Reply with the command shown in Valet.", ""]) {
+  // A string is the pre-v1-flow codeless DM. Rejecting it would drop the
+  // whole plugin; the host just keeps "DM me" off for it.
+  it("tolerates a legacy string deliveryDm", () => {
+    const result = validateValetPlugin({
+      name: "fixture",
+      version: "0.1.0",
+      identityLink: { provider: "slack", instructions: "DM the Valet app: link <code>", deliveryDm: "Reply in Valet." },
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects a deliveryDm that is neither a function nor a string", () => {
+    for (const deliveryDm of [42, { text: "dm" }]) {
       const result = validateValetPlugin({
         name: "fixture",
         version: "0.1.0",

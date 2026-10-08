@@ -794,7 +794,7 @@ describe("link-code TTL copy", () => {
 
 // ── POST /:provider/verify ───────────────────────────────────────────────────
 
-import { mintDeliveredLinkCode } from "../channels/identity-links.js";
+import { identityForExternal, mintDeliveredLinkCode } from "../channels/identity-links.js";
 
 describe("POST /api/me/identity-links/:provider/verify", () => {
   it("400s on a wrong code and links nothing", async () => {
@@ -824,5 +824,20 @@ describe("POST /api/me/identity-links/:provider/verify", () => {
     const start = (await (await fetch(`${api.baseUrl}/api/me/identity-links/slack/start`, { method: "POST" })).json()) as StartIdentityLinkResponse;
 
     expect((await verify(api.baseUrl, start.code)).status).toBe(400);
+  });
+
+  // Same rule as the OAuth connect's identity_conflict: an account another
+  // Valet user linked stays theirs.
+  it("409s and keeps the existing link when the DMed account belongs to another Valet user", async () => {
+    const booted = await bootWithDeliverySlack();
+    api = booted.api;
+    await linkIdentity(api.providers.db, { provider: "slack", externalId: "U777", userId: "someone-else" });
+    const code = await mintDeliveredLinkCode(api.providers.db, "local-user", "slack", "U777");
+
+    const res = await verify(api.baseUrl, code);
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("linked to another Valet user");
+    const owner = await identityForExternal(api.providers.db, "slack", "U777");
+    expect(owner?.userId).toBe("someone-else");
   });
 });

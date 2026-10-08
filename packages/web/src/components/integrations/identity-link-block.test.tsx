@@ -131,13 +131,15 @@ describe("IdentityLinkBlock sign-in with OAuth", () => {
     expect(screen.queryByRole("button", { name: "Sign in with Slack" })).toBeNull();
     rerender(<IdentityLinkBlock link={UNLINKED} title="Slack" offerOAuth />);
     expect(screen.getByRole("button", { name: "Sign in with Slack" })).toBeTruthy();
+    // The button grants more than a link; the card says so.
+    expect(screen.getByText(/search, read, and post in Slack as you/)).toBeTruthy();
   });
 
   it("starts the OAuth connect for the declared service", () => {
     Object.defineProperty(window, "location", { value: { ...window.location, href: "" }, writable: true });
     render(<IdentityLinkBlock link={UNLINKED} title="Slack" offerOAuth />);
     fireEvent.click(screen.getByRole("button", { name: "Sign in with Slack" }));
-    expect(window.location.href).toBe("/api/credentials/slack-user/connect");
+    expect(window.location.href).toBe("/api/credentials/slack-user/connect?landing=connected-accounts");
   });
 
   it("hides the button when the deployment has no OAuth client", () => {

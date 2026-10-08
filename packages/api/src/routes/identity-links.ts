@@ -24,6 +24,7 @@ import { authCodeEnvReady, findOAuthDeclaration } from "../services/integration-
 import {
   CODE_TTL_MS,
   consumeDeliveredLinkCode,
+  identityForExternal,
   identityForUser,
   linkIdentity,
   mintDeliveredLinkCode,
@@ -65,7 +66,7 @@ function linkDeclarations(plugins: ValetPlugin[]): Map<string, IdentityLinkDecla
 /** True when `POST .../deliver` can work: the plugin declares the DM and
  * the running transport can resolve a member by email. */
 function canDeliverCode(decl: IdentityLinkDeclaration, transport: ChannelTransport | null): boolean {
-  return decl.deliveryDm !== undefined && typeof transport?.lookupUserByEmail === "function";
+  return typeof decl.deliveryDm === "function" && typeof transport?.lookupUserByEmail === "function";
 }
 
 /** The declared OAuth service that also writes this identity link, when the
@@ -196,7 +197,7 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
   }
   const transport = channelHost.transportFor(provider);
   const { deliveryDm } = decl;
-  if (transport === null || deliveryDm === undefined || typeof transport.lookupUserByEmail !== "function") {
+  if (transport === null || typeof deliveryDm !== "function" || typeof transport.lookupUserByEmail !== "function") {
     return c.json(
       { error: `${provider} does not support code delivery by DM. Use the show-code flow instead.` },
       404,
@@ -288,6 +289,7 @@ identityLinksRouter.post("/:provider/deliver", async (c) => {
  * - 200 `VerifyIdentityLinkResponse` — linked.
  * - 400 — missing, wrong, or expired code.
  * - 404 — unknown provider.
+ * - 409 — the DMed account is linked to another Valet user.
  */
 identityLinksRouter.post("/:provider/verify", async (c) => {
   const { db, plugins } = c.var.providers;
@@ -306,6 +308,15 @@ identityLinksRouter.post("/:provider/verify", async (c) => {
   const consumed = code === "" ? null : await consumeDeliveredLinkCode(db, user.id, provider, code);
   if (!consumed) {
     return c.json({ error: "That code is invalid or expired. Send yourself a new DM from this card." }, 400);
+  }
+  // Same rule as the OAuth connect (`identity_conflict`): an account another
+  // Valet user linked stays theirs until they unlink it.
+  const owner = await identityForExternal(db, provider, consumed.externalId);
+  if (owner && owner.userId !== user.id) {
+    return c.json(
+      { error: `That ${provider} account is linked to another Valet user. Ask them to unlink it, then try again.` },
+      409,
+    );
   }
   const prior = await identityForUser(db, provider, user.id);
   await linkIdentity(db, {

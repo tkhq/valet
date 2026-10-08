@@ -96,6 +96,29 @@ export async function consumeLinkCode(
   return { userId: row.userId };
 }
 
+/** True when `code` is a live code the bot DMed (the "DM me" flow). Chat
+ * never redeems one, but the host uses this to tell a person who pasted it
+ * into the bot DM to enter it in Valet instead. Reads only. */
+export async function isDeliveredLinkCode(
+  db: AppDb,
+  provider: string,
+  code: string,
+  now = Date.now(),
+): Promise<boolean> {
+  const rows = await db
+    .select({ expiresAt: identityLinkCodes.expiresAt })
+    .from(identityLinkCodes)
+    .where(
+      and(
+        eq(identityLinkCodes.provider, provider),
+        eq(identityLinkCodes.codeHash, hashCode(code)),
+        isNotNull(identityLinkCodes.externalId),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0 && (rows[0]?.expiresAt ?? 0) >= now;
+}
+
 /** Redeems a delivered code typed into the web app by the user who
  * requested it. Returns the provider account the code was DMed to. */
 export async function consumeDeliveredLinkCode(

@@ -260,6 +260,14 @@ path, skips bound codes. A picked member who replies with the code from
 Slack therefore links nothing. That reply was the takeover the codeless DM
 (#372) prevented.
 
+If the person pastes a DMed code into the bot DM instead, the host does
+not consume it and does not call it invalid. It replies that the code must
+be entered in Valet (`isDeliveredLinkCode` reads, never deletes). Verify
+refuses with 409 when the DMed account is already linked to another Valet
+user, the same rule as the OAuth connect's `identity_conflict`. A plugin
+that still declares a string `deliveryDm` (the old codeless DM) still
+loads, with "DM me" off.
+
 Three more changes close this:
 
 - `POST /api/me/identity-links/:provider/start` returns `replyText` when
@@ -274,7 +282,11 @@ Three more changes close this:
   sender still gets the link instructions. A linked sender never reaches
   this check, so a code-shaped message from them stays a normal message.
 
-Settings also offers "Sign in with Slack". The Slack `identityLink`
+Settings also offers "Sign in with Slack", with a note that it also lets
+Valet search, read, and post as the person. It starts the connect with
+`landing=connected-accounts`, a fixed page name carried in the signed
+state, so a successful connect returns to Settings. A failure still lands
+on `/integrations`, which renders the error. The Slack `identityLink`
 declares `oauthService: "slack-user"`, and `GET /api/me/identity-links`
 reports it only when that OAuth client's environment is set. The button
 starts the slack-user OAuth connect, which writes the identity link on
