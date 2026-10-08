@@ -180,6 +180,10 @@ class FakePodsApi implements SandboxPodsApi {
   async listNamespacedPod(_params: ListPodsParams): Promise<{ items: FakePod[] }> {
     return { items: this.pods };
   }
+
+  async patchNamespacedPod(_params: { name: string; namespace: string; body: unknown }): Promise<unknown> {
+    throw new Error("FakePodsApi.patchNamespacedPod not implemented for this test");
+  }
 }
 
 /** Fake `SandboxPodStatusApi` backed by a fixed map of namespace/name ->
@@ -919,6 +923,9 @@ describe("sandboxStatus", () => {
     const podsApi: SandboxPodsApi = {
       listNamespacedPod: async () => {
         throw new Error("must not resolve a pod for a Suspended CR");
+      },
+      patchNamespacedPod: async () => {
+        throw new Error("must not patch a pod for a Suspended CR");
       },
     };
     const podStatusApi: SandboxPodStatusApi = {

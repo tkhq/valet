@@ -10,7 +10,7 @@ import { assertSafeExecId, looksSignalKilled, KubernetesSandbox, KubernetesSandb
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
 import { SANDBOX_CR_API_VERSION } from "../src/index.js";
-import { buildSandboxManifest, credsSecretName, BROWSER_LABEL_KEY, DOCKER_LABEL_KEY, NESTED_KUBERNETES_LABEL_KEY, sandboxCrName } from "../src/manifest.js";
+import { buildSandboxManifest, credsSecretName, BROWSER_LABEL_KEY, DOCKER_LABEL_KEY, NESTED_KUBERNETES_LABEL_KEY, sandboxCrName, SESSION_LABEL_KEY } from "../src/manifest.js";
 import { RUNTIME_STATE_ANNOTATION } from "../src/runtime-state.js";
 import { wrapAsWorkloadUser, type ExecStatus } from "../src/exec.js";
 import type { K8sProviderConfig, ResourceRequirements, SandboxCR, SandboxCRRead } from "../src/types.js";
@@ -29,7 +29,8 @@ import type {
   SandboxCpuMemoryResources,
   PodStatusInfo,
 } from "../src/lifecycle.js";
-import { imageFingerprint, resourceFingerprint, sandboxCpuMemoryResources } from "../src/lifecycle.js";
+import { EVICTION_PROTECT_ANNOTATION, imageFingerprint, LEASED_LABEL, resourceFingerprint, sandboxCpuMemoryResources, SANDBOX_KIND } from "../src/lifecycle.js";
+import type { PodSummary } from "../src/types.js";
 import type { PodLivenessApi } from "../src/provider.js";
 import type { PodExecApi } from "../src/exec.js";
 
@@ -114,7 +115,7 @@ describe("preparation transport diagnostics", () => {
       objectsApi: new FakeObjectsApi(),
       podsApi: { listNamespacedPod: async () => ({ items: [
         { name: "prep-pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] },
-      ] }) },
+      ] }), patchNamespacedPod: async () => ({}) },
       execApi: { exec: async () => { throw event; } },
       livenessApi: { getPodUid: async () => "uid" }, cfg: providerCfg,
     }, "sandbox");
@@ -253,6 +254,10 @@ class FakeObjectsApi implements SandboxCustomObjectsApi {
 class FakePodsApi implements SandboxPodsApi {
   async listNamespacedPod(_params: ListPodsParams): Promise<{ items: never[] }> {
     return { items: [] };
+  }
+
+  async patchNamespacedPod(_params: { name: string; namespace: string; body: unknown }): Promise<unknown> {
+    throw new Error("FakePodsApi.patchNamespacedPod not implemented for this test");
   }
 }
 
@@ -1957,7 +1962,7 @@ describe("confirmed eviction reporting", () => {
     }) };
     const sandbox = new KubernetesSandbox({
       objectsApi: new FakeObjectsApi(),
-      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }) },
+      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
       execApi, livenessApi: { getPodUid: async () => "uid" }, cfg: providerCfg,
       evictionApi: {
         getPod: async () => disappear && evicted ? null : { uid: "uid", reason: evicted ? "Evicted" : undefined, message: "docker-state exceeded 8Gi" },
@@ -1985,7 +1990,7 @@ describe("confirmed eviction reporting", () => {
     // A fresh instance without eviction evidence models an ordinary command failure.
     const ordinary = new KubernetesSandbox({
       objectsApi: new FakeObjectsApi(),
-      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }) },
+      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
       execApi: { exec: async (_ns, _pod, _c, _cmd, _o, _e, _i, _t, cb) => {
         cb?.({ status: "Failure", details: { causes: [{ reason: "ExitCode", message: "1" }] } });
         return { close() {} };
@@ -2010,7 +2015,7 @@ describe("job pod identity", () => {
     });
     const sandbox = new KubernetesSandbox({
       objectsApi: new FakeObjectsApi(),
-      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }) },
+      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
       execApi: { exec }, livenessApi: { getPodUid: async () => uid }, cfg: providerCfg,
       evictionApi: {
         getPod: async () => ({ uid }),
@@ -2045,5 +2050,128 @@ describe("job pod identity", () => {
     await expect(sandbox.pollJob(execId, 0)).resolves.toMatchObject({ status: "done", exitCode: 0 });
     replace();
     await expect(sandbox.pollJob(execId, 0)).resolves.toMatchObject({ status: "failed" });
+  });
+});
+
+// ── Kubernetes eviction protection (Task 11, 2026-10-08 wakeups/leases) ──
+
+/** Builds a `PodSummary` that `resolvePodName`'s list-fallback can match:
+ * an `ownerReferences` entry naming the Sandbox CR (default "sb-1"), plus
+ * whatever annotations/labels the eviction-protection comparison reads. */
+function podSummary(opts: {
+  name: string;
+  crName?: string;
+  annotations?: Record<string, string>;
+  labels?: Record<string, string>;
+}): PodSummary {
+  return {
+    name: opts.name,
+    ownerReferences: [{ kind: SANDBOX_KIND, name: opts.crName ?? "sb-1", controller: true }],
+    annotations: opts.annotations,
+    labels: opts.labels,
+  };
+}
+
+/** Fake SandboxPodsApi for eviction-protection tests: a mutable single-pod
+ * list (`setPod`) plus a recorded log of every patch call. Unlike
+ * `FakePodsApi`, `patchNamespacedPod` does NOT mutate the held pod. Tests
+ * call `setPod` explicitly to simulate the apiserver's merge having landed,
+ * so a test can assert on the pre-patch state before advancing it. */
+class FakeEvictionPodsApi implements SandboxPodsApi {
+  private pod: PodSummary | null = null;
+  readonly patches: { name: string; namespace: string; body: unknown }[] = [];
+
+  setPod(pod: PodSummary | null): void {
+    this.pod = pod;
+  }
+
+  async listNamespacedPod(_params: ListPodsParams): Promise<{ items: PodSummary[] }> {
+    return { items: this.pod ? [this.pod] : [] };
+  }
+
+  async patchNamespacedPod(params: { name: string; namespace: string; body: unknown }): Promise<unknown> {
+    this.patches.push(params);
+    return {};
+  }
+}
+
+function makeEvictionProvider(podsApi: SandboxPodsApi): KubernetesSandboxProvider {
+  return new KubernetesSandboxProvider(
+    { objectsApi: new FakeObjectsApi(), podsApi, execApi: fakePodExecApi, livenessApi: new FakeLivenessApi() },
+    providerCfg,
+  );
+}
+
+describe("KubernetesSandboxProvider eviction protection", () => {
+  it("setEvictionProtection patches the annotation and label once, then reports unchanged", async () => {
+    const pods = new FakeEvictionPodsApi();
+    pods.setPod(podSummary({ name: "sb-1-abc" }));
+    const provider = makeEvictionProvider(pods);
+
+    expect(await provider.setEvictionProtection("sb-1", true)).toEqual({ changed: true });
+    expect(pods.patches).toHaveLength(1);
+    expect(pods.patches[0]).toEqual({
+      name: "sb-1-abc",
+      namespace: providerCfg.namespace,
+      body: {
+        metadata: {
+          annotations: { [EVICTION_PROTECT_ANNOTATION]: "false" },
+          labels: { [LEASED_LABEL]: "true" },
+        },
+      },
+    });
+
+    // Simulate the apiserver having applied that merge patch.
+    pods.setPod(podSummary({
+      name: "sb-1-abc",
+      annotations: { [EVICTION_PROTECT_ANNOTATION]: "false" },
+      labels: { [LEASED_LABEL]: "true" },
+    }));
+    expect(await provider.setEvictionProtection("sb-1", true)).toEqual({ changed: false });
+    expect(pods.patches).toHaveLength(1);
+  });
+
+  it("setEvictionProtection false removes both with a null merge patch", async () => {
+    const pods = new FakeEvictionPodsApi();
+    pods.setPod(podSummary({
+      name: "sb-1-abc",
+      annotations: { [EVICTION_PROTECT_ANNOTATION]: "false" },
+      labels: { [LEASED_LABEL]: "true" },
+    }));
+    const provider = makeEvictionProvider(pods);
+
+    expect(await provider.setEvictionProtection("sb-1", false)).toEqual({ changed: true });
+    expect(pods.patches[0]?.body).toEqual({
+      metadata: {
+        annotations: { [EVICTION_PROTECT_ANNOTATION]: null },
+        labels: { [LEASED_LABEL]: null },
+      },
+    });
+  });
+
+  it("listEvictionProtected returns the CR names of labelled pods", async () => {
+    const pods = new FakeEvictionPodsApi();
+    let seenSelector: string | undefined;
+    pods.listNamespacedPod = async (params) => {
+      seenSelector = params.labelSelector;
+      return {
+        items: [
+          podSummary({ name: "sb-1-abc", crName: "sb-1", labels: { [SESSION_LABEL_KEY]: "sb-1", [LEASED_LABEL]: "true" } }),
+          podSummary({ name: "sb-2-xyz", crName: "sb-2", labels: { [SESSION_LABEL_KEY]: "sb-2", [LEASED_LABEL]: "true" } }),
+        ],
+      };
+    };
+    const provider = makeEvictionProvider(pods);
+
+    expect(await provider.listEvictionProtected()).toEqual(["sb-1", "sb-2"]);
+    expect(seenSelector).toBe(`${LEASED_LABEL}=true`);
+  });
+
+  it("setEvictionProtection on a sandbox with no pod returns changed:false", async () => {
+    const pods = new FakeEvictionPodsApi();
+    const provider = makeEvictionProvider(pods);
+
+    expect(await provider.setEvictionProtection("sb-1", true)).toEqual({ changed: false });
+    expect(pods.patches).toHaveLength(0);
   });
 });

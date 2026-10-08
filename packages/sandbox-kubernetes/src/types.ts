@@ -389,4 +389,10 @@ export interface PodOwnerReference {
 export interface PodSummary {
   name: string;
   ownerReferences?: PodOwnerReference[];
+  /** The pod's current annotations, when the caller's projection includes
+   * them. Populated for eviction-protection reads (lifecycle.ts's
+   * `setEvictionProtection`/`listEvictionProtected`), absent otherwise. */
+  annotations?: Record<string, string>;
+  /** The pod's current labels, same conditions as `annotations`. */
+  labels?: Record<string, string>;
 }
