@@ -17,6 +17,7 @@ import type {
   DecisionGateRequest,
   DecisionResolution,
   ExecJobHandle,
+  ExecResult,
   JobPoll,
   MessageQuery,
   Sandbox,
@@ -150,5 +151,16 @@ describe("bash tool: timeout hint", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("the sync-exec timeout text points at background mode", async () => {
+    const exec = vi.fn(
+      async (): Promise<ExecResult> => ({ stdout: "partial", stderr: "", exitCode: 124, timedOut: true }),
+    );
+    const r = await bashTool.execute({ command: "long-running-task", timeout: 30 }, makeCtx({ id: "sb-sync-timeout", exec }));
+    expect(r.text).toContain("partial");
+    expect(r.text).toContain(
+      "[timed out after 30s] For work longer than an hour, rerun with background: true and a deadline_hours.",
+    );
   });
 });
