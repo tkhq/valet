@@ -51,6 +51,10 @@ concurrency:
 
 jobs:
   binaries:
+    env:
+      # The macOS runner exhausted Node's default heap during workspace builds.
+      # Leave room for native allocations and the OS on the 7 GB runner.
+      NODE_OPTIONS: --max-old-space-size=4096
     permissions:
       contents: read
     strategy:
@@ -118,13 +122,10 @@ jobs:
       - name: Generate plugin registries
         run: make generate-registries
 
-      # A fresh checkout has no workspace dist/ outputs. Root `pnpm
-      # typecheck` is `tsc --build` over the project-reference graph — the
-      # only command that emits them in dependency order (per-package plain
-      # `tsc` can't: it doesn't build referenced projects). The web SPA
-      # typecheck and the server bundle resolve against these dist/ outputs.
-      - name: Build workspace packages (tsc --build)
-        run: pnpm typecheck
+      # Required CI already typechecks this commit. Emit the workspace graph
+      # for packaging without repeating its semantic checks on each platform.
+      - name: Emit workspace packages
+        run: pnpm exec tsc --build --noCheck
 
       - name: Build web SPA
         run: pnpm --filter @valet/web build

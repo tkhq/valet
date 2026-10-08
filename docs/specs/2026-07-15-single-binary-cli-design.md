@@ -86,3 +86,12 @@ Implemented on branch `feat/single-binary-cli` (PR against `dev-v2`). Plan: `doc
 ### CLI integration test launcher
 
 The integration suite resolves the tsx loader through the workspace dependency graph. It starts the loader with the current Node executable. A missing package-local binary no longer prevents server startup. Spawn errors fail immediately and remove the test data directory.
+
+
+## CLI release memory budget
+
+The CLI release job sets `NODE_OPTIONS=--max-old-space-size=4096` on both build runners.
+This avoids the observed 2 GB default heap limit on macOS and leaves memory for native allocations.
+Required CI checks the source commit before publishing. Packaging emits workspace outputs with `tsc --build --noCheck`.
+The web build retains its typecheck. Both platform jobs retain compilation and native health and SPA smoke tests.
+Publishing still requires both platform jobs to succeed.

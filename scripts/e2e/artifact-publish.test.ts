@@ -79,6 +79,20 @@ describe('All release paths require CI', () => {
     expect(cli.getIn(['jobs', 'binaries', 'steps', 1, 'run'])).toBe('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"');
   });
 
+  it('emits CLI dependencies within an explicit heap budget and keeps native smoke gates', () => {
+    expect(cli.getIn(['jobs', 'binaries', 'env', 'NODE_OPTIONS'])).toBe('--max-old-space-size=4096');
+    const steps = String(cli.getIn(['jobs', 'binaries', 'steps']));
+    expect(steps).toContain('pnpm exec tsc --build --noCheck');
+    expect(steps).not.toContain('run: pnpm typecheck');
+    expect(steps).toContain('pnpm --filter @valet/web build');
+    expect(steps).toContain('node packages/api/build/compile-binary.mjs');
+    expect(steps).toContain('Smoke test (native target)');
+    expect(steps).toContain('/api/health');
+    expect(cli.getIn(['jobs', 'binaries', 'strategy', 'matrix', 'include', 0, 'smoke'])).toBe('valet-darwin-arm64');
+    expect(cli.getIn(['jobs', 'binaries', 'strategy', 'matrix', 'include', 1, 'smoke'])).toBe('valet-linux-x64');
+    expect(cli.getIn(['jobs', 'publish', 'needs'])).toBe('binaries');
+  });
+
   it('requires shared checks before creating an application release or tag', () => {
     expect(release.getIn(['jobs', 'checks', 'uses'])).toBe('./.github/workflows/ci-checks.yml');
     expect(release.getIn(['jobs', 'release', 'needs'])).toBe('checks');
