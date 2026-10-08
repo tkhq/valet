@@ -192,7 +192,7 @@ function withResourceFingerprint(
 }
 
 /** Fingerprint desired requests/limits, not admission-mutated pod resources.
- * Also covers `scratch` (absent vs present counts as a change) — the
+ * Also covers `scratch` (absent vs present counts as a change): the
  * scratch emptyDir is node-local disk the same way cpu/memory are node
  * compute, so a scratch-only change must roll the pod exactly like a
  * cpu/memory change does. */
@@ -515,7 +515,7 @@ export interface SandboxCpuMemoryResources {
   requests?: { cpu?: string | number; memory?: string | number };
   limits?: { cpu?: string | number; memory?: string | number };
   /** The `scratch` emptyDir's `sizeLimit`, read from the pod template's
-   * volumes (not a container request/limit — see `SandboxResourceOpts`). */
+   * volumes (not a container request/limit, see `SandboxResourceOpts`). */
   scratch?: string;
 }
 
@@ -531,7 +531,7 @@ function scratchSizeLimit(spec: unknown): string | undefined {
 }
 
 /** Read the named sandbox container's CPU/memory requests and limits, plus
- * the scratch emptyDir's size (read separately — it lives on `spec.volumes`,
+ * the scratch emptyDir's size (read separately: it lives on `spec.volumes`,
  * not the container's resources). */
 export function sandboxCpuMemoryResources(template: unknown): SandboxCpuMemoryResources {
   if (!isRecord(template) || !isRecord(template.spec) || !Array.isArray(template.spec.containers)) return {};
