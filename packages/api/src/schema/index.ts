@@ -1592,7 +1592,7 @@ export const actionInvocations = pgTable(
     startedAt: bigint("started_at", { mode: "number" }),
     resolvedBy: text("resolved_by"),
     /** Who made an external call (`pol:ext:` rows): `mcp:<OAuth client id>`,
-     * `agentKey`, `apiKey`, or `session`. Null on other rows. */
+     * `cli`, `apiKey`, or `session`. Null on other rows. */
     caller: text("caller"),
   },
   (t) => [
@@ -2509,6 +2509,44 @@ export const teamDeletionRequests = pgTable("team_deletion_requests", {
 }, (t) => [
   uniqueIndex("team_deletion_requests_pending").on(t.teamId, t.resourceType, t.resourceId).where(sql`${t.status} = 'pending'`),
   index("team_deletion_requests_team_status").on(t.teamId, t.status),
+]);
+
+/**
+ * `valet login` device sign-in (`routes/cli-device.ts`). A request waits
+ * here until the person enters its user code on `/cli/device` and allows
+ * it. Only a hash of the device code is stored.
+ */
+export const cliDeviceRequests = pgTable("cli_device_requests", {
+  deviceCodeHash: text("device_code_hash").primaryKey(),
+  userCode: text("user_code").notNull(),
+  device: text("device").notNull(),
+  status: text("status").$type<"pending" | "approved" | "denied">().notNull().default("pending"),
+  userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+  lastPollAt: bigint("last_poll_at", { mode: "number" }),
+}, (t) => [uniqueIndex("cli_device_requests_user_code").on(t.userCode)]);
+
+/**
+ * A signed-in CLI (`vltc_` access token). The access token lasts a day, the
+ * refresh token 30 days from its last use, and each refresh replaces both.
+ * Only hashes are stored. The person disconnects a CLI in Settings >
+ * Agent access.
+ */
+export const cliTokens = pgTable("cli_tokens", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  device: text("device").notNull(),
+  accessHash: text("access_hash").notNull(),
+  refreshHash: text("refresh_hash").notNull(),
+  accessExpiresAt: bigint("access_expires_at", { mode: "number" }).notNull(),
+  refreshExpiresAt: bigint("refresh_expires_at", { mode: "number" }).notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  lastUsedAt: bigint("last_used_at", { mode: "number" }),
+}, (t) => [
+  uniqueIndex("cli_tokens_access").on(t.accessHash),
+  uniqueIndex("cli_tokens_refresh").on(t.refreshHash),
+  index("cli_tokens_user").on(t.userId),
 ]);
 
 /** Database-maintained projection. The migration owns its source FK and trigger. */

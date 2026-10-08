@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, ApiError } from "~/api/client";
+import { NotYou } from "~/components/auth/not-you";
 import { Button, Spinner } from "~/components/primitives";
 
 /**
@@ -116,8 +117,9 @@ export function ConsentPage({ code }: { code: string | undefined }) {
               </Button>
             </div>
             <p className="text-center text-xs text-muted">
-              Code goes to {info.data.redirect_origin}
+              Code goes to {info.data.redirect_origin}. You can disconnect the app any time in Settings &gt; Agent access.
             </p>
+            <NotYou account={info.data.account} />
           </div>
         )}
       </div>

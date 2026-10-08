@@ -46,6 +46,8 @@ If a service is listed as not connected, tell the person to connect it at {{VALE
    - `running`: call `get_thread` with `wait_seconds` to wait again.
    - `waiting_for_decision`: read `pending_decisions`. Answer a question with `resolve_decision`. For an approval, give the person the `url`.
    - `failed` or `aborted`: read `error`.
+   - `command_ran`: the prompt was a slash command. Read `reply` for what it did.
+   - `idle` (from `get_thread`): no turn is running in the thread. Send a message to start one.
 3. Follow up in the same thread with `send_message`.
 
 ## Use team memory and skills

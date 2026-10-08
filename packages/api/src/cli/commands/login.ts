@@ -4,29 +4,28 @@
  *
  * Structure (mirrors `sessions`/`send`): `run` is a thin shell that builds the
  * real deps and delegates to the pure, injectable `runLogin`. Tests pass a
- * stub client factory, a scripted `readSecret`, and a stub browser sign-in.
+ * stub client factory, a scripted `readSecret`, and a stub device sign-in.
  *
  * Credential precedence:
  *   1. `--api-key <key>`: use that key (scripts and CI).
  *   2. `--api-key -`: read a key from stdin, or from a hidden prompt on a TTY.
- *      Use it on a remote machine, where the browser cannot reach the CLI.
  *   3. `--api-key=` or a bare `--api-key`: keyless, for a local stub instance.
- *   4. Otherwise: keyless if the instance runs stub auth, else browser sign-in
- *      (`cli/browser-login.ts`), which mints a personal API key for this
- *      computer after the person approves it in the browser.
+ *   4. Otherwise: keyless if the instance runs stub auth, else device sign-in
+ *      (`cli/device-login.ts`): the person enters a code in a browser on any
+ *      computer, and the CLI gets a CLI token pair. No API key is created.
  *
- * The key is verified via `client.me()` BEFORE anything is written: an
+ * The credential is verified via `client.me()` BEFORE anything is written: an
  * `AuthError` prints a failure and returns `AuthFailure` with NO config write.
- * The key is never echoed back to the user.
+ * A credential is never echoed back to the user.
  */
 import { InstanceClient } from "../client.js";
-import type { ValetConfig } from "../config.js";
+import type { ProfileConfig, ValetConfig } from "../config.js";
 import { saveConfig } from "../config.js";
-import { BROWSER_LOGIN_TIMEOUT_MS, browserLogin, openInBrowser } from "../browser-login.js";
+import { deviceLogin, openInBrowser, revokeDeviceLogin } from "../device-login.js";
 import { AuthError, ExitCode, UnreachableError } from "../exit.js";
 import { parseGlobalFlags, printErr, printLine, type ParsedFlags } from "../output.js";
 import type { CliContext } from "../types.js";
-import type { AuthConfigResponse, GetMeResponse } from "../../wire/types.js";
+import type { AuthConfigResponse, CliTokenResponse, GetMeResponse } from "../../wire/types.js";
 
 /** The subset of `InstanceClient` the `login` command needs. */
 export interface LoginClient {
@@ -35,14 +34,16 @@ export interface LoginClient {
 
 /** Injectable dependencies for `runLogin`. */
 export interface LoginDeps {
-  /** Build a client for a url + optional key (real: `new InstanceClient`). */
+  /** Build a client for a url + optional credential (real: `new InstanceClient`). */
   makeClient(opts: { url: string; apiKey?: string }): LoginClient;
   /** Read a secret interactively (hidden TTY) or from stdin; `undefined` = keyless. */
   readSecret(): Promise<string | undefined>;
   /** `GET /api/auth-config`: whether the instance runs stub auth (no credential needed). */
   authConfig(url: string): Promise<Pick<AuthConfigResponse, "stub">>;
-  /** Sign in through the browser and return a new API key. Throws `AuthError` on denial or timeout. */
-  browserLogin(url: string, opts: { openBrowser: boolean; port?: number }): Promise<string>;
+  /** Sign in through a browser and return a CLI token pair. Throws `AuthError` on denial or timeout. */
+  deviceLogin(url: string, opts: { openBrowser: boolean }): Promise<CliTokenResponse>;
+  /** Sign out a replaced device sign-in on the server. Best effort. */
+  revoke(url: string, token: string): Promise<void>;
 }
 
 /**
@@ -70,12 +71,12 @@ export function profileNameForUrl(url: string): string {
 
 /**
  * Pure login: resolve the credential, verify it, then persist. Returns the
- * process exit code. Never echoes the key.
+ * process exit code. Never echoes a credential.
  */
 export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: ValetConfig): Promise<number> {
   const url = flags.rest[0];
   if (url === undefined || url === "") {
-    printErr("usage: valet login <url> [--name <name>] [--no-browser] [--port <port>] [--api-key <key> | --api-key -]");
+    printErr("usage: valet login <url> [--name <name>] [--no-browser] [--api-key <key> | --api-key -]");
     return ExitCode.Usage;
   }
 
@@ -92,33 +93,29 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
     }
   }
 
-  // `--port` fixes the loopback port, so a remote machine can forward it
-  // (`ssh -L <port>:127.0.0.1:<port>`) and still sign in through a browser.
-  let port: number | undefined;
-  const portFlag = flags.flags.port;
-  if (portFlag !== undefined) {
-    port = typeof portFlag === "string" ? Number(portFlag) : NaN;
-    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
-      printErr("valet login: --port must be a number from 1024 to 65535.");
-      return ExitCode.Usage;
-    }
-  }
-
-  // Resolve the credential: flags first, else browser sign-in.
-  let apiKey: string | undefined;
+  // Resolve the credential: flags first, else device sign-in.
+  let profile: ProfileConfig = { url };
   const fromFlags = apiKeyFromFlags(flags);
   if (typeof fromFlags === "string") {
-    apiKey = fromFlags;
+    profile = { url, apiKey: fromFlags };
   } else if (fromFlags && "prompt" in fromFlags) {
-    apiKey = await deps.readSecret();
-  } else if (fromFlags) {
-    apiKey = undefined; // explicit keyless
-  } else {
+    const key = await deps.readSecret();
+    if (key !== undefined) profile = { url, apiKey: key };
+  } else if (!fromFlags) {
     const base = url.replace(/\/$/, "");
     const { stub } = await deps.authConfig(base);
     if (!stub) {
       try {
-        apiKey = await deps.browserLogin(base, { openBrowser: flags.flags["no-browser"] !== true, ...(port !== undefined ? { port } : {}) });
+        const tokens = await deps.deviceLogin(base, { openBrowser: flags.flags["no-browser"] !== true });
+        profile = {
+          url,
+          cli: {
+            accessToken: tokens.access_token,
+            refreshToken: tokens.refresh_token,
+            accessExpiresAt: tokens.access_expires_at,
+            refreshExpiresAt: tokens.refresh_expires_at,
+          },
+        };
       } catch (err) {
         if (err instanceof AuthError) {
           printErr(`valet login: ${err.message} Profile not saved.`);
@@ -130,7 +127,8 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
   }
 
   // Verify BEFORE persisting.
-  const client = deps.makeClient({ url, apiKey });
+  const credential = profile.cli?.accessToken ?? profile.apiKey;
+  const client = deps.makeClient({ url, apiKey: credential });
   try {
     await client.me();
   } catch (err) {
@@ -141,7 +139,10 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
     throw err; // UnreachableError / ApiError propagate to the dispatcher.
   }
 
-  const profile = apiKey !== undefined ? { url, apiKey } : { url };
+  // A replaced device sign-in would otherwise stay valid until it expires.
+  const replaced = config.profiles?.[name]?.cli;
+  if (replaced) await deps.revoke(config.profiles?.[name]?.url.replace(/\/$/, "") ?? url, replaced.refreshToken);
+
   const next: ValetConfig = {
     ...config,
     profiles: { ...(config.profiles ?? {}), [name]: profile },
@@ -149,7 +150,7 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
   };
   saveConfig(next);
 
-  printLine(`logged in to ${url} as profile "${name}"${apiKey === undefined ? " (keyless)" : ""}`);
+  printLine(`logged in to ${url} as profile "${name}"${credential === undefined ? " (keyless)" : ""}`);
   return ExitCode.OK;
 }
 
@@ -218,21 +219,12 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
     makeClient: (opts) => new InstanceClient(opts),
     readSecret,
     authConfig,
-    browserLogin: (url, opts) => {
-      if (process.env.SSH_CONNECTION && opts.port === undefined) {
-        printErr("This looks like a remote machine, so your browser cannot reach this CLI. Press Ctrl-C, then:");
-        printErr(`  1. Here, run: valet login ${url} --no-browser --port 8765`);
-        printErr("  2. On your computer, run: ssh -L 8765:127.0.0.1:8765 <this host>");
-        printErr("  3. Open the printed URL in your browser.");
-      }
-      return browserLogin({
-        url,
-        ...(opts.port !== undefined ? { port: opts.port } : {}),
-        openUrl: opts.openBrowser ? openInBrowser : () => Promise.resolve(false),
-        log: printErr,
-        timeoutMs: BROWSER_LOGIN_TIMEOUT_MS,
-      });
-    },
+    deviceLogin: (url, opts) => deviceLogin({
+      url,
+      openUrl: opts.openBrowser ? openInBrowser : () => Promise.resolve(false),
+      log: printErr,
+    }),
+    revoke: revokeDeviceLogin,
   };
   return runLogin(deps, flags, ctx.config);
 }

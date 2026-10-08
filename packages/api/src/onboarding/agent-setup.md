@@ -34,56 +34,53 @@ On Windows, run these steps in WSL. The installer supports macOS and Linux only.
 
 ## Step 2. Log in
 
-You run the login. The person approves it in their browser.
+You run the login. The person approves it in a browser.
 
-1. Tell the person: "I am logging the Valet CLI in to {{VALET_URL}}. Your browser will open. Check that it names this computer, then choose Allow."
-2. Run this command. It waits up to 5 minutes for the approval. Set your command timeout to at least 330 seconds. If you cannot, run it in the background and wait until it prints `logged in`:
+1. Run this command. It waits up to 10 minutes for the approval. Set your command timeout to at least 660 seconds. If you cannot, run it in the background and read its output:
 
    ```sh
    valet login {{VALET_URL}} --name valet
    ```
 
-3. If the browser does not open, the command prints a URL. Give that URL to the person.
-4. If Valet asks the person to sign in first, they sign in, and the approval page then opens.
-5. If this computer is a remote machine (for example, you run over SSH), the person's browser cannot reach the CLI. Use the remote steps in the troubleshooting section.
+2. The command prints a code such as `BCDF-GHJK` and the page {{VALET_URL}}/cli/device. Give both to the person, with this text: "Open {{VALET_URL}}/cli/device, sign in if Valet asks, type the code, check that the page names this computer, and choose Allow."
+3. Wait until the command prints `logged in`.
 
-The CLI receives its key directly from Valet. You never see it. The key cannot approve requests or change policies.
+The browser can be on any computer, so this also works over SSH. The CLI receives a CLI token directly from Valet, not an API key. It signs out after 30 days without use. The person can disconnect it in Settings > Agent access. It cannot approve requests or change policies.
 
 When the command prints `logged in`, run `valet threads list`. It must exit with code 0. If it exits with code 5, repeat this step. If `VALET_INSTANCE` is set in the environment, it overrides the login: unset it, or set it to `valet`.
 
 ## Step 3. Connect MCP
 
-MCP gives you the Valet tools directly. The CLI also works without MCP.
+MCP gives you the Valet tools directly. The CLI also works without MCP. Run the command for your agent:
 
-**Claude Code.** Run this from the project's root directory:
+| Agent | Command | Then ask the person to |
+|---|---|---|
+| Claude Code | `valet mcp setup claude-code` | Restart Claude Code, run `/mcp`, choose `valet`, and choose Authenticate. |
+| Codex | `valet mcp setup codex` | Run `codex mcp login valet`. |
+| Cursor | `valet mcp setup cursor` | Restart Cursor. If it does not ask to sign in, open Cursor Settings > MCP and sign in to `valet`. |
 
-```sh
-valet mcp setup claude-code
-```
+Each command adds the `valet` server for every project. No file goes into the repository, and no secret is written. For another agent, run `valet mcp setup --print` and add the printed entry where the agent reads MCP servers. If the agent cannot run OAuth, tell the person, and continue with the CLI only.
 
-This adds a `valet` server to `.mcp.json` in the current directory. The entry holds only the URL, no secret. To make Valet available in every project instead, run:
+In the browser, the person checks the app name and chooses Allow. They can disconnect the app later in Settings > Agent access.
 
-```sh
-claude mcp add --transport http valet {{VALET_URL}}/mcp --scope user
-```
-
-Claude Code loads MCP servers when it starts. Ask the person to do these steps:
-
-1. Restart Claude Code. If it asks whether to use the `valet` server from `.mcp.json`, approve it.
-2. Run `/mcp`, choose `valet`, and choose Authenticate.
-3. In the browser, check the app name and choose Allow.
-
-You can use the MCP tools only in the new session. Continue with the CLI until then.
-
-**Other agents.** Run `valet mcp setup --print`. It prints a standard MCP server entry for {{VALET_URL}}/mcp. Add that entry where your agent reads MCP servers. The server signs in with OAuth. If your agent cannot run OAuth, tell the person, and continue with the CLI only.
+You can use the MCP tools only after the agent restarts. Continue with the CLI until then.
 
 ## Step 4. Install the Valet skill
 
-The skill tells you when and how to use Valet. Claude Code asks the person to approve a write under `~/.claude`. For Claude Code:
+The skill tells you when and how to use Valet. Your agent may ask the person to approve the write.
+
+**Claude Code:**
 
 ```sh
 mkdir -p ~/.claude/skills/valet
 curl -fsSL {{VALET_URL}}/agent-skill.md -o ~/.claude/skills/valet/SKILL.md
+```
+
+**Codex:**
+
+```sh
+mkdir -p ~/.codex/skills/valet
+curl -fsSL {{VALET_URL}}/agent-skill.md -o ~/.codex/skills/valet/SKILL.md
 ```
 
 For another agent, save the same file where that agent reads skills or standing instructions.
@@ -92,21 +89,21 @@ For another agent, save the same file where that agent reads skills or standing 
 
 1. Run `valet threads list`. It must exit with code 0.
 2. Run `valet tools search github`. It must exit with code 0 and list tools. A listed tool does not prove that its service is connected. Report a service as connected only after a `valet tools call` to it succeeds.
-3. If MCP is connected in this session, call the `whoami` tool, then `list_workspaces`. If the person still has to restart Claude Code, say that MCP is set up and needs that restart.
+3. If MCP is connected in this session, call the `whoami` tool, then `list_workspaces`. If the person still has to restart the agent, say that MCP is set up and needs that restart.
 4. Tell the person what works: the CLI login, MCP, and the skill. Name anything that failed, and its fix.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `valet login` exits with code 5 | The person chose Deny, or did not approve within 5 minutes. Ask them, then repeat step 2. |
-| `valet` exits with code 5 on another command | The CLI key was revoked. Repeat step 2. |
-| After Allow, the browser shows "This site can't be reached" for `127.0.0.1`, and `valet login` already stopped | Your command timeout stopped the CLI before the person chose Allow. Repeat step 2 with a longer timeout, or run it in the background. |
-| After Allow, the browser shows "This site can't be reached" for `127.0.0.1`, and `valet login` still waits | The CLI runs on a remote machine. Press Ctrl-C. Run `valet login {{VALET_URL}} --name valet --no-browser --port 8765`. Ask the person to run `ssh -L 8765:127.0.0.1:8765 <host>` on their own computer, then open the printed URL there. |
+| `valet login` exits with code 5 | The person chose Deny, or did not approve within 10 minutes. Ask them, then repeat step 2. |
+| The page says no sign-in waits for the code | The code is wrong, expired, or was used. Check the code in the command output. If the command stopped, repeat step 2. |
+| `valet login` stopped before the person chose Allow | Your command timeout stopped it. Repeat step 2 with a longer timeout, or run it in the background. |
+| `valet` exits with code 5 on another command | The CLI was disconnected, or was not used for 30 days. Repeat step 2. |
 | `valet` exits with code 6 | Valet is not reachable. Check {{VALET_URL}}/api/health in a browser or with `curl`. |
 | macOS says the binary is damaged | Run `xattr -d com.apple.quarantine ~/.local/bin/valet`. This happens only after a browser download. |
 | `valet` says `unknown command: tools` or `threads` | The CLI is too old. Repeat step 1 to reinstall it. |
 | `valet send` or `valet chat` fails with "lost connection" | The CLI is too old. Repeat step 1 to reinstall it. |
-| `.mcp.json` has an `Authorization` header with `<MCP_OAUTH_TOKEN>` | An old CLI wrote it. Reinstall the CLI (step 1), delete the `valet` entry, and run step 3 again. |
-| An MCP call returns 401 | The sign-in expired or did not finish. Ask the person to authenticate again (step 3). |
+| `.mcp.json` has an `Authorization` header with `<MCP_OAUTH_TOKEN>` | An old CLI wrote it. Reinstall the CLI (step 1), delete the `valet` entry from `.mcp.json`, and run step 3 again. |
+| An MCP call returns 401 | The sign-in expired, did not finish, or the person disconnected the app. Ask the person to authenticate again (step 3). |
 | A tool returns `approval_required` | The organization's policy needs a person to approve that action. Do not retry it. Ask Valet to do it with `start_thread`, or tell the person. |

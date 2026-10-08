@@ -9,8 +9,8 @@ import { resolveOrgId } from "../lib/org.js";
 import type { ValetAuth } from "../auth/index.js";
 import { verifySandboxToken } from "../auth/sandbox-tokens.js";
 import { mcpCallerFor, mcpRouteAllowed } from "../auth/mcp-caller.js";
+import { CLI_ACCESS_PREFIX, verifyCliAccessToken } from "../auth/cli-tokens.js";
 import {
-  AGENT_KEY_PREFIX,
   isAgentCaller,
   teamApiKeyPathAllowed,
   teamIdFromApiKeyMetadata,
@@ -136,14 +136,23 @@ async function userFromSession(auth: ValetAuth, db: AppDb, headers: Headers): Pr
 export interface RequestIdentity {
   user: AuthUser;
   principal: RequestPrincipal;
-  /** A key minted by `valet login` (`AGENT_KEY_PREFIX`). */
-  agent?: boolean;
+  /** A `valet login` CLI token (`auth/cli-tokens.ts`), not an API key. */
+  cli?: boolean;
 }
 
 /** The AuthUser (and team principal, when metadata carries `teamId`)
  * behind a valid api key, or `undefined` for an invalid, malformed,
  * dangling, or orphaned-team key. Shared by rung 4 and `resolveOptionalIdentity`. */
 async function identityFromApiKey(auth: ValetAuth, db: AppDb, key: string): Promise<RequestIdentity | undefined> {
+  // A `valet login` CLI token travels in the same header as an API key.
+  if (key.startsWith(CLI_ACCESS_PREFIX)) {
+    const token = await verifyCliAccessToken(db, key);
+    if (!token) return undefined;
+    const [row] = await db.select().from(users).where(eq(users.id, token.userId)).limit(1);
+    if (!row) return undefined;
+    const user: AuthUser = { id: row.id, email: row.email, name: row.name ?? undefined, role: row.role, orgId: await resolveOrgId(db) };
+    return { user, principal: userPrincipal(user.id), cli: true };
+  }
   let result: Awaited<ReturnType<ValetAuth["api"]["verifyApiKey"]>>;
   try {
     result = await auth.api.verifyApiKey({ body: { key } });
@@ -172,7 +181,7 @@ async function identityFromApiKey(auth: ValetAuth, db: AppDb, key: string): Prom
     if (!team || team.orgId !== user.orgId) return undefined;
     return { user, principal: { type: "team", id: teamId } };
   }
-  return { user, principal: userPrincipal(user.id), agent: result.key.prefix === AGENT_KEY_PREFIX };
+  return { user, principal: userPrincipal(user.id) };
 }
 
 function setCaller(
@@ -368,7 +377,7 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
         if (!identity) {
           return c.json({ error: "invalid api key" }, 401);
         }
-        setCaller(c, identity.user, identity.agent ? "agentKey" : "apiKey", identity.principal, auth);
+        setCaller(c, identity.user, identity.cli ? "cli" : "apiKey", identity.principal, auth);
         await next();
         return;
       }
@@ -419,7 +428,7 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
 const PERSON_ONLY_WRITES: ReadonlyArray<RegExp> = [
   // Every organization admin write. A policy preview changes nothing.
   /^\/api\/org(?!\/policies\/preview$)(\/|$)/,
-  /^\/api\/me\/(policy-overrides|grants)(\/|$)/,
+  /^\/api\/me\/(policy-overrides|grants|agent-access)(\/|$)/,
   // A team's settings, deletion, policies, grants, members, and keys.
   /^\/api\/teams\/[^/]+$/,
   /^\/api\/teams\/[^/]+\/(policies|policy-overrides|grants|members|api-keys|deletion-requests)(\/|$)/,
@@ -439,7 +448,7 @@ export function agentRefusedRoute(method: string, path: string): boolean {
 export function refuseAgentAuthority(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     if (c.var.authVia && isAgentCaller(c.var.authVia) && agentRefusedRoute(c.req.method, c.req.path)) {
-      return c.json({ error: "A person must do this in Valet in the browser. Agent credentials (MCP and `valet login` keys) cannot approve requests, change policies, or administer the organization or a team." }, 403);
+      return c.json({ error: "A person must do this in Valet in the browser. Agent credentials (MCP apps and `valet login`) cannot approve requests, change policies, or administer the organization or a team." }, 403);
     }
     await next();
   };

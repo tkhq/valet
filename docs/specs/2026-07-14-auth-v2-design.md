@@ -148,21 +148,23 @@ The older `features.ssoTeamSync` and `auth.sso.teams.groups` configuration shape
 - Server config: `apiKey({ defaultPrefix: "vlt_", rateLimit: { enabled: false } })` — Valet keys are power-user credentials; better-auth's per-key rate limiting defaults (10 req/day) are wrong for us.
 - Wire: `x-api-key: vlt_…` (middleware rung 3).
 
-### CLI browser sign-in
+### CLI device sign-in
 
-`valet login <url>` gets a personal API key through the browser, the way an MCP client signs in with OAuth. The person never copies a key.
+`valet login <url>` signs in with OAuth device authorization (RFC 8628) and gets a CLI token, not an API key (`routes/cli-device.ts`, `auth/cli-tokens.ts`, `cli/device-login.ts`). The person never copies a secret, and nothing listens on the CLI's computer, so the browser can be on another computer.
 
 1. The CLI reads `GET /api/auth-config`. A stub-auth instance needs no credential, so the CLI saves a keyless profile.
-2. The CLI listens on `127.0.0.1:<random port>` and opens `<instance>/cli/login` with `redirect_uri=http://127.0.0.1:<port>/callback`, a PKCE S256 `code_challenge`, a random `state`, and the computer name.
-3. The web page (`routes/cli.login.tsx`) reads `GET /api/cli/login`. A signed-out visitor is sent to `/login?next=`. The page names the account and the computer, and offers Allow and Deny.
-4. Allow posts to `POST /api/cli/login`. The route stores a one-time code in `verification` (identifier `cli-login:<sha256(code)>`, five minutes) and returns the loopback URL with the code and state. Deny returns the loopback URL with `error=access_denied`.
-5. The CLI checks the state and posts the code, the PKCE verifier, and the redirect URI to `POST /api/cli/login/token`. That route is public, because the CLI has no credential yet. It deletes the code on first use, checks the verifier, and creates a personal key named `valet CLI (<computer>)` with the prefix `vlt_agent_` (`AGENT_KEY_PREFIX`).
+2. The CLI posts its computer name to `POST /api/cli/device/code`. The route stores a `cli_device_requests` row (device code as a SHA-256 hash, ten minutes) and returns the device code, a user code such as `BCDF-GHJK`, and the page path `/cli/device`.
+3. The CLI prints the user code and opens `<instance>/cli/device`. The page does not read the code from its URL: the person types it, so a link from someone else cannot approve their CLI with one click. A signed-out visitor is sent to `/login?next=`.
+4. The page reads `GET /api/cli/device?user_code=` and shows the account, the computer, and the code. Allow or Deny posts to `POST /api/cli/device`. Only a browser session can decide (`authVia === "session"`), from a Valet origin.
+5. The CLI polls `POST /api/cli/device/token` every five seconds. The route answers `authorization_pending`, `slow_down` for a faster poll, `access_denied`, or `expired_token`. After Allow, it deletes the request once and returns a token pair.
 
-The agent onboarding has the person's coding agent run `valet login`, so this key is an agent credential. The auth middleware sets `authVia: "agentKey"` for it, and `isAgentCaller` treats it like an MCP token: it may answer a question gate, but it gets 403 on an approval or credential gate, and on every write in `PERSON_ONLY_WRITES` (`refuseAgentAuthority`): organization administration, personal and team policies, overrides, and grants, team settings, members, and keys, workflow permissions and approvals, credential sharing with a team, and security needs. better-auth cannot change a key's prefix after creation, so the tag cannot be removed. A key created in Settings has the default `vlt_` prefix and keeps full authority. An agent that can read a person's Settings key on the same computer can still use it. The server cannot tell those callers apart.
+A CLI token pair is an access token (`vltc_`, one day) and a refresh token (`vltr_`, 30 days from its last use). `cli_tokens` stores only hashes. The CLI sends the access token in `x-api-key`, so every command and the stream socket work unchanged. Before a command runs, the CLI refreshes a token that expires within 12 hours (`POST /api/cli/token/refresh`). A refresh replaces both tokens in one conditional `UPDATE`, so a refresh token works once. `valet logout`, and a new `valet login` for the same profile, revoke the old pair (`POST /api/cli/token/revoke`). Expired rows are deleted when that person signs in again.
 
-The key travels only in the token response, never through the browser. A leaked code is useless without the verifier, and a failed exchange still deletes it. Only a browser session can approve (`authVia === "session"`), a decision must come from a Valet origin, and the redirect must be a loopback `/callback` URL with a port. The person revokes a CLI key in Settings > API keys, like any other key.
+The auth middleware sends a `vltc_` value to `verifyCliAccessToken` instead of better-auth, and sets `authVia: "cli"`. The onboarding has the person's coding agent run `valet login`, so `isAgentCaller` treats this token like an MCP token: it may answer a question gate, but it gets 403 on an approval or credential gate, and on every write in `PERSON_ONLY_WRITES` (`refuseAgentAuthority`): organization administration, personal and team policies, overrides, and grants, team settings, members, and keys, workflow permissions and approvals, credential sharing with a team, security needs, and Agent access. A key created in Settings keeps full authority. `valet login <url> --api-key -` saves one. An agent that can read a person's Settings key on the same computer can still use it. The server cannot tell those callers apart.
 
-On a remote machine the browser cannot reach the CLI's loopback port. `--port <n>` fixes the port, so the person forwards it with `ssh -L <n>:127.0.0.1:<n>` and still gets an agent key. `valet login <url> --api-key -` reads a Settings key from a hidden prompt or stdin, and `--api-key <key>` works for scripts. A Settings key is not an agent key.
+### Agent access
+
+Settings > Agent access (`routes/agent-access.ts`, `GET /api/me/agent-access`) lists the MCP apps that hold OAuth tokens for the person and the CLIs signed in with `valet login`. Disconnect deletes the app's `oauthAccessToken` and `oauthConsent` rows, or the CLI's `cli_tokens` row, so it stops working at once. An agent credential cannot disconnect anything.
 
 ## Sandbox auth (`auth/sandbox-tokens.ts`)
 

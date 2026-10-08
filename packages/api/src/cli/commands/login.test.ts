@@ -8,6 +8,8 @@ import { parseGlobalFlags } from "../output.js";
 import { apiKeyFromFlags, profileNameForUrl, runLogin, type LoginClient, type LoginDeps } from "./login.js";
 import type { MeResponse } from "../../wire/types.js";
 
+const TOKENS = { access_token: "vltc_access", refresh_token: "vltr_refresh", access_expires_at: 2_000, refresh_expires_at: 3_000 };
+
 const ME: MeResponse = {
   id: "u1",
   email: "me@x.com",
@@ -61,7 +63,8 @@ function okDeps(overrides: Partial<LoginDeps> = {}): {
       return Promise.resolve("vlt_prompted");
     },
     authConfig: () => Promise.resolve({ stub: false }),
-    browserLogin: () => Promise.resolve("vlt_browser"),
+    deviceLogin: () => Promise.resolve(TOKENS),
+    revoke: () => Promise.resolve(),
     ...overrides,
   };
   return {
@@ -144,7 +147,8 @@ describe("runLogin", () => {
       },
       readSecret: () => Promise.resolve(undefined),
       authConfig: () => Promise.resolve({ stub: false }),
-      browserLogin: () => Promise.resolve("unused"),
+      deviceLogin: () => Promise.resolve(TOKENS),
+      revoke: () => Promise.resolve(),
     };
     const flags = parseGlobalFlags(["https://valet.example.com", "--api-key", "bad"]);
     const code = await runLogin(deps, flags, {});
@@ -166,46 +170,60 @@ describe("runLogin", () => {
     expect(saved.profiles?.["localhost:8788"]).not.toHaveProperty("apiKey");
   });
 
-  it("signs in through the browser when no --api-key flag is present", async () => {
+  it("signs in with a device code when no --api-key flag is present, and saves a CLI token, not a key", async () => {
     const opens: boolean[] = [];
     const bundle = okDeps({
-      browserLogin: (_url, opts) => {
+      deviceLogin: (_url, opts) => {
         opens.push(opts.openBrowser);
-        return Promise.resolve("vlt_browser");
+        return Promise.resolve(TOKENS);
       },
     });
     const flags = parseGlobalFlags(["https://valet.example.com/"]);
     expect(await runLogin(bundle.deps, flags, {})).toBe(ExitCode.OK);
     expect(opens).toEqual([true]);
     expect(bundle.readCalls).toBe(0);
-    expect(bundle.built).toEqual([{ url: "https://valet.example.com/", apiKey: "vlt_browser" }]);
-    expect(loadConfig().profiles?.["valet.example.com"]?.apiKey).toBe("vlt_browser");
-    expect(stdout()).not.toContain("vlt_browser");
+    expect(bundle.built).toEqual([{ url: "https://valet.example.com/", apiKey: "vltc_access" }]);
+    expect(loadConfig().profiles?.["valet.example.com"]).toEqual({
+      url: "https://valet.example.com/",
+      cli: { accessToken: "vltc_access", refreshToken: "vltr_refresh", accessExpiresAt: 2_000, refreshExpiresAt: 3_000 },
+    });
+    expect(stdout()).not.toContain("vltc_access");
   });
 
-  it("passes --no-browser through to the browser sign-in", async () => {
+  it("passes --no-browser through to the device sign-in", async () => {
     const opens: boolean[] = [];
     const { deps } = okDeps({
-      browserLogin: (_url, opts) => {
+      deviceLogin: (_url, opts) => {
         opens.push(opts.openBrowser);
-        return Promise.resolve("vlt_browser");
+        return Promise.resolve(TOKENS);
       },
     });
     expect(await runLogin(deps, parseGlobalFlags(["https://valet.example.com", "--no-browser"]), {})).toBe(ExitCode.OK);
     expect(opens).toEqual([false]);
   });
 
-  it("saves a keyless profile for a stub-auth instance without opening a browser", async () => {
-    const browser = vi.fn(() => Promise.resolve("never"));
-    const { deps, built } = okDeps({ authConfig: () => Promise.resolve({ stub: true }), browserLogin: browser });
+  it("signs out the device sign-in a new login replaces", async () => {
+    const revoked: string[] = [];
+    const { deps } = okDeps({ revoke: (_url, token) => {
+      revoked.push(token);
+      return Promise.resolve();
+    } });
+    const existing: ValetConfig = { profiles: { prod: { url: "https://valet.example.com", cli: { accessToken: "a", refreshToken: "vltr_old", accessExpiresAt: 1, refreshExpiresAt: 1 } } } };
+    expect(await runLogin(deps, parseGlobalFlags(["https://valet.example.com", "--name", "prod"]), existing)).toBe(ExitCode.OK);
+    expect(revoked).toEqual(["vltr_old"]);
+  });
+
+  it("saves a keyless profile for a stub-auth instance without a device sign-in", async () => {
+    const device = vi.fn(() => Promise.resolve(TOKENS));
+    const { deps, built } = okDeps({ authConfig: () => Promise.resolve({ stub: true }), deviceLogin: device });
     expect(await runLogin(deps, parseGlobalFlags(["http://localhost:8788"]), {})).toBe(ExitCode.OK);
-    expect(browser).not.toHaveBeenCalled();
+    expect(device).not.toHaveBeenCalled();
     expect(built).toEqual([{ url: "http://localhost:8788", apiKey: undefined }]);
     expect(loadConfig().profiles?.["localhost:8788"]).toEqual({ url: "http://localhost:8788" });
   });
 
-  it("returns AuthFailure and saves nothing when the browser sign-in is denied", async () => {
-    const { deps } = okDeps({ browserLogin: () => Promise.reject(new AuthError("the sign-in was denied in the browser.")) });
+  it("returns AuthFailure and saves nothing when the device sign-in is denied", async () => {
+    const { deps } = okDeps({ deviceLogin: () => Promise.reject(new AuthError("the sign-in was denied in the browser.")) });
     expect(await runLogin(deps, parseGlobalFlags(["https://valet.example.com"]), {})).toBe(ExitCode.AuthFailure);
     expect(existsSync(configPath())).toBe(false);
     expect(stderr()).toContain("denied in the browser");
@@ -249,7 +267,8 @@ describe("runLogin", () => {
       }),
       readSecret: () => Promise.resolve(undefined),
       authConfig: () => Promise.resolve({ stub: false }),
-      browserLogin: () => Promise.resolve("unused"),
+      deviceLogin: () => Promise.resolve(TOKENS),
+      revoke: () => Promise.resolve(),
     };
     const flags = parseGlobalFlags(["http://localhost:8788", "--api-key", "k"]);
     await expect(runLogin(deps, flags, {})).rejects.toBeInstanceOf(UnreachableError);
@@ -263,7 +282,8 @@ describe("runLogin", () => {
       }),
       readSecret: () => Promise.resolve(undefined),
       authConfig: () => Promise.resolve({ stub: false }),
-      browserLogin: () => Promise.resolve("unused"),
+      deviceLogin: () => Promise.resolve(TOKENS),
+      revoke: () => Promise.resolve(),
     };
     const flags = parseGlobalFlags(["http://localhost:8788", "--api-key", "k"]);
     await expect(runLogin(deps, flags, {})).rejects.toBeInstanceOf(ApiError);

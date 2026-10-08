@@ -5593,21 +5593,37 @@ export interface OAuthConsentDecision {
   redirect: string;
 }
 
-/** `GET /api/cli/login` response: what the browser sign-in page shows for `valet login`. */
-export interface CliLoginInfo {
+/** `POST /api/cli/device/code` response: what `valet login` shows and polls with. */
+export interface CliDeviceCodeResponse {
+  device_code: string;
+  /** Shown in the terminal; the person types it on the Valet page. */
+  user_code: string;
+  /** Path of the page where the person enters the code, on the instance URL. */
+  verification_path: string;
+  expires_in: number;
+  /** Seconds between polls. */
+  interval: number;
+}
+
+/** CLI token pair (`POST /api/cli/device/token` and `POST /api/cli/token/refresh`). Times are epoch ms. */
+export interface CliTokenResponse {
+  access_token: string;
+  refresh_token: string;
+  access_expires_at: number;
+  refresh_expires_at: number;
+}
+
+/** `GET /api/cli/device` response: what the browser sign-in page shows for `valet login`. */
+export interface CliDeviceInfo {
   account: string;
   /** The computer name the CLI reported. The CLI chooses it, so it proves nothing. */
   device: string;
+  user_code: string;
   access: string[];
 }
 
-/** `POST /api/cli/login` response: the CLI's loopback URL, with a code or `error=access_denied`. */
-export interface CliLoginDecision {
-  redirect: string;
-}
-
-/** `POST /api/cli/login/token` response: the personal API key the CLI saves. */
-export interface CliLoginTokenResponse {
-  key: string;
-  name: string;
+/** `GET /api/me/agent-access` response: the apps and CLIs that can act as the caller. */
+export interface AgentAccessResponse {
+  mcp_apps: Array<{ client_id: string; name: string; connected_at: number | null; expires_at: number | null }>;
+  cli_devices: Array<{ id: string; device: string; signed_in_at: number; last_used_at: number | null }>;
 }

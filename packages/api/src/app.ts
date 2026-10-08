@@ -52,7 +52,8 @@ import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
 import { actionsRouter } from "./routes/actions.js";
 import { mcpAuthorizeGate, mcpTokenGate, oauthConsentRouter } from "./routes/oauth-consent.js";
-import { cliLoginRouter, cliLoginTokenHandler } from "./routes/cli-login.js";
+import { cliDevicePublicRouter, cliDeviceRouter } from "./routes/cli-device.js";
+import { agentAccessRouter } from "./routes/agent-access.js";
 import { mountOnboardingRoutes } from "./onboarding/routes.js";
 import { templatesRouter } from "./routes/templates.js";
 import { skillsRouter } from "./routes/skills.js";
@@ -283,8 +284,12 @@ export function createApp(
     // cannot skip it by leaving out prompt=consent (routes/oauth-consent.ts).
     app.get("/api/auth/mcp/authorize", mcpAuthorizeGate(auth));
     app.post("/api/auth/mcp/token", mcpTokenGate(providers.db));
-    // `valet login` exchanges its one-time code here before it has a key.
-    app.post("/api/cli/login/token", bodyLimit({ maxSize: 16 * 1024 }), cliLoginTokenHandler({ auth, db: providers.db }));
+    // `valet login` starts, polls, refreshes, and signs out here before it
+    // has a credential (routes/cli-device.ts).
+    app.use("/api/cli/device/code", bodyLimit({ maxSize: 16 * 1024 }));
+    app.use("/api/cli/device/token", bodyLimit({ maxSize: 16 * 1024 }));
+    app.use("/api/cli/token/*", bodyLimit({ maxSize: 16 * 1024 }));
+    app.route("/api/cli", cliDevicePublicRouter(providers.db));
     app.on(["POST", "GET"], "/api/auth/*", async (c) => {
       const res = await auth.handler(c.req.raw);
       return filterTeamKeysFromPersonalApiKeyList(c.req.path, res);
@@ -334,7 +339,7 @@ export function createApp(
   app.route("/api/threads", threadsRouter);
   app.route("/api/actions", actionsRouter);
   app.route("/api/oauth/consent", oauthConsentRouter);
-  app.route("/api/cli/login", cliLoginRouter);
+  app.route("/api/cli/device", cliDeviceRouter);
   app.route("/api/sessions", childWorkRouter);
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.
@@ -383,6 +388,7 @@ export function createApp(
   // registers just GET / and PATCH / (no wildcard/param routes), so there is
   // no actual collision to lose. Revisit this ordering if /api/me ever grows
   // a catch-all route that could shadow /api/me/identity-links.
+  app.route("/api/me/agent-access", agentAccessRouter);
   app.route("/api/me/identity-links", identityLinksRouter);
   // Mounted BEFORE /api/me for the same defensive-ordering reason as
   // identityLinksRouter above.
@@ -438,7 +444,7 @@ export function createApp(
   // `opts.webDistDir` points at a real build (has index.html).
   // The approval pages must not load in a frame, so another site cannot
   // overlay them and trick a click on Allow.
-  for (const path of ["/oauth/consent", "/cli/login"]) {
+  for (const path of ["/oauth/consent", "/cli/device"]) {
     app.use(path, async (c, next) => {
       await next();
       c.header("X-Frame-Options", "DENY");

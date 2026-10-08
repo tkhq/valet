@@ -64,7 +64,7 @@ MCP prompts are not exposed. The server is created for each request, so listing 
 
 ### Agents answer questions; people approve
 
-An MCP client is an agent, and so is the key that browser `valet login` mints (`authVia: "agentKey"`, see "CLI browser sign-in" in the auth spec), because the onboarding has the agent run that login. `isAgentCaller` covers both. The thread decision route refuses an `approval` or `credential_request` gate from an agent, and returns "A person must approve this request." Without this rule, one agent could approve another agent's `require_approval` action. An agent can still answer a `question` gate. `list_inbox` marks each thread decision with `agent_can_answer`.
+An MCP client is an agent, and so is the CLI token `valet login` gets (`authVia: "cli"`, see "CLI device sign-in" in the auth spec), because the onboarding has the agent run that login. `isAgentCaller` covers both. The thread decision route refuses an `approval` or `credential_request` gate from an agent, and returns "A person must approve this request." Without this rule, one agent could approve another agent's `require_approval` action. An agent can still answer a `question` gate. `list_inbox` marks each thread decision with `agent_can_answer`.
 
 `refuseAgentAuthority` also gives an agent 403 on writes where a person decides (`PERSON_ONLY_WRITES` in `middleware/auth.ts`): every organization admin write (a policy preview is allowed), personal and team policies, overrides, and grants, team settings, members, and keys, workflow permissions (which pre-approve steps) and approvals, credential sharing with a team, and security needs. Otherwise an agent could turn a `require_approval` policy into `allow`, or widen its reach through the person's admin rights. A key created in Settings keeps full authority.
 
@@ -72,7 +72,7 @@ An MCP client is an agent, and so is the key that browser `valet login` mints (`
 
 Onboarding is one link. A person tells their agent to read `<instance>/agent-setup.md` and follow it. The instance serves two public markdown pages (`onboarding/routes.ts`) and fills `{{VALET_URL}}` with its public URL:
 
-- `/agent-setup.md`: install the CLI, run `valet login` (the person approves it in the browser, see "CLI browser sign-in" in the auth spec), connect MCP, install the skill, and check the setup. The page forbids the agent to request, print, or save a secret, or to approve a Valet approval.
+- `/agent-setup.md`: install the CLI, run `valet login` (the person enters its code in a browser, see "CLI device sign-in" in the auth spec), connect MCP with `valet mcp setup` for Claude Code, Codex, or Cursor, install the skill, and check the setup. The page forbids the agent to request, print, or save a secret, or to approve a Valet approval.
 - `/agent-skill.md`: the `valet` skill (`SKILL.md` format). It maps tasks to MCP tools and CLI commands and repeats the safety rules.
 
 The pages hold no secrets or per-user data. The build inlines the markdown, so the bundle and the binary serve it.
@@ -101,11 +101,11 @@ Each tool returns JSON text and the same value as `structuredContent`. Message a
 
 ### Sign-in and consent
 
-Every MCP authorization goes through Valet's consent page (`routes/oauth-consent.ts`, web `/oauth/consent`). A handler before better-auth rewrites each authorize request to carry exactly one `prompt=consent`. better-call reads a repeated query key as an array, which the plugin does not treat as consent, so a second `prompt` would otherwise skip the page. Accepting writes a `mcp-consent:` row, and `mcpTokenGate` refuses to exchange an authorization code without one. Either check alone stops a client that skips the page. A signed-out request is sent to `/login?next=<authorize URL>`, and the login page loads `next` after sign-in, which resumes the authorization. The client receives its code only after the person chooses Allow. A consent decision is accepted from the public origin (`VALET_PUBLIC_URL` or `BETTER_AUTH_URL`) or the request origin, because a TLS-terminating ingress shows the server an `http` request origin.
+Every MCP authorization goes through Valet's consent page (`routes/oauth-consent.ts`, web `/oauth/consent`). A handler before better-auth rewrites each authorize request to carry exactly one `prompt=consent`. better-call reads a repeated query key as an array, which the plugin does not treat as consent, so a second `prompt` would otherwise skip the page. Accepting writes a `mcp-consent:` row, and `mcpTokenGate` refuses to exchange an authorization code without one. Either check alone stops a client that skips the page. The person disconnects an app in Settings > Agent access (see the auth spec), which deletes its tokens. A signed-out request is sent to `/login?next=<authorize URL>`, and the login page loads `next` after sign-in, which resumes the authorization. The client receives its code only after the person chooses Allow. A consent decision is accepted from the public origin (`VALET_PUBLIC_URL` or `BETTER_AUTH_URL`) or the request origin, because a TLS-terminating ingress shows the server an `http` request origin.
 
 ### Sign-in
 
-The instance publishes OAuth protected-resource and authorization-server metadata and supports dynamic client registration. An MCP client that implements MCP authorization signs in by itself. `valet mcp setup` therefore writes only the endpoint URL, unless `--token` supplies a bearer token for a client that cannot run OAuth.
+The instance publishes OAuth protected-resource and authorization-server metadata and supports dynamic client registration. An MCP client that implements MCP authorization signs in by itself. `valet mcp setup` therefore adds only the endpoint URL, at user scope for Claude Code and Codex and in `~/.cursor/mcp.json` for Cursor, unless `--token` supplies a bearer token for a client that cannot run OAuth.
 
 ## Not included
 

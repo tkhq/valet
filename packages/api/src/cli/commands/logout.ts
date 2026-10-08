@@ -12,6 +12,7 @@ import type { ValetConfig } from "../config.js";
 import { saveConfig } from "../config.js";
 import { ExitCode, ProfileNotFoundError } from "../exit.js";
 import { parseGlobalFlags, printErr, printLine } from "../output.js";
+import { revokeDeviceLogin } from "../device-login.js";
 import type { CliContext } from "../types.js";
 
 /**
@@ -55,9 +56,13 @@ export function runLogout(config: ValetConfig, name: string | undefined): number
   return ExitCode.OK;
 }
 
-export function run(args: string[], ctx: CliContext): number {
+export async function run(args: string[], ctx: CliContext): Promise<number> {
   const flags = parseGlobalFlags(args);
   const name =
     flags.rest[0] ?? (typeof flags.flags.instance === "string" ? flags.flags.instance : undefined);
+  // Sign a device sign-in out on the server too, so its token stops working
+  // now rather than when it expires.
+  const profile = name ? ctx.config.profiles?.[name] : undefined;
+  if (profile?.cli) await revokeDeviceLogin(profile.url.replace(/\/$/, ""), profile.cli.refreshToken);
   return runLogout(ctx.config, name);
 }

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import type { ValetConfig } from "../config.js";
 import { ExitCode } from "../exit.js";
 import { NoInstanceError } from "../exit.js";
-import { buildMcpServerConfig, defaultFsSeam, run, writeClaudeCodeConfig, type FsSeam } from "./mcp.js";
+import { buildMcpServerConfig, defaultFsSeam, run, runMcp, writeClaudeCodeConfig, type FsSeam } from "./mcp.js";
 
 let outSpy: MockInstance;
 let errSpy: MockInstance;
@@ -199,5 +199,58 @@ describe("run — usage / errors", () => {
     } finally {
       if (prev !== undefined) process.env.VALET_INSTANCE = prev;
     }
+  });
+});
+
+describe("runMcp — per-agent setup", () => {
+  function deps(statuses: Record<string, number | null> = {}) {
+    const calls: string[] = [];
+    const files: Record<string, string> = {};
+    return {
+      calls, files,
+      deps: {
+        exec: (cmd: string, args: string[]) => {
+          const line = `${cmd} ${args.join(" ")}`;
+          calls.push(line);
+          const key = Object.keys(statuses).find((k) => line.startsWith(k));
+          return { status: key ? statuses[key]! : 0, output: "" };
+        },
+        fs: { readFile: (p: string) => files[p], writeFile: (p: string, c: string) => { files[p] = c; } },
+        cwd: "/repo",
+        home: "/home/me",
+      },
+    };
+  }
+  const ctx = { command: "mcp", config: { profiles: { p: { url: "https://valet.example.com/" } }, defaultProfile: "p" } };
+
+  it("adds Valet to Claude Code at user scope, so no file lands in the repository", async () => {
+    const { deps: d, calls, files } = deps();
+    expect(await runMcp(d, ["setup", "claude-code"], ctx)).toBe(ExitCode.OK);
+    expect(calls).toContain("claude mcp add --transport http --scope user valet https://valet.example.com/mcp");
+    expect(files).toEqual({});
+    expect(stdout()).toContain("/mcp");
+  });
+
+  it("writes ./.mcp.json with --project, and prints the command when claude is missing", async () => {
+    const project = deps();
+    expect(await runMcp(project.deps, ["setup", "claude-code", "--project"], ctx)).toBe(ExitCode.OK);
+    expect(JSON.parse(project.files["/repo/.mcp.json"]!)).toEqual({ mcpServers: { valet: { type: "http", url: "https://valet.example.com/mcp" } } });
+    const missing = deps({ "claude mcp add": null });
+    expect(await runMcp(missing.deps, ["setup", "claude-code"], ctx)).toBe(ExitCode.Failure);
+    expect(stderr()).toContain("claude mcp add --transport http --scope user valet https://valet.example.com/mcp");
+  });
+
+  it("adds Valet to Codex and says how to sign in", async () => {
+    const { deps: d, calls } = deps();
+    expect(await runMcp(d, ["setup", "codex"], ctx)).toBe(ExitCode.OK);
+    expect(calls).toContain("codex mcp add valet --url https://valet.example.com/mcp");
+    expect(stdout()).toContain("codex mcp login valet");
+  });
+
+  it("merges Valet into Cursor's mcp.json without a type field", async () => {
+    const { deps: d, files } = deps();
+    files["/home/me/.cursor/mcp.json"] = JSON.stringify({ mcpServers: { other: { url: "https://x" } } });
+    expect(await runMcp(d, ["setup", "cursor"], ctx)).toBe(ExitCode.OK);
+    expect(JSON.parse(files["/home/me/.cursor/mcp.json"]!)).toEqual({ mcpServers: { other: { url: "https://x" }, valet: { url: "https://valet.example.com/mcp" } } });
   });
 });

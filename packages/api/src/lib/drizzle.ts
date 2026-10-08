@@ -588,6 +588,21 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
 );` },
   { describe: "team_deletion_requests_pending", probe: { kind: "index", index: "team_deletion_requests_pending" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS "team_deletion_requests_pending" ON "team_deletion_requests" ("team_id", "resource_type", "resource_id") WHERE "status" = 'pending';` },
   { describe: "team_deletion_requests_team_status", probe: { kind: "index", index: "team_deletion_requests_team_status" }, sql: `CREATE INDEX IF NOT EXISTS "team_deletion_requests_team_status" ON "team_deletion_requests" ("team_id", "status");` },
+  { describe: "cli_device_requests table", probe: { kind: "table", table: "cli_device_requests" }, sql: `CREATE TABLE IF NOT EXISTS "cli_device_requests" (
+  "device_code_hash" text PRIMARY KEY NOT NULL, "user_code" text NOT NULL, "device" text NOT NULL,
+  "status" text NOT NULL DEFAULT 'pending', "user_id" text REFERENCES "user"("id") ON DELETE cascade,
+  "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "last_poll_at" bigint
+);` },
+  { describe: "cli_device_requests_user_code", probe: { kind: "index", index: "cli_device_requests_user_code" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS "cli_device_requests_user_code" ON "cli_device_requests" ("user_code");` },
+  { describe: "cli_tokens table", probe: { kind: "table", table: "cli_tokens" }, sql: `CREATE TABLE IF NOT EXISTS "cli_tokens" (
+  "id" text PRIMARY KEY NOT NULL, "user_id" text NOT NULL REFERENCES "user"("id") ON DELETE cascade,
+  "device" text NOT NULL, "access_hash" text NOT NULL, "refresh_hash" text NOT NULL,
+  "access_expires_at" bigint NOT NULL, "refresh_expires_at" bigint NOT NULL,
+  "created_at" bigint NOT NULL, "last_used_at" bigint
+);` },
+  { describe: "cli_tokens_access", probe: { kind: "index", index: "cli_tokens_access" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_access" ON "cli_tokens" ("access_hash");` },
+  { describe: "cli_tokens_refresh", probe: { kind: "index", index: "cli_tokens_refresh" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_refresh" ON "cli_tokens" ("refresh_hash");` },
+  { describe: "cli_tokens_user", probe: { kind: "index", index: "cli_tokens_user" }, sql: `CREATE INDEX IF NOT EXISTS "cli_tokens_user" ON "cli_tokens" ("user_id");` },
 
   {
     describe: "action_invocations.thread_id column",

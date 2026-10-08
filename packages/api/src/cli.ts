@@ -10,6 +10,7 @@
  * have side effects beyond running `main()` at the bottom.
  */
 import { loadConfig } from "./cli/config.js";
+import { refreshSelectedProfile } from "./cli/token-refresh.js";
 import { CliError, ExitCode } from "./cli/exit.js";
 import { printErr, printLine } from "./cli/output.js";
 import type { CommandModule } from "./cli/types.js";
@@ -46,6 +47,9 @@ const COMMANDS: Record<string, CommandImporter> = {
   reset: () => import("./cli/commands/reset.js"),
   prebuild: () => import("./cli/commands/prebuild.js"),
 };
+
+/** Commands that never call an instance with the selected profile's credential. */
+const NO_INSTANCE_COMMANDS = new Set(["serve", "login", "logout", "instance", "config", "reset"]);
 
 const USAGE = `valet <command> [options]
 
@@ -103,7 +107,9 @@ async function main(): Promise<number> {
     return ExitCode.Usage;
   }
 
-  const config = loadConfig();
+  let config = loadConfig();
+  // Commands that call an instance get a fresh device sign-in first.
+  if (!NO_INSTANCE_COMMANDS.has(first)) config = await refreshSelectedProfile(config, rest);
   const mod = await importer();
   return await mod.run(rest, { command: first, config });
 }

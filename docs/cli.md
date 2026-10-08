@@ -43,7 +43,7 @@ To connect a local coding agent (Claude Code, Codex, Cursor) to Valet, give it o
 Read https://<your-valet>/agent-setup.md and follow it.
 ```
 
-Every Valet instance serves `/agent-setup.md` and `/agent-skill.md` without login. Each page fills in that instance's public URL (`VALET_PUBLIC_URL`, else a public `BETTER_AUTH_URL`, else the request origin). The setup page tells the agent to install the CLI, run `valet login` (the person approves it in the browser), connect MCP with `valet mcp setup`, install the `valet` skill from `/agent-skill.md`, and check the result. The agent never handles the API key: the CLI receives it directly from the instance. The page sources are `packages/api/src/onboarding/agent-setup.md` and `valet-skill.md`.
+Every Valet instance serves `/agent-setup.md` and `/agent-skill.md` without login. Each page fills in that instance's public URL (`VALET_PUBLIC_URL`, else a public `BETTER_AUTH_URL`, else the request origin). The setup page tells the agent to install the CLI, run `valet login` (the person approves it in the browser), connect MCP with `valet mcp setup`, install the `valet` skill from `/agent-skill.md`, and check the result. The agent never handles a secret: the CLI receives its token directly from the instance. The page sources are `packages/api/src/onboarding/agent-setup.md` and `valet-skill.md`.
 
 ## Quick Start
 
@@ -65,24 +65,23 @@ Client subcommands target a named **instance profile**: a
 `{ url, apiKey? }` pair stored in `~/.valet/config.json`.
 
 ```bash
-valet login https://valet.example.com --name prod   # opens a browser to approve
+valet login https://valet.example.com --name prod   # shows a code to enter in a browser
 valet instance list          # show profiles + default
 valet instance use prod      # make one the default
 valet logout prod            # remove it
 ```
 
-`login` opens the instance in a browser. After you choose Allow, the
-browser returns a one-time code to the CLI, and the CLI exchanges it for a
-personal API key named `valet CLI (<computer>)`. You can revoke that key in
-Settings > API keys. If the browser does not open, the CLI prints the URL.
-Use `--no-browser` to only print it. On a remote machine, run
-`valet login <url> --no-browser --port 8765`, forward the port from your
-computer with `ssh -L 8765:127.0.0.1:8765 <host>`, and open the printed URL
-there. Other ways to log in:
+`login` shows a code such as `BCDF-GHJK` and opens `<instance>/cli/device`.
+Type the code on that page and choose Allow. The browser can be on any
+computer, so this also works over SSH. `--no-browser` only prints the page
+URL. The CLI receives a CLI token, not an API key. The token refreshes
+itself while you use the CLI, and signs out after 30 days without use.
+Disconnect a CLI in Settings > Agent access, or with `valet logout`, which
+also signs it out on the server. A new `login` signs out the one it
+replaces. Other ways to log in:
 
 - `--api-key vlt_...` uses a key you already have, for scripts and CI.
-- `--api-key -` reads a key from a hidden prompt or stdin. Use it on a
-  remote machine, where the browser cannot reach the CLI.
+- `--api-key -` reads a key from a hidden prompt or stdin.
 - An instance with stub auth (`VALET_LOCAL_AUTH=1`) needs no key.
 
 `login` verifies the credential against the instance before it persists
@@ -193,32 +192,38 @@ Inspect and resolve pending decision gates (approvals, questions,
 credential requests) without an interactive session. These commands
 default to the orchestrator session. `--session <id>` overrides.
 
-A key from browser `valet login` is an agent key (prefix `vlt_agent_`). It
-can answer a question, but it cannot approve a request or change a policy,
-because the onboarding has a coding agent run `valet login`. Approve in the
-browser. To approve from a terminal, create a key in Settings > API keys and
-log in with `valet login <url> --api-key -`.
+A `valet login` CLI token is an agent credential. It can answer a question,
+but it cannot approve a request or change a policy, because the onboarding
+has a coding agent run `valet login`. Approve in the browser. To approve from
+a terminal, create a key in Settings > API keys and log in with
+`valet login <url> --api-key -`.
 
 ### `valet status`
 
 Instance health plus client/server version skew. Skew is a warning
 (stderr in human mode, a `skew` boolean in `--json`), not a failure.
 
-### `valet mcp setup [claude-code] [--print] [--token <bearer>] [--name <n>]`
+### `valet mcp setup [claude-code|codex|cursor] [--project] [--print] [--token <bearer>] [--name <n>]`
 
-Wire a local agent to the instance's `/mcp` endpoint. For Claude Code, the
-command merges a streamable-HTTP server entry into the project-local
-`.mcp.json` and preserves everything else in the file. `--print` emits the
-config JSON to stdout for any agent instead of writing.
+Wire a local agent to the instance's `/mcp` endpoint, for every project:
+
+- `claude-code` (default) runs `claude mcp add --transport http --scope user`.
+  `--project` writes the project's `.mcp.json` instead.
+- `codex` runs `codex mcp add <name> --url <endpoint>`. Then run
+  `codex mcp login <name>`.
+- `cursor` merges the server into `~/.cursor/mcp.json`.
+
+`--print` emits the config JSON to stdout for any other agent, and writes
+nothing.
 
 The `/mcp` endpoint uses OAuth, not the `x-api-key` the other commands use.
-It is mounted only when the instance runs real auth. Without `--token`, the
-written entry carries only the endpoint URL. Claude Code then signs in through
-the instance's OAuth flow the first time it connects: it opens a browser login
-and stores the token. If the browser does not open, run `/mcp` in Claude Code
-and choose Authenticate. With `--token <bearer>`, the entry embeds an
-`Authorization` header for a client that cannot run OAuth, and the file is
-written with owner-only permissions (`0600`).
+It is mounted only when the instance runs real auth. The entry carries only
+the endpoint URL. The agent signs in through the instance's OAuth flow, and
+the person approves the app on Valet's consent page. In Claude Code, restart
+it, run `/mcp`, and choose Authenticate. Disconnect an app in Settings > Agent
+access. With `--token <bearer>`, the command writes `./.mcp.json` with an
+`Authorization` header for a client that cannot run OAuth, with owner-only
+permissions (`0600`).
 
 The MCP tools let a local agent delegate work and follow it. See
 [MCP agent tools](./specs/2026-10-07-mcp-agent-tools-design.md).

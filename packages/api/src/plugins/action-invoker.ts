@@ -115,7 +115,7 @@ export interface ActionInvocationContext {
    * agent does (`appliesIn: "session"`), so the policy hierarchy is inherited,
    * and it writes an audit row keyed `pol:ext:{invocationId}:{attempt}`. `client` names
    * the caller in the row's `caller` column: `mcp:<OAuth client id>`, or the
-   * credential type (`agentKey`, `apiKey`, `session`).
+   * credential type (`cli`, `apiKey`, `session`).
    */
   external?: {
     client: string;

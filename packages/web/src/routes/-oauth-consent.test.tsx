@@ -8,6 +8,8 @@ vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (options: unknown) => ({ options, useSearch: () => ({}) }),
 }));
 
+vi.mock("~/lib/auth-client", () => ({ authClient: { signOut: vi.fn() } }));
+
 const oauthConsent = vi.fn<(code: string) => Promise<OAuthConsentInfo>>();
 const decideOAuthConsent = vi.fn<(code: string, accept: boolean) => Promise<{ redirect: string }>>();
 vi.mock("~/api/client", () => ({

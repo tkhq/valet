@@ -22,7 +22,15 @@ export interface ServeConfig {
 
 export interface ProfileConfig {
   url: string;
+  /** An API key from Settings (`valet login --api-key`). */
   apiKey?: string;
+  /** A `valet login` device sign-in (`cli/device-login.ts`). Times are epoch ms. */
+  cli?: {
+    accessToken: string;
+    refreshToken: string;
+    accessExpiresAt: number;
+    refreshExpiresAt: number;
+  };
 }
 
 export interface ValetConfig {

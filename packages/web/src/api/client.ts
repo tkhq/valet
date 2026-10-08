@@ -530,13 +530,13 @@ export const api = {
     request<import("@valet/api/wire").OAuthConsentInfo>("GET", `/oauth/consent?consent_code=${encodeURIComponent(consentCode)}`),
   decideOAuthConsent: (consentCode: string, accept: boolean) =>
     request<import("@valet/api/wire").OAuthConsentDecision>("POST", "/oauth/consent", { consent_code: consentCode, accept }),
-  cliLogin: (params: { redirectUri: string; codeChallenge: string; device: string }) =>
-    request<import("@valet/api/wire").CliLoginInfo>(
-      "GET",
-      `/cli/login?${new URLSearchParams({ redirect_uri: params.redirectUri, code_challenge: params.codeChallenge, device: params.device }).toString()}`,
-    ),
-  decideCliLogin: (body: { redirect_uri: string; code_challenge: string; state: string; device: string; accept: boolean }) =>
-    request<import("@valet/api/wire").CliLoginDecision>("POST", "/cli/login", body),
+  cliDevice: (userCode: string) =>
+    request<import("@valet/api/wire").CliDeviceInfo>("GET", `/cli/device?user_code=${encodeURIComponent(userCode)}`),
+  decideCliDevice: (userCode: string, accept: boolean) =>
+    request<{ ok: true }>("POST", "/cli/device", { user_code: userCode, accept }),
+  agentAccess: () => request<import("@valet/api/wire").AgentAccessResponse>("GET", "/me/agent-access"),
+  disconnectMcpApp: (clientId: string) => request<{ ok: true }>("DELETE", `/me/agent-access/mcp/${encodeURIComponent(clientId)}`),
+  disconnectCliDevice: (id: string) => request<{ ok: true }>("DELETE", `/me/agent-access/cli/${encodeURIComponent(id)}`),
   productAnnouncements: () => request<import("@valet/api/wire").ProductAnnouncementsResponse>("GET", "/product-announcements"),
   acknowledgeProductAnnouncement: (id: string) => request<{ acknowledged: true }>("POST", `/product-announcements/${encodeURIComponent(id)}/acknowledge`),
   listTeamDeletionRequests: (teamId: string, options: ListTeamDeletionRequestsParams = {}) => {

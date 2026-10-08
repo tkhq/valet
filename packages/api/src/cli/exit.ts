@@ -20,6 +20,8 @@
  */
 export enum ExitCode {
   OK = 0,
+  /** A step outside Valet failed, e.g. another agent's CLI. */
+  Failure = 1,
   Usage = 2,
   GatePending = 3,
   TurnError = 4,
