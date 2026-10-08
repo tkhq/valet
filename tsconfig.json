@@ -48,6 +48,7 @@
     { "path": "./packages/plugin-sandbox-tunnels" },
     { "path": "./packages/plugin-assistants" },
     { "path": "./packages/plugin-memory" },
+    { "path": "./packages/plugin-native-documents" },
     { "path": "./packages/plugin-security" },
     { "path": "./packages/sandbox-gateway" },
     { "path": "./packages/api" },

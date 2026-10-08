@@ -391,6 +391,13 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "generated file reservations", probe: { kind: "table", table: "generated_files" }, sql: `CREATE TABLE "generated_files" (
+  "id" text PRIMARY KEY, "org_id" text NOT NULL, "session_id" text NOT NULL,
+  "thread_id" text NOT NULL, "digest" text NOT NULL, "name" text NOT NULL,
+  "mime_type" text NOT NULL, "bytes" bigint NOT NULL, "ready" boolean NOT NULL DEFAULT false,
+  "created_at" bigint NOT NULL
+)` },
+  { describe: "generated file deduplication", probe: { kind: "index", index: "generated_files_scope_digest" }, sql: "CREATE UNIQUE INDEX generated_files_scope_digest ON generated_files (org_id, session_id, thread_id, digest)" },
   { describe: "product announcements", probe: { kind: "table", table: "product_announcements" }, sql: `CREATE TABLE "product_announcements" (
   "id" text PRIMARY KEY, "activated_at" bigint NOT NULL
 );

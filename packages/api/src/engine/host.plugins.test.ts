@@ -141,7 +141,7 @@ describe("EngineHost + plugin extras", () => {
     const toolNames = (child.options.tools ?? []).map((t) => t.name);
     // `skill` joins the catalog tools whenever the plugin set ships a skill
     // (see `plugins/skill-tool.ts`).
-    expect(toolNames.sort()).toEqual(["call_tool", "list_tools", "skill"]);
+    expect(toolNames.sort()).toEqual(["call_tool", "file_attach", "list_tools", "skill"]);
     expect(child.options.skills?.map((s) => s.name)).toEqual(["demo-skill"]);
     expect(child.options.roles?.map((r) => r.name)).toEqual(["demo-role"]);
   });
@@ -287,7 +287,7 @@ describe("EngineHost + plugin extras", () => {
     });
 
     expectPromptToolConsistency(session);
-    expect(session.options.tools?.map((tool) => tool.name)).toEqual(["list_tools", "call_tool", "skill"]);
+    expect(session.options.tools?.map((tool) => tool.name)).toEqual(["list_tools", "call_tool", "skill", "file_attach"]);
     const nativeResult = await listTools(session, stubCredentials, "thread");
     expect(nativeResult).toContain("list_threads, thread_read");
     expect(session.options.skills).toBeUndefined();

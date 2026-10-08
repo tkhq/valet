@@ -2843,3 +2843,18 @@ export const productAnnouncementAcknowledgements = pgTable("product_announcement
   userId: text("user_id").notNull(),
   acknowledgedAt: bigint("acknowledged_at", { mode: "number" }).notNull(),
 }, (t) => [primaryKey({ columns: [t.announcementId, t.userId] })]);
+
+
+/** Charged before BlobStore writes; pending rows also consume retention capacity. */
+export const generatedFiles = pgTable("generated_files", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  digest: text("digest").notNull(),
+  name: text("name").notNull(),
+  mimeType: text("mime_type").notNull(),
+  bytes: bigint("bytes", { mode: "number" }).notNull(),
+  ready: boolean("ready").notNull().default(false),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+}, t => [uniqueIndex("generated_files_scope_digest").on(t.orgId, t.sessionId, t.threadId, t.digest)]);
