@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import type { ReactNode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, type InfiniteData } from "@tanstack/react-query";
 import type { ListThreadsResponse } from "@valet/api/wire";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./client";
-import { qk, useSendPrompt, useSetThreadModel } from "./queries";
+import { qk, useMarkThreadsRead, useSendPrompt, useSetThreadModel } from "./queries";
 
 const sessionId = "session-1";
 
@@ -90,5 +90,55 @@ describe("useSetThreadModel", () => {
     act(() => result.current.mutate({ threadId: "chosen", model: "l" }));
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(client.getQueryData<ListThreadsResponse>(qk.threads(sessionId))?.threads[0]?.model).toBe("s");
+  });
+});
+
+describe("useSidebarThreads", () => {
+  afterEach(() => vi.restoreAllMocks());
+  it("requests ten rows, retains rows after an error, retries, and isolates workspace pages", async () => {
+    const { useSidebarThreads } = await import("./queries");
+    const row = { id: "one", sessionId, createdAt: 1, lastUserActivityAt: 1 };
+    const list = vi.spyOn(api, "listThreads")
+      .mockResolvedValueOnce({ threads: [row], nextCursor: "next" })
+      .mockRejectedValueOnce(new Error("network"))
+      .mockResolvedValueOnce({ threads: [row, { ...row, id: "two" }] })
+      .mockResolvedValueOnce({ threads: [{ ...row, id: "team", sessionId: "team" }] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result, rerender } = renderHook(({ id }) => useSidebarThreads(id, { sort: "created", origin: "all", fixedIds: [] }), { wrapper, initialProps: { id: sessionId } });
+    await waitFor(() => expect(result.current.data?.threads).toHaveLength(1));
+    expect(list).toHaveBeenNthCalledWith(1, sessionId, { sort: "created", origin: "all", fixedIds: [], limit: 10, cursor: undefined });
+    await act(() => result.current.fetchNextPage());
+    await waitFor(() => expect(result.current.isFetchNextPageError).toBe(true));
+    expect(result.current.data?.threads).toEqual([row]);
+    await act(() => result.current.fetchNextPage());
+    await waitFor(() => expect(result.current.data?.threads).toHaveLength(2));
+    expect(list.mock.calls[2]?.[1]?.cursor).toBe("next");
+    rerender({ id: "team" });
+    expect(result.current.data).toBeUndefined();
+    await waitFor(() => expect(result.current.data?.threads[0]?.id).toBe("team"));
+    client.clear();
+  });
+});
+
+describe("paged thread read state", () => {
+  afterEach(() => vi.restoreAllMocks());
+  it("marks loaded workspace pages without marking sibling execution sessions read", async () => {
+    vi.spyOn(api, "markThreadsRead").mockResolvedValue(undefined);
+    const client = new QueryClient();
+    const row = { id: "one", sessionId, createdAt: 1, lastUserActivityAt: 1 };
+    const key = qk.threadPages(sessionId);
+    client.setQueryData<InfiniteData<ListThreadsResponse>>(key, { pages: [{ threads: [row] }], pageParams: [undefined] });
+    client.setQueryData<InfiniteData<ListThreadsResponse>>(qk.threadPages("root"), {
+      pages: [{ threads: [row, { ...row, id: "sibling", sessionId: "sibling" }] }], pageParams: [undefined],
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => useMarkThreadsRead(sessionId), { wrapper });
+    await act(() => result.current.mutateAsync({}));
+    expect(client.getQueryData<InfiniteData<ListThreadsResponse>>(key)?.pages[0]?.threads[0]?.readAt).toBeGreaterThan(0);
+    const embedded = client.getQueryData<InfiniteData<ListThreadsResponse>>(qk.threadPages("root"))?.pages[0]?.threads;
+    expect(embedded?.[0]?.readAt).toBeGreaterThan(0);
+    expect(embedded?.[1]?.readAt).toBeUndefined();
+    client.clear();
   });
 });

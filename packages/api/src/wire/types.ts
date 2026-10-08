@@ -988,6 +988,9 @@ export interface MarkThreadsReadRequest {
 
 export interface ListThreadsResponse {
   threads: ThreadSummary[];
+  nextCursor?: string;
+  defaultThreadId?: string;
+  originCounts?: Record<"all" | "chat" | "auto" | "channel" | "other", number>;
 }
 
 export interface CreateThreadRequest {

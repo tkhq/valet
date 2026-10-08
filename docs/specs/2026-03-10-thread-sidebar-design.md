@@ -98,3 +98,17 @@ ChatContainer (orchestrator)
 - Web, Slack, and Telegram user prompts update the server-derived timestamp. Agent-driven submissions do not update it.
 - Timestamp writes are monotonic. A durable WebSocket event updates every connected viewer after persistence.
 - Origin filters and the archived-thread section keep their existing order and behavior.
+
+### Progressive loading (2026-10-08, current web UI)
+
+- The current sidebar requests ten recent threads from the server. Scrolling to the end requests the next page.
+- A **Load more threads** button supports keyboard use. If a request fails, **Retry** keeps the rows already loaded.
+- The server applies authorization, archive state, origin filters, and sort order before it selects a page.
+- A cursor uses the sort timestamp, creation timestamp, and thread ID. Equal timestamps do not drop rows.
+- Pins, grouped project threads, pending approvals, the selected thread, and the implicit default remain available outside the recent page limit.
+- Search checks titles and persisted messages across authorized history. Project-name matches include assigned threads outside loaded pages.
+- Cache keys include the workspace runtime, sort, origin, selected thread, and fixed thread IDs. Workspace switches do not reuse another workspace's rows.
+- Live activity refreshes paged lists. Existing mutation updates support both single-page and infinite-query cache shapes.
+
+The first version scans authorized candidate metadata before paging. Activity and pull-request enrichment runs only for returned rows.
+This limits response size and enrichment work, but does not bound candidate metadata reads. Unpaged API callers and archived history keep their existing response behavior.

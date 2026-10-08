@@ -34,7 +34,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
   return {
     ...actual,
     useThreadSearch: () => ({ data: { threads: [] }, isFetching: false, isError: false }),
-    useThreads: () => ({
+    useSidebarThreads: () => ({
       data: { threads: [{ id: "thread-1", title: null, createdAt: Date.now() }] },
       isLoading: false,
       error: null,
