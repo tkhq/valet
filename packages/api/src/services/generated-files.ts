@@ -16,7 +16,18 @@ export function generatedFileKey(orgId: string, sessionId: string, threadId: str
   return `generated-files/${scope}/${fileId}`;
 }
 
-export function buildFileAttachTool(blobs: BlobStore): ToolDef {
+/** Accept only the host's configured origin, never a model argument or request header. */
+export function generatedFileOrigin(configuredUrl?: string): string | undefined {
+  if (!configuredUrl) return undefined;
+  try {
+    const url = new URL(configuredUrl);
+    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) return undefined;
+    return url.origin;
+  } catch { return undefined; }
+}
+
+export function buildFileAttachTool(blobs: BlobStore, configuredPublicUrl?: string): ToolDef {
+  const origin = generatedFileOrigin(configuredPublicUrl);
   const parameters = Type.Object({ path: Type.String({ description: "Absolute path of the completed file in the sandbox." }) });
   const tool: ToolDef<typeof parameters> = {
     name: "file_attach",
@@ -44,8 +55,8 @@ export function buildFileAttachTool(blobs: BlobStore): ToolDef {
           await blobs.delete(key);
           throw error;
         }
-        const url = `/api/sessions/${encodeURIComponent(ctx.sessionId)}/threads/${encodeURIComponent(ctx.threadId)}/files/${id}`;
-        return { text: JSON.stringify({ name, mimeType, bytes: bytes.byteLength, url }), ok: true };
+        const url = `${origin ?? ""}/api/sessions/${encodeURIComponent(ctx.sessionId)}/threads/${encodeURIComponent(ctx.threadId)}/files/${id}`;
+        return { text: JSON.stringify({ name, mimeType, bytes: bytes.byteLength, url, ...(!origin ? { deliveryNote: "This relative URL works in the Valet web app. For channel delivery, configure VALET_PUBLIC_URL and attach the file again." } : {}) }), ok: true };
       } catch {
         return { text: "Could not attach the file. Verify the file exists and retry file_attach.", ok: false };
       }

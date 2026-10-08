@@ -133,6 +133,7 @@ import {
 import securityPlugin from "@valet/plugin-security/plugin";
 import { codingSystemPrompt } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
+import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool } from "../services/generated-files.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
@@ -1478,7 +1479,7 @@ export class EngineHost {
       effectivePins,
       catalogOptions,
     );
-    if (this.opts.blobs) extras.tools.push(buildFileAttachTool(this.opts.blobs));
+    if (this.opts.blobs) extras.tools.push(buildFileAttachTool(this.opts.blobs, publicUrlFromEnv(process.env)));
     return extras;
   }
 

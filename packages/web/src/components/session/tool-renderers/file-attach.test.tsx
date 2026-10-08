@@ -21,6 +21,21 @@ describe("file download result", () => {
     expect(pickRenderer("file_attach")).toBe(fileAttachRenderer);
   });
 
+  it.each([
+    (url: string) => JSON.stringify({ ...file, url }),
+    (url: string) => ({ text: JSON.stringify({ ...file, url }) }),
+    (url: string) => ({ content: [{ type: "text", text: JSON.stringify({ ...file, url }) }] }),
+  ])("renders same-origin absolute links after persistence", wrap => {
+    const url = `${window.location.origin}${file.url}`;
+    const Body = fileAttachRenderer.Body;
+    render(<Body args={{}} result={wrap(url)} status="completed" toolName="file_attach" />);
+    expect(screen.getByRole("link").getAttribute("href")).toBe(url);
+  });
+
+  it.each(["https://other.test/api/sessions/s/threads/t/files/id", "https://user:pass@valet.test/api/sessions/s/threads/t/files/id", "/api/sessions/s/threads/t/files/id?redirect=evil", "/api/sessions/s/threads/t/files/id#evil"])("rejects untrusted download URLs: %s", url => {
+    expect(parseFileDownload({ text: JSON.stringify({ ...file, url }) }, "https://valet.test")).toBeNull();
+  });
+
   it.each(["javascript:alert(1)", "https://other.test/file", "//other.test/file", "/api/artifacts/share"])('does not turn %s into a download', (url) => {
     expect(parseFileDownload({ text: JSON.stringify({ ...file, url }) })).toBeNull();
   });

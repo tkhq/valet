@@ -2,12 +2,16 @@ import { Download } from "lucide-react";
 import { ToolBody } from "./tool-shell";
 import { resultText, structuredResult, type ToolRenderer } from "./types";
 
-export function parseFileDownload(result: unknown): { name: string; url: string } | null {
+export function parseFileDownload(result: unknown, origin = window.location.origin): { name: string; url: string } | null {
   const value = structuredResult(result);
   if (!value || typeof value !== "object" || !("name" in value) || !("url" in value)) return null;
   if (typeof value.name !== "string" || !value.name || typeof value.url !== "string") return null;
-  // Only the authenticated download endpoint can become a clickable file result.
-  if (!/^\/api\/sessions\/[^/?#]+\/threads\/[^/?#]+\/files\/[a-zA-Z0-9-]+$/.test(value.url)) return null;
+  // Only this app's authenticated download endpoint can become a clickable result.
+  if (!value.url.startsWith("/api/") && !/^https?:\/\//.test(value.url)) return null;
+  let url: URL;
+  try { url = new URL(value.url, origin); } catch { return null; }
+  if (url.origin !== origin || url.username || url.password || url.search || url.hash || value.url.startsWith("//")) return null;
+  if (!/^\/api\/sessions\/[^/?#]+\/threads\/[^/?#]+\/files\/[a-zA-Z0-9-]+$/.test(url.pathname)) return null;
   return { name: value.name, url: value.url };
 }
 

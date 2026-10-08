@@ -60,11 +60,34 @@ The agent must not substitute an HTML download page or flattened images for the 
 Storage keys include organization, session, and thread identifiers.
 The tool checks the upload size limit before reading and after reading.
 The returned URL points directly to `/api/sessions/:id/threads/:threadId/files/:fileId`.
+The host prefixes the configured public origin for links sent through Slack or other channels.
+The origin comes from `VALET_PUBLIC_URL`, or a public HTTPS `BETTER_AUTH_URL`.
+The tool does not accept an origin from model arguments or request headers.
+Without a configured public origin, links remain relative and work only in the Valet web app.
+The tool reports this limitation with instructions to configure `VALET_PUBLIC_URL`.
+Recipients must sign in to Valet and pass the existing download authorization checks.
+The web renderer accepts relative links and absolute links on its current origin.
 The route checks current session access and thread visibility before reading the snapshot.
 It sends an attachment disposition and prevents content sniffing and caching.
 Downloads do not wake a sandbox and remain available after the source file is removed.
 The chat renderer provides a Download link from live and persisted tool results.
 `artifact_publish` rejects native document paths and directs the agent to `file_attach`.
+
+### Storage lifetime
+
+Generated files use the host's existing `FsBlobStore`, as browser evidence does.
+Set `VALET_BLOBS_DIR` or `VALET_DATA_DIR` to retained storage outside the application release directory.
+The standard Helm API deployment currently mounts no persistent blob volume.
+Its default writable container storage does not retain downloads after pod replacement.
+Helm operators must supply persistent blob storage before promising downloads across API rollouts.
+A filesystem-store reopen test verifies retained bytes; it does not verify a deployment's storage configuration.
+
+Generated snapshots have no expiration, automatic garbage collection, or aggregate storage quota.
+They remain on disk until an operator removes them, including after session or thread deletion.
+Deleted sessions cannot authorize downloads, but their bytes are not automatically removed.
+Each attachment is limited to 50 MiB. Repeated attachments consume additional storage.
+This follows the existing browser-evidence storage lifetime; it does not establish bounded disk usage.
+Operators must plan retained capacity and monitor disk usage before enabling channel-driven document workflows.
 
 Deployment requires both the API bundle and rebuilt standard sandbox image.
 Existing sandboxes retain their previous image until replaced through the normal sandbox lifecycle.

@@ -6,7 +6,7 @@ import { eq, and, sql } from "drizzle-orm";
 import { agentSessions, teams, teamMembers } from "../schema/index.js";
 import { DEFAULT_MAX_UPLOAD_BYTES } from "@valet/shared";
 import { VirtualSandboxProvider, type Sandbox, type ToolContext } from "@valet/engine";
-import { buildFileAttachTool, generatedFileKey, readGeneratedFile } from "./generated-files.js";
+import { buildFileAttachTool, generatedFileKey, generatedFileOrigin, readGeneratedFile } from "./generated-files.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -39,17 +39,33 @@ async function testSandbox() {
 }
 
 describe("file_attach", () => {
+  it("uses only the configured public origin for channel links", async () => {
+    directory = await mkdtemp(join(tmpdir(), "generated-files-"));
+    const sandbox = await testSandbox();
+    await sandbox.writeBinary("/workspace/report.docx", bytes);
+    const ctx = { ...context(sandbox), channelType: "slack", config: { apiBaseUrl: "https://untrusted.example", publicUrl: "https://untrusted.example" } };
+    const result = await buildFileAttachTool(new FsBlobStore(directory), "https://valet.example/app?ignored=true").execute({ path: "/workspace/report.docx" }, ctx);
+    expect(parseOutput(result.text).url).toMatch(/^https:\/\/valet\.example\/api\/sessions\//);
+    const fallback = await buildFileAttachTool(new FsBlobStore(directory)).execute({ path: "/workspace/report.docx" }, ctx);
+    expect(parseOutput(fallback.text).url).toMatch(/^\/api\/sessions\//);
+    expect(fallback.text).toContain("configure VALET_PUBLIC_URL");
+  });
+
+  it.each(["javascript:alert(1)", "//other.example", "https://user:secret@other.example", "invalid"])("rejects unsafe configured origins: %s", value => {
+    expect(generatedFileOrigin(value)).toBeUndefined();
+  });
+
   it("retains exact binary bytes and metadata across store replacement and sandbox deletion", async () => {
     directory = await mkdtemp(join(tmpdir(), "generated-files-"));
     const blobs = new FsBlobStore(directory);
     const sandbox = await testSandbox();
     const path = '/workspace/revised résumé.docx';
     await sandbox.writeBinary(path, bytes);
-    const result = await buildFileAttachTool(blobs).execute({ path }, context(sandbox));
+    const result = await buildFileAttachTool(blobs, "https://valet.example").execute({ path }, context(sandbox));
     expect(result.ok).toBe(true);
     const output = parseOutput(result.text);
     expect(output).toMatchObject({ name: "revised résumé.docx", bytes: bytes.length, mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
-    expect(output.url).toMatch(/^\/api\/sessions\/session\/threads\/thread\/files\/[\da-f-]+$/);
+    expect(output.url).toMatch(/^https:\/\/valet\.example\/api\/sessions\/session\/threads\/thread\/files\/[\da-f-]+$/);
     await sandbox.rm(path);
     const reopened = new FsBlobStore(directory);
     const id = output.url.split("/").at(-1);
@@ -86,22 +102,22 @@ describe("file_attach", () => {
     const thread = await session.ensureDefaultThread();
     const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 30_000 });
     await sandbox.writeBinary("/workspace/revised.docx", bytes);
-    const result = await buildFileAttachTool(api.providers.blobs).execute({ path: "/workspace/revised.docx" }, context(sandbox, id, thread.id));
+    const result = await buildFileAttachTool(api.providers.blobs, api.baseUrl).execute({ path: "/workspace/revised.docx" }, context(sandbox, id, thread.id));
     expect(result.ok).toBe(true);
     const output = parseOutput(result.text);
     const privateThread = await session.createThread("app-assistant:test-member");
-    const privateResult = await buildFileAttachTool(api.providers.blobs).execute({ path: "/workspace/revised.docx" }, context(sandbox, id, privateThread.id));
+    const privateResult = await buildFileAttachTool(api.providers.blobs, api.baseUrl).execute({ path: "/workspace/revised.docx" }, context(sandbox, id, privateThread.id));
     const privateOutput = parseOutput(privateResult.text);
     await session.attachment.destroy();
-    const downloaded = await fetch(`${api.baseUrl}${output.url}`);
+    const downloaded = await fetch(output.url);
     expect(downloaded.status).toBe(200);
     expect(downloaded.headers.get("content-type")).toBe("application/vnd.openxmlformats-officedocument.wordprocessingml.document");
     expect(downloaded.headers.get("content-disposition")).toContain('attachment; filename="revised.docx"');
     expect(downloaded.headers.get("x-content-type-options")).toBe("nosniff");
     expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(bytes);
-    expect((await fetch(`${api.baseUrl}${output.url}`, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(404);
+    expect((await fetch(output.url, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(404);
     const other = await session.createThread("other");
-    expect((await fetch(`${api.baseUrl}${output.url.replace(thread.id, other.id)}`)).status).toBe(404);
+    expect((await fetch(output.url.replace(thread.id, other.id))).status).toBe(404);
     const { db } = api.providers;
     await db.insert(teams).values({ id: "download-team", orgId: "local-org", name: "Documents", createdAt: Date.now() });
     await db.insert(teamMembers).values([
@@ -110,10 +126,10 @@ describe("file_attach", () => {
     ]);
     await db.update(agentSessions).set({ ownerType: "team", ownerId: "download-team" }).where(eq(agentSessions.id, id));
     await db.execute(sql`UPDATE engine_sessions SET owner_type = 'team', owner_id = 'download-team' WHERE id = ${id}`);
-    expect((await fetch(`${api.baseUrl}${output.url}`)).status).toBe(200);
-    expect((await fetch(`${api.baseUrl}${privateOutput.url}`)).status).toBe(404);
+    expect((await fetch(output.url)).status).toBe(200);
+    expect((await fetch(privateOutput.url)).status).toBe(404);
     await db.delete(teamMembers).where(and(eq(teamMembers.teamId, "download-team"), eq(teamMembers.userId, "local-user")));
-    expect((await fetch(`${api.baseUrl}${output.url}`)).status).toBe(404);
+    expect((await fetch(output.url)).status).toBe(404);
 
   });
 });
