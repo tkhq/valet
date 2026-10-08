@@ -24,10 +24,12 @@ import {
   buildActionInvoker,
   discoverServiceActions,
   externalActionMode,
+  externalServiceRefusal,
   findAction,
   qualifiedActionId,
   recordAttemptAudit,
   sharedAccountApprover,
+  VALET_INTERNAL_SERVICES,
   type ActionInvocationContext,
   type ActionInvokerOpts,
   type ServiceActions,
@@ -133,7 +135,9 @@ actionsRouter.get("/", async (c) => {
   const serviceFilter = c.req.query("service");
   const query = c.req.query("q")?.trim().toLowerCase();
   const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 25) || 25, 1), 100);
-  const services = serviceFilter ? [serviceFilter] : [...opts.actionPluginByService.keys()];
+  // Valet's own services are not brokered to agents (`VALET_INTERNAL_SERVICES`).
+  const services = (serviceFilter ? [serviceFilter] : [...opts.actionPluginByService.keys()])
+    .filter((service) => !VALET_INTERNAL_SERVICES.has(service));
   const listed = await Promise.all(services.map((service) =>
     withTimeout(discoverCached(opts, ctx, service), DISCOVERY_TIMEOUT_MS, { service, unavailable: "Tool discovery timed out. Try again, or filter by service." })));
 
@@ -146,6 +150,8 @@ actionsRouter.get("/", async (c) => {
 });
 
 async function loadTool(c: Context<AppEnv>, ctx: ActionInvocationContext, toolId: string) {
+  const refused = externalServiceRefusal(toolId.split(".")[0] ?? "");
+  if (refused) return { error: refused };
   const parsed = parseToolId(c, toolId);
   if (!parsed) return { error: `Unknown tool "${toolId}". Use search_tools to find a tool_id.` };
   const opts = invokerOpts(c);

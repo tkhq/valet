@@ -313,12 +313,30 @@ export async function recordAttemptAudit(
   });
 }
 
+/**
+ * Services that change Valet itself rather than an integration: workflows
+ * and their schedules, skills, event subscriptions, and profile pictures.
+ * An external agent cannot call them through the broker
+ * (`ActionInvocationContext.external`): it could install a schedule that
+ * keeps prompting the person's assistant after the agent is disconnected.
+ * Valet's own assistant still uses them inside a thread.
+ */
+export const VALET_INTERNAL_SERVICES: ReadonlySet<string> = new Set(["workflows", "skills", "events", "profile_pictures"]);
+
+export function externalServiceRefusal(service: string): string | undefined {
+  return VALET_INTERNAL_SERVICES.has(service)
+    ? `${service} tools change Valet itself, so agents cannot call them through the tool broker. Ask the person to make the change in Valet.`
+    : undefined;
+}
+
 async function computeResult(
   opts: ActionInvokerOpts,
   req: WorkflowInvokeActionRequest,
   ctx: ActionInvocationContext,
   audit: AuditTrack,
 ): Promise<WorkflowInvokeActionResult> {
+  const refused = ctx.external ? externalServiceRefusal(req.service) : undefined;
+  if (refused) return { ok: false, error: refused };
   const entry = opts.actionPluginByService.get(req.service);
   if (!entry) return unknownAction(req);
 

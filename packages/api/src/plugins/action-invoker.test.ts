@@ -815,6 +815,17 @@ describe("buildActionInvoker", () => {
     expect(fixture.calls()).toBe(1);
   });
 
+  it("refuses an external call to a service that changes Valet itself", async () => {
+    const fixture = countingAction();
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("workflows", { service: "workflows", actions: [fixture.action] }) });
+    const result = await invoke(
+      { service: "workflows", action: "ping", params: {}, invocationId: "ext:u:user:u:workflows.ping:d:k" },
+      { userId: "u", orgId: "org1", owner: { type: "user", id: "u" }, external: { client: "cli", attempt: "a1" } },
+    );
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("change Valet itself") });
+    expect(fixture.calls()).toBe(0);
+  });
+
   it("external call for a team: names the member whose shared account it needs, and never borrows it", async () => {
     const db = await makeDb();
     await db.insert(teams).values({ id: "t1", orgId: "org1", name: "Team", createdAt: 1 });

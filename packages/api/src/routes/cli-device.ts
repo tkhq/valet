@@ -18,7 +18,7 @@
  * a hash, and works once.
  */
 import { createHash, randomBytes, randomInt } from "node:crypto";
-import { and, count, eq, gt, lt } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray, lt } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { mintCliToken, refreshCliToken, revokeCliToken } from "../auth/cli-tokens.js";
 import type { AppEnv } from "../env.js";
@@ -35,8 +35,13 @@ export const POLL_INTERVAL_S = 5;
 const MAX_DEVICE_LENGTH = 64;
 /** Sign-ins one client may start per minute. */
 const STARTS_PER_MINUTE = 10;
-/** Live sign-ins the instance holds at once. More would only come from a flood. */
-const MAX_WAITING = 1_000;
+/**
+ * Waiting sign-ins the instance keeps. When the table is full, a new
+ * sign-in evicts the oldest one nobody approved, instead of refusing every
+ * new login: a flood then shortens how long an old code waits, but it
+ * cannot lock everyone out.
+ */
+const MAX_WAITING = 10_000;
 /** No vowels or look-alike characters, so a code cannot spell a word or be misread. */
 const USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
 
@@ -107,9 +112,21 @@ function isProxyAddress(address: string): boolean {
 }
 
 export function clientKey(peer: string | undefined, forwardedFor: string | undefined): string {
-  if (peer && !isProxyAddress(peer)) return peer;
+  if (peer && !isProxyAddress(peer)) return addressBlock(peer);
   const hops = (forwardedFor ?? "").split(",").map((h) => h.trim()).filter(Boolean);
-  return hops[hops.length - 1] ?? peer ?? "unknown";
+  const last = hops[hops.length - 1];
+  return last ? addressBlock(last) : peer ?? "unknown";
+}
+
+/** An IPv6 address as its /64 block: one client usually holds a whole /64. IPv4 stays as is. */
+function addressBlock(address: string): string {
+  const a = address.replace(/^::ffff:/, "");
+  if (!a.includes(":")) return a;
+  const [head = "", tail = ""] = a.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = a.includes("::") ? [...left, ...Array(8 - left.length - right.length).fill("0"), ...right] : left;
+  return `${groups.slice(0, 4).map((g) => g.toLowerCase().replace(/^0+(?=.)/, "")).join(":")}::/64`;
 }
 
 function allowStart(key: string, now: number): boolean {
@@ -147,7 +164,10 @@ export function cliDevicePublicRouter(db: AppDb): Hono<AppEnv> {
     await db.delete(cliDeviceRequests).where(lt(cliDeviceRequests.expiresAt, now));
     const [{ waiting }] = await db.select({ waiting: count() }).from(cliDeviceRequests);
     if (waiting >= MAX_WAITING) {
-      return c.json({ error: "temporarily_unavailable", error_description: "Too many sign-ins are waiting. Try `valet login` again in a few minutes." }, 503);
+      // Evict the oldest sign-ins nobody approved to make room.
+      const oldest = await db.select({ hash: cliDeviceRequests.deviceCodeHash }).from(cliDeviceRequests)
+        .where(eq(cliDeviceRequests.status, "pending")).orderBy(asc(cliDeviceRequests.createdAt)).limit(waiting - MAX_WAITING + 1);
+      if (oldest.length > 0) await db.delete(cliDeviceRequests).where(inArray(cliDeviceRequests.deviceCodeHash, oldest.map((r) => r.hash)));
     }
     const deviceCode = randomBytes(32).toString("base64url");
     let userCode = "";

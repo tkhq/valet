@@ -86,7 +86,9 @@ already chose Allow, it finishes at once. An agent uses this when its
 commands cannot run for minutes. Other ways to log in:
 
 - `--api-key vlt_...` uses a key you already have, for scripts and CI.
-- `--api-key -` reads a key from a hidden prompt or stdin.
+- `--api-key -` reads a key from a hidden prompt or stdin. Without a flag,
+  a key piped on stdin (`printf %s "$KEY" | valet login <url>`) is still
+  used. A pipe with no data within half a second counts as none.
 - An instance with stub auth (`VALET_LOCAL_AUTH=1`) needs no key.
 
 `login` verifies the credential against the instance before it persists

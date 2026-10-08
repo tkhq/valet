@@ -10,7 +10,8 @@
  *   1. `--api-key <key>`: use that key (scripts and CI).
  *   2. `--api-key -`: read a key from stdin, or from a hidden prompt on a TTY.
  *   3. `--api-key=` or a bare `--api-key`: keyless, for a local stub instance.
- *   4. Otherwise: keyless if the instance runs stub auth, else device sign-in
+ *   4. No flag, but a key piped on stdin: use that key, as older versions did.
+ *   5. Otherwise: keyless if the instance runs stub auth, else device sign-in
  *      (`cli/device-login.ts`): the person enters a code in a browser on any
  *      computer, and the CLI gets a CLI token pair. No API key is created.
  *
@@ -43,6 +44,8 @@ export interface LoginDeps {
   makeClient(opts: { url: string; apiKey?: string }): LoginClient;
   /** Read a secret interactively (hidden TTY) or from stdin; `undefined` = keyless. */
   readSecret(): Promise<string | undefined>;
+  /** A key piped on stdin with no flag (`printf %s "$KEY" | valet login <url>`), or undefined. Never waits on a terminal. */
+  pipedKey(): Promise<string | undefined>;
   /** `GET /api/auth-config`: whether the instance runs stub auth (no credential needed). */
   authConfig(url: string): Promise<Pick<AuthConfigResponse, "stub">>;
   /** Start a device sign-in (`POST /api/cli/device/code`). */
@@ -113,8 +116,12 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
     if (key !== undefined) profile = { url, apiKey: key };
   } else if (!fromFlags) {
     const base = url.replace(/\/$/, "");
-    const { stub } = await deps.authConfig(base);
-    if (!stub) {
+    const piped = await deps.pipedKey();
+    const { stub } = piped === undefined ? await deps.authConfig(base) : { stub: true };
+    if (piped !== undefined) {
+      profile = { url, apiKey: piped };
+      printErr("valet login: using the API key from stdin. Pass --api-key - to make that explicit.");
+    } else if (!stub) {
       const outcome = await signInWithDevice(deps, flags, config, name, url);
       if (typeof outcome === "number") return outcome;
       profile = outcome;
@@ -213,6 +220,41 @@ async function signInWithDevice(
   };
 }
 
+/**
+ * A key piped on stdin. A pipe that brings no data within PIPE_WAIT_MS (an
+ * agent's tool runner often leaves stdin open and empty) counts as none, so
+ * the device sign-in starts instead of hanging.
+ */
+const PIPE_WAIT_MS = 500;
+
+async function pipedKey(): Promise<string | undefined> {
+  if (process.stdin.isTTY) return undefined;
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    let settled = false;
+    const finish = (value: string | undefined): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      process.stdin.removeListener("data", onData);
+      process.stdin.removeListener("end", onEnd);
+      process.stdin.pause();
+      resolve(value);
+    };
+    const onData = (chunk: Buffer | string): void => {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+      clearTimeout(timer); // Data arrived: wait for the end of the pipe.
+    };
+    const onEnd = (): void => {
+      const text = Buffer.concat(chunks).toString("utf8").trim();
+      finish(text === "" ? undefined : text);
+    };
+    const timer = setTimeout(() => finish(undefined), PIPE_WAIT_MS);
+    process.stdin.on("data", onData);
+    process.stdin.once("end", onEnd);
+  });
+}
+
 async function readSecret(): Promise<string | undefined> {
   if (!process.stdin.isTTY) {
     const raw = (await readAllStdin()).trim();
@@ -272,6 +314,7 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
   const deps: LoginDeps = {
     makeClient: (opts) => new InstanceClient(opts),
     readSecret,
+    pipedKey,
     authConfig,
     startDevice: (url) => startDeviceLogin(url),
     pollDevice: (pending) => pollDeviceLogin(pending),

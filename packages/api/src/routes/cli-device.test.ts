@@ -14,7 +14,7 @@ import { AuthError } from "../cli/exit.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
 import { clearDeviceStartLimits, clientKey } from "./cli-device.js";
-import { actionInvocations, oauthAccessToken, oauthApplication, workflowActionGrants } from "../schema/index.js";
+import { actionInvocations, cliDeviceRequests, oauthAccessToken, oauthApplication, workflowActionGrants } from "../schema/index.js";
 
 let api: TestApi | undefined;
 let faux: FauxProviderRegistration | undefined;
@@ -362,5 +362,45 @@ describe("valet login device sign-in", () => {
     expect(clientKey("10.0.0.7", "9.9.9.9, 198.51.100.2")).toBe("198.51.100.2");
     expect(clientKey("::ffff:127.0.0.1", "198.51.100.3")).toBe("198.51.100.3");
     expect(clientKey("127.0.0.1", undefined)).toBe("127.0.0.1");
+    // One IPv6 /64 is one client, however many addresses it rotates through.
+    expect(clientKey("2001:db8:1:2::a", undefined)).toBe(clientKey("2001:db8:1:2:ffff:1:2:3", undefined));
+    expect(clientKey("2001:db8:1:2::a", undefined)).not.toBe(clientKey("2001:db8:1:3::a", undefined));
+  });
+
+  it("evicts the oldest waiting sign-in when the table is full, instead of refusing every new login", async () => {
+    const { testApi, base } = await setup();
+    const now = Date.now();
+    const rows = Array.from({ length: 10_000 }, (_, i) => ({
+      deviceCodeHash: `flood-${i}`, userCode: `FLOOD-${String(i).padStart(5, "0")}`, device: "x",
+      createdAt: now - 60_000 + i, expiresAt: now + 600_000,
+    }));
+    for (let i = 0; i < rows.length; i += 2_000) await testApi.providers.db.insert(cliDeviceRequests).values(rows.slice(i, i + 2_000));
+    const fresh = await fetch(`${base}/api/cli/device/code`, { method: "POST", headers: { "Content-Type": "application/json", "X-Forwarded-For": "198.51.100.77" }, body: "{}" });
+    expect(fresh.status).toBe(200);
+    const remaining = await testApi.providers.db.select({ hash: cliDeviceRequests.deviceCodeHash }).from(cliDeviceRequests);
+    expect(remaining).toHaveLength(10_000);
+    expect(remaining.some((r) => r.hash === "flood-0")).toBe(false);
+  });
+
+  it("keeps Valet's own services (workflows, skills, events) out of the tool broker for agents", async () => {
+    // A stand-in for the built-in workflows plugin, so search would list it if the filter failed.
+    const saveWorkflow: PluginAction = {
+      id: "workflows.save_workflow", name: "save_workflow", description: "Save a workflow.", riskLevel: "low",
+      parameters: Type.Object({ name: Type.Optional(Type.String()) }),
+      execute: async () => ({ success: true, data: { saved: true } }),
+    };
+    const workflowsStandIn: ValetPlugin = { name: "workflows-stand-in", version: "0.0.1", actions: [{ service: "workflows", actions: [saveWorkflow] }] };
+    const { base, cookie } = await setup({ plugins: [workflowsStandIn] });
+    const cliToken = (await signIn(base, cookie).run).access_token;
+    const headers = { "x-api-key": cliToken, "Content-Type": "application/json" };
+    const search = (await (await fetch(`${base}/api/actions?limit=200`, { headers })).json()) as { tools: Array<{ tool_id: string }> };
+    expect(search.tools.some((t) => /^(workflows|skills|events|profile_pictures)\./.test(t.tool_id))).toBe(false);
+    const describe = await fetch(`${base}/api/actions/workflows.save_workflow`, { headers });
+    expect(describe.status).toBe(404);
+    expect(await describe.text()).toContain("change Valet itself");
+    // The reviewer's repro: create a workflow through the broker.
+    const invoke = await fetch(`${base}/api/actions/workflows.save_workflow/invoke`, { method: "POST", headers, body: JSON.stringify({ params: { name: "x" } }) });
+    expect(invoke.status).toBe(404);
+    expect(await invoke.text()).toContain("change Valet itself");
   });
 });

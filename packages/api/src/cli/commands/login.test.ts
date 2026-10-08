@@ -64,6 +64,7 @@ function okDeps(overrides: Partial<LoginDeps> = {}): {
       return Promise.resolve("vlt_prompted");
     },
     authConfig: () => Promise.resolve({ stub: false }),
+    pipedKey: () => Promise.resolve(undefined),
     startDevice: (url: string) => Promise.resolve({ ...PENDING, url }),
     pollDevice: () => Promise.resolve(TOKENS),
     openUrl: () => Promise.resolve(true),
@@ -151,6 +152,7 @@ describe("runLogin", () => {
       },
       readSecret: () => Promise.resolve(undefined),
       authConfig: () => Promise.resolve({ stub: false }),
+      pipedKey: () => Promise.resolve(undefined),
       startDevice: (url: string) => Promise.resolve({ ...PENDING, url }),
       pollDevice: () => Promise.resolve(TOKENS),
       openUrl: () => Promise.resolve(true),
@@ -248,6 +250,16 @@ describe("runLogin", () => {
     expect(saved.profiles?.b?.cli?.accessToken).toBe("vltc_access");
   });
 
+  it("uses a key piped on stdin without a flag, as older versions did, and starts no device sign-in", async () => {
+    const starts = vi.fn((url: string) => Promise.resolve({ ...PENDING, url }));
+    const { deps, built } = okDeps({ pipedKey: () => Promise.resolve("vlt_piped"), startDevice: starts });
+    expect(await runLogin(deps, parseGlobalFlags(["https://valet.example.com"]), {})).toBe(ExitCode.OK);
+    expect(starts).not.toHaveBeenCalled();
+    expect(built).toEqual([{ url: "https://valet.example.com", apiKey: "vlt_piped" }]);
+    expect(stderr()).toContain("--api-key -");
+    expect(stderr()).not.toContain("vlt_piped");
+  });
+
   it("signs out the device sign-in a new login replaces", async () => {
     const revoked: string[] = [];
     const { deps } = okDeps({ revoke: (_url, token) => {
@@ -316,6 +328,7 @@ describe("runLogin", () => {
       }),
       readSecret: () => Promise.resolve(undefined),
       authConfig: () => Promise.resolve({ stub: false }),
+      pipedKey: () => Promise.resolve(undefined),
       startDevice: (url: string) => Promise.resolve({ ...PENDING, url }),
       pollDevice: () => Promise.resolve(TOKENS),
       openUrl: () => Promise.resolve(true),
@@ -334,6 +347,7 @@ describe("runLogin", () => {
       }),
       readSecret: () => Promise.resolve(undefined),
       authConfig: () => Promise.resolve({ stub: false }),
+      pipedKey: () => Promise.resolve(undefined),
       startDevice: (url: string) => Promise.resolve({ ...PENDING, url }),
       pollDevice: () => Promise.resolve(TOKENS),
       openUrl: () => Promise.resolve(true),
