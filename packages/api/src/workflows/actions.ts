@@ -146,7 +146,17 @@ export function formatEditLintErrors(blocking: string[], preExisting: string[], 
   );
 }
 
+/**
+ * The workflow owner for an assistant tool call. The assistant is an agent
+ * (`WorkflowOwner.agentEditor`): a step change it makes revokes the
+ * workflow's grants.
+ */
 export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null {
+  const owner = ownerFromContextUnmarked(ctx);
+  return owner ? { ...owner, agentEditor: true } : null;
+}
+
+function ownerFromContextUnmarked(ctx: PluginActionContext): WorkflowOwner | null {
   // A channel sender with no Valet account runs as the rule's creator, but is
   // not that person: they may not manage the workspace's workflows.
   if (ctx.externalSender) return null;

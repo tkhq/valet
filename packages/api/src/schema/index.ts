@@ -2525,7 +2525,10 @@ export const cliDeviceRequests = pgTable("cli_device_requests", {
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
   lastPollAt: bigint("last_poll_at", { mode: "number" }),
-}, (t) => [uniqueIndex("cli_device_requests_user_code").on(t.userCode)]);
+}, (t) => [
+  uniqueIndex("cli_device_requests_user_code").on(t.userCode),
+  index("cli_device_requests_expires").on(t.expiresAt),
+]);
 
 /**
  * A signed-in CLI (`vltc_` access token). The access token lasts a day, the
@@ -2543,6 +2546,10 @@ export const cliTokens = pgTable("cli_tokens", {
   refreshExpiresAt: bigint("refresh_expires_at", { mode: "number" }).notNull(),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   lastUsedAt: bigint("last_used_at", { mode: "number" }),
+  /** The pair a refresh replaced, kept for a short grace (`auth/cli-tokens.ts`). */
+  prevAccessHash: text("prev_access_hash"),
+  prevRefreshHash: text("prev_refresh_hash"),
+  rotatedAt: bigint("rotated_at", { mode: "number" }),
 }, (t) => [
   uniqueIndex("cli_tokens_access").on(t.accessHash),
   uniqueIndex("cli_tokens_refresh").on(t.refreshHash),

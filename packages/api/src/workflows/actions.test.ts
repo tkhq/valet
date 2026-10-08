@@ -118,7 +118,7 @@ describe("ownerFromContext", () => {
   });
 
   it("derives the owner from ctx.userId/orgId", () => {
-    expect(ownerFromContext(ctx())).toEqual({ userId: "user1", orgId: "org1" });
+    expect(ownerFromContext(ctx())).toEqual({ userId: "user1", orgId: "org1", agentEditor: true });
   });
 
   it("keeps the session owner as the workflow principal", () => {
@@ -127,6 +127,7 @@ describe("ownerFromContext", () => {
       orgId: "org1",
       principal: { type: "team", id: "team1" },
       requireTeamMembership: true,
+      agentEditor: true,
     });
   });
 
@@ -135,7 +136,7 @@ describe("ownerFromContext", () => {
       owner: { type: "team", id: "team1" }, actor: { id: "current-member" },
     }))).toEqual({
       userId: "current-member", orgId: "org1",
-      principal: { type: "team", id: "team1" }, requireTeamMembership: true,
+      principal: { type: "team", id: "team1" }, requireTeamMembership: true, agentEditor: true,
     });
   });
 
@@ -148,6 +149,7 @@ describe("ownerFromContext", () => {
       orgId: "org1",
       principal: { type: "team", id: "team1" },
       requireTeamMembership: false,
+      agentEditor: true,
     });
   });
 

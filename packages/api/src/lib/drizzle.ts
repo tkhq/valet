@@ -598,11 +598,16 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   "id" text PRIMARY KEY NOT NULL, "user_id" text NOT NULL REFERENCES "user"("id") ON DELETE cascade,
   "device" text NOT NULL, "access_hash" text NOT NULL, "refresh_hash" text NOT NULL,
   "access_expires_at" bigint NOT NULL, "refresh_expires_at" bigint NOT NULL,
-  "created_at" bigint NOT NULL, "last_used_at" bigint
+  "created_at" bigint NOT NULL, "last_used_at" bigint,
+  "prev_access_hash" text, "prev_refresh_hash" text, "rotated_at" bigint
 );` },
   { describe: "cli_tokens_access", probe: { kind: "index", index: "cli_tokens_access" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_access" ON "cli_tokens" ("access_hash");` },
   { describe: "cli_tokens_refresh", probe: { kind: "index", index: "cli_tokens_refresh" }, sql: `CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_refresh" ON "cli_tokens" ("refresh_hash");` },
   { describe: "cli_tokens_user", probe: { kind: "index", index: "cli_tokens_user" }, sql: `CREATE INDEX IF NOT EXISTS "cli_tokens_user" ON "cli_tokens" ("user_id");` },
+  { describe: "cli_tokens.prev_access_hash column", probe: { kind: "column", table: "cli_tokens", column: "prev_access_hash" }, sql: 'ALTER TABLE "cli_tokens" ADD COLUMN IF NOT EXISTS "prev_access_hash" text' },
+  { describe: "cli_tokens.prev_refresh_hash column", probe: { kind: "column", table: "cli_tokens", column: "prev_refresh_hash" }, sql: 'ALTER TABLE "cli_tokens" ADD COLUMN IF NOT EXISTS "prev_refresh_hash" text' },
+  { describe: "cli_tokens.rotated_at column", probe: { kind: "column", table: "cli_tokens", column: "rotated_at" }, sql: 'ALTER TABLE "cli_tokens" ADD COLUMN IF NOT EXISTS "rotated_at" bigint' },
+  { describe: "cli_device_requests_expires", probe: { kind: "index", index: "cli_device_requests_expires" }, sql: 'CREATE INDEX IF NOT EXISTS "cli_device_requests_expires" ON "cli_device_requests" ("expires_at");' },
 
   {
     describe: "action_invocations.thread_id column",

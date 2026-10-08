@@ -92,7 +92,7 @@ export function CliDevicePage() {
               Continue
             </Button>
           </form>
-        ) : info.isPending || signingIn ? (
+        ) : info.isPending || signingIn || !info.data ? (
           <div className="flex justify-center">
             <Spinner />
           </div>

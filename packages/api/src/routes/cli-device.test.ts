@@ -13,11 +13,13 @@ import { deviceLogin } from "../cli/device-login.js";
 import { AuthError } from "../cli/exit.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
-import { actionInvocations, oauthAccessToken, oauthApplication } from "../schema/index.js";
+import { clearDeviceStartLimits } from "./cli-device.js";
+import { actionInvocations, oauthAccessToken, oauthApplication, workflowActionGrants } from "../schema/index.js";
 
 let api: TestApi | undefined;
 let faux: FauxProviderRegistration | undefined;
 afterEach(async () => {
+  clearDeviceStartLimits();
   faux?.unregister();
   faux = undefined;
   await api?.cleanup();
@@ -32,6 +34,28 @@ function riskyPlugin(): ValetPlugin {
     execute: async () => ({ success: true, data: { ran: true } }),
   };
   return { name: "demo", version: "0.0.1", actions: [{ service: "demo", actions: [risky] }] };
+}
+
+/** A high-risk action, which needs approval by risk default. */
+function widgetsPlugin(): ValetPlugin {
+  const deploy: PluginAction = {
+    id: "deploy", name: "deploy", description: "Deploy widgets.", riskLevel: "high",
+    parameters: Type.Object({ target: Type.Optional(Type.String()) }),
+    execute: async () => ({ success: true, data: {} }),
+  };
+  return { name: "widgets", version: "0.0.1", actions: [{ service: "widgets", actions: [deploy] }] };
+}
+
+function deployWorkflow(target: string) {
+  return {
+    version: "dag/v1",
+    nodes: [
+      { id: "trigger", type: "trigger" },
+      { id: "ship", type: "tool", service: "widgets", action: "deploy", params: { target } },
+      { id: "stop", type: "stop" },
+    ],
+    edges: [{ from: "trigger", to: "ship" }, { from: "ship", to: "stop" }],
+  };
 }
 
 function sessionCookie(setCookie: string | null): string {
@@ -115,12 +139,11 @@ describe("valet login device sign-in", () => {
     const apps = (await (await fetch(`${base}/api/me/agent-access`, { headers: { cookie } })).json()) as { cli_devices: Array<{ id: string; device: string }> };
     expect(apps.cli_devices).toEqual([expect.objectContaining({ device: "test-box" })]);
 
-    // A refresh replaces both tokens and works once.
+    // A refresh replaces both tokens. Once the new pair is used, the old refresh token is dead.
     const refresh = (token: string) => fetch(`${base}/api/cli/token/refresh`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: token }) });
     const fresh = (await (await refresh(tokens.refresh_token)).json()) as { access_token: string };
-    expect((await refresh(tokens.refresh_token)).status).toBe(401);
-    expect((await fetch(`${base}/api/me`, { headers: { "x-api-key": tokens.access_token } })).status).toBe(401);
     expect((await fetch(`${base}/api/me`, { headers: { "x-api-key": fresh.access_token } })).status).toBe(200);
+    expect((await refresh(tokens.refresh_token)).status).toBe(401);
 
     // Disconnecting in Settings signs the CLI out at once.
     const gone = await fetch(`${base}/api/me/agent-access/cli/${apps.cli_devices[0]?.id}`, { method: "DELETE", headers: json(cookie, base) });
@@ -253,5 +276,64 @@ describe("valet login device sign-in", () => {
     // A policy preview changes nothing, so an agent may run it.
     const preview = await fetch(`${base}/api/org/policies/preview`, { method: "POST", headers: { "x-api-key": cliToken, "Content-Type": "application/json" }, body: "{}" });
     expect(await preview.text()).not.toContain("Agent credentials");
+  });
+
+  it("revokes a workflow's pre-approvals when a CLI token changes its steps; a person's edit keeps them", async () => {
+    const { testApi, base, cookie } = await setup({ plugins: [widgetsPlugin()] });
+    const cliToken = (await signIn(base, cookie).run).access_token;
+    const created = await fetch(`${base}/api/workflows`, { method: "POST", headers: json(cookie, base), body: JSON.stringify({ name: "Deploy", definition: deployWorkflow("staging") }) });
+    expect(created.status).toBe(201);
+    const { id } = (await created.json()) as { id: string };
+    const allow = () => fetch(`${base}/api/workflows/${id}/permissions/allow`, { method: "POST", headers: json(cookie, base), body: "{}" });
+    expect((await allow()).status).toBe(200);
+    const grants = () => testApi.providers.db.select().from(workflowActionGrants);
+    expect((await grants()).map((g) => g.actionId)).toEqual(["widgets.deploy"]);
+
+    // The reviewer's repro: the agent points the approved step at production.
+    const agentEdit = await fetch(`${base}/api/workflows/${id}`, {
+      method: "PUT", headers: { "x-api-key": cliToken, "Content-Type": "application/json" }, body: JSON.stringify({ definition: deployWorkflow("production") }),
+    });
+    expect(agentEdit.status).toBe(200);
+    expect(await grants()).toEqual([]);
+
+    // A person who can grant keeps the approval when they edit.
+    expect((await allow()).status).toBe(200);
+    const personEdit = await fetch(`${base}/api/workflows/${id}`, { method: "PUT", headers: json(cookie, base), body: JSON.stringify({ definition: deployWorkflow("canary") }) });
+    expect(personEdit.status).toBe(200);
+    expect((await grants()).map((g) => g.actionId)).toEqual(["widgets.deploy"]);
+  });
+
+  it("keeps the replaced pair working briefly, and recovers a lost refresh response only while the new pair is unused", async () => {
+    const { base, cookie } = await setup();
+    const first = await signIn(base, cookie).run;
+    const refresh = async (token: string) => {
+      const res = await fetch(`${base}/api/cli/token/refresh`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: token }) });
+      return { status: res.status, body: (await res.json()) as { access_token: string; refresh_token: string } };
+    };
+    const me = (token: string) => fetch(`${base}/api/me`, { headers: { "x-api-key": token } }).then((r) => r.status);
+
+    const second = await refresh(first.refresh_token);
+    expect(second.status).toBe(200);
+    // A command that read the old access token just before the refresh still works.
+    expect(await me(first.access_token)).toBe(200);
+    // The response was lost: replaying the old refresh token issues another pair.
+    const third = await refresh(first.refresh_token);
+    expect(third.status).toBe(200);
+    expect(await me(third.body.access_token)).toBe(200);
+    // Once the new pair is in use, the old refresh token is dead.
+    expect((await refresh(first.refresh_token)).status).toBe(401);
+    expect((await refresh(third.body.refresh_token)).status).toBe(200);
+  });
+
+  it("limits how many sign-ins one client starts per minute", async () => {
+    const { base } = await setup();
+    const start = () => fetch(`${base}/api/cli/device/code`, { method: "POST", headers: { "Content-Type": "application/json", "X-Forwarded-For": "203.0.113.9" }, body: "{}" });
+    for (let i = 0; i < 10; i++) expect((await start()).status).toBe(200);
+    const limited = await start();
+    expect(limited.status).toBe(429);
+    expect(await limited.text()).toContain("Wait a minute");
+    // Another client is not affected.
+    const other = await fetch(`${base}/api/cli/device/code`, { method: "POST", headers: { "Content-Type": "application/json", "X-Forwarded-For": "198.51.100.4" }, body: "{}" });
+    expect(other.status).toBe(200);
   });
 });

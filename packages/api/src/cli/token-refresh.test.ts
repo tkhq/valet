@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ValetConfig } from "./config.js";
-import { refreshSelectedProfile } from "./token-refresh.js";
+import { UnreachableError } from "./exit.js";
+import { refreshSelectedProfile, type RefreshDeps } from "./token-refresh.js";
 
 const HOUR = 60 * 60_000;
 const NOW = 1_000_000_000;
@@ -18,11 +19,24 @@ function config(accessExpiresAt: number): ValetConfig {
 
 afterEach(() => vi.unstubAllEnvs());
 
+/** Deps whose file reads return `onDisk` (the config as another command may have saved it). */
+function deps(overrides: Partial<RefreshDeps> & { onDisk: ValetConfig }): RefreshDeps {
+  const { onDisk, ...rest } = overrides;
+  return {
+    refresh: vi.fn(async () => FRESH),
+    save: vi.fn(),
+    now: () => NOW,
+    reload: () => onDisk,
+    withLock: (fn) => fn(),
+    ...rest,
+  };
+}
+
 describe("refreshSelectedProfile", () => {
   it("refreshes a device sign-in that expires soon and saves the new pair", async () => {
     const refresh = vi.fn(async () => FRESH);
     const save = vi.fn();
-    const next = await refreshSelectedProfile(config(NOW + HOUR), [], { refresh, save, now: () => NOW });
+    const next = await refreshSelectedProfile(config(NOW + HOUR), [], deps({ refresh, save, onDisk: config(NOW + HOUR) }));
     expect(refresh).toHaveBeenCalledWith("https://valet.example.com", "vltr_old");
     expect(next.profiles?.prod?.cli).toEqual({ accessToken: "vltc_new", refreshToken: "vltr_new", accessExpiresAt: FRESH.access_expires_at, refreshExpiresAt: FRESH.refresh_expires_at });
     expect(save).toHaveBeenCalledWith(next);
@@ -31,10 +45,27 @@ describe("refreshSelectedProfile", () => {
   it("leaves a token with hours left, an API key profile, and a failed refresh alone", async () => {
     const save = vi.fn();
     const fresh = config(NOW + 20 * HOUR);
-    expect(await refreshSelectedProfile(fresh, [], { refresh: vi.fn(async () => FRESH), save, now: () => NOW })).toBe(fresh);
+    expect(await refreshSelectedProfile(fresh, [], deps({ save, onDisk: fresh }))).toBe(fresh);
     const keyed = config(NOW);
-    expect(await refreshSelectedProfile(keyed, ["--instance", "key"], { refresh: vi.fn(async () => FRESH), save, now: () => NOW })).toBe(keyed);
-    expect(await refreshSelectedProfile(keyed, [], { refresh: vi.fn(async () => undefined), save, now: () => NOW })).toBe(keyed);
+    expect(await refreshSelectedProfile(keyed, ["--instance", "key"], deps({ save, onDisk: keyed }))).toBe(keyed);
+    expect(await refreshSelectedProfile(keyed, [], deps({ refresh: vi.fn(async () => undefined), save, onDisk: keyed }))).toBe(keyed);
     expect(save).not.toHaveBeenCalled();
+  });
+
+  it("uses the pair another command saved while this one waited for the lock, without refreshing again", async () => {
+    const refresh = vi.fn(async () => FRESH);
+    const refreshedByOther = config(NOW + 24 * HOUR);
+    const next = await refreshSelectedProfile(config(NOW + HOUR), [], deps({ refresh, onDisk: refreshedByOther }));
+    expect(refresh).not.toHaveBeenCalled();
+    expect(next).toBe(refreshedByOther);
+  });
+
+  it("retries once when the refresh request fails in transit", async () => {
+    const refresh = vi.fn()
+      .mockRejectedValueOnce(new UnreachableError("connection reset"))
+      .mockResolvedValueOnce(FRESH);
+    const next = await refreshSelectedProfile(config(NOW + HOUR), [], deps({ refresh, onDisk: config(NOW + HOUR) }));
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(next.profiles?.prod?.cli?.accessToken).toBe("vltc_new");
   });
 });

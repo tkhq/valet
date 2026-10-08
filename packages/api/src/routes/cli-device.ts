@@ -18,7 +18,7 @@
  * a hash, and works once.
  */
 import { createHash, randomBytes, randomInt } from "node:crypto";
-import { and, eq, gt, lt } from "drizzle-orm";
+import { and, count, eq, gt, lt } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { mintCliToken, refreshCliToken, revokeCliToken } from "../auth/cli-tokens.js";
 import type { AppEnv } from "../env.js";
@@ -33,6 +33,10 @@ const REQUEST_TTL_MS = 10 * 60_000;
 /** Seconds the CLI waits between polls. A faster poll gets `slow_down`. */
 export const POLL_INTERVAL_S = 5;
 const MAX_DEVICE_LENGTH = 64;
+/** Sign-ins one client may start per minute. */
+const STARTS_PER_MINUTE = 10;
+/** Live sign-ins the instance holds at once. More would only come from a flood. */
+const MAX_WAITING = 1_000;
 /** No vowels or look-alike characters, so a code cannot spell a word or be misread. */
 const USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
 
@@ -68,6 +72,35 @@ function hashCode(code: string): string {
   return createHash("sha256").update(code).digest("hex");
 }
 
+/**
+ * Fixed one-minute windows per client. The key is the first
+ * `X-Forwarded-For` hop, which the ingress sets, else one shared bucket.
+ * A forged header only spreads one flooder across buckets; `MAX_WAITING`
+ * still bounds the table.
+ */
+const starts = new Map<string, { windowStart: number; count: number }>();
+
+function clientKey(c: Context<AppEnv>): string {
+  return c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || c.req.header("x-real-ip") || "direct";
+}
+
+function allowStart(key: string, now: number): boolean {
+  const entry = starts.get(key);
+  if (!entry || now - entry.windowStart >= 60_000) {
+    // Drop finished windows now and then, so the map stays small.
+    if (starts.size > 10_000) for (const [k, v] of starts) if (now - v.windowStart >= 60_000) starts.delete(k);
+    starts.set(key, { windowStart: now, count: 1 });
+    return true;
+  }
+  entry.count += 1;
+  return entry.count <= STARTS_PER_MINUTE;
+}
+
+/** Test seam: forget rate-limit windows. */
+export function clearDeviceStartLimits(): void {
+  starts.clear();
+}
+
 function deviceError(c: Context<AppEnv>, error: "authorization_pending" | "slow_down" | "access_denied" | "expired_token", description: string) {
   return c.json({ error, error_description: description }, 400);
 }
@@ -77,18 +110,30 @@ export function cliDevicePublicRouter(db: AppDb): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
 
   router.post("/device/code", async (c) => {
-    const body = await readOptionalJsonObject(c);
     const now = Date.now();
+    if (!allowStart(clientKey(c), now)) {
+      return c.json({ error: "slow_down", error_description: "Too many sign-ins started from this computer. Wait a minute, then run `valet login` again." }, 429);
+    }
+    const body = await readOptionalJsonObject(c);
     // Requests nobody finished are useless after they expire.
     await db.delete(cliDeviceRequests).where(lt(cliDeviceRequests.expiresAt, now));
+    const [{ waiting }] = await db.select({ waiting: count() }).from(cliDeviceRequests);
+    if (waiting >= MAX_WAITING) {
+      return c.json({ error: "temporarily_unavailable", error_description: "Too many sign-ins are waiting. Try `valet login` again in a few minutes." }, 503);
+    }
     const deviceCode = randomBytes(32).toString("base64url");
-    // A collision with a live code is possible but rare; the unique index
-    // turns it into an error, and the CLI starts again.
-    const userCode = newUserCode();
-    await db.insert(cliDeviceRequests).values({
-      deviceCodeHash: hashCode(deviceCode), userCode, device: deviceLabel(body?.device),
-      createdAt: now, expiresAt: now + REQUEST_TTL_MS,
-    });
+    let userCode = "";
+    // A new code can collide with a live one; the unique index refuses it,
+    // and the next attempt draws another.
+    for (let attempt = 0; attempt < 3 && userCode === ""; attempt++) {
+      const candidate = newUserCode();
+      const inserted = await db.insert(cliDeviceRequests).values({
+        deviceCodeHash: hashCode(deviceCode), userCode: candidate, device: deviceLabel(body?.device),
+        createdAt: now, expiresAt: now + REQUEST_TTL_MS,
+      }).onConflictDoNothing().returning({ userCode: cliDeviceRequests.userCode });
+      if (inserted.length > 0) userCode = candidate;
+    }
+    if (userCode === "") return c.json({ error: "temporarily_unavailable", error_description: "Valet could not start a sign-in. Run `valet login` again." }, 503);
     return c.json({
       device_code: deviceCode,
       user_code: userCode,

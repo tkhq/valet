@@ -2599,7 +2599,8 @@ CREATE TABLE IF NOT EXISTS "cli_tokens" (
   "id" text PRIMARY KEY NOT NULL, "user_id" text NOT NULL REFERENCES "user"("id") ON DELETE cascade,
   "device" text NOT NULL, "access_hash" text NOT NULL, "refresh_hash" text NOT NULL,
   "access_expires_at" bigint NOT NULL, "refresh_expires_at" bigint NOT NULL,
-  "created_at" bigint NOT NULL, "last_used_at" bigint
+  "created_at" bigint NOT NULL, "last_used_at" bigint,
+  "prev_access_hash" text, "prev_refresh_hash" text, "rotated_at" bigint
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_access" ON "cli_tokens" ("access_hash");
@@ -2607,3 +2608,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_access" ON "cli_tokens" ("access_h
 CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_refresh" ON "cli_tokens" ("refresh_hash");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "cli_tokens_user" ON "cli_tokens" ("user_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "cli_device_requests_expires" ON "cli_device_requests" ("expires_at");
