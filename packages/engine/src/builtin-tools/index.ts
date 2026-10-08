@@ -1,5 +1,12 @@
 import { Type } from "typebox";
-import { isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange } from "@valet/shared";
+import {
+  isValidSandboxCpu,
+  parseResourceQuantity,
+  sandboxCpuRange,
+  MIN_SCRATCH_BYTES,
+  isScratchRequestError,
+  ScratchRequestError,
+} from "@valet/shared";
 import { storedToolResultText } from "../compaction.js";
 import { isDecisionGateExpired } from "../decision-gate.js";
 import { terminalOutcome } from "./terminal-outcome.js";
@@ -850,7 +857,9 @@ export const taskTool = defineTool({
     "XL children review only. Include the scope, selected tier and reason, " +
     "and acceptance checks in the brief. Tiers resolve through org config; " +
     "do not name specific models. To retry capacity-blocked children, set " +
-    "task.resources to lower CPU or memory values. Omitted fields inherit defaults.",
+    "task.resources to lower CPU or memory values. resources.scratch requests " +
+    "node-local scratch disk for the child, bounded by the deploy agent cap. " +
+    "Omitted fields inherit defaults.",
   parameters: Type.Object({
     prompt: Type.String({ minLength: 1, description: "The task for the child session to perform." }),
     title: Type.Optional(Type.String()),
@@ -865,6 +874,12 @@ export const taskTool = defineTool({
         memory: Type.Optional(
           Type.String({
             description: 'Memory for the child\'s sandbox as a Kubernetes quantity, such as "4Gi". Omit to use the host default.',
+          }),
+        ),
+        scratch: Type.Optional(
+          Type.String({
+            description:
+              'Node-local /scratch size for the child as a Kubernetes quantity, such as "200Gi". Wiped when the child\'s sandbox stops. Bounded by the deploy agent cap.',
           }),
         ),
       }),
@@ -918,9 +933,23 @@ export const taskTool = defineTool({
         }
       }
 
+      const scratchRaw = args.resources.scratch;
+      let normalizedScratch: string | undefined;
+      if (scratchRaw !== undefined) {
+        // Syntax only here; the spawner applies the deploy and agent caps
+        // (spec A4) because the caps live in api config.
+        const text = typeof scratchRaw === "string" ? scratchRaw.trim() : "";
+        const bytes = text ? parseResourceQuantity(text) : null;
+        if (bytes === null || bytes < MIN_SCRATCH_BYTES) {
+          return { text: `[task_resources] scratch "${String(scratchRaw)}" is not a Kubernetes quantity of at least 1Gi. Use a form like "200Gi".` };
+        }
+        normalizedScratch = text;
+      }
+
       resources = {
         ...(args.resources.cpu !== undefined ? { cpu: args.resources.cpu } : {}),
         ...(normalizedMemory !== undefined ? { memory: normalizedMemory } : {}),
+        ...(normalizedScratch !== undefined ? { scratch: normalizedScratch } : {}),
       };
     }
 
@@ -935,15 +964,23 @@ export const taskTool = defineTool({
       docker: args.docker,
     };
     const owner = ctx.owner ?? { type: "user", id: ctx.userId };
-    const result = await spawner(req, {
-      parentSessionId: ctx.sessionId,
-      parentThreadId: ctx.threadId,
-      actorUserId: ctx.userId,
-      owner,
-      // The spawning submission's channel origin rides to the watcher, so
-      // the child.settled signal can inherit it (see ChildWatcher).
-      ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
-    });
+    let result;
+    try {
+      result = await spawner(req, {
+        parentSessionId: ctx.sessionId,
+        parentThreadId: ctx.threadId,
+        actorUserId: ctx.userId,
+        owner,
+        // The spawning submission's channel origin rides to the watcher, so
+        // the child.settled signal can inherit it (see ChildWatcher).
+        ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
+      });
+    } catch (err) {
+      if (isScratchRequestError(err)) {
+        return { text: `[task_resources] ${err.message}` };
+      }
+      throw err;
+    }
     return {
       text: [
         `spawned child session ${result.childSessionId} (submission ${result.queueItemId}). Its result will arrive in this thread as a child.settled signal.`,
