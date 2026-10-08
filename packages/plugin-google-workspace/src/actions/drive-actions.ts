@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Type } from 'typebox';
 import type { Static, TSchema } from 'typebox';
 import {
@@ -24,6 +25,9 @@ import { insertMarkdown } from './docs-markdown.js';
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DOCS_API = 'https://docs.googleapis.com/v1';
+const MAX_SUBTREE_FOLDERS = 100;
+const MAX_SUBTREE_PAGES = 100;
+const MAX_SUBTREE_REQUESTS_PER_CALL = 10;
 
 const MIME_TYPE_SHORTCUTS: Record<string, string> = {
   document: 'application/vnd.google-apps.document',
@@ -85,6 +89,81 @@ function isGoogleWorkspaceMimeType(mimeType: string | undefined): boolean {
 
 function getExportMimeType(googleMimeType: string | undefined): string | null {
   return googleMimeType ? WORKSPACE_EXPORT_DEFAULTS[googleMimeType] || null : null;
+}
+
+interface SubtreeCursor {
+  folders: string[];
+  index: number;
+  phase: 'discover' | 'search';
+  pageToken?: string;
+  discoveryPages: number;
+  expires: number;
+}
+
+/** Bind continuations to the account, caller, thread, and complete search criteria. */
+function cursorSignature(payload: string, token: string, binding: string): Buffer {
+  return createHmac('sha256', token).update(binding).update('\0').update(payload).digest();
+}
+
+function readSubtreeCursor(cursor: string, token: string, binding: string): SubtreeCursor {
+  const invalid = 'Invalid or expired folder search cursor. Restart the search without pageToken.';
+  if (cursor.length > 32_000) throw new Error(invalid);
+  const [payload, signature, extra] = cursor.split('.');
+  if (!payload || !signature || extra) throw new Error(invalid);
+  const supplied = Buffer.from(signature, 'base64url');
+  const expected = cursorSignature(payload, token, binding);
+  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new Error(invalid);
+  const state = JSON.parse(Buffer.from(payload, 'base64url').toString()) as SubtreeCursor;
+  if (state.expires < Date.now()) throw new Error(invalid);
+  return state;
+}
+
+async function searchSubtree(qs: URLSearchParams, rootId: string, token: string,
+  cursor: string | undefined, binding: string, signingKey: string, signal: AbortSignal) {
+  const state: SubtreeCursor = cursor ? readSubtreeCursor(cursor, signingKey, binding) : {
+    folders: [rootId], index: 0, phase: 'discover', discoveryPages: 0, expires: Date.now() + 3_600_000,
+  };
+  let files: DriveFile[] = [];
+  for (let requests = 0; requests < MAX_SUBTREE_REQUESTS_PER_CALL && state.index < state.folders.length; requests++) {
+    const parent = `'${escapeDriveQuery(state.folders[state.index])}' in parents`;
+    const request = new URLSearchParams(qs);
+    if (state.phase === 'discover') {
+      if (state.discoveryPages >= MAX_SUBTREE_PAGES) throw new Error('Folder search exceeded 100 discovery pages. Search a smaller folder subtree.');
+      request.set('q', `trashed=false and mimeType='application/vnd.google-apps.folder' and ${parent}`);
+      request.set('fields', 'nextPageToken,incompleteSearch,files(id)');
+      request.set('pageSize', '1000');
+      request.delete('orderBy');
+    } else {
+      request.set('q', `(${qs.get('q')}) and ${parent}`);
+    }
+    if (state.pageToken) request.set('pageToken', state.pageToken);
+    const response = await fetch(`${DRIVE_API}/files?${request}`, {
+      headers: { Authorization: `Bearer ${token}` }, signal,
+    });
+    if (!response.ok) throw new Error((await driveError(response)).error);
+    const data = await response.json() as { files?: DriveFile[]; nextPageToken?: string; incompleteSearch?: boolean };
+    if (data.incompleteSearch) throw new Error('Drive returned an incomplete folder search. Search a smaller folder subtree.');
+    state.pageToken = data.nextPageToken;
+    if (state.phase === 'discover') {
+      state.discoveryPages++;
+      for (const folder of data.files ?? []) {
+        if (state.folders.includes(folder.id)) continue;
+        if (state.folders.length >= MAX_SUBTREE_FOLDERS) throw new Error('Folder search exceeded 100 folders. Search a smaller folder subtree.');
+        state.folders.push(folder.id);
+      }
+      if (!state.pageToken) state.phase = 'search';
+    } else {
+      files = data.files ?? [];
+      if (!state.pageToken) { state.index++; state.phase = 'discover'; }
+      if (files.length || state.pageToken) break;
+    }
+  }
+  let nextPageToken: string | undefined;
+  if (state.index < state.folders.length) {
+    const payload = Buffer.from(JSON.stringify(state)).toString('base64url');
+    nextPageToken = `${payload}.${cursorSignature(payload, signingKey, binding).toString('base64url')}`;
+  }
+  return { files, nextPageToken };
 }
 
 /** Resolve a MIME type shortcut or return the value as-is. */
@@ -270,7 +349,7 @@ const searchFiles = action(
     mimeType: Type.Optional(
       Type.String({ description: 'Restrict to a specific file type (shortcuts or full MIME type)' }),
     ),
-    folderId: Type.Optional(Type.String({ description: 'Restrict to files inside this folder' })),
+    folderId: Type.Optional(Type.String({ description: 'Search this folder subtree. Results are ordered within each folder, not globally. Follow pageToken even on empty pages. Maximum 100 folders and 100 discovery pages per search.' })),
     orderBy: Type.Optional(
       Type.Union([Type.Literal('name'), Type.Literal('modifiedTime'), Type.Literal('createdTime')]),
     ),
@@ -290,7 +369,8 @@ const searchFiles = action(
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
-    const token = await getAccessToken(ctx);
+    const credential = await ctx.credentials.get();
+    const token = credential?.accessToken;
     if (!token) return { success: false, error: 'Missing access token' };
     try {
       const queryParts: string[] = ['trashed=false'];
@@ -307,7 +387,7 @@ const searchFiles = action(
       }
 
       if (p.mimeType) queryParts.push(`mimeType='${escapeDriveQuery(resolveMimeType(p.mimeType))}'`);
-      if (p.folderId) queryParts.push(`'${escapeDriveQuery(p.folderId)}' in ancestors`);
+
       if (p.modifiedAfter) {
         const cutoff = new Date(p.modifiedAfter).toISOString();
         queryParts.push(`modifiedTime > '${escapeDriveQuery(cutoff)}'`);
@@ -322,17 +402,27 @@ const searchFiles = action(
 
       const qs = new URLSearchParams({
         q: finalQuery,
-        fields: `nextPageToken,files(${LIST_FILE_FIELDS})`,
+        fields: `nextPageToken,incompleteSearch,files(${LIST_FILE_FIELDS})`,
         pageSize: String(p.maxResults || 10),
         supportsAllDrives: 'true',
         includeItemsFromAllDrives: 'true',
         orderBy: orderByParam,
       });
-      if (p.pageToken) qs.set('pageToken', p.pageToken);
-
-      const res = await driveFetch(`/files?${qs}`, token);
-      if (!res.ok) return driveError(res);
-      const data = (await res.json()) as { files: DriveFile[]; nextPageToken?: string };
+      let data: { files?: DriveFile[]; nextPageToken?: string; incompleteSearch?: boolean };
+      if (p.folderId) {
+        const binding = JSON.stringify([ctx.orgId, ctx.userId, ctx.sessionId, ctx.threadId, p.folderId, qs.toString()]);
+        // Google keeps the refresh token across routine access-token renewal.
+        const signingKey = credential?.refreshToken || token;
+        data = await searchSubtree(qs, p.folderId, token, p.pageToken, binding, signingKey, ctx.signal);
+      } else {
+        if (p.pageToken) qs.set('pageToken', p.pageToken);
+        const res = await driveFetch(`/files?${qs}`, token);
+        if (!res.ok) return driveError(res);
+        data = await res.json() as typeof data;
+        if (data.incompleteSearch) {
+          return { success: false, error: 'Drive returned an incomplete search. Add a folderId or use more restrictive search criteria.' };
+        }
+      }
       const files = (data.files || []).map((f) => ({
         id: f.id,
         name: f.name,

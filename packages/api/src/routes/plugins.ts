@@ -242,6 +242,7 @@ pluginsRouter.get("/", async (c) => {
       dynamic: dynamicServices.size > 0 ? true : undefined,
       services,
       actionServices,
+      skills: (plugin.skills ?? []).map((skill) => ({ name: skill.name, description: skill.description })),
     };
   }));
 

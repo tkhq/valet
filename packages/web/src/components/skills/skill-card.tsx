@@ -59,6 +59,7 @@ export function originLabel(skill: SkillSummary): string {
   if (skill.origin === "plugin") return "Plugin";
   if (skill.origin === "repo") return "Repo";
   if (skill.ownerType === "org") return "Org";
+  if (skill.ownerType === "team") return "Team";
   return "Yours";
 }
 
@@ -91,6 +92,7 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
               <Badge variant="neutral">prompt</Badge>
             )}
           </div>
+          {skill.origin === "plugin" && <p className="mt-1 text-xs text-muted">Installed instructions</p>}
           {skill.description && (
             <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted">
               {skill.description}

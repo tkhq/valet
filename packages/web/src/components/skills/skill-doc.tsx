@@ -132,6 +132,7 @@ export function SkillDoc({
       }
       content={skill?.content}
       skillName={skill?.name}
+      skill={skill}
       isLoading={!creating && isLoading}
       error={creating ? undefined : error}
     >

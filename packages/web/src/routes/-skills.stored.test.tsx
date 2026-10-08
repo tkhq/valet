@@ -122,6 +122,8 @@ vi.mock("~/api/skill-sources", () => ({
 }));
 
 import { SkillsIndexPage } from "./skills.index";
+vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: vi.fn() }) }));
+
 import { SkillDoc } from "~/components/skills/skill-doc";
 
 describe("SkillsIndexPage with stored skills", () => {

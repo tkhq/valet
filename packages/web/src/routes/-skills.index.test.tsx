@@ -158,6 +158,7 @@ describe("SkillsIndexPage", () => {
   });
 
   it("lists the repositories of the workspace in view, as the skills below do", () => {
+    searchParams = { view: "sources" };
     sourcesQuery.mockClear();
     render(<SkillsIndexPage />);
     expect(sourcesQuery).toHaveBeenLastCalledWith(expect.objectContaining({ ownerType: "user", ownerId: "u-1" }));
@@ -415,7 +416,7 @@ describe("SkillsIndexPage — the repositories panel", () => {
     currentData = skillsData;
     currentState = { isLoading: false, error: null };
     sourcesData = { sources: [], nextCursor: null };
-    searchParams = {};
+    searchParams = { view: "sources" };
     navigate.mockReset();
     addSource.mockReset();
   });
@@ -450,3 +451,18 @@ describe("SkillsIndexPage — the repositories panel", () => {
     expect(lastNavigationSearch()).toMatchObject({ sourcePage: "src_2", page: undefined });
   });
 });
+
+ it("keeps catalog filters and both pages when opening Sources", () => {
+    searchParams = { q: "drive", scope: "team", filter: "prompts", page: "skill_2", sourcePage: "source_2" };
+    render(<SkillsIndexPage />);
+    expect(screen.queryByRole("button", { name: /import from github/i })).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Sources" }));
+    expect(lastNavigationSearch()).toEqual({ ...searchParams, view: "sources" });
+  });
+  it("returns from Sources without losing catalog state", () => {
+    searchParams = { view: "sources", q: "drive", page: "skill_2", sourcePage: "source_2" };
+    render(<SkillsIndexPage />);
+    expect(screen.queryByLabelText("Search skills")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Catalog" }));
+    expect(lastNavigationSearch()).toEqual({ ...searchParams, view: undefined });
+  });
