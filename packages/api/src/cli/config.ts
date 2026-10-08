@@ -33,14 +33,30 @@ export interface ProfileConfig {
   };
 }
 
+/**
+ * A `valet login` device sign-in that waits for the person, keyed by profile
+ * name. A later `valet login` for that profile resumes it, so the sign-in
+ * survives the process that started it (`--no-wait`, or an agent whose
+ * command was stopped). Times are epoch ms.
+ */
+export interface PendingLogin {
+  url: string;
+  deviceCode: string;
+  userCode: string;
+  verificationPath: string;
+  expiresAt: number;
+  interval: number;
+}
+
 export interface ValetConfig {
   serve?: ServeConfig;
   profiles?: Record<string, ProfileConfig>;
   defaultProfile?: string;
+  pendingLogins?: Record<string, PendingLogin>;
 }
 
 /** The known top-level keys of `ValetConfig`. Anything else warns + is dropped. */
-const KNOWN_KEYS = new Set<string>(["serve", "profiles", "defaultProfile"]);
+const KNOWN_KEYS = new Set<string>(["serve", "profiles", "defaultProfile", "pendingLogins"]);
 
 /** Resolve the data root, honoring `VALET_DATA_DIR` (default `~/.valet`). */
 function dataDir(): string {
@@ -92,6 +108,7 @@ export function loadConfig(): ValetConfig {
     if (key === "serve" && isRecord(value)) known.serve = value as ServeConfig;
     else if (key === "profiles" && isRecord(value)) known.profiles = value as Record<string, ProfileConfig>;
     else if (key === "defaultProfile" && typeof value === "string") known.defaultProfile = value;
+    else if (key === "pendingLogins" && isRecord(value)) known.pendingLogins = value as Record<string, PendingLogin>;
   }
   return known;
 }

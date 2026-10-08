@@ -41,6 +41,7 @@ const LOCAL: OAuthConsentInfo = {
   redirect_is_local: true,
   account: "me@valet.test",
   access: ["Use your connected integrations"],
+  limits: ["It cannot approve requests."],
 };
 
 afterEach(() => {

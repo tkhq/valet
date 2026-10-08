@@ -12,6 +12,7 @@
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { ApiError, AuthError, UnreachableError } from "./exit.js";
+import type { PendingLogin } from "./config.js";
 import type { CliDeviceCodeResponse, CliTokenResponse } from "../wire/types.js";
 
 export interface DeviceLoginOpts {
@@ -53,29 +54,51 @@ function errorOf(body: unknown): { error?: string; description?: string } {
   };
 }
 
-/** Sign in through the browser and return a CLI token pair. */
-export async function deviceLogin(opts: DeviceLoginOpts): Promise<CliTokenResponse> {
-  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const now = opts.now ?? Date.now;
-  const started = await post<CliDeviceCodeResponse>(`${opts.url}/api/cli/device/code`, { device: opts.device ?? hostname() });
+/** Ask the instance for a device code and a user code. */
+export async function startDeviceLogin(url: string, device: string = hostname(), now: () => number = Date.now): Promise<PendingLogin> {
+  const started = await post<CliDeviceCodeResponse>(`${url}/api/cli/device/code`, { device });
   if (started.status !== 200 || !("device_code" in started.body)) {
     throw new ApiError(started.status, errorOf(started.body).description ?? "the instance could not start a sign-in");
   }
   const code = started.body;
-  const pageUrl = `${opts.url}${code.verification_path}`;
+  return {
+    url,
+    deviceCode: code.device_code,
+    userCode: code.user_code,
+    verificationPath: code.verification_path,
+    expiresAt: now() + code.expires_in * 1000,
+    interval: code.interval,
+  };
+}
 
-  const opened = await opts.openUrl(pageUrl);
-  opts.log(`To sign in, ${opened ? "use the browser page that opened" : `open ${pageUrl} in a browser on any computer`}, and enter this code:`);
-  opts.log("");
-  opts.log(`    ${code.user_code}`);
-  opts.log("");
-  opts.log(`Waiting for approval (up to ${Math.round(code.expires_in / 60)} minutes)...`);
+/** The lines that tell the person where to enter the code. */
+export function deviceCodeInstructions(pending: PendingLogin, opened: boolean): string[] {
+  const pageUrl = `${pending.url}${pending.verificationPath}`;
+  return [
+    `To sign in, ${opened ? "use the browser page that opened" : `open ${pageUrl} in a browser on any computer`}, and enter this code:`,
+    "",
+    `    ${pending.userCode}`,
+    "",
+  ];
+}
 
-  const deadline = now() + code.expires_in * 1000;
-  let intervalMs = code.interval * 1000;
-  while (now() < deadline) {
-    await sleep(intervalMs);
-    const polled = await post<CliTokenResponse>(`${opts.url}/api/cli/device/token`, { device_code: code.device_code });
+/**
+ * Poll until the person allows or denies the sign-in, or it expires. The
+ * first poll is immediate, so resuming a sign-in the person already allowed
+ * finishes at once.
+ */
+export async function pollDeviceLogin(
+  pending: PendingLogin,
+  opts: { sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
+): Promise<CliTokenResponse> {
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = opts.now ?? Date.now;
+  let intervalMs = pending.interval * 1000;
+  let first = true;
+  while (now() < pending.expiresAt) {
+    if (!first) await sleep(intervalMs);
+    first = false;
+    const polled = await post<CliTokenResponse>(`${pending.url}/api/cli/device/token`, { device_code: pending.deviceCode });
     if (polled.status === 200 && "access_token" in polled.body) return polled.body;
     const { error, description } = errorOf(polled.body);
     if (error === "authorization_pending") continue;
@@ -87,7 +110,19 @@ export async function deviceLogin(opts: DeviceLoginOpts): Promise<CliTokenRespon
     if (error === "expired_token") throw new AuthError(`${description ?? "the sign-in code expired."} Run \`valet login\` again.`);
     throw new ApiError(polled.status, description ?? error ?? "the sign-in failed");
   }
-  throw new AuthError(`no approval within ${Math.round(code.expires_in / 60)} minutes. Run \`valet login\` again, and enter the code in the browser.`);
+  throw new AuthError("the sign-in code expired before anyone chose Allow. Run `valet login` again, and enter the new code in the browser.");
+}
+
+/** Start a sign-in, show the code, and wait for it. Returns a CLI token pair. */
+export async function deviceLogin(opts: DeviceLoginOpts): Promise<CliTokenResponse> {
+  const pending = await startDeviceLogin(opts.url, opts.device, opts.now);
+  const opened = await opts.openUrl(`${pending.url}${pending.verificationPath}`);
+  for (const line of deviceCodeInstructions(pending, opened)) opts.log(line);
+  opts.log("Waiting for approval...");
+  // The first poll waits one interval, so the person has time to act.
+  if (opts.sleep) await opts.sleep(pending.interval * 1000);
+  else await new Promise<void>((resolve) => setTimeout(resolve, pending.interval * 1000));
+  return pollDeviceLogin(pending, { sleep: opts.sleep, now: opts.now });
 }
 
 /** Replace a CLI token pair. Undefined when the sign-in expired or was disconnected. */

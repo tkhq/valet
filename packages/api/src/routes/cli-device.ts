@@ -40,8 +40,10 @@ const USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
 const CLI_ACCESS = [
   "Act as you in Valet from that computer's terminal: start and continue threads, run workflows, and use your connected integrations",
   "Stay signed in while the CLI is in use. It signs out after 30 days without use, or when you disconnect it in Settings > Agent access",
-  "It cannot approve requests, change policies, or administer your organization or teams. You do those in the browser",
 ];
+
+/** What a CLI token cannot do, shown below the access list. */
+const CLI_LIMITS = ["It cannot approve requests, change policies, or administer your organization or teams. You do those in the browser."];
 
 /** The computer name the CLI reports, trimmed to printable text. The CLI chooses it, so it proves nothing. */
 export function deviceLabel(raw: unknown): string {
@@ -164,7 +166,7 @@ cliDeviceRouter.get("/", async (c) => {
   const userCode = normalizeUserCode(c.req.query("user_code"));
   const request = userCode ? await pendingRequest(c.var.providers.db, userCode) : undefined;
   if (!userCode || !request) return c.json({ error: NOT_FOUND }, 404);
-  return c.json({ account: c.var.user.email, device: request.device, user_code: userCode, access: CLI_ACCESS } satisfies CliDeviceInfo);
+  return c.json({ account: c.var.user.email, device: request.device, user_code: userCode, access: CLI_ACCESS, limits: CLI_LIMITS } satisfies CliDeviceInfo);
 });
 
 cliDeviceRouter.post("/", async (c) => {

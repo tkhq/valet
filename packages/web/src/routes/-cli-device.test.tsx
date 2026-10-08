@@ -26,7 +26,7 @@ vi.mock("~/api/client", () => ({
 
 const { CliDevicePage } = await import("./cli.device");
 
-const INFO: CliDeviceInfo = { account: "me@valet.test", device: "laptop", user_code: "BCDF-GHJK", access: ["Act as you in Valet"] };
+const INFO: CliDeviceInfo = { account: "me@valet.test", device: "laptop", user_code: "BCDF-GHJK", access: ["Act as you in Valet"], limits: ["It cannot approve requests."] };
 
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

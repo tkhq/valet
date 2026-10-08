@@ -104,6 +104,9 @@ export function ConsentPage({ code }: { code: string | undefined }) {
                   <li key={line}>{line}</li>
                 ))}
               </ul>
+              {info.data.limits.map((line) => (
+                <p key={line} className="text-xs text-muted">{line}</p>
+              ))}
             </div>
 
             {error && <p className="text-sm text-danger-600">{error}</p>}

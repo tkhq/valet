@@ -36,14 +36,20 @@ On Windows, run these steps in WSL. The installer supports macOS and Linux only.
 
 You run the login. The person approves it in a browser.
 
-1. Run this command. It waits up to 10 minutes for the approval. Set your command timeout to at least 660 seconds. If you cannot, run it in the background and read its output:
+1. Start the sign-in. This command prints a code such as `BCDF-GHJK` and exits at once:
+
+   ```sh
+   valet login {{VALET_URL}} --name valet --no-wait
+   ```
+
+2. Give the person the code and this text: "Open {{VALET_URL}}/cli/device, sign in if Valet asks, type the code, check that the page names this computer, and choose Allow. Tell me when you are done."
+3. When the person says they are done, finish the sign-in. This command picks up the same code and prints `logged in`:
 
    ```sh
    valet login {{VALET_URL}} --name valet
    ```
 
-2. The command prints a code such as `BCDF-GHJK` and the page {{VALET_URL}}/cli/device. Give both to the person, with this text: "Open {{VALET_URL}}/cli/device, sign in if Valet asks, type the code, check that the page names this computer, and choose Allow."
-3. Wait until the command prints `logged in`.
+   If the person has not chosen Allow yet, the command waits for them, for up to 10 minutes from step 1.
 
 The browser can be on any computer, so this also works over SSH. The CLI receives a CLI token directly from Valet, not an API key. It signs out after 30 days without use. The person can disconnect it in Settings > Agent access. It cannot approve requests or change policies.
 
@@ -96,9 +102,9 @@ For another agent, save the same file where that agent reads skills or standing 
 
 | Symptom | Fix |
 |---|---|
-| `valet login` exits with code 5 | The person chose Deny, or did not approve within 10 minutes. Ask them, then repeat step 2. |
-| The page says no sign-in waits for the code | The code is wrong, expired, or was used. Check the code in the command output. If the command stopped, repeat step 2. |
-| `valet login` stopped before the person chose Allow | Your command timeout stopped it. Repeat step 2 with a longer timeout, or run it in the background. |
+| `valet login` exits with code 5 | The person chose Deny, or did not approve within 10 minutes. Ask them, then repeat step 2 from item 1. |
+| The page says no sign-in waits for the code | The code is wrong, expired, or was used. Check the code from item 1. If it expired, repeat step 2 from item 1. |
+| Your command timeout stopped `valet login` in item 3 | Run item 3 again. It resumes the same sign-in. |
 | `valet` exits with code 5 on another command | The CLI was disconnected, or was not used for 30 days. Repeat step 2. |
 | `valet` exits with code 6 | Valet is not reachable. Check {{VALET_URL}}/api/health in a browser or with `curl`. |
 | macOS says the binary is damaged | Run `xattr -d com.apple.quarantine ~/.local/bin/valet`. This happens only after a browser download. |

@@ -14,14 +14,19 @@
  *      (`cli/device-login.ts`): the person enters a code in a browser on any
  *      computer, and the CLI gets a CLI token pair. No API key is created.
  *
+ * A device sign-in is saved in `pendingLogins` until it ends, and a later
+ * `valet login` for the same profile resumes it. `--no-wait` starts one,
+ * prints the code, and exits, so an agent whose commands cannot run for
+ * minutes can finish the sign-in with a second `valet login`.
+ *
  * The credential is verified via `client.me()` BEFORE anything is written: an
  * `AuthError` prints a failure and returns `AuthFailure` with NO config write.
  * A credential is never echoed back to the user.
  */
 import { InstanceClient } from "../client.js";
-import type { ProfileConfig, ValetConfig } from "../config.js";
+import type { PendingLogin, ProfileConfig, ValetConfig } from "../config.js";
 import { saveConfig } from "../config.js";
-import { deviceLogin, openInBrowser, revokeDeviceLogin } from "../device-login.js";
+import { deviceCodeInstructions, openInBrowser, pollDeviceLogin, revokeDeviceLogin, startDeviceLogin } from "../device-login.js";
 import { AuthError, ExitCode, UnreachableError } from "../exit.js";
 import { parseGlobalFlags, printErr, printLine, type ParsedFlags } from "../output.js";
 import type { CliContext } from "../types.js";
@@ -40,8 +45,13 @@ export interface LoginDeps {
   readSecret(): Promise<string | undefined>;
   /** `GET /api/auth-config`: whether the instance runs stub auth (no credential needed). */
   authConfig(url: string): Promise<Pick<AuthConfigResponse, "stub">>;
-  /** Sign in through a browser and return a CLI token pair. Throws `AuthError` on denial or timeout. */
-  deviceLogin(url: string, opts: { openBrowser: boolean }): Promise<CliTokenResponse>;
+  /** Start a device sign-in (`POST /api/cli/device/code`). */
+  startDevice(url: string): Promise<PendingLogin>;
+  /** Poll a device sign-in until it ends. Throws `AuthError` on denial or expiry. */
+  pollDevice(pending: PendingLogin): Promise<CliTokenResponse>;
+  /** Open the page where the person enters the code. False when nothing opened it. */
+  openUrl(url: string): Promise<boolean>;
+  now(): number;
   /** Sign out a replaced device sign-in on the server. Best effort. */
   revoke(url: string, token: string): Promise<void>;
 }
@@ -76,7 +86,7 @@ export function profileNameForUrl(url: string): string {
 export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: ValetConfig): Promise<number> {
   const url = flags.rest[0];
   if (url === undefined || url === "") {
-    printErr("usage: valet login <url> [--name <name>] [--no-browser] [--api-key <key> | --api-key -]");
+    printErr("usage: valet login <url> [--name <name>] [--no-browser] [--no-wait] [--api-key <key> | --api-key -]");
     return ExitCode.Usage;
   }
 
@@ -105,24 +115,9 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
     const base = url.replace(/\/$/, "");
     const { stub } = await deps.authConfig(base);
     if (!stub) {
-      try {
-        const tokens = await deps.deviceLogin(base, { openBrowser: flags.flags["no-browser"] !== true });
-        profile = {
-          url,
-          cli: {
-            accessToken: tokens.access_token,
-            refreshToken: tokens.refresh_token,
-            accessExpiresAt: tokens.access_expires_at,
-            refreshExpiresAt: tokens.refresh_expires_at,
-          },
-        };
-      } catch (err) {
-        if (err instanceof AuthError) {
-          printErr(`valet login: ${err.message} Profile not saved.`);
-          return ExitCode.AuthFailure;
-        }
-        throw err;
-      }
+      const outcome = await signInWithDevice(deps, flags, config, name, url);
+      if (typeof outcome === "number") return outcome;
+      profile = outcome;
     }
   }
 
@@ -143,10 +138,12 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
   const replaced = config.profiles?.[name]?.cli;
   if (replaced) await deps.revoke(config.profiles?.[name]?.url.replace(/\/$/, "") ?? url, replaced.refreshToken);
 
+  const { [name]: _finished, ...stillPending } = config.pendingLogins ?? {};
   const next: ValetConfig = {
     ...config,
     profiles: { ...(config.profiles ?? {}), [name]: profile },
     defaultProfile: name,
+    ...(Object.keys(stillPending).length > 0 ? { pendingLogins: stillPending } : { pendingLogins: undefined }),
   };
   saveConfig(next);
 
@@ -159,6 +156,59 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
  * Lazily imports `node:readline` so non-`login` commands never pay for it and
  * the module stays side-effect-free on import.
  */
+/**
+ * Run or resume the device sign-in for profile `name`. Returns the profile
+ * to verify and save, or an exit code when the command ends here.
+ */
+async function signInWithDevice(
+  deps: LoginDeps,
+  flags: ParsedFlags,
+  config: ValetConfig,
+  name: string,
+  url: string,
+): Promise<ProfileConfig | number> {
+  const base = url.replace(/\/$/, "");
+  const saved = config.pendingLogins?.[name];
+  const resumed = saved !== undefined && saved.url === base && saved.expiresAt > deps.now();
+  const pending = resumed ? saved : await deps.startDevice(base);
+  if (!resumed) {
+    saveConfig({ ...config, pendingLogins: { ...(config.pendingLogins ?? {}), [name]: pending } });
+  }
+  const opened = !resumed && flags.flags["no-browser"] !== true && flags.flags["no-wait"] !== true
+    ? await deps.openUrl(`${pending.url}${pending.verificationPath}`)
+    : false;
+  if (resumed) printErr(`Resuming the sign-in that waits for code ${pending.userCode} (open ${pending.url}${pending.verificationPath}).`);
+  else for (const line of deviceCodeInstructions(pending, opened)) printErr(line);
+
+  if (flags.flags["no-wait"] === true) {
+    printErr(`When the person has chosen Allow, run \`valet login ${base} --name ${name}\` to finish. The code expires in ${Math.max(1, Math.round((pending.expiresAt - deps.now()) / 60_000))} minutes.`);
+    return ExitCode.OK;
+  }
+  printErr("Waiting for approval...");
+  let tokens: CliTokenResponse;
+  try {
+    tokens = await deps.pollDevice(pending);
+  } catch (err) {
+    if (err instanceof AuthError) {
+      // The sign-in ended: forget it, so the next login starts a new one.
+      const { [name]: _ended, ...rest } = config.pendingLogins ?? {};
+      saveConfig({ ...config, pendingLogins: Object.keys(rest).length > 0 ? rest : undefined });
+      printErr(`valet login: ${err.message} Profile not saved.`);
+      return ExitCode.AuthFailure;
+    }
+    throw err;
+  }
+  return {
+    url,
+    cli: {
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token,
+      accessExpiresAt: tokens.access_expires_at,
+      refreshExpiresAt: tokens.refresh_expires_at,
+    },
+  };
+}
+
 async function readSecret(): Promise<string | undefined> {
   if (!process.stdin.isTTY) {
     const raw = (await readAllStdin()).trim();
@@ -219,11 +269,10 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
     makeClient: (opts) => new InstanceClient(opts),
     readSecret,
     authConfig,
-    deviceLogin: (url, opts) => deviceLogin({
-      url,
-      openUrl: opts.openBrowser ? openInBrowser : () => Promise.resolve(false),
-      log: printErr,
-    }),
+    startDevice: (url) => startDeviceLogin(url),
+    pollDevice: (pending) => pollDeviceLogin(pending),
+    openUrl: openInBrowser,
+    now: Date.now,
     revoke: revokeDeviceLogin,
   };
   return runLogin(deps, flags, ctx.config);

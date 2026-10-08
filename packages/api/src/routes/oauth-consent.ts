@@ -53,8 +53,10 @@ const MCP_ACCESS = [
   "Start and continue Valet threads, and answer questions Valet asks",
   "Read and write your memory and your teams' memory, and read your skills",
   "Run your workflows, and publish pages that everyone in your organization can open",
-  "It cannot approve requests, change policies, or administer your organization or teams",
 ];
+
+/** What an MCP token cannot do, shown below the access list. */
+const MCP_LIMITS = ["It cannot approve requests, change policies, or administer your organization or teams."];
 
 function isLoopback(uri: string): boolean {
   try {
@@ -138,6 +140,7 @@ oauthConsentRouter.get("/", async (c) => {
     redirect_is_local: isLoopback(pending.redirectURI),
     account: c.var.user.email,
     access: MCP_ACCESS,
+    limits: MCP_LIMITS,
   };
   return c.json(body);
 });

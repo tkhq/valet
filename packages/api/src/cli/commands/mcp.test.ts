@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import type { ValetConfig } from "../config.js";
 import { ExitCode } from "../exit.js";
 import { NoInstanceError } from "../exit.js";
-import { buildMcpServerConfig, defaultFsSeam, run, runMcp, writeClaudeCodeConfig, type FsSeam } from "./mcp.js";
+import { buildMcpServerConfig, defaultFsSeam, run, runMcp, withCodexServer, writeClaudeCodeConfig, type FsSeam } from "./mcp.js";
 
 let outSpy: MockInstance;
 let errSpy: MockInstance;
@@ -218,6 +218,7 @@ describe("runMcp — per-agent setup", () => {
         fs: { readFile: (p: string) => files[p], writeFile: (p: string, c: string) => { files[p] = c; } },
         cwd: "/repo",
         home: "/home/me",
+        codexHome: "/home/me/.codex",
       },
     };
   }
@@ -240,11 +241,17 @@ describe("runMcp — per-agent setup", () => {
     expect(stderr()).toContain("claude mcp add --transport http --scope user valet https://valet.example.com/mcp");
   });
 
-  it("adds Valet to Codex and says how to sign in", async () => {
-    const { deps: d, calls } = deps();
+  it("writes Valet into Codex's config.toml without starting a sign-in, and says how to sign in", async () => {
+    const { deps: d, calls, files } = deps();
+    files["/home/me/.codex/config.toml"] = 'model = "o3"\n\n[mcp_servers.valet]\nurl = "https://old"\n\n[mcp_servers.valet.env]\nX = "1"\n\n[profiles.fast]\nmodel = "o4"\n';
     expect(await runMcp(d, ["setup", "codex"], ctx)).toBe(ExitCode.OK);
-    expect(calls).toContain("codex mcp add valet --url https://valet.example.com/mcp");
+    expect(calls).toEqual([]);
+    expect(files["/home/me/.codex/config.toml"]).toBe('model = "o3"\n\n[profiles.fast]\nmodel = "o4"\n\n[mcp_servers.valet]\nurl = "https://valet.example.com/mcp"\n');
     expect(stdout()).toContain("codex mcp login valet");
+  });
+
+  it("creates Codex's config.toml when there is none", () => {
+    expect(withCodexServer("", "valet", "https://v/mcp")).toBe('[mcp_servers.valet]\nurl = "https://v/mcp"\n');
   });
 
   it("merges Valet into Cursor's mcp.json without a type field", async () => {

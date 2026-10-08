@@ -109,7 +109,7 @@ Every MCP authorization goes through Valet's consent page (`routes/oauth-consent
 
 ### Sign-in
 
-The instance publishes OAuth protected-resource and authorization-server metadata and supports dynamic client registration. An MCP client that implements MCP authorization signs in by itself. `valet mcp setup` therefore adds only the endpoint URL, at user scope for Claude Code and Codex and in `~/.cursor/mcp.json` for Cursor, unless `--token` supplies a bearer token for a client that cannot run OAuth.
+The instance publishes OAuth protected-resource and authorization-server metadata and supports dynamic client registration. An MCP client that implements MCP authorization signs in by itself. `valet mcp setup` therefore adds only the endpoint URL, at user scope for Claude Code, in `$CODEX_HOME/config.toml` for Codex (not `codex mcp add`, which starts a sign-in at once and waits), and in `~/.cursor/mcp.json` for Cursor, unless `--token` supplies a bearer token for a client that cannot run OAuth.
 
 ## Not included
 

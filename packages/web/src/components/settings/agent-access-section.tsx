@@ -29,6 +29,7 @@ export function AgentAccessSection() {
 
   return (
     <div className="space-y-8">
+      <SetupCard />
       <div className="space-y-2">
         <h3 className="text-sm font-medium text-ink">MCP apps</h3>
         {apps.length === 0 ? (
@@ -39,7 +40,7 @@ export function AgentAccessSection() {
               <AccessRow
                 key={app.client_id}
                 title={app.name}
-                detail={`Connected ${day(app.connected_at)}${app.expires_at ? ` · access ends ${day(app.expires_at)} unless the app signs in again` : ""}`}
+                detail={`Connected ${day(app.connected_at)}`}
                 pending={disconnect.isPending && disconnect.variables?.id === app.client_id}
                 onDisconnect={() => disconnect.mutate({ kind: "mcp", id: app.client_id })}
               />
@@ -88,6 +89,39 @@ function AccessRow({ title, detail, pending, onDisconnect }: { title: string; de
       >
         {confirming ? "Confirm disconnect" : "Disconnect"}
       </Button>
+    </div>
+  );
+}
+
+/**
+ * How to connect a coding agent: one sentence the person pastes into it. The
+ * agent then follows `/agent-setup.md`, which runs `valet login` and
+ * `valet mcp setup` and asks the person to approve each in the browser.
+ */
+function SetupCard() {
+  const instruction = `Read ${window.location.origin}/agent-setup.md and follow it.`;
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(instruction);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard access can be refused; the text stays selectable.
+    }
+  }
+  return (
+    <div className="space-y-2 rounded border border-line px-4 py-3">
+      <h3 className="text-sm font-medium text-ink">Set up a coding agent</h3>
+      <p className="text-sm text-muted">
+        To connect Claude Code, Codex, or Cursor, paste this into the agent. It installs the Valet CLI, connects MCP, and asks you to approve each step in the browser.
+      </p>
+      <div className="flex items-center gap-2">
+        <code className="min-w-0 flex-1 select-all truncate rounded bg-neutral-100 px-2 py-1.5 text-xs text-ink dark:bg-neutral-800">{instruction}</code>
+        <Button size="sm" variant="secondary" onClick={() => void copy()}>
+          {copied ? "Copied" : "Copy"}
+        </Button>
+      </div>
     </div>
   );
 }

@@ -5,8 +5,10 @@
  * - `claude-code`: `claude mcp add --scope user`, so Valet is available in
  *   every project and no config file lands in a repository. `--project`
  *   writes `./.mcp.json` instead.
- * - `codex`: `codex mcp add <name> --url <endpoint>`. Sign in with
- *   `codex mcp login <name>`.
+ * - `codex`: writes `[mcp_servers.<name>]` into `$CODEX_HOME/config.toml`
+ *   (default `~/.codex`). `codex mcp add` is not used: for an OAuth server it
+ *   starts a sign-in at once and waits for a browser, which hangs a script.
+ *   The person signs in with `codex mcp login <name>`.
  * - `cursor`: merges the server into `~/.cursor/mcp.json`.
  *
  * `/mcp` auth is OAuth, not `x-api-key`. The endpoint is mounted only when
@@ -184,10 +186,39 @@ export interface McpDeps {
   fs: FsSeam;
   cwd: string;
   home: string;
+  /** Codex's config directory: `$CODEX_HOME`, else `~/.codex`. */
+  codexHome: string;
+}
+
+/**
+ * Put `[mcp_servers.<name>]` with `url` into a Codex `config.toml`, replacing
+ * that table if it exists and leaving every other line alone. Line-based, so
+ * comments and formatting elsewhere survive.
+ */
+export function withCodexServer(toml: string, name: string, url: string): string {
+  const header = `[mcp_servers.${name}]`;
+  const lines = toml === "" ? [] : toml.replace(/\n$/, "").split("\n");
+  const out: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // A sub-table such as [mcp_servers.<name>.env] belongs to the entry too.
+    if (trimmed === header || trimmed.startsWith(`[mcp_servers.${name}.`)) {
+      skipping = true;
+      continue;
+    }
+    if (skipping && trimmed.startsWith("[")) skipping = false;
+    if (!skipping) out.push(line);
+  }
+  while (out.length > 0 && out[out.length - 1]?.trim() === "") out.pop();
+  if (out.length > 0) out.push("");
+  out.push(header, `url = ${JSON.stringify(url)}`);
+  return `${out.join("\n")}\n`;
 }
 
 export async function run(args: string[], ctx: CliContext): Promise<number> {
-  return runMcp({ exec: defaultExec, fs: defaultFsSeam, cwd: process.cwd(), home: homedir() }, args, ctx);
+  const home = homedir();
+  return runMcp({ exec: defaultExec, fs: defaultFsSeam, cwd: process.cwd(), home, codexHome: process.env.CODEX_HOME || resolve(home, ".codex") }, args, ctx);
 }
 
 export async function runMcp(deps: McpDeps, args: string[], ctx: CliContext): Promise<number> {
@@ -226,18 +257,10 @@ export async function runMcp(deps: McpDeps, args: string[], ctx: CliContext): Pr
   }
 
   if (agent === "codex") {
-    // Replace an older entry under the same name; a missing one is fine.
-    deps.exec("codex", ["mcp", "remove", name]);
-    const added = deps.exec("codex", ["mcp", "add", name, "--url", entry.url]);
-    if (added.status !== 0) {
-      printErr(added.status === null
-        ? "mcp: the codex command was not found. Install Codex, or add this server to ~/.codex/config.toml yourself:"
-        : `mcp: codex mcp add failed: ${added.output}`);
-      printErr(`  [mcp_servers.${name}]\n  url = "${entry.url}"`);
-      return ExitCode.Failure;
-    }
-    printLine(`added MCP server "${name}" to Codex → ${entry.url}`);
-    printLine(`Sign in: run \`codex mcp login ${name}\`, then choose Allow in the browser.`);
+    const target = resolve(deps.codexHome, "config.toml");
+    deps.fs.writeFile(target, withCodexServer(deps.fs.readFile(target) ?? "", name, entry.url));
+    printLine(`wrote MCP server "${name}" → ${target}`);
+    printLine(`Sign in: run \`codex mcp login ${name}\` in a terminal, open the URL it prints, and choose Allow.`);
     return ExitCode.OK;
   }
 

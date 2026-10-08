@@ -5586,6 +5586,8 @@ export interface OAuthConsentInfo {
   account: string;
   /** What an approved app can do. */
   access: string[];
+  /** What the app cannot do. */
+  limits: string[];
 }
 
 /** `POST /api/oauth/consent` response: where to send the browser next. */
@@ -5620,6 +5622,8 @@ export interface CliDeviceInfo {
   device: string;
   user_code: string;
   access: string[];
+  /** What the CLI cannot do. */
+  limits: string[];
 }
 
 /** `GET /api/me/agent-access` response: the apps and CLIs that can act as the caller. */

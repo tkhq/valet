@@ -21,7 +21,7 @@ export function ApiKeysPage() {
           <WorkspaceClause />
         </span>
       }
-      description="Create keys to call the Valet API from scripts."
+      description="Create keys to call the Valet API from scripts. To connect a coding agent such as Claude Code, use Agent access instead."
     >
       <ApiKeysSection />
     </Section>

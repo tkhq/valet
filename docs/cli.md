@@ -78,7 +78,12 @@ URL. The CLI receives a CLI token, not an API key. The token refreshes
 itself while you use the CLI, and signs out after 30 days without use.
 Disconnect a CLI in Settings > Agent access, or with `valet logout`, which
 also signs it out on the server. A new `login` signs out the one it
-replaces. Other ways to log in:
+replaces.
+
+`--no-wait` prints the code and exits. The CLI saves the waiting sign-in,
+and the next `valet login` for the same profile resumes it. If the person
+already chose Allow, it finishes at once. An agent uses this when its
+commands cannot run for minutes. Other ways to log in:
 
 - `--api-key vlt_...` uses a key you already have, for scripts and CI.
 - `--api-key -` reads a key from a hidden prompt or stdin.
@@ -209,8 +214,8 @@ Wire a local agent to the instance's `/mcp` endpoint, for every project:
 
 - `claude-code` (default) runs `claude mcp add --transport http --scope user`.
   `--project` writes the project's `.mcp.json` instead.
-- `codex` runs `codex mcp add <name> --url <endpoint>`. Then run
-  `codex mcp login <name>`.
+- `codex` writes the server into `$CODEX_HOME/config.toml` (default
+  `~/.codex`). Then run `codex mcp login <name>` in a terminal.
 - `cursor` merges the server into `~/.cursor/mcp.json`.
 
 `--print` emits the config JSON to stdout for any other agent, and writes
