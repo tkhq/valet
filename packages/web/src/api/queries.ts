@@ -103,18 +103,57 @@ export function useThreads(id: string, opts?: UseQueryOptions<ListThreadsRespons
   });
 }
 
+/** Keep each fixed-row request below common proxy URL limits, including encoded IDs. */
+export function fixedThreadBatches(ids: string[]): string[][] {
+  const batches: string[][] = [];
+  let bytes = 0;
+  for (const id of [...new Set(ids)].sort()) {
+    const size = encodeURIComponent(id).length + 9;
+    if (size > 2048) throw new Error("A saved thread ID is too long. Remove the invalid pin or project assignment.");
+    if (!batches.length || batches[batches.length - 1].length >= 50 || bytes + size > 3000) {
+      batches.push([]);
+      bytes = 0;
+    }
+    batches[batches.length - 1].push(id);
+    bytes += size;
+  }
+  return batches;
+}
+
+async function readFixedThreads(id: string, fixedIds: string[], threadId?: string): Promise<ListThreadsResponse> {
+  const batches = fixedThreadBatches(fixedIds);
+  if (!batches.length && threadId) batches.push([]);
+  const threads: ThreadSummary[] = [];
+  // Serial batches bound concurrent workspace metadata reads for large projects.
+  for (const fixedIds of batches) {
+    const page = await api.listThreads(id, { fixedIds, fixedOnly: true, threadId });
+    threads.push(...page.threads);
+  }
+  return { threads: [...new Map(threads.map(thread => [thread.id, thread])).values()] };
+}
+
 export function useSidebarThreads(id: string, options: { sort: string; origin: string; fixedIds: string[]; threadId?: string }) {
+  const { sort, origin, threadId } = options;
+  const fixedIds = [...new Set(options.fixedIds)].sort();
   const query = useInfiniteQuery({
-    queryKey: qk.threadPages(id, options),
+    queryKey: qk.threadPages(id, { sort, origin }),
     initialPageParam: undefined as string | undefined,
-    queryFn: ({ pageParam }) => api.listThreads(id, { ...options, limit: 10, cursor: pageParam }),
+    queryFn: ({ pageParam }) => api.listThreads(id, { sort, origin, limit: 10, cursor: pageParam }),
     getNextPageParam: page => page.nextCursor,
     enabled: !!id,
   });
+  const fixed = useQuery({
+    queryKey: [...qk.threads(id), "fixed", fixedIds, threadId],
+    queryFn: () => readFixedThreads(id, fixedIds, threadId),
+    placeholderData: (previous, previousQuery) => previousQuery?.queryKey[1] === id ? previous : undefined,
+    enabled: !!id && (fixedIds.length > 0 || !!threadId),
+  });
   const pages = query.data?.pages;
-  return { ...query, data: pages ? {
-    ...pages[0], threads: [...new Map(pages.flatMap(page => page.threads).map(thread => [thread.id, thread])).values()],
-  } : undefined };
+  return { ...query, fixedReady: !fixed.isFetching && !fixed.isError,
+    fixedError: fixed.error, refetchFixed: fixed.refetch,
+    data: pages ? {
+      ...pages[0], threads: [...new Map([...pages.flatMap(page => page.threads), ...(fixed.data?.threads ?? [])].map(thread => [thread.id, thread])).values()],
+    } : undefined };
 }
 
 export function mapThreadData(current: ListThreadsResponse | InfiniteData<ListThreadsResponse> | undefined, change: (thread: ThreadSummary) => ThreadSummary) {
@@ -126,7 +165,11 @@ export function mapThreadData(current: ListThreadsResponse | InfiniteData<ListTh
 export function useThreadSearch(id: string, query: string, enabled: boolean, fixedIds: string[] = []) {
   return useQuery<ListThreadsResponse>({
     queryKey: [...qk.threadSearch(id, query), fixedIds],
-    queryFn: () => api.listThreads(id, { q: query, fixedIds }),
+    queryFn: async () => {
+      const matches = await api.listThreads(id, { q: query });
+      const fixed = await readFixedThreads(id, fixedIds);
+      return { ...matches, threads: [...new Map([...matches.threads, ...fixed.threads].map(thread => [thread.id, thread])).values()] };
+    },
     enabled: enabled && !!id && !!query,
     staleTime: 0,
   });

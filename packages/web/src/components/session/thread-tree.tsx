@@ -374,7 +374,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   }
   // A gate on an archived thread has no row in `visible`; without this the
   // gate would be invisible while the archived section is closed.
-  const archivedGated = threadsQ.data !== undefined && hasGateOutsideList(threadsQ.data?.threads ?? [], gatedThreadIds);
+  const archivedGated = threadsQ.data !== undefined && threadsQ.fixedReady && hasGateOutsideList(threadsQ.data?.threads ?? [], gatedThreadIds);
 
   function selectThreadSort(next: ThreadSortMode) {
     setSortMode(next);
@@ -600,6 +600,9 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
             <div className="px-4 py-3 flex items-center gap-2 text-sm text-muted">
               <Spinner size={14} /> Loading…
             </div>
+          )}
+          {threadsQ.fixedError && (
+            <div role="alert" className="px-4 py-3 text-sm text-danger-500">Could not load pinned, project, or selected threads. {threadsQ.fixedError.message} <button type="button" onClick={() => void threadsQ.refetchFixed()} className="underline">Retry</button></div>
           )}
           {threadsQ.error && (
             <div role="alert" className="px-4 py-3 text-sm text-danger-500">Could not load threads. <button type="button" onClick={() => void (threadsQ.isFetchNextPageError ? threadsQ.fetchNextPage() : threadsQ.refetch())} className="underline">Retry</button></div>

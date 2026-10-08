@@ -105,10 +105,16 @@ ChatContainer (orchestrator)
 - A **Load more threads** button supports keyboard use. If a request fails, **Retry** keeps the rows already loaded.
 - The server applies authorization, archive state, origin filters, and sort order before it selects a page.
 - A cursor uses the sort timestamp, creation timestamp, and thread ID. Equal timestamps do not drop rows.
-- Pins, grouped project threads, pending approvals, the selected thread, and the implicit default remain available outside the recent page limit.
+- Pins, grouped project threads, pending approvals, the selected thread, and the implicit default remain available beyond the recent page.
+- Recent pages are independent of pins and projects. A pinned recent row can reduce the number of unpinned rows among the first ten.
 - Search checks titles and persisted messages across authorized history. Project-name matches include assigned threads outside loaded pages.
-- Cache keys include the workspace runtime, sort, origin, selected thread, and fixed thread IDs. Workspace switches do not reuse another workspace's rows.
-- Live activity refreshes paged lists. Existing mutation updates support both single-page and infinite-query cache shapes.
+- Page cache keys include the workspace runtime, sort, and origin. Selection, pins, project assignments, and approvals do not reset loaded pages.
+- Supplemental rows use separate requests with at most 50 IDs and 3,000 encoded fixed-ID query bytes per batch. These rows ignore origin filters.
+- The archived approval marker waits for supplemental reads. An active row outside the origin filter does not imply archived history.
+- Workspace switches do not reuse another workspace's rows. The selected thread is requested explicitly when opening its conversation.
+- The server and client break equal creation timestamps by ascending thread ID.
+- Live activity updates loaded rows without refetching pages. Completed turns and normal list invalidations still refresh the list.
+- Existing mutation updates support both single-page and infinite-query cache shapes.
 
 The first version scans authorized candidate metadata before paging. Activity and pull-request enrichment runs only for returned rows.
 This limits response size and enrichment work, but does not bound candidate metadata reads. Unpaged API callers and archived history keep their existing response behavior.

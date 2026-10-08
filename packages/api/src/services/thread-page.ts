@@ -11,6 +11,10 @@ function origin(thread: ThreadSummary): Origin {
 
 /** Apply paging only after workspace authorization and archive/search filtering. */
 export function threadPage(threads: ThreadSummary[], params: URLSearchParams): ListThreadsResponse {
+  const fixed = new Set(params.getAll("fixedId"));
+  const selected = params.get("threadId");
+  if (fixed.size > 50) throw new Error("Request at most 50 fixed threads at a time.");
+  if (params.get("fixedOnly") === "1") return { threads: threads.filter(t => fixed.has(t.id) || t.id === selected) };
   const rawLimit = params.get("limit");
   if (rawLimit === null) return { threads };
   const limit = Number(rawLimit);
@@ -23,8 +27,6 @@ export function threadPage(threads: ThreadSummary[], params: URLSearchParams): L
   const originCounts = { all: visible.length, chat: 0, auto: 0, channel: 0, other: 0 };
   for (const t of visible) originCounts[origin(t)]++;
   const defaultThreadId = [...visible].sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id))[0]?.id;
-  const fixed = new Set(params.getAll("fixedId"));
-  const selected = params.get("threadId");
   const time = (t: ThreadSummary) => sort === "created" ? t.createdAt : t.lastUserActivityAt;
   const sorted = visible.filter(t => filter === "all" || origin(t) === filter)
     .sort((a, b) => time(b) - time(a) || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
@@ -41,6 +43,6 @@ export function threadPage(threads: ThreadSummary[], params: URLSearchParams): L
   const page = remaining.slice(0, limit);
   const last = page.at(-1);
   const nextCursor = remaining.length > limit && last ? Buffer.from(JSON.stringify({ time: time(last), created: last.createdAt, id: last.id })).toString("base64url") : undefined;
-  const extras = threads.filter(t => t.id === selected || t.id === defaultThreadId || (fixed.has(t.id) && (filter === "all" || origin(t) === filter)));
+  const extras = threads.filter(t => t.id === selected || t.id === defaultThreadId || fixed.has(t.id));
   return { threads: [...new Map([...page, ...extras].map(t => [t.id, t])).values()], nextCursor, defaultThreadId, originCounts };
 }

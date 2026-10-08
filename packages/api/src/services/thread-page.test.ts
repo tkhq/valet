@@ -32,3 +32,16 @@ it("keeps a selected helper thread available to the main view", () => {
   const helper = { ...threads[0]!, id: "helper", key: "app-assistant:private" };
   expect(threadPage([...threads, helper], new URLSearchParams("limit=10&threadId=helper")).threads).toContainEqual(helper);
 });
+
+it("retains gated rows outside an origin filter without consuming page slots", () => {
+  const page = threadPage(threads, new URLSearchParams("limit=10&origin=chat&fixedId=t23"));
+  expect(page.threads.some(t => t.id === "t23")).toBe(true);
+  expect(page.threads.filter(t => t.key === "web:x")).toHaveLength(10);
+});
+
+it("returns only authorized fixed rows without applying the origin filter", () => {
+  const page = threadPage(threads, new URLSearchParams("fixedOnly=1&fixedId=t23&fixedId=foreign&origin=chat"));
+  expect(page.threads.map(t => t.id)).toEqual(["t23"]);
+  expect(page.nextCursor).toBeUndefined();
+  expect(() => threadPage(threads, new URLSearchParams(Array.from({ length: 51 }, (_, i): [string, string] => ["fixedId", `id-${i}`])))).toThrow(/at most 50/);
+});

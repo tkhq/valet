@@ -21,6 +21,9 @@ it("pages workspace threads and searches persisted content beyond the first page
   const selected = await (await fetch(`${base}?limit=10&threadId=paged-0&fixedId=foreign-thread`)).json() as ListThreadsResponse;
   expect(selected.threads.some(t => t.id === "paged-0")).toBe(true);
   expect(selected.threads.some(t => t.id === "foreign-thread")).toBe(false);
+  const fixed = await (await fetch(`${base}?fixedOnly=1&fixedId=paged-0&fixedId=foreign-thread`)).json() as ListThreadsResponse;
+  expect(fixed.threads.map(t => t.id)).toEqual(["paged-0"]);
+  expect((await fetch(`${base}?fixedOnly=1&fixedId=paged-0`, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(404);
   const { sql } = await import("drizzle-orm");
   await api.providers.db.execute(sql`INSERT INTO engine_entries(id,session_id,thread_id,entry_type,role,content,created_at) VALUES ('search-old',${owner.sessionId},'paged-0','message','user','needle beyond page',1001)`);
   const found = await (await fetch(`${base}?q=needle`)).json() as ListThreadsResponse;

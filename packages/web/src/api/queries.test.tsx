@@ -107,7 +107,7 @@ describe("useSidebarThreads", () => {
     const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
     const { result, rerender } = renderHook(({ id }) => useSidebarThreads(id, { sort: "created", origin: "all", fixedIds: [] }), { wrapper, initialProps: { id: sessionId } });
     await waitFor(() => expect(result.current.data?.threads).toHaveLength(1));
-    expect(list).toHaveBeenNthCalledWith(1, sessionId, { sort: "created", origin: "all", fixedIds: [], limit: 10, cursor: undefined });
+    expect(list).toHaveBeenNthCalledWith(1, sessionId, { sort: "created", origin: "all", limit: 10, cursor: undefined });
     await act(() => result.current.fetchNextPage());
     await waitFor(() => expect(result.current.isFetchNextPageError).toBe(true));
     expect(result.current.data?.threads).toEqual([row]);
@@ -119,6 +119,37 @@ describe("useSidebarThreads", () => {
     await waitFor(() => expect(result.current.data?.threads[0]?.id).toBe("team"));
     client.clear();
   });
+  it("keeps loaded pages when selection, pins, and project assignments change", async () => {
+    const { useSidebarThreads } = await import("./queries");
+    const row = { id: "one", sessionId, createdAt: 1, lastUserActivityAt: 1 };
+    const list = vi.spyOn(api, "listThreads").mockImplementation(async (_id, opts) => ({
+      threads: opts?.fixedIds?.length ? opts.fixedIds.map(id => ({ ...row, id })) : [{ ...row, id: opts?.cursor === "3" ? "three" : opts?.cursor ? "two" : "one" }],
+      nextCursor: opts?.cursor === "3" ? undefined : opts?.cursor ? "3" : "2",
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result, rerender } = renderHook(({ fixedIds, threadId }) => useSidebarThreads(sessionId, { sort: "created", origin: "all", fixedIds, threadId }), {
+      wrapper, initialProps: { fixedIds: [] as string[], threadId: undefined as string | undefined },
+    });
+    await waitFor(() => expect(result.current.data?.threads).toHaveLength(1));
+    await act(() => result.current.fetchNextPage());
+    await waitFor(() => expect(result.current.data?.threads.map(t => t.id)).toEqual(["one", "two"]));
+    await act(() => result.current.fetchNextPage());
+    await waitFor(() => expect(result.current.data?.threads).toHaveLength(3));
+    rerender({ fixedIds: ["pin", "project", "gate"], threadId: "two" });
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.data?.threads.map(t => t.id)).toEqual(["one", "two", "three"]);
+    await waitFor(() => expect(result.current.data?.threads.some(t => t.id === "project")).toBe(true));
+    expect(result.current.data?.threads.some(t => t.id === "two")).toBe(true);
+    expect(list.mock.calls.filter(([, opts]) => opts?.limit === 10)).toHaveLength(3);
+    const calls = list.mock.calls.length;
+    rerender({ fixedIds: ["gate", "pin", "project"], threadId: "two" });
+    expect(list.mock.calls).toHaveLength(calls);
+    rerender({ fixedIds: ["gate", "pin", "project"], threadId: "three" });
+    expect(result.current.data?.threads.some(t => t.id === "project")).toBe(true);
+    client.clear();
+  });
+
 });
 
 describe("paged thread read state", () => {
@@ -141,4 +172,23 @@ describe("paged thread read state", () => {
     expect(embedded?.[1]?.readAt).toBeUndefined();
     client.clear();
   });
+});
+
+it("batches hundreds of fixed IDs into bounded requests without dropping rows", async () => {
+  const { fixedThreadBatches, useSidebarThreads } = await import("./queries");
+  const ids = Array.from({ length: 280 }, (_, i) => `project-thread-${i.toString().padStart(4, "0")}`);
+  const batches = fixedThreadBatches(ids);
+  expect(batches.flat()).toEqual(ids);
+  for (const batch of batches) {
+    expect(batch.length).toBeLessThanOrEqual(50);
+    expect(new URLSearchParams(batch.map(id => ["fixedId", id])).toString().length).toBeLessThan(3000);
+  }
+  const list = vi.spyOn(api, "listThreads").mockImplementation(async (_id, opts) => ({ threads: (opts?.fixedIds ?? ["recent"]).map(id => ({ id, sessionId, createdAt: 1, lastUserActivityAt: 1 })) }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const { result } = renderHook(() => useSidebarThreads(sessionId, { sort: "created", origin: "chat", fixedIds: ids }), { wrapper });
+  await waitFor(() => expect(result.current.data?.threads).toHaveLength(281));
+  expect(list.mock.calls.filter(([,opts]) => opts?.fixedOnly)).toHaveLength(6);
+  client.clear();
+  vi.restoreAllMocks();
 });

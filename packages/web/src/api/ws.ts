@@ -143,8 +143,7 @@ export function useSessionWebSocket(sessionId: string) {
           if (wire.type === "thread.activity") {
             qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), current => mapThreadData(current, thread =>
               thread.id === wire.threadId ? { ...thread, lastUserActivityAt: Math.max(thread.lastUserActivityAt, wire.lastUserActivityAt) } : thread));
-            const matching = threadListFilters(sessionId);
-            void qc.invalidateQueries({ predicate: query => query.queryKey[3] === "pages" && matching.predicate(query) });
+            // Activity reorders cached rows locally. Do not refetch every loaded page per frame.
           }
           // Reset backoff only after receiving init — confirms the session
           // is valid and the connection is healthy. Resetting in onopen

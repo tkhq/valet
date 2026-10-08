@@ -34,6 +34,7 @@ let hasNextPage = false;
 const fetchNextPage = vi.fn();
 let hasMoreThreads = false;
 let threadPageError = false;
+let fixedReady = true;
 const fetchMoreThreads = vi.fn();
 let pendingGates: Record<string, DecisionGate> = {};
 let sessionModel: string | undefined;
@@ -55,7 +56,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
   return {
     ...actual,
     useThreadSearch: () => ({ data: { threads: searchMatches }, isFetching: false, isError: false }),
-    useSidebarThreads: () => ({ data: { threads }, isLoading: false, error: threadPageError ? new Error("network") : null,
+    useSidebarThreads: () => ({ data: { threads }, fixedReady, isLoading: false, error: threadPageError ? new Error("network") : null,
       hasNextPage: hasMoreThreads, fetchNextPage: fetchMoreThreads, isFetchNextPageError: threadPageError, isError: threadPageError, isFetching: false }),
     useSession: () => ({
       data: sessionModel ? { model: sessionModel } : undefined,
@@ -175,6 +176,7 @@ beforeEach(() => {
   hasNextPage = false;
   hasMoreThreads = false;
   threadPageError = false;
+  fixedReady = true;
   fetchMoreThreads.mockClear();
   pendingGates = {};
   sessionModel = undefined;
@@ -485,6 +487,23 @@ describe("ThreadTree — response-required bell", () => {
     await user.keyboard("{Escape}");
     expect(screen.getByLabelText("Needs approval").closest("a")?.textContent).toContain("Plan the launch");
 
+  });
+
+  it("does not put an active filtered Slack approval on archived history", () => {
+    window.localStorage.setItem("valet:thread-origin", "chat");
+    threads.push(thread({ id: "slack-active", key: "slack:C1:1", title: "Slack gated" }));
+    pendingGates = { g1: gate("g1", "slack-active") };
+    renderTree();
+    expect(screen.queryByText("Slack gated")).toBeNull();
+    expect(screen.queryByLabelText("Response required")).toBeNull();
+  });
+
+  it("does not label missing supplemental rows as archived while they load", () => {
+    fixedReady = false;
+    pendingGates = { g1: gate("g1", "not-loaded") };
+    renderTree();
+    expect(screen.queryByLabelText("Response required")).toBeNull();
+    fixedReady = true;
   });
 
   it("surfaces a gate on an archived thread: toggle bell, then row bell", async () => {

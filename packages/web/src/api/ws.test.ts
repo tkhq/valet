@@ -157,7 +157,7 @@ describe("useSessionWebSocket", () => {
     unmount();
   });
 
-  it("updates cached activity and refreshes only matching paged lists", () => {
+  it("updates cached activity without refetching loaded pages", () => {
     const { queryClient, unmount } = renderSocketHook("s1");
     queryClient.setQueryData<ListThreadsResponse>(["sessions", "s1", "threads"], {
       threads: [
@@ -174,7 +174,7 @@ describe("useSessionWebSocket", () => {
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const pages = ["sessions", "root", "threads", "pages"];
     queryClient.setQueryData(pages, {
-      pages: [{ threads: [{ id: "t1", sessionId: "s1", createdAt: 1, lastUserActivityAt: 10 }] }], pageParams: [undefined],
+      pages: Array.from({ length: 5 }, (_, i) => ({ threads: [{ id: i === 0 ? "t1" : `page-${i}`, sessionId: "s1", createdAt: 1, lastUserActivityAt: 10 }] })), pageParams: [undefined, "2", "3", "4", "5"],
     });
     const unrelated = ["sessions", "other-workspace", "threads", "pages"];
     queryClient.setQueryData(unrelated, { pages: [{ threads: [] }], pageParams: [undefined] });
@@ -207,8 +207,8 @@ describe("useSessionWebSocket", () => {
     expect(cached?.threads.find((thread) => thread.id === "t1")?.lastUserActivityAt).toBe(30);
     expect(cached?.threads.find((thread) => thread.id === "t2")?.lastUserActivityAt).toBe(20);
     expect(queryClient.getQueryData<ListThreadsResponse>(["sessions", "root", "threads"])?.threads.map(t => t.lastUserActivityAt)).toEqual([30, 5]);
-    expect(invalidate).toHaveBeenCalledTimes(2);
-    expect(queryClient.getQueryState(pages)?.isInvalidated).toBe(true);
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(queryClient.getQueryState(pages)?.isInvalidated).toBe(false);
     expect(queryClient.getQueryState(unrelated)?.isInvalidated).toBe(false);
     expect(queryClient.getQueryState(["sessions", "s1", "threads"])?.isInvalidated).toBe(false);
     unmount();
