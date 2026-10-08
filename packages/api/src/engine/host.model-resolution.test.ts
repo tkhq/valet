@@ -85,6 +85,7 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
     it.each([
       ["anthropic/claude-fable-5-1", "claude-fable-5-1", "anthropic", "ANTHROPIC_API_KEY"],
       ["openai/gpt-6.1-sol", "gpt-6.1-sol", "openai", "OPENAI_API_KEY"],
+      ["openai/gpt-5.6-sol", "gpt-5.6-sol", "openai", "OPENAI_API_KEY"],
     ] as const)("resolves %s", async (spec, wireId, provider, envName) => {
       vi.stubEnv(envName, "test-key");
       const resolved = await resolveModelSpec(db, credentials, orgId, spec);

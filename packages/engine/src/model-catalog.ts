@@ -42,9 +42,14 @@ function bundledMetadata(provider: string): Model<Api>[] {
   return [...upstream, ...supplementalModels.filter((model) => model.provider === provider && !ids.has(model.id))];
 }
 
+/** Retired choices remain resolvable for existing sessions, but cannot be selected anew. */
+export function isCatalogModel(provider: string, modelId: string): boolean {
+  return !isDisabledModel(modelId) && !(provider === "openai" && modelId === "gpt-5.6-sol");
+}
+
 /** Selectable bundled models. Disabled metadata remains available for billing. */
 export function bundledModels(provider: string): Model<Api>[] {
-  return bundledMetadata(provider).filter((model) => !isDisabledModel(model.id));
+  return bundledMetadata(provider).filter((model) => isCatalogModel(provider, model.id));
 }
 
 /** Historical usage pricing only; this lookup does not authorize execution. */
@@ -54,5 +59,6 @@ export function bundledPricingModel(provider: string, modelId: string): Model<Ap
 
 /** One bundled model by provider and wire id, or undefined when unknown. */
 export function bundledModel(provider: string, modelId: string): Model<Api> | undefined {
-  return bundledModels(provider).find((model) => model.id === modelId);
+  if (isDisabledModel(modelId)) return undefined;
+  return bundledMetadata(provider).find((model) => model.id === modelId);
 }
