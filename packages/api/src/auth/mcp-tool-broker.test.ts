@@ -15,6 +15,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
 import { clearDiscoveryCache } from "../routes/actions.js";
 import { actionInvocations, actionPolicies, oauthAccessToken, oauthApplication, orgMembers, orgs, teamMembers, teams, users } from "../schema/index.js";
+import { seedMcpConsent } from "../integration/_mcp-consent.js";
 import { shareCredential } from "../services/credential-shares.js";
 
 let api: TestApi | undefined;
@@ -105,6 +106,7 @@ async function seedUser(testApi: TestApi, id: string): Promise<string> {
   await db.insert(orgMembers).values({ orgId: "broker-org", userId: id, role: "member", createdAt: now });
   const token = `token-${id}`;
   await db.insert(oauthApplication).values({ id: `app-${id}`, name: "Claude Code", clientId: `client-${id}`, type: "public", createdAt: new Date(now), updatedAt: new Date(now) });
+  await seedMcpConsent(db, id, `client-${id}`);
   await db.insert(oauthAccessToken).values({
     id: `oauth-${id}`, accessToken: token, refreshToken: `refresh-${id}`,
     accessTokenExpiresAt: new Date(now + 600_000), refreshTokenExpiresAt: new Date(now + 3_600_000),

@@ -73,15 +73,43 @@ function hashCode(code: string): string {
 }
 
 /**
- * Fixed one-minute windows per client. The key is the first
- * `X-Forwarded-For` hop, which the ingress sets, else one shared bucket.
- * A forged header only spreads one flooder across buckets; `MAX_WAITING`
- * still bounds the table.
+ * Fixed one-minute windows per client. A client cannot forge the key:
+ *
+ * - It is the TCP peer address, read from the runtime (`peerAddress`).
+ * - When that peer is a proxy (a loopback or private address, as an
+ *   in-cluster ingress is), the key is the last `X-Forwarded-For` hop: the
+ *   one that proxy appended. Earlier hops come from the client and are
+ *   ignored.
+ *
+ * `MAX_WAITING` still bounds the table if many real addresses flood it.
  */
 const starts = new Map<string, { windowStart: number; count: number }>();
 
-function clientKey(c: Context<AppEnv>): string {
-  return c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || c.req.header("x-real-ip") || "direct";
+/** The TCP peer address under `@hono/node-server` (`env.incoming`) or Bun (`env.requestIP`). */
+function peerAddress(c: Context<AppEnv>): string | undefined {
+  const env: unknown = c.env;
+  if (!env || typeof env !== "object") return undefined;
+  const e = env as { incoming?: { socket?: { remoteAddress?: unknown } }; requestIP?: unknown };
+  const nodeAddress = e.incoming?.socket?.remoteAddress;
+  if (typeof nodeAddress === "string") return nodeAddress;
+  if (typeof e.requestIP === "function") {
+    const ip: unknown = (e.requestIP as (req: Request) => unknown)(c.req.raw);
+    if (ip && typeof ip === "object" && "address" in ip && typeof ip.address === "string") return ip.address;
+  }
+  return undefined;
+}
+
+/** Loopback or private: a proxy in front of Valet, not a client on the internet. */
+function isProxyAddress(address: string): boolean {
+  const a = address.replace(/^::ffff:/, "");
+  return a === "::1" || /^127\./.test(a) || /^10\./.test(a) || /^192\.168\./.test(a)
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(a) || /^f[cd][0-9a-f]{2}:/i.test(a);
+}
+
+export function clientKey(peer: string | undefined, forwardedFor: string | undefined): string {
+  if (peer && !isProxyAddress(peer)) return peer;
+  const hops = (forwardedFor ?? "").split(",").map((h) => h.trim()).filter(Boolean);
+  return hops[hops.length - 1] ?? peer ?? "unknown";
 }
 
 function allowStart(key: string, now: number): boolean {
@@ -111,7 +139,7 @@ export function cliDevicePublicRouter(db: AppDb): Hono<AppEnv> {
 
   router.post("/device/code", async (c) => {
     const now = Date.now();
-    if (!allowStart(clientKey(c), now)) {
+    if (!allowStart(clientKey(peerAddress(c), c.req.header("x-forwarded-for")), now)) {
       return c.json({ error: "slow_down", error_description: "Too many sign-ins started from this computer. Wait a minute, then run `valet login` again." }, 429);
     }
     const body = await readOptionalJsonObject(c);

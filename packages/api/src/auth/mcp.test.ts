@@ -14,6 +14,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { users, oauthAccessToken, agentSessions } from "../schema/index.js";
+import { seedMcpConsent } from "../integration/_mcp-consent.js";
 
 let api: TestApi | undefined;
 
@@ -88,13 +89,14 @@ describe("MCP endpoint", () => {
     });
 
     const accessToken = "mcp-test-access-token";
+    await seedMcpConsent(db, "mcp-user-1", "mcp-client");
     await db.insert(oauthAccessToken).values({
       id: "mcp-token-1",
       accessToken,
       refreshToken: "mcp-refresh-token-1",
       accessTokenExpiresAt: new Date(now + 60_000),
       refreshTokenExpiresAt: new Date(now + 3_600_000),
-      clientId: null,
+      clientId: "mcp-client",
       userId: "mcp-user-1",
       scopes: "mcp",
       createdAt: new Date(now),

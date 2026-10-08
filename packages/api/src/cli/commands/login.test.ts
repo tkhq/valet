@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { configPath, loadConfig, type ValetConfig } from "../config.js";
+import { configPath, loadConfig, saveConfig, type ValetConfig } from "../config.js";
 import { ApiError, AuthError, ExitCode, UnreachableError } from "../exit.js";
 import { parseGlobalFlags } from "../output.js";
 import { apiKeyFromFlags, profileNameForUrl, runLogin, type LoginClient, type LoginDeps } from "./login.js";
@@ -233,6 +233,21 @@ describe("runLogin", () => {
     expect(open).not.toHaveBeenCalled();
   });
 
+  it("keeps a refresh another command saved while this login waited", async () => {
+    const other = { url: "https://other.example.com", cli: { accessToken: "vltc_a", refreshToken: "vltr_a_old", accessExpiresAt: 1, refreshExpiresAt: 1 } };
+    const startup: ValetConfig = { profiles: { a: other } };
+    saveConfig(startup);
+    const { deps } = okDeps({ pollDevice: async () => {
+      // Profile a refreshes in another command while this login polls.
+      saveConfig({ profiles: { a: { ...other, cli: { ...other.cli, refreshToken: "vltr_a_new" } } } });
+      return TOKENS;
+    } });
+    expect(await runLogin(deps, parseGlobalFlags(["https://valet.example.com", "--name", "b"]), startup)).toBe(ExitCode.OK);
+    const saved = loadConfig();
+    expect(saved.profiles?.a?.cli?.refreshToken).toBe("vltr_a_new");
+    expect(saved.profiles?.b?.cli?.accessToken).toBe("vltc_access");
+  });
+
   it("signs out the device sign-in a new login replaces", async () => {
     const revoked: string[] = [];
     const { deps } = okDeps({ revoke: (_url, token) => {
@@ -285,6 +300,7 @@ describe("runLogin", () => {
       profiles: { old: { url: "http://old", apiKey: "k_old" } },
       defaultProfile: "old",
     };
+    saveConfig(existing); // The CLI passes the config it loaded from disk.
     const { deps } = okDeps();
     const flags = parseGlobalFlags(["http://localhost:8788", "--api-key", "k_new"]);
     expect(await runLogin(deps, flags, existing)).toBe(ExitCode.OK);

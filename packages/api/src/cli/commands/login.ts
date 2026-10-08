@@ -25,7 +25,7 @@
  */
 import { InstanceClient } from "../client.js";
 import type { PendingLogin, ProfileConfig, ValetConfig } from "../config.js";
-import { saveConfig } from "../config.js";
+import { updateConfig } from "../config.js";
 import { deviceCodeInstructions, openInBrowser, pollDeviceLogin, revokeDeviceLogin, startDeviceLogin } from "../device-login.js";
 import { AuthError, ExitCode, UnreachableError } from "../exit.js";
 import { parseGlobalFlags, printErr, printLine, type ParsedFlags } from "../output.js";
@@ -138,14 +138,13 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
   const replaced = config.profiles?.[name]?.cli;
   if (replaced) await deps.revoke(config.profiles?.[name]?.url.replace(/\/$/, "") ?? url, replaced.refreshToken);
 
-  const { [name]: _finished, ...stillPending } = config.pendingLogins ?? {};
-  const next: ValetConfig = {
-    ...config,
-    profiles: { ...(config.profiles ?? {}), [name]: profile },
+  // Reload under the lock: while this login waited, another command may have
+  // refreshed a profile, and saving the startup copy would undo that.
+  await updateConfig((current) => ({
+    ...withoutPending(current, name),
+    profiles: { ...(current.profiles ?? {}), [name]: profile },
     defaultProfile: name,
-    ...(Object.keys(stillPending).length > 0 ? { pendingLogins: stillPending } : { pendingLogins: undefined }),
-  };
-  saveConfig(next);
+  }));
 
   printLine(`logged in to ${url} as profile "${name}"${credential === undefined ? " (keyless)" : ""}`);
   return ExitCode.OK;
@@ -156,6 +155,12 @@ export async function runLogin(deps: LoginDeps, flags: ParsedFlags, config: Vale
  * Lazily imports `node:readline` so non-`login` commands never pay for it and
  * the module stays side-effect-free on import.
  */
+/** `config` without a waiting sign-in for profile `name`. */
+function withoutPending(config: ValetConfig, name: string): ValetConfig {
+  const { [name]: _ended, ...rest } = config.pendingLogins ?? {};
+  return { ...config, pendingLogins: Object.keys(rest).length > 0 ? rest : undefined };
+}
+
 /**
  * Run or resume the device sign-in for profile `name`. Returns the profile
  * to verify and save, or an exit code when the command ends here.
@@ -172,7 +177,7 @@ async function signInWithDevice(
   const resumed = saved !== undefined && saved.url === base && saved.expiresAt > deps.now();
   const pending = resumed ? saved : await deps.startDevice(base);
   if (!resumed) {
-    saveConfig({ ...config, pendingLogins: { ...(config.pendingLogins ?? {}), [name]: pending } });
+    await updateConfig((current) => ({ ...current, pendingLogins: { ...(current.pendingLogins ?? {}), [name]: pending } }));
   }
   const opened = !resumed && flags.flags["no-browser"] !== true && flags.flags["no-wait"] !== true
     ? await deps.openUrl(`${pending.url}${pending.verificationPath}`)
@@ -191,8 +196,7 @@ async function signInWithDevice(
   } catch (err) {
     if (err instanceof AuthError) {
       // The sign-in ended: forget it, so the next login starts a new one.
-      const { [name]: _ended, ...rest } = config.pendingLogins ?? {};
-      saveConfig({ ...config, pendingLogins: Object.keys(rest).length > 0 ? rest : undefined });
+      await updateConfig((current) => withoutPending(current, name));
       printErr(`valet login: ${err.message} Profile not saved.`);
       return ExitCode.AuthFailure;
     }

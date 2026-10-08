@@ -5,7 +5,7 @@
  * This module MUST stay free of side effects on import — no fs access, no
  * env reads at module scope. Everything happens inside the exported fns.
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ConfigError } from "./exit.js";
@@ -30,6 +30,10 @@ export interface ProfileConfig {
     refreshToken: string;
     accessExpiresAt: number;
     refreshExpiresAt: number;
+    /** Access tokens this profile held before its last refreshes, newest
+     * first. A long command that started with one finds this profile, and
+     * only this profile, again (`latestCredential`). */
+    previousAccessTokens?: string[];
   };
 }
 
@@ -136,4 +140,54 @@ export function saveConfig(cfg: ValetConfig, path: string = configPath()): void 
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const LOCK_WAIT_MS = 10_000;
+/** A lock older than this is left over from a crashed command. */
+const LOCK_STALE_MS = 30_000;
+
+/**
+ * Run `fn` while holding the config lock, an exclusive-create file beside the
+ * config. Commands that write the config while another may be writing it
+ * (login, logout, token refresh) take it, so no command saves an old copy
+ * over a newer one. Gives up waiting after LOCK_WAIT_MS and runs anyway.
+ */
+export async function withConfigLock<T>(fn: () => Promise<T>, path: string = configPath()): Promise<T> {
+  const lockPath = join(dirname(path), "config.lock");
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  let held = false;
+  while (!held && Date.now() < deadline) {
+    try {
+      closeSync(openSync(lockPath, "wx", 0o600));
+      held = true;
+    } catch {
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) unlinkSync(lockPath);
+      } catch {
+        // Gone already: the next attempt creates it.
+      }
+      if (!held) await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    if (held) {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // Removed by a stale-lock cleanup: nothing to release.
+      }
+    }
+  }
+}
+
+/** Reload the config under the lock, apply `change`, and save the result. */
+export async function updateConfig(change: (current: ValetConfig) => ValetConfig): Promise<ValetConfig> {
+  return withConfigLock(async () => {
+    const next = change(loadConfig());
+    saveConfig(next);
+    return next;
+  });
 }

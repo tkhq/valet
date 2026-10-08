@@ -28,7 +28,7 @@ import type { ValetAuth } from "../auth/index.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
-import { oauthApplication, verification } from "../schema/index.js";
+import { oauthApplication, oauthConsent, verification } from "../schema/index.js";
 import type { OAuthConsentDecision, OAuthConsentInfo } from "../wire/types.js";
 
 export const oauthConsentRouter = new Hono<AppEnv>();
@@ -162,6 +162,15 @@ oauthConsentRouter.post("/", async (c) => {
   await c.var.providers.db.insert(verification).values({
     id: randomUUID(), identifier: consentIdentifier(code), value: pending.userId, expiresAt,
   });
+  // The lasting record that this person approved this app. `/mcp` refuses a
+  // token without one (`hasMcpConsent`), and Agent access deletes it.
+  const now = new Date();
+  await c.var.providers.db.delete(oauthConsent)
+    .where(and(eq(oauthConsent.clientId, pending.clientId), eq(oauthConsent.userId, pending.userId)));
+  await c.var.providers.db.insert(oauthConsent).values({
+    id: randomUUID(), clientId: pending.clientId, userId: pending.userId,
+    scopes: pending.scope.join(" "), consentGiven: true, createdAt: now, updatedAt: now,
+  });
   return c.json({ redirect: withParams(pending.redirectURI, { code, state: pending.state }) } satisfies OAuthConsentDecision);
 });
 
@@ -251,4 +260,18 @@ export function mcpTokenGate(db: AppDb) {
     }
     return next();
   };
+}
+
+/**
+ * Whether `userId` approved MCP app `clientId` on the consent page. A token
+ * issued before the consent page existed, or for an app the person
+ * disconnected, has no record, and `/mcp` refuses it so the app signs in
+ * through consent again.
+ */
+export async function hasMcpConsent(db: AppDb, clientId: string | null | undefined, userId: string): Promise<boolean> {
+  if (!clientId) return false;
+  const [row] = await db.select({ id: oauthConsent.id }).from(oauthConsent)
+    .where(and(eq(oauthConsent.clientId, clientId), eq(oauthConsent.userId, userId), eq(oauthConsent.consentGiven, true)))
+    .limit(1);
+  return row !== undefined;
 }

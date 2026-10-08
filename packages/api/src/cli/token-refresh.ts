@@ -5,7 +5,7 @@
  * command (`chat`) then has hours of validity left.
  *
  * A refresh token works once, so two commands that start together must not
- * both refresh. A lock file next to the config file serializes them. The
+ * both refresh. The config lock (`withConfigLock`) serializes them. The
  * command that waited reloads the config, finds the fresh pair the other
  * one saved, and uses it. A refresh whose response was lost is retried
  * once; the server accepts that replay (`auth/cli-tokens.ts`).
@@ -13,16 +13,13 @@
  * A failed refresh changes nothing. The command then gets a 401, and the
  * error tells the person to run `valet login` again.
  */
-import { openSync, closeSync, statSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { configPath, loadConfig, saveConfig, type ValetConfig } from "./config.js";
+import { loadConfig, saveConfig, withConfigLock, type ValetConfig } from "./config.js";
 import { refreshDeviceLogin } from "./device-login.js";
 import { UnreachableError } from "./exit.js";
 
 const REFRESH_WINDOW_MS = 12 * 60 * 60_000;
-const LOCK_WAIT_MS = 10_000;
-/** A lock older than this is left over from a crashed command. */
-const LOCK_STALE_MS = 30_000;
+/** Replaced access tokens a profile remembers, so a long command finds it again. */
+const PREVIOUS_TOKENS_KEPT = 3;
 
 export interface RefreshDeps {
   refresh: typeof refreshDeviceLogin;
@@ -50,42 +47,7 @@ function needsRefresh(config: ValetConfig, name: string, now: number): boolean {
   return cli !== undefined && cli.accessExpiresAt - now <= REFRESH_WINDOW_MS;
 }
 
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Exclusive-create lock file beside the config. Gives up after LOCK_WAIT_MS and runs anyway. */
-async function withFileLock<T>(fn: () => Promise<T>): Promise<T> {
-  const path = join(dirname(configPath()), "refresh.lock");
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  let held = false;
-  while (!held && Date.now() < deadline) {
-    try {
-      closeSync(openSync(path, "wx", 0o600));
-      held = true;
-    } catch {
-      try {
-        if (Date.now() - statSync(path).mtimeMs > LOCK_STALE_MS) unlinkSync(path);
-      } catch {
-        // Gone already: the next attempt creates it.
-      }
-      if (!held) await sleep(150);
-    }
-  }
-  try {
-    return await fn();
-  } finally {
-    if (held) {
-      try {
-        unlinkSync(path);
-      } catch {
-        // Removed by a stale-lock cleanup: nothing to release.
-      }
-    }
-  }
-}
-
-const defaultDeps: RefreshDeps = { refresh: refreshDeviceLogin, save: saveConfig, now: Date.now, reload: () => loadConfig(), withLock: withFileLock };
+const defaultDeps: RefreshDeps = { refresh: refreshDeviceLogin, save: saveConfig, now: Date.now, reload: () => loadConfig(), withLock: (fn) => withConfigLock(fn) };
 
 export async function refreshSelectedProfile(config: ValetConfig, args: string[], deps: RefreshDeps = defaultDeps): Promise<ValetConfig> {
   const name = selectedProfile(config, args);
@@ -122,6 +84,7 @@ export async function refreshSelectedProfile(config: ValetConfig, args: string[]
             refreshToken: fresh.refresh_token,
             accessExpiresAt: fresh.access_expires_at,
             refreshExpiresAt: fresh.refresh_expires_at,
+            previousAccessTokens: [cli.accessToken, ...(cli.previousAccessTokens ?? [])].slice(0, PREVIOUS_TOKENS_KEPT),
           },
         },
       },
@@ -137,16 +100,18 @@ export async function refreshSelectedProfile(config: ValetConfig, args: string[]
  * retires `stale` after the server's short grace, or the token may be near
  * expiry. A non-CLI credential (an API key) comes back unchanged.
  */
-export async function latestCredential(url: string, stale: string | undefined, deps: RefreshDeps = defaultDeps): Promise<string | undefined> {
+export async function latestCredential(stale: string | undefined, deps: RefreshDeps = defaultDeps): Promise<string | undefined> {
   if (!stale?.startsWith("vltc_")) return stale;
-  const base = url.replace(/\/$/, "");
   let config: ValetConfig;
   try {
     config = deps.reload();
   } catch {
     return stale;
   }
-  const entry = Object.entries(config.profiles ?? {}).find(([, p]) => p.cli !== undefined && p.url.replace(/\/$/, "") === base);
+  // Only the profile that held `stale`, never another profile for the same
+  // URL: two people can sign in to one instance from one computer.
+  const entry = Object.entries(config.profiles ?? {}).find(([, p]) =>
+    p.cli !== undefined && (p.cli.accessToken === stale || (p.cli.previousAccessTokens ?? []).includes(stale)));
   if (!entry) return stale;
   const [name, profile] = entry;
   if (profile.cli && profile.cli.accessToken !== stale) return profile.cli.accessToken;

@@ -9,7 +9,7 @@
  * a temp dir).
  */
 import type { ValetConfig } from "../config.js";
-import { saveConfig } from "../config.js";
+import { loadConfig, saveConfig, withConfigLock } from "../config.js";
 import { ExitCode, ProfileNotFoundError } from "../exit.js";
 import { parseGlobalFlags, printErr, printLine } from "../output.js";
 import { revokeDeviceLogin } from "../device-login.js";
@@ -64,5 +64,6 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
   // now rather than when it expires.
   const profile = name ? ctx.config.profiles?.[name] : undefined;
   if (profile?.cli) await revokeDeviceLogin(profile.url.replace(/\/$/, ""), profile.cli.refreshToken);
-  return runLogout(ctx.config, name);
+  // Reload under the lock, so a refresh another command saved meanwhile is kept.
+  return withConfigLock(async () => runLogout(loadConfig(), name));
 }

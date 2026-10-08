@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
 import { oauthAccessToken, orgMembers, orgs, skills, users } from "../schema/index.js";
+import { seedMcpConsent } from "../integration/_mcp-consent.js";
 import { createWorkflowDefinition } from "../workflows/service.js";
 
 let api: TestApi | undefined;
@@ -41,10 +42,11 @@ async function seedUser(testApi: TestApi, id: string): Promise<string> {
   await db.insert(orgs).values({ id: ORG, name: "WS Org", createdAt: now }).onConflictDoNothing();
   await db.insert(users).values({ id, name: `User ${id}`, email: `${id}@nowhere.test`, role: "member", createdAt: new Date(now), updatedAt: new Date(now) });
   await db.insert(orgMembers).values({ orgId: ORG, userId: id, role: "member", createdAt: now });
+  await seedMcpConsent(db, id, `client-${id}`);
   await db.insert(oauthAccessToken).values({
     id: `oauth-${id}`, accessToken: `token-${id}`, refreshToken: `refresh-${id}`,
     accessTokenExpiresAt: new Date(now + 600_000), refreshTokenExpiresAt: new Date(now + 3_600_000),
-    clientId: null, userId: id, scopes: "mcp", createdAt: new Date(now), updatedAt: new Date(now),
+    clientId: `client-${id}`, userId: id, scopes: "mcp", createdAt: new Date(now), updatedAt: new Date(now),
   });
   return `token-${id}`;
 }

@@ -13,7 +13,7 @@ import { deviceLogin } from "../cli/device-login.js";
 import { AuthError } from "../cli/exit.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
-import { clearDeviceStartLimits } from "./cli-device.js";
+import { clearDeviceStartLimits, clientKey } from "./cli-device.js";
 import { actionInvocations, oauthAccessToken, oauthApplication, workflowActionGrants } from "../schema/index.js";
 
 let api: TestApi | undefined;
@@ -348,8 +348,19 @@ describe("valet login device sign-in", () => {
     const limited = await start();
     expect(limited.status).toBe(429);
     expect(await limited.text()).toContain("Wait a minute");
+    // Rotating the client-supplied hops does not escape the limit: behind a
+    // proxy, only the last hop (the one the proxy appended) counts.
+    const spoofed = await fetch(`${base}/api/cli/device/code`, { method: "POST", headers: { "Content-Type": "application/json", "X-Forwarded-For": "1.2.3.4, 203.0.113.9" }, body: "{}" });
+    expect(spoofed.status).toBe(429);
     // Another client is not affected.
     const other = await fetch(`${base}/api/cli/device/code`, { method: "POST", headers: { "Content-Type": "application/json", "X-Forwarded-For": "198.51.100.4" }, body: "{}" });
     expect(other.status).toBe(200);
+  });
+
+  it("keys the rate limit on the peer, or on the proxy's last hop, never on a forged one", () => {
+    expect(clientKey("203.0.113.5", "9.9.9.9")).toBe("203.0.113.5");
+    expect(clientKey("10.0.0.7", "9.9.9.9, 198.51.100.2")).toBe("198.51.100.2");
+    expect(clientKey("::ffff:127.0.0.1", "198.51.100.3")).toBe("198.51.100.3");
+    expect(clientKey("127.0.0.1", undefined)).toBe("127.0.0.1");
   });
 });

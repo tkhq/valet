@@ -7,7 +7,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { verification } from "../schema/index.js";
+import { oauthAccessToken, verification } from "../schema/index.js";
+import { seedMcpConsent } from "../integration/_mcp-consent.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -214,5 +215,31 @@ describe("MCP OAuth consent", () => {
       body: JSON.stringify({ consent_code: "code-for-someone-else", accept: true }),
     });
     expect(foreign.status).toBe(403);
+  });
+
+  it("refuses an MCP token issued without consent, such as one from before the consent page", async () => {
+    const { testApi, cookie } = await setup();
+    const me = (await (await fetch(`${testApi.baseUrl}/api/me`, { headers: { cookie } })).json()) as { id: string };
+    const now = Date.now();
+    const seedToken = (token: string, clientId: string) => testApi.providers.db.insert(oauthAccessToken).values({
+      id: `tok-${token}`, accessToken: token, refreshToken: `r-${token}`, clientId, userId: me.id, scopes: "openid",
+      accessTokenExpiresAt: new Date(now + 600_000), refreshTokenExpiresAt: new Date(now + 3_600_000), createdAt: new Date(now), updatedAt: new Date(now),
+    });
+    const whoami = (token: string) => fetch(`${testApi.baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "whoami", arguments: {} } }),
+    });
+    // An app the person never approved: a valid token alone is refused.
+    const { oauthApplication } = await import("../schema/index.js");
+    await testApi.providers.db.insert(oauthApplication).values({ id: "app-old", name: "Old Agent", clientId: "old-client-2", type: "public", createdAt: new Date(now), updatedAt: new Date(now) });
+    await seedToken("pre-consent", "old-client-2");
+    const refused = await whoami("pre-consent");
+    expect(refused.status).toBe(401);
+    expect(refused.headers.get("www-authenticate")).toContain("resource_metadata");
+    // With a consent record, the same kind of token works.
+    await seedMcpConsent(testApi.providers.db, me.id, "approved-client");
+    await seedToken("approved", "approved-client");
+    expect((await whoami("approved")).status).toBe(200);
   });
 });

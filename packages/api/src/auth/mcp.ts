@@ -36,6 +36,7 @@ import type { Providers } from "../providers/types.js";
 import { users } from "../schema/index.js";
 import type { ValetAuth } from "./index.js";
 import { attachMcpCaller } from "./mcp-caller.js";
+import { hasMcpConsent } from "../routes/oauth-consent.js";
 import { registerAgentTools, type ApiCaller } from "./mcp-tools.js";
 import { registerWorkspaceTools } from "./mcp-workspace-tools.js";
 
@@ -52,10 +53,19 @@ export function mcpHandler(opts: McpHandlerOpts): (req: Request) => Promise<Resp
   const { auth, db, listSessions, dispatch, engineStore } = opts;
 
   return withMcpAuth(auth, async (req, session) => {
-    const server = new McpServer({ name: "valet", version: "1.0.0" });
     // Links use the public auth URL (`BETTER_AUTH_URL`), the same base the
     // `WWW-Authenticate` challenge names; behind an ingress `req.url` can be internal.
     const origin = new URL(auth.options.baseURL ?? req.url).origin;
+    // A valid token is not enough: the person must have approved this app on
+    // the consent page. The 401 matches `withMcpAuth`'s, so the client signs in again.
+    if (!(await hasMcpConsent(db, session.clientId, session.userId))) {
+      const challenge = `Bearer resource_metadata="${origin}${auth.options.basePath ?? "/api/auth"}/.well-known/oauth-protected-resource"`;
+      return Response.json(
+        { jsonrpc: "2.0", error: { code: -32000, message: "Unauthorized: approve this app on the Valet consent page. Sign in to the MCP server again." }, id: null },
+        { status: 401, headers: { "WWW-Authenticate": challenge, "Access-Control-Expose-Headers": "WWW-Authenticate" } },
+      );
+    }
+    const server = new McpServer({ name: "valet", version: "1.0.0" });
 
     const [row] = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
     if (row) {

@@ -98,7 +98,7 @@ export class InstanceClient {
     // A CLI token this command started with may have been replaced by
     // another command's refresh. Pick up the new one and try once more.
     if (res.status === 401) {
-      const fresh = await latestCredential(this.base, this.apiKey);
+      const fresh = await latestCredential(this.apiKey);
       if (fresh !== this.apiKey) {
         this.apiKey = fresh;
         res = await send();

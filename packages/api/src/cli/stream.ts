@@ -254,7 +254,7 @@ export async function* streamSession(opts: StreamSessionOpts): AsyncGenerator<Wi
   signal?.addEventListener("abort", stop, { once: true });
 
   const runConnection = async (): Promise<ConnectionOutcome> => {
-    apiKey = await latestCredential(url, apiKey);
+    apiKey = await latestCredential(apiKey);
     return connectOnce(apiKey ? { "x-api-key": apiKey } : undefined);
   };
 

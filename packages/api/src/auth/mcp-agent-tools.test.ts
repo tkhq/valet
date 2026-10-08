@@ -12,6 +12,7 @@ import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, type FauxProv
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { oauthAccessToken, orgMembers, orgs, users } from "../schema/index.js";
+import { seedMcpConsent } from "../integration/_mcp-consent.js";
 import { attachMcpCaller } from "./mcp-caller.js";
 
 let api: TestApi | undefined;
@@ -34,13 +35,14 @@ async function seedUser(testApi: TestApi, id: string): Promise<string> {
   await db.insert(users).values({ id, name: `User ${id}`, email: `${id}@nowhere.test`, role: "member", createdAt: new Date(now), updatedAt: new Date(now) });
   await db.insert(orgMembers).values({ orgId: "mcp-org", userId: id, role: "member", createdAt: now });
   const token = `token-${id}`;
+  await seedMcpConsent(db, id, `client-${id}`);
   await db.insert(oauthAccessToken).values({
     id: `oauth-${id}`,
     accessToken: token,
     refreshToken: `refresh-${id}`,
     accessTokenExpiresAt: new Date(now + 600_000),
     refreshTokenExpiresAt: new Date(now + 3_600_000),
-    clientId: null,
+    clientId: `client-${id}`,
     userId: id,
     scopes: "mcp",
     createdAt: new Date(now),
