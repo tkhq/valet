@@ -44,7 +44,7 @@ const FULL_PROFILE_COMMAND = [
 
 export const WORKSPACE_VOLUME_NAME = "workspace";
 export const WORKSPACE_MOUNT_PATH = "/workspace";
-/** Node-local scratch emptyDir — wiped when the pod stops (spec Part A). */
+/** Node-local scratch emptyDir, wiped when the pod stops (spec Part A). */
 export const SCRATCH_VOLUME_NAME = "scratch";
 export const SCRATCH_MOUNT_PATH = "/scratch";
 export const SESSION_LABEL_KEY = "valet.dev/session-id";
@@ -186,7 +186,7 @@ function memoryLimitFor(request: string): string {
   return formatStorageQuantity(bytes * MEMORY_LIMIT_FACTOR);
 }
 
-/** Bytes for a quantity string, or 0 for an absent/unparseable one — an
+/** Bytes for a quantity string, or 0 for an absent/unparseable one. An
  * absent term contributes nothing to a sum, and an unparseable one degrades
  * to 0 rather than poisoning the whole sum (the raw string still reaches
  * admission unmodified when scratch is absent, see `ephemeralStorageSums`). */
@@ -199,7 +199,7 @@ function termBytes(value: string | undefined): number {
  * Adds the scratch emptyDir size onto the deploy's ephemeral-storage
  * request/limit knobs, since scratch usage counts against the same
  * node-disk accounting (TKAI-349) as those knobs. Without scratch, the
- * deploy knob passes through VERBATIM (not reformatted) — this keeps the
+ * deploy knob passes through VERBATIM (not reformatted): this keeps the
  * manifest byte-identical to before scratch existed. A side is included
  * only when scratch or that side's own knob is defined; both absent omits
  * the side entirely (an operator can still disable ephemeral-storage
@@ -231,7 +231,7 @@ export function ephemeralStorageSums(
  * the node going NotReady. An absent side is omitted — no fallback from one
  * to the other, so an operator can disable either knob ("0" in
  * sandbox-backend.ts) alone. `scratch` adds onto both sides via
- * `ephemeralStorageSums` — the scratch emptyDir is node-local disk too. */
+ * `ephemeralStorageSums` (the scratch emptyDir is node-local disk too). */
 function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequirements | undefined {
   const requests: ResourceList = {};
   const limits: ResourceList = {};

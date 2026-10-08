@@ -122,7 +122,7 @@ export interface SandboxResourceOpts {
   /** Node-local /scratch emptyDir size, as a Kubernetes quantity string
    * (e.g. "100Gi"). Mirrors `SandboxResources.scratch` (@valet/engine).
    * Adds to `ephemeralStorage`/`ephemeralStorageLimit` on the sandbox
-   * container's `ephemeral-storage` requests/limits — the scratch volume's
+   * container's `ephemeral-storage` requests/limits: the scratch volume's
    * usage counts against the same node-disk accounting (TKAI-349). */
   scratch?: string;
 }
