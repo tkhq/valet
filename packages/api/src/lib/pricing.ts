@@ -53,8 +53,9 @@ export function priceUsage(kind: ProviderKind, modelId: string, usage: ProxyUsag
     const model = bundledPricingModel(piProvider(kind), canonical);
     if (!model) return null;
     const cost = calculateCost(model, {
-      // OpenAI includes cached tokens in input; pi-ai expects uncached input.
-      input: kind === "openai" ? Math.max(0, usage.input - usage.cacheRead) : usage.input,
+      // parseUsage persists uncached input for every provider (disjoint
+      // categories), which is what pi-ai expects.
+      input: usage.input,
       output: usage.output,
       cacheRead: usage.cacheRead,
       cacheWrite: usage.cacheWrite,
