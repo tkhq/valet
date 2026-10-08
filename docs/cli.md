@@ -43,7 +43,7 @@ To connect a local coding agent (Claude Code, Codex, Cursor) to Valet, give it o
 Read https://<your-valet>/agent-setup.md and follow it.
 ```
 
-Every Valet instance serves `/agent-setup.md` and `/agent-skill.md` without login. Each page fills in that instance's public URL (`VALET_PUBLIC_URL`, else a public `BETTER_AUTH_URL`, else the request origin). The setup page tells the agent to install the CLI, ask the person to log in from their own terminal, connect MCP with `valet mcp setup`, install the `valet` skill from `/agent-skill.md`, and check the result. The agent never handles the API key: `valet login` reads it from a hidden prompt. The page sources are `packages/api/src/onboarding/agent-setup.md` and `valet-skill.md`.
+Every Valet instance serves `/agent-setup.md` and `/agent-skill.md` without login. Each page fills in that instance's public URL (`VALET_PUBLIC_URL`, else a public `BETTER_AUTH_URL`, else the request origin). The setup page tells the agent to install the CLI, run `valet login` (the person approves it in the browser), connect MCP with `valet mcp setup`, install the `valet` skill from `/agent-skill.md`, and check the result. The agent never handles the API key: the CLI receives it directly from the instance. The page sources are `packages/api/src/onboarding/agent-setup.md` and `valet-skill.md`.
 
 ## Quick Start
 
@@ -65,11 +65,22 @@ Client subcommands target a named **instance profile**: a
 `{ url, apiKey? }` pair stored in `~/.valet/config.json`.
 
 ```bash
-valet login https://valet.example.com --api-key vlt_... --name prod
+valet login https://valet.example.com --name prod   # opens a browser to approve
 valet instance list          # show profiles + default
 valet instance use prod      # make one the default
 valet logout prod            # remove it
 ```
+
+`login` opens the instance in a browser. After you choose Allow, the
+browser returns a one-time code to the CLI, and the CLI exchanges it for a
+personal API key named `valet CLI (<computer>)`. You can revoke that key in
+Settings > API keys. If the browser does not open, the CLI prints the URL.
+Use `--no-browser` to only print it. Other ways to log in:
+
+- `--api-key vlt_...` uses a key you already have, for scripts and CI.
+- `--api-key -` reads a key from a hidden prompt or stdin. Use it on a
+  remote machine, where the browser cannot reach the CLI.
+- An instance with stub auth (`VALET_LOCAL_AUTH=1`) needs no key.
 
 `login` verifies the credential against the instance before it persists
 the profile, then makes the new profile the default. A command resolves

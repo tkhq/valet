@@ -75,8 +75,13 @@ function sidebarForPath(pathname: string) {
  * never sees app nav before they can sign in. */
 const PUBLIC_ROUTES = new Set(["/login", "/signup"]);
 
+/** Approval pages for an app or the CLI. They need a session (their API
+ * calls send a signed-out visitor to `/login?next=`), but render without app
+ * chrome so the decision is the only thing on the page. */
+const APPROVAL_ROUTES = new Set(["/oauth/consent", "/cli/login"]);
+
 function isPublicPath(pathname: string): boolean {
-  return PUBLIC_ROUTES.has(pathname) || pathname.startsWith("/a/");
+  return PUBLIC_ROUTES.has(pathname) || APPROVAL_ROUTES.has(pathname) || pathname.startsWith("/a/");
 }
 
 function RootLayout() {

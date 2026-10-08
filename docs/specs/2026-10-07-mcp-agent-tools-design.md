@@ -69,7 +69,7 @@ An MCP client is an agent. The thread decision route refuses an `approval` or `c
 
 Onboarding is one link. A person tells their agent to read `<instance>/agent-setup.md` and follow it. The instance serves two public markdown pages (`onboarding/routes.ts`) and fills `{{VALET_URL}}` with its public URL:
 
-- `/agent-setup.md`: install the CLI, have the person run `valet login` in their own terminal, connect MCP, install the skill, and check the setup. The page forbids the agent to request, print, or save a secret, or to approve a Valet approval.
+- `/agent-setup.md`: install the CLI, run `valet login` (the person approves it in the browser, see "CLI browser sign-in" in the auth spec), connect MCP, install the skill, and check the setup. The page forbids the agent to request, print, or save a secret, or to approve a Valet approval.
 - `/agent-skill.md`: the `valet` skill (`SKILL.md` format). It maps tasks to MCP tools and CLI commands and repeats the safety rules.
 
 The pages hold no secrets or per-user data. The build inlines the markdown, so the bundle and the binary serve it.

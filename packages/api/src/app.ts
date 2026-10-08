@@ -51,6 +51,7 @@ import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
 import { actionsRouter } from "./routes/actions.js";
 import { mcpAuthorizeGate, oauthConsentRouter } from "./routes/oauth-consent.js";
+import { cliLoginRouter, cliLoginTokenHandler } from "./routes/cli-login.js";
 import { mountOnboardingRoutes } from "./onboarding/routes.js";
 import { templatesRouter } from "./routes/templates.js";
 import { skillsRouter } from "./routes/skills.js";
@@ -280,6 +281,8 @@ export function createApp(
     // Every MCP authorization goes through Valet's consent page: a client
     // cannot skip it by leaving out prompt=consent (routes/oauth-consent.ts).
     app.get("/api/auth/mcp/authorize", mcpAuthorizeGate(auth));
+    // `valet login` exchanges its one-time code here before it has a key.
+    app.post("/api/cli/login/token", cliLoginTokenHandler({ auth, db: providers.db }));
     app.on(["POST", "GET"], "/api/auth/*", async (c) => {
       const res = await auth.handler(c.req.raw);
       return filterTeamKeysFromPersonalApiKeyList(c.req.path, res);
@@ -328,6 +331,7 @@ export function createApp(
   app.route("/api/threads", threadsRouter);
   app.route("/api/actions", actionsRouter);
   app.route("/api/oauth/consent", oauthConsentRouter);
+  app.route("/api/cli/login", cliLoginRouter);
   app.route("/api/sessions", childWorkRouter);
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.

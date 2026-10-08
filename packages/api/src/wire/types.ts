@@ -5592,3 +5592,22 @@ export interface OAuthConsentInfo {
 export interface OAuthConsentDecision {
   redirect: string;
 }
+
+/** `GET /api/cli/login` response: what the browser sign-in page shows for `valet login`. */
+export interface CliLoginInfo {
+  account: string;
+  /** The computer name the CLI reported. The CLI chooses it, so it proves nothing. */
+  device: string;
+  access: string[];
+}
+
+/** `POST /api/cli/login` response: the CLI's loopback URL, with a code or `error=access_denied`. */
+export interface CliLoginDecision {
+  redirect: string;
+}
+
+/** `POST /api/cli/login/token` response: the personal API key the CLI saves. */
+export interface CliLoginTokenResponse {
+  key: string;
+  name: string;
+}

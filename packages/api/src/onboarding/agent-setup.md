@@ -27,20 +27,23 @@ Valet is your organization's agent platform. After setup, you can:
 3. The installer puts `valet` in `~/.local/bin`. If `valet` is still not found, add `~/.local/bin` to `PATH` for this shell: `export PATH="$HOME/.local/bin:$PATH"`.
 4. Run `valet --help`. The command list must include `tools`. If it does not, the CLI is older than this instance. Run the install command in item 2 again. It replaces the old binary.
 
-## Step 2. Log in (the person does this step)
+## Step 2. Log in
 
-Ask the person to do these three things. Give them the exact text below.
+You run the login. The person approves it in their browser.
 
-1. Open {{VALET_URL}}/settings/api-keys and create an API key.
-2. In their own terminal, not in this conversation, run:
+1. Tell the person: "I am logging the Valet CLI in to {{VALET_URL}}. Your browser will open. Check that it names this computer, then choose Allow."
+2. Run this command. It waits up to 5 minutes for the approval, so allow a long timeout:
 
    ```sh
    valet login {{VALET_URL}} --name valet
    ```
 
-3. Paste the key at the hidden prompt.
+3. If the browser does not open, the command prints a URL. Give that URL to the person.
+4. If Valet asks the person to sign in first, they sign in, and the approval page then opens.
 
-When the person says they are done, run `valet status`. The output must show `ok: true` for {{VALET_URL}}. If `valet status` shows another instance, run `valet instance use valet`.
+The CLI receives its key directly from Valet. You never see it.
+
+When the command prints `logged in`, run `valet status`. The output must show `ok: true` for {{VALET_URL}}. If `valet status` shows another instance, run `valet instance use valet`.
 
 ## Step 3. Connect MCP
 
@@ -84,7 +87,9 @@ For another agent, save the same file where that agent reads skills or standing 
 
 | Symptom | Fix |
 |---|---|
-| `valet` exits with code 5 | The login failed or the key was revoked. Ask the person to repeat step 2. |
+| `valet login` exits with code 5 | The person chose Deny, or did not approve within 5 minutes. Ask them, then repeat step 2. |
+| `valet` exits with code 5 on another command | The CLI key was revoked. Repeat step 2. |
+| `valet login` waits, but the browser shows "This site can't be reached" for `127.0.0.1` | The browser runs on another computer than the CLI. Ask the person to run `valet login {{VALET_URL}} --name valet --api-key -` in their own terminal on this computer, with a key from {{VALET_URL}}/settings/api-keys. |
 | `valet` exits with code 6 | Valet is not reachable. Check {{VALET_URL}}/api/health in a browser or with `curl`. |
 | macOS says the binary is damaged | Run `xattr -d com.apple.quarantine ~/.local/bin/valet`. This happens only after a browser download. |
 | `valet` says `unknown command: tools` or `threads` | The CLI is too old. Repeat step 1 to reinstall it. |

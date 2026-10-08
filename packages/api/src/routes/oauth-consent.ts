@@ -94,7 +94,7 @@ async function loadPending(c: Context<AppEnv>, code: unknown): Promise<{ code: s
  * sends `Origin: https://<public host>`, so the request origin alone would
  * refuse every real decision.
  */
-function allowedOrigins(c: Context<AppEnv>): Set<string> {
+export function trustedRequestOrigins(c: Context<AppEnv>): Set<string> {
   const origins = new Set([new URL(c.req.url).origin]);
   for (const configured of [publicUrlFromEnv(process.env), process.env.BETTER_AUTH_URL]) {
     if (!configured) continue;
@@ -134,7 +134,7 @@ oauthConsentRouter.post("/", async (c) => {
   // The session cookie is SameSite=Lax, so a cross-site POST arrives signed
   // out. Refuse a foreign Origin anyway, before any state changes.
   const origin = c.req.header("origin");
-  if (origin && !allowedOrigins(c).has(origin)) return c.json({ error: "Approve the app from the Valet page." }, 403);
+  if (origin && !trustedRequestOrigins(c).has(origin)) return c.json({ error: "Approve the app from the Valet page." }, 403);
   const body = await readOptionalJsonObject(c);
   if (!body || typeof body.accept !== "boolean") return c.json({ error: "Send { consent_code, accept: true | false }." }, 400);
   const loaded = await loadPending(c, body.consent_code);

@@ -60,6 +60,8 @@ function okDeps(overrides: Partial<LoginDeps> = {}): {
       readCalls += 1;
       return Promise.resolve("vlt_prompted");
     },
+    authConfig: () => Promise.resolve({ stub: false }),
+    browserLogin: () => Promise.resolve("vlt_browser"),
     ...overrides,
   };
   return {
@@ -80,6 +82,9 @@ describe("apiKeyFromFlags", () => {
   });
   it("returns keyless sentinel for a bare --api-key", () => {
     expect(apiKeyFromFlags(parseGlobalFlags(["url", "--api-key"]))).toEqual({ keyless: true });
+  });
+  it("returns the prompt sentinel for --api-key -", () => {
+    expect(apiKeyFromFlags(parseGlobalFlags(["url", "--api-key", "-"]))).toEqual({ prompt: true });
   });
   it("returns undefined when the flag is absent", () => {
     expect(apiKeyFromFlags(parseGlobalFlags(["url"]))).toBeUndefined();
@@ -138,6 +143,8 @@ describe("runLogin", () => {
         return { me: () => Promise.reject(new AuthError("authentication failed (401)")) };
       },
       readSecret: () => Promise.resolve(undefined),
+      authConfig: () => Promise.resolve({ stub: false }),
+      browserLogin: () => Promise.resolve("unused"),
     };
     const flags = parseGlobalFlags(["https://valet.example.com", "--api-key", "bad"]);
     const code = await runLogin(deps, flags, {});
@@ -159,11 +166,56 @@ describe("runLogin", () => {
     expect(saved.profiles?.["localhost:8788"]).not.toHaveProperty("apiKey");
   });
 
-  it("prompts via readSecret when no --api-key flag is present", async () => {
+  it("signs in through the browser when no --api-key flag is present", async () => {
+    const opens: boolean[] = [];
+    const bundle = okDeps({
+      browserLogin: (_url, opts) => {
+        opens.push(opts.openBrowser);
+        return Promise.resolve("vlt_browser");
+      },
+    });
+    const flags = parseGlobalFlags(["https://valet.example.com/"]);
+    expect(await runLogin(bundle.deps, flags, {})).toBe(ExitCode.OK);
+    expect(opens).toEqual([true]);
+    expect(bundle.readCalls).toBe(0);
+    expect(bundle.built).toEqual([{ url: "https://valet.example.com/", apiKey: "vlt_browser" }]);
+    expect(loadConfig().profiles?.["valet.example.com"]?.apiKey).toBe("vlt_browser");
+    expect(stdout()).not.toContain("vlt_browser");
+  });
+
+  it("passes --no-browser through to the browser sign-in", async () => {
+    const opens: boolean[] = [];
+    const { deps } = okDeps({
+      browserLogin: (_url, opts) => {
+        opens.push(opts.openBrowser);
+        return Promise.resolve("vlt_browser");
+      },
+    });
+    expect(await runLogin(deps, parseGlobalFlags(["https://valet.example.com", "--no-browser"]), {})).toBe(ExitCode.OK);
+    expect(opens).toEqual([false]);
+  });
+
+  it("saves a keyless profile for a stub-auth instance without opening a browser", async () => {
+    const browser = vi.fn(() => Promise.resolve("never"));
+    const { deps, built } = okDeps({ authConfig: () => Promise.resolve({ stub: true }), browserLogin: browser });
+    expect(await runLogin(deps, parseGlobalFlags(["http://localhost:8788"]), {})).toBe(ExitCode.OK);
+    expect(browser).not.toHaveBeenCalled();
+    expect(built).toEqual([{ url: "http://localhost:8788", apiKey: undefined }]);
+    expect(loadConfig().profiles?.["localhost:8788"]).toEqual({ url: "http://localhost:8788" });
+  });
+
+  it("returns AuthFailure and saves nothing when the browser sign-in is denied", async () => {
+    const { deps } = okDeps({ browserLogin: () => Promise.reject(new AuthError("the sign-in was denied in the browser.")) });
+    expect(await runLogin(deps, parseGlobalFlags(["https://valet.example.com"]), {})).toBe(ExitCode.AuthFailure);
+    expect(existsSync(configPath())).toBe(false);
+    expect(stderr()).toContain("denied in the browser");
+  });
+
+  it("reads the key with readSecret for --api-key -", async () => {
     // NB: access readCalls via the bundle AFTER the call — destructuring the
     // getter would snapshot it at 0 before runLogin runs.
     const bundle = okDeps();
-    const flags = parseGlobalFlags(["http://localhost:8788"]);
+    const flags = parseGlobalFlags(["http://localhost:8788", "--api-key", "-"]);
     expect(await runLogin(bundle.deps, flags, {})).toBe(ExitCode.OK);
     expect(bundle.readCalls).toBe(1);
     expect(bundle.built).toEqual([{ url: "http://localhost:8788", apiKey: "vlt_prompted" }]);
@@ -172,7 +224,7 @@ describe("runLogin", () => {
 
   it("treats an empty readSecret result as keyless", async () => {
     const { deps } = okDeps({ readSecret: () => Promise.resolve(undefined) });
-    const flags = parseGlobalFlags(["http://localhost:8788"]);
+    const flags = parseGlobalFlags(["http://localhost:8788", "--api-key", "-"]);
     expect(await runLogin(deps, flags, {})).toBe(ExitCode.OK);
     expect(loadConfig().profiles?.["localhost:8788"]).toEqual({ url: "http://localhost:8788" });
   });
@@ -196,6 +248,8 @@ describe("runLogin", () => {
         me: () => Promise.reject(new UnreachableError("could not reach")),
       }),
       readSecret: () => Promise.resolve(undefined),
+      authConfig: () => Promise.resolve({ stub: false }),
+      browserLogin: () => Promise.resolve("unused"),
     };
     const flags = parseGlobalFlags(["http://localhost:8788", "--api-key", "k"]);
     await expect(runLogin(deps, flags, {})).rejects.toBeInstanceOf(UnreachableError);
@@ -208,6 +262,8 @@ describe("runLogin", () => {
         me: () => Promise.reject(new ApiError(500, "boom")),
       }),
       readSecret: () => Promise.resolve(undefined),
+      authConfig: () => Promise.resolve({ stub: false }),
+      browserLogin: () => Promise.resolve("unused"),
     };
     const flags = parseGlobalFlags(["http://localhost:8788", "--api-key", "k"]);
     await expect(runLogin(deps, flags, {})).rejects.toBeInstanceOf(ApiError);

@@ -148,6 +148,20 @@ The older `features.ssoTeamSync` and `auth.sso.teams.groups` configuration shape
 - Server config: `apiKey({ defaultPrefix: "vlt_", rateLimit: { enabled: false } })` — Valet keys are power-user credentials; better-auth's per-key rate limiting defaults (10 req/day) are wrong for us.
 - Wire: `x-api-key: vlt_…` (middleware rung 3).
 
+### CLI browser sign-in
+
+`valet login <url>` gets a personal API key through the browser, the way an MCP client signs in with OAuth. The person never copies a key.
+
+1. The CLI reads `GET /api/auth-config`. A stub-auth instance needs no credential, so the CLI saves a keyless profile.
+2. The CLI listens on `127.0.0.1:<random port>` and opens `<instance>/cli/login` with `redirect_uri=http://127.0.0.1:<port>/callback`, a PKCE S256 `code_challenge`, a random `state`, and the computer name.
+3. The web page (`routes/cli.login.tsx`) reads `GET /api/cli/login`. A signed-out visitor is sent to `/login?next=`. The page names the account and the computer, and offers Allow and Deny.
+4. Allow posts to `POST /api/cli/login`. The route stores a one-time code in `verification` (identifier `cli-login:<sha256(code)>`, five minutes) and returns the loopback URL with the code and state. Deny returns the loopback URL with `error=access_denied`.
+5. The CLI checks the state and posts the code, the PKCE verifier, and the redirect URI to `POST /api/cli/login/token`. That route is public, because the CLI has no credential yet. It deletes the code on first use, checks the verifier, and creates a personal key named `valet CLI (<computer>)` with `auth.api.createApiKey`.
+
+The key travels only in the token response, never through the browser. A leaked code is useless without the verifier, and a failed exchange still deletes it. Only a browser session can approve (`authVia === "session"`), a decision must come from a Valet origin, and the redirect must be a loopback `/callback` URL with a port. The person revokes a CLI key in Settings > API keys, like any other key.
+
+On a remote machine the browser cannot reach the CLI's loopback port. There, `valet login <url> --api-key -` reads a key from a hidden prompt or stdin. `--api-key <key>` still works for scripts.
+
 ## Sandbox auth (`auth/sandbox-tokens.ts`)
 
 Two credentials, one file, both independent of better-auth:
