@@ -1,6 +1,5 @@
 import { assistantMemoryNamespace } from "../services/memory-scope.js";
 import { assistantExecutions } from "../schema/index.js";
-import { isDisabledModel } from "@valet/engine/model-catalog";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
 import { workflowEditorThreadContext } from "../workflows/editor-thread-context.js";
@@ -3302,7 +3301,6 @@ export class EngineHost {
     if (!this.opts.db || prefs.length === 0) return undefined;
     const rows = await listLlmProviders(this.opts.db, orgId);
     for (const pref of prefs) {
-      if (isDisabledModel(pref)) continue;
       const { namespace } = parseModelId(pref);
       const row = rows.find((r) => providerNamespace(r) === namespace);
       let active: boolean;
@@ -3334,7 +3332,7 @@ export class EngineHost {
       .where(eq(users.id, userId))
       .limit(1);
     const pref = rows[0]?.defaultModel;
-    return pref && !isDisabledModel(pref) ? pref : undefined;
+    return pref ?? undefined;
   }
 
   /**
@@ -3400,9 +3398,8 @@ export class EngineHost {
       childDefault?: string;
     },
   ): Promise<BuildModel> {
-    // Retired pins must not brick history or the model selector on restore.
-    // Explicit selections remain rejected by the resolver and request boundary.
-    if (existing?.model && !isDisabledModel(existing.model)) return this.resolveModelObject(orgId, existing.model);
+    // Preserve the saved model when restoring an existing session.
+    if (existing?.model) return this.resolveModelObject(orgId, existing.model);
     const id =
       prefs.overrideId ??
       prefs.childDefault ??

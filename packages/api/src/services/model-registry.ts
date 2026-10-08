@@ -56,7 +56,7 @@ import {
   type Model,
   type MutableModels,
 } from "@earendil-works/pi-ai";
-import { bundledModel, bundledModels, isCatalogModel, isDisabledModel } from "@valet/engine/model-catalog";
+import { bundledModel, bundledModels, isCatalogModel } from "@valet/engine/model-catalog";
 import type { AppDb } from "../lib/drizzle.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { PgModelsStore } from "./models-store-pg.js";
@@ -262,7 +262,6 @@ export class ModelRegistry {
   /** One model by provider and WIRE id, or undefined when the provider does
    * not know it. Replaces the deprecated `getModel` compat read. */
   getModel(providerId: RegistryProvider, modelId: string): Model<Api> | undefined {
-    if (isDisabledModel(modelId)) return undefined;
     return this.models.getModel(providerId, modelId) ?? bundledModel(providerId, modelId);
   }
 

@@ -17,7 +17,6 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import { orgs, type LlmProviderRow } from "../schema/index.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
 import { hasOrgKey } from "./model-catalog.js";
-import { isDisabledModel } from "@valet/engine/model-catalog";
 
 /** The five size tiers, in order. */
 export const TIER_TOKENS = ["xs", "s", "m", "l", "xl"] as const;
@@ -96,7 +95,6 @@ async function firstActiveSpec(
   specs: string[] | undefined,
 ): Promise<string | undefined> {
   for (const spec of specs ?? []) {
-    if (isDisabledModel(spec)) continue;
     const { namespace } = parseModelId(spec);
     const row = rows.find((r) => providerNamespace(r) === namespace);
     let active: boolean;

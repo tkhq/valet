@@ -83,9 +83,12 @@ describe("runtime model fallback policy", () => {
     expect(await fallback("m", ["anthropic", row.id])).toBeNull();
   });
 
-  it("skips globally disabled models even in stale approved tier configuration", async () => {
+  it("uses Astra only when configured and approved", async () => {
     vi.stubEnv("OPENAI_API_KEY", "openai-key");
     await setOrgTierMap(fixture.appDb, orgId, { ...DEFAULT_TIER_MAP, m: [primary, "openai/gpt-6-astra", secondary] });
+    await setApprovedModels(fixture.appDb, orgId, [primary, secondary]);
     expect(await fallback()).toMatchObject({ canonicalId: secondary });
+    await setApprovedModels(fixture.appDb, orgId, [primary, secondary, "openai/gpt-6-astra"]);
+    expect(await fallback()).toMatchObject({ canonicalId: "openai/gpt-6-astra" });
   });
 });
