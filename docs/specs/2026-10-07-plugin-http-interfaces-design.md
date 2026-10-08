@@ -101,6 +101,9 @@ Authenticated callers must have current organization membership. Team keys canno
 
 Linear declares `/events` with signature authentication. The host retains `/webhooks/events/linear` as an alias.
 Both URLs use the same event deduplication and dispatch pipeline. The plugin owns payload parsing and trigger selection.
+The host supplies every assembled trigger whose service matches the route plugin.
+Linear verifies against that complete list, including definitions contributed by other plugins.
+Triggers from other services cannot participate in Linear verification.
 A temporary host adapter reads existing Linear installations and signing metadata without refreshing credentials.
 The installation's stored organization determines event ownership after verification. Request bodies cannot override it.
 

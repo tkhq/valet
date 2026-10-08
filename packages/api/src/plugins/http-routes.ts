@@ -96,7 +96,8 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
         const { db, eventDispatcher } = c.var.providers;
         const installation = await resolveInstallation(db, key);
         if (!installation) return ack();
-        const verification = await route.verify(request, installation.secrets);
+        const triggers = c.var.providers.plugins.flatMap((loaded) => loaded.triggers ?? []).filter((trigger) => trigger.service === plugin.name);
+        const verification = await route.verify(request, installation.secrets, triggers);
         if (!verification.accepted) {
           await writeDropLog(db, {
             orgId: installation.orgId, reason: verification.rejection.reason, detail: verification.rejection.detail,

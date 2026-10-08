@@ -1,4 +1,4 @@
-import type { NormalizedEvent, PluginValidationIssue, TriggerRejection } from './valet-plugin.js';
+import type { NormalizedEvent, PluginValidationIssue, TriggerDef, TriggerRejection } from './valet-plugin.js';
 
 /** Portable declarations only. The API host owns routing and authentication. */
 export interface PluginHttpRequest {
@@ -41,7 +41,8 @@ export type PluginHttpRoute =
       method: 'POST';
       /** Untrusted lookup key. The host selects the installation and signing metadata. */
       installationKey(request: PluginHttpRequest): string | null | Response;
-      verify(request: PluginHttpRequest, secrets: Record<string, string>): PluginIngressVerification | Promise<PluginIngressVerification>;
+      /** The host supplies every loaded trigger for this route's service. */
+      verify(request: PluginHttpRequest, secrets: Record<string, string>, triggers: readonly TriggerDef[]): PluginIngressVerification | Promise<PluginIngressVerification>;
       /** Also used for unknown installations and signed, unsupported events. */
       acknowledgementStatus: 200 | 202 | 204;
     });

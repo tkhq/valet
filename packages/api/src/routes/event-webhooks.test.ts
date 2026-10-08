@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import { eq } from "drizzle-orm";
+import type { TriggerDef, ValetPlugin } from "@valet/engine";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions, linearInstallations } from "../schema/index.js";
@@ -113,6 +114,55 @@ describe("POST /webhooks/events/:service", () => {
   });
 
   describe("linear ingress", () => {
+    it("ingests contributed Linear triggers through both URLs without widening verification", async () => {
+      const contributed: TriggerDef = {
+        id: "linear.custom", service: "linear", description: "Custom Linear event",
+        catalog: [{ key: "linear.custom.create", description: "Custom resource created", filters: [] }],
+        verify(request, secrets) {
+          const signature = createHmac("sha256", secrets.webhookSecret).update(request.rawBody).digest("hex");
+          if (request.headers["linear-signature"] !== signature) return null;
+          const payload: unknown = JSON.parse(new TextDecoder().decode(request.rawBody));
+          if (typeof payload !== "object" || payload === null || !("type" in payload) || payload.type !== "Custom") return null;
+          return { eventType: "Custom", deliveryId: request.headers["linear-delivery"], payload };
+        },
+        toEvent(event) {
+          return { key: "linear.custom.create", dedupeKey: event.deliveryId, occurredAt: new Date().toISOString(), refs: {}, summary: "Custom resource created", payload: event.payload };
+        },
+      };
+      const unrelatedVerify = vi.fn(() => null);
+      const extension: ValetPlugin = {
+        name: "linear-extension", version: "1", triggers: [
+          contributed,
+          { ...contributed, id: "other.custom", service: "other", verify: unrelatedVerify, catalog: [] },
+        ],
+      };
+      api = await bootTestApi({ plugins: [linearPlugin, extension] });
+      await api.providers.eventDispatcher.stop();
+      await seedLinearOrg(api);
+      await seedSubscription(api, ["linear.custom.create"]);
+      const body = JSON.stringify({ type: "Custom", action: "create", organizationId: "lin-org-1", webhookTimestamp: Date.now() });
+      const { baseUrl } = api;
+      const send = (path: string, signature: string) => fetch(`${baseUrl}${path}`, {
+        method: "POST", headers: { "Linear-Signature": signature, "Linear-Delivery": "custom-delivery" }, body,
+      });
+      for (const path of ["/webhooks/events/linear", "/plugins/linear/http/events"]) {
+        expect((await send(path, linearSig(body, "wrong-secret"))).status).toBe(403);
+        expect(await api.providers.db.select().from(events)).toHaveLength(0);
+      }
+      for (const path of ["/webhooks/events/linear", "/plugins/linear/http/events"]) {
+        expect((await send(path, linearSig(body, WEBHOOK_SECRET))).status).toBe(200);
+      }
+      const rows = await api.providers.db.select().from(events);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ orgId: "local-org", service: "linear", eventKey: "linear.custom.create" });
+      const deliveries = await api.providers.db.select().from(eventDeliveries);
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0]).toMatchObject({ eventId: rows[0].id, subscriptionId: "sub_seed", status: "pending" });
+      const drops = await api.providers.db.select().from(eventDropLog);
+      expect(drops.map(drop => drop.reason)).toEqual(["bad_signature", "bad_signature"]);
+      expect(unrelatedVerify).not.toHaveBeenCalled();
+    });
+
     it("keeps diagnostic ownership on the resolved installation even if a plugin returns extra fields", async () => {
       api = await bootTestApi({ plugins: [{
         ...linearPlugin,
