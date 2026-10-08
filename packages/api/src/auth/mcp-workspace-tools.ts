@@ -23,6 +23,7 @@ import type {
   StartWorkflowRunResponse,
 } from "../wire/types.js";
 import type { McpToolDeps } from "./mcp-tools.js";
+import { capOutput } from "./mcp-output.js";
 
 const MAX_TEXT_CHARS = 20_000;
 // Under a 60-second ingress timeout; see mcp-tools.ts.
@@ -32,14 +33,16 @@ const POLL_MS = 1_000;
 
 class ApiError extends Error {}
 
-function ok(value: unknown): CallToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], structuredContent: value as Record<string, unknown> };
+function ok(value: unknown, capNote?: string): CallToolResult {
+  const capped = capOutput(value, capNote);
+  return { content: [{ type: "text", text: JSON.stringify(capped, null, 2) }], structuredContent: capped };
 }
 
-function run<A>(fn: (args: A) => Promise<unknown>): (args: A) => Promise<CallToolResult> {
+/** `capNote` tells the agent how to get the rest of a result that `capOutput` shortened. */
+function run<A>(fn: (args: A) => Promise<unknown>, capNote?: string): (args: A) => Promise<CallToolResult> {
   return async (args) => {
     try {
-      return ok(await fn(args));
+      return ok(await fn(args), capNote);
     } catch (err) {
       if (err instanceof ApiError) return { content: [{ type: "text", text: err.message }], isError: true };
       throw err;
@@ -167,7 +170,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
         })),
         ...(res.nextCursor ? { more: "More skills exist. Narrow the query." } : {}),
       };
-    }),
+    }, "Set a smaller limit or a query to see fewer skills."),
   );
 
   server.registerTool(
@@ -209,7 +212,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     run(async ({ query, workspace, limit }: { query: string; workspace?: string; limit?: number }) => {
       const params = ownerParams(workspace, new URLSearchParams({ q: query, limit: String(limit ?? 10) }));
       return call<unknown>(deps, "GET", withQuery("/api/memory/search", params), "Memory search");
-    }),
+    }, "Set a smaller limit to see fewer results. Use read_memory with a result's path to read that file."),
   );
 
   server.registerTool(

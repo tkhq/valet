@@ -97,7 +97,9 @@ The queue item read uses ids that an authorized route call returned, so it widen
 
 ### Results
 
-Each tool returns JSON text and the same value as `structuredContent`. Message and reply text is capped at 8,000 characters. A failed route call returns an MCP tool error with a corrective action, for example "Thread not found, or you do not have access to it. Use list_threads or list_workspaces to find a valid id."
+Each tool returns JSON text and the same value as `structuredContent`. Message and reply text is capped at 8,000 characters. Skill instructions and memory file content are capped at 20,000 characters.
+
+The whole result is capped at 24,000 characters of compact JSON (`auth/mcp-output.ts`). This covers values that Valet does not control: a `call_tool` result, a `describe_tool` schema, search hits, and lists. A result under the cap is returned unchanged. A larger result keeps its other fields, and its largest field is shortened. A list keeps its first items and reports `omitted_items`. Any other value becomes a text preview of its JSON. The result then carries `truncated: true`, `original_chars`, and a `note`. When a way to get the rest exists, the note names it: narrower params for `call_tool`, a smaller `limit` or a query for lists and searches, `read_memory` for one search hit, and a smaller `messages` for `get_thread`. The result is always a JSON object. A failed route call returns an MCP tool error with a corrective action, for example "Thread not found, or you do not have access to it. Use list_threads or list_workspaces to find a valid id."
 
 ### Sign-in and consent
 

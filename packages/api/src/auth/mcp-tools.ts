@@ -28,6 +28,7 @@ import type {
   SendPromptResponse,
   ThreadSummary,
 } from "../wire/types.js";
+import { capOutput } from "./mcp-output.js";
 
 /** One in-process call to an `/api` route as the verified MCP user. */
 export type ApiCaller = (method: "GET" | "POST" | "PUT", path: string, body?: unknown) => Promise<{ status: number; body: unknown }>;
@@ -61,8 +62,9 @@ const workspaceArg = z.string().min(1).optional()
 const waitArg = z.number().int().min(0).max(MAX_WAIT_SECONDS).optional()
   .describe(`Seconds to wait for the assistant to finish (0-${MAX_WAIT_SECONDS}). Default: ${DEFAULT_WAIT_SECONDS}. If the turn is still running when the wait ends, call get_thread to wait again.`);
 
-function ok(value: unknown): CallToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], structuredContent: value as Record<string, unknown> };
+function ok(value: unknown, capNote?: string): CallToolResult {
+  const capped = capOutput(value, capNote);
+  return { content: [{ type: "text", text: JSON.stringify(capped, null, 2) }], structuredContent: capped };
 }
 
 function fail(message: string): CallToolResult {
@@ -206,10 +208,11 @@ async function sendAndWait(deps: McpToolDeps, threadId: string, prompt: string, 
   return waitForTurn(deps, { sessionId, threadId, queueItemId: sent.messageId, waitSeconds });
 }
 
-function run<A>(fn: (args: A) => Promise<unknown>): (args: A) => Promise<CallToolResult> {
+/** `capNote` tells the agent how to get the rest of a result that `capOutput` shortened. */
+function run<A>(fn: (args: A) => Promise<unknown>, capNote?: string): (args: A) => Promise<CallToolResult> {
   return async (args) => {
     try {
-      return ok(await fn(args));
+      return ok(await fn(args), capNote);
     } catch (err) {
       if (err instanceof ApiError) return fail(err.message);
       throw err;
@@ -263,7 +266,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
           url: threadUrl(deps, t.id),
         }));
       return { threads };
-    }),
+    }, "Set a smaller limit or a query to see fewer threads."),
   );
 
   server.registerTool(
@@ -332,7 +335,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
         messages: shown.slice(-(messages ?? 10)).map(messageView),
         url: threadUrl(deps, thread_id),
       };
-    }),
+    }, "Set messages to a smaller number to see fewer, or open the thread url."),
   );
 
   server.registerTool(
@@ -357,7 +360,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
       if (limit) params.set("limit", String(limit));
       const suffix = params.size > 0 ? `?${params.toString()}` : "";
       return call<unknown>(deps, "GET", `/api/actions${suffix}`, "Tool search");
-    }),
+    }, "Set a smaller limit, a more specific query, or a service to see fewer tools."),
   );
 
   server.registerTool(
@@ -380,7 +383,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
       if (params) q.set("params", JSON.stringify(params));
       const suffix = q.size > 0 ? `?${q.toString()}` : "";
       return call<unknown>(deps, "GET", `/api/actions/${encodeURIComponent(tool_id)}${suffix}`, "Tool");
-    }),
+    }, "The tool description is too long to return in full. If call_tool rejects your params, its error names the problem."),
   );
 
   server.registerTool(
@@ -405,7 +408,7 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
         params: params ?? {},
         ...(workspace ? { workspace } : {}),
         ...(idempotency_key ? { idempotencyKey: idempotency_key } : {}),
-      })),
+      }), "The tool returned more than Valet can pass back. To get the rest, call it again with narrower params, such as a filter, a smaller limit, or a page."),
   );
 
   server.registerTool(

@@ -304,6 +304,22 @@ describe("MCP tool broker", () => {
     expect(demo.calls["demo.slow"]).toBe(1);
   });
 
+  it("caps a large call_tool result and says how to get the rest", async () => {
+    const { testApi, alice } = await setup();
+    const res = await fetch(`${testApi.baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${alice}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name: "call_tool", arguments: { tool_id: "demo.ping", params: { text: "x".repeat(60_000) } } } }),
+    });
+    const { result } = (await res.json()) as { result: { content: Array<{ text: string }>; structuredContent: Record<string, unknown> } };
+    const structured = result.structuredContent;
+    expect(JSON.stringify(structured).length).toBeLessThanOrEqual(24_000);
+    expect(structured).toMatchObject({ tool_id: "demo.ping", status: "completed", truncated: true, note: expect.stringContaining("narrower params") });
+    expect(typeof structured.result).toBe("string");
+    expect(String(structured.result)).toMatch(/^\{"echoed":"xxx/);
+    expect(JSON.parse(result.content[0].text)).toEqual(structured);
+  });
+
   describe("audit rows for calls that return before the policy check", () => {
     /** Alice and Bob share one team. Alice holds demo and locked credentials. */
     async function teamSetup(opts: { aliceShares: string[] }) {
