@@ -20,4 +20,16 @@ describe("Section", () => {
     render(<Section title="Plugins">rows</Section>);
     expect(screen.getByRole("heading", { name: "Plugins" }).className).not.toContain("sr-only");
   });
+
+  it("hides the group when no row renders", () => {
+    function NothingToShow() {
+      return null;
+    }
+    const { container } = render(<Section title="Tools and skills">{false}<NothingToShow /></Section>);
+    const group = container.querySelector("section > div:last-child");
+    // jsdom applies no CSS. The group is empty, and `empty:hidden` is what
+    // keeps an empty grey box off the page.
+    expect(group?.childNodes).toHaveLength(0);
+    expect(group?.className.split(" ")).toContain("empty:hidden");
+  });
 });

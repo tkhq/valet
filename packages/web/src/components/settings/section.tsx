@@ -32,8 +32,9 @@ export function Section({
       </div>
       {/* The group pads its own top and bottom, so a child with no padding
           of its own (a note, a form) does not touch the rounded edge. A row
-          with its own padding trims it at the ends to keep the same inset. */}
-      <div className="divide-y divide-line rounded-2xl bg-ink-wash px-4 py-3">{children}</div>
+          with its own padding trims it at the ends to keep the same inset.
+          A group whose rows all render nothing is hidden, not an empty box. */}
+      <div className="divide-y divide-line rounded-2xl bg-ink-wash px-4 py-3 empty:hidden">{children}</div>
     </section>
   );
 }
