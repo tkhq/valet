@@ -117,13 +117,23 @@ const JOB_FILES_RETENTION_MINUTES = 24 * 60;
  * `/scratch` size limit. Logs grow only through kickoffs, so pruning at
  * each kickoff bounds them without any row state. Best effort: a failure
  * here never blocks the kickoff.
+ *
+ * `find -exec` passes each name as one argument, so a workload-chosen name
+ * is never split or globbed in the kickoff's working directory. A job
+ * counts once, and only when both of its stamps are gone after the `rm`:
+ * a root-owned `.dead` that the sticky bit keeps is not counted again on
+ * every later kickoff (fix wave 4, security N6 and k8s N-3).
  */
-function pruneOldJobFilesScript(): string {
-  const dir = shQuote(JOBS_DIR);
+export function pruneOldJobFilesScript(jobsDir: string = JOBS_DIR): string {
+  const dir = shQuote(jobsDir);
+  const each =
+    'for f in "$@"; do [ -e "$f" ] || continue; b="${f%.*}"; ' +
+    'rm -f "$b.out" "$b.pid" "$b.exit" "$b.dead" "$b.fifo" 2>/dev/null; ' +
+    '[ -e "$b.exit" ] || [ -e "$b.dead" ] || echo pruned; done';
   return (
-    `n=0; for f in $(find ${dir} -maxdepth 1 \\( -name '*.exit' -o -name '*.dead' \\) -mmin +${JOB_FILES_RETENTION_MINUTES} 2>/dev/null); do ` +
-    `b="\${f%.*}"; rm -f "$b.out" "$b.pid" "$b.exit" "$b.dead" "$b.fifo" 2>/dev/null; n=$((n+1)); done; ` +
-    `if [ "$n" -gt 0 ]; then echo "pruned=$n"; fi; `
+    `n=$(find ${dir} -maxdepth 1 \\( -name '*.exit' -o -name '*.dead' \\) -mmin +${JOB_FILES_RETENTION_MINUTES} ` +
+    `-exec sh -c ${shQuote(each)} sh {} + 2>/dev/null | wc -l | tr -d ' '); ` +
+    `if [ "\${n:-0}" -gt 0 ]; then echo "pruned=$n"; fi; `
   );
 }
 
