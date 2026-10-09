@@ -46,7 +46,7 @@
  * so it ran anyway."
  */
 import type { ApprovalMode, PolicyProvenanceSource, RiskLevel } from "@valet/engine";
-import { evaluateMatchers, type ParamMatcher } from "./matchers.js";
+import { evaluateMatchers, readPath, type ParamMatcher } from "./matchers.js";
 
 export type PolicyAppliesIn = "any" | "workflow" | "session";
 
@@ -116,6 +116,13 @@ export interface PolicyResolutionInput {
   /** Caller-supplied clock reading (ms) — kept explicit so expiry edge cases
    *  are deterministic in tests; this module never calls `Date.now()`. */
   now: number;
+  /**
+   * `params` lists only the values known before the action runs, as for a
+   * hosted provider tool whose prompt the model writes later. A matcher on
+   * an absent path may match a deny or approval row, so the row applies and
+   * fails closed. It never matches an allow row, which would widen access.
+   */
+  partialParams?: boolean;
 }
 
 export interface PolicyDecisionProvenance {
@@ -199,17 +206,29 @@ function matchesTarget(
   return false;
 }
 
+/**
+ * Apply a row's matchers. With `partialParams`, a matcher whose path is
+ * absent from the known params might match once the action runs: a deny or
+ * approval row then counts as matching, an allow row does not.
+ */
+function matchesParams(row: { mode: ApprovalMode; paramMatchers: ParamMatcher[] }, input: PolicyResolutionInput): boolean {
+  if (!input.partialParams) return evaluateMatchers(row.paramMatchers, input.params);
+  const known = row.paramMatchers.filter((matcher) => readPath(input.params, matcher.path) !== undefined);
+  if (known.length !== row.paramMatchers.length && row.mode === "allow") return false;
+  return evaluateMatchers(known, input.params);
+}
+
 function matchesPolicyRow(row: ActionPolicyRow, input: PolicyResolutionInput): boolean {
   if (row.revokedAt !== null) return false;
   if (row.expiresAt !== null && row.expiresAt <= input.now) return false;
   if (row.appliesIn !== "any" && row.appliesIn !== input.appliesIn) return false;
   if (!matchesTarget(row, input)) return false;
-  return evaluateMatchers(row.paramMatchers, input.params);
+  return matchesParams(row, input);
 }
 
 function matchesOverrideRow(row: ActionPolicyOverrideRow, input: PolicyResolutionInput): boolean {
   if (!matchesTarget(row, input)) return false;
-  return evaluateMatchers(row.paramMatchers, input.params);
+  return matchesParams(row, input);
 }
 
 function matchesGrantRow(row: RuntimeGrantRow, input: PolicyResolutionInput): boolean {

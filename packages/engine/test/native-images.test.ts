@@ -8,6 +8,8 @@ import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvid
 import { buildPluginCatalog } from "../src/plugin-catalog.js";
 import { ELIDED_TOOL_OUTPUT } from "../src/compaction.js";
 import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_TOOL_PARAMS } from "../src/native-images.js";
+import { isAnimatedPng, validateImage } from "../src/image-output.js";
+import { crc32 } from "node:zlib";
 import { bundledModel } from "../src/model-catalog.js";
 import { VirtualSandbox } from "../src/providers/sandbox/virtual.js";
 import type { ToolContext } from "../src/types.js";
@@ -35,9 +37,9 @@ function sse(events: unknown[]): Response {
   return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
 }
 /** The plugin action native generation stands in for. Its policy decides whether the hosted tool is offered. */
-const openaiPlugin: ActionPlugin = { service: "openai", actions: [{
-  id: "openai.generate_image", name: "Generate Image", description: "Generate", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true }),
-}] };
+const openaiPlugin: ActionPlugin = { service: "openai", actions: ["generate_image", "edit_image"].map((name) => ({
+  id: `openai.${name}`, name, description: name, riskLevel: "low" as const, parameters: Type.Object({}), execute: async () => ({ success: true }),
+})) };
 const openaiCatalog = () => buildPluginCatalog([openaiPlugin]);
 function requestTools(fetchMock: ReturnType<typeof vi.fn<typeof fetch>>, index = 0): string {
   const [, init] = fetchMock.mock.calls[index];
@@ -220,6 +222,8 @@ it.each([
   expect(JSON.stringify(bodies[1].tools)).toContain("openai__generate_image");
   expect(JSON.stringify(bodies[1].input)).not.toContain("Use native image_generation");
   expect(bridge.enabled(model)).toBe(false);
+  // The retry did not offer the hosted tool, so its plugin generation must not be hidden.
+  expect(bridge.offered).toBe(false);
 });
 
 it.each([
@@ -365,8 +369,49 @@ it("reports a saved path even if the turn aborts immediately after its write", a
   if (!path) throw new Error("missing saved path in abort error");
   // The thread persists an aborted message's text, not its error. The path must be in the text.
   expect(final.content).toContainEqual({ type: "text", text: expect.stringContaining(path) });
+  expect(final.content).toContainEqual(expect.objectContaining({ type: "toolCall", name: NATIVE_IMAGE_RESULT_TOOL, arguments: { path, image_id: "img_1" } }));
   expect(Buffer.from(await sandbox.readBinary(path)).equals(png)).toBe(true);
   expect(bridge.savedInRequest).toBe(true);
+  // Pi drops the aborted message from the next request. The saved path must still arrive.
+  const fetchMock = vi.fn<typeof fetch>(async () => wire([]));
+  vi.stubGlobal("fetch", fetchMock);
+  await bridge.stream(model, { messages: [final, { role: "user", content: "Make it blue", timestamp: 3 }] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox).result();
+  const input: unknown[] = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).input;
+  expect(JSON.stringify(input)).toContain(path);
+  expect(JSON.stringify(input)).not.toContain(NATIVE_IMAGE_RESULT_TOOL);
+});
+
+it("replays an interrupted receipt as its saved path", async () => {
+  const fetchMock = mockProvider([item()]);
+  const bridge = new NativeImageBridge();
+  const sandbox = new VirtualSandbox("interrupted-replay");
+  const final = await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox).result();
+  const call = final.content.find((block) => block.type === "toolCall");
+  if (call?.type !== "toolCall" || typeof call.arguments.path !== "string") throw new Error("missing receipt");
+  fetchMock.mockImplementation(async () => wire([]));
+  await bridge.stream(model, { messages: [final, {
+    role: "toolResult", toolCallId: call.id, toolName: NATIVE_IMAGE_RESULT_TOOL,
+    content: [{ type: "text", text: "Operation aborted" }], isError: true, timestamp: 2,
+  }, { role: "user", content: "Make it blue", timestamp: 3 }] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox).result();
+  const input: unknown[] = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).input;
+  expect(input).toContainEqual({ role: "user", content: [{ type: "input_text", text: expect.stringContaining(call.arguments.path) }] });
+  expect(JSON.stringify(input)).not.toContain("Operation aborted");
+});
+
+it("rejects an animated PNG that Sharp reports as a single page", async () => {
+  const chunk = (type: string, data: Buffer) => {
+    const length = Buffer.alloc(4); length.writeUInt32BE(data.length);
+    const typed = Buffer.concat([Buffer.from(type, "latin1"), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(typed));
+    return Buffer.concat([length, typed, crc]);
+  };
+  const ihdrEnd = 8 + 25;
+  const actl = Buffer.alloc(8); actl.writeUInt32BE(2, 0); actl.writeUInt32BE(0, 4);
+  const apng = Buffer.concat([png.subarray(0, ihdrEnd), chunk("acTL", actl), png.subarray(ihdrEnd)]);
+  expect((await sharp(apng).metadata()).pages ?? 1).toBe(1);
+  expect(isAnimatedPng(apng)).toBe(true);
+  expect(isAnimatedPng(png)).toBe(false);
+  await expect(validateImage(apng, sharp)).rejects.toThrow("Animated images are not accepted");
 });
 
 it("does not retry a streamed image-tool error as a request-time rejection", async () => {
@@ -429,16 +474,19 @@ it("preserves a provider final result without a terminal stream event", async ()
 const partialWrite = { type: "function_call", id: "fc_write", call_id: "call_write", name: "write", arguments: "", status: "in_progress" };
 const writeDelta = { type: "response.function_call_arguments.delta", item_id: "fc_write", output_index: 1, delta: '{"path":"config.json","content":"{\\"trunc' };
 const completeBash = { type: "function_call", id: "fc_bash", call_id: "call_bash", name: "bash", arguments: '{"command":"ls"}', status: "completed" };
+const incompleteWrite = { ...partialWrite, arguments: '{"path":"config.json","content":"{\\"trunc', status: "incomplete" };
 const cutOffs: Array<[string, unknown]> = [
   ["response.failed", { type: "response.failed", response: { id: "resp", status: "failed", error: { code: "server_error", message: "upstream failure" }, output: [item(), partialWrite] } }],
   ["response.incomplete max_output_tokens", { type: "response.incomplete", response: { id: "resp", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [item(), partialWrite] } }],
   ["response.incomplete content_filter", { type: "response.incomplete", response: { id: "resp", status: "incomplete", incomplete_details: { reason: "content_filter" }, output: [item(), partialWrite] } }],
 ];
 it.each(cutOffs)("never runs a cut-off tool call after a saved image (%s)", async (name, terminal) => {
+  // The provider may close the truncated item as done with status "incomplete"; pi still ends the call.
   vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => sse([
     { type: "response.output_item.done", output_index: 0, item: item() },
     { type: "response.output_item.added", output_index: 1, item: partialWrite },
     writeDelta,
+    { type: "response.output_item.done", output_index: 1, item: incompleteWrite },
     terminal,
   ])));
   // Without the bridge, pi surfaces the truncated call. The bridge must not let it run.
@@ -570,4 +618,12 @@ it("offers the hosted tool when policy allows the plugin action and audits each 
 
 it.each(["no plugin catalog", "catalog without the OpenAI plugin"])("offers no hosted tool with %s", async (setup) => {
   expect(await promptWithPolicy(setup === "no plugin catalog" ? {} : { pluginCatalog: buildPluginCatalog([]) })).not.toContain("image_generation");
+});
+
+it("offers no hosted tool when editing is denied, because the hosted tool also edits", async () => {
+  const resolve = vi.fn(async (input: { actionId: string }) => input.actionId === "openai.edit_image"
+    ? { mode: "deny" as const, provenance: { baseMode: "deny" as const, source: "org_policy" as const } }
+    : { mode: "allow" as const, provenance: { baseMode: "allow" as const, source: "risk_default" as const } });
+  expect(await promptWithPolicy({ pluginCatalog: openaiCatalog(), policyResolver: { resolve } })).not.toContain("image_generation");
+  expect(resolve.mock.calls.map(([input]) => input.actionId).sort()).toEqual(["openai.edit_image", "openai.generate_image"]);
 });

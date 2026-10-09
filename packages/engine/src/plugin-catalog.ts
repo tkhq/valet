@@ -484,8 +484,10 @@ export interface HostedActionGrant {
 /**
  * Resolve whether `actionId` would run now without a gate: the action is
  * registered, its service is available, and policy resolves to allow for
- * `params`, the parameters the hosted tool will use. A hosted provider tool
- * asks this before it is offered, so an administrator's deny, approval, or
+ * `params`, the parameters the hosted tool will use. The resolver sees them
+ * as partial: a matcher on a parameter the model supplies later, such as the
+ * prompt, may match a deny or approval row. A hosted provider tool asks this
+ * before it is offered, so an administrator's deny, approval, or
  * parameter-scoped policy on the action still holds. It opens no gate and
  * writes no audit record: the plugin path audits the real invocation when
  * the hosted tool is withheld. Resolver failures fail closed.
@@ -520,6 +522,7 @@ export async function resolveUngatedAction(
       sessionId: ctx.sessionId,
       threadId: ctx.threadId,
       appliesIn: "session",
+      partialParams: true,
     });
     return decision.mode === "allow" ? { ...grant, decision } : undefined;
   } catch {

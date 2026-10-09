@@ -102,7 +102,7 @@ describe("actionRunsUngated", () => {
     expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: failing }))).toBe(false);
     const resolve = vi.fn(async () => ({ mode: "allow" as const, provenance: { baseMode: "allow" as const, source: "risk_default" as const } }));
     await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: { resolve }, owner: { type: "team", id: "team-a" } }), { model: "sunburst" });
-    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ teamId: "team-a", service: "openai", actionId: "openai.generate_image", riskLevel: "low", appliesIn: "session", params: { model: "sunburst" } }));
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ teamId: "team-a", service: "openai", actionId: "openai.generate_image", riskLevel: "low", appliesIn: "session", params: { model: "sunburst" }, partialParams: true }));
   });
 
   it("audits a hosted execution as the plugin action with the grant's provenance", async () => {

@@ -9,6 +9,8 @@ import type { Sandbox, ToolDef, ToolResult } from "./types.js";
 export const NATIVE_IMAGE_RESULT_TOOL = "openai_native_image";
 /** The plugin action native generation replaces. Its availability and policy decide whether the hosted tool is offered. */
 export const NATIVE_IMAGE_PLUGIN_ACTION = "openai.generate_image";
+/** The hosted tool also edits images in context, so this action's policy must allow too. */
+export const NATIVE_IMAGE_EDIT_ACTION = "openai.edit_image";
 /** The hosted tool's fixed parameters. Policy sees them as the plugin action's params. */
 export const NATIVE_IMAGE_TOOL_PARAMS = { model: "gpt-image-2.5-sunburst", output_format: "png", quality: "auto" } as const;
 const NATIVE_PATH = /^generated-images\/[a-f0-9-]+\.(png|jpg|webp)$/;
@@ -26,17 +28,30 @@ function imageToolRejected(message: string): boolean {
     && !/invalid[_ -]?(?:api[_ -]?key)|authentication[_ -]?error|insufficient[_ -]?quota|rate[_ -]?limit/i.test(message);
 }
 
-/** Text of a replayed receipt output, whether pi serialized it as a string or as content parts. */
+/** Text of a replayed receipt output, whether pi serialized it as a string or as content parts. Image parts are skipped. */
 function outputText(output: unknown): string | undefined {
   if (typeof output === "string") return output;
   if (!Array.isArray(output)) return undefined;
   const texts: string[] = [];
   for (const part of output) {
-    if (!record(part)) return undefined;
-    if (part.type !== "input_text" || typeof part.text !== "string") return undefined;
-    texts.push(part.text);
+    if (record(part) && part.type === "input_text" && typeof part.text === "string") texts.push(part.text);
   }
   return texts.join("");
+}
+
+/** The context a saved original leaves when its receipt result cannot carry it. */
+function savedNote(paths: string[], detail: string): string {
+  return `Image originals saved at ${paths.join(", ")}. ${detail} Use these files; do not regenerate them. To change one, use openai.edit_image on that file.`;
+}
+
+/** Receipt paths in an assistant message, from the receipt tool-call arguments. */
+function receiptPathsOf(message: Message): string[] {
+  if (message.role !== "assistant") return [];
+  const paths: string[] = [];
+  for (const block of message.content) {
+    if (block.type === "toolCall" && block.name === NATIVE_IMAGE_RESULT_TOOL && typeof block.arguments.path === "string") paths.push(block.arguments.path);
+  }
+  return paths;
 }
 
 /** The message an error carries when the provider threw before it streamed anything. */
@@ -154,16 +169,16 @@ export class NativeImageBridge {
     const output = createAssistantMessageEventStream();
     const receipts: Array<{ path: string; image_id: string }> = [];
     const seen = new Map<string, string>();
-    // Tool calls whose arguments finished streaming. Any other call in a cut-off message is truncated.
+    // Function calls the provider marked completed with parseable arguments, by call_id.
+    // Pi also ends an incomplete item, so only the provider's status counts.
     const completeCalls = new Set<string>();
     let partial: AssistantMessage | undefined;
-    const savedPaths = () => receipts.map((receipt) => receipt.path).join(", ");
     const deliver = (message: AssistantMessage, cutOff?: string) => {
       // Once originals exist, a failed or cut-off stream becomes receipts, not a retryable assistant error.
       if (cutOff !== undefined) {
         this.unavailable = true;
         // Only calls that finished streaming may run. A truncated call must never execute.
-        message.content = message.content.filter((block) => block.type !== "toolCall" || completeCalls.has(block.id));
+        message.content = message.content.filter((block) => block.type !== "toolCall" || completeCalls.has(block.id.split("|")[0]));
         const warning = `The image stream ended early (${cutOff}) after saving this original. Use saved originals; do not regenerate them.`;
         for (const receipt of receipts) {
           const key = `${receipt.image_id}:${receipt.path}`;
@@ -186,10 +201,18 @@ export class NativeImageBridge {
       message.stopReason = "toolUse";
       output.push({ type: "done", reason: "toolUse", message });
     };
-    // An aborted message persists its text, not its error. Put the saved paths where the transcript keeps them.
+    // An aborted message persists its text and tool calls, not its error. Pi drops aborted
+    // messages from later requests, so the receipt calls here let `request` re-inject the paths.
     const abortWithSaved = (message: AssistantMessage) => {
-      const note = `Image originals saved at ${savedPaths()}. The turn was aborted. Use these files; do not regenerate them.`;
+      const note = savedNote(receipts.map((receipt) => receipt.path), "The turn was aborted.");
       message.content.push({ type: "text", text: note });
+      for (const receipt of receipts) {
+        const toolCall = { type: "toolCall" as const, id: `call_${crypto.randomUUID().replaceAll("-", "")}`, name: NATIVE_IMAGE_RESULT_TOOL, arguments: receipt };
+        const contentIndex = message.content.length;
+        message.content.push(toolCall);
+        output.push({ type: "toolcall_start", contentIndex, partial: message });
+        output.push({ type: "toolcall_end", contentIndex, toolCall, partial: message });
+      }
       output.push({ type: "error", reason: "aborted", error: { ...message, stopReason: "aborted", errorMessage: note } });
     };
     const capture = async (item: unknown) => {
@@ -225,7 +248,16 @@ export class NativeImageBridge {
     };
     const request = (native: boolean) => {
       let instructed = false;
-      const transcript: { messages: Message[] } = { messages: context.messages.map((message, messageIndex) => {
+      const transcript: { messages: Message[] } = { messages: context.messages.flatMap((message, messageIndex): Message[] => {
+        // Pi drops an aborted or errored assistant message. Its saved originals must still reach the model.
+        if (message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error")) {
+          const paths = receiptPathsOf(message);
+          return paths.length ? [message, { role: "user", content: savedNote(paths, "That turn was interrupted after saving them."), timestamp: message.timestamp }] : [message];
+        }
+        return [mapped(message, messageIndex)];
+      }) };
+      let started = false;
+      function mapped(message: Message, messageIndex: number): Message {
         if (message.role === "assistant" && message.content.some((block) => block.type === "toolCall" && block.name === NATIVE_IMAGE_RESULT_TOOL)) {
           // Temporary IDs identify exactly this message's paired items after pi's conversion.
           // The payload hook removes them with the missing hosted item's reasoning.
@@ -248,8 +280,7 @@ export class NativeImageBridge {
         instructed = true;
         return { ...message, toolsAdded: message.toolsAdded?.filter((tool) => !hidden(tool.name)), toolsRemoved: message.toolsRemoved?.filter((tool) => !hidden(tool.name)),
           ...(addInstruction ? { sections: { ...message.sections, "valet-native-images": IMAGE_INSTRUCTIONS } } : {}) };
-      }) };
-      let started = false;
+      }
       const upstream = streamSimple(model, transcript, {
         ...options,
         onResponse: async (response, requestModel) => {
@@ -272,9 +303,12 @@ export class NativeImageBridge {
                 return [];
               }
               if (item.type === "function_call_output" && typeof item.call_id === "string" && receiptCalls.has(item.call_id)) {
+                // A pruned, interrupted, or errored receipt result loses its path. The call arguments keep it.
                 const path = receiptPaths.get(item.call_id);
-                if (path && outputText(item.output) === ELIDED_TOOL_OUTPUT) {
-                  return [{ role: "user", content: [{ type: "input_text", text: `Image saved at ${path}. Its preview was removed to save context. To change it, use openai.edit_image on that file.` }] }];
+                const text = outputText(item.output);
+                if (path && !(text ?? "").includes(path)) {
+                  const detail = text === ELIDED_TOOL_OUTPUT ? "Its preview was removed to save context." : "Its receipt did not complete.";
+                  return [{ role: "user", content: [{ type: "input_text", text: savedNote([path], detail) }] }];
                 }
                 return [{ role: "user", content: Array.isArray(item.output) ? item.output : [{ type: "input_text", text: item.output }] }];
               }
@@ -294,7 +328,13 @@ export class NativeImageBridge {
         onProviderStreamEvent: async (event, requestModel) => {
           await options.onProviderStreamEvent?.(event, requestModel);
           if (!native || !record(event)) return;
-          if (event.type === "response.output_item.done") await capture(event.item);
+          if (event.type === "response.output_item.done") {
+            const item = event.item;
+            if (record(item) && item.type === "function_call" && item.status === "completed" && typeof item.call_id === "string") {
+              try { JSON.parse(String(item.arguments)); completeCalls.add(item.call_id); } catch { /* truncated arguments never run */ }
+            }
+            await capture(item);
+          }
           if (event.type === "response.completed" && record(event.response) && Array.isArray(event.response.output)) {
             for (const item of event.response.output) await capture(item);
           }
@@ -309,14 +349,13 @@ export class NativeImageBridge {
           this.ready ??= await this.prepare(hosted, sandbox);
           if (!this.ready) { this.withheld = true; native = false; }
         }
-        this.offered = native;
         let current = request(native);
         for (;;) {
+          this.offered = native;
           let retryWithoutImages = false;
           for await (const event of current.upstream) {
             if ("partial" in event) partial = event.partial;
             if (event.type === "error") partial = event.error;
-            if (event.type === "toolcall_end") completeCalls.add(event.toolCall.id);
             if (event.type === "error" && native && !current.started() && !options.signal?.aborted && !receipts.length && imageToolRejected(event.error.errorMessage ?? "")) {
               this.unavailable = true;
               retryWithoutImages = true;

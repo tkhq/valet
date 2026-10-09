@@ -462,3 +462,28 @@ describe("durable workflow grants", () => {
     expect(resolvePolicyDecision(rows({ workflowGrants, overrides: [override({ actionId: "gmail.send_email", mode: "deny" })] }), baseInput({ appliesIn: "workflow" }), undefined).mode).toBe("deny");
   });
 });
+
+describe("resolvePolicyDecision — partialParams (hosted provider tools)", () => {
+  const action = "openai.generate_image";
+  const promptDeny = orgPolicy({ id: "pol-prompt", actionId: action, mode: "deny", paramMatchers: [{ path: "prompt", op: "regex", value: "confidential" }] });
+  const promptAllow = orgPolicy({ id: "pol-allow", actionId: action, mode: "allow", paramMatchers: [{ path: "prompt", op: "regex", value: "marketing" }] });
+  const modelDeny = orgPolicy({ id: "pol-model", actionId: action, mode: "deny", paramMatchers: [{ path: "model", op: "eq", value: "sunburst" }] });
+  const hosted = (overrides: Partial<PolicyResolutionInput>) => baseInput({ actionId: action, service: "openai", riskLevel: "low", params: { model: "sunburst" }, ...overrides });
+
+  it("lets a deny matcher on an absent path apply, so the hosted check fails closed", () => {
+    expect(resolvePolicyDecision(rows({ policies: [promptDeny] }), hosted({}), undefined).mode).toBe("allow");
+    const partial = resolvePolicyDecision(rows({ policies: [promptDeny] }), hosted({ partialParams: true }), undefined);
+    expect(partial).toMatchObject({ mode: "deny", provenance: { matchedPolicyId: "pol-prompt" } });
+  });
+
+  it("never lets an allow matcher on an absent path widen access", () => {
+    const partial = resolvePolicyDecision(rows({ policies: [promptAllow] }), hosted({ riskLevel: "high", partialParams: true }), undefined);
+    expect(partial.mode).toBe("require_approval");
+    expect(partial.provenance.matchedPolicyId).toBeUndefined();
+  });
+
+  it("evaluates matchers on known paths exactly", () => {
+    expect(resolvePolicyDecision(rows({ policies: [modelDeny] }), hosted({ partialParams: true }), undefined).mode).toBe("deny");
+    expect(resolvePolicyDecision(rows({ policies: [modelDeny] }), hosted({ params: { model: "flare" }, partialParams: true }), undefined).mode).toBe("allow");
+  });
+});

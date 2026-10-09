@@ -230,6 +230,8 @@ export interface ResolveActionPolicyInput {
   pluginDefault: ApprovalMode | undefined;
   now: number;
   externalSender?: boolean;
+  /** See `PolicyResolutionInput.partialParams`. */
+  partialParams?: boolean;
 }
 
 /**
@@ -257,6 +259,7 @@ export async function resolveActionPolicy(db: AppDb, input: ResolveActionPolicyI
       sessionId: input.sessionId,
       workflowExecutionId: input.workflowExecutionId,
       now: input.now,
+      ...(input.partialParams ? { partialParams: true } : {}),
     },
     input.pluginDefault,
   );
@@ -661,6 +664,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
             appliesIn: input.appliesIn,
             sessionId: input.sessionId,
             now: clock(),
+            ...(input.partialParams ? { partialParams: true } : {}),
           },
           pluginDefaultFor(input.service),
         );
@@ -679,6 +683,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         pluginDefault: pluginDefaultFor(input.service),
         now: clock(),
         ...(input.externalSender ? { externalSender: true } : {}),
+        ...(input.partialParams ? { partialParams: true } : {}),
       });
 
       if (decision.mode === "deny") return decision;

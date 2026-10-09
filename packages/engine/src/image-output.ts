@@ -17,10 +17,27 @@ export async function imageDecoder(): Promise<typeof sharpType> {
   }
 }
 
+/** Sharp reports no pages for an animated PNG, so look for the acTL chunk before the first IDAT. */
+export function isAnimatedPng(bytes: Uint8Array): boolean {
+  const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (bytes.length < 8 || signature.some((byte, index) => bytes[index] !== byte)) return false;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 8;
+  while (offset + 8 <= bytes.length) {
+    const length = view.getUint32(offset);
+    const type = String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+    if (type === "acTL") return true;
+    if (type === "IDAT" || type === "IEND") return false;
+    offset += 12 + length;
+  }
+  return false;
+}
+
 export async function validateImage(bytes: Uint8Array, sharp: typeof sharpType, expectedFormat?: string): Promise<string> {
   if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) {
     throw new Error("The image is empty or exceeds 20 MB. Use a smaller image or request a smaller output.");
   }
+  if (isAnimatedPng(bytes)) throw new Error("Animated images are not accepted. Use a still PNG, JPEG, or WebP image.");
   try {
     const image = sharp(bytes, { failOn: "warning", limitInputPixels: MAX_IMAGE_PIXELS });
     const metadata = await image.metadata();

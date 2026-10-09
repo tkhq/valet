@@ -9,7 +9,7 @@ import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
-import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION, NATIVE_IMAGE_TOOL_PARAMS } from "./native-images.js";
+import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION, NATIVE_IMAGE_EDIT_ACTION, NATIVE_IMAGE_TOOL_PARAMS } from "./native-images.js";
 import { recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext } from "./model-context.js";
@@ -4956,11 +4956,12 @@ export class Thread {
 
   /**
    * Native generation spends the chat provider's key, so it is offered only
-   * when the plugin action it replaces would run now without a gate: the
+   * when the plugin actions it replaces would run now without a gate: the
    * OpenAI plugin is registered, its service is available, and policy
-   * resolves to allow for the hosted tool's parameters. A deny or approval
-   * policy keeps the plugin action visible instead, and `invokeAction`
-   * applies and audits it as usual.
+   * resolves to allow for the hosted tool's parameters. The hosted tool both
+   * generates and edits images in context, so generation and editing must
+   * both be allowed. A deny or approval policy keeps the plugin actions
+   * visible instead, and `invokeAction` applies and audits them as usual.
    */
   private async nativeImageGenerationPermitted(signal: AbortSignal | undefined): Promise<boolean> {
     if (this.runningItem?.author?.externalSender) return false;
@@ -4972,7 +4973,11 @@ export class Thread {
       toolName: NATIVE_IMAGE_RESULT_TOOL,
       toolArgs: {},
     });
-    this.nativeImageGrant = await resolveUngatedAction(catalog, NATIVE_IMAGE_PLUGIN_ACTION, ctx, { ...NATIVE_IMAGE_TOOL_PARAMS });
+    const [generate, edit] = await Promise.all([
+      resolveUngatedAction(catalog, NATIVE_IMAGE_PLUGIN_ACTION, ctx, { ...NATIVE_IMAGE_TOOL_PARAMS }),
+      resolveUngatedAction(catalog, NATIVE_IMAGE_EDIT_ACTION, ctx, { ...NATIVE_IMAGE_TOOL_PARAMS }),
+    ]);
+    this.nativeImageGrant = generate && edit ? generate : undefined;
     return this.nativeImageGrant !== undefined;
   }
 
@@ -5386,7 +5391,16 @@ export class Thread {
           // Compose parts: leading text + tool calls (already tracked)
           const parts: MessagePart[] = [];
           if (text) parts.push({ type: "text", text });
-          for (const p of this.currentAssistantParts) parts.push(p);
+          for (const p of this.currentAssistantParts) {
+            // A call the stream removed from the final message (a truncated call after a
+            // saved image) never runs. Settle its part, or it stays "running" forever.
+            if (p.type === "tool_call" && p.status === "running"
+              && !event.message.content.some((block) => block.type === "toolCall" && block.id === p.callId)) {
+              p.status = "error";
+              p.error = "The response ended before this call completed. It did not run.";
+            }
+            parts.push(p);
+          }
 
           // "length" maps to end_turn: a length-terminated turn still ended
           // with usable output (Task 6 resolves result text from the last

@@ -82,13 +82,13 @@ Native generation uses the existing provider's host-side auth. It does not resol
 Untrusted external-sender turns do not receive the native hosted tool.
 
 The hosted tool is offered only when `openai.generate_image` would run now without a gate.
-Once per turn, before the first request, the thread asks `resolveUngatedAction` for that action: the OpenAI plugin must be registered in the session's plugin catalog, its service must be available, and the policy resolver must answer `allow`.
-The policy input carries the hosted tool's fixed parameters (`model`, `output_format`, `quality`), so a parameter-scoped policy on those fields applies. A policy scoped to the prompt text cannot apply, because the prompt is not known before the request. Use a deny or approval policy on the action for that case.
+Once per turn, before the first request, the thread asks `resolveUngatedAction` for `openai.generate_image` and for `openai.edit_image`: the OpenAI plugin must be registered in the session's plugin catalog, its service must be available, and the policy resolver must answer `allow` for both. The hosted tool also edits images in context, so an edit deny withholds it.
+The policy input carries the hosted tool's fixed parameters (`model`, `output_format`, `quality`) and marks them partial. A matcher on a parameter the model supplies later, such as the prompt, counts as matching for a deny or approval row and never for an allow row. A prompt-scoped deny therefore withholds the hosted tool instead of failing open.
 A `deny` or `require_approval` decision, a resolver error, a missing catalog, or a missing plugin withholds the hosted tool for the turn.
 The bridge then prepares `generated-images/` in the sandbox before the request. If the sandbox is not ready, the hosted tool is withheld for the turn, so a cold sandbox cannot cost a paid image. The direct fallback prepares its directory the same way.
 The plugin action then stays visible, and `invokeAction` applies and audits the same policy when the agent calls it.
 The check opens no gate and writes no audit record. Each saved native image writes one `completed` action-invocation record for `openai.generate_image`, with the grant's provenance and the saved path in its params, so hosted spend appears in the same audit as plugin invocations.
-Duplicate plugin actions are hidden only while the most recent request offered the hosted tool. A replayed approval after an API restart therefore reaches the plugin action.
+Duplicate plugin actions are hidden only while the most recent request offered the hosted tool. A replayed approval after an API restart, or the retry after a request-time rejection, therefore reaches the plugin action.
 Requests preserve existing sampling, timeout, and abort settings. The bridge preserves final results from providers that end without terminal events.
 A request-time 400, 403, 404, or 422 error naming image-tool access or availability triggers one request without the hosted tool.
 That turn uses plugin generation, including catalog and pinned tools. Authentication, quota, unrelated model errors, and stream errors do not trigger this fallback.
@@ -103,9 +103,9 @@ If the preview fails, the receipt returns the saved path and a warning instead o
 The web renderer keeps that path visible without a preview.
 If a later stream event fails, completed images still produce receipts with a stream warning.
 The warning names the upstream end state: the provider error, `length` for an output-token cutoff, or the incomplete reason such as `content_filter`.
-A cut-off message keeps only tool calls whose arguments finished streaming, plus the receipts. A truncated call never runs.
-An abort after saving appends the paths to the message text and reports them in its error.
-The thread persists an aborted message's text, so the paths survive reload and reach the next request.
+A cut-off message keeps only function calls the provider marked `completed` with parseable arguments, plus the receipts. A truncated call never runs, even when pi reports its end. The thread settles such a call's part as an error that did not run.
+An abort after saving appends the paths to the message text, adds the receipt tool calls, and reports the paths in its error.
+Pi drops aborted and errored assistant messages from later requests, so the bridge adds a user-context note with the saved paths after such a message. A receipt result that lacks its path, whether pruned, interrupted, or errored, replays as the saved path too.
 Receipt replay still propagates aborts; it does not treat them as preview failures. A request that saved an image cannot use transient-turn retries or provider fallback. Later plain requests retain normal recovery after receipts.
 The direct Images fallback follows the same order: it writes the validated original, then makes the preview.
 If the preview fails or the turn aborts after the write, the action succeeds with the saved path and a warning, without an attachment.
@@ -134,7 +134,7 @@ Replay and organization-access behavior are mitigated by scripted tests, not liv
 ## Shared output validation
 
 Both paths decode canonical base64 and validate the actual format, pixel count, animation, and byte size.
-Image inputs and original outputs are limited to 20 MB and 16,777,216 pixels. Animated images are not accepted.
+Image inputs and original outputs are limited to 20 MB and 16,777,216 pixels. Animated images are not accepted. Sharp reports no pages for an animated PNG, so validation also rejects a PNG with an `acTL` chunk.
 Sharp decodes all pixels before saving. Its lazy loader uses the existing `__VALET_SHARP__` native-runtime hook.
 If decoding cannot load, the request fails before spending image-generation credits and names the installation repair.
 

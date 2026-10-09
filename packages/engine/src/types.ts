@@ -1048,6 +1048,12 @@ export interface PolicyResolveInput {
   sessionId: string;
   threadId: string;
   appliesIn: "session" | "workflow";
+  /**
+   * `params` lists only the values known before the request, as for a hosted
+   * provider tool whose prompt the model writes later. A matcher on an absent
+   * path may match a deny or approval row, never an allow row.
+   */
+  partialParams?: boolean;
   /** The turn came from a channel sender with no Valet account
    * (`ToolContext.externalSender`). A session-wide grant a teammate gave does
    * not cover them. */
