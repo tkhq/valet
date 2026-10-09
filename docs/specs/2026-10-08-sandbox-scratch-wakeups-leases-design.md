@@ -588,7 +588,7 @@ Unit (vitest):
   - running watch, 3 new lines → one `watch.event`, offset advanced.
   - running watch, over rate → `expired`, `rate`.
   - pending timer, due → `done`, `fired`.
-  - pending timer, not due → `null`.
+  - pending timer before `fire_at` → `null`.
 - Idle sweeps (INV-2), `ChildWatcher` settle hold (C4), pod reconcile
   (C5) against fakes.
 - `bash` background validation and the sleep refusal; every tool's
