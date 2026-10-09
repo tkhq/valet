@@ -351,14 +351,23 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   scopes this lookup to the parent session in both store implementations.
   The channel host polls up to 20 due intents per pass. A conditional lease
   prevents concurrent workers from claiming the same intent during that lease.
-  The dispatcher bypasses the live dropped-reply feedback path. Provider send
-  errors stay with the intent, which retries with backoff capped at five
-  minutes. A successful send completes the intent. An explicit reply or an
+  The dispatcher bypasses the live dropped-reply feedback path. While the
+  parent turn runs, the dispatcher checks the intent every two seconds and
+  records no failure. The engine settles every submission, so this wait ends.
+  A provider send error or a missing route (for example, a stopped channel)
+  is a failed attempt. Each failed attempt records `attempts` and
+  `last_error`, logs the intent ID, and increments the
+  `valet.channels.child_reply.failures` counter. The next attempt waits one
+  second, doubling to a five-minute cap. After ten failed attempts, about 8.5
+  minutes, the dispatcher sets `failed_at` and writes a `child_reply_failed`
+  problem row in one transaction. It does not try again. A successful send
+  completes the intent and clears `last_error`. The dispatcher deletes
+  completed intents after seven days and failed intents after 30 days, at
+  most once per hour. An explicit reply or an
   aborted parent turn suppresses automatic delivery. Assistant entries that
   ended in an error or abort are never selected, so a parent round that fails
   and then succeeds under the same submission posts the successful text.
   The live event handler does not also send automatic child replies.
-  Failed attempts retain an error and attempt count for diagnosis.
   Delivery is at least once: a crash after provider acceptance but before the
   completion write can duplicate a reply. No provider-independent atomic send
   and database commit exists. This queue does not replay older untracked replies.

@@ -2924,4 +2924,6 @@ export const childReplyDeliveries = pgTable("child_reply_deliveries", {
   completedAt: bigint("completed_at", { mode: "number" }),
   attempts: integer("attempts").notNull().default(0),
   lastError: text("last_error"),
+  /** Set when retries stop. `last_error` and an `event_drop_log` row say why. */
+  failedAt: bigint("failed_at", { mode: "number" }),
 }, (t) => [index("child_reply_deliveries_due").on(t.orgId, t.completedAt, t.nextAttemptAt)]);

@@ -71,7 +71,7 @@ import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js
 import { digestGate } from "./gate-digest.js";
 import { savedGatePrompts, deleteSavedGatePrompts } from "./gate-prompts.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
-import { ChildReplyDispatcher } from "./child-replies.js";
+import { ChildReplyDispatcher, type ChildReplyOutcome } from "./child-replies.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
 import { recordChannelMessage, slackChannelKey, slackConversationFromThreadKey, slackMessageUrl } from "../services/channel-messages.js";
 
@@ -177,6 +177,10 @@ function turnOrigin(entries: SessionEntry[], queueItemId: string) {
   }
   return undefined;
 }
+
+const DONE: ChildReplyOutcome = { kind: "done" };
+const WAITING: ChildReplyOutcome = { kind: "waiting" };
+const undeliverable = (reason: string): ChildReplyOutcome => ({ kind: "undeliverable", reason });
 
 /** An automatic `child.settled` reply belongs to the durable child-reply intent. */
 function ownedByChildReplyIntent(entries: SessionEntry[], queueItemId: string): boolean {
@@ -427,9 +431,9 @@ export class ChannelHost {
       db: deps.db, engineStore: deps.engineStore, resolveOrgId: deps.resolveOrgId, now: () => this.now(),
       deliver: async (row) => {
         const session = await deps.engineStore.getSession(row.sessionId);
-        if (!session) return true;
+        if (!session) return DONE;
         if (session.orgId !== row.orgId) throw new Error("Child reply session organization mismatch");
-        if (!row.queueItemId) return false;
+        if (!row.queueItemId) return WAITING;
         return this.deliverFirstAssistantReply(row.sessionId, row.threadId, {
           queueItemId: row.queueItemId, durableChildReply: true,
         });
@@ -814,7 +818,11 @@ export class ChannelHost {
     this.markDelivered(dedupeKey);
   }
 
-  /** Post only the first assistant text for an addressed channel turn. */
+  /**
+   * Post only the first assistant text for an addressed channel turn. The
+   * live outbound path ignores the outcome; the durable child-reply
+   * dispatcher schedules from it.
+   */
   private async deliverFirstAssistantReply(
     sessionId: string,
     threadId: string,
@@ -824,9 +832,9 @@ export class ChannelHost {
       queueItemId?: string;
       reason?: "end_turn" | "tool_use" | "error" | "abort";
     },
-  ): Promise<boolean> {
+  ): Promise<ChildReplyOutcome> {
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
-    if (!thread) return false;
+    if (!thread) return undeliverable(`Parent thread ${threadId} no longer exists.`);
     const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
     const triggerEntry = trigger.messageId === undefined
       ? undefined
@@ -835,20 +843,20 @@ export class ChannelHost {
             entry.type === "message" && entry.role === "assistant" && entry.id === trigger.messageId,
         );
     const queueItemId = trigger.queueItemId ?? triggerEntry?.queueItemId;
-    if (!queueItemId) return false;
+    if (!queueItemId) return DONE;
     // The durable intent owns automatic child replies, including the
     // admission-to-receipt crash window. Manual settlements stay on the live
     // path so they keep the dropped-reply reminder.
-    if (!trigger.durableChildReply && ownedByChildReplyIntent(entries, queueItemId)) return false;
+    if (!trigger.durableChildReply && ownedByChildReplyIntent(entries, queueItemId)) return DONE;
     const dedupeKey = `${sessionId}:first-reply:${queueItemId}`;
     if (trigger.reason === "error" || trigger.reason === "abort") {
       if (trigger.reason === "abort") this.markDelivered(dedupeKey);
-      return false;
+      return DONE;
     }
     const queueItem = await this.deps.engineStore.getQueueItem(sessionId, queueItemId);
     if (queueItem?.abortRequestedAt !== undefined || queueItem?.outcome?.outcome === "aborted") {
       this.markDelivered(dedupeKey);
-      return true;
+      return DONE;
     }
 
     const first = entries.find(
@@ -859,9 +867,9 @@ export class ChannelHost {
         entry.stopReason !== "error" && entry.stopReason !== "abort" &&
         Boolean(entry.content),
     );
-    if (!first || first.type !== "message" || !first.content) return queueItem?.status === "settled";
+    if (!first || first.type !== "message" || !first.content) return queueItem?.status === "settled" ? DONE : WAITING;
     const origin = turnOrigin(entries, queueItemId);
-    if (!origin) return true;
+    if (!origin) return DONE;
     if (origin.reply === "manual") {
       if (
         triggerEntry?.stopReason === "end_turn" &&
@@ -879,18 +887,18 @@ export class ChannelHost {
           queueItemId,
         });
       }
-      return true;
+      return DONE;
     }
 
     const explicit = originReplyState(entries, queueItemId);
-    if (explicit === "pending") return false;
-    if (explicit === "succeeded") return true;
+    if (explicit === "pending") return WAITING;
+    if (explicit === "succeeded") return DONE;
 
     const target = this.channelThreadFor(origin.threadKey);
-    if (!target) return false;
-    if (this.delivered.has(dedupeKey)) return true;
+    if (!target) return undeliverable(`Channel ${origin.channelType} is not running or does not own ${origin.threadKey}.`);
+    if (this.delivered.has(dedupeKey)) return DONE;
     const transport = this.transports.get(target.channelType);
-    if (!transport) return false;
+    if (!transport) return undeliverable(`Channel ${target.channelType} has no transport.`);
     const sender = await this.workspaceSenderForSession(sessionId, queueItemId);
     let sent: SendRef;
     try {
@@ -913,12 +921,12 @@ export class ChannelHost {
       }
       await this.retryFailedReplyFeedback(sessionId, thread.key, queueItemId, origin, reason);
       this.markDelivered(dedupeKey);
-      return true;
+      return DONE;
     }
     // Outside the send's error handling: the reply is already posted, so a
     // failed record must never tell the agent to post it again.
     await this.recordSentReply(target.channelType, target.conversationKey, sessionId, threadId, sent.messageId, { text: first.content });
-    return true;
+    return DONE;
   }
 
   /**

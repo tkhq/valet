@@ -13,6 +13,7 @@ const REASON_LABEL: Record<string, string> = {
   slack_interaction_unmatched: "Slack form did not start a workflow",
   unlinked_sender: "Unlinked sender",
   channel_reply_failed: "Reply not posted",
+  child_reply_failed: "Delegated reply not posted",
   duplicate: "Duplicate delivery",
   unsupported_kind: "Unsupported message",
   unsupported_event: "Unhandled event type",

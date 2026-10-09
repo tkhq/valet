@@ -622,7 +622,7 @@ export class ChildWatcher {
         });
       }
       console.error(`ChildWatcher: giving up on ${watch.childSessionId} after permanent failure:`, err);
-      await this.deps.db.update(childReplyDeliveries).set({ completedAt: Date.now(), lastError: String(err).slice(0, 1_000) })
+      await this.deps.db.update(childReplyDeliveries).set({ failedAt: Date.now(), lastError: String(err).slice(0, 1_000) })
         .where(and(eq(childReplyDeliveries.id, namespaceInternalDispatchId(watch.childSessionId, `settled:${watch.childSessionId}:${watch.queueItemId}`)),
           eq(childReplyDeliveries.orgId, watch.orgId), isNull(childReplyDeliveries.queueItemId)));
       await this.markSettled(watch.childSessionId, watch.queueItemId);

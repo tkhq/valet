@@ -937,6 +937,142 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent).toHaveLength(1);
   });
 
+  /**
+   * A finished parent reply to a child settlement with one durable intent,
+   * and a second host on a test clock. Its dispatcher runs only on explicit
+   * passes, and the default host's dispatcher is stopped.
+   */
+  async function failingChildReply(id: string, threadKey: string) {
+    host.stopOutbound();
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId: `qi-${id}`, signal: {
+        signalType: "child.settled", tagName: "signal", origin: { channelType: threadKey.split(":")[0] ?? "fake", threadKey, reply: "auto" },
+      } }),
+      { type: "message", id: `reply-${id}`, sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "Delegated work finished", queueItemId: `qi-${id}`, stopReason: "end_turn" },
+    ]);
+    // Start at time zero, before the intent is due, so the boot pass is a no-op.
+    const clock = { now: 0 };
+    await testDb.appDb.insert(childReplyDeliveries).values({
+      id, orgId: ORG_ID, sessionId: session.id, threadId, queueItemId: `qi-${id}`, nextAttemptAt: 1_000_000,
+    });
+    const timed = new ChannelHost({
+      db: testDb.appDb, engineHost, engineStore, eventStream, engineCredentials,
+      plugins: [{ name: "timed", version: "0", transports: [{ channelType: "fake", create: () => fakeTransport }] }],
+      resolveOrgId: async () => ORG_ID, now: () => clock.now,
+    });
+    await timed.start();
+    timed.stopOutbound();
+    await timed.retryChildReplies();
+    clock.now = 1_000_000;
+    const row = async () => {
+      const [found] = await testDb.appDb.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, id));
+      if (!found) throw new Error(`child reply ${id} is missing`);
+      return found;
+    };
+    return { timed, clock, row };
+  }
+
+  it("backs off a failing child reply, then fails it terminally and stops sending", async () => {
+    const send = vi.spyOn(fakeTransport, "send").mockRejectedValue(new Error("Slack is unavailable"));
+    const { timed, clock, row } = await failingChildReply("reply-capped", "fake:99");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const delays: number[] = [];
+      for (let attempt = 1; attempt <= 10; attempt++) {
+        await timed.retryChildReplies();
+        const after = await row();
+        expect(after.attempts).toBe(attempt);
+        expect(after.lastError).toContain("Slack is unavailable");
+        expect(after.completedAt).toBeNull();
+        if (attempt < 10) {
+          expect(after.failedAt).toBeNull();
+          delays.push(after.nextAttemptAt - clock.now);
+          // Not yet due: a pass before the backoff ends sends nothing.
+          clock.now = after.nextAttemptAt - 1;
+          await timed.retryChildReplies();
+          expect(send).toHaveBeenCalledTimes(attempt);
+          clock.now = after.nextAttemptAt;
+        }
+      }
+      expect(delays).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000]);
+      const terminal = await row();
+      expect(terminal.failedAt).toBe(clock.now);
+      const drops = await testDb.appDb.select().from(eventDropLog).where(eq(eventDropLog.reason, "child_reply_failed"));
+      expect(drops).toHaveLength(1);
+      expect(drops[0]?.detail).toContain("reply-capped");
+      expect(error.mock.calls.some(([message]) => String(message).includes("reply-capped"))).toBe(true);
+
+      clock.now += 24 * 60 * 60_000;
+      await timed.retryChildReplies();
+      expect(send).toHaveBeenCalledTimes(10);
+      expect(fakeTransport.sent).toHaveLength(0);
+    } finally {
+      await timed.stop();
+    }
+  });
+
+  it("records an attempt and backs off when the origin channel is not running", async () => {
+    const { timed, clock, row } = await failingChildReply("reply-no-channel", "absent:99");
+    try {
+      await timed.retryChildReplies();
+      const first = await row();
+      expect(first.attempts).toBe(1);
+      expect(first.lastError).toContain("absent");
+      expect(first.nextAttemptAt).toBe(clock.now + 1_000);
+      clock.now = first.nextAttemptAt;
+      await timed.retryChildReplies();
+      const second = await row();
+      expect(second.attempts).toBe(2);
+      expect(second.nextAttemptAt).toBe(clock.now + 2_000);
+      expect(second.completedAt).toBeNull();
+    } finally {
+      await timed.stop();
+    }
+  });
+
+  it("completes a child reply that succeeds after failed attempts", async () => {
+    const send = vi.spyOn(fakeTransport, "send")
+      .mockRejectedValueOnce(new Error("Slack is unavailable"))
+      .mockRejectedValueOnce(new Error("Slack is still unavailable"));
+    const { timed, clock, row } = await failingChildReply("reply-recovers", "fake:99");
+    try {
+      for (let pass = 0; pass < 3; pass++) {
+        await timed.retryChildReplies();
+        clock.now = (await row()).nextAttemptAt;
+      }
+      const done = await row();
+      expect(send).toHaveBeenCalledTimes(3);
+      expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["Delegated work finished"]);
+      expect(done).toMatchObject({ attempts: 2, lastError: null, failedAt: null });
+      expect(done.completedAt).not.toBeNull();
+    } finally {
+      await timed.stop();
+    }
+  });
+
+  it("prunes finished child replies after their retention and keeps open ones", async () => {
+    const { timed, clock } = await failingChildReply("reply-open", "absent:99");
+    const day = 24 * 60 * 60_000;
+    clock.now = 40 * day;
+    const base = { orgId: ORG_ID, sessionId: "parent", threadId: "thread", queueItemId: "qi", nextAttemptAt: clock.now + day };
+    await testDb.appDb.insert(childReplyDeliveries).values([
+      { ...base, id: "completed-old", completedAt: clock.now - 8 * day },
+      { ...base, id: "completed-recent", completedAt: clock.now - 6 * day },
+      { ...base, id: "failed-old", failedAt: clock.now - 31 * day, lastError: "Slack is unavailable" },
+      { ...base, id: "failed-recent", failedAt: clock.now - 29 * day, lastError: "Slack is unavailable" },
+    ]);
+    try {
+      await timed.retryChildReplies();
+      const ids = (await testDb.appDb.select({ id: childReplyDeliveries.id }).from(childReplyDeliveries)).map((row) => row.id).sort();
+      expect(ids).toEqual(["completed-recent", "failed-recent", "reply-open"]);
+    } finally {
+      await timed.stop();
+    }
+  });
+
   it("posts a child reply from the round that succeeds after an errored round", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
