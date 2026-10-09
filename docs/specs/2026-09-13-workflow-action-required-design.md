@@ -95,8 +95,15 @@ A policy gate also requires a human web principal.
 The query polls every five seconds while the Workflows hub is open.
 A successful resolution invalidates the run, run lists, and action-required list.
 A raced `409` also invalidates the action-required list.
-The item disappears after the run consumes the resolution and leaves its wait.
+The item disappears when the resolution signal is stored.
+The run can still list the wait until it reads the signal, but the API does not list an answered gate.
 The run page then shows the checkpoint outcome.
+
+A gate accepts its answer while the run is parked or claimed (`running`), if the run's last park still waits on it.
+Answering one gate wakes and claims the run, so a second gate in the same run must accept its answer too.
+The interpreter reads unconsumed signals on every pass.
+If the run parks before it reads the answer, the lost-wake sweep wakes it.
+The signal's unique key still selects one resolution, and the shared-account approver check applies in both states.
 
 The existing approval attention event remains the only notification event.
 Its dedupe key is unchanged.

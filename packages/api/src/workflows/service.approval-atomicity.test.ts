@@ -5,7 +5,7 @@ import { actionInvocations, runtimeGrants, teamMembers, teams, workflowDefinitio
 import { shareCredential } from "../services/credential-shares.js";
 import * as borrow from "../services/credential-borrow.js";
 import * as policy from "../policies/service.js";
-import { resolveWorkflowApproval } from "./service.js";
+import { listWorkflowActionRequired, resolveWorkflowApproval } from "./service.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { vi.restoreAllMocks(); await api?.cleanup(); api = undefined; });
@@ -82,4 +82,41 @@ it("does not let a team principal borrow its minting user's account", async () =
   expect(await p.workflowStore.listSignals("run-atomic")).toEqual([]);
   expect(await p.db.select().from(runtimeGrants)).toEqual([]);
   expect(wake).not.toHaveBeenCalled();
+});
+
+it("keeps the borrow approver check while a claimed run still waits on the gate", async () => {
+  const { p, wake } = await setup();
+  await p.workflowStore.claimRun("run-atomic", "host", 30_000);
+  const result = await resolveWorkflowApproval({ db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials, engineStore: p.engineStore },
+    { userId: "local-user", orgId: "local-org", principal: { type: "team", id: "atomic-team" } },
+    { runId: "run-atomic", nodeId: "step", approved: true, via: "web" });
+  expect(result).toBe("not_approver");
+  expect(await p.workflowStore.listSignals("run-atomic")).toEqual([]);
+  expect(wake).not.toHaveBeenCalled();
+});
+
+it("accepts a second gate's answer after the first answer wakes the run", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  await p.db.insert(teams).values({ id: "t2", orgId: "local-org", name: "T2", createdAt: 1 });
+  await p.db.insert(teamMembers).values({ teamId: "t2", userId: "local-user", role: "member" });
+  const definition = { version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" }, { id: "a", type: "tool", service: "demo", action: "ping", params: {} }, { id: "b", type: "tool", service: "demo", action: "pong", params: {} }],
+    edges: [{ from: "trigger", to: "a" }, { from: "trigger", to: "b" }] };
+  await p.db.insert(workflowDefinitions).values({ id: "wf-two", orgId: "local-org", ownerType: "team", ownerId: "t2", name: "Two gates", definition, createdAt: 1, updatedAt: 1 });
+  await p.workflowStore.createRun("run-two", { workflowId: "wf-two", definitionVersionId: "v1" }, definition, "v1", { ownerType: "team", ownerId: "t2", actorUserId: "local-user" });
+  await p.workflowStore.parkRun("run-two", 1, [{ kind: "signal", nodeId: "a", signalType: "approval:a" }, { kind: "signal", nodeId: "b", signalType: "approval:b" }]);
+  // The run host claims the run as soon as gate a's answer wakes it.
+  vi.spyOn(p.workflowRunHost, "wake").mockImplementation(async (runId) => { await p.workflowStore.claimRun(runId, "host", 30_000); });
+  const deps = { db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials, engineStore: p.engineStore, actionPluginByService: p.actionPluginByService };
+  const answer = (nodeId: string) => resolveWorkflowApproval(deps, { userId: "local-user", orgId: "local-org" }, { runId: "run-two", nodeId, approved: true, scope: "once", via: "web" });
+  expect(await answer("a")).toBe("ok");
+  expect((await p.workflowStore.getRun("run-two"))?.status).toBe("running");
+  expect(await answer("b")).toBe("ok");
+  expect((await p.workflowStore.listSignals("run-two", { unconsumed: true })).map(s => s.signalType)).toEqual(["approval:a", "approval:b"]);
+  // An answer for a node the run does not wait on still fails.
+  expect(await answer("trigger")).toBe("not_parked");
+  // If the drive re-parks before it reads b's answer, the sweep wakes the run.
+  // Meanwhile the answered gate is not listed as waiting.
+  await p.workflowStore.parkRun("run-two", 2, [{ kind: "signal", nodeId: "b", signalType: "approval:b" }]);
+  expect((await listWorkflowActionRequired(deps, { userId: "local-user", orgId: "local-org" })).items).toEqual([]);
 });

@@ -1347,6 +1347,12 @@ export interface DecisionGate {
   /** The one member who may answer: the gate asks to use their shared
    * account. Anyone else sees the gate as waiting on them. */
   approver?: { userId: string; name?: string };
+  /** Present only on a tool approval gate whose "approve" allows exactly
+   * this one call and writes no grant. A bulk answer covers only these.
+   * Absent on `ask_approval`, `sec_start`, and shared-account gates. */
+  oneShot?: true;
+  /** The gated tool action's risk level, on tool approval gates only. */
+  riskLevel?: "low" | "medium" | "high" | "critical";
 }
 
 export interface DecisionResolution {

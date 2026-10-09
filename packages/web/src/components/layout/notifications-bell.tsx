@@ -7,6 +7,8 @@ import { Badge, Button, Popover, PopoverContent, PopoverTrigger, StatusDot } fro
 import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { relativeTime } from "~/lib/relative-time";
+import { listedKeys } from "./bulk-answers";
+import { NeedsActionHeader, useBulkAnswerRun } from "./needs-action-header";
 
 /** Unread updates, newest first, one row per title: a workflow that fails
  * every few minutes is one row with a count, not a list. Read updates leave
@@ -43,9 +45,17 @@ export function NotificationsBell() {
   const unread = updates.length;
   const loading = workflows.isLoading || decisions.isLoading;
   const failed = workflows.isError || decisions.isError;
+  // After a bulk run, refetch the lists it covered. An item still listed was
+  // not answered, whatever its response said.
+  const bulkRun = useBulkAnswerRun(async () => {
+    const [w, d] = await Promise.all([workflows.refetch(), decisionCursor ? page.refetch() : summary.refetch()]);
+    if (decisionCursor) void summary.refetch();
+    if (w.isError || d.isError) return undefined;
+    return listedKeys(w.data?.items ?? [], d.data?.items ?? []);
+  });
   function changeOpen(value: boolean) {
     setOpen(value);
-    if (!value) setDecisionCursor(undefined);
+    if (!value) { setDecisionCursor(undefined); bulkRun.dismiss(); }
     if (value) { void notifications.refetch(); void workflows.refetch(); void decisions.refetch(); }
   }
   async function openUpdate({ latest, ids }: { latest: NotificationSummary; ids: string[] }) {
@@ -67,7 +77,8 @@ export function NotificationsBell() {
           <Button variant="ghost" size="sm" aria-label="Close notifications" onClick={() => changeOpen(false)}><X className="h-4 w-4" /></Button>
         </div>
         <section aria-label="Needs action" className="space-y-3 p-4">
-          <div className="flex items-center justify-between"><h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Needs action</h3><Badge variant={pendingCount ? "warning" : "neutral"}>{pendingCount}{partialCount ? "+" : ""}</Badge></div>
+          <NeedsActionHeader pendingCount={pendingCount} partialCount={partialCount} workflows={workflows.data?.items ?? []}
+            decisions={decisions.data?.items ?? []} partial={!!moreDecisions || !!decisionCursor} run={bulkRun} />
           {loading && <p className="text-sm text-muted">Loading approvals…</p>}
           {failed && <div role="alert" className="text-sm text-danger-500">Could not load all approvals. <button className="underline" onClick={() => { void workflows.refetch(); void decisions.refetch(); }}>Retry</button></div>}
           {!loading && !failed && pendingCount === 0 && !moreDecisions && !decisionCursor && <p className="text-sm text-muted">You're all caught up. No decisions are waiting.</p>}
