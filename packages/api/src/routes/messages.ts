@@ -947,15 +947,21 @@ export async function submitSessionPrompt(
       })
     : Promise.resolve();
 
-  // Clear the external route before human input can enter a child, even if child_send races it.
-  if (author) {
+  // Human input takes the child's work away from the channel turn that
+  // delegated it. Clear the reply route only after the engine accepts the
+  // input: a rejected prompt changes nothing. The engine store and the app
+  // database cannot share a transaction, so the watcher also clears the
+  // route when it follows a human-authored successor (`ChildWatcher.attempt`).
+  const releaseChildReplyRoute = async () => {
+    if (!author) return;
     await db.update(childWatches).set({ originJson: null }).where(and(
       eq(childWatches.childSessionId, row.id), eq(childWatches.orgId, row.orgId),
     ));
-  }
+  };
 
   if (admission.promoteItemId) {
     const receipt = await thread.promoteQueuedItem(admission.promoteItemId);
+    await releaseChildReplyRoute();
     const activityAt = Date.now();
     await recordSessionActivity(db, row.id, activityAt);
     await recordThreadActivityBestEffort(() => recordActivity(activityAt));
@@ -1081,6 +1087,7 @@ export async function submitSessionPrompt(
     attachmentRefStore.restore(resolvedFileAttachments);
     throw err;
   }
+  await releaseChildReplyRoute();
 
   // Session recency is completion time. `activityAt` marks request start and
   // can be older than a later submission that already finished.

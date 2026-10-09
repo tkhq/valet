@@ -48,6 +48,31 @@ describe("POST /messages: queueMode and promote", () => {
     expect(watch?.originJson).toBeNull();
   });
 
+  it.each([
+    { rejection: "an unknown file reference", body: { text: "Private follow-up", fileRefs: [{ ref: "missing-ref" }] } },
+    { rejection: "an unknown promoted item", body: { promoteItemId: "missing-item" } },
+  ])("keeps a child reply origin when the web prompt has $rejection", async ({ body }) => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const session = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: "local-user", orgId: "local-org", workspace: "/tmp",
+    });
+    await session.pause();
+    const originJson = JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" });
+    await api.providers.db.insert(childWatches).values({
+      childSessionId: sessionId, parentSessionId: "parent", parentThreadId: "thread-parent",
+      queueItemId: "original", actorUserId: "local-user", orgId: "local-org", settled: false,
+      createdAt: Date.now(), originJson,
+    });
+    const response = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(response.status).toBeLessThan(500);
+    const [watch] = await api.providers.db.select().from(childWatches).where(eq(childWatches.childSessionId, sessionId));
+    expect(watch?.originJson).toBe(originJson);
+  });
+
   it("400s when queueMode is not followup or steer", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
