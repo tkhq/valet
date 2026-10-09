@@ -258,6 +258,9 @@ export interface PodLivenessApi {
   /** Returns the pod's current `metadata.uid`, or `null` if the pod does
    * not exist (a 404 from the API server). */
   getPodUid(namespace: string, podName: string): Promise<string | null>;
+  /** Returns the pod's `status.phase`, or `null` if the pod does not exist.
+   * Optional: a fake without it skips the phase check. */
+  getPodPhase?(namespace: string, podName: string): Promise<string | null>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -275,6 +278,15 @@ export function podLivenessApiAdapter(api: k8s.CoreV1Api): PodLivenessApi {
       try {
         const pod = await api.readNamespacedPod({ name: podName, namespace });
         return pod.metadata?.uid ?? null;
+      } catch (err) {
+        if (isNotFoundError(err)) return null;
+        throw err;
+      }
+    },
+    async getPodPhase(namespace, podName) {
+      try {
+        const pod = await api.readNamespacedPod({ name: podName, namespace });
+        return pod.status?.phase ?? null;
       } catch (err) {
         if (isNotFoundError(err)) return null;
         throw err;
@@ -731,6 +743,7 @@ export class KubernetesSandbox implements Sandbox {
     try {
       // Read the original identity before resolvePodContext can observe a healthy replacement.
       if (original) await this.checkEviction(original.podName, original.uid);
+      else await this.checkRestoredJobPod();
       return await this.withPodContext(async (current) => {
         if (original && (original.podName !== current.podName || (original.uid !== null && original.uid !== current.uid))) {
           await this.checkEviction(original.podName, original.uid);
@@ -742,6 +755,30 @@ export class KubernetesSandbox implements Sandbox {
       // PolicySandbox settles a job on a rejected poll. Keep identity only for active jobs.
       this.jobPods.delete(execId);
       throw error;
+    }
+  }
+
+  /**
+   * A handle with no kickoff identity (restored after an api restart, or
+   * polled again after a terminal poll) cannot compare pod uids. It checks
+   * the backing pod instead. A job's process lives only in the Running pod
+   * that started it, so a missing CR, a missing pod, or a pod in another
+   * phase (a recreated pod still Pending) means the job is gone. The error
+   * text is the one `isSandboxGone` matches, so the wakeup row ends
+   * `sandbox_unavailable` instead of waiting for its deadline (fix wave 3,
+   * concurrency P1).
+   */
+  private async checkRestoredJobPod(): Promise<void> {
+    const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.deps.cfg, this.id);
+    if (podName === null) {
+      throw podUnavailableError(this.id, "no backing pod — the job's backing pod was recreated or removed");
+    }
+    const phase = await this.deps.livenessApi.getPodPhase?.(this.deps.cfg.namespace, podName);
+    if (phase === null) {
+      throw podUnavailableError(this.id, `pod ${podName} not found — the job's backing pod was recreated or removed`);
+    }
+    if (phase !== undefined && phase !== "Running") {
+      throw podUnavailableError(this.id, `pod ${podName} is ${phase} — the job's backing pod was recreated or removed`);
     }
   }
 
