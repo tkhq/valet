@@ -361,19 +361,33 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
   server.registerTool(
     "list_artifacts",
     {
-      description: "Lists published Valet artifacts (shareable pages and documents) in a workspace.",
-      inputSchema: { workspace: workspaceArg },
+      description: "Lists published Valet artifacts (shareable pages and documents) in a workspace, newest update first.",
+      inputSchema: {
+        query: z.string().min(1).optional().describe("Only artifacts whose title or key contains this text (case-insensitive)."),
+        workspace: workspaceArg,
+        limit: z.number().int().min(1).max(100).optional().describe("Maximum artifacts to return. Default: 25."),
+      },
       annotations: { readOnlyHint: true },
     },
-    run(async ({ workspace }: { workspace?: string }) => {
+    run(async ({ query, workspace, limit }: { query?: string; workspace?: string; limit?: number }) => {
       const res = await call<ListArtifactsResponse>(deps, "GET", withQuery("/api/artifacts", ownerParams(workspace)), "Artifacts");
+      // The route pages only under an owner filter, and a personal list has
+      // none, so the filter and the limit apply here. Without them, an org
+      // with a few hundred artifacts overflowed the output cap on every call.
+      const needle = query?.toLowerCase();
+      const matched = res.artifacts
+        .filter((a) => !a.revoked)
+        .filter((a) => !needle || a.path.toLowerCase().includes(needle) || a.title.toLowerCase().includes(needle))
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+      const shown = matched.slice(0, limit ?? 25);
       return {
-        artifacts: res.artifacts.filter((a) => !a.revoked).map((a) => ({
+        artifacts: shown.map((a) => ({
           key: a.path, title: a.title, format: a.format, version: a.version, visibility: a.visibility, url: a.url,
           updated_at: new Date(a.updatedAt).toISOString(),
         })),
+        ...(matched.length > shown.length ? { more: `${matched.length - shown.length} more artifacts match. Set a query or a larger limit.` } : {}),
       };
-    }),
+    }, "Set a smaller limit or a query to see fewer artifacts."),
   );
 
   server.registerTool(
