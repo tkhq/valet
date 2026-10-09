@@ -579,6 +579,18 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     probe: { kind: "column", table: "session_threads", column: "last_user_activity_at" },
     sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "last_user_activity_at" bigint',
   },
+  { describe: "child completion reply deliveries", probe: { kind: "table", table: "child_reply_deliveries" }, sql: `CREATE TABLE IF NOT EXISTS "child_reply_deliveries" (
+  "id" text PRIMARY KEY NOT NULL,
+  "org_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "queue_item_id" text,
+  "next_attempt_at" bigint NOT NULL,
+  "completed_at" bigint,
+  "attempts" integer DEFAULT 0 NOT NULL,
+  "last_error" text
+);` },
+  { describe: "child completion reply due index", probe: { kind: "index", index: "child_reply_deliveries_due" }, sql: `CREATE INDEX IF NOT EXISTS "child_reply_deliveries_due" ON "child_reply_deliveries" ("org_id", "completed_at", "next_attempt_at");` },
   {
     describe: "session_repos.resolved_ref column",
     probe: { kind: "column", table: "session_repos", column: "resolved_ref" },

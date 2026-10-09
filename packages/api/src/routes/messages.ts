@@ -27,7 +27,7 @@ import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@vale
 import { isAgentCaller, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
-import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, assistantExecutions, childWatches, legacyAssistantRuntimes, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
 import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
@@ -946,6 +946,13 @@ export async function submitSessionPrompt(
         emit: (event) => engineSession.emit(event),
       })
     : Promise.resolve();
+
+  // Clear the external route before human input can enter a child, even if child_send races it.
+  if (author) {
+    await db.update(childWatches).set({ originJson: null }).where(and(
+      eq(childWatches.childSessionId, row.id), eq(childWatches.orgId, row.orgId),
+    ));
+  }
 
   if (admission.promoteItemId) {
     const receipt = await thread.promoteQueuedItem(admission.promoteItemId);

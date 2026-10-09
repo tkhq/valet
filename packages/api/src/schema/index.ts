@@ -2913,3 +2913,15 @@ export const generatedFiles = pgTable("generated_files", {
   ready: boolean("ready").notNull().default(false),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, t => [uniqueIndex("generated_files_scope_digest").on(t.orgId, t.sessionId, t.threadId, t.digest)]);
+
+export const childReplyDeliveries = pgTable("child_reply_deliveries", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  queueItemId: text("queue_item_id"),
+  nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+  completedAt: bigint("completed_at", { mode: "number" }),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+}, (t) => [index("child_reply_deliveries_due").on(t.orgId, t.completedAt, t.nextAttemptAt)]);
