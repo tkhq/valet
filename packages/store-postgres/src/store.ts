@@ -1441,7 +1441,7 @@ export class PgSessionStore implements SessionStore {
       const status = asString(raw.status, "status");
       const n = toNum(raw.n, "n");
       if (!isWakeupKind(kind) || !isWakeupStatus(status)) {
-        for (let i = 0; i < n; i++) recordWakeupBadRow("engine_wakeups");
+        recordWakeupBadRow("engine_wakeups", n);
         console.error(`store-postgres: ${n} engine_wakeups row(s) have kind "${kind}" and status "${status}", which no read can act on.`);
         continue;
       }
@@ -1498,7 +1498,7 @@ export class PgSessionStore implements SessionStore {
     return mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)));
   }
 
-  async listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<Wakeup[]> {
+  async listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<{ rows: Wakeup[]; next: WakeupCursor | null }> {
     const params: unknown[] = [now, limit];
     let keyset = "";
     if (after) {
@@ -1512,7 +1512,11 @@ export class PgSessionStore implements SessionStore {
        ORDER BY created_at, id LIMIT $2`,
       params,
     );
-    return mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)));
+    // The cursor comes from the last raw row, so an unreadable row that
+    // mapGoodRows skips never makes a full page look short (fix wave 4, data N1).
+    const last = r.rows[r.rows.length - 1];
+    const next = r.rows.length < limit || !last ? null : { createdAt: toNum(last.created_at, "created_at"), id: asString(last.id, "id") };
+    return { rows: mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw))), next };
   }
 
   async transitionWakeup(
@@ -1536,6 +1540,11 @@ export class PgSessionStore implements SessionStore {
       [id, releasedAt, cause],
     );
     return r.rows[0] ? rowToLease(rawToLeaseRow(r.rows[0])) : null;
+  }
+
+  async getLease(id: string): Promise<Lease | null> {
+    const r = await this.db.query("SELECT * FROM engine_leases WHERE id = $1", [id]);
+    return mapGoodRows(r.rows, "engine_leases", (raw) => rowToLease(rawToLeaseRow(raw)))[0] ?? null;
   }
 
   async listActiveLeases(sessionId: string): Promise<Lease[]> {

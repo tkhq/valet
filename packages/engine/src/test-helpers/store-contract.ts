@@ -14,6 +14,12 @@ import type {
 export interface StoreContractContext {
   factory: () => SessionStore | Promise<SessionStore>;
   teardown?: (store: SessionStore) => void | Promise<void>;
+  /**
+   * Makes the stored wakeup `id` unreadable, as a row with an unknown enum
+   * value would be. A store whose rows are always readable omits it, and
+   * the tests that need an unreadable row skip.
+   */
+  corruptWakeup?: (store: SessionStore, id: string) => Promise<void>;
 }
 
 export function runSessionStoreContract(name: string, ctx: StoreContractContext) {
@@ -707,9 +713,9 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         await store.createWakeup(wakeup());
         await store.createWakeup(wakeup({ id: "wk_t", kind: "timer", status: "pending", prompt: "p", fireAt: 500, command: undefined, execId: undefined, leaseId: undefined, deadlineAt: undefined }));
         await store.createWakeup(wakeup({ id: "wk_done", status: "done" }));
-        expect((await store.listDueWakeups(100, 10)).map((w) => w.id)).toEqual(["wk_a"]);
-        expect((await store.listDueWakeups(500, 10)).map((w) => w.id).sort()).toEqual(["wk_a", "wk_t"]);
-        expect(await store.listDueWakeups(500, 1)).toHaveLength(1);
+        expect((await store.listDueWakeups(100, 10)).rows.map((w) => w.id)).toEqual(["wk_a"]);
+        expect((await store.listDueWakeups(500, 10)).rows.map((w) => w.id).sort()).toEqual(["wk_a", "wk_t"]);
+        expect((await store.listDueWakeups(500, 1)).rows).toHaveLength(1);
       });
 
       it("transitionWakeup is a CAS: the second caller gets null", async () => {
@@ -748,11 +754,29 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         await store.createWakeup(wakeup({ id: "wk_3", createdAt: 2 }));
         await store.createWakeup(wakeup({ id: "wk_t", kind: "timer", status: "pending", prompt: "p", fireAt: 5, createdAt: 9, command: undefined, execId: undefined, leaseId: undefined, deadlineAt: undefined }));
         const first = await store.listDueWakeups(10, 2);
-        expect(first.map((w) => w.id)).toEqual(["wk_1", "wk_2"]);
+        expect(first.rows.map((w) => w.id)).toEqual(["wk_1", "wk_2"]);
+        expect(first.next).toEqual({ createdAt: 2, id: "wk_2" });
         const second = await store.listDueWakeups(10, 2, { createdAt: 2, id: "wk_2" });
-        expect(second.map((w) => w.id)).toEqual(["wk_3", "wk_t"]);
-        expect(await store.listDueWakeups(10, 2, { createdAt: 9, id: "wk_t" })).toEqual([]);
+        expect(second.rows.map((w) => w.id)).toEqual(["wk_3", "wk_t"]);
+        expect(second.next).toEqual({ createdAt: 9, id: "wk_t" });
+        expect(await store.listDueWakeups(10, 2, { createdAt: 9, id: "wk_t" })).toEqual({ rows: [], next: null });
+        // A short page has no next page.
+        expect((await store.listDueWakeups(10, 5)).next).toBeNull();
       });
+
+      it.skipIf(!ctx.corruptWakeup)(
+        "pages past an unreadable row in the middle of a full page (fix wave 4, data N1)",
+        async () => {
+          for (let i = 1; i <= 5; i++) await store.createWakeup(wakeup({ id: `wk_${i}`, createdAt: i }));
+          await ctx.corruptWakeup?.(store, "wk_2");
+          const first = await store.listDueWakeups(10, 3);
+          expect(first.rows.map((w) => w.id)).toEqual(["wk_1", "wk_3"]);
+          expect(first.next).toEqual({ createdAt: 3, id: "wk_3" });
+          const second = await store.listDueWakeups(10, 3, first.next ?? undefined);
+          expect(second.rows.map((w) => w.id)).toEqual(["wk_4", "wk_5"]);
+          expect(second.next).toBeNull();
+        },
+      );
 
       it("fills a missing lease sandbox id once, and only on an active lease", async () => {
         await store.createLease(lease({ sandboxId: undefined }));
@@ -788,7 +812,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.releaseLease("ls_h", "deadline", 1)).toBeNull();
         // A watcher CAS on a deleted row loses.
         expect(await store.transitionWakeup("wk_a", ["running"], "done", { cause: "exit" }, 2)).toBeNull();
-        expect(await store.listDueWakeups(1_000, 10)).toEqual([expect.objectContaining({ id: "wk_other" })]);
+        expect((await store.listDueWakeups(1_000, 10)).rows).toEqual([expect.objectContaining({ id: "wk_other" })]);
       });
 
       // ── fix wave 2 (B2, H3, M11, M12, M14, M17, B7, L8) ──
@@ -823,6 +847,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.countActiveLeases("sess-1")).toBe(0);
         // The release used the CAS time and cause; a second release finds nothing.
         expect(await store.releaseLease("ls_a", "deadline", 60)).toBeNull();
+        expect(await store.getLease("ls_a")).toMatchObject({ releaseCause: "owner_ended", releasedAt: 50 });
         expect(await store.transitionWakeupAndReleaseLease("wk_a", ["running"], "expired", {}, 70, "deadline")).toBeNull();
       });
 
@@ -830,7 +855,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         await store.createWakeup(wakeup({ id: "wk_p", status: "pending" }));
         await store.createWakeup(wakeup({ id: "wk_w", kind: "watch", status: "pending" }));
         await store.createWakeup(wakeup({ id: "wk_t", kind: "timer", status: "running", prompt: "p", fireAt: 1, command: undefined, execId: undefined, leaseId: undefined }));
-        expect((await store.listDueWakeups(10, 10)).map((w) => w.id).sort()).toEqual(["wk_p", "wk_w"]);
+        expect((await store.listDueWakeups(10, 10)).rows.map((w) => w.id).sort()).toEqual(["wk_p", "wk_w"]);
       });
 
       it("counts wakeups by kind and status over the given statuses", async () => {

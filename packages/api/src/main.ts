@@ -657,12 +657,32 @@ void runBootChain().catch((err) => {
 // serve command) owns process lifecycle. Idempotent so repeated close() /
 // double signals are harmless.
 
+/**
+ * Starts a stop at once and returns a promise that settles when it ends.
+ * A throw, sync or async, is logged, never rethrown.
+ */
+function startStop(name: string, stop: () => Promise<void>): Promise<void> {
+  try {
+    return stop().catch((err: unknown) => {
+      console.error(`${name}.stop failed:`, err);
+    });
+  } catch (err) {
+    console.error(`${name}.stop failed:`, err);
+    return Promise.resolve();
+  }
+}
+
 async function close(): Promise<void> {
   if (closed) return;
   // Also read by the boot chain between steps: services not yet started
   // after this point stay unstarted, so the stops below can meet a service
   // that never ran — each one tolerates that.
   closed = true;
+  // The WakeWatcher's stop flag goes up first: the awaited stops below can
+  // take most of the hard-exit budget, and a pass must not start new rows
+  // meanwhile (fix wave 4, concurrency M6). It is awaited below, before
+  // evictAll.
+  const wakeWatcherStopped = startStop("wakeWatcher", () => providers.wakeWatcher.stop());
   try {
     providers.workflowScheduler.stop();
   } catch (err) {
@@ -734,13 +754,9 @@ async function close(): Promise<void> {
   } catch (err) {
     console.error("idleHibernationSweep.stop failed:", err);
   }
-  try {
-    // Awaited: a pass in flight can sit between a wakeup's CAS and its
-    // signal delivery, and evictAll below must not run under it.
-    await providers.wakeWatcher.stop();
-  } catch (err) {
-    console.error("wakeWatcher.stop failed:", err);
-  }
+  // Awaited: a pass in flight can sit between a wakeup's CAS and its
+  // signal delivery, and evictAll below must not run under it.
+  await wakeWatcherStopped;
   try {
     providers.securityRunnerDriver.stop();
   } catch (err) {

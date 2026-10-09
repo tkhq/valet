@@ -63,6 +63,16 @@ describe("applyEngineMigrations", () => {
     ]);
   });
 
+  it("creates the fix wave 3 watch buffer columns, both nullable (fix wave 4, data contract gaps)", async () => {
+    const result = await db.query(
+      `SELECT column_name, data_type, is_nullable FROM information_schema.columns
+       WHERE table_schema = current_schema() AND table_name = 'engine_wakeups'
+         AND column_name IN ('watch_buffer','last_emit_at')`,
+    );
+    const got = result.rows.map((r) => `${String(r.column_name)}:${String(r.data_type)}:${String(r.is_nullable)}`).sort();
+    expect(got).toEqual(["last_emit_at:bigint:YES", "watch_buffer:text:YES"]);
+  });
+
   it("creates the partial created_at index cost attribution scans", async () => {
     const result = await db.query(
       "SELECT indexdef FROM pg_indexes WHERE tablename = 'engine_entries' AND indexname = $1",
