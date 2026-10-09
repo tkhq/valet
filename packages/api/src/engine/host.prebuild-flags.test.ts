@@ -371,6 +371,105 @@ describe("childSessionFor repo prebuild flags", () => {
     }
   });
 
+  /**
+   * The dropped-scratch console warning is logged once per repo, the same
+   * way `resourcesWithheld` is deduplicated. A repo reconciled on every
+   * run-start window must not spam the log. `startupWarnings` carries the
+   * same warning text to every child regardless; only the console log
+   * dedups.
+   */
+  it("logs the dropped-scratch warning once per repo but still warns every child", async () => {
+    const prevScratchMax = process.env.VALET_SANDBOX_SCRATCH_MAX;
+    process.env.VALET_SANDBOX_SCRATCH_MAX = "1Ti";
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      fixture = startGithubFixture({
+        createInstallationToken: (id) => ({
+          body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
+        }),
+        getContents: (_owner, _repo, path) =>
+          path === ".valet/prebuild.yaml"
+            ? contentsBody("resources:\n  scratch: 2Ti\n", "blob-scratch-cap-dedup")
+            : { status: 404, body: { message: "Not Found" } },
+      });
+      const recorder = new RecordingSandboxProvider();
+      api = await bootTestApi({
+        sandboxProvider: recorder,
+        githubTokenDeps: {
+          key: deriveSecretKey("test-key"),
+          apiUrl: fixture.url,
+          githubUrl: fixture.url,
+        },
+      });
+      const { engineHost, db, engineCredentials } = api.providers;
+      await saveAppConfig({ credentials: engineCredentials }, "local-org", appConfig);
+      const now = Date.now();
+      await db.insert(githubInstallations).values({
+        id: "ghi_scratch_cap_dedup",
+        orgId: "local-org",
+        installationId: 445,
+        accountLogin: "tkhq",
+        accountType: "Organization",
+        repositorySelection: "all",
+        suspended: false,
+        cachedToken: null,
+        cachedTokenExpiresAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const parent = await engineHost.sessionFor("parent-scratch-cap-dedup", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp/parent-scratch-cap-dedup",
+      });
+      const parentThread = parent.thread("web:default");
+
+      const warningText =
+        "Valet did not apply the repository's scratch setting. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or ask an admin to raise the cap.";
+      for (const childId of ["child-scratch-cap-dedup-1", "child-scratch-cap-dedup-2"]) {
+        await db.insert(agentSessions).values({
+          id: childId, userId: "local-user", orgId: "local-org", workspace: `/tmp/${childId}`,
+          status: "active", ownerType: "user", ownerId: "local-user", profile: "headless",
+          createdAt: now, updatedAt: now,
+        });
+        await db.insert(sessionRepos).values({
+          sessionId: childId,
+          host: "github",
+          fullName: "tkhq/dedup-mono",
+          cloneUrl: "https://github.com/tkhq/dedup-mono.git",
+          ref: null,
+          auth: "auto",
+          position: 0,
+          targetDir: "dedup-mono",
+        });
+        const startupWarnings: string[] = [];
+        const child = await engineHost.childSessionFor(childId, {
+          parentSessionId: "parent-scratch-cap-dedup",
+          parentThreadId: parentThread.id,
+          actorUserId: "local-user",
+          orgId: "local-org",
+          owner: { type: "user", id: "local-user" },
+          workspace: `/tmp/${childId}`,
+          startupWarnings,
+        });
+        await child.attachment.ensureReady({ timeoutMs: 5_000 });
+        // startupWarnings carries the warning to EVERY child. Only the
+        // console log is deduplicated.
+        expect(startupWarnings).toEqual([warningText]);
+      }
+
+      const scratchCapLogs = warnSpy.mock.calls.filter(
+        ([message]) => typeof message === "string" && message.includes("did not apply the repository's scratch setting"),
+      );
+      expect(scratchCapLogs).toHaveLength(1);
+    } finally {
+      warnSpy.mockRestore();
+      if (prevScratchMax === undefined) delete process.env.VALET_SANDBOX_SCRATCH_MAX;
+      else process.env.VALET_SANDBOX_SCRATCH_MAX = prevScratchMax;
+    }
+  });
+
   it("pins mutable private-repo flags and checkout to one authenticated commit", async () => {
     const oldSha = "9ae8720066b8af545eec68ad64789dd75b014687";
     const newSha = "afbbbca285b504f6f43781f77c68817522c4bd4d";

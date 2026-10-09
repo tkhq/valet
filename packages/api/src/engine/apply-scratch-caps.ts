@@ -13,8 +13,8 @@ function dropScratch(resources: PrebuildResources | undefined): PrebuildResource
 /**
  * Applies the deploy scratch cap to a repository's `.valet/prebuild.yaml`
  * declaration. A repo-declared `scratch` above the cap (or scratch disabled
- * entirely) is DROPPED, never clamped (spec INV-4: refuse, don't repair) —
- * the repo keeps every other declared resource. `source: "prebuild"` applies
+ * entirely) is DROPPED, never clamped (spec INV-4: refuse, don't repair).
+ * The repo keeps every other declared resource. `source: "prebuild"` applies
  * only the deploy cap; the agent cap is `task`-only and already enforced on
  * the spawner's own override (Task 13).
  */
