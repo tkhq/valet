@@ -763,7 +763,7 @@ export class ChildWatcher {
     if (automaticReply) {
       await this.deps.db.insert(childReplyDeliveries).values({
         id: replyId, orgId: watch.orgId, sessionId: watch.parentSessionId,
-        threadId: watch.parentThreadId, nextAttemptAt: Date.now(),
+        threadId: watch.parentThreadId, nextAttemptAt: Date.now(), createdAt: Date.now(),
       }).onConflictDoNothing();
     }
     const receipt = await admitSignal(this.deps, {

@@ -354,6 +354,9 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   The dispatcher bypasses the live dropped-reply feedback path. While the
   parent turn runs, the dispatcher checks the intent every two seconds and
   records no failure. The engine settles every submission, so this wait ends.
+  An intent whose submission was never admitted (a crash between the two
+  writes) has nothing to wait for. Ten minutes after it was written, the
+  dispatcher counts it as a failed attempt, and the retry limit below ends it.
   A provider send error or a missing route (for example, a stopped channel)
   is a failed attempt. Each failed attempt records `attempts` and
   `last_error`, logs the intent ID, and increments the

@@ -2628,7 +2628,8 @@ CREATE TABLE IF NOT EXISTS "child_reply_deliveries" (
   "completed_at" bigint,
   "attempts" integer DEFAULT 0 NOT NULL,
   "last_error" text,
-  "failed_at" bigint
+  "failed_at" bigint,
+  "created_at" bigint
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "child_reply_deliveries_due" ON "child_reply_deliveries" ("org_id", "completed_at", "next_attempt_at");

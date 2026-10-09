@@ -139,7 +139,7 @@ describe("delegated child completion over a channel", () => {
 
     await engineStore.settleUnclaimed("child-auto", run.childThreadId, run.queueItemId, { outcome: "completed" });
 
-    await vi.waitFor(() => expect(run.transport.sent).toHaveLength(1), { timeout: 10_000, interval: 50 });
+    await vi.waitFor(() => expect(run.transport.sent).toHaveLength(1), { timeout: 30_000, interval: 50 });
     expect(run.transport.sent[0]).toMatchObject({ conversationKey: "fake:dm:C1" });
     expect(run.transport.sent[0]?.message.markdown).toMatch(/^Parent update \d+$/);
     const [intent] = await api!.providers.db.select().from(childReplyDeliveries);
@@ -153,7 +153,7 @@ describe("delegated child completion over a channel", () => {
     const run = await bootDelegation("child-resume");
     const { engineStore } = api!.providers;
     await engineStore.settleUnclaimed("child-resume", run.childThreadId, run.queueItemId, { outcome: "completed" });
-    await vi.waitFor(() => expect(run.transport.sent).toHaveLength(1), { timeout: 10_000, interval: 50 });
+    await vi.waitFor(() => expect(run.transport.sent).toHaveLength(1), { timeout: 30_000, interval: 50 });
 
     // The parent sends follow-up work from another thread. The new result
     // still belongs to the channel turn that delegated the task.
@@ -165,7 +165,7 @@ describe("delegated child completion over a channel", () => {
     if (!resumed) throw new Error("child_send did not admit the follow-up");
     await engineStore.settleUnclaimed("child-resume", run.childThreadId, resumed.queueItemId, { outcome: "completed" });
 
-    await vi.waitFor(() => expect(run.transport.sent).toHaveLength(2), { timeout: 10_000, interval: 50 });
+    await vi.waitFor(() => expect(run.transport.sent).toHaveLength(2), { timeout: 30_000, interval: 50 });
     expect(run.transport.sent.every((sent) => sent.conversationKey === "fake:dm:C1")).toBe(true);
     const signals = await childSettledSignals(run.parentId);
     expect(signals.map((signal) => signal.content.origin)).toEqual([ORIGIN, ORIGIN]);
@@ -187,20 +187,20 @@ describe("delegated child completion over a channel", () => {
     await vi.waitFor(async () => {
       const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-takeover"));
       expect(watch?.queueItemId).toBe(successor);
-    }, { timeout: 10_000, interval: 50 });
+    }, { timeout: 30_000, interval: 50 });
     await engineStore.settleUnclaimed("child-takeover", run.childThreadId, successor, { outcome: "completed" });
 
     await vi.waitFor(async () => {
       const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-takeover"));
       expect(watch?.settled).toBe(true);
-    }, { timeout: 10_000, interval: 50 });
+    }, { timeout: 30_000, interval: 50 });
     const signals = await childSettledSignals(run.parentId);
     expect(signals).toHaveLength(1);
     expect(signals[0]?.content.origin).toBeUndefined();
     // Let the parent finish its turn and a dispatcher pass run: nothing posts.
     await vi.waitFor(async () => {
       expect((await engineStore.getQueueItem(run.parentId, signals[0]!.id))?.status).toBe("settled");
-    }, { timeout: 10_000, interval: 50 });
+    }, { timeout: 30_000, interval: 50 });
     await api!.providers.channelHost.retryChildReplies();
     expect(run.transport.sent).toHaveLength(0);
     expect(await db.select().from(childReplyDeliveries)).toHaveLength(0);

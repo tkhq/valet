@@ -23,6 +23,10 @@ const RETRY_BASE_MS = 1_000;
 const RETRY_CAP_MS = 5 * 60_000;
 /** Poll interval while the parent turn runs. The engine settles every submission, so this wait is bounded. */
 const WAITING_POLL_MS = 2_000;
+/** The parent's update is admitted right after its intent is written. An
+ * intent with no admitted submission after this long lost its admission (a
+ * crash between the two writes), and nothing else would ever finish it. */
+export const CHILD_REPLY_ADMISSION_WINDOW_MS = 10 * 60_000;
 const LEASE_MS = 60_000;
 const PRUNE_EVERY_MS = 60 * 60_000;
 const COMPLETED_RETENTION_MS = 7 * 24 * 60 * 60_000;
@@ -98,7 +102,11 @@ export class ChildReplyDispatcher {
           queueItemId = item?.id ?? null;
           if (queueItemId) await db.update(childReplyDeliveries).set({ queueItemId }).where(leased);
         }
-        outcome = queueItemId ? await this.deps.deliver({ ...row, queueItemId }) : { kind: "waiting" };
+        const admissionLost = !queueItemId && row.createdAt !== null
+          && this.deps.now() - row.createdAt > CHILD_REPLY_ADMISSION_WINDOW_MS;
+        outcome = queueItemId ? await this.deps.deliver({ ...row, queueItemId })
+          : admissionLost ? { kind: "undeliverable", reason: "The parent update was never admitted." }
+          : { kind: "waiting" };
       } catch (error) {
         outcome = { kind: "undeliverable", reason: error instanceof Error ? error.message : String(error) };
       }

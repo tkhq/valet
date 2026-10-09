@@ -39,6 +39,7 @@ import { wireAttentionRouter } from "../orchestrator/attention-wiring.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
 import { ChannelHost, type ChannelHostDeps } from "./host.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
+import { CHILD_REPLY_ADMISSION_WINDOW_MS } from "./child-replies.js";
 
 const ORG_ID = "local-org";
 const USER_ID = "local-user";
@@ -1028,6 +1029,34 @@ describe("ChannelHost outbound delivery", () => {
       expect(second.attempts).toBe(2);
       expect(second.nextAttemptAt).toBe(clock.now + 2_000);
       expect(second.completedAt).toBeNull();
+    } finally {
+      await timed.stop();
+    }
+  });
+
+  it("stops waiting for a parent update that was never admitted", async () => {
+    const { timed, clock } = await failingChildReply("reply-anchor", "absent:99");
+    try {
+      // The intent was written, but its admission never happened: no queue
+      // item carries its dispatch id, so nothing else would ever finish it.
+      await testDb.appDb.insert(childReplyDeliveries).values({
+        id: "reply-unadmitted", orgId: ORG_ID, sessionId: "parent-without-admission", threadId: "thread",
+        nextAttemptAt: clock.now, createdAt: clock.now,
+      });
+      const unadmitted = async () => {
+        const [found] = await testDb.appDb.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, "reply-unadmitted"));
+        if (!found) throw new Error("child reply reply-unadmitted is missing");
+        return found;
+      };
+      await timed.retryChildReplies();
+      expect(await unadmitted()).toMatchObject({ attempts: 0, lastError: null });
+
+      clock.now += CHILD_REPLY_ADMISSION_WINDOW_MS + 1;
+      await testDb.appDb.update(childReplyDeliveries).set({ nextAttemptAt: clock.now }).where(eq(childReplyDeliveries.id, "reply-unadmitted"));
+      await timed.retryChildReplies();
+      const late = await unadmitted();
+      expect(late.attempts).toBe(1);
+      expect(late.lastError).toContain("never admitted");
     } finally {
       await timed.stop();
     }
