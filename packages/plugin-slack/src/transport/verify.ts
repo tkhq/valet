@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import type { RawChannelUpdate } from "@valet/engine";
 
 /**
  * Verify Slack request signature using HMAC-SHA256.
@@ -98,4 +99,30 @@ export function verifySlackSignatureSync(
   const signatureBytes = encoder.encode(signature);
   if (expectedBytes.length !== signatureBytes.length) return false;
   return timingSafeEqual(expectedBytes, signatureBytes);
+}
+
+/**
+ * Verifies one Slack delivery over its exact bytes and returns its updates.
+ * Events API bodies are JSON. Interactivity bodies are form-encoded with one
+ * `payload` JSON field. Returns `null` for a bad signature, a stale
+ * timestamp, or a body that does not parse. `headers` must use lowercase
+ * names. The events route and the channel transport share this function.
+ */
+export function verifySlackDelivery(
+  headers: Record<string, string>,
+  rawBody: Uint8Array,
+  signingSecret: string,
+): RawChannelUpdate[] | null {
+  const bodyText = new TextDecoder().decode(rawBody);
+  if (!verifySlackSignatureSync(headers, bodyText, signingSecret)) return null;
+  try {
+    if (bodyText.startsWith("payload=")) {
+      const payload = new URLSearchParams(bodyText).get("payload");
+      if (payload === null) return null;
+      return [JSON.parse(payload) as unknown];
+    }
+    return [JSON.parse(bodyText) as unknown];
+  } catch {
+    return null;
+  }
 }

@@ -1,5 +1,5 @@
 import type { Hono, Handler } from 'hono';
-import { validatePluginHttpRoutes, type PluginHttpCaller, type PluginHttpRequest, type ValetPlugin } from '@valet/engine';
+import { validatePluginHttpRoutes, type PluginHttpCaller, type PluginHttpRequest, type PluginHttpRoute, type ValetPlugin } from '@valet/engine';
 import type { AppEnv } from '../env.js';
 import { requireActingUser } from '../middleware/auth.js';
 import { requireOrgAdmin } from '../routes/_org-admin.js';
@@ -7,10 +7,27 @@ import { isOrgMember } from '../services/org.js';
 import { ingestEvent } from '../events/ingest.js';
 import { writeDropLog } from '../orchestrator/signals.js';
 import { httpInstallationResolvers } from './http-installations.js';
+import { httpRouteBinding } from './http-bindings.js';
 
-/** Only the host can reserve existing public URLs. Plugins declare relative paths. */
-const LEGACY_PATHS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
-  linear: { events: '/webhooks/events/linear' },
+interface LegacyRoute {
+  path: string;
+  method: PluginHttpRoute['method'];
+  auth: PluginHttpRoute['auth'];
+}
+
+/**
+ * Only the host can reserve existing URLs. Plugins declare relative paths.
+ * Each alias fixes its method and authentication, so a plugin cannot widen
+ * access to an existing URL by changing its declaration.
+ */
+const LEGACY_ROUTES: Readonly<Record<string, Readonly<Record<string, LegacyRoute>>>> = {
+  linear: { events: { path: '/webhooks/events/linear', method: 'POST', auth: 'signature' } },
+  slack: {
+    // Installed Slack apps call this URL for Events API and interactivity deliveries.
+    events: { path: '/api/channels/slack/webhook', method: 'POST', auth: 'public' },
+    // The web client reads the setup view here.
+    app: { path: '/api/org/slack', method: 'GET', auth: 'org-admin' },
+  },
 };
 
 const tooLarge = () => Response.json({ error: 'payload too large' }, { status: 413 });
@@ -60,6 +77,10 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
       if (route.auth === 'signature' && !resolveInstallation) {
         throw new Error(`Configure an installation resolver for plugin ${plugin.name} before mounting signed ingress.`);
       }
+      const binding = httpRouteBinding(plugin.name, route.id);
+      if (binding && binding.auth !== route.auth) {
+        throw new Error(`Host binding for ${plugin.name} route ${route.id} requires ${binding.auth} authentication.`);
+      }
       const handler: Handler<AppEnv> = async (c) => {
         let caller: PluginHttpCaller | undefined;
         if (!publicRoute) {
@@ -83,10 +104,11 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
           url: c.req.url, headers: Object.fromEntries(headers),
           params: c.req.param(), rawBody, signal: c.req.raw.signal,
         };
-        if (route.auth === 'public') return route.handle(request);
+        const { providers } = c.var;
+        if (route.auth === 'public') return binding ? binding.bind({ providers, request }) : route.handle(request);
         if (route.auth !== 'signature') {
           if (!caller) return c.json({ error: 'Sign in to use this plugin route.' }, 401);
-          return route.handle(request, caller);
+          return binding ? binding.bind({ providers, request, caller }) : route.handle(request, caller);
         }
         const key = route.installationKey(request);
         if (key !== null && typeof key !== 'string') return key;
@@ -114,11 +136,13 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
       };
       const prefix = publicRoute ? '/plugins' : '/api/plugins';
       app.on(route.method, `${prefix}/${plugin.name}/http${route.path}`, handler);
-      const aliases = Object.hasOwn(LEGACY_PATHS, plugin.name) ? LEGACY_PATHS[plugin.name] : undefined;
+      const aliases = Object.hasOwn(LEGACY_ROUTES, plugin.name) ? LEGACY_ROUTES[plugin.name] : undefined;
       const legacy = aliases && Object.hasOwn(aliases, route.id) ? aliases[route.id] : undefined;
       if (legacy) {
-        if (route.auth !== 'signature') throw new Error(`Legacy ingress ${legacy} requires signature authentication.`);
-        app.on(route.method, legacy, handler);
+        if (route.auth !== legacy.auth || route.method !== legacy.method) {
+          throw new Error(`Compatibility route ${legacy.method} ${legacy.path} requires ${legacy.auth} authentication.`);
+        }
+        app.on(route.method, legacy.path, handler);
       }
     }
   }

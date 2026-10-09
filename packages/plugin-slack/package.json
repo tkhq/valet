@@ -13,6 +13,14 @@
     "./plugin": {
       "types": "./dist/plugin.d.ts",
       "default": "./dist/plugin.js"
+    },
+    "./http": {
+      "types": "./dist/http.d.ts",
+      "default": "./dist/http.js"
+    },
+    "./app-manifest": {
+      "types": "./dist/app-manifest.d.ts",
+      "default": "./dist/app-manifest.js"
     }
   },
   "scripts": {

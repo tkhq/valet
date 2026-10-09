@@ -5088,7 +5088,8 @@ export interface DeleteGrantResponse {
 //
 // The manifest targets Slack's agent messaging experience: the feature key
 // is `agent_view`, and the app subscribes `app_home_opened` /
-// `app_context_changed` / `message.im`. See `services/slack-app.ts`.
+// `app_context_changed` / `message.im`. The Slack plugin builds it
+// (`packages/plugin-slack/src/app-manifest.ts`, `http.ts`).
 
 /** Slack's app-manifest schema — only the fields this flow sets.
  * https://docs.slack.dev/reference/app-manifest/ */

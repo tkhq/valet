@@ -345,8 +345,8 @@ or a valid implicit DM recipient.
 | `identity-links.ts` Telegram routes | Migrate to the generic provider-parameterized routes; delete the hardcoded handlers. |
 | `github-connect.ts`, `github-app.ts` | Stay. Locked constraint from the integration-oauth design: the GitHub App flow (installations, repo bindings, token tiers) is not a credential connect. |
 | `linear-connect.ts` | Stays, as a documented exception. It is org-admin-gated, verifies app credentials with `client_credentials`, and stores the app, organization credential, and `linear_installations` mapping. Linear owns the app webhook; there is no browser approval callback or `webhookCreate` call. See [Organization Linear application setup](2026-07-20-event-system-design.md#organization-linear-application-setup-2026-09-29). |
-| `slack-app.ts` | Stays. Org manifest handout, not OAuth. |
-| `slack-webhook.ts` | Stays. Dedicated for documented reasons (challenge echo, dedupe, workspace gate). |
+| `slack-app.ts` | Moved into the Slack plugin as the org-admin `app` route. `/api/org/slack` remains a host alias ([Plugin HTTP interfaces](2026-10-07-plugin-http-interfaces-design.md#slack-adoption)). Org manifest handout, not OAuth. |
+| `slack-webhook.ts` | Moved into the Slack plugin as the public `events` route. `/api/channels/slack/webhook` remains a host alias. The durable inbox and its drain stay in `channels/slack-inbox.ts`. Dedicated for documented reasons (challenge echo, dedupe, workspace gate). |
 
 **Rule**: user-scoped credential connects have exactly one home — the
 generic connect surface plus plugin declarations. A PR that adds a new

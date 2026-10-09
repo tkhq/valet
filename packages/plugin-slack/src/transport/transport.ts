@@ -56,7 +56,7 @@ import { DirectoryCache } from "./directory-cache.js";
 import { fetchThreadTranscript } from "./thread-context.js";
 import { enrichSlackText } from "./text-enrich.js";
 import { escapeMrkdwn, markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
-import { verifySlackSignatureSync } from "./verify.js";
+import { verifySlackDelivery } from "./verify.js";
 
 const MAX_IMAGE_DOWNLOAD_BYTES = 10 * 1024 * 1024; // 10 MB (images prefer thumbnails anyway)
 const MAX_FILE_DOWNLOAD_BYTES = 25 * 1024 * 1024; // 25 MB (PDFs, documents)
@@ -321,7 +321,7 @@ export class SlackTransport implements ChannelTransport {
    * whose webhook the host registers with a secret it minted.
    *
    * `webhookSecret` is the key the rest of Valet uses for a provider-issued
-   * webhook secret: `routes/slack-webhook.ts` passes it, the Slack
+   * webhook secret: the host reads it for the `events` route, the Slack
    * `TriggerDef`s read it, and `routes/credentials.ts` stores it under that
    * name. `signingSecret` is accepted as well so a credential saved under
    * the older key still verifies.
@@ -334,19 +334,7 @@ export class SlackTransport implements ChannelTransport {
     if (secret === undefined || secret === "") return null;
     const headers: Record<string, string> = {};
     for (const [key, value] of Object.entries(req.headers)) headers[key.toLowerCase()] = value;
-    const bodyText = new TextDecoder().decode(req.rawBody);
-    if (!verifySlackSignatureSync(headers, bodyText, secret)) return null;
-    try {
-      if (bodyText.startsWith("payload=")) {
-        // Interactivity posts form-encoded with a single `payload` JSON param.
-        const payload = new URLSearchParams(bodyText).get("payload");
-        if (payload === null) return null;
-        return [JSON.parse(payload) as unknown];
-      }
-      return [JSON.parse(bodyText) as unknown];
-    } catch {
-      return null;
-    }
+    return verifySlackDelivery(headers, req.rawBody, secret);
   }
 
   parseUpdate(update: RawChannelUpdate): InboundChannelEvent | null {

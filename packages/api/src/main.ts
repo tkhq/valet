@@ -1,4 +1,4 @@
-import { configureSlackIngress } from "./routes/slack-webhook.js";
+import { configureSlackIngress } from "./channels/slack-inbox.js";
 /**
  * Node server boot.
  *
