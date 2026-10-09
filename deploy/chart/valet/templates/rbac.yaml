@@ -37,7 +37,9 @@ rules:
     resources: ["pods"]
     # The controller creates pods. The api reads them, resolves Job pods by
     # label, and deletes a backing pod only to apply image or resource drift.
-    verbs: ["get", "list", "delete"]
+    # `patch` sets the autoscaler safe-to-evict annotation on leased pods
+    # (wakeups spec C5).
+    verbs: ["get", "list", "patch", "delete"]
   # Read eviction evidence after a sandbox pod has been deleted.
   - apiGroups: [""]
     resources: ["events"]
