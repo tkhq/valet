@@ -118,6 +118,8 @@ export {
   recordWakeupBadRow,
   recordWakeupSweepFailed,
   recordWakeupSweepOk,
+  recordJobLogsPruned,
+  recordDockerJobOutputDropped,
   type SandboxDestroyReason,
   type SandboxFlagKind,
   type WorkspaceGrowOutcome,

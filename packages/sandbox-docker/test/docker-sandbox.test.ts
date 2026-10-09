@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { access, mkdtemp, readdir, rm, readFile, writeFile, symlink } from "node:fs/promises";
+import { access, mkdtemp, readdir, rm, readFile, stat, writeFile, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { omittedMarker, SandboxGoneError } from "@valet/engine";
 import { DockerSandboxProvider, type DockerSandboxCreateOpts, createSandboxWorkspace } from "../src/index.js";
-import { jobOutputLimit, sliceUtf8 } from "../src/sandbox.js";
+import { dropFinishedDetachedOutputs, jobOutputLimit, sliceUtf8 } from "../src/sandbox.js";
 import { buildFullProfileTestImage } from "./full-profile-test-image.js";
 
 /** Skip the whole suite when Docker isn't available locally. */
@@ -570,6 +570,9 @@ describeDocker("DockerSandbox", () => {
     const sbId = sb.id;
     const scratchDir = sb.scratchHostDir!;
     expect(scratchDir).toBeTruthy();
+    // Sticky, so the workload user cannot replace a root-owned path in it
+    // (fix wave 3, security H-1).
+    expect((await stat(scratchDir)).mode & 0o7777).toBe(0o1777);
     try {
       const write = await sb.exec("echo hi > /scratch/test && cat /scratch/test");
       expect(write.exitCode).toBe(0);
@@ -646,5 +649,26 @@ describe("docker job output helpers (fix wave 2)", () => {
     expect(jobOutputLimit({ detached: true, maxOutputBytes: 1000 })).toBe(1000);
     expect(jobOutputLimit({ maxOutputBytes: 5 })).toBe(5);
     expect(jobOutputLimit()).toBeUndefined();
+  });
+});
+
+describe("dropFinishedDetachedOutputs (fix wave 3, security L4)", () => {
+  type Job = { detached: boolean; status: "running" | "done" | "failed"; output: string };
+  it("drops the oldest finished detached buffers until the total fits, and keeps running jobs", () => {
+    const jobs = new Map<string, Job>([
+      ["a", { detached: true, status: "done", output: "x".repeat(40) }],
+      ["b", { detached: true, status: "running", output: "x".repeat(40) }],
+      ["c", { detached: true, status: "failed", output: "x".repeat(40) }],
+      ["d", { detached: false, status: "done", output: "x".repeat(40) }],
+      ["e", { detached: true, status: "done", output: "x".repeat(40) }],
+    ]);
+    expect(dropFinishedDetachedOutputs(jobs, 100)).toEqual(["a", "c"]);
+    expect([...jobs.keys()]).toEqual(["b", "d", "e"]);
+  });
+
+  it("drops nothing under the cap, and nothing it may not drop over it", () => {
+    const jobs = new Map<string, Job>([["a", { detached: true, status: "running", output: "x".repeat(500) }]]);
+    expect(dropFinishedDetachedOutputs(jobs, 100)).toEqual([]);
+    expect(dropFinishedDetachedOutputs(new Map<string, Job>(), 100)).toEqual([]);
   });
 });

@@ -54,6 +54,8 @@ import {
   recordCompactionCoverageGap,
   recordLeaseOrphanReleased,
   recordWakeupBadRow,
+  recordDockerJobOutputDropped,
+  recordJobLogsPruned,
   recordWakeupSweepFailed,
   recordWakeupSweepOk,
   recordLeaseNodeSeconds,
@@ -237,6 +239,13 @@ describe("fix wave 2 wakeup and lease metrics", () => {
       value: 1,
       attributes: { kind: "timer", cause: "session_deleted" },
     });
+  });
+
+  it("counts pruned job file sets and dropped docker buffers (fix wave 3, k8s M-B, security L4)", () => {
+    recordJobLogsPruned(3);
+    recordDockerJobOutputDropped();
+    expect(metricState.points).toContainEqual({ name: "valet.jobs.logs_pruned", value: 3, attributes: undefined });
+    expect(metricState.points).toContainEqual({ name: "valet.jobs.docker_output_dropped", value: 1, attributes: undefined });
   });
 
   it("names the exported sweep_ok_at series in its description (fix wave 3, data L3)", () => {

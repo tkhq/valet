@@ -253,8 +253,9 @@ describe.skipIf(!hasSetsid || !hasBase64W0)("job-mode shell protocol against a r
     expect(kickoff.status).toBe(0);
 
     const { output, exitCode } = await pollToCompletion(execId);
-    expect(output).toBe("x".repeat(100));
-    expect(output.length).toBe(100);
+    // The cap keeps the first 100 bytes and then appends one marker line
+    // (fix wave 3, k8s M-B), so a tail read shows the log stopped there.
+    expect(output).toBe(`${"x".repeat(100)}\n[valet: log capped at 100 bytes; later output dropped]\n`);
     expect(exitCode).toBe(0);
   }, 10_000);
 
@@ -482,6 +483,24 @@ describe("job file reuse guards (fix wave 2)", () => {
     expect(result.status).toBe(17);
     expect(result.stderr).toContain(execId);
     expect(await readFile(`${JOBS_DIR}/${execId}.out`, "utf8")).toBe("old log\n");
+  });
+
+  it("a kickoff prunes the files of a job that ended more than a day ago and keeps newer ones (fix wave 3, k8s M-B)", async () => {
+    const old = newExecId();
+    const fresh = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    for (const ext of ["out", "pid", "exit"]) {
+      await writeFile(`${JOBS_DIR}/${old}.${ext}`, "x\n");
+      await writeFile(`${JOBS_DIR}/${fresh}.${ext}`, "x\n");
+    }
+    sh(`touch -t 202001010000 ${JOBS_DIR}/${old}.exit`);
+    // A refused kickoff still runs the prune, so this needs no setsid.
+    const refusedId = fresh;
+    const result = sh(jobKickoffCommand(refusedId, "echo new"));
+    expect(result.status).toBe(17);
+    expect(result.stdout).toMatch(/pruned=[1-9]/);
+    await expect(readFile(`${JOBS_DIR}/${old}.out`, "utf8")).rejects.toThrow();
+    expect(await readFile(`${JOBS_DIR}/${fresh}.out`, "utf8")).toBe("x\n");
   });
 
   it("execJobInPod surfaces the refusal as an error that names the id", async () => {

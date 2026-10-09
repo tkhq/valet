@@ -83,7 +83,7 @@
  * whole group death was somehow otherwise observed, which for SIGKILL never
  * comes). See `jobKickoffCommand`'s capped branch for the fifo wiring.
  */
-import type { ExecJobHandle, ExecOpts, JobPoll, JobPollOpts } from "@valet/engine";
+import { jobLogCappedLine, recordJobLogsPruned, type ExecJobHandle, type ExecOpts, type JobPoll, type JobPollOpts } from "@valet/engine";
 import { buildShellCommand, execInPod, JOBS_DIR, shQuote, type ExecDeps } from "./exec.js";
 
 function jobOutPath(execId: string): string {
@@ -106,6 +106,26 @@ function jobFifoPath(execId: string): string {
 
 /** Kickoff exit status when the exec id already has job files. */
 const KICKOFF_ID_IN_USE_EXIT = 17;
+
+/** Job files whose `.exit` or `.dead` is older than this many minutes are pruned. */
+const JOB_FILES_RETENTION_MINUTES = 24 * 60;
+
+/**
+ * Deletes the files of jobs that ended more than a day ago and prints
+ * `pruned=<n>` when it deleted any (fix wave 3, k8s M-B). Job files used to
+ * live as long as the pod, and on a scratch pod they count against the
+ * `/scratch` size limit. Logs grow only through kickoffs, so pruning at
+ * each kickoff bounds them without any row state. Best effort: a failure
+ * here never blocks the kickoff.
+ */
+function pruneOldJobFilesScript(): string {
+  const dir = shQuote(JOBS_DIR);
+  return (
+    `n=0; for f in $(find ${dir} -maxdepth 1 \\( -name '*.exit' -o -name '*.dead' \\) -mmin +${JOB_FILES_RETENTION_MINUTES} 2>/dev/null); do ` +
+    `b="\${f%.*}"; rm -f "$b.out" "$b.pid" "$b.exit" "$b.dead" "$b.fifo" 2>/dev/null; n=$((n+1)); done; ` +
+    `if [ "$n" -gt 0 ]; then echo "pruned=$n"; fi; `
+  );
+}
 
 /**
  * Builds the kickoff script. Structure (see module docblock for why the
@@ -196,7 +216,18 @@ export function jobKickoffCommand(execId: string, innerCommand: string, maxOutpu
   } else {
     const limit = Math.max(0, Math.floor(maxOutputBytes));
     const fifo = jobFifoPath(execId);
-    const cappingFilter = `head -c ${limit} > ${shQuote(outFile)}; cat > /dev/null`;
+    // Past the cap, one marker line goes to the end of OUT, so a tail read
+    // or a watch sees that output stopped there (fix wave 3, k8s M-B).
+    // `head -c 1 | wc -c` waits for one byte past the cap; a job that stays
+    // under the cap reaches EOF and gets no marker. This needs a `head`
+    // that reads no more than it writes from a pipe: GNU coreutils does
+    // (checked on the sandbox image); BSD head over-reads, so the marker
+    // can be missing there.
+    const marker = jobLogCappedLine(limit);
+    const cappingFilter =
+      `head -c ${limit} > ${shQuote(outFile)}; ` +
+      `if [ "$(head -c 1 | wc -c | tr -d ' ')" -gt 0 ]; then printf '\\n%s' ${shQuote(marker)} >> ${shQuote(outFile)}; fi; ` +
+      `cat > /dev/null`;
     // The capping filter has to run as a SEPARATE process from the job
     // (see module docblock's "maxOutputBytes" section for why a plain
     // `head -c LIMIT` alone would SIGPIPE-kill the job early) — but piping
@@ -255,7 +286,7 @@ export function jobKickoffCommand(execId: string, innerCommand: string, maxOutpu
   // backgrounds the whole and-list, so the refusal's `exit` would end only
   // that background shell and the kickoff would report success.
   return (
-    `mkdir -p ${shQuote(JOBS_DIR)} || exit 1; ${refuse}: > ${shQuote(outFile)} || exit 1; ` +
+    `mkdir -p ${shQuote(JOBS_DIR)} || exit 1; ${pruneOldJobFilesScript()}${refuse}: > ${shQuote(outFile)} || exit 1; ` +
     `( ${wrapped} ) </dev/null >/dev/null 2>&1 & ` +
     `${waitForPid}; ` +
     `echo started`
@@ -384,6 +415,8 @@ export async function execJobInPod(
   if (result.exitCode !== 0) {
     throw new Error(`execJob kickoff failed (exit ${result.exitCode}): ${result.stderr.trim() || "no diagnostic output"}. Check the sandbox pod status before retrying.`);
   }
+  const pruned = /pruned=(\d+)/.exec(result.stdout);
+  if (pruned) recordJobLogsPruned(Number(pruned[1]));
   return { execId };
 }
 
