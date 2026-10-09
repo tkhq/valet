@@ -1,15 +1,15 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import type { Wakeup, WakeupLimits } from "@valet/engine";
-import { decideWakeup, tail, LOG_TAIL_BYTES, WATCH_READ_BYTES, type WakeupDecision, type WakeupProbe } from "./wake-watcher-decide.js";
+import type { Wakeup } from "@valet/engine";
+import { decideWakeup, tail, LOG_TAIL_BYTES, WATCH_READ_BYTES, type DecideOptions, type WakeupDecision, type WakeupProbe } from "./wake-watcher-decide.js";
 
 interface Vector {
   name: string;
   now: number;
   row: Wakeup;
   probe: WakeupProbe;
-  limits: Pick<WakeupLimits, "watchMaxEventsPerHour">;
+  limits: DecideOptions;
   expected: WakeupDecision | null;
 }
 
@@ -35,6 +35,10 @@ describe("tail", () => {
     const result = tail(long);
     expect(Buffer.byteLength(result)).toBe(LOG_TAIL_BYTES);
     expect(result).toBe("x".repeat(LOG_TAIL_BYTES));
+  });
+
+  it("replaces NUL, which Postgres text rejects (fix wave 2, M4)", () => {
+    expect(tail("a\u0000b")).toBe("a�b");
   });
 
   it("trims by characters from the end for multi-byte strings", () => {
