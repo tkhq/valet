@@ -9,6 +9,8 @@ import type { Sandbox, ToolDef, ToolResult } from "./types.js";
 export const NATIVE_IMAGE_RESULT_TOOL = "openai_native_image";
 /** The plugin action native generation replaces. Its availability and policy decide whether the hosted tool is offered. */
 export const NATIVE_IMAGE_PLUGIN_ACTION = "openai.generate_image";
+/** The hosted tool's fixed parameters. Policy sees them as the plugin action's params. */
+export const NATIVE_IMAGE_TOOL_PARAMS = { model: "gpt-image-2.5-sunburst", output_format: "png", quality: "auto" } as const;
 const NATIVE_PATH = /^generated-images\/[a-f0-9-]+\.(png|jpg|webp)$/;
 const IMAGE_INSTRUCTIONS = "Use native image_generation to generate images and edit images already in context. Images are saved automatically and receipts return their paths. For an existing sandbox image not in context, use openai.edit_image. Do not call plugin image generation.";
 
@@ -37,22 +39,55 @@ function outputText(output: unknown): string | undefined {
   return texts.join("");
 }
 
+/** The message an error carries when the provider threw before it streamed anything. */
+function emptyAssistantMessage(model: Model<Api>): AssistantMessage {
+  const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  return { role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
+    usage: { ...zero, totalTokens: 0, cost: { ...zero, total: 0 } }, stopReason: "error", timestamp: Date.now() };
+}
+
+/** What the thread supplies for a hosted request. A boolean stands in for tests. */
+export interface HostedImageHooks {
+  /** The turn's policy check. False or a throw withholds the hosted tool for the turn. */
+  permitted: () => Promise<boolean>;
+  /** Called once per saved original, right after its write. */
+  saved?: (receipt: { path: string; image_id: string }) => void;
+}
+
 /** One thread owns this bridge. The engine stores its results through ordinary tool persistence. */
 export class NativeImageBridge {
   private saved = new Map<string, ToolResult>();
   private unavailable = false;
-  private denied = false;
+  private withheld = false;
+  /** The turn's policy-and-sandbox check, made once. */
+  private ready: boolean | undefined;
   savedInRequest = false;
+  /** True while the most recent request offered the hosted tool, so duplicate plugin actions hide only then. */
+  offered = false;
 
   beginTurn(): void {
     this.savedInRequest = false;
     this.unavailable = false;
-    this.denied = false;
+    this.withheld = false;
+    this.ready = undefined;
+    this.offered = false;
   }
 
-  /** False after a request-time rejection or a policy denial in this turn, so the plugin action stays visible. */
+  /** False after a request-time rejection, a policy denial, or an unready sandbox in this turn, so the plugin action stays visible. */
   enabled(model: Model<Api>): boolean {
-    return !this.unavailable && !this.denied && supportsNativeImageGeneration(model);
+    return !this.unavailable && !this.withheld && supportsNativeImageGeneration(model);
+  }
+
+  /** Policy first, then the sandbox. A cold sandbox must be ready before a paid request, as the fallback's directory prep is. */
+  private async prepare(hosted: boolean | HostedImageHooks, sandbox: Sandbox): Promise<boolean> {
+    const permitted = typeof hosted === "boolean" ? hosted : await hosted.permitted().catch(() => false);
+    if (!permitted) return false;
+    try {
+      await sandbox.mkdir("generated-images");
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   tool(): ToolDef {
@@ -98,11 +133,7 @@ export class NativeImageBridge {
     }
   }
 
-  /**
-   * `allowed` decides whether this request offers the hosted tool. The thread
-   * passes its policy check; a false or a throw withholds the tool for the turn.
-   */
-  stream(model: Model<Api>, context: { messages: Message[] }, options: SimpleStreamOptions, sandbox: Sandbox, allowed: boolean | (() => Promise<boolean>) = true) {
+  stream(model: Model<Api>, context: { messages: Message[] }, options: SimpleStreamOptions, sandbox: Sandbox, hosted: boolean | HostedImageHooks = true) {
     this.saved.clear();
     this.savedInRequest = false;
     // Pi preserves rs_* signatures but drops their following hosted image item. The image guide
@@ -141,12 +172,16 @@ export class NativeImageBridge {
         }
       }
       delete message.errorMessage;
+      // Tools run in content order. Receipts go before any other call, so a stop or a
+      // restart during a slow or gated call cannot leave a saved original unrecorded.
+      const firstCall = message.content.findIndex((block) => block.type === "toolCall");
+      let contentIndex = firstCall === -1 ? message.content.length : firstCall;
       for (const receipt of receipts) {
         const toolCall = { type: "toolCall" as const, id: `call_${crypto.randomUUID().replaceAll("-", "")}`, name: NATIVE_IMAGE_RESULT_TOOL, arguments: receipt };
-        const contentIndex = message.content.length;
-        message.content.push(toolCall);
+        message.content.splice(contentIndex, 0, toolCall);
         output.push({ type: "toolcall_start", contentIndex, partial: message });
         output.push({ type: "toolcall_end", contentIndex, toolCall, partial: message });
+        contentIndex++;
       }
       message.stopReason = "toolUse";
       output.push({ type: "done", reason: "toolUse", message });
@@ -182,6 +217,7 @@ export class NativeImageBridge {
       // Register the original immediately. Preview work or a later abort cannot erase its receipt.
       this.savedInRequest = true;
       receipts.push({ path, image_id: item.id });
+      if (typeof hosted !== "boolean") hosted.saved?.({ path, image_id: item.id });
       seen.set(item.id, hash);
       const key = `${item.id}:${path}`;
       this.saved.set(key, this.receipt(bytes, path, item.id, format, "Image saved. Use the saved original; do not regenerate it."));
@@ -253,7 +289,7 @@ export class NativeImageBridge {
           if (!native) return replay;
           await imageDecoder();
           return { ...replay, tools: [...(Array.isArray(transformed.tools) ? transformed.tools : []),
-            { type: "image_generation", model: "gpt-image-2.5-sunburst", output_format: "png", quality: "auto" }] };
+            { type: "image_generation", ...NATIVE_IMAGE_TOOL_PARAMS }] };
         },
         onProviderStreamEvent: async (event, requestModel) => {
           await options.onProviderStreamEvent?.(event, requestModel);
@@ -270,9 +306,10 @@ export class NativeImageBridge {
       try {
         let native = this.enabled(model);
         if (native) {
-          const permitted = typeof allowed === "function" ? await allowed().catch(() => false) : allowed;
-          if (!permitted) { this.denied = true; native = false; }
+          this.ready ??= await this.prepare(hosted, sandbox);
+          if (!this.ready) { this.withheld = true; native = false; }
         }
+        this.offered = native;
         let current = request(native);
         for (;;) {
           let retryWithoutImages = false;
@@ -303,9 +340,14 @@ export class NativeImageBridge {
       } catch (error) {
         if (partial && receipts.length && !options.signal?.aborted) deliver(partial, (error instanceof Error ? error.message : "image delivery failed").slice(0, 300));
         else if (partial && receipts.length) abortWithSaved(partial);
-        else if (partial) output.push({ type: "error", reason: options.signal?.aborted ? "aborted" : "error",
-          error: { ...partial, stopReason: options.signal?.aborted ? "aborted" : "error",
-            errorMessage: error instanceof Error ? error.message : "Image delivery failed. Request the image again." } });
+        else {
+          // A throw before the first event (provider setup, a missing key) must still end
+          // the stream with a message, or the agent loop waits forever.
+          const reason = options.signal?.aborted ? "aborted" : "error";
+          const message = partial ?? emptyAssistantMessage(model);
+          output.push({ type: "error", reason, error: { ...message, stopReason: reason,
+            errorMessage: error instanceof Error ? error.message : "The model request failed. Retry the turn." } });
+        }
       } finally {
         output.end();
         seen.clear();

@@ -4,10 +4,10 @@ import { randomBytes } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import sharp from "sharp";
 import { Type } from "typebox";
-import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type ActionPlugin, type PolicyResolver } from "../src/index.js";
+import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type ActionPlugin, type PolicyInvocationRecord, type PolicyResolver } from "../src/index.js";
 import { buildPluginCatalog } from "../src/plugin-catalog.js";
 import { ELIDED_TOOL_OUTPUT } from "../src/compaction.js";
-import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL } from "../src/native-images.js";
+import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_TOOL_PARAMS } from "../src/native-images.js";
 import { bundledModel } from "../src/model-catalog.js";
 import { VirtualSandbox } from "../src/providers/sandbox/virtual.js";
 import type { ToolContext } from "../src/types.js";
@@ -258,6 +258,9 @@ it.each([false, true])("replays image-turn items without orphaned IDs (mixed res
   if (mixed) {
     expect(final.content).toContainEqual({ type: "text", text: "Checking the image", textSignature: JSON.stringify({ v: 1, id: "msg_image", phase: "commentary" }) });
     expect(final.content).toContainEqual(expect.objectContaining({ type: "toolCall", id: "call_image_bash|fc_image_bash", name: "bash" }));
+    // Tools run in content order: the receipt must run before a slow or gated call can be stopped.
+    const names = final.content.filter((block) => block.type === "toolCall").map((block) => block.name);
+    expect(names).toEqual([NATIVE_IMAGE_RESULT_TOOL, "bash"]);
   }
   const result = await bridge.tool().execute(call.arguments, { sandbox, signal: new AbortController().signal } as ToolContext);
   const unrelatedReasoning = { ...reasoning, id: "rs_unrelated", encrypted_content: "encrypted-unrelated" };
@@ -387,6 +390,21 @@ it("propagates a replay-tool abort instead of treating it as a preview failure",
   } finally { preview.mockRestore(); }
 });
 
+it("ends the stream with an error message when the provider throws before streaming", async () => {
+  const original = getApiProvider("anthropic-messages");
+  const stream = () => { throw new Error("No API key for anthropic"); };
+  registerApiProvider({ api: "anthropic-messages", stream, streamSimple: stream }, "image-throw-test");
+  try {
+    const chatModel = bundledModel("anthropic", "claude-haiku-4-5");
+    if (!chatModel) throw new Error("missing chat model");
+    const final = await new NativeImageBridge().stream(chatModel, { messages: [] }, {}, new VirtualSandbox("throw")).result();
+    expect(final).toMatchObject({ role: "assistant", stopReason: "error", errorMessage: "No API key for anthropic", content: [] });
+  } finally {
+    unregisterApiProviders("image-throw-test");
+    if (original) registerApiProvider(original);
+  }
+});
+
 it("preserves a provider final result without a terminal stream event", async () => {
   const original = getApiProvider("anthropic-messages");
   const final = fauxAssistantMessage("workflow completed");
@@ -450,7 +468,7 @@ it("keeps a tool call whose arguments finished streaming before the stream faile
   ])));
   const final = await new NativeImageBridge().stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, new VirtualSandbox("complete-call")).result();
   expect(final.stopReason).toBe("toolUse");
-  expect(final.content.filter((block) => block.type === "toolCall").map((call) => call.name)).toEqual(["bash", NATIVE_IMAGE_RESULT_TOOL]);
+  expect(final.content.filter((block) => block.type === "toolCall").map((call) => call.name)).toEqual([NATIVE_IMAGE_RESULT_TOOL, "bash"]);
 });
 
 it("replays a pruned receipt as its saved path", async () => {
@@ -476,19 +494,49 @@ it("replays a pruned receipt as its saved path", async () => {
 it.each([false, "throw"] as const)("withholds the hosted tool when the policy check answers %s", async (answer) => {
   const fetchMock = mockProvider([]);
   const bridge = new NativeImageBridge();
-  const allowed = answer === "throw" ? async () => { throw new Error("policy store unavailable"); } : async () => false;
-  await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, new VirtualSandbox("policy"), allowed).result();
+  const permitted = answer === "throw" ? async () => { throw new Error("policy store unavailable"); } : async () => false;
+  expect(bridge.offered).toBe(false);
+  await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, new VirtualSandbox("policy"), { permitted }).result();
   expect(requestTools(fetchMock)).not.toContain("image_generation");
   expect(bridge.enabled(model)).toBe(false);
+  expect(bridge.offered).toBe(false);
   bridge.beginTurn();
   expect(bridge.enabled(model)).toBe(true);
 });
 
-async function promptWithPolicy(options: { pluginCatalog?: ReturnType<typeof openaiCatalog>; policyResolver?: PolicyResolver }) {
+it("checks policy once per turn, prepares the sandbox before the paid request, and reports saved originals", async () => {
+  const fetchMock = mockProvider([item()]);
+  const sandbox = new VirtualSandbox("prepare");
+  const mkdir = vi.spyOn(sandbox, "mkdir");
+  const permitted = vi.fn(async () => true);
+  const saved = vi.fn();
+  const bridge = new NativeImageBridge();
+  await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox, { permitted, saved }).result();
+  expect(bridge.offered).toBe(true);
+  expect(mkdir.mock.invocationCallOrder[0]).toBeLessThan(fetchMock.mock.invocationCallOrder[0]);
+  expect(saved).toHaveBeenCalledWith({ path: expect.stringMatching(/^generated-images\//), image_id: "img_1" });
+  await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox, { permitted, saved }).result();
+  expect(permitted).toHaveBeenCalledTimes(1);
+  expect(requestTools(fetchMock, 1)).toContain("image_generation");
+});
+
+it("withholds the hosted tool when the sandbox is not ready, before any paid request", async () => {
+  const fetchMock = mockProvider([item()]);
+  const sandbox = new VirtualSandbox("cold");
+  vi.spyOn(sandbox, "mkdir").mockRejectedValue(new Error("sandbox not ready"));
+  const bridge = new NativeImageBridge();
+  await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox, { permitted: async () => true }).result();
+  expect(requestTools(fetchMock)).not.toContain("image_generation");
+  expect(bridge.offered).toBe(false);
+  expect(bridge.enabled(model)).toBe(false);
+});
+
+async function promptWithPolicy(options: { pluginCatalog?: ReturnType<typeof openaiCatalog>; policyResolver?: PolicyResolver }, items: unknown[] = []) {
   const store = new InMemorySessionStore();
   const events = new InMemoryEventStream();
   const engine = new Engine({ providers: { store, stream: events, sandboxProvider: new VirtualSandboxProvider() } });
-  const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => wire([{ type: "message", id: "msg_plain", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Done.", annotations: [] }] }]));
+  const plain = wire([{ type: "message", id: "msg_plain", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Done.", annotations: [] }] }]);
+  const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(items.length ? wire(items) : plain).mockImplementation(async () => wire([{ type: "message", id: "msg_plain", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Done.", annotations: [] }] }]));
   vi.stubGlobal("fetch", fetchMock);
   const session = await engine.createSession({ userId: "u", orgId: "o", workspace: "/workspace", sandbox: {}, model,
     purpose: "child", resolveModel: async () => ({ model, apiKey: "sk-fixture-key" }), ...options });
@@ -504,12 +552,20 @@ async function promptWithPolicy(options: { pluginCatalog?: ReturnType<typeof ope
 it.each(["deny", "require_approval"] as const)("offers no hosted tool when policy resolves %s for openai.generate_image", async (mode) => {
   const resolve = vi.fn(async () => ({ mode, provenance: { baseMode: mode, source: "team_policy" as const } }));
   expect(await promptWithPolicy({ pluginCatalog: openaiCatalog(), policyResolver: { resolve } })).not.toContain("image_generation");
-  expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ actionId: "openai.generate_image", service: "openai", appliesIn: "session" }));
+  // Parameter-scoped policies see the hosted tool's fixed parameters.
+  expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ actionId: "openai.generate_image", service: "openai", appliesIn: "session", params: NATIVE_IMAGE_TOOL_PARAMS }));
 });
 
-it("offers the hosted tool when policy allows the plugin action", async () => {
+it("offers the hosted tool when policy allows the plugin action and audits each saved image", async () => {
   const resolve = vi.fn(async () => ({ mode: "allow" as const, provenance: { baseMode: "allow" as const, source: "risk_default" as const } }));
-  expect(await promptWithPolicy({ pluginCatalog: openaiCatalog(), policyResolver: { resolve } })).toContain("image_generation");
+  const records: PolicyInvocationRecord[] = [];
+  const tools = await promptWithPolicy({ pluginCatalog: openaiCatalog(), policyResolver: { resolve, onInvocation: async (record) => { records.push(record); } } }, [item()]);
+  expect(tools).toContain("image_generation");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(records).toEqual([expect.objectContaining({
+    service: "openai", actionId: "openai.generate_image", toolId: "openai.generate_image", status: "completed", resolvedMode: "allow", appliesIn: "session",
+    params: { ...NATIVE_IMAGE_TOOL_PARAMS, path: expect.stringMatching(/^generated-images\//), image_id: "img_1" },
+  })]);
 });
 
 it.each(["no plugin catalog", "catalog without the OpenAI plugin"])("offers no hosted tool with %s", async (setup) => {

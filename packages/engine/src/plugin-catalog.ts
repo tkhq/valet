@@ -469,42 +469,106 @@ function approvalGateRequest(
 }
 
 /**
- * Whether `actionId` would run now without a gate: the action is registered,
- * its service is available, and policy resolves to allow. A hosted provider
- * tool that stands in for a plugin action asks this before it is offered, so
- * an administrator's deny or approval policy on the action still holds. It
- * opens no gate and writes no audit record: the plugin path audits the real
- * invocation when the hosted tool is withheld. Resolver failures fail closed.
+ * The grant a hosted provider tool holds while it stands in for a plugin
+ * action: the action's identity and the policy decision that allowed it.
+ * `recordHostedActionInvocation` audits each hosted execution against it.
  */
-export async function actionRunsUngated(
+export interface HostedActionGrant {
+  service: string;
+  actionId: string;
+  riskLevel: RiskLevel;
+  params: Record<string, unknown>;
+  decision: PolicyDecision;
+}
+
+/**
+ * Resolve whether `actionId` would run now without a gate: the action is
+ * registered, its service is available, and policy resolves to allow for
+ * `params`, the parameters the hosted tool will use. A hosted provider tool
+ * asks this before it is offered, so an administrator's deny, approval, or
+ * parameter-scoped policy on the action still holds. It opens no gate and
+ * writes no audit record: the plugin path audits the real invocation when
+ * the hosted tool is withheld. Resolver failures fail closed.
+ */
+export async function resolveUngatedAction(
   catalog: PluginCatalog,
   actionId: string,
   ctx: ToolContext,
-): Promise<boolean> {
-  if (ctx.externalSender) return false;
+  params: Record<string, unknown>,
+): Promise<HostedActionGrant | undefined> {
+  if (ctx.externalSender) return undefined;
   const entry = catalog.byId.get(actionId);
-  if (!entry) return false;
+  if (!entry) return undefined;
   const availability = await checkServiceAvailability(catalog, entry.service, entry.plugin.requiresCredential === true);
-  if (availability.unavailable || availability.error) return false;
+  if (availability.unavailable || availability.error) return undefined;
+  const grant = { service: entry.service, actionId: qualifiedId(entry), riskLevel: entry.action.riskLevel, params };
   const resolver = ctx.policyResolver;
-  if (!resolver) return approvalModeFor(entry) === "allow";
+  if (!resolver) {
+    const mode = approvalModeFor(entry);
+    if (mode !== "allow") return undefined;
+    return { ...grant, decision: { mode, provenance: { baseMode: mode, source: entry.plugin.defaultApprovalMode ? "plugin_default" : "risk_default" } } };
+  }
   try {
     const decision = await resolver.resolve({
       teamId: ctx.owner?.type === "team" ? ctx.owner.id : undefined,
       service: entry.service,
-      actionId: qualifiedId(entry),
+      actionId: grant.actionId,
       riskLevel: entry.action.riskLevel,
-      params: undefined,
+      params,
       userId: ctx.userId,
       orgId: ctx.orgId,
       sessionId: ctx.sessionId,
       threadId: ctx.threadId,
       appliesIn: "session",
     });
-    return decision.mode === "allow";
+    return decision.mode === "allow" ? { ...grant, decision } : undefined;
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+/** True when {@link resolveUngatedAction} grants `actionId` for `params`. */
+export async function actionRunsUngated(
+  catalog: PluginCatalog,
+  actionId: string,
+  ctx: ToolContext,
+  params: Record<string, unknown> = {},
+): Promise<boolean> {
+  return (await resolveUngatedAction(catalog, actionId, ctx, params)) !== undefined;
+}
+
+/**
+ * Audit one hosted execution as the plugin action it replaced, with the same
+ * record shape `call_tool` emits for a completed invocation. `params` adds
+ * the execution's outputs, such as the saved path, to the grant's inputs.
+ */
+export function recordHostedActionInvocation(
+  ctx: ToolContext,
+  grant: HostedActionGrant,
+  params: Record<string, unknown>,
+  summary: string,
+): void {
+  const resolver = ctx.policyResolver;
+  if (!resolver) return;
+  const merged = { ...grant.params, ...params };
+  emitInvocation(resolver, {
+    service: grant.service,
+    actionId: grant.actionId,
+    toolId: grant.actionId,
+    riskLevel: grant.riskLevel,
+    sessionId: ctx.sessionId,
+    threadId: ctx.threadId,
+    userId: ctx.userId,
+    orgId: ctx.orgId,
+    appliesIn: "session",
+    summary,
+    resumeKey: `${grant.actionId}:${boundedArgsKey(stableJson(merged))}`,
+    queueItemId: ctx.queueItemId,
+    params: merged,
+    status: "completed",
+    resolvedMode: "allow",
+    provenance: grant.decision.provenance,
+  });
 }
 
 export async function invokeAction(

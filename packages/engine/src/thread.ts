@@ -9,8 +9,8 @@ import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
-import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION } from "./native-images.js";
-import { actionRunsUngated } from "./plugin-catalog.js";
+import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION, NATIVE_IMAGE_TOOL_PARAMS } from "./native-images.js";
+import { recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
@@ -3799,6 +3799,7 @@ export class Thread {
     this.credentialError = undefined;
     this.turnAgentError = undefined;
     this.nativeImages.beginTurn();
+    this.nativeImageGrant = undefined;
     // Per-turn: the next turn may hold a transcript compaction can help.
     this.turnCompactionBlocked = false;
     this.currentAssistantMessageId = undefined;
@@ -4950,13 +4951,16 @@ export class Thread {
   }
 
   private readonly nativeImages = new NativeImageBridge();
+  /** The turn's grant for hosted generation; each saved image is audited against it. */
+  private nativeImageGrant: HostedActionGrant | undefined;
 
   /**
    * Native generation spends the chat provider's key, so it is offered only
    * when the plugin action it replaces would run now without a gate: the
    * OpenAI plugin is registered, its service is available, and policy
-   * resolves to allow. A deny or approval policy keeps the plugin action
-   * visible instead, and `invokeAction` applies and audits it as usual.
+   * resolves to allow for the hosted tool's parameters. A deny or approval
+   * policy keeps the plugin action visible instead, and `invokeAction`
+   * applies and audits it as usual.
    */
   private async nativeImageGenerationPermitted(signal: AbortSignal | undefined): Promise<boolean> {
     if (this.runningItem?.author?.externalSender) return false;
@@ -4968,7 +4972,21 @@ export class Thread {
       toolName: NATIVE_IMAGE_RESULT_TOOL,
       toolArgs: {},
     });
-    return actionRunsUngated(catalog, NATIVE_IMAGE_PLUGIN_ACTION, ctx);
+    this.nativeImageGrant = await resolveUngatedAction(catalog, NATIVE_IMAGE_PLUGIN_ACTION, ctx, { ...NATIVE_IMAGE_TOOL_PARAMS });
+    return this.nativeImageGrant !== undefined;
+  }
+
+  /** Hosted spend appears in the action audit like a plugin invocation would. */
+  private recordNativeImage(receipt: { path: string; image_id: string }): void {
+    const grant = this.nativeImageGrant;
+    if (!grant) return;
+    const ctx = this.buildToolContext({
+      signal: new AbortController().signal,
+      toolCallId: "native-image-audit",
+      toolName: NATIVE_IMAGE_RESULT_TOOL,
+      toolArgs: { ...receipt },
+    });
+    recordHostedActionInvocation(ctx, grant, { ...receipt }, `Generated an image with ${NATIVE_IMAGE_TOOL_PARAMS.model} through the session model`);
   }
 
   private buildAgent(): Agent {
@@ -5045,7 +5063,10 @@ export class Thread {
             this.reasoningDisabled ? undefined : this.session.options.sampling?.reasoning,
           ),
           samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
-        }, this.session.sandbox, () => this.nativeImageGenerationPermitted(options?.signal));
+        }, this.session.sandbox, {
+          permitted: () => this.nativeImageGenerationPermitted(options?.signal),
+          saved: (receipt) => this.recordNativeImage(receipt),
+        });
       },
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
@@ -5133,7 +5154,8 @@ export class Thread {
     return {
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
-      nativeImageGeneration: !this.runningItem?.author?.externalSender && this.nativeImages.enabled(this.lastRequestModel ?? this.agent.state.model),
+      // Only while the hosted tool was actually offered: a replayed approval after a restart must reach the plugin action.
+      nativeImageGeneration: this.nativeImages.offered,
       userId: actorId,
       ...(this.runningItem?.author && !this.runningItem.author.externalSender &&
         runningContent !== undefined && !isSignalContent(runningContent) &&

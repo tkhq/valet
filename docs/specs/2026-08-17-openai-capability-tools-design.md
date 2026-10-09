@@ -82,10 +82,13 @@ Native generation uses the existing provider's host-side auth. It does not resol
 Untrusted external-sender turns do not receive the native hosted tool.
 
 The hosted tool is offered only when `openai.generate_image` would run now without a gate.
-Before each request, the thread asks `actionRunsUngated` for that action: the OpenAI plugin must be registered in the session's plugin catalog, its service must be available, and the policy resolver must answer `allow`.
+Once per turn, before the first request, the thread asks `resolveUngatedAction` for that action: the OpenAI plugin must be registered in the session's plugin catalog, its service must be available, and the policy resolver must answer `allow`.
+The policy input carries the hosted tool's fixed parameters (`model`, `output_format`, `quality`), so a parameter-scoped policy on those fields applies. A policy scoped to the prompt text cannot apply, because the prompt is not known before the request. Use a deny or approval policy on the action for that case.
 A `deny` or `require_approval` decision, a resolver error, a missing catalog, or a missing plugin withholds the hosted tool for the turn.
+The bridge then prepares `generated-images/` in the sandbox before the request. If the sandbox is not ready, the hosted tool is withheld for the turn, so a cold sandbox cannot cost a paid image. The direct fallback prepares its directory the same way.
 The plugin action then stays visible, and `invokeAction` applies and audits the same policy when the agent calls it.
-The check opens no gate and writes no audit record.
+The check opens no gate and writes no audit record. Each saved native image writes one `completed` action-invocation record for `openai.generate_image`, with the grant's provenance and the saved path in its params, so hosted spend appears in the same audit as plugin invocations.
+Duplicate plugin actions are hidden only while the most recent request offered the hosted tool. A replayed approval after an API restart therefore reaches the plugin action.
 Requests preserve existing sampling, timeout, and abort settings. The bridge preserves final results from providers that end without terminal events.
 A request-time 400, 403, 404, or 422 error naming image-tool access or availability triggers one request without the hosted tool.
 That turn uses plugin generation, including catalog and pinned tools. Authentication, quota, unrelated model errors, and stream errors do not trigger this fallback.
@@ -94,6 +97,8 @@ The next turn can try native generation again.
 ### Saved originals and failed streams
 
 The adapter writes validated original bytes before making the preview. It registers the receipt as soon as the write completes.
+Receipt tool calls are placed before any other tool call in the message. Tools run in content order, so a stop or restart during a slow or gated call cannot leave a saved original unrecorded.
+If the provider throws before it streams anything, the bridge still ends the stream with an error message, so the agent loop settles.
 If the preview fails, the receipt returns the saved path and a warning instead of asking for another paid generation.
 The web renderer keeps that path visible without a preview.
 If a later stream event fails, completed images still produce receipts with a stream warning.
@@ -188,7 +193,7 @@ the CLAUDE.md tool-call persistence rule.
   hidden in `list_tools`).
 - Plugin tests cover model selection, generation and edits, formats, unsupported options, malformed output, limits, write failures, aborts, and real LocalSandbox paths.
 - Engine tests exercise capability selection, raw hosted events, null and failed results, write failures, aborts, encoded limits, and fallback discovery.
-- Engine tests cover cut-off streams with truncated calls, pruned-receipt replay, policy-gated offering with deny, approval, allow, and missing-catalog cases, and image-aware token estimates.
+- Engine tests cover cut-off streams with truncated calls, pruned-receipt replay, policy-gated offering with deny, approval, allow, and missing-catalog cases, parameter-scoped policy input, sandbox prep before the request, receipt ordering, audit records per saved image, and image-aware token estimates.
 - An API integration test uses the real pinned OpenAI streaming provider with scripted SSE responses.
   It checks native generation, multi-turn editing, sandbox bytes, agent image feedback, live media, Postgres persistence, REST history, process-cache restore, and session isolation.
 - A fallback API test checks direct generation and editing with Sunburst and Flare, sandbox files, and inline persisted results.

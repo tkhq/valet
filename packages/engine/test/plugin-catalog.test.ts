@@ -7,6 +7,8 @@ import {
   pluginCatalogTools,
   buildPluginCatalog,
   actionRunsUngated,
+  resolveUngatedAction,
+  recordHostedActionInvocation,
   invokeAction,
   pinnedToolName,
   prepareActionArgs,
@@ -99,8 +101,31 @@ describe("actionRunsUngated", () => {
     const failing: PolicyResolver = { resolve: async () => { throw new Error("policy store unavailable"); } };
     expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: failing }))).toBe(false);
     const resolve = vi.fn(async () => ({ mode: "allow" as const, provenance: { baseMode: "allow" as const, source: "risk_default" as const } }));
-    await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: { resolve }, owner: { type: "team", id: "team-a" } }));
-    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ teamId: "team-a", service: "openai", actionId: "openai.generate_image", riskLevel: "low", appliesIn: "session" }));
+    await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: { resolve }, owner: { type: "team", id: "team-a" } }), { model: "sunburst" });
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ teamId: "team-a", service: "openai", actionId: "openai.generate_image", riskLevel: "low", appliesIn: "session", params: { model: "sunburst" } }));
+  });
+
+  it("audits a hosted execution as the plugin action with the grant's provenance", async () => {
+    const catalog = buildPluginCatalog([plugin]);
+    const records: PolicyInvocationRecord[] = [];
+    const resolver: PolicyResolver = {
+      resolve: async () => ({ mode: "allow", provenance: { baseMode: "allow", source: "org_policy", matchedPolicyId: "pol-1" } }),
+      onInvocation: async (record) => { records.push(record); },
+    };
+    const ctx = makeCtx({ policyResolver: resolver, queueItemId: "q-1" });
+    const grant = await resolveUngatedAction(catalog, "openai.generate_image", ctx, { model: "sunburst" });
+    if (!grant) throw new Error("expected a grant");
+    expect(records).toHaveLength(0);
+    recordHostedActionInvocation(ctx, grant, { path: "generated-images/a.png" }, "Generated an image");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(records).toEqual([expect.objectContaining({
+      service: "openai", actionId: "openai.generate_image", toolId: "openai.generate_image", riskLevel: "low", status: "completed", resolvedMode: "allow",
+      provenance: { baseMode: "allow", source: "org_policy", matchedPolicyId: "pol-1" }, params: { model: "sunburst", path: "generated-images/a.png" },
+      queueItemId: "q-1", summary: "Generated an image", resumeKey: expect.stringMatching(/^openai\.generate_image:/),
+    })]);
+    // Without a resolver there is no audit port, and no grant is denied by that absence.
+    recordHostedActionInvocation(makeCtx(), grant, {}, "none");
+    expect(await resolveUngatedAction(catalog, "openai.generate_image", makeCtx(), {})).toMatchObject({ decision: { mode: "allow", provenance: { source: "risk_default" } } });
   });
 
   it("refuses external senders and unavailable services", async () => {
