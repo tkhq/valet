@@ -73,6 +73,7 @@ It can then call `openai.edit_image` with the saved `image_path` and the same mo
 
 Both API paths validate one completed image result and decode canonical base64.
 Sharp checks the actual format and decodes pixels before the sandbox write. The original encoded bytes remain unchanged.
+The image validator loads Sharp lazily. Compiled binaries use the existing `__VALET_SHARP__` runtime from extracted assets.
 The file extension, detected format, and attachment MIME must agree. A result reports success only after the write completes.
 
 Image inputs and outputs are limited to 20 MB and 16,777,216 pixels. Animated images are not accepted.

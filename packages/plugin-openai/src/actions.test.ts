@@ -346,6 +346,15 @@ describe("openaiPlugin", () => {
     expect(files.size).toBe(0);
   });
 
+  it("uses the native binary's supplied Sharp runtime for validation", async () => {
+    const embeddedSharp = vi.fn((input: Uint8Array, options: sharp.SharpOptions) => sharp(input, options));
+    vi.stubGlobal("__VALET_SHARP__", embeddedSharp);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: PNG_B64 }] })));
+    const { ctx } = makeCtx({ credential: { accessToken: "sk-test" } });
+    expect((await getAction("openai.generate_image").execute({ prompt: "fox" }, ctx)).success).toBe(true);
+    expect(embeddedSharp).toHaveBeenCalledWith(expect.any(Uint8Array), expect.objectContaining({ limitInputPixels: 4096 * 4096 }));
+  });
+
   it("transcribe_audio returns the transcript text", async () => {
     mockFetch().mockResolvedValue(new Response(JSON.stringify({ text: "hello world" }), { status: 200 }));
     const files = new Map<string, Uint8Array>([["/workspace/a.mp3", new TextEncoder().encode("audio")]]);

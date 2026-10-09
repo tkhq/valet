@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
-import sharp from "sharp";
+import type sharpType from "sharp";
 import { Type, type Static } from "typebox";
 import { readResponseBytes, type PluginActionContext, type PluginActionResult } from "@valet/engine";
+
+declare global {
+  var __VALET_SHARP__: typeof sharpType | undefined;
+}
 
 // Verified against the OpenAI image guide and model pages on 2026-10-09.
 const IMAGE_MODELS = [
@@ -85,6 +89,7 @@ async function validateImage(bytes: Uint8Array, expectedFormat?: string): Promis
     throw new Error("The image is empty or exceeds 20 MB. Use a smaller image or request a smaller output.");
   }
   try {
+    const sharp = globalThis.__VALET_SHARP__ ?? (await import("sharp")).default;
     const image = sharp(bytes, { failOn: "warning", limitInputPixels: MAX_IMAGE_PIXELS });
     const metadata = await image.metadata();
     if (!metadata.format || !Object.hasOwn(FORMATS, metadata.format) || (expectedFormat && metadata.format !== expectedFormat) ||
