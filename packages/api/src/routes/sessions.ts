@@ -1,12 +1,14 @@
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { visibleWorkOrigin } from "../services/work-origin.js";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { and, count, desc, eq, inArray, notExists, or, sql } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { parseAssistantSessionId, type Principal } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { activeLeaseRefusal, cancelAllWorkAsHuman, listBackgroundWork } from "../engine/wakeups-admin.js";
+import { canCancelSessionWakeup } from "./wakeups.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
 import {
@@ -60,6 +62,7 @@ import type {
   GetSessionResponse,
   ListSessionsResponse,
   PatchSessionRequest,
+  PatchSessionResponse,
   PauseSessionResponse,
   RepoBinding,
   SandboxJwtResponse,
@@ -1145,6 +1148,25 @@ sessionsRouter.patch("/:id", async (c) => {
     hadSandbox = live.attachment.current() !== null;
   }
 
+  // An owner move ends the background work the old owner's turns started
+  // (fix wave 2, H11): a timer or a process signal would otherwise start a
+  // turn billed to, and credentialed as, the new owner. It is a human cancel
+  // attributed to the mover, with no signal, because that signal turn would
+  // also run as the new owner. It runs before the owner write, while the
+  // cached session still binds the old owner.
+  let cancelledWorkCount: number | undefined;
+  if (nextOwner !== undefined) {
+    const work = await listBackgroundWork(engineStore, id);
+    if (work.wakeups.length > 0 || work.leases.length > 0) {
+      if (!(await canCancelSessionWakeup(db, row, c.var.principal))) {
+        return c.json({ error: "This session has background work you cannot stop. Ask a session admin to move it." }, 403);
+      }
+      const owned = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
+      const stopped = await cancelAllWorkAsHuman(engineStore, owned, id, {}, { actorUserId: userId, signal: "suppress" });
+      cancelledWorkCount = stopped.cancelled.length;
+    }
+  }
+
   // The writes land after every validation, so a rejected model never
   // leaves a half-applied patch behind.
   let effectiveRow = row;
@@ -1221,7 +1243,7 @@ sessionsRouter.patch("/:id", async (c) => {
   const readOnlyReason = runtime?.ownerType === "team" && !id.startsWith("execution:")
     && !await isLegacyAssistantRuntime(db, id, effectiveRow.orgId)
     ? "This legacy conversation is read-only. Start a new thread to continue." : undefined;
-  const detail: GetSessionResponse = {
+  const detail: PatchSessionResponse = {
     readOnlyReason,
     isWorkspaceRuntime: runtime !== undefined,
     ...rowToSummary(effectiveRow, deriveRunFields(runStateRow(effectiveRow), unsettled)),
@@ -1231,6 +1253,7 @@ sessionsRouter.patch("/:id", async (c) => {
     reasoning,
     profile: effectiveRow.profile,
     docker: effectiveRow.docker,
+    ...(cancelledWorkCount !== undefined ? { cancelledWorkCount } : {}),
   };
   return c.json(detail);
 });
@@ -1310,13 +1333,33 @@ sessionsRouter.post("/:id/pause", async (c) => {
     return c.json({ error: "a turn is running" }, 409);
   }
 
+  // Active leases block a pause, as they block the idle sweeps (spec C3,
+  // fix wave 2 B8): suspending deletes the running process and /scratch.
+  // `force=true` stops that work first, as a human cancel.
+  const leaseRefusal = await activeLeaseRefusal(engineStore, id);
+  const force = leaseRefusal !== null && (await wantsForce(c));
+  if (leaseRefusal !== null && !force) {
+    return c.json({ error: leaseRefusal }, 409);
+  }
+  if (force && !(await canCancelSessionWakeup(db, row, c.var.principal))) {
+    return c.json({ error: "You cannot stop this session's background work. Ask a session admin to pause it." }, 403);
+  }
+
   const session = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
+  const stopped = force
+    ? await cancelAllWorkAsHuman(engineStore, session, id, { leasedOnly: true }, {
+        actorUserId: userId,
+        signal: "defer",
+        note: "They paused the session. Do not start it again unless someone asks.",
+      })
+    : undefined;
   await session.attachment.suspend();
 
   // `suspend()` silently no-ops unless the attachment was `ready` — only
   // stamp the row `hibernated` when it actually transitioned, so a pause hit
   // mid-provision doesn't lie about having suspended anything.
   if (session.attachment.state !== "suspended") {
+    await stopped?.sendSignals();
     return c.json({ error: "sandbox is not ready to pause" }, 409);
   }
 
@@ -1326,9 +1369,32 @@ sessionsRouter.post("/:id/pause", async (c) => {
   // resurrected. The sandbox handle rides along for the reaper.
   await writeHibernated(db, id, session.attachment.sandboxId);
 
-  const body: PauseSessionResponse = { status: "hibernated" };
+  // The signal turns start only after the sandbox stopped, so none of them
+  // races the suspend.
+  await stopped?.sendSignals();
+  const body: PauseSessionResponse = {
+    status: "hibernated",
+    ...(stopped && stopped.cancelled.length > 0 ? { cancelledWork: stopped.cancelled.map((w) => w.id) } : {}),
+  };
   return c.json(body, 200);
 });
+
+/**
+ * True when the request asks to stop active background work: the query
+ * `force=true`, or a JSON body `{ "force": true }`. A missing or non-JSON
+ * body reads as no.
+ */
+async function wantsForce(c: Context<AppEnv>): Promise<boolean> {
+  if (c.req.query("force") === "true") return true;
+  try {
+    const text = await c.req.text();
+    if (!text) return false;
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null && "force" in parsed && parsed.force === true;
+  } catch {
+    return false;
+  }
+}
 
 // ── Replace sandbox ───────────────────────────────────────────────────────
 
@@ -1363,6 +1429,18 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
     return c.json({ error: "a turn is running. Wait for it to finish, then retry." }, 409);
   }
 
+  // Active leases block a replace, as they block a pause (fix wave 2, B8):
+  // the old sandbox goes away with every process in it. `force=true` stops
+  // that work first, as a human cancel.
+  const leaseRefusal = await activeLeaseRefusal(engineStore, id);
+  const force = leaseRefusal !== null && (await wantsForce(c));
+  if (leaseRefusal !== null && !force) {
+    return c.json({ error: leaseRefusal }, 409);
+  }
+  if (force && !(await canCancelSessionWakeup(db, row, caller))) {
+    return c.json({ error: "You cannot stop this session's background work. Ask a session admin to replace the sandbox." }, 403);
+  }
+
   const session = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
 
   // Re-check immediately before replacing — a submission admitted while
@@ -1373,11 +1451,22 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
     return c.json({ error: "a turn is running. Wait for it to finish, then retry." }, 409);
   }
 
+  const stopped = force
+    ? await cancelAllWorkAsHuman(engineStore, session, id, { leasedOnly: true }, {
+        actorUserId: c.var.user.id,
+        signal: "defer",
+        note: "They replaced the sandbox. Do not start it again unless someone asks.",
+      })
+    : undefined;
+
   try {
     await session.attachment.replace();
   } catch (err) {
+    await stopped?.sendSignals();
     return c.json({ error: (err as Error).message }, 409);
   }
+  // The signal turns start only after the old sandbox is gone.
+  await stopped?.sendSignals();
 
   // `replace()` resolves once the re-provision settles, but a provision
   // that fails lands in `error` state without throwing — don't report ok
@@ -1389,7 +1478,10 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
     );
   }
 
-  return c.json({ ok: true }, 200);
+  return c.json(
+    { ok: true, ...(stopped && stopped.cancelled.length > 0 ? { cancelledWork: stopped.cancelled.map((w) => w.id) } : {}) },
+    200,
+  );
 });
 
 // ── Delete ────────────────────────────────────────────────────────────────
