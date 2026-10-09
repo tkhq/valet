@@ -98,9 +98,6 @@ function returnedImage(body: unknown) {
 /** Direct Images API fallback for models without native image generation. */
 export async function executeImage(args: ImageArgs, ctx: PluginActionContext, key: string, apiUrl: string): Promise<PluginActionResult> {
   ctx.signal.throwIfAborted();
-  if (ctx.sessionPurpose === "workflow") {
-    throw new Error("Image generation needs a session sandbox. Run this action in an agent session, not a workflow tool node.");
-  }
   const { model, format, path, options } = validateArgs(args);
   const sharp = await imageDecoder();
   let source: Uint8Array | undefined;

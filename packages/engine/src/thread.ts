@@ -4222,8 +4222,8 @@ export class Thread {
     let fallbackExhausted = false;
 
     for (;;) {
-      // Recheck after every attempt: a retry can itself save a paid image.
-      if (this.nativeImages.savedInTurn) return;
+      // Guard only the failed request, not later requests after persisted receipts.
+      if (this.nativeImages.savedInRequest) return;
       const last = this.agent.state.messages[this.agent.state.messages.length - 1];
       if (!last || last.role !== "assistant" || last.stopReason !== "error") return;
       const error = last.errorMessage ?? "";

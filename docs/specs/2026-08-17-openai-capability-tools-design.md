@@ -91,13 +91,16 @@ The adapter writes validated original bytes before making the preview. It regist
 If the preview fails, the receipt returns the saved path and a warning instead of asking for another paid generation.
 The web renderer keeps that path visible without a preview.
 If a later stream event fails, completed images still produce receipts with a stream warning.
-An abort after saving reports the paths in its error. Receipt replay still propagates aborts; it does not treat them as preview failures. A turn that saved an image cannot use transient-turn retries or provider fallback.
+An abort after saving reports the paths in its error. Receipt replay still propagates aborts; it does not treat them as preview failures. A request that saved an image cannot use transient-turn retries or provider fallback. Later plain requests retain normal recovery after receipts.
 
 ### Responses replay
 
 Pi-ai replays reasoning signatures but does not replay their following hosted image items.
 The payload hook omits reasoning from native-image turns and converts internal receipt function pairs into ordinary text/vision user context.
-It preserves unrelated reasoning and ordinary assistant phases. The next request contains no orphaned image-turn reasoning or fabricated receipt function pair.
+The same assistant message's text and real function-call items lose their provider IDs when its reasoning is omitted.
+Real function calls retain their call IDs and matching outputs. Unrelated reasoning, item IDs, and assistant phases remain unchanged.
+The [Responses input reference](https://developers.openai.com/api/reference/resources/responses/methods/create) accepts hosted image items with base64 results.
+This adapter instead uses ID-free replay and bounded previews, so it does not resend large originals. The next request contains no orphaned image-turn reasoning or fabricated receipt function pair.
 The [image guide](https://developers.openai.com/api/docs/guides/image-generation) supports edits from image inputs without prior reasoning.
 The [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) requires complete output when preserving reasoning; this adapter does not preserve image-turn reasoning.
 A scripted SSE test includes reasoning and checks the exact next-turn input sequence.
@@ -121,8 +124,8 @@ Native receipts can recover from an interrupted turn by reading the saved file, 
 Relative input and output paths stay relative to the sandbox working directory, including on LocalSandbox.
 Absolute container paths must resolve inside `/workspace`. Sandbox providers retain their own isolation and filesystem policy.
 The fallback response reader bounds bytes before JSON parsing. Error bodies are capped at 64 KB and retain their HTTP status.
-Workflow tool nodes have no session sandbox and refuse image generation before any paid request.
-Other invocations prepare the target directory before the request. Sandbox preparation failures retain their real cause.
+All invocations prepare the target directory before the request. Workflow agent sessions with a writable sandbox can generate images.
+Sandbox-less workflow tool nodes fail during directory preparation, before payment. Sandbox preparation failures retain their real cause.
 Input size is checked before and after the sandbox read.
 The plugin does not retry paid image requests automatically. Provider errors redact credential values.
 

@@ -24,7 +24,10 @@ afterEach(async () => {
 
 function responseStream(id: string, item: Record<string, unknown>): Response {
   const reasoning = { type: "reasoning", id: `rs_${id}`, summary: [{ type: "summary_text", text: "Create the requested image" }], encrypted_content: "fixture-encrypted-reasoning" };
-  const items = item.type === "image_generation_call" ? [reasoning, item] : [item];
+  const items = item.type === "image_generation_call" ? [reasoning, item,
+    { type: "message", id: `msg_mixed_${id}`, role: "assistant", status: "completed", phase: "commentary", content: [{ type: "output_text", text: "Checking the saved image", annotations: [] }] },
+    { type: "function_call", id: `fc_mixed_${id}`, call_id: `call_mixed_${id}`, name: "bash", arguments: '{"command":"pwd"}', status: "completed" },
+  ] : [item];
   const events = [
     { type: "response.created", response: { id } },
     ...items.flatMap((output, output_index) => [
@@ -114,10 +117,17 @@ it("the selected OpenAI model generates and edits natively with sandbox files, l
     expect(JSON.stringify(requests[1].input)).not.toContain("rs_resp_1");
     expect(JSON.stringify(requests[2].input)).not.toContain("rs_resp_1");
     expect(JSON.stringify(requests[1].input)).not.toContain('"name":"openai_native_image"');
+    expect(requests[1].input).toEqual(expect.arrayContaining([
+      { type: "message", role: "assistant", status: "completed", phase: "commentary", content: [{ type: "output_text", text: "Checking the saved image", annotations: [] }] },
+      { type: "function_call", call_id: "call_mixed_resp_1", name: "bash", arguments: '{"command":"pwd"}' },
+      expect.objectContaining({ type: "function_call_output", call_id: "call_mixed_resp_1" }),
+    ]));
+    expect(JSON.stringify(requests[2].input)).not.toContain("fc_mixed_resp_1");
+    expect(JSON.stringify(requests[2].input)).not.toContain("msg_mixed_resp_1");
   } finally { ws.close(); }
 });
 
-it("an unsupported session model generates and edits through direct Images with saved files and inline history", async () => {
+it("an unsupported workflow agent model generates and edits through direct Images with a real sandbox", async () => {
   vi.stubEnv("OPENAI_API_KEY", "fixture-openai-key");
   const faux = registerFauxProvider({ api: "openai-responses", provider: "image-fallback", models: [{ id: "image-fallback", input: ["text", "image"] }] });
   unregister = () => faux.unregister();
@@ -130,6 +140,7 @@ it("an unsupported session model generates and edits through direct Images with 
   expect(response.status).toBe(201);
   const created = await response.json() as CreateSessionResponse;
   const session = await testApi.providers.engineHost.sessionFor(created.id, { orgId: "local-org", userId: "local-user", workspace });
+  session.options.purpose = "workflow";
   session.options.resolveModel = async () => ({ model: faux.getModel(), apiKey: "fixture-openai-key" });
   await session.setModel("image-fallback");
   const png = await sharp({ create: { width: 2, height: 2, channels: 3, background: "red" } }).png().toBuffer();

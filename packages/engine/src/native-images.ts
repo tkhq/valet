@@ -25,10 +25,10 @@ function imageToolRejected(message: string): boolean {
 export class NativeImageBridge {
   private saved = new Map<string, ToolResult>();
   private unavailable = false;
-  savedInTurn = false;
+  savedInRequest = false;
 
   beginTurn(): void {
-    this.savedInTurn = false;
+    this.savedInRequest = false;
     this.unavailable = false;
   }
 
@@ -47,7 +47,6 @@ export class NativeImageBridge {
         if (!record(args) || typeof args.path !== "string" || !NATIVE_PATH.test(args.path) || typeof args.image_id !== "string") {
           throw new Error("Invalid native image receipt. Request the image again.");
         }
-        this.savedInTurn = true;
         const key = `${args.image_id}:${args.path}`;
         const saved = this.saved.get(key);
         if (saved) { this.saved.delete(key); return saved; }
@@ -82,10 +81,13 @@ export class NativeImageBridge {
 
   stream(model: Model<Api>, context: { messages: Message[] }, options: SimpleStreamOptions, sandbox: Sandbox, allowed = true) {
     this.saved.clear();
+    this.savedInRequest = false;
     // Pi preserves rs_* signatures but drops their following hosted image item. The image guide
     // permits edits from image context alone. Omit this turn's reasoning, not unrelated reasoning.
     const orphanedReasoning = new Set<string>();
     const receiptCalls = new Set<string>();
+    const unpairedItemIds = new Set<string>();
+    const unpairedCalls = new Set<string>();
     for (const message of context.messages) {
       if (message.role !== "assistant" || !message.content.some((block) => block.type === "toolCall" && block.name === NATIVE_IMAGE_RESULT_TOOL)) continue;
       for (const block of message.content) {
@@ -143,7 +145,7 @@ export class NativeImageBridge {
         await sandbox.writeBinary(path, bytes);
       } catch { options.signal?.throwIfAborted(); throw new Error("Cannot save the generated image. Check the sandbox storage and request it again."); }
       // Register the original immediately. Preview work or a later abort cannot erase its receipt.
-      this.savedInTurn = true;
+      this.savedInRequest = true;
       receipts.push({ path, image_id: item.id });
       seen.set(item.id, hash);
       const key = `${item.id}:${path}`;
@@ -152,7 +154,23 @@ export class NativeImageBridge {
     };
     const request = (native: boolean) => {
       let instructed = false;
-      const transcript: { messages: Message[] } = { messages: context.messages.map((message) => {
+      const transcript: { messages: Message[] } = { messages: context.messages.map((message, messageIndex) => {
+        if (message.role === "assistant" && message.content.some((block) => block.type === "toolCall" && block.name === NATIVE_IMAGE_RESULT_TOOL)) {
+          // Temporary IDs identify exactly this message's paired items after pi's conversion.
+          // The payload hook removes them with the missing hosted item's reasoning.
+          return { ...message, content: message.content.map((block, blockIndex) => {
+            if (block.type !== "text" && block.type !== "toolCall") return block;
+            if (block.type === "toolCall") {
+              // Match pi's call_id normalization without changing tool/result pairing.
+              unpairedCalls.add(block.id.split("|")[0].replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64).replace(/_+$/, ""));
+              return block;
+            }
+            const id = `msg_valet_replay_${messageIndex}_${blockIndex}`;
+            unpairedItemIds.add(id);
+            const signature: unknown = block.textSignature?.startsWith("{") ? JSON.parse(block.textSignature) : undefined;
+            return { ...block, textSignature: JSON.stringify({ ...(record(signature) ? signature : {}), v: 1, id }) };
+          }) };
+        }
         if (message.role !== "system") return message;
         const hidden = (name: string) => name === NATIVE_IMAGE_RESULT_TOOL || (native && name === "openai__generate_image");
         const addInstruction = native && !instructed;
@@ -178,6 +196,11 @@ export class NativeImageBridge {
               if (item.type === "function_call" && item.name === NATIVE_IMAGE_RESULT_TOOL) return [];
               if (item.type === "function_call_output" && typeof item.call_id === "string" && receiptCalls.has(item.call_id)) {
                 return [{ role: "user", content: Array.isArray(item.output) ? item.output : [{ type: "input_text", text: item.output }] }];
+              }
+              if ((typeof item.id === "string" && unpairedItemIds.has(item.id))
+                || ((item.type === "function_call" || item.type === "custom_tool_call") && typeof item.call_id === "string" && unpairedCalls.has(item.call_id))) {
+                const { id: _id, ...unpaired } = item;
+                return [unpaired];
               }
               return [item];
             }) }

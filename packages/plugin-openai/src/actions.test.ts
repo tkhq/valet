@@ -107,12 +107,23 @@ describe("openaiPlugin", () => {
     ]);
   });
 
-  it("refuses workflow image generation before any paid request", async () => {
+  it("preserves the throwing workflow tool-node sandbox error before payment", async () => {
     const { ctx } = makeCtx({ credential: { accessToken: "sk-test" } });
     ctx.sessionPurpose = "workflow";
     ctx.sandbox.mkdir = async () => { throw new Error("sandbox unavailable in workflow action invocation"); };
-    await expect(getAction("openai.generate_image").execute({ prompt: "fox" }, ctx)).rejects.toThrow("session sandbox");
+    await expect(getAction("openai.generate_image").execute({ prompt: "fox" }, ctx)).rejects.toThrow("sandbox unavailable in workflow action invocation");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("allows workflow agent image generation with a writable sandbox", async () => {
+    const { ctx, files } = makeCtx({ credential: { accessToken: "sk-test" } });
+    ctx.sessionPurpose = "workflow";
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: PNG_B64 }] })));
+    const result = await getAction("openai.generate_image").execute({ prompt: "fox" }, ctx);
+    expect(result.success).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(files.size).toBe(1);
+    expect(Buffer.from([...files.values()][0]).equals(Buffer.from(PNG_B64, "base64"))).toBe(true);
   });
 
   it("preserves sandbox preparation errors before spending credits", async () => {

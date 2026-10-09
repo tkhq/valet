@@ -1,5 +1,5 @@
 import { createAssistantMessageEventStream, getApiProvider, registerApiProvider, unregisterApiProviders } from "@earendil-works/pi-ai/compat";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { randomBytes } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import sharp from "sharp";
@@ -152,7 +152,7 @@ it.each(["response-failure", "second-image-failure"])("delivers saved receipts a
   const calls = final.content.filter((block) => block.type === "toolCall");
   expect(calls).toHaveLength(1);
   expect(calls[0].name).toBe(NATIVE_IMAGE_RESULT_TOOL);
-  expect(bridge.savedInTurn).toBe(true);
+  expect(bridge.savedInRequest).toBe(true);
   expect(bridge.enabled(model)).toBe(false);
   expect(fetchMock).toHaveBeenCalledTimes(1);
   if (typeof calls[0].arguments.path !== "string") throw new Error("missing receipt");
@@ -227,21 +227,30 @@ it("makes only one tool-free retry when that retry is also rejected", async () =
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
-it("omits only orphaned image-turn reasoning from the exact replay payload", async () => {
+it.each([false, true])("replays image-turn items without orphaned IDs (mixed response: %s)", async (mixed) => {
   const reasoning = { type: "reasoning", id: "rs_image", summary: [{ type: "summary_text", text: "Draw an image" }], encrypted_content: "encrypted-image-reasoning" };
-  const fetchMock = mockProvider([reasoning, item()]);
+  const text = { type: "message", id: "msg_image", role: "assistant", status: "completed", phase: "commentary", content: [{ type: "output_text", text: "Checking the image", annotations: [] }] };
+  const bash = { type: "function_call", id: "fc_image_bash", call_id: "call_image_bash", name: "bash", arguments: '{"command":"ls"}', status: "completed" };
+  const fetchMock = mockProvider([reasoning, item(), ...(mixed ? [text, bash] : [])]);
   const bridge = new NativeImageBridge();
   const sandbox = new VirtualSandbox("reasoning-replay");
   const user = { role: "user" as const, content: "Draw a square", timestamp: 1 };
   const final = await bridge.stream(model, { messages: [user] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox).result();
   expect(final.content).toContainEqual({ type: "thinking", thinking: "Draw an image", thinkingSignature: JSON.stringify(reasoning) });
-  const call = final.content.find((block) => block.type === "toolCall");
+  const call = final.content.find((block) => block.type === "toolCall" && block.name === NATIVE_IMAGE_RESULT_TOOL);
   if (call?.type !== "toolCall") throw new Error("missing receipt");
+  if (mixed) {
+    expect(final.content).toContainEqual({ type: "text", text: "Checking the image", textSignature: JSON.stringify({ v: 1, id: "msg_image", phase: "commentary" }) });
+    expect(final.content).toContainEqual(expect.objectContaining({ type: "toolCall", id: "call_image_bash|fc_image_bash", name: "bash" }));
+  }
   const result = await bridge.tool().execute(call.arguments, { sandbox, signal: new AbortController().signal } as ToolContext);
   const unrelatedReasoning = { ...reasoning, id: "rs_unrelated", encrypted_content: "encrypted-unrelated" };
   const prior: typeof final = { ...final, content: [{ type: "thinking", thinking: "Prior task", thinkingSignature: JSON.stringify(unrelatedReasoning) }, { type: "text", text: "Prior answer", textSignature: "msg_prior" }] };
   fetchMock.mockImplementation(async () => wire([]));
-  await bridge.stream(model, { messages: [prior, user, final, {
+  await bridge.stream(model, { messages: [prior, user, final, ...(mixed ? [{
+    role: "toolResult" as const, toolCallId: "call_image_bash|fc_image_bash", toolName: "bash",
+    content: [{ type: "text" as const, text: "image.png" }], isError: false, timestamp: 2,
+  }] : []), {
     role: "toolResult", toolCallId: call.id, toolName: NATIVE_IMAGE_RESULT_TOOL,
     content: [{ type: "text", text: result.text }, { type: "image", data: base64, mimeType: "image/png" }], isError: false, timestamp: 2,
   }, { role: "user", content: "Make it blue", timestamp: 3 }] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox).result();
@@ -251,13 +260,18 @@ it("omits only orphaned image-turn reasoning from the exact replay payload", asy
     unrelatedReasoning,
     { type: "message", role: "assistant", content: [{ type: "output_text", text: "Prior answer", annotations: [] }], status: "completed", id: "msg_prior" },
     { role: "user", content: [{ type: "input_text", text: "Draw a square" }] },
+    ...(mixed ? [
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Checking the image", annotations: [] }], status: "completed", phase: "commentary" },
+      { type: "function_call", call_id: "call_image_bash", name: "bash", arguments: '{"command":"ls"}' },
+      { type: "function_call_output", call_id: "call_image_bash", output: "image.png" },
+    ] : []),
     { role: "user", content: [{ type: "input_text", text: result.text }, { type: "input_image", detail: "auto", image_url: `data:image/png;base64,${base64}` }] },
     { role: "user", content: [{ type: "input_text", text: "Make it blue" }] },
   ]);
   expect(JSON.stringify(body.input)).not.toContain("rs_image");
 });
 
-it.each([false, true])("blocks retries after an image is saved (earlier retry: %s)", async (earlierRetry) => {
+it.each([false, true])("retries a later plain request without regenerating the saved image (earlier retry: %s)", async (earlierRetry) => {
   const store = new InMemorySessionStore();
   const events = new InMemoryEventStream();
   const engine = new Engine({ providers: { store, stream: events, sandboxProvider: new VirtualSandboxProvider() } });
@@ -265,7 +279,8 @@ it.each([false, true])("blocks retries after an image is saved (earlier retry: %
   const fetchMock = vi.fn<typeof fetch>();
   if (earlierRetry) fetchMock.mockResolvedValueOnce(wire([], "failed"));
   fetchMock.mockResolvedValueOnce(wire([item()], "failed"))
-    .mockImplementation(async () => wire([], "failed"));
+    .mockResolvedValueOnce(wire([], "failed"))
+    .mockImplementation(async () => wire([{ type: "message", id: "msg_recovered", role: "assistant", status: "completed", content: [{ type: "output_text", text: "The saved image is ready.", annotations: [] }] }]));
   vi.stubGlobal("fetch", fetchMock);
   const session = await engine.createSession({ userId: "u", orgId: "o", workspace: "/workspace", sandbox: {}, model,
     purpose: "child", turnRetry: { maxAttempts: 2, backoffMs: [1] }, resolveFallbackModel: fallback,
@@ -276,14 +291,46 @@ it.each([false, true])("blocks retries after an image is saved (earlier retry: %
   try {
     const receipt = await session.prompt("Draw a square");
     await expect.poll(() => settled).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(earlierRetry ? 3 : 2);
-    expect(fallback).toHaveBeenCalledTimes(earlierRetry ? 1 : 0);
+    expect(fetchMock).toHaveBeenCalledTimes(earlierRetry ? 4 : 3);
+    expect(fallback).toHaveBeenCalledTimes(1);
     const messages = await store.getEntries(session.id, receipt.threadId);
     expect(JSON.stringify(messages)).toContain("generated-images/");
     expect(JSON.stringify(messages)).toContain(NATIVE_IMAGE_RESULT_TOOL);
+    expect(JSON.stringify(messages)).toContain("The saved image is ready.");
     const requests = fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
     expect(requests.filter((request) => request.tools?.some((tool: { type: string }) => tool.type === "image_generation"))).toHaveLength(earlierRetry ? 2 : 1);
   } finally { await session.destroy(); }
+});
+
+it("allows provider fallback for a later plain request after image receipts", async () => {
+  const backup = registerFauxProvider({ provider: "image-receipt-backup" });
+  backup.setResponses([fauxAssistantMessage("Recovered after the image receipt.")]);
+  const store = new InMemorySessionStore();
+  const events = new InMemoryEventStream();
+  const engine = new Engine({ providers: { store, stream: events, sandboxProvider: new VirtualSandboxProvider() } });
+  const fallback = vi.fn(async () => ({ model: backup.getModel(), apiKey: "backup-key" }));
+  const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(wire([item()], "failed"))
+    .mockImplementation(async () => wire([], "failed"));
+  vi.stubGlobal("fetch", fetchMock);
+  const session = await engine.createSession({ userId: "u", orgId: "o", workspace: "/workspace", sandbox: {}, model,
+    purpose: "child", resolveFallbackModel: fallback, resolveModel: async () => ({ model, apiKey: "sk-fixture-key" }),
+  });
+  let settled = false;
+  events.subscribe({ sessionId: session.id }, ({ event }) => { if (event.type === "submission_settled") settled = true; });
+  try {
+    const receipt = await session.prompt("Draw a square");
+    await expect.poll(() => settled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fallback).toHaveBeenCalledTimes(1);
+    const messages = await store.getEntries(session.id, receipt.threadId);
+    expect(JSON.stringify(messages)).toContain("generated-images/");
+    expect(JSON.stringify(messages)).toContain("Recovered after the image receipt.");
+    const requests = fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+    expect(requests.filter((request) => request.tools?.some((tool: { type: string }) => tool.type === "image_generation"))).toHaveLength(1);
+  } finally {
+    await session.destroy();
+    backup.unregister();
+  }
 });
 
 it("reports a saved path even if the turn aborts immediately after its write", async () => {
@@ -298,7 +345,7 @@ it("reports a saved path even if the turn aborts immediately after its write", a
   const path = final.errorMessage?.match(/generated-images\/[a-f0-9-]+\.png/)?.[0];
   if (!path) throw new Error("missing saved path in abort error");
   expect(Buffer.from(await sandbox.readBinary(path)).equals(png)).toBe(true);
-  expect(bridge.savedInTurn).toBe(true);
+  expect(bridge.savedInRequest).toBe(true);
 });
 
 it("does not retry a streamed image-tool error as a request-time rejection", async () => {
