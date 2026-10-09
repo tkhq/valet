@@ -87,10 +87,16 @@ Tell the agent to read those files. Do not ask it to retype the data.
 
 Keys are literal, normalized relative paths. Use `/` between segments of letters, digits, dots, underscores, and hyphens.
 Do not use templates, dot segments, empty segments, absolute paths, or backslashes in keys.
+Do not define a file and its child path (`a` and `a/b`).
 Values are template strings. A single expression preserves its type: strings are UTF-8 text; other values become pretty-printed JSON.
 Missing paths follow `policy.onUnresolvedPath`: `empty` uses the existing empty/null rendering; `fail` stops the node before dispatch.
 A foreach body can use `item` and `index` in values. Each iteration has its own directory.
 The host scopes directories by run, node, and iteration. Limits are 100 files, 10 MiB per file, and 25 MiB total.
+Inputs are ephemeral. The host removes them when the consuming step settles and removes the run directory on every settlement outcome.
+Use the default `until_idle` wait mode. `files` cannot use `wait.mode: "none"` because settlement would remove data before consumption.
+A bounded sweep removes crash leftovers older than 7 days. Cleanup failures are logged without failing the run.
+Shared legacy team sandboxes and unverifiable audiences cannot receive files. Use a session step or start a new private thread.
+Provisioning and transport failures retain normal retries. A duplicate dispatch cannot overwrite previously delivered bytes.
 `llm` and `tool` nodes do not accept `files`.
 
 ## Model selection

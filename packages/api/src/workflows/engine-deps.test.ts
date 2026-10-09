@@ -20,7 +20,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentInputPrompt } from "./agent-files.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage, workflowRunThreadKey } from "./engine-deps.js";
 import { eq } from "drizzle-orm";
-import { legacyWorkflowAdmissions, assistants, orgs, workflowDefinitions } from "../schema/index.js";
+import { legacyAssistantRuntimes, legacyWorkflowRuntimes, legacyWorkflowAdmissions, assistants, orgs, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { ensureDefaultAssistantSession, loadAssistantBySessionId, resolveDefaultAssistant } from "../assistants/service.js";
@@ -430,7 +430,7 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       origin: { assistantSessionId: root.sessionId, threadId: originThread.id } },
     { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
     const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
-    const options = { dispatchId: `workflow:${runId}:report`, queueMode: "followup" as const, ownerHint: { ownerType: "team", ownerId: team.id }, files: [{ path: "audience.txt", content: "private input" }] };
+    const options = { dispatchId: `workflow:${runId}:report`, queueMode: "followup" as const, ownerHint: { ownerType: "team", ownerId: team.id }, files: key.startsWith("slack:") ? undefined : [{ path: "audience.txt", content: "private input" }] };
     const receipt = await deps.promptOrchestrator("report into the original audience", options);
     expect(receipt.sessionId).not.toBe(root.sessionId);
     expect(await engineStore.getSession(receipt.sessionId)).toMatchObject({ parentSessionId: root.sessionId, parentThreadId: originThread.id });
@@ -441,18 +441,39 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     await engineStore.admitSubmission(root.sessionId, originThread.id, { id: "old-admission", threadId: originThread.id,
       dispatchId: `workflow:${runId}:old-report`, content: { kind: "signal", signalType: "workflow.request", body: "old report", attributes: { runId } },
       status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now });
-    const retainedOptions = { ...options, dispatchId: `workflow:${runId}:retained-files` };
+    const retainedOptions = { ...options, files: [{ path: "audience.txt", content: "private input" }], dispatchId: `workflow:${runId}:retained-files` };
     await engineStore.admitSubmission(root.sessionId, originThread.id, { id: "retained-files", threadId: originThread.id,
       dispatchId: retainedOptions.dispatchId,
       content: { kind: "signal", signalType: "workflow.request",
         body: agentInputPrompt(engineHost.sandboxWorkingDirectory(root.session), "retained report", retainedOptions), attributes: { runId } },
       status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now });
-    expect(await deps.promptOrchestrator("retained report", retainedOptions))
-      .toEqual({ sessionId: root.sessionId, threadId: originThread.id, queueItemId: "retained-files" });
+    await expect(deps.promptOrchestrator("retained report", retainedOptions))
+      .rejects.toThrow("shared legacy team sandbox");
     engineHost.evictCache(root.sessionId);
     const oldReceipt = await deps.promptOrchestrator("old report", { ...options, files: undefined, dispatchId: `workflow:${runId}:old-report` });
     expect(oldReceipt).toEqual({ sessionId: root.sessionId, threadId: originThread.id, queueItemId: "old-admission" });
     expect(await deps.awaitResult(oldReceipt.sessionId, oldReceipt.threadId, oldReceipt.queueItemId)).toMatchObject({ outcome: "aborted" });
+  });
+
+  it("rejects input delivery to a retained shared team runtime before provisioning", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { createTeam } = await import("../services/teams.js");
+    const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "Shared files", creatorUserId: LOCAL_USER.id });
+    const root = await ensureDefaultAssistantSession(api.providers, { type: "team", id: team.id }, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+    const now = Date.now(), runId = "shared-inputs", workflowId = "shared-workflow";
+    await db.insert(legacyAssistantRuntimes).values({ sessionId: root.sessionId, orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id });
+    await db.insert(workflowDefinitions).values({ id: workflowId, orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "Shared", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: now, updatedAt: now });
+    await db.insert(legacyWorkflowRuntimes).values({ workflowId, sessionId: root.sessionId, orgId: LOCAL_ORG.id });
+    await workflowStore.createRun(runId, { workflowId, definitionVersionId: "v1" }, { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
+    const ready = vi.spyOn(root.session.attachment, "ensureReady");
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    await expect(deps.promptOrchestrator("Read", { dispatchId: `workflow:${runId}:build`, queueMode: "followup",
+      ownerHint: { ownerType: "team", ownerId: team.id }, files: [{ path: "private.txt", content: "secret" }] }))
+      .rejects.toMatchObject({ name: "AgentInputFileError", message: expect.stringContaining("Use a session step or start a new private thread") });
+    expect(ready).not.toHaveBeenCalled();
+    expect(await engineStore.listUnsettledSubmissions(root.sessionId)).toEqual([]);
   });
 
   it.each(["archived", "missing"])("fails closed for a supplied %s origin instead of using the default audience", async (state) => {

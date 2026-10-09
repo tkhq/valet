@@ -1,4 +1,4 @@
-import { agentInputPrompt, writeAgentInputFiles } from "./agent-files.js";
+import { agentInputPrompt, cleanupAgentInputFiles, writeAgentInputFiles } from "./agent-files.js";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 /**
  * `WorkflowEngineDeps` (Phase 5 plan decision 15) implemented over
@@ -38,6 +38,7 @@ import type { Usage } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
   parsePrincipal,
+  type Session,
   type ActionPlugin,
   type CredentialStore,
   type Principal,
@@ -46,7 +47,10 @@ import {
   type ValetPlugin,
 } from "@valet/engine";
 import { bundledModel } from "@valet/engine/model-catalog";
+import { AgentInputFileError } from "@valet/workflow";
+import { canAccessSessionResources } from "../services/session-access.js";
 import type {
+  WorkflowDefinition,
   WorkflowAwaitResultOptions,
   WorkflowCreateSessionOptions,
   WorkflowEngineDeps,
@@ -62,7 +66,7 @@ import type {
   WorkflowRunOrigin,
   WorkflowStore,
 } from "@valet/workflow";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -344,6 +348,52 @@ async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, ti
   });
 }
 
+/** Runs for every settlement outcome, before thread eviction or sandbox reclaim. */
+export async function cleanupWorkflowRunInputs(opts: WorkflowEngineDepsOpts, runId: string): Promise<void> {
+  try {
+    const run = await opts.store.getRun(runId);
+    if (!run) return;
+    // The interpreter persists a validated dag/v1 snapshot for every run.
+    const definition = run.definition as WorkflowDefinition;
+    const fileNodes = new Set(definition.nodes.flatMap(node => node.type === "foreach" ? [node.body] : [node])
+      .filter(node => "files" in node && node.files && Object.keys(node.files).length > 0).map(node => node.id));
+    if (!fileNodes.size) return;
+    const sessions = new Set((await opts.store.getCheckpoints(runId))
+      .filter(cp => fileNodes.has(cp.nodeId) && (cp.effects?.inputFilesAttempted || cp.effects?.receipt)).map(cp => cp.effects?.sessionId)
+      .filter((id): id is string => typeof id === "string"));
+    for (const sessionId of sessions) {
+      try {
+        const session = await ensureSession(opts, sessionId);
+        await cleanupAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), { runId });
+      } catch (err) {
+        console.warn(`workflow input run cleanup failed for ${runId} on ${sessionId}:`, err);
+      }
+    }
+  } catch (err) {
+    console.warn(`workflow input run cleanup failed for ${runId}:`, err);
+  }
+}
+
+/** Preserve the admission's bytes and receipt when re-driving a lost checkpoint. */
+async function deliverInputs(opts: WorkflowEngineDepsOpts, session: Session,
+  text: string, promptOpts: WorkflowPromptOptions | WorkflowPromptOrchestratorOptions): Promise<string> {
+  if (!promptOpts.files?.length) return text;
+  // Validate before touching the checkpoint or sandbox.
+  agentInputPrompt(opts.host.sandboxWorkingDirectory(session), text, promptOpts);
+  const prior = await opts.db.execute(sql`SELECT id FROM engine_queue_items
+    WHERE session_id = ${session.id} AND dispatch_id = ${promptOpts.dispatchId} LIMIT 1`) as { rows: Array<{ id: string }> };
+  if (!prior.rows.length) {
+    // Record the resolved target before a partial write can fail. Settlement
+    // cleanup must also find orchestrator writes that never admitted a prompt.
+    const [, runId, nodeId, iteration = '0'] = promptOpts.dispatchId.split(':');
+    const checkpoint = (await opts.store.getCheckpoints(runId)).find(cp => cp.nodeId === nodeId && cp.iteration === Number(iteration));
+    if (checkpoint?.status === 'intent') {
+      await opts.store.putIntent({ ...checkpoint, attempt: promptOpts.workflowAttempt ?? checkpoint.attempt, effects: { ...checkpoint.effects, sessionId: session.id, inputFilesAttempted: true } });
+    }
+  }
+  return writeAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), text, promptOpts, prior.rows.length > 0);
+}
+
 export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowEngineDeps {
   const invokeActionImpl = buildActionInvoker({
     db: opts.db,
@@ -375,7 +425,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         }
         return { threadId: previous.threadId, queueItemId: previous.queueItemId };
       }
-      const deliveredText = await writeAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), text, promptOpts);
+      const deliveredText = await deliverInputs(opts, session, text, promptOpts);
       const receipt = await thread.submitPrompt(deliveredText, {
         dispatchId: promptOpts.dispatchId,
         model: promptOpts.model,
@@ -383,6 +433,11 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         queueMode: promptOpts.queueMode,
       });
       return { threadId: thread.id, queueItemId: receipt.queueItemId };
+    },
+
+    async cleanupAgentInputs(sessionId: string, dispatchId: string): Promise<void> {
+      const session = await ensureSession(opts, sessionId);
+      await cleanupAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), { dispatchId });
     },
 
     async awaitResult(
@@ -557,6 +612,10 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         throw new Error("Workflow origin owner is no longer a team member. Start a new run from an authorized assistant.");
       }
       if (previous) {
+        if (promptOpts.files?.length && previousAssistant?.ownerType === "team" &&
+            await isLegacyAssistantRuntime(opts.db, previous.sessionId, ctx.orgId)) {
+          throw new AgentInputFileError("Workflow files cannot be delivered to a shared legacy team sandbox. Use a session step or start a new private thread.");
+        }
         return { sessionId: previous.sessionId, threadId: previous.threadId, queueItemId: previous.queueItemId };
       }
       // Through the shared helper, so a runtime first woken by a workflow
@@ -592,6 +651,13 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         const target = await resolveWorkflowReportTarget(deps,
           { type: assistant.ownerType, id: assistant.ownerId }, meta, session, thread, promptOpts.dispatchId);
         if (target.priorQueueItemId) {
+          if (promptOpts.files?.length && assistant.ownerType === "team" &&
+              (!session.options.parentSessionId || await isLegacyAssistantRuntime(opts.db, session.id, ctx.orgId))) {
+            throw new AgentInputFileError("Workflow files cannot be delivered to a shared legacy team sandbox. Use a session step or start a new private thread.");
+          }
+          if (promptOpts.files?.length) {
+            await writeAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), promptText, promptOpts, true);
+          }
           const item = await opts.engineStore.getQueueItem(session.id, target.priorQueueItemId);
           const content = item?.content;
           if (!content || typeof content === "string" || !("kind" in content) || content.kind !== "signal" ||
@@ -607,7 +673,19 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // string-valued by contract (`SignalContent`), and nothing set it
       // before — which is why a workflow report showed up in a person's
       // assistant as an envelope labelled "workflow.request" and nothing else.
-      const deliveredText = await writeAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), promptText, promptOpts);
+      if (promptOpts.files?.length) {
+        const data = await session.toData();
+        const legacyShared = data.owner.type === "team" && await isLegacyAssistantRuntime(opts.db, session.id, ctx.orgId);
+        const audienceAccess = await canAccessSessionResources({ db: opts.db, engineStore: opts.engineStore,
+          engineCredentials: opts.credentials, onePassword: opts.onePassword },
+          { ...data, ownerType: data.owner.type, ownerId: data.owner.id },
+          principal.type === "team" && ctx.actorUserId === `team:${principal.id}`
+            ? { type: "team", id: principal.id } : { type: "user", id: ctx.actorUserId });
+        if (legacyShared || !audienceAccess) {
+          throw new AgentInputFileError("Workflow files cannot be delivered to a shared or unverifiable sandbox audience. Use a session step or start a new private thread.");
+        }
+      }
+      const deliveredText = await deliverInputs(opts, session, promptText, promptOpts);
       const content: SignalContent = {
         kind: "signal",
         signalType: "workflow.request",

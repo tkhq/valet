@@ -331,6 +331,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "The app labels an `orchestrator` step \"Thread\"; its stored type is still `orchestrator`. " +
       "Session and orchestrator nodes accept files: { 'data.json': '{{nodes.fetch.result}}' }. " +
       "Keys are literal relative paths. The host writes rendered inputs before the first turn and appends a path/byte manifest. " +
+      "Files are ephemeral and require until_idle waiting. Shared legacy team sandboxes cannot receive them. " +
       "Use files instead of pasting large data into prompts. Limits: 100 files, 10 MiB each, 25 MiB per node. " +
       "The definition is validated before saving; validation errors come back in `error`. " +
       "Returns { workflowId } — always surface it to the user.",
@@ -677,6 +678,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Presence replaces the channel identity; null clears it. " +
       "Session and orchestrator upserts accept files mapping literal relative paths to template strings. " +
       "The host writes these inputs before the first turn (100 files, 10 MiB each, 25 MiB total). " +
+      "Inputs are ephemeral, require until_idle waiting, and cannot use shared legacy team sandboxes. " +
       "Prefer this over save_workflow for small edits — the patched result runs the full " +
       "linter, so a bad patch returns lint errors instead of saving. The linter reads the " +
       "WHOLE merged definition, so an error in a node you did not touch also blocks the " +

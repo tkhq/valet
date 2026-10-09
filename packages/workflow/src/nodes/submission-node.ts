@@ -50,6 +50,7 @@ export interface SubmissionNodeContext {
 export interface SubmissionNodeHooks<TDispatched, TSettled> {
   /** Short label for error messages ("session" | "orchestrator"). */
   nodeKind: string;
+  hasInputFiles?: boolean;
   /** `workflow:{runId}:{nodeId}[:{iteration}]` — the primary submission's dispatchId (repairs append `:repair`). */
   dispatchId: string;
   /** Effects to persist on the very first intent write, before any dispatch happens (e.g. `{ sessionId }` when the caller mints its own id up front; `{}` when the dispatch itself resolves the session). */
@@ -73,6 +74,28 @@ interface SubmissionEffects {
 }
 
 export async function executeSubmissionNode<TDispatched, TSettled>(
+  ctx: SubmissionNodeContext,
+  hooks: SubmissionNodeHooks<TDispatched, TSettled>,
+): Promise<
+  | { status: 'completed'; result: TDispatched | TSettled }
+  | { status: 'failed'; error: string }
+  | { status: 'parked'; waitingOn: [{ kind: 'submission'; nodeId: string; sessionId: string; threadId: string; queueItemId: string }] }
+> {
+  const outcome = await executeSubmission(ctx, hooks);
+  if (outcome.status !== 'parked' && hooks.hasInputFiles && ctx.engine.cleanupAgentInputs) {
+    try {
+      const checkpoint = (await ctx.store.getCheckpoints(ctx.run.runId))
+        .find(cp => cp.nodeId === ctx.nodeId && cp.iteration === ctx.iteration);
+      const sessionId = checkpoint?.effects?.sessionId;
+      if (typeof sessionId === 'string' && (checkpoint?.effects?.inputFilesAttempted || checkpoint?.effects?.receipt)) await ctx.engine.cleanupAgentInputs(sessionId, hooks.dispatchId);
+    } catch (err) {
+      console.warn(`workflow input cleanup failed for ${hooks.dispatchId}:`, err);
+    }
+  }
+  return outcome;
+}
+
+async function executeSubmission<TDispatched, TSettled>(
   ctx: SubmissionNodeContext,
   hooks: SubmissionNodeHooks<TDispatched, TSettled>,
 ): Promise<
@@ -112,13 +135,14 @@ export async function executeSubmissionNode<TDispatched, TSettled>(
     } catch (err) {
       if (!(err instanceof ValidationError) && !(err instanceof AgentInputFileError)) throw err;
       const error = err.message;
+      const target = (await store.getCheckpoints(run.runId)).find(cp => cp.nodeId === nodeId && cp.iteration === iteration);
       await store.completeCheckpoint(run.runId, nodeId, iteration, attempt, {
         runId: run.runId,
         nodeId,
         iteration,
         status: 'failed',
         error,
-        effects: hooks.initialEffects,
+        effects: { ...hooks.initialEffects, ...target?.effects },
         attempt,
         createdAt: clock(),
       });

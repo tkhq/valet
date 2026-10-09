@@ -23,6 +23,15 @@ function validPath(path: string): boolean {
     /^[A-Za-z0-9._-]+$/.test(segment) && segment !== '.' && segment !== '..');
 }
 
+function pathCollision(path: string, paths: Iterable<string>): string | undefined {
+  for (const other of paths) {
+    if (path.startsWith(`${other}/`) || other.startsWith(`${path}/`)) {
+      return `files paths ${JSON.stringify(path)} and ${JSON.stringify(other)} collide as file and directory. Rename one file.`;
+    }
+  }
+  return undefined;
+}
+
 /** Accepted paths are already normalized. No two accepted spellings can alias. */
 export function validateAgentFiles(files: unknown): string[] {
   if (!files || typeof files !== 'object' || Array.isArray(files)) {
@@ -33,7 +42,11 @@ export function validateAgentFiles(files: unknown): string[] {
   if (entries.length > MAX_AGENT_INPUT_FILES) {
     errors.push(`files has ${entries.length} entries, over the ${MAX_AGENT_INPUT_FILES} file cap. Remove files from this node.`);
   }
+  const paths = new Set<string>();
   for (const [path, source] of entries) {
+    const collision = pathCollision(path, paths);
+    if (collision) errors.push(collision);
+    paths.add(path);
     if (!validPath(path)) {
       errors.push(`files path ${JSON.stringify(path)} is invalid. Use normalized relative paths with letters, digits, dots, underscores, and hyphens; omit dot segments.`);
     }
@@ -58,6 +71,8 @@ function checkRenderedFile(file: RenderedAgentFile, paths: Set<string>, total: n
   if (!validPath(file.path) || paths.has(file.path)) {
     throw new AgentInputFileError(`files path ${JSON.stringify(file.path)} is invalid or duplicated. Use unique normalized relative paths.`);
   }
+  const collision = pathCollision(file.path, paths);
+  if (collision) throw new AgentInputFileError(collision);
   paths.add(file.path);
   const bytes = new TextEncoder().encode(file.content).byteLength;
   if (bytes > MAX_AGENT_INPUT_FILE_BYTES) {

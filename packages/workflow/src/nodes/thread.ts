@@ -31,7 +31,7 @@
  */
 
 import type { ThreadNode } from '../dag/nodes.js';
-import { renderAgentFiles } from '../dag/agent-files.js';
+import { AgentInputFileError, renderAgentFiles } from '../dag/agent-files.js';
 import { renderTemplate, type TemplateContext } from '../dag/expression.js';
 import { executeSubmissionNode, withOutputSchemaPrompt, type SubmissionDispatch } from './submission-node.js';
 import { iterationSuffix, resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
@@ -85,16 +85,20 @@ export async function executeThread(args: NodeExecutorArgs<ThreadNode>): Promise
     { run, nodeId: node.id, attempt, iteration, store, clock, engine, existingCheckpoint },
     {
       nodeKind: 'orchestrator',
+      hasInputFiles: !!node.files && Object.keys(node.files).length > 0,
       dispatchId,
       initialEffects: {},
       waitMode: node.wait?.mode,
       outputSchema: node.outputSchema,
       dispatch: async (id): Promise<SubmissionDispatch> => {
         const files = renderAgentFiles(node.files, templateContext, run.definition);
+        if (files.length && node.wait?.mode === 'none') {
+          throw new AgentInputFileError('files require wait.mode until_idle so inputs survive the consuming turn. Remove wait.mode none.');
+        }
         const promptText = withOutputSchemaPrompt(renderText(node.prompt, templateContext), node.outputSchema);
         const dispatched = await engine.promptOrchestrator(promptText, {
           dispatchId: id,
-          ...(files.length ? { files } : {}),
+          ...(files.length ? { files, workflowAttempt: attempt } : {}),
           queueMode: 'followup',
           ownerHint: owner,
         });

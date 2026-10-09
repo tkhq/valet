@@ -719,7 +719,7 @@ it('preserves agent files through canvas and inspector edits, including foreach 
     edges: [{ from: 't', to: 's' }, { from: 's', to: 'o' }, { from: 'o', to: 'f' }],
   };
   definition = updateNode(definition, 's', { prompt: 'Read the data' });
-  definition = updateNode(definition, 'o', { wait: { mode: 'none' } });
+  definition = updateNode(definition, 'o', { wait: { mode: 'until_idle' } });
   definition = setNodePosition(definition, 's', { x: 100, y: 200 });
   const saved = JSON.parse(JSON.stringify(definition));
   expect(saved.nodes[1].files).toEqual(files);

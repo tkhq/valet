@@ -63,7 +63,7 @@ import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
 import { configMcpPlugins } from "../plugins/config-mcp.js";
-import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
+import { buildWorkflowEngineDeps, cleanupWorkflowRunInputs } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { buildRunOriginReport, buildRunSettledAttention, buildRunThreadArchive, workflowApprovalHref } from "../workflows/run-attention.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
@@ -766,6 +766,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // Then the sandbox reclaim — both are contained by contract, so a
     // failure in either never abandons the drive lease.
     onRunSettled: async (info) => {
+      await cleanupWorkflowRunInputs({ host: engineHost, store: workflowStore, db, engineStore,
+        actionPluginByService, credentials: engineCredentials }, info.runId);
       await runSettledAttention(info);
       // The run's own assistant thread leaves the sidebar here, and only
       // here: no sweep archives it later (`run-attention.ts`).

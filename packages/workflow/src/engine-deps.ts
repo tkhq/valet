@@ -25,6 +25,8 @@ export interface WorkflowCreateSessionOptions {
 export interface WorkflowPromptOptions {
   /** Rendered inputs. The host writes these before admitting the submission. Never checkpoint contents. */
   files?: RenderedAgentFile[];
+  /** Drive fence for recording the resolved sandbox target before input writes. */
+  workflowAttempt?: number;
   /** Idempotent admission key: `workflow:{runId}:{nodeId}[:{iteration}][:repair]`. */
   dispatchId: string;
   model?: string;
@@ -79,6 +81,8 @@ export interface WorkflowLlmCompleteResult {
 export interface WorkflowPromptOrchestratorOptions {
   /** Rendered inputs, written in the resolved execution sandbox before admission. */
   files?: RenderedAgentFile[];
+  /** Drive fence for recording the resolved sandbox target before input writes. */
+  workflowAttempt?: number;
   /** Idempotent admission key: `workflow:{runId}:{nodeId}[:{iteration}][:repair]`. */
   dispatchId: string;
   /**
@@ -144,6 +148,9 @@ export interface WorkflowEngineDeps {
     queueItemId: string,
     opts?: WorkflowAwaitResultOptions,
   ): Promise<SubmissionResult>;
+
+  /** Best-effort cleanup after a consuming node settles. Never changes its outcome. */
+  cleanupAgentInputs?(sessionId: string, dispatchId: string): Promise<void>;
 
   /** Withdraws in-flight engine work for a run being cancelled. */
   abort(sessionId: string, threadId: string, queueItemId?: string): Promise<void>;

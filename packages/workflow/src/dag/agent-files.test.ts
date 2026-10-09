@@ -25,6 +25,18 @@ describe('agent input files', () => {
     expect(() => validateRenderedAgentFiles([{ path, content: 'data' }])).toThrow('files path');
   });
 
+  it.each([['a', 'a/b'], ['a/b', 'a']])('rejects file/child collisions in order %j, %j', (first, second) => {
+    const files = { [first]: 'x', [second]: 'y' };
+    expect(validateWorkflowDefinition(definition({ ...session, files }))).toMatchObject({ ok: false, errors: [expect.stringContaining('file and directory')] });
+    expect(() => renderAgentFiles(files, {}, {})).toThrow('file and directory');
+    expect(() => validateRenderedAgentFiles(Object.entries(files).map(([path, content]) => ({ path, content })))).toThrow('file and directory');
+    expect(validateAgentFiles({ 'a': '', 'ab/c': '' })).toEqual([]);
+  });
+
+  it('rejects dispatch-only input files because settlement removes ephemeral inputs', () => {
+    expect(validateWorkflowDefinition(definition({ ...session, wait: { mode: 'none' } }))).toMatchObject({ ok: false, errors: [expect.stringContaining('until_idle')] });
+  });
+
   it('rejects duplicate rendered paths', () => {
     expect(() => validateRenderedAgentFiles([{ path: 'a', content: '' }, { path: 'a', content: '' }])).toThrow('duplicated');
   });
