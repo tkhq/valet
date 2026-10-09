@@ -78,7 +78,7 @@ function makeCtx(seam: Partial<WakeupsSeam>): ToolContext {
       create: vi.fn(),
       hold: vi.fn(),
       get: vi.fn(),
-      list: vi.fn(async () => ({ wakeups: [], leases: [] })),
+      list: vi.fn(async () => ({ wakeups: [], leases: [], otherThreads: 0 })),
       cancel: vi.fn(),
       readLog: vi.fn(),
       ...seam,
@@ -159,10 +159,53 @@ describe("wakeup_list", () => {
     const list = vi.fn(async () => ({
       wakeups: [{ ...baseWakeup, id: "wk_a", reason: "proof build", deadlineAt: 1_700_000_000_000 }],
       leases: [{ ...baseLease, id: "ls_h", ownerKind: "hold" as const, reason: "manual", deadlineAt: 1_700_000_000_000 }],
+      otherThreads: 0,
     }));
     const r = await wakeupListTool.execute({}, makeCtx({ list }));
+    expect(list).toHaveBeenCalledWith("t1");
     expect(r.text).toContain('wk_a process running "proof build" deadline 2023-11-14T22:13:20.000Z');
     expect(r.text).toContain('ls_h hold "manual" deadline 2023-11-14T22:13:20.000Z');
+    expect(r.text).not.toContain("other threads");
+  });
+
+  it("adds one line that counts the other threads' work (M14)", async () => {
+    const list = vi.fn(async () => ({ wakeups: [], leases: [], otherThreads: 3 }));
+    const r = await wakeupListTool.execute({}, makeCtx({ list }));
+    expect(r.text).toBe("(no active wakeups or holds in this thread)\n3 more in other threads of this session.");
+  });
+});
+
+describe("fix wave 2 tool changes", () => {
+  const origin = { channelType: "slack", threadKey: "slack:C1:1.2" };
+
+  it("passes the turn's origin to create and the thread and origin to hold (H3, M17)", async () => {
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_t", kind: "timer" as const, fireAt: 1_700_000_060_000 } }));
+    const hold = vi.fn(async () => ({ ...baseLease, id: "ls_h" }));
+    const ctx = { ...makeCtx({ create, hold }), origin };
+    await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, ctx);
+    expect(create.mock.calls[0]?.[1]).toMatchObject({ kind: "timer", origin });
+    await holdSandboxTool.execute({ hours: 1, reason: "r" }, ctx);
+    expect(hold).toHaveBeenCalledWith({ hours: 1, reason: "r", threadId: "t1", origin });
+  });
+
+  it("returns the seam's hold refusal as text (M10)", async () => {
+    const hold = vi.fn(async (): Promise<Lease> => {
+      throw new Error("[hold_sandbox] No sandbox is running. Start work that needs the sandbox first.");
+    });
+    const r = await holdSandboxTool.execute({ hours: 1, reason: "r" }, makeCtx({ hold }));
+    expect(r.text).toBe("[hold_sandbox] No sandbox is running. Start work that needs the sandbox first.");
+  });
+
+  it("process_read passes tail through (H5)", async () => {
+    const readLog = vi.fn(async () => ({ text: "last", nextOffset: 99, eof: false }));
+    await processReadTool.execute({ id: "wk_a", bytes: 100, tail: true }, makeCtx({ readLog }));
+    expect(readLog).toHaveBeenCalledWith("wk_a", 0, 100, { tail: true });
+  });
+
+  it("start texts say how to read the latest output (H5)", async () => {
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_w", kind: "watch" as const } }));
+    const r = await watchTool.execute({ command: "tail -f x", reason: "ci", max_hours: 2 }, makeCtx({ create }));
+    expect(r.text).toContain("process_read { id: \"wk_w\", tail: true }");
   });
 });
 
@@ -187,7 +230,7 @@ describe("wakeups seam absent", () => {
   it("every tool refuses without the seam", async () => {
     const ctx = makeCtx({});
     delete ctx.wakeups;
-    const unavailable = "[wakeups_unavailable] this session cannot schedule wakeups.";
+    const unavailable = "[wakeups_unavailable] this session cannot schedule wakeups. Run the work in the foreground.";
     expect((await watchTool.execute({ command: "x", reason: "r", max_hours: 1 }, ctx)).text).toBe(unavailable);
     expect((await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, ctx)).text).toBe(unavailable);
     expect((await holdSandboxTool.execute({ hours: 1, reason: "r" }, ctx)).text).toBe(unavailable);
@@ -202,10 +245,11 @@ describe("per-session limit", () => {
     const list = vi.fn(async () => ({
       wakeups: Array.from({ length: 20 }, (_, i) => ({ ...baseWakeup, id: `wk_${i}` })),
       leases: [],
+      otherThreads: 0,
     }));
     const r = await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, makeCtx({ list }));
     expect(r.text).toBe(
-      "[wakeups_limit] This session already has 20 active wakeups and leases (limit 20, sandbox.wakeupsPerSession). Cancel one with wakeup_cancel.",
+      "[wakeups_limit] This thread already has 20 active wakeups and holds (limit 20, sandbox.wakeupsPerSession). Cancel one of them with wakeup_cancel.",
     );
   });
 
@@ -213,6 +257,7 @@ describe("per-session limit", () => {
     const list = vi.fn(async () => ({
       wakeups: Array.from({ length: 10 }, (_, i) => ({ ...baseWakeup, id: `wk_${i}` })),
       leases: Array.from({ length: 10 }, (_, i) => ({ ...baseLease, id: `ls_${i}`, ownerKind: "process" as const, ownerId: `wk_${i}` })),
+      otherThreads: 50,
     }));
     const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_t", kind: "timer" as const, fireAt: 1_700_000_060_000 } }));
     const r = await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, makeCtx({ list, create }));
@@ -223,6 +268,7 @@ describe("per-session limit", () => {
     const list = vi.fn(async () => ({
       wakeups: Array.from({ length: 19 }, (_, i) => ({ ...baseWakeup, id: `wk_${i}` })),
       leases: [{ ...baseLease, id: "ls_h" }],
+      otherThreads: 0,
     }));
     const r = await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, makeCtx({ list }));
     expect(r.text).toContain("[wakeups_limit]");

@@ -80,7 +80,7 @@ function makeCtx(sandbox: FakeSandbox, seam?: Partial<WakeupsSeam>): ToolContext
       create: vi.fn(),
       hold: vi.fn(),
       get: vi.fn(),
-      list: vi.fn(async () => ({ wakeups: [], leases: [] })),
+      list: vi.fn(async () => ({ wakeups: [], leases: [], otherThreads: 0 })),
       cancel: vi.fn(),
       readLog: vi.fn(),
       ...seam,
@@ -107,7 +107,7 @@ describe("bash tool: background mode", () => {
     });
     expect(r.text).toBe(
       "started sandbox process wk_p (deadline 2023-11-14T22:13:20.000Z). " +
-        "You will receive a process.exited signal. Read its log with process_read.",
+        'You will receive a process.exited signal. Read its log with process_read; process_read { id: "wk_p", tail: true } shows the latest output.',
     );
   });
 
@@ -145,22 +145,23 @@ describe("bash tool: timeout hint", () => {
       const resultPromise = bashTool.execute({ command: "long-running-task", timeout: 61 }, ctx);
       await vi.advanceTimersByTimeAsync(61_000 + JOB_POLL_INTERVAL_MS * 2);
       const r = await resultPromise;
+      // A command that ran 60s or more may need background mode; the hint
+      // names every field background requires (fix wave 2, M16).
       expect(r.text).toContain(
-        "[timed out after 61s] For work longer than an hour, rerun with background: true and a deadline_hours.",
+        "[timed out after 61s] Rerun with a larger timeout (max 3600). For work longer than an hour, rerun with background: true, deadline_hours, and reason.",
       );
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("the sync-exec timeout text points at background mode", async () => {
+  it("a short sync-exec timeout suggests a larger timeout only", async () => {
     const exec = vi.fn(
       async (): Promise<ExecResult> => ({ stdout: "partial", stderr: "", exitCode: 124, timedOut: true }),
     );
     const r = await bashTool.execute({ command: "long-running-task", timeout: 30 }, makeCtx({ id: "sb-sync-timeout", exec }));
     expect(r.text).toContain("partial");
-    expect(r.text).toContain(
-      "[timed out after 30s] For work longer than an hour, rerun with background: true and a deadline_hours.",
-    );
+    expect(r.text).toContain("[timed out after 30s] Rerun with a larger timeout (max 3600).");
+    expect(r.text).not.toContain("background");
   });
 });
