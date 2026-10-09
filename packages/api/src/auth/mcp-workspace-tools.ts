@@ -520,8 +520,8 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     "unpublish_artifact",
     {
       description:
-        "Unpublishes an artifact: its link stops working for everyone. Use it to take down a page published by mistake. " +
-        "You can unpublish an artifact you published, or one in a workspace you manage.",
+        "Unpublishes an artifact: its link stops working for everyone, and this cannot be undone. " +
+        "Use it to take down a page published by mistake. You can unpublish only artifacts you published.",
       inputSchema: { artifact_id: z.string().min(1).describe("artifact_id from list_artifacts.") },
       annotations: { destructiveHint: true },
     },

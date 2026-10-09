@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
 import { oauthAccessToken, orgMembers, orgs, skills, users } from "../schema/index.js";
+import { eq } from "drizzle-orm";
 import { seedMcpConsent } from "../integration/_mcp-consent.js";
 import { createWorkflowDefinition } from "../workflows/service.js";
 
@@ -118,6 +119,10 @@ describe("MCP workspace tools", () => {
     expect(patched.data).toMatchObject({ path: "notes/release.md", patched: true });
     const missing = await tool(testApi.baseUrl, alice, "patch_memory", { path: "notes/release.md", old_string: "Fridays", new_string: "x" });
     expect(missing.isError).toBe(true);
+    // "e" appears many times: a first-match replace would edit the wrong passage.
+    const ambiguous = await tool(testApi.baseUrl, alice, "patch_memory", { path: "notes/release.md", old_string: "e", new_string: "E" });
+    expect(ambiguous.isError).toBe(true);
+    expect(ambiguous.text).toContain("appears more than once");
 
     expect((await tool(testApi.baseUrl, alice, "move_memory", { from: "notes/release.md", to: "projects/release.md" })).data).toMatchObject({ moved: true });
     expect((await tool(testApi.baseUrl, alice, "read_memory", { path: "projects/release.md" })).text).toContain("Wednesdays");
@@ -229,6 +234,11 @@ describe("MCP workspace tools", () => {
     expect(item).toMatchObject({ key: "reports/oops", artifact_id: expect.any(String) });
 
     expect((await tool(testApi.baseUrl, bob, "unpublish_artifact", { artifact_id: item?.artifact_id })).isError).toBe(true);
+    // An org admin may revoke any artifact in the browser, but not through an agent.
+    await testApi.providers.db.update(orgMembers).set({ role: "admin" }).where(eq(orgMembers.userId, "bob"));
+    const asAdmin = await tool(testApi.baseUrl, bob, "unpublish_artifact", { artifact_id: item?.artifact_id });
+    expect(asAdmin.isError).toBe(true);
+    expect(asAdmin.text).toContain("An agent can unpublish only artifacts you published");
     expect((await tool(testApi.baseUrl, alice, "unpublish_artifact", { artifact_id: item?.artifact_id })).data).toMatchObject({ unpublished: true });
     expect((await tool(testApi.baseUrl, alice, "list_artifacts")).data.artifacts).toEqual([]);
   });
