@@ -38,6 +38,7 @@ import {
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { WakeWatcher } from "../engine/wake-watcher.js";
 import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import { submitSessionPrompt } from "../routes/messages.js";
 import { ChannelHost } from "../channels/host.js";
@@ -413,6 +414,17 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // engine/idle-hibernation-sweep.test.ts.
   const idleHibernationSweep = new IdleHibernationSweep({ db, engineHost, engineStore, idleMs: 0 });
 
+  // sweepIntervalMs 0 disables the timer; a test drives `sweep()` directly.
+  // Behavior is tested in engine/wake-watcher.test.ts.
+  const wakeWatcher = new WakeWatcher({
+    db,
+    engineStore,
+    engineHost,
+    provider: sandboxProvider,
+    limits: wakeupLimits,
+    sweepIntervalMs: 0,
+  });
+
   // sweepIntervalMs 0 disables the sweep; behavior is tested in
   // orchestrator/security-runner-driver.test.ts.
   const securityRunnerDriver = new SecurityRunnerDriver({
@@ -575,6 +587,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
     idleHibernationSweep,
+    wakeWatcher,
     securityRunnerDriver,
     channelHost,
     workflowStore,

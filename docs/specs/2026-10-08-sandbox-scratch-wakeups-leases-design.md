@@ -645,4 +645,22 @@ Steps 1 to 4 unblock the user. Step 5 and 6 follow in the same release.
 
 ## Deviations
 
-None yet. Implementation gaps become errata to this file in the same PR.
+Implementation gaps become errata to this file in the same PR.
+
+- **B5, signal delivery failure.** The WakeWatcher submits a signal once,
+  after the CAS. If the submit throws, the watcher logs the error with the
+  wakeup id and does not retry. The row already moved, so the signal is
+  lost. The log line is the only record. `valet.wakeups.total` keeps its
+  closed cause set and has no `delivery_failed` cause.
+- **B5, probe failures.** An exec error that is not
+  `SandboxUnavailableError`, `SandboxSupersededError`, or the kubernetes
+  pod-gone error leaves the row unchanged for the next tick. A row whose
+  lease has no `sandbox_id` and no ready live session is also skipped and
+  logged each tick. The lease then stays active past its deadline and
+  raises `valet_leases_over_deadline` (INV-6).
+- **C5, reconcile shape.** The watcher calls
+  `SandboxProvider.setEvictionProtection(id, true)` for each leased sandbox
+  each tick. The provider reports `changed` when the pod lacked the
+  annotation. A change on a sandbox whose oldest lease is older than two
+  ticks counts toward `valet_leases_unannotated`. Providers without the
+  seam (docker, local) skip the reconcile.

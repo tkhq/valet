@@ -487,6 +487,10 @@ async function runBootChain(): Promise<void> {
   // only reaps hibernated rows, so these were stranded with running pods.
   providers.idleHibernationSweep.start();
 
+  // Probes due wakeups, delivers their signals, expires hold leases, and
+  // reconciles eviction protection on leased pods (spec 2026-10-08, B5, C5).
+  providers.wakeWatcher.start();
+
   // Autonomy nudge sweep (valet-security spec §Autonomy): re-drives an idle
   // security runner that stopped with work remaining. The only pause is the
   // sec_start approval gate (an unsettled submission), so the sweep never
@@ -729,6 +733,11 @@ async function close(): Promise<void> {
     providers.idleHibernationSweep.stop();
   } catch (err) {
     console.error("idleHibernationSweep.stop failed:", err);
+  }
+  try {
+    providers.wakeWatcher.stop();
+  } catch (err) {
+    console.error("wakeWatcher.stop failed:", err);
   }
   try {
     providers.securityRunnerDriver.stop();

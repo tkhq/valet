@@ -31,6 +31,7 @@ import {
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { WakeWatcher } from "../engine/wake-watcher.js";
 import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import { submitSessionPrompt } from "../routes/messages.js";
 import { resolveSecurityNudgeIntervalMs, resolveSecurityNudgeMaxStalls } from "./security-nudge.js";
@@ -592,6 +593,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     idleMs: resolveIdleMinutes(process.env) * 60_000,
   });
 
+  // Owns every wakeup and lease: probes due wakeups, delivers their signals,
+  // expires hold leases, and keeps leased pods out of autoscaler eviction
+  // (spec 2026-10-08, B5, C5). `start()`/`stop()` are called from `main.ts`.
+  const wakeWatcher = new WakeWatcher({
+    db,
+    engineStore,
+    engineHost,
+    provider: sandboxProvider,
+    limits: wakeupLimits,
+  });
+
   // Autonomy nudge sweep (valet-security spec §Autonomy). Re-drives an idle
   // security runner that stopped with work remaining; a stall cap alerts the
   // user after N no-progress nudges instead of looping. Nudges through the
@@ -900,6 +912,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
     idleHibernationSweep,
+    wakeWatcher,
     securityRunnerDriver,
     channelHost,
     workflowStore,

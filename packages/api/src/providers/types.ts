@@ -20,6 +20,7 @@ import type { HibernationReaper } from "../engine/hibernation-reaper.js";
 import type { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import type { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import type { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import type { WakeWatcher } from "../engine/wake-watcher.js";
 import type { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import type { ChannelHost } from "../channels/host.js";
 import type { EventDispatcher } from "../events/dispatcher.js";
@@ -83,6 +84,8 @@ export interface Providers {
   sandboxReconcileSweep: SandboxReconcileSweep;
   /** Hibernates idle active sessions evicted from the host cache; `start()`/`stop()` called from main.ts. */
   idleHibernationSweep: IdleHibernationSweep;
+  /** Owns wakeups and leases (spec 2026-10-08, B5); `start()`/`stop()` called from main.ts. */
+  wakeWatcher: WakeWatcher;
   /** Autonomy nudge sweep — re-drives an idle security runner with work
    * remaining, capped by a stall budget; `start()`/`stop()` called from
    * main.ts (valet-security spec §Autonomy). */
