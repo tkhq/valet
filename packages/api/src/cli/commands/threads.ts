@@ -2,10 +2,17 @@ import { InstanceClient } from "../client.js";
 import { ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printJson, printLine, renderTable, type ParsedFlags } from "../output.js";
 import { resolveInstance } from "../resolve.js";
+import { flagProblem } from "../command-kit.js";
 import type { CliContext } from "../types.js";
 
 type ThreadsClient = Pick<InstanceClient, "getThread" | "listWorkspaceThreads" | "createWorkspaceThread" | "abortThread">;
 export async function runThreads(client: ThreadsClient, flags: ParsedFlags): Promise<number> {
+  // A bare or empty --workspace would create the thread in the personal workspace.
+  const problem = flagProblem(flags);
+  if (problem) {
+    printErr(problem);
+    return ExitCode.Usage;
+  }
   const workspace = typeof flags.flags.workspace === "string" ? flags.flags.workspace : undefined;
   switch (flags.rest[0]) {
     case "list": {
@@ -38,7 +45,9 @@ export async function runThreads(client: ThreadsClient, flags: ParsedFlags): Pro
       }
       const { stopped } = await client.abortThread(id, thread.activeItemId);
       if (flags.json) printJson({ thread_id: id, stopped, message_id: thread.activeItemId });
-      else printLine(stopped ? `stopped ${thread.activeItemId}` : `nothing stopped: ${thread.activeItemId} finished first. Run \`valet threads stop ${id}\` again to stop a newer turn.`);
+      else printLine(stopped
+        ? `stop requested for ${thread.activeItemId}. If it was already finishing, it can still end as completed.`
+        : `nothing stopped: ${thread.activeItemId} finished first. Run \`valet threads stop ${id}\` again to stop a newer turn.`);
       return ExitCode.OK;
     }
   }

@@ -14,7 +14,7 @@
  */
 import { basename, extname } from "node:path";
 import type { InstanceClient } from "../client.js";
-import { intFlag, readSource, runWithClient, strFlag, usage } from "../command-kit.js";
+import { flagProblem, intFlag, readSource, runWithClient, strFlag, usage } from "../command-kit.js";
 import { ExitCode } from "../exit.js";
 import { printJson, printLine, renderTable, type ParsedFlags } from "../output.js";
 import type { CliContext } from "../types.js";
@@ -39,6 +39,8 @@ function formatFor(file: string, flag: string | undefined): "markdown" | "html" 
 }
 
 export async function runArtifacts(deps: ArtifactsDeps, flags: ParsedFlags): Promise<number> {
+  const problem = flagProblem(flags);
+  if (problem) return usage(problem);
   const [sub, ...args] = flags.rest;
   const workspace = strFlag(flags, "workspace");
   const { client } = deps;

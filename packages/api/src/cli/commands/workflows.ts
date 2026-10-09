@@ -15,7 +15,7 @@
  * cancelled, or (for cancel) settled some other way first.
  */
 import type { InstanceClient } from "../client.js";
-import { intFlag, parseJsonObject, readSource, runWithClient, strFlag, usage } from "../command-kit.js";
+import { flagProblem, intFlag, parseJsonObject, readSource, runWithClient, strFlag, usage } from "../command-kit.js";
 import { ExitCode } from "../exit.js";
 import { printErr, printJson, printLine, renderTable, type ParsedFlags } from "../output.js";
 import type { CliContext } from "../types.js";
@@ -90,6 +90,8 @@ function report(detail: GetWorkflowRunResponse, json: boolean, cancelling = fals
 }
 
 export async function runWorkflows(deps: WorkflowsDeps, flags: ParsedFlags): Promise<number> {
+  const problem = flagProblem(flags);
+  if (problem) return usage(problem);
   const [sub, id] = flags.rest;
   const { client } = deps;
   const wait = intFlag(flags, "wait");

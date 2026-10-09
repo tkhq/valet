@@ -79,6 +79,15 @@ describe("valet workflows", () => {
     expect(stderr()).toContain("valet workflows status r1");
   });
 
+  // An unquoted empty $PAYLOAD turns `--input $PAYLOAD --wait 60` into a bare --input.
+  it("refuses a bare --input or --input-file instead of running with defaults", async () => {
+    for (const args of [["run", "w1", "--input", "--wait", "5"], ["run", "w1", "--input"], ["run", "w1", "--input-file"]]) {
+      const { deps, calls } = fake([detail("settled", "completed")]);
+      expect(await run(deps, args), args.join(" ")).toBe(ExitCode.Usage);
+      expect(calls).toEqual([]);
+    }
+  });
+
   it("refuses an explicitly empty --input instead of running with defaults", async () => {
     const { deps, calls } = fake([detail("settled", "completed")]);
     expect(await run(deps, ["run", "w1", "--input", ""])).toBe(ExitCode.Usage);

@@ -32,6 +32,12 @@ describe("valet artifacts publish", () => {
   });
 
   // Two teammates' svc-a/README.md and svc-b/README.md would both default to "README".
+  it("does not let an empty --workspace skip the team --key guard", async () => {
+    const { deps, shared } = fake();
+    expect(await runArtifacts(deps, parseGlobalFlags(["publish", "svc-b/README.md", "--workspace", ""]))).toBe(ExitCode.Usage);
+    expect(shared).toEqual([]);
+  });
+
   it("needs --key for a team publish", async () => {
     const { deps, shared } = fake();
     expect(await runArtifacts(deps, parseGlobalFlags(["publish", "svc-b/README.md", "--workspace", "team-1"]))).toBe(ExitCode.Usage);
@@ -47,6 +53,27 @@ describe("valet artifacts publish", () => {
 });
 
 describe("valet memory", () => {
+  // An unset $TEAM_ID must not send a team delete to the personal workspace.
+  it("refuses an empty or bare --workspace before any write", async () => {
+    const calls: string[] = [];
+    const client: MemoryClient = {
+      searchMemory: async () => ({ results: [] }),
+      readMemory: async () => ({}),
+      writeMemory: async () => { calls.push("write"); return {}; },
+      patchMemory: async () => { calls.push("patch"); return {}; },
+      moveMemory: async () => { calls.push("mv"); },
+      deleteMemory: async () => { calls.push("rm"); },
+    };
+    const deps = { client, readSource: async () => "# x" };
+    for (const args of [
+      ["rm", "projects/plan.md", "--workspace", ""], ["rm", "projects/plan.md", "--workspace"], ["rm", "projects/plan.md", "--workspace="],
+      ["write", "a.md", "--file", "a.md", "--workspace", ""], ["mv", "a.md", "b.md", "--workspace"],
+    ]) {
+      expect(await runMemory(deps, parseGlobalFlags(args)), args.join(" ")).toBe(ExitCode.Usage);
+    }
+    expect(calls).toEqual([]);
+  });
+
   it("patch deletes only with an explicit empty --new, and write refuses empty content", async () => {
     const patches: Array<{ oldString: string; newString: string }> = [];
     const client: MemoryClient = {

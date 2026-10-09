@@ -292,7 +292,9 @@ valet artifacts unpublish <artifact-id>
 
 `inbox` lists the questions, approvals, and workflow runs that wait for you. Answer a question with `valet gates resolve`. `whoami` shows the signed-in user. `workspaces` lists the ids `--workspace` accepts.
 
-`valet threads stop <id>` stops the thread's running turn. A follow-up queued behind it keeps its place.
+`valet threads stop <id>` requests a stop of the thread's running turn. A follow-up queued behind it keeps its place. If the turn finished first, the command says nothing was stopped.
+
+Every command refuses a flag given without a value, or with an empty value. For a value that starts with `--`, use `--flag=<value>`. `memory patch --new ""` is the one empty value allowed.
 
 ### `valet reset [--yes]`
 

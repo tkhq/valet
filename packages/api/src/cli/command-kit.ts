@@ -16,6 +16,25 @@ export function strFlag(flags: ParsedFlags, name: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+/** Flags that take no value. */
+const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["json"]);
+
+/**
+ * The first flag that was given without a usable value, as a message naming
+ * the fix. A bare flag (also how a value starting with "--", or an unquoted
+ * empty shell variable, parses) and an empty value are refused, so a command
+ * never falls back to defaults or the personal workspace for an argument the
+ * caller meant to supply. `allowEmpty` names flags where "" is meaningful.
+ */
+export function flagProblem(flags: ParsedFlags, allowEmpty: readonly string[] = []): string | undefined {
+  for (const [name, value] of Object.entries(flags.flags)) {
+    if (BOOLEAN_FLAGS.has(name)) continue;
+    if (value === true) return `Set a value for --${name}. For a value that starts with "--", use --${name}=<value>.`;
+    if (value === "" && !allowEmpty.includes(name)) return `--${name} is empty. Set a value, or omit the flag.`;
+  }
+  return undefined;
+}
+
 /**
  * A positive whole-number flag. Returns the number, undefined when absent,
  * or an error message naming the fix.

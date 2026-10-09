@@ -14,7 +14,7 @@
  * Every subcommand takes --workspace user|TEAM_ID and --json.
  */
 import type { InstanceClient } from "../client.js";
-import { intFlag, readSource, runWithClient, strFlag, usage } from "../command-kit.js";
+import { flagProblem, intFlag, readSource, runWithClient, strFlag, usage } from "../command-kit.js";
 import { ExitCode } from "../exit.js";
 import { printJson, printLine, renderTable, type ParsedFlags } from "../output.js";
 import type { CliContext } from "../types.js";
@@ -37,6 +37,8 @@ export interface MemoryDeps {
 }
 
 export async function runMemory(deps: MemoryDeps, flags: ParsedFlags): Promise<number> {
+  const problem = flagProblem(flags, ["new"]);
+  if (problem) return usage(problem);
   const [sub, ...args] = flags.rest;
   const workspace = strFlag(flags, "workspace");
   const { client } = deps;
@@ -76,11 +78,7 @@ export async function runMemory(deps: MemoryDeps, flags: ParsedFlags): Promise<n
     }
     case "patch": {
       const memoryPath = args[0];
-      // A value that starts with "--" parses as a bare flag. Refuse it rather
-      // than read a bare --new as "delete the passage".
-      if (flags.flags.old === true || flags.flags.new === true) {
-        return usage('Pass a value to --old and --new. For text that starts with "--", use --new=<text>. To delete the passage, use --new "".');
-      }
+      // flagProblem already refused a bare --old or --new. Only --new "" (delete) may be empty.
       const oldString = strFlag(flags, "old");
       const newString = strFlag(flags, "new");
       if (!memoryPath || !oldString || newString === undefined) return usage(USAGE);
