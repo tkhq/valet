@@ -1,10 +1,14 @@
 /**
- * Rows for `/integrations` (settings-redesign spec, "Integrations").
+ * Rows and the detail panel for `/integrations` (settings-redesign spec,
+ * "Integrations").
  *
- * One row per plugin: the service's brand mark, name + connection state,
- * one line of description, a muted line naming who owns the connection and
- * its reach (tool count / "tools load on connect" / "no key needed"), and
- * the connect controls on the right.
+ * A row is one line: the brand mark, the name, a badge only when the
+ * connection needs attention, one line of description, and what the row
+ * offers (Connect, Set up, or the organization's). The row opens the
+ * detail panel, which holds everything else: who owns the connection, its
+ * reach (tool count / "tools load on connect" / "no key needed"), the
+ * account, repair notes, the connect and disconnect controls, and the
+ * tools. A page of twenty services stays one screen tall.
  *
  * A connected service also shows what its credential is worth: the account
  * it belongs to, and — when the token expired, failed to refresh, or
@@ -35,7 +39,10 @@ import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
 import { Badge, Button, ConfirmDialog } from "~/components/primitives";
 import { useDisconnectCredential } from "~/api/integrations";
 import { errorText } from "~/lib/error-text";
-import { CardHeading, IntegrationCard } from "./integration-card";
+import { Link } from "@tanstack/react-router";
+import { ChevronRight } from "lucide-react";
+import { ServiceIcon } from "~/components/service-icon";
+import { CardHeading } from "./integration-card";
 import { ConnectDialog } from "./connect-dialog";
 import { ShareWithTeam } from "./share-with-team";
 import { displayName, pluginDisplayName } from "./display-name";
@@ -130,14 +137,57 @@ function orgNoteFor(service: PluginServiceSummary): React.ReactNode {
   return service.service === "github" ? <GithubOrgAppLine /> : undefined;
 }
 
-// ── Tiles ────────────────────────────────────────────────────────────────
+// ── Rows ─────────────────────────────────────────────────────────────────
 
-export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
+/** What a row shows on its right: the attention badge, or what it offers. */
+function rowState(plugin: PluginSummary): { badge?: { label: string; variant: "warning" | "danger" }; offer?: string } {
+  const services = plugin.services.filter(isVisibleService);
+  if (services.length === 0) return {};
+  for (const service of services) {
+    const badge = healthBadge(serviceHealth(service));
+    if (badge && badge.variant !== "success") return { badge: { label: badge.label, variant: badge.variant } };
+  }
+  if (services.some((service) => service.connected)) return {};
+  if (services.some((service) => service.connect === "org")) return { offer: "Organization" };
+  if (services.every((service) => service.connect === "unconfigured")) return { offer: "Set up" };
+  return { offer: "Connect" };
+}
+
+/**
+ * One integration as one line. The row is a link to its own detail panel
+ * (`?service=`), so the panel is linkable and Back closes it.
+ */
+export function IntegrationRow({ plugin, search }: { plugin: PluginSummary; search: Record<string, string> }) {
+  const title = pluginDisplayName(plugin);
+  const state = rowState(plugin);
+  return (
+    <li>
+      <Link
+        to="/integrations"
+        search={{ ...search, service: plugin.name }}
+        className="-mx-4 flex min-h-12 items-center gap-3 px-4 py-2 transition-colors hover:bg-ink-wash-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-500/40 touch-manipulation"
+      >
+        <ServiceIcon slug={iconSlug(plugin)} label={title} size="sm" />
+        <span className="min-w-0 shrink-0 truncate text-sm font-medium text-ink sm:max-w-[40%]">{title}</span>
+        <span className="hidden min-w-0 flex-1 truncate text-xs text-muted sm:block">{plugin.description}</span>
+        <span className="ml-auto flex shrink-0 items-center gap-2 text-xs">
+          {state.badge && <Badge variant={state.badge.variant}>{state.badge.label}</Badge>}
+          {state.offer && <span className={state.offer === "Connect" ? "text-moss" : "text-muted"}>{state.offer}</span>}
+          <ChevronRight className="h-4 w-4 text-muted" aria-hidden />
+        </span>
+      </Link>
+    </li>
+  );
+}
+
+/** Everything about one integration: owner, reach, account, repair notes,
+ * controls, and its tools. The body of the detail panel. */
+export function IntegrationDetail({ plugin }: { plugin: PluginSummary }) {
   const meta = reachMeta(plugin);
   const single = plugin.services.length === 1 ? plugin.services[0] : undefined;
 
   return (
-    <IntegrationCard>
+    <div className="min-w-0">
       {single ? (
         <ServiceBlock
           service={single}
@@ -173,8 +223,8 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
           )}
         </>
       )}
-      <IntegrationDetails plugin={plugin} />
-    </IntegrationCard>
+      <IntegrationDetails plugin={plugin} expanded />
+    </div>
   );
 }
 

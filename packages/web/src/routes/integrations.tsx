@@ -5,7 +5,8 @@ import { Spinner, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { SearchInput } from "~/components/search-input";
 import { Section } from "~/components/settings/section";
-import { hasVisibleSurface, IntegrationRow, integrationGroup, isService } from "~/components/integrations/integration-row";
+import { hasVisibleSurface, IntegrationDetail, IntegrationRow, integrationGroup, isService } from "~/components/integrations/integration-row";
+import { Dialog, DialogContent, DialogTitle } from "~/components/primitives";
 import { IntegrationList } from "~/components/integrations/integration-card";
 import { OrphanCredentials } from "~/components/integrations/orphan-credentials";
 import { pluginDisplayName } from "~/components/integrations/display-name";
@@ -34,13 +35,15 @@ import { useListOwner } from "~/lib/use-list-owner";
  */
 interface IntegrationsSearch {
   q?: string;
+  /** The plugin whose detail panel is open. */
+  service?: string;
 }
 
 /** Reads the search params, keeping only strings. The OAuth round trip's
  * `?connected=`/`?error=` stay off this schema: `useConnectResult` reads
  * and clears them from `window.location` on mount. */
 function readIntegrationsSearch(raw: unknown): IntegrationsSearch {
-  return { q: textParam(raw, "q") };
+  return { q: textParam(raw, "q"), service: textParam(raw, "service") };
 }
 
 export const Route = createFileRoute("/integrations")({
@@ -137,6 +140,9 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
   const available = services.filter((plugin) => integrationGroup(plugin) === "available");
   const builtin = services.filter((plugin) => integrationGroup(plugin) === "builtin");
   const searching = query.trim().length > 0;
+  // Rows keep the search when they open a panel; closing it keeps it too.
+  const rowSearch: Record<string, string> = searching ? { q: query } : {};
+  const detail = search.service ? reachable.find((plugin) => plugin.name === search.service) : undefined;
   const showSearch = reachable.length > 0 || searching;
 
   return (
@@ -210,7 +216,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                 <Section title="Connected" description="Services your assistant can reach now.">
                   <IntegrationList label="Connected">
                     {connected.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} />
+                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} />
                     ))}
                   </IntegrationList>
                 </Section>
@@ -219,7 +225,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                 <Section title="Available" description="Connect a service to let your assistant use it.">
                   <IntegrationList label="Available">
                     {available.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} />
+                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} />
                     ))}
                   </IntegrationList>
                 </Section>
@@ -228,7 +234,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                 <Section title="Built in" description="Ready to use. These need no account.">
                   <IntegrationList label="Built in">
                     {builtin.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} />
+                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} />
                     ))}
                   </IntegrationList>
                 </Section>
@@ -236,6 +242,19 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
             </div>
           )}
           {!isLoading && !error && <OrphanCredentials plugins={plugins} />}
+          <Dialog
+            open={detail !== undefined}
+            onOpenChange={(open) => {
+              if (!open) void navigate({ to: "/integrations", search: rowSearch });
+            }}
+          >
+            {detail && (
+              <DialogContent className="max-w-xl" aria-describedby={undefined}>
+                <DialogTitle className="sr-only">{pluginDisplayName(detail)}</DialogTitle>
+                <IntegrationDetail plugin={detail} />
+              </DialogContent>
+            )}
+          </Dialog>
         </div>
       </div>
     </div>

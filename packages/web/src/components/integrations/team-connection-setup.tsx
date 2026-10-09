@@ -53,7 +53,7 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
             const blocked = service.connect === "unconfigured" && service.connectBlockedBy !== "org";
             return <IntegrationCard key={service.service}>
               <CardHeading title={displayName(service.service)} slug={service.iconSlug ?? service.service}
-                description={blocked ? "Ask an organization admin to configure OAuth for this service." : "Connect an account this team can use."}
+                description={blocked ? "Ask an organization admin to configure OAuth for this service." : undefined}
                 meta={blocked ? undefined : canManage ? "Team connection" : "Team admin required"}
                 right={<Button size="sm" variant="secondary" disabled={blocked || !canConnect} onClick={() => setSelected(service)}>{`Connect ${displayName(service.service)}`}</Button>} />
             </IntegrationCard>;
@@ -65,12 +65,20 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
     {canConnect && selected && <TeamConnectionDialog key={selected.service} teamId={teamId} service={selected} onClose={() => setSelected(null)} />}
     <Section title="Tools and skills" description="Installed capabilities for this team.">
       {plugins.error && <ErrorRow>Could not load plugin details. Reload the page to try again.</ErrorRow>}
-      {withTools.length > 0 && <IntegrationList label="Tools and skills">
-        {withTools.map((plugin) => <IntegrationCard key={plugin.name}>
-          <CardHeading title={pluginDisplayName(plugin)} slug={plugin.services[0]?.iconSlug ?? plugin.name} description={plugin.description} />
-          <IntegrationDetails plugin={plugin} />
-        </IntegrationCard>)}
-      </IntegrationList>}
+      {/* Collapsed: a list of every plugin's tools would bury the
+          connections above it. */}
+      {withTools.length > 0 && <details className="group">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 text-sm text-muted hover:text-ink [&::-webkit-details-marker]:hidden">
+          <span className="transition-transform group-open:rotate-90" aria-hidden>›</span>
+          {`Show the tools of ${withTools.length} ${withTools.length === 1 ? "integration" : "integrations"}`}
+        </summary>
+        <IntegrationList label="Tools and skills">
+          {withTools.map((plugin) => <IntegrationCard key={plugin.name}>
+            <CardHeading title={pluginDisplayName(plugin)} slug={plugin.services[0]?.iconSlug ?? plugin.name} description={plugin.description} />
+            <IntegrationDetails plugin={plugin} />
+          </IntegrationCard>)}
+        </IntegrationList>
+      </details>}
     </Section>
   </>;
 }

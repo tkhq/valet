@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -16,9 +17,13 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
 });
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
-  useSearch: () => ({}),
+  useSearch: () => searchState,
   useNavigate: () => vi.fn(),
+  Link: ({ to, children, className }: { to: string; children: ReactNode; className?: string }) => <a href={to} className={className}>{children}</a>,
 }));
+
+/** The personal page's open detail panel (`?service=`). */
+let searchState: Record<string, string> = {};
 
 function team(id: string, name: string, callerRole: TeamSummary["callerRole"]): TeamSummary {
   return { id, name, callerRole, orgId: "org", origin: "local", externalId: null,
@@ -75,6 +80,7 @@ function mount() {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  searchState = {};
   window.history.replaceState(null, "", "/integrations");
   setKey.mockClear();
   teamId = undefined;
@@ -96,6 +102,7 @@ beforeEach(() => {
 
 describe("Integrations workspace isolation", () => {
   it("switches Personal -> team A -> team B -> Personal without retaining forms or team dialogs", async () => {
+    searchState = { service: "typefully" };
     const view = mount();
     fireEvent.click(await screen.findByRole("button", { name: "Connect Typefully" }));
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -120,8 +127,9 @@ describe("Integrations workspace isolation", () => {
     expect(api.listPlugins).toHaveBeenCalledWith("a");
     expect(api.listPlugins).toHaveBeenCalledWith("b");
 
+    searchState = {};
     view.switchTo();
-    expect(await screen.findByRole("button", { name: "Connect Typefully" })).toBeTruthy();
+    expect(await screen.findByRole("link", { name: /Typefully/ })).toBeTruthy();
     expect(screen.queryByText("Sentry")).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(api.deleteCredential).not.toHaveBeenCalled();
@@ -237,6 +245,7 @@ describe("Team account connection", () => {
   it("discards the open form after a failed credential read and does not reopen it on recovery", async () => {
     teamId = "a";
     const put = vi.spyOn(api, "putCredential").mockResolvedValue({ ok: true });
+    searchState = { service: "typefully" };
     const view = mount();
     fireEvent.click(await screen.findByRole("button", { name: "Connect Typefully" }));
     expect(screen.getByText("Paste a token for the account intended for this team. Everyone on this team can use its permissions.")).toBeTruthy();
@@ -273,6 +282,7 @@ describe("Team account connection", () => {
   it("requires confirmation and writes only to the selected team's empty slot", async () => {
     teamId = "a";
     const put = vi.spyOn(api, "putCredential").mockResolvedValue({ ok: true });
+    searchState = { service: "typefully" };
     const view = mount();
     fireEvent.click(await screen.findByRole("button", { name: "Connect Typefully" }));
     fireEvent.change(screen.getByLabelText("Team account token"), { target: { value: "team-test-token" } });
@@ -332,7 +342,7 @@ describe("Team account connection", () => {
     window.history.replaceState(null, "", "/integrations?teamId=gone&error=team_access_changed");
     mount();
     expect(await screen.findByText("Team access changed. Ask a team admin to restart the connection.")).toBeTruthy();
-    expect(await screen.findByRole("button", { name: "Connect Typefully" })).toBeTruthy();
+    expect(await screen.findByRole("link", { name: /Typefully/ })).toBeTruthy();
     expect(window.sessionStorage.getItem("valet:workspace")).toBe("user");
     expect(screen.queryByText("Team unavailable")).toBeNull();
     // Only the personal list (for saved credentials no row covers) loads.
