@@ -1318,6 +1318,16 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
       queueMode: req.queue === true ? "followup" : "steer",
     });
 
+    // Only the parent thread that delegated the work keeps automatic posts
+    // to its channel thread. Work continued from another parent thread can
+    // carry that thread's context, so from then on the parent replies to the
+    // channel thread only when it chooses to (`reply: "manual"`).
+    const origin = parseOriginJson(watchRow.originJson);
+    const keepsAutomaticReply = ctx.parentThreadId === watchRow.parentThreadId;
+    const downgradedOrigin = origin !== undefined && origin.reply !== "manual" && !keepsAutomaticReply
+      ? JSON.stringify({ ...origin, reply: "manual" })
+      : undefined;
+
     // Re-point BEFORE arming: the fresh watcher must find the row already
     // tracking its submission, and the stale watcher (if any) must find it
     // no longer tracking the old one. Clearing `dismissedAt` keeps a
@@ -1329,6 +1339,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
         queueItemId: receipt.queueItemId,
         settled: false,
         dismissedAt: null,
+        ...(downgradedOrigin !== undefined ? { originJson: downgradedOrigin } : {}),
       })
       .where(eq(childWatches.childSessionId, req.childSessionId));
 

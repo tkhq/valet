@@ -175,7 +175,7 @@ describe("delegated child completion over a channel", () => {
     expect(run.transport.sent).toHaveLength(1);
   });
 
-  it("keeps the origin thread when the parent resumes a settled child", async () => {
+  it("keeps the origin thread when the delegating parent thread resumes a settled child", async () => {
     const run = await bootDelegation("child-resume");
     const { engineStore } = api!.providers;
     await engineStore.settleUnclaimed("child-resume", run.childThreadId, run.queueItemId, { outcome: "completed" });
@@ -183,12 +183,12 @@ describe("delegated child completion over a channel", () => {
     await api!.providers.channelHost.retryChildReplies();
     expect(run.transport.sent).toHaveLength(1);
 
-    // The parent sends follow-up work from another thread. The new result
-    // still belongs to the channel turn that delegated the task.
+    // The thread that delegated the task sends follow-up work. The new
+    // result still belongs to that thread's channel turn.
     const sender = buildChildSender(run.deps, run.watcher);
     const resumed = await sender(
       { childSessionId: "child-resume", message: "one more thing: add tests" },
-      { parentSessionId: run.parentId, parentThreadId: "th-elsewhere", actorUserId: USER_ID },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID },
     );
     if (!resumed) throw new Error("child_send did not admit the follow-up");
     await engineStore.settleUnclaimed("child-resume", run.childThreadId, resumed.queueItemId, { outcome: "completed" });
@@ -199,6 +199,37 @@ describe("delegated child completion over a channel", () => {
     expect(run.transport.sent.every((sent) => sent.conversationKey === "fake:dm:C1")).toBe(true);
     const signals = await childSettledSignals(run.parentId);
     expect(signals.map((signal) => signal.content.origin)).toEqual([ORIGIN, ORIGIN]);
+  });
+
+  it("does not post automatically when another parent thread resumes a settled child", async () => {
+    const run = await bootDelegation("child-resume-elsewhere");
+    const { db, engineStore } = api!.providers;
+    await engineStore.settleUnclaimed("child-resume-elsewhere", run.childThreadId, run.queueItemId, { outcome: "completed" });
+    await parentUpdateSettled(run, "child-resume-elsewhere", run.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+
+    // Another parent thread, for example a private DM, continues the work.
+    // Its result can carry that thread's context, so it must not post into
+    // the channel thread that delegated the original task.
+    const sender = buildChildSender(run.deps, run.watcher);
+    const resumed = await sender(
+      { childSessionId: "child-resume-elsewhere", message: "use the private numbers I gave you" },
+      { parentSessionId: run.parentId, parentThreadId: "th-elsewhere", actorUserId: USER_ID },
+    );
+    if (!resumed) throw new Error("child_send did not admit the follow-up");
+    await engineStore.settleUnclaimed("child-resume-elsewhere", run.childThreadId, resumed.queueItemId, { outcome: "completed" });
+    const signals = await vi.waitFor(async () => {
+      const found = await childSettledSignals(run.parentId);
+      if (found.length < 2) throw new Error("the resumed settlement is not admitted yet");
+      return found;
+    }, { timeout: 30_000, interval: 20 });
+    await run.parentThread.awaitResult(signals[1]!.id);
+
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+    expect(signals.map((signal) => signal.content.origin)).toEqual([ORIGIN, { ...ORIGIN, reply: "manual" }]);
+    expect(await db.select().from(childReplyDeliveries)).toHaveLength(1);
   });
 
   it.each([

@@ -337,8 +337,11 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   to the original channel thread. A manual settlement does not post
   automatically. It uses the same once-per-thread silence reminder as other
   manual turns. The child result itself does not post directly.
-  `child_send` and restart recovery retain the stored origin, even when a
-  follow-up comes from another parent thread.
+  `child_send` from the parent thread that delegated the work, and restart
+  recovery, retain the stored origin. A `child_send` from another parent
+  thread changes the stored policy to `manual`, so that thread's context
+  never posts to the original channel thread automatically. The parent can
+  still reply there explicitly.
   The web admission path clears the stored channel origin only when the
   engine accepts human input that supersedes the watched child submission.
   A followup, a promotion that runs ahead of queued delegated work, input on

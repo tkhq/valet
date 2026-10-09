@@ -2480,7 +2480,7 @@ describe("buildChildSender", () => {
     expect(rows[0]?.queueItemId).toBe(res?.queueItemId);
   });
 
-  it.each([undefined, "auto", "manual"] satisfies ChannelOrigin["reply"][])("re-opens a settled child and preserves reply policy %s", async (reply) => {
+  it.each([undefined, "auto", "manual"] satisfies ChannelOrigin["reply"][])("re-opens a settled child from another thread with a manual reply (stored policy %s)", async (reply) => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
@@ -2502,7 +2502,8 @@ describe("buildChildSender", () => {
 
     const sender = buildChildSender(deps, watcher);
     // Send from a DIFFERENT thread than the spawn origin: the durable edge
-    // (and the settlement signal) must stay with the spawning thread.
+    // (and the settlement signal) must stay with the spawning thread, but
+    // the channel thread no longer gets an automatic post.
     const res = await sender(
       { childSessionId: "child-again", message: "one more thing: add tests" },
       { parentSessionId: "parent-again", parentThreadId: "th-elsewhere", actorUserId: "local-user" },
@@ -2529,7 +2530,7 @@ describe("buildChildSender", () => {
     if (typeof content !== "object" || content === null || !("kind" in content) || content.kind !== "signal") {
       throw new Error("Expected a child settlement signal");
     }
-    expect(content.origin).toEqual(origin);
+    expect(content.origin).toEqual({ ...origin, reply: "manual" });
   });
 
   it.each([true, false])("follows a successor across rearm with human takeover %s", async (humanTakeover) => {
