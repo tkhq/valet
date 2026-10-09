@@ -6,6 +6,7 @@ import { threadReadAccess } from "../services/thread-access.js";
 import { workflowEditorThreadContext } from "../workflows/editor-thread-context.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import { and, eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -1309,6 +1310,11 @@ export class EngineHost {
       await onStartRef(pendingStartRef);
       pendingStartRef = undefined;
     }
+    // A child reports this warning to its parent (`startupWarnings`). A
+    // REST session has no parent, so the warning goes on its thread.
+    if (repoFlags.scratchWarning) {
+      await this.noteSessionWarning(session, repoFlags.scratchWarning);
+    }
 
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
@@ -2396,11 +2402,38 @@ export class EngineHost {
   ): { wakeups: WakeupsSeam } {
     return {
       wakeups: buildWakeupsSeam(
-        { engineStore: this.opts.engineStore, limits: this.opts.wakeupLimits },
+        { engineStore: this.opts.engineStore, limits: this.opts.wakeupLimits, provider: this.opts.sandboxProvider },
         sessionId,
         getSession,
       ),
     };
+  }
+
+  /**
+   * Shows a startup warning as a `system` entry on the session's default
+   * thread, where the session page renders it. The model does not see
+   * `system` entries (`entriesToAgentMessages` skips them). A rebuild after
+   * a restart finds the entry and does not write it again. Best-effort: a
+   * failed write is logged and never blocks the session.
+   */
+  private async noteSessionWarning(session: Session, text: string): Promise<void> {
+    try {
+      const thread = await session.createThread("web:default");
+      const snapshot = await this.opts.engineStore.getThreadSnapshot(session.id, thread.id);
+      if (snapshot?.entries.some((e) => e.type === "message" && e.role === "system" && e.content === text)) return;
+      await thread.appendEntry({
+        id: `e-${randomUUID()}`,
+        sessionId: session.id,
+        threadId: thread.id,
+        parentId: null,
+        type: "message",
+        role: "system",
+        content: text,
+        createdAt: Date.now(),
+      });
+    } catch (err) {
+      console.error(`EngineHost: session ${session.id}: showing a startup warning failed:`, err);
+    }
   }
 
   /**

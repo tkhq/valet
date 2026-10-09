@@ -683,6 +683,57 @@ describe("childSessionFor repo prebuild flags", () => {
     });
   });
 
+  it("shows a dropped scratch request on a REST session's thread once (fix wave 1, I5)", async () => {
+    const prevScratchMax = process.env.VALET_SANDBOX_SCRATCH_MAX;
+    process.env.VALET_SANDBOX_SCRATCH_MAX = "1Ti";
+    try {
+      fixture = startGithubFixture({
+        getContents: (_owner, _repo, path) =>
+          path === ".valet/prebuild.yaml"
+            ? contentsBody("resources:\n  scratch: 2Ti\n", "blob-rest-scratch")
+            : { status: 404, body: { message: "Not Found" } },
+      });
+      api = await bootTestApi({
+        sandboxProvider: new RecordingSandboxProvider(),
+        githubTokenDeps: { key: deriveSecretKey("test-key"), apiUrl: fixture.url, githubUrl: fixture.url },
+      });
+      const { engineHost, engineStore, db } = api.providers;
+      const sessionId = "rest-scratch-refused";
+      const now = Date.now();
+      await db.insert(agentSessions).values({
+        id: sessionId, userId: "local-user", orgId: "local-org", workspace: `/tmp/${sessionId}`,
+        status: "active", ownerType: "user", ownerId: "local-user", profile: "headless", createdAt: now, updatedAt: now,
+      });
+      await db.insert(sessionRepos).values({
+        sessionId, host: "github", fullName: "acme/open-widgets", cloneUrl: "https://github.com/acme/open-widgets.git",
+        ref: null, auth: "auto", position: 0, targetDir: "open-widgets",
+      });
+      const meta = {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: `/tmp/${sessionId}`,
+        repos: [binding({ fullName: "acme/open-widgets" })],
+      };
+      const warning =
+        "Valet did not apply the repository's scratch setting. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or ask an admin to raise the cap.";
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const session = await engineHost.sessionFor(sessionId, meta);
+      // A rebuild (api restart or cache eviction) must not repeat the entry.
+      engineHost.evictCache(sessionId);
+      await engineHost.sessionFor(sessionId, meta);
+      warnSpy.mockRestore();
+
+      const thread = session.thread("web:default");
+      const entries = await engineStore.getEntries(sessionId, thread.id);
+      const notices = entries.filter((e) => e.type === "message" && e.role === "system" && e.content === warning);
+      expect(notices).toHaveLength(1);
+    } finally {
+      if (prevScratchMax === undefined) delete process.env.VALET_SANDBOX_SCRATCH_MAX;
+      else process.env.VALET_SANDBOX_SCRATCH_MAX = prevScratchMax;
+    }
+  });
+
   it("preserves persisted Kubernetes when the repository read fails", async () => {
     fixture = startGithubFixture({ getContents: () => ({ status: 500, body: { message: "failed" } }) });
     const recorder = new NestedRecordingSandboxProvider();

@@ -1307,7 +1307,12 @@ describe("ChildWatcher", () => {
       .limit(1);
     expect(stillUnsettled[0]?.settled).toBe(false);
 
-    await engineStore.settleUnclaimed("child-leased-gap", childThread.id, signalItemId, { outcome: "completed" });
+    // The post-exit turn fails. child.settled must report this turn, not
+    // the first turn's "completed" (fix wave 1, I3).
+    await engineStore.settleUnclaimed("child-leased-gap", childThread.id, signalItemId, {
+      outcome: "failed",
+      error: "post-exit turn: 3 tests failed",
+    });
 
     await waitFor(async () => {
       const rows = await db
@@ -1328,6 +1333,9 @@ describe("ChildWatcher", () => {
         (i.content as SignalContent).signalType === "child.settled",
     );
     expect(settledSignals).toHaveLength(1);
+    const settled = settledSignals[0]?.content as SignalContent;
+    expect(settled.attributes?.outcome).toBe("failed");
+    expect(settled.body).toContain("post-exit turn: 3 tests failed");
   });
 
   it.each(["failed", "aborted"] as const)(

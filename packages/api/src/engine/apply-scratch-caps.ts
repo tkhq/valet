@@ -1,5 +1,5 @@
-import { isScratchRequestError, validateScratchRequest, type ScratchCaps } from "@valet/shared";
-import { recordScratchRefused } from "@valet/engine";
+import { isScratchRequestError, parseResourceQuantity, validateScratchRequest, type ScratchCaps } from "@valet/shared";
+import { recordScratchRefused, recordScratchRequested } from "@valet/engine";
 import type { PrebuildResources } from "../prebuilds/recipe.js";
 import type { ResolvedRepoPrebuildFlags } from "./resolve-repo-resources.js";
 
@@ -25,7 +25,8 @@ export function applyScratchCaps(
   const scratch = flags.resources?.scratch;
   if (scratch === undefined) return { flags };
   try {
-    validateScratchRequest(scratch, "prebuild", caps);
+    const accepted = validateScratchRequest(scratch, "prebuild", caps);
+    recordScratchRequested("repo", parseResourceQuantity(accepted) ?? 0);
     return { flags };
   } catch (err) {
     if (!isScratchRequestError(err)) throw err;

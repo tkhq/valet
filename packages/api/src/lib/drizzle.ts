@@ -1642,7 +1642,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   },
   {
     // engine_wakeups table (spec 2026-10-08: sandbox scratch, wakeups, and
-    // leases). Engine table — same ENGINE_SCHEMA_VERSION caveat as above.
+    // leases). Engine table: the same ENGINE_SCHEMA_VERSION caveat as above.
     describe: "engine_wakeups table (spec 2026-10-08)",
     probe: { kind: "table", table: "engine_wakeups" },
     sql: `CREATE TABLE IF NOT EXISTS "engine_wakeups" (
@@ -1665,7 +1665,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'CREATE INDEX IF NOT EXISTS "engine_wakeups_due" ON "engine_wakeups" ("status","kind","fire_at")',
   },
   {
-    // engine_leases table (spec 2026-10-08). Engine table — same caveat.
+    // engine_leases table (spec 2026-10-08). Engine table: the same caveat.
     describe: "engine_leases table (spec 2026-10-08)",
     probe: { kind: "table", table: "engine_leases" },
     sql: `CREATE TABLE IF NOT EXISTS "engine_leases" (
