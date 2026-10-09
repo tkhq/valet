@@ -65,6 +65,13 @@ export type MarkdownSegment =
  * starts a table header and always ends a table body. */
 const BLOCK_START = /^ {0,3}(?:[`~]{3,}|>|#{1,6}\s|[-+*]\s|\d+[.)]\s)/;
 
+/** A line that opens a container whose following lines belong to it until a
+ * blank line: a blockquote or list item (lazy continuation lines), or an
+ * HTML block. A pipe table there is part of the container, so lifting it out
+ * as its own table would break the container in two. Slack's own `<https://…>`
+ * links and `<@U…>` mentions are not tags, so they open nothing. */
+const CONTAINER_START = /^ {0,3}(?:>|[-+*]\s|\d+[.)]\s|<(?:\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/>]|$)|!--|\?))/;
+
 /**
  * Split Markdown into prose runs and pipe tables. Fenced and indented code
  * stay prose, so table examples inside them are never rendered as tables.
@@ -79,8 +86,11 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
     else segments.push({ type: 'text', lines: [line] });
   };
   let fence: string | undefined;
+  let inContainer = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
+    if (!fence && /^\s*$/.test(line)) inContainer = false;
+    else if (!fence && CONTAINER_START.test(line)) inContainer = true;
     if (fence) {
       prose(line);
       if (new RegExp(`^ {0,3}${fence[0]}{${fence.length},}[ \\t]*$`).test(line)) fence = undefined;
@@ -93,7 +103,7 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
       continue;
     }
     const delimiter = lines[index + 1];
-    if (/^(?: {4}|\t)/.test(line) || BLOCK_START.test(line) || delimiter === undefined || !isTableDelimiterRow(delimiter)) {
+    if (inContainer || /^(?: {4}|\t)/.test(line) || BLOCK_START.test(line) || delimiter === undefined || !isTableDelimiterRow(delimiter)) {
       prose(line);
       continue;
     }

@@ -197,8 +197,8 @@ function tableBlock(table: MarkdownTable): { block: Block; characters: number } 
 
 /**
  * Split Markdown into `markdown` blocks for prose and `table` blocks for
- * pipe tables. Returns undefined when the text has no renderable table, a
- * table exceeds Slack's limits, or the result needs more than `maxBlocks`
+ * pipe tables. Returns undefined when the text has no renderable table or
+ * more than one, a table exceeds Slack's limits, or the result needs more than `maxBlocks`
  * blocks, so the caller keeps its existing rendering.
  */
 export function tablesToTableBlocks(text: string, maxBlocks: number): Block[] | undefined {
@@ -222,7 +222,11 @@ export function tablesToTableBlocks(text: string, maxBlocks: number): Block[] | 
     blocks.push(table.block);
     tables += 1;
   }
-  if (tables === 0 || blocks.length > maxBlocks) return undefined;
+  // Slack has documented one table per message, rejecting a second with
+  // `only_one_table_allowed`. The current page no longer says so, but a
+  // rejected send loses the message, so a message with several tables keeps
+  // the Markdown rendering.
+  if (tables !== 1 || blocks.length > maxBlocks) return undefined;
   return blocks;
 }
 

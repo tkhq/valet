@@ -487,6 +487,13 @@ assistant identity, so that retry carries the content Slack accepted and a
 second, unrelated error cannot hide the fallback. Caller-supplied blocks never
 get this retry.
 
+A message with more than one pipe table keeps the single Markdown block. Slack
+has documented a limit of one table per message and rejected a second table
+with `only_one_table_allowed`, which the `invalid_blocks` retry does not catch.
+A table that continues a blockquote, a list item, or an HTML block stays in that
+container, because Markdown reads it as part of the container. A blank line
+ends the container, and a table after it renders natively.
+
 ### Images in question answers
 
 The web question card accepts image uploads, clipboard images, and dropped images. An answer can contain images without text. Failed submissions retain the draft and its images. Changing questions clears that draft.

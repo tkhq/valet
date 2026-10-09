@@ -108,13 +108,36 @@ describe('tablesToTableBlocks', () => {
     });
   });
 
-  it('keeps prose between and after tables as Markdown blocks', () => {
-    const source = 'Intro\n\n| a |\n|-|\n| 1 |\n\nMiddle _note_\n\n| b |\n|-|\n| 2 |\n\n- tail';
+  it('keeps prose before and after a table as Markdown blocks', () => {
+    const source = 'Intro\n\n| a |\n|-|\n| 1 |\n\nAfter _note_\n\n- tail';
     const blocks = tablesToTableBlocks(source, 50);
-    expect(blocks?.map((block) => block.type)).toEqual(['markdown', 'table', 'markdown', 'table', 'markdown']);
+    expect(blocks?.map((block) => block.type)).toEqual(['markdown', 'table', 'markdown']);
     expect(blocks?.[0]).toEqual({ type: 'markdown', text: 'Intro' });
-    expect(blocks?.[2]).toEqual({ type: 'markdown', text: 'Middle _note_' });
-    expect(blocks?.[4]).toEqual({ type: 'markdown', text: '- tail' });
+    expect(blocks?.[2]).toEqual({ type: 'markdown', text: 'After _note_\n\n- tail' });
+  });
+
+  it('keeps the Markdown block when a message holds more than one table', () => {
+    // Slack has documented a one-table limit; a rejected send loses the message.
+    const source = 'Intro\n\n| a |\n|-|\n| 1 |\n\nMiddle\n\n| b |\n|-|\n| 2 |';
+    expect(tablesToTableBlocks(source, 50)).toBeUndefined();
+  });
+
+  it.each([
+    ['a blockquote', '> quote\na | b\n|-|-|\n| 1 | 2 |'],
+    ['a bullet item', '- item\na | b\n|-|-|\n| 1 | 2 |'],
+    ['an ordered item', '1. item\na | b\n|-|-|\n| 1 | 2 |'],
+    ['an HTML block', '<div>\n| a | b |\n|-|-|\n| 1 | 2 |\n</div>'],
+  ])('leaves a table that continues %s inside it', (_name, source) => {
+    // Lifting the table out would split the container around it.
+    expect(tablesToTableBlocks(source, 50)).toBeUndefined();
+  });
+
+  it.each([
+    ['a link', '<https://example.com|docs>\n\n| a |\n|-|\n| 1 |'],
+    ['a mention', '<@U123> results\n\n| a |\n|-|\n| 1 |'],
+    ['a closed blockquote', '> quote\n\n| a |\n|-|\n| 1 |'],
+  ])('still renders a table after %s', (_name, source) => {
+    expect(tablesToTableBlocks(source, 50)?.map((block) => block.type)).toEqual(['markdown', 'table']);
   });
 
   it('keeps indented code before a table intact', () => {
