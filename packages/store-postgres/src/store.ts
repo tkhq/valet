@@ -1547,6 +1547,15 @@ export class PgSessionStore implements SessionStore {
     return mapGoodRows(r.rows, "engine_leases", (raw) => rowToLease(rawToLeaseRow(raw)))[0] ?? null;
   }
 
+  async deleteWakeupRows(sessionId: string, rows: { wakeupId?: string; leaseId?: string }): Promise<void> {
+    if (rows.wakeupId !== undefined) {
+      await this.db.query("DELETE FROM engine_wakeups WHERE session_id = $1 AND id = $2", [sessionId, rows.wakeupId]);
+    }
+    if (rows.leaseId !== undefined) {
+      await this.db.query("DELETE FROM engine_leases WHERE session_id = $1 AND id = $2", [sessionId, rows.leaseId]);
+    }
+  }
+
   async listActiveLeases(sessionId: string): Promise<Lease[]> {
     const r = await this.db.query(
       `SELECT * FROM engine_leases WHERE session_id = $1 AND released_at IS NULL ORDER BY created_at, id`,

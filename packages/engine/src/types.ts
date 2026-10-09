@@ -2254,6 +2254,12 @@ export interface SessionStore {
   releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null>;
   /** The lease with `id`, released or not, or null for an unknown or unreadable row. */
   getLease(id: string): Promise<Lease | null>;
+  /**
+   * Deletes one wakeup row and one lease row of `sessionId`, when they
+   * exist. For a create that landed after its session was deleted: it
+   * removes only what that create wrote, never the session's other rows.
+   */
+  deleteWakeupRows(sessionId: string, rows: { wakeupId?: string; leaseId?: string }): Promise<void>;
   listActiveLeases(sessionId: string): Promise<Lease[]>;
   listAllActiveLeases(): Promise<Lease[]>;
   countActiveLeases(sessionId: string): Promise<number>;

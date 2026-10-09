@@ -124,7 +124,10 @@ export async function gateBackgroundWork(
   const items = selectWork(await listBackgroundWork(engineStore, row.id), filter);
   if (items.length === 0) return { kind: "clear" };
   const mayCancel = await canCancelSessionWakeup(db, row, c.var.principal);
-  const visible = await keepVisibleWork(c, row, items, mayCancel);
+  // Work with no thread is session-level, so the gate names it to every
+  // caller; `forceAllowed` below still needs `mayCancel`. Counting it as
+  // hidden would tell the caller to ask "the people in those threads".
+  const visible = await keepVisibleWork(c, row, items, true);
   const hiddenCount = items.length - visible.length;
   const forceAllowed = mayCancel && hiddenCount === 0;
   if (force && forceAllowed) return { kind: "force", ids: new Set(visible.map((w) => w.id)) };

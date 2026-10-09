@@ -349,8 +349,14 @@ describe("WakeWatcher", () => {
     await h.watcher().sweep();
 
     expect(h.prompt).toHaveBeenCalledTimes(1);
-    const { opts } = signalOf(h.prompt.mock.calls[0]);
+    const { content, opts } = signalOf(h.prompt.mock.calls[0]);
     expect(opts).toEqual({ dispatchId: "wakeup:wk_a:terminal", queueMode: "followup" });
+    // The main thread can have other readers: the body is a notice, not the
+    // work's output, and no channel origin rides along (fix wave 4, N3).
+    const body = typeof content !== "string" && "body" in content ? content.body : "";
+    expect(body).toContain("the thread it ran in is gone");
+    expect(body).not.toContain("ping");
+    expect(content).not.toHaveProperty("origin");
   });
 
   it("logs a delivery failure with the wakeup id and keeps the terminal row", async () => {

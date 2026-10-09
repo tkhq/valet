@@ -86,6 +86,20 @@ describe("thread addressing compatibility", () => {
       status: "pending" as const, createdAt: Date.now(), updatedAt: Date.now(),
     };
     await api.providers.engineStore.saveDecisionGate(thread.sessionId, thread.id, gate);
+    // The gated turn is unsettled. An archive must not wait for it (fix
+    // wave 4 re-review F1): the withdrawal below is what settles it.
+    const now = Date.now();
+    await api.providers.engineStore.admitSubmission(thread.sessionId, thread.id, {
+      id: "q-archive",
+      threadId: thread.id,
+      content: "needs approval",
+      status: "blocked_on_decision_gate",
+      attemptCount: 0,
+      maxAttempts: 10,
+      timeoutAt: now + 3_600_000,
+      createdAt: now,
+      updatedAt: now,
+    });
     api.providers.engineHost.evictCache(thread.sessionId);
     // Archive used to flip archivedAt only, and the agent stayed suspended
     // on a gate nobody would see again.

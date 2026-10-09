@@ -397,6 +397,15 @@ export class InMemorySessionStore implements SessionStore {
     return l ? { ...l } : null;
   }
 
+  async deleteWakeupRows(sessionId: string, rows: { wakeupId?: string; leaseId?: string }): Promise<void> {
+    if (rows.wakeupId !== undefined && this.wakeups.get(rows.wakeupId)?.sessionId === sessionId) {
+      this.wakeups.delete(rows.wakeupId);
+    }
+    if (rows.leaseId !== undefined && this.leases.get(rows.leaseId)?.sessionId === sessionId) {
+      this.leases.delete(rows.leaseId);
+    }
+  }
+
   async listActiveLeases(sessionId: string): Promise<Lease[]> {
     return [...this.leases.values()]
       .filter((l) => l.sessionId === sessionId && l.releasedAt === undefined)

@@ -1254,15 +1254,17 @@ sessionsRouter.patch("/:id", async (c) => {
       // the rebuild ran wins, the same TOCTOU rule `POST /:id/sandbox/replace`
       // applies. The row already carries the new profile, so say so.
       const recheck = await engineStore.listUnsettledSubmissions(id);
+      // The web's confirm dialog reads this sentence to mark the list stopped.
+      const alreadyStopped = stopped ? " The background work already stopped." : "";
       if (recheck.length > 0) {
         await sendStopped();
-        return c.json({ error: profileSavedButSandboxFailed("a turn started") }, 409);
+        return c.json({ error: profileSavedButSandboxFailed("a turn started") + alreadyStopped }, 409);
       }
       // Leased work that started after the gate would die with the old
       // sandbox (fix wave 4, N5); the same rule as pause and replace.
       if (await leasedWorkStarted(engineStore, id)) {
         await sendStopped();
-        return c.json({ error: profileSavedButSandboxFailed("background work started") }, 409);
+        return c.json({ error: profileSavedButSandboxFailed("background work started") + alreadyStopped }, 409);
       }
       try {
         await rebuilt.attachment.replace();

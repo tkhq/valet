@@ -654,15 +654,16 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
     if (reasoningErr) return c.json({ error: reasoningErr }, 400);
   }
 
-  // A plain archive waits for the thread's turn (fix wave 4, P4). A turn
-  // that starts background work after the gate below would leave work
-  // running on a hidden thread, and nobody would see the 409 for it.
-  if (body.archived === true && body.force !== true) {
-    const busy = (await c.var.providers.engineStore.listUnsettledSubmissions(sessionId))
-      .some((item) => item.threadId === thread.id);
-    if (busy) {
-      return c.json({ error: "A turn is running in this thread. Wait for it to finish, then archive." }, 409);
-    }
+  // An archive waits for the thread's turn, forced or not (fix wave 4, P4).
+  // A turn that starts background work after the gate below would leave
+  // work running on a hidden thread, and nobody would see the 409 for it.
+  // A turn blocked on an approval does not count: the archive withdraws
+  // its gate below (TKAI-260), and the turn then settles.
+  const threadBusy = async (): Promise<boolean> =>
+    (await c.var.providers.engineStore.listUnsettledSubmissions(sessionId))
+      .some((item) => item.threadId === thread.id && item.status !== "blocked_on_decision_gate");
+  if (body.archived === true && (await threadBusy())) {
+    return c.json({ error: "A turn is running in this thread. Wait for it to finish, then archive." }, 409);
   }
 
   // Archiving a thread with background work stops that work, so it needs

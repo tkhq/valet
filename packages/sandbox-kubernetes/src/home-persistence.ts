@@ -115,17 +115,14 @@ export function scratchStartScript(root = SCRATCH_ROOT, jobLogLink = JOB_LOG_LIN
   if [ -d "$link" ] && [ ! -L "$link" ]; then rmdir "$link" 2>/dev/null || :; fi
   ln -sfn "$scratch/valet-jobs" "$link"
   stamp=$(mktemp 2>/dev/null) || stamp=
-  if [ -n "$stamp" ]; then
-    pids=$(find "$scratch/valet-jobs" -maxdepth 1 -name '*.pid' ! -newer "$stamp")
-    rm -f "$stamp"
-  else
-    pids=$(find "$scratch/valet-jobs" -maxdepth 1 -name '*.pid')
-  fi
-  printf '%s\\n' "$pids" | while IFS= read -r pidfile; do
-    [ -n "$pidfile" ] || continue
+  for pidfile in "$scratch"/valet-jobs/*.pid; do
+    [ -e "$pidfile" ] || continue
+    if [ -n "$stamp" ] && [ "$pidfile" -nt "$stamp" ]; then continue; fi
     dead="\${pidfile%.pid}.dead"
     [ -e "\${pidfile%.pid}.exit" ] || [ -e "$dead" ] || [ -L "$dead" ] || : > "$dead" 2>/dev/null || :
   done
+  [ -z "$stamp" ] || rm -f "$stamp"
+  export VALET_SCRATCH_DEAD_MARKED=1
 fi
 `;
 }

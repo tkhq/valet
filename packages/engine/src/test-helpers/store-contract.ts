@@ -836,6 +836,18 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.listAllActiveLeases()).toEqual([]);
       });
 
+      it("deleteWakeupRows removes only the named rows of the session", async () => {
+        await store.createWakeupWithLease(wakeup(), lease());
+        await store.createWakeup(wakeup({ id: "wk_other", execId: undefined, leaseId: undefined }));
+        await store.deleteWakeupRows("another-session", { wakeupId: "wk_a", leaseId: "ls_a" });
+        expect(await store.getWakeup("wk_a")).not.toBeNull();
+        await store.deleteWakeupRows("sess-1", { wakeupId: "wk_a", leaseId: "ls_a" });
+        expect(await store.getWakeup("wk_a")).toBeNull();
+        expect(await store.getLease("ls_a")).toBeNull();
+        expect(await store.getWakeup("wk_other")).not.toBeNull();
+        await expect(store.deleteWakeupRows("sess-1", { wakeupId: "wk_missing" })).resolves.toBeUndefined();
+      });
+
       it("transitionWakeupAndReleaseLease releases the row's lease with the CAS, and nothing when the CAS loses", async () => {
         await store.createWakeupWithLease(wakeup(), lease());
         const lost = await store.transitionWakeupAndReleaseLease("wk_a", ["pending"], "cancelled", { cause: "cancelled" }, 40, "cancelled");

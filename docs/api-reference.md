@@ -45,9 +45,16 @@ background work. While such work is open, these actions return 409 with a
   (`pending` while it starts, else `running`), reason, thread, deadline or
   fire time, and start time. `hiddenCount` counts the rest. Their reasons
   are not shown.
-- Work with no thread belongs to the session. Callers who may cancel
-  background work see it. Other callers do not see it in `work` or in
-  `GET /api/sessions/:id/wakeups`.
+- Work with no thread belongs to the session. The 409 names it to every
+  caller and never counts it as hidden. Only callers who may cancel
+  background work see it in `GET /api/sessions/:id/wakeups` or can cancel
+  it.
+- Pause, replace, and a profile change read the leased work again right
+  before they stop the sandbox. Work that started after the gate returns
+  409 with `background work started` in the text; retry to see it.
+- A thread archive, forced or not, returns 409 while a turn runs in that
+  thread. A turn that waits on an approval does not count: the archive
+  withdraws the approval.
 - To stop the work and act, retry with `force: true` in the JSON body. Pause
   and replace also accept `?force=true`.
 - `force` needs the right to cancel background work (session admins). A

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Taken first, before docker starts: the .dead loop below skips any pid newer than it.
+scratch_stamp=$(mktemp 2>/dev/null) || scratch_stamp=
 if [ "${VALET_SANDBOX_DOCKER:-0}" = 1 ] || [ "${VALET_SANDBOX_KUBERNETES:-0}" = 1 ]; then
   /cgroup-bootstrap.sh
   export VALET_CGROUP_BOOTSTRAPPED=1
@@ -20,21 +22,19 @@ if [ -d /scratch ]; then
   ln -sfn /scratch/valet-jobs /tmp/valet-jobs
   # A container restart killed every job, but /scratch kept its files. Mark
   # each job with no exit code dead, so a poll does not trust a reused pid.
-  # Only jobs older than this start: a kickoff that races the loop keeps
-  # its pid. A marker that already exists, or that root cannot write, is
-  # left alone, so a planted entry never stops the start.
-  stamp=$(mktemp 2>/dev/null) || stamp=
-  if [ -n "$stamp" ]; then
-    pids=$(find /scratch/valet-jobs -maxdepth 1 -name '*.pid' ! -newer "$stamp")
-    rm -f "$stamp"
-  else
-    pids=$(find /scratch/valet-jobs -maxdepth 1 -name '*.pid')
+  # Only jobs older than this script's start: a kickoff that races the
+  # loop keeps its pid. A marker that already exists, or that root cannot
+  # write, is left alone, so a planted entry never stops the start. The
+  # k8s start prefix runs the same loop first and sets the flag.
+  if [ "${VALET_SCRATCH_DEAD_MARKED:-}" != 1 ]; then
+    for pidfile in /scratch/valet-jobs/*.pid; do
+      [ -e "$pidfile" ] || continue
+      if [ -n "$scratch_stamp" ] && [ "$pidfile" -nt "$scratch_stamp" ]; then continue; fi
+      dead="${pidfile%.pid}.dead"
+      [ -e "${pidfile%.pid}.exit" ] || [ -e "$dead" ] || [ -L "$dead" ] || : > "$dead" 2>/dev/null || :
+    done
   fi
-  printf '%s\n' "$pids" | while IFS= read -r pidfile; do
-    [ -n "$pidfile" ] || continue
-    dead="${pidfile%.pid}.dead"
-    [ -e "${pidfile%.pid}.exit" ] || [ -e "$dead" ] || [ -L "$dead" ] || : > "$dead" 2>/dev/null || :
-  done
+  [ -z "$scratch_stamp" ] || rm -f "$scratch_stamp"
 fi
 # Root services use a root-only temp dir. The workload user keeps
 # /scratch/tmp from the container env.
