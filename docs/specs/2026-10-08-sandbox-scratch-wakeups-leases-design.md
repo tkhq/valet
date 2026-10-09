@@ -1291,9 +1291,11 @@ with an earlier entry, the entry below wins.
   repository request that survived a failed saved-defaults read is still
   capped before the fresh-create path applies it.
 - **PR review, docker cancel kills the command.** A docker job records
-  its process group in a pid file (`setsid -w` when util-linux has it);
-  `cancelJob` kills that group inside the container before it ends the
-  host-side `docker exec` client.
+  its process group in a pid file (`setsid -w` when util-linux has it; a
+  `docker exec` shell is already its own group leader). `cancelJob` kills
+  every member of that group inside the container (a `/proc` sweep, since
+  dash and BusyBox `kill` spell a group kill differently) before it ends
+  the host-side `docker exec` client.
 - **PR review, every line at exit.** The terminal watch branch has no
   200-line cap; `chunkLines` bounds each event instead. The 200-line cap
   stays for a running tick.
