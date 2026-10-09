@@ -1,0 +1,150 @@
+/**
+ * The name, avatar, and personality a workspace's assistant carried before
+ * the workspace runtime replaced per-assistant profiles. The runtime dropped
+ * `name`, `avatar_url`, and `personality` from the Drizzle model and from a
+ * fresh database's schema, but an upgraded database still holds the values,
+ * and nothing removes them. Without this read, a customized assistant lost
+ * its name and avatar in channel replies, and its personality in the prompt,
+ * on upgrade.
+ *
+ * Read-only, like `integration-limit.ts`: nothing writes a new value, so the
+ * profile stays what it was at upgrade. `to_jsonb` reads a column that a
+ * database created after the change does not have as null, rather than
+ * failing the query.
+ */
+import { sql } from "drizzle-orm";
+import type { Principal } from "@valet/engine";
+import { PRESENCE_DISPLAY_NAME_MAX_LENGTH, validatePresence } from "@valet/shared";
+import { LEGACY_RUNTIME_MARKER, type AppDb } from "../lib/drizzle.js";
+
+export interface LegacyAssistantProfile {
+  name?: string;
+  avatarUrl?: string;
+  /** Trimmed. `""` is an explicitly neutral persona: the old editor stored
+   * it when someone cleared the personality. Absent means never set. */
+  personality?: string;
+  /** When this database was upgraded to the workspace runtime (epoch ms). */
+  upgradedAt?: number;
+  /** The row is a migration-retained assistant: the singleton cutover moved
+   * it to a tombstone owner (`<owner>:retired:<id>`), but its runtime still
+   * runs. It is not the workspace's live assistant. */
+  retained?: true;
+}
+
+/**
+ * The stored name as one trimmed line of at most 80 UTF-16 units: Slack's
+ * `username` limit, and the cap `validatePresence` applies to every other
+ * display name. The old API stored any string, so a stored name can hold
+ * line breaks or run long. Control and line-separator characters become
+ * spaces, so the name cannot break out of the "You are <name>." line into
+ * a new prompt section or a new Slack line. Its words still reach the
+ * prompt: the same owners and the assistant itself wrote both the name and
+ * the personality, which is instruction text by design.
+ */
+function displayName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const line = value.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
+  let capped = "";
+  for (const char of line) {
+    if (capped.length + char.length > PRESENCE_DISPLAY_NAME_MAX_LENGTH) break;
+    capped += char;
+  }
+  return capped.trim() || undefined;
+}
+
+/** A trimmed https URL that `validatePresence` accepts, without the inner
+ * whitespace the old API also refused. */
+function avatarUrl(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const url = value.trim();
+  return url && !/\s/.test(url) && validatePresence({ avatarUrl: url }) === null ? url : undefined;
+}
+
+/**
+ * Whose profile to read. A post that belongs to one assistant passes that
+ * assistant's id: the singleton cutover moved a team's extra assistants to
+ * tombstone owners but keeps them running (`legacyAssistantRow` in
+ * `service.ts`), and an owner lookup would hand such an assistant the
+ * surviving assistant's profile. A post that no assistant claims passes the
+ * owner. It reads the workspace's live assistant only while no retained
+ * assistant of that owner still runs; otherwise it reads nothing, and the
+ * post uses the workspace name as before the restore.
+ */
+export type LegacyProfileKey = { assistantId: string } | { owner: Principal };
+
+/** The carried-over profile, or undefined when it has none. */
+export async function loadLegacyAssistantProfile(
+  db: AppDb,
+  orgId: string,
+  key: LegacyProfileKey,
+): Promise<LegacyAssistantProfile | undefined> {
+  // An id read skips the archived filter: the caller already resolved the
+  // row, and a retained assistant's row is archived under its tombstone owner.
+  const match = "assistantId" in key
+    ? sql`a.id = ${key.assistantId}`
+    : sql`a.owner_type = ${key.owner.type} AND a.owner_id = ${key.owner.id} AND a.archived_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM legacy_assistant_runtimes l JOIN assistants r ON r.session_id = l.session_id
+        WHERE l.org_id = ${orgId} AND l.owner_type = ${key.owner.type} AND l.owner_id = ${key.owner.id}
+          AND r.owner_id = l.owner_id || ':retired:' || r.id
+          AND NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = l.session_id AND s.status = 'deleted'))`;
+  const result = await db.execute(sql`SELECT p->>'name' AS name, p->>'avatar_url' AS avatar_url,
+      p->>'personality' AS personality, right(p->>'owner_id', length(':retired:' || (p->>'id'))) = ':retired:' || (p->>'id') AS retained,
+      (SELECT m.applied_at FROM __valet_app_migrations m WHERE m.filename = ${LEGACY_RUNTIME_MARKER}) AS upgraded_at
+    FROM (SELECT to_jsonb(a) AS p FROM assistants a WHERE a.org_id = ${orgId} AND ${match} LIMIT 1) live`) as {
+    rows: Array<{ name: unknown; avatar_url: unknown; personality: unknown; retained: unknown; upgraded_at: unknown }>;
+  };
+  const row = result.rows[0];
+  if (!row) return undefined;
+  const profile: LegacyAssistantProfile = {
+    ...(displayName(row.name) ? { name: displayName(row.name) } : {}),
+    ...(avatarUrl(row.avatar_url) ? { avatarUrl: avatarUrl(row.avatar_url) } : {}),
+    ...(typeof row.personality === "string" ? { personality: row.personality.trim() } : {}),
+    ...(row.retained === true ? { retained: true as const } : {}),
+  };
+  if (Object.keys(profile).length === 0) return undefined;
+  const upgradedAt = Number(row.upgraded_at);
+  return row.upgraded_at !== null && Number.isFinite(upgradedAt) ? { ...profile, upgradedAt } : profile;
+}
+
+/**
+ * The personality text for the prompt, from the `assistant/personality.md`
+ * memory file and the carried-over column.
+ *
+ * Before the workspace runtime, a set column won over the file, and `""`
+ * in the column was an explicitly neutral persona. The file could already
+ * exist then: `PATCH /api/orchestrator/info` wrote it on every personality
+ * save, and the assistant could write it with its memory tools. After the
+ * upgrade the file is the only personality anyone can change, through the
+ * assistant's memory tools or the memory API.
+ *
+ * So the column keeps winning while the file is unchanged since the
+ * upgrade, which reproduces what the workspace had. A file written after
+ * the upgrade is a newer edit, and it wins. The upgrade marker and the
+ * file's `updated_at` both come from the API's clock. A database without
+ * the marker cannot show a later edit, so the column wins there.
+ *
+ * A removed file reads as absent, so the column applies again: the memory
+ * store keeps no tombstone that would show the file was a later edit. A
+ * whitespace-only file clears the personality instead (legacy continuity
+ * spec, "Limitation: no editor").
+ *
+ * The old prompt had no persona at all without a name, so a column without
+ * a carried-over name is ignored. The file then applies as it does on a
+ * database created after the upgrade.
+ *
+ * A migration-retained assistant shares the team's memory, so a file edit
+ * after the upgrade is the live assistant's and never reaches it. It keeps
+ * its own column. With a NULL column it used the shared file, as before the
+ * upgrade, but only while the file is unchanged since the upgrade: the
+ * store keeps no earlier copy, so after a later edit it has no personality.
+ */
+export function effectivePersonality(
+  file: { content: string; updatedAt: number } | null,
+  legacy: LegacyAssistantProfile | undefined,
+): string {
+  const column = legacy?.name ? legacy.personality : undefined;
+  const editedAfterUpgrade = file !== null && file.updatedAt > (legacy?.upgradedAt ?? Number.POSITIVE_INFINITY);
+  if (legacy?.retained) return column ?? (file && !editedAfterUpgrade ? file.content : "");
+  if (column === undefined) return file?.content ?? "";
+  return file && editedAfterUpgrade ? file.content : column;
+}

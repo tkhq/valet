@@ -191,7 +191,11 @@ and `signal` records engine-routed admissions.
   the same line renders. If a gap remains on the events path, close it here.
 - **Outbound identity (TKAI-387).** Host deliveries and Slack actions resolve
   the current workspace name. Team and organization runs use their owner's
-  name. Personal runs use the bot identity. Workflows may set
+  name. Personal runs use the bot identity. A workspace whose assistant had a
+  custom name or avatar before the workspace runtime (2026-10-06) keeps it as
+  the workspace default. The legacy continuity spec
+  (`2026-10-06-legacy-continuity-design.md`, "Carried-over assistant
+  profile") describes that read and its limits. Workflows may set
   `definition.presence: { displayName?, avatarUrl? }`; event subscriptions may
   set `target.presence` for either an assistant or workflow target. Fields
   inherit in order: workspace, workflow, subscription, explicit action arguments.

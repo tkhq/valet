@@ -29,6 +29,31 @@ Where an execution mapping already exists from an earlier prerelease, preserve t
 - The new model must not introduce audience-based rejection for an existing supported workflow combination within its original ownership boundary.
 - Explicit user deletion, revocation and archival remain effective. Migration must not resurrect intentionally deleted work.
 
+## Carried-over assistant profile
+
+The workspace runtime removed `assistants.name`, `avatar_url`, and `personality` from the Drizzle schema and from a fresh database. An upgraded database still holds these columns. `assistants/legacy-profile.ts` reads them read-only through `to_jsonb`, so a database without the columns reads null and does not fail. Nothing writes them.
+
+- **Reply identity.** The name and avatar are the workspace's base channel identity (`services/workspace-sender.ts`). Workflow, subscription, and action presence still override each field. Without a carried-over name, team and organization posts use the owner's name and personal posts use the bot identity.
+- **Whose profile.** The singleton cutover moved a team's extra assistants to tombstone owners but keeps them running, so an owner lookup could give their posts the surviving assistant's name and persona. A post therefore reads the row of the assistant it belongs to, by id. An assistant session and its channel replies use that assistant. A child uses its parent assistant. A workflow's tool actions and session steps use the assistant whose runtime the upgrade kept for that workflow or run. A post that no assistant claims, such as a workflow created after the upgrade or an external agent's action, reads the workspace's live assistant only while no retained assistant of that owner runs. Otherwise it reads no profile and uses the workspace name, as before the restore. A retained assistant without its own profile also uses the workspace name.
+- **Retained personality.** A retained assistant shares its team's memory, so an edit of the team's `assistant/personality.md` after the upgrade is the live assistant's personality. A retained assistant uses its own column when it is set, `''` included ("You are <name>. <personality>"). Before the upgrade, a NULL column used the shared file. It still does while the file is unchanged since the upgrade. The memory store keeps no earlier copy of a file, so after a later edit the retained assistant has only its name. An edit or a whitespace reset of the shared file never reaches a retained assistant.
+- **Prompt name.** A carried-over name opens the persona prefix: "You are <name>."
+- **Normalization.** The old API stored any string as a name. The read turns control and line-separator characters into spaces, trims the name, and caps it at 80 UTF-16 units, the Slack `username` limit and the `validatePresence` cap. So the name stays on its own line in the prompt and in Slack. The read drops an avatar that `validatePresence` rejects or that contains whitespace.
+- **Personality precedence.** Before the upgrade, a set column won over the `assistant/personality.md` memory file, and `""` in the column was an explicitly neutral persona. The file could already exist then: `PATCH /api/orchestrator/info` wrote it on every personality save, and the assistant could write it with its memory tools. After the upgrade the file is the only personality that anyone can change. The prompt therefore uses the column while the file is absent or unchanged since the upgrade, and the file when someone wrote it after the upgrade. The upgrade time is the `applied_at` of the `legacy-runtime-continuity-v1` row in `__valet_app_migrations`, compared with the file's `updated_at`. A null column uses the file, as before. The old prompt had no persona without a name, so the column applies only with a carried-over name. Without one, the file applies as on a database created after the upgrade. An OKF import keeps the bundle's timestamp, so an imported pre-upgrade file does not count as a later edit.
+
+### Limitation: no editor
+
+The product has no control that changes or clears a carried-over name, avatar, or personality. This is deliberate. A renamed team keeps posting under its old assistant name. A personal workspace posts under its old assistant name, not the bot identity. Workflow, subscription, and action presence can still override the name and avatar for their own posts. An `assistant/personality.md` written after the upgrade overrides the carried-over personality.
+
+Removing that file brings the carried-over personality back. The memory store deletes a file without a tombstone or history, so nothing records that the removed file was a later edit, and recording it would need a schema change. To clear the personality without an operator, a user or the assistant writes `assistant/personality.md` with only whitespace. Its `updated_at` is after the upgrade, so it wins, and the prompt keeps only the name. This applies to the live assistant only. Only an operator can change a retained assistant's personality, as in step 3 below.
+
+To change a value, an operator edits the row in the database. The columns exist only on an upgraded database.
+
+1. Find the workspace's live row: `SELECT id, name, avatar_url, personality FROM assistants WHERE org_id = '<org id>' AND owner_type = '<user|team|org>' AND owner_id = '<owner id>' AND archived_at IS NULL;` A migration-retained assistant's row has `owner_id = '<owner id>:retired:<assistant id>'`.
+2. To clear the name, avatar, or both, set the column to NULL: `UPDATE assistants SET name = NULL, avatar_url = NULL WHERE id = '<assistant id>';`
+3. To let the memory file supply the personality, set `personality = NULL`. To keep a neutral persona, set `personality = ''`.
+
+An empty or blank name or avatar reads the same as NULL. Without a name, team and organization posts use the owner's name, and personal posts use the bot identity. The next channel post reads the new values. The prompt reads them when the workspace's session is next built, for example after an API restart.
+
 ## Recovery and external actions
 
 Use the existing fenced queue, approval and checkpoint recovery protocols. Preserve completed tool results and dispatch IDs. Do not replay completed external actions to reconstruct state.

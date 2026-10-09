@@ -85,6 +85,9 @@ const ACTION_TIMEOUT_MS = 120_000;
  */
 export interface ActionInvocationContext {
   presence?: Presence;
+  /** The assistant this invocation belongs to, when the caller can name
+   * one. It keys the carried-over sender profile (`workspaceSenderIdentity`). */
+  assistantId?: string;
   userId: string;
   orgId: string;
   owner: Principal;
@@ -1174,7 +1177,7 @@ function buildActionContext(
     summary: undefined,
     credentials,
     // Workflow actions use the same owner identity as session-backed actions.
-    resolveOutboundSender: async () => mergePresence(await workspaceSenderIdentity(db, ctx.orgId, ctx.owner), presence),
+    resolveOutboundSender: async () => mergePresence(await workspaceSenderIdentity(db, ctx.orgId, ctx.owner, ctx.assistantId), presence),
     sandbox: throwingSandbox(sessionId),
     // Unlike the capabilities stubbed out below, document extraction is
     // genuinely available here: it is a pure call over bytes against the

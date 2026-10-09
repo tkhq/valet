@@ -151,6 +151,7 @@ import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { limitPlugins, loadIntegrationLimit } from "../assistants/integration-limit.js";
+import { effectivePersonality, loadLegacyAssistantProfile } from "../assistants/legacy-profile.js";
 import { listSkillSourcesFor } from "../services/skills.js";
 import { skillTelemetrySink } from "../services/skill-telemetry.js";
 import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
@@ -2583,10 +2584,11 @@ export class EngineHost {
     return promise;
   }
 
-  /** Team and organization display names are workspace configuration. */
-  private outboundSenderResolver(orgId: string, owner: Principal) {
+  /** Team and organization display names are workspace configuration.
+   * An assistant session passes its own id (`workspaceSenderIdentity`). */
+  private outboundSenderResolver(orgId: string, owner: Principal, assistantId?: string) {
     const db = this.opts.db;
-    return db ? () => workspaceSenderIdentity(db, orgId, owner) : undefined;
+    return db ? () => workspaceSenderIdentity(db, orgId, owner, assistantId) : undefined;
   }
 
   private async buildAssistantSession(
@@ -2638,7 +2640,7 @@ export class EngineHost {
     const scope: MemoryScope = { owner: principal, actorUserId: meta.actorUserId, ...(principal.type === "team" ? { namespace: await assistantMemoryNamespace(db, sessionId, principal.id, meta.orgId) } : {}) };
     await ensureTodayJournal(db, scope);
     const snapshotContent = await assembleMemorySnapshot(db, scope);
-    const personaPrefix = await this.resolvePersonaPrefix(db, scope);
+    const personaPrefix = await this.resolvePersonaPrefix(db, meta.orgId, scope, assistant.id);
     // The owner's human name, so the persona names the workspace instead of
     // its raw id (the "team_<uuid>" leak). A missing row falls back to a
     // neutral phrase inside the persona.
@@ -2729,7 +2731,7 @@ export class EngineHost {
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId);
-    const resolveOutboundSender = this.outboundSenderResolver(meta.orgId, principal);
+    const resolveOutboundSender = this.outboundSenderResolver(meta.orgId, principal, assistant.id);
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
@@ -2855,11 +2857,20 @@ export class EngineHost {
     return session;
   }
 
-  /** Use private persona text first, then the same team's explicitly shared persona. */
-  private async resolvePersonaPrefix(db: AppDb, scope: MemoryScope): Promise<string> {
+  /**
+   * The memory file is private persona text first, then the same team's
+   * explicitly shared persona. `effectivePersonality` weighs it against the
+   * personality the workspace's assistant carried over from its profile
+   * (`legacy-profile.ts`): the carried-over value keeps its old precedence
+   * until someone edits the file after the upgrade. A carried-over name
+   * opens the prefix. The profile is the session's own assistant's, so a
+   * migration-retained assistant never takes the surviving one's.
+   */
+  private async resolvePersonaPrefix(db: AppDb, orgId: string, scope: MemoryScope, assistantId: string): Promise<string> {
     const row = await readOwnFile(db, scope, "assistant/personality.md")
       ?? (scope.owner.type === "team" && scope.namespace ? await readOwnFile(db, { ...scope, namespace: "" }, "assistant/personality.md") : null);
-    return personaPrefixText(row?.content ?? "");
+    const legacy = await loadLegacyAssistantProfile(db, orgId, { assistantId });
+    return personaPrefixText(effectivePersonality(row, legacy), legacy?.name);
   }
 
   /** The shared per-process EventStream. Engine sessions and WS handlers fan out through this one instance. */
@@ -3705,7 +3716,10 @@ export class EngineHost {
     );
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
-    const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner);
+    // A child posts as its parent assistant, so a child of a migration-retained
+    // assistant never takes the surviving assistant's carried-over profile.
+    const parentAssistant = this.opts.db ? await loadAssistantBySessionId(this.opts.db, opts.parentSessionId) : undefined;
+    const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner, parentAssistant?.id);
     // A child spawned with a repo binding (the spawner inserts the
     // `session_repos` row before calling in here) gets the same declarative
     // clone prep a REST-created session gets. Only this first build decides —
@@ -3893,6 +3907,8 @@ export class EngineHost {
       workspace: string;
       title?: string;
       modelId?: string;
+      /** The assistant the run belongs to, for its carried-over sender profile. */
+      assistantId?: string;
     },
   ): Promise<Session> {
     this.assertSessionBuildAllowed(sessionId);
@@ -3917,6 +3933,7 @@ export class EngineHost {
       workspace: string;
       title?: string;
       modelId?: string;
+      assistantId?: string;
     },
   ): Promise<Session> {
     // `opts.owner` is the run's own principal (`WorkflowRun.owner`, which
@@ -3969,7 +3986,7 @@ export class EngineHost {
     const specProvider = await this.buildSpecProvider(sessionId, meta);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
-    const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner);
+    const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner, opts.assistantId);
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
