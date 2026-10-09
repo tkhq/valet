@@ -137,7 +137,7 @@ describe("SkillsIndexPage with stored skills", () => {
     const { container } = render(<SkillsIndexPage />);
     // Query inside the grid so the scope-filter dropdown's <option>s do not
     // count. One plugin skill, two personal stored skills.
-    const grid = container.querySelector(".grid");
+    const grid = container.querySelector(`ul[aria-label="Skills"]`);
     const badgeText = (label: string) =>
       Array.from(grid?.querySelectorAll("span") ?? []).filter((el) => el.textContent === label);
     expect(badgeText("Plugin").length).toBe(1);
@@ -200,7 +200,7 @@ describe("SkillsIndexPage with stored skills", () => {
     // Counted inside the grid, as in the scope-badge test above: the scope
     // filter over the grid carries a "Team" option, which is a filter value
     // and not a badge on a card.
-    const grid = container.querySelector(".grid");
+    const grid = container.querySelector(`ul[aria-label="Skills"]`);
     const teamBadges = Array.from(grid?.querySelectorAll("span") ?? []).filter(
       (el) => el.textContent === "Team",
     );

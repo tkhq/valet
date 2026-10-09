@@ -1,35 +1,34 @@
 /**
- * One tile per skill on `/skills`, built from the same parts as
- * `IntegrationRow`: a service icon, the friendly name, a clamped
- * description, and an `mt-auto` footer that pairs mono metadata on the left
- * with the action on the right.
+ * One row per skill on `/skills`, in the same grouped-list style as the
+ * Integrations rows (settings-redesign spec, "Skills"): a service icon, the
+ * friendly name with its badges, one line of description, and a mono line
+ * of metadata.
  *
  * A plugin skill takes the OWNING PLUGIN's icon — its brand mark, or the
  * plugin's brand colour under the skill's own initial when the plugin has
  * no mark. Either way skills from one plugin read as a family in a mixed
- * grid. A stored skill takes the moss accent instead — the colour separates
+ * list. A stored skill takes the moss accent instead — the colour separates
  * a skill a plugin ships from a skill stored for the caller at a glance, and
  * the scope badge says it in words.
  *
- * The mono footer carries the skill's ID — the string an agent references,
+ * The mono line carries the skill's ID — the string an agent references,
  * which the title's display name hides. The owning plugin is appended only
  * when it differs from the skill name: most plugins ship one skill of the
  * same name, so printing it always would repeat the title.
  *
- * Every card opens the skill's page. A plugin skill goes to the name route.
+ * Every row opens the skill's page. A plugin skill goes to the name route.
  * A stored skill goes to the row-id route instead: a shadowed skill shares
  * its name with the skill shadowing it, so the name route cannot reach it.
- * That link covers the card instead of wrapping it, because the owner badge
+ * That link covers the row instead of wrapping it, because the owner badge
  * in the title row is a link too and an anchor cannot hold another anchor.
  */
 import { Link } from "@tanstack/react-router";
 import type { SkillSummary, StoredSkillSummary } from "@valet/api/wire";
-import { Badge, cardClass } from "~/components/primitives";
+import { Badge } from "~/components/primitives";
 import { OwnerBadge } from "~/components/owner-badge";
 import { ServiceIcon } from "~/components/service-icon";
 import { displayName } from "~/components/integrations/display-name";
 import { ScopeBadge, scopeForSkill } from "./scope-badge";
-import { cn } from "~/lib/cn";
 
 /**
  * What to do about a skill another skill of the same name keeps out of every
@@ -69,7 +68,6 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
   const showPlugin = plugin !== undefined && plugin !== title;
 
   const body = (
-    <>
       <div className="flex items-start gap-3">
         <ServiceIcon
           slug={skill.origin === "plugin" ? skill.plugin : undefined}
@@ -92,40 +90,32 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
               <Badge variant="neutral">prompt</Badge>
             )}
           </div>
-          {skill.origin === "plugin" && <p className="mt-1 text-xs text-muted">Installed instructions</p>}
           {skill.description && (
-            <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted">
+            <p className="mt-0.5 line-clamp-1 text-xs leading-relaxed text-muted">
               {skill.description}
             </p>
           )}
           {skill.origin !== "plugin" && skill.shadowed && (
             <p className="mt-1 text-xs leading-relaxed text-danger-500">{shadowNote(skill)}</p>
           )}
+          <p className="mt-1 truncate font-mono text-xs text-muted">
+            {skill.name}
+            {showPlugin && ` · ${plugin}`}
+            {skill.takesArgs && " · takes arguments"}
+          </p>
         </div>
       </div>
-
-      <div className="mt-auto flex items-center justify-between gap-3 pt-4">
-        <span className="truncate font-mono text-xs text-muted">
-          {skill.name}
-          {showPlugin && ` · ${plugin}`}
-          {skill.takesArgs && " · takes arguments"}
-        </span>
-        <span className="shrink-0 text-xs text-moss underline-offset-2 group-hover:underline">
-          Read
-        </span>
-      </div>
-    </>
   );
 
   const shell =
-    cn(cardClass, "group relative flex flex-col p-5 text-left transition-shadow hover:shadow-sm");
-  // The card's own link, stretched over the card. It carries the name a
+    "group relative px-4 py-3.5 transition-colors first:rounded-t-2xl last:rounded-b-2xl hover:bg-ink-wash-strong";
+  // The row's own link, stretched over the row. It carries the name a
   // reader hears, because it holds no text of its own.
-  const cover = "absolute inset-0 rounded-lg";
+  const cover = "absolute inset-0 rounded-[inherit]";
   const label = `Read ${title}`;
 
   return (
-    <div className={shell}>
+    <li className={shell}>
       {skill.origin === "plugin" ? (
         <Link
           to="/skills/$skillName"
@@ -142,6 +132,6 @@ export function SkillCard({ skill }: { skill: SkillSummary }) {
         />
       )}
       {body}
-    </div>
+    </li>
   );
 }
