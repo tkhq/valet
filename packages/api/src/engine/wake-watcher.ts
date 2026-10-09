@@ -168,6 +168,8 @@ export class WakeWatcher {
     this.clock = deps.now ?? Date.now;
     this.decideOptions = {
       watchMaxEventsPerHour: deps.limits.watchMaxEventsPerHour,
+      tickMs: this.intervalMs,
+      leaseMaxHours: deps.limits.leaseMaxHours,
       ...(deps.limits.watchMinIntervalMs !== undefined ? { watchMinIntervalMs: deps.limits.watchMinIntervalMs } : {}),
       ...(deps.jobLogDir !== undefined ? { logDir: deps.jobLogDir } : {}),
     };
@@ -283,6 +285,7 @@ export class WakeWatcher {
             output: poll.output,
             nextOffset: poll.nextOffset,
             ...(poll.exitCode !== undefined ? { exitCode: poll.exitCode } : {}),
+            ...(poll.truncated ? { truncated: true } : {}),
           };
         }
       } catch (err) {
