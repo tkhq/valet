@@ -17,4 +17,18 @@ describe("every session builder injects the wakeups seam", () => {
     expect(builders).toBeGreaterThan(0);
     expect(seams).toBe(builders);
   });
+
+  /**
+   * Same host-multi-builder trap for the lease seam (spec INV-8, Task 19):
+   * a builder that gets `wakeups` but not `isLeased` lets its attachment
+   * replace a leased sandbox's pod. One `leaseOptions` spread per
+   * `wakeupsOptions` spread keeps the two seams wired together.
+   */
+  it("has one leaseOptions spread per wakeupsOptions spread", async () => {
+    const src = await readFile(new URL("./host.ts", import.meta.url), "utf8");
+    const seams = src.match(/\.\.\.this\.wakeupsOptions\(/g)?.length ?? 0;
+    const leases = src.match(/\.\.\.this\.leaseOptions\(/g)?.length ?? 0;
+    expect(seams).toBeGreaterThan(0);
+    expect(leases).toBe(seams);
+  });
 });

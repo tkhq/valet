@@ -1281,6 +1281,7 @@ export class EngineHost {
             ...this.browserOptions(sessionId),
             extractDocument: extractDocumentText,
             ...this.wakeupsOptions(sessionId, () => builtSession),
+            ...this.leaseOptions(sessionId),
             ...this.threadAccessOptions(),
             ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
@@ -1314,6 +1315,7 @@ export class EngineHost {
           ...this.browserOptions(sessionId),
           extractDocument: extractDocumentText,
           ...this.wakeupsOptions(sessionId, () => builtSession),
+          ...this.leaseOptions(sessionId),
           ...this.threadAccessOptions(),
           ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
@@ -2516,6 +2518,18 @@ export class EngineHost {
   }
 
   /**
+   * Builds the `{ isLeased }` session option every builder spreads in
+   * alongside `wakeups` (spec INV-8, Task 19). The attachment calls this
+   * before a pod-replacing image or resource change at run-start reconcile
+   * and defers the change while a lease is active.
+   */
+  private leaseOptions(sessionId: string): { isLeased: () => Promise<boolean> } {
+    return {
+      isLeased: () => this.opts.engineStore.countActiveLeases(sessionId).then((n) => n > 0),
+    };
+  }
+
+  /**
    * Mints a short-lived service JWT (`{ sub: userId, sid: sessionId }`) for
    * `POST /api/sessions/:id/sandbox-jwt` (Task 8, auth-v2 plan) — the same
    * master/derivation the sandbox's own `VALET_SANDBOX_JWT_SECRET` uses, so
@@ -2925,6 +2939,7 @@ export class EngineHost {
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
       ...this.wakeupsOptions(sessionId, () => builtSession),
+      ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
@@ -4080,6 +4095,7 @@ export class EngineHost {
       ...this.browserOptions(childSessionId),
       extractDocument: extractDocumentText,
       ...this.wakeupsOptions(childSessionId, () => builtSession),
+      ...this.leaseOptions(childSessionId),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
@@ -4285,6 +4301,7 @@ export class EngineHost {
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
       ...this.wakeupsOptions(sessionId, () => builtSession),
+      ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
