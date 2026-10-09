@@ -109,9 +109,10 @@ export async function executeImage(args: ImageArgs, ctx: PluginActionContext, ke
       const stat = await ctx.sandbox.stat(sourcePath);
       if (!stat.isFile || stat.size > MAX_IMAGE_BYTES) throw new Error("Invalid source");
       source = await ctx.sandbox.readBinary(sourcePath);
-    } catch {
+    } catch (cause) {
       ctx.signal.throwIfAborted();
-      throw new Error(`Cannot read the image file at ${sourcePath}. Use an existing sandbox file smaller than 20 MB.`);
+      const reason = cause instanceof Error ? cause.message.replaceAll(key, "[redacted]").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]") : "Sandbox read failed";
+      throw new Error(`Cannot read the image file at ${sourcePath}: ${reason}. Use an existing sandbox file smaller than 20 MB.`);
     }
     sourceFormat = await validateImage(source, sharp);
   }

@@ -240,6 +240,14 @@ describe("openaiPlugin", () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
+  it("edit_image preserves the source sandbox error before fetching", async () => {
+    const { ctx } = makeCtx({ credential: { accessToken: "sk-test" } });
+    ctx.sandbox.stat = async () => { throw new Error("sandbox unavailable in workflow action invocation"); };
+    await expect(getAction("openai.edit_image").execute({ image_path: "in.png", prompt: "fox" }, ctx))
+      .rejects.toThrow("sandbox unavailable in workflow action invocation");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("edit_image names the missing source file in its error", async () => {
     const { ctx } = makeCtx({ credential: { accessToken: "sk-test" } });
     await expect(

@@ -126,7 +126,7 @@ Absolute container paths must resolve inside `/workspace`. Sandbox providers ret
 The fallback response reader bounds bytes before JSON parsing. Error bodies are capped at 64 KB and retain their HTTP status.
 All invocations prepare the target directory before the request. Workflow agent sessions with a writable sandbox can generate images.
 Sandbox-less workflow tool nodes fail during directory preparation, before payment. Sandbox preparation failures retain their real cause.
-Input size is checked before and after the sandbox read.
+Input size is checked before and after the sandbox read. Source-read errors retain the sandbox cause with credential values redacted.
 The plugin does not retry paid image requests automatically. Provider errors redact credential values.
 
 Durable transcript images and sandbox files are separate outputs. Sandbox files follow the session's storage lifecycle.
