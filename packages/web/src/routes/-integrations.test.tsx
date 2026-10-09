@@ -195,6 +195,9 @@ vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
   useSearch: () => useMockSearch(),
   useNavigate: () => navigate,
+  // Only a row click pushes a panel entry, and the Link stub here does not
+  // report one, so closing navigates and never goes back.
+  useRouter: () => ({ history: { back: vi.fn() } }),
   Link: ({ to, search, className, children }: { to: string; search: Record<string, string>; className?: string; children: ReactNode }) => (
     <a href={to} className={className} onClick={(event) => { event.preventDefault(); setSearch(search); }}>{children}</a>
   ),

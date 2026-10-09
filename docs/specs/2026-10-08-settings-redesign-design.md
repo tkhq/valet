@@ -87,7 +87,8 @@ Settings matches the thread UI:
   personal 1Password token. Its second credential list is removed. Integrations
   owns service connections, and Connected accounts links to it with
   `?workspace=user`, so the link opens your personal Integrations whatever the
-  switcher holds.
+  switcher holds. On Integrations the switcher navigates with the workspace it
+  chose, so the parameter cannot hold the page on Personal.
 - The unconfigured-channel copy names Settings → Organization, where the bot
   token lives.
 
@@ -110,8 +111,10 @@ switcher.
 - A row is a link to `?service=<plugin>`, which opens the plugin's details
   in a modal panel: who owns the connection (Your account, or Managed by your
   organization), its reach, the account, pairing, repair notes, the controls,
-  and the tools. A link can open the panel. Closing it replaces the history
-  entry and keeps `?q=`, so Back does not reopen it. An unknown `?service=`
+  and the tools. A link can open the panel. Closing a panel that a row click
+  opened goes back to the list entry, so open and close cycles add no history.
+  Closing a panel that a link opened replaces its entry. Either way the list
+  keeps `?q=`, and Back does not reopen the panel. An unknown `?service=`
   opens nothing. Disconnect on a credential that stores a 1Password reference
   says that the 1Password item is not deleted.
 - A saved credential that no listed service covers, for example one left by

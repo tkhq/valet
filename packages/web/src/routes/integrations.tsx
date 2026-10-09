@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
+import { useEffect, useRef, useState } from "react";
+import { createFileRoute, useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import { usePlugins } from "~/api/integrations";
 import { Spinner, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
@@ -129,6 +129,12 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
   // this module and never builds a real router context.
   const search = readIntegrationsSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
+  const router = useRouter();
+  // True while the open panel came from a row click on this page, which
+  // pushed its entry. Closing it then goes back to the list entry, so
+  // open and close cycles add no history. A panel reached by a link has no
+  // list entry behind it on this page, so closing replaces its entry.
+  const pushedPanel = useRef(false);
   const query = search.q ?? "";
 
   // `hasVisibleSurface` drops plugins whose every service is unconfigured,
@@ -220,7 +226,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                 <Section title="Connected" description="Services your assistant can reach now.">
                   <IntegrationList label="Connected">
                     {connected.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} />
+                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
                     ))}
                   </IntegrationList>
                 </Section>
@@ -229,7 +235,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                 <Section title="Available" description="Connect a service to let your assistant use it.">
                   <IntegrationList label="Available">
                     {available.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} />
+                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
                     ))}
                   </IntegrationList>
                 </Section>
@@ -238,7 +244,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                 <Section title="Built in" description="Ready to use. These need no account.">
                   <IntegrationList label="Built in">
                     {builtin.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} />
+                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
                     ))}
                   </IntegrationList>
                 </Section>
@@ -249,9 +255,15 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
           <Dialog
             open={detail !== undefined}
             onOpenChange={(open) => {
+              if (open) return;
+              if (pushedPanel.current) {
+                pushedPanel.current = false;
+                router.history.back();
+                return;
+              }
               // Replace, not push: a pushed close leaves the open panel one
               // entry back, so Back would reopen what the reader just closed.
-              if (!open) void navigate({ to: "/integrations", search: rowSearch, replace: true });
+              void navigate({ to: "/integrations", search: rowSearch, replace: true });
             }}
           >
             {detail && (

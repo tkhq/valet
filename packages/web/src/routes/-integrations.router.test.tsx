@@ -109,17 +109,48 @@ beforeEach(() => {
 });
 
 describe("the integration detail panel", () => {
-  it("closes without a history entry, so Back does not reopen it", async () => {
+  it("closes back to the list, so one Back then leaves the page", async () => {
     const router = mount();
-    fireEvent.click(await screen.findByRole("link", { name: /Notion/ }));
-    await screen.findByRole("dialog");
-    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    // Each cycle opens a panel by a push and closes it. None may leave an
+    // entry behind, or Back does nothing visible once per cycle.
+    for (let cycle = 0; cycle < 3; cycle++) {
+      fireEvent.click(await screen.findByRole("link", { name: /Notion/ }));
+      fireEvent.keyDown(await screen.findByRole("dialog"), { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      await waitFor(() => expect(router.state.location.search).toEqual({}));
+    }
+    expect(router.state.location.pathname).toBe("/integrations");
+
+    await act(async () => router.history.back());
+    await waitFor(() => expect(router.state.location.pathname).toBe("/elsewhere"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("closes a linked panel in place, so Back leaves without reopening it", async () => {
+    const router = mount("/integrations?service=notion");
+    fireEvent.keyDown(await screen.findByRole("dialog"), { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // The panel was the first Integrations entry, so closing must not go
+    // back out of the page.
+    expect(router.state.location.pathname).toBe("/integrations");
     expect(router.state.location.search).toEqual({});
 
     await act(async () => router.history.back());
-    await waitFor(() => expect(router.state.location.search).toEqual({}));
+    await waitFor(() => expect(router.state.location.pathname).toBe("/elsewhere"));
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("closes with Back after a push, and Forward reopens it", async () => {
+    const router = mount();
+    fireEvent.click(await screen.findByRole("link", { name: /Notion/ }));
+    await screen.findByRole("dialog");
+    await act(async () => router.history.back());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await act(async () => router.history.forward());
+    fireEvent.keyDown(await screen.findByRole("dialog"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await act(async () => router.history.back());
+    await waitFor(() => expect(router.state.location.pathname).toBe("/elsewhere"));
   });
 
   it("keeps the search when it closes", async () => {

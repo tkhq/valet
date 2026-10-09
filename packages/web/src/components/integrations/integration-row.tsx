@@ -161,7 +161,12 @@ function rowState(plugin: PluginSummary): { badge?: { label: string; variant: "w
  * One integration as one line. The row is a link to its own detail panel
  * (`?service=`), so the panel is linkable and Back closes it.
  */
-export function IntegrationRow({ plugin, search }: { plugin: PluginSummary; search: Record<string, string> }) {
+export function IntegrationRow({ plugin, search, onOpen }: {
+  plugin: PluginSummary;
+  search: Record<string, string>;
+  /** Runs when a plain click opens the panel in this tab. */
+  onOpen?: () => void;
+}) {
   const title = pluginDisplayName(plugin);
   const state = rowState(plugin);
   return (
@@ -170,6 +175,10 @@ export function IntegrationRow({ plugin, search }: { plugin: PluginSummary; sear
       <Link
         to="/integrations"
         search={{ ...search, service: plugin.name }}
+        onClick={(event) => {
+          // A modified click opens a new tab and pushes nothing here.
+          if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) onOpen?.();
+        }}
         className="-mx-4 block px-4 py-2 transition-colors hover:bg-ink-wash-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-500/40 touch-manipulation"
       >
         <CardHeading
