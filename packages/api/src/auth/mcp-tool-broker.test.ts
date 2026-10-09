@@ -195,6 +195,17 @@ describe("MCP tool broker", () => {
     expect(demo.calls["demo.ping"]).toBe(2);
   });
 
+  // A bare schema path ("/text: Expected string") left the caller guessing
+  // what to do next.
+  it("names the fix when params do not match the schema", async () => {
+    const { testApi, demo, alice } = await setup();
+    const bad = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.ping", params: { text: 7 } });
+    expect(bad.data).toMatchObject({ tool_id: "demo.ping", status: "failed" });
+    expect(bad.data.error).toContain("Invalid params for demo.ping: /text:");
+    expect(bad.data.error).toContain("Change the params to match the tool's parameter schema.");
+    expect(demo.calls["demo.ping"]).toBeUndefined();
+  });
+
   it("inherits deny and require_approval policies without running the action", async () => {
     const { testApi, demo, alice } = await setup();
     const blocked = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.blocked" });

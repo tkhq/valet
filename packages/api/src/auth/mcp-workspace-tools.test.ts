@@ -174,4 +174,23 @@ describe("MCP workspace tools", () => {
     expect(listed.data.artifacts).toEqual([expect.objectContaining({ key: "reports/tests", title: "Still green", version: 2 })]);
     expect((await tool(testApi.baseUrl, bob, "list_artifacts")).data.artifacts).toEqual([]);
   });
+
+  // An org with a few hundred artifacts overflowed the output cap on every
+  // call, and the tool had no argument to narrow the list.
+  it("filters artifacts by query and caps the list with a limit", async () => {
+    const { testApi, alice } = await boot();
+    for (const key of ["reports/alpha", "reports/beta", "notes/gamma"]) {
+      await tool(testApi.baseUrl, alice, "publish_artifact", { key, title: `Page ${key}`, content: "# x" });
+    }
+    const matched = await tool(testApi.baseUrl, alice, "list_artifacts", { query: "REPORTS/" });
+    expect(matched.data.artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "reports/alpha" }), expect.objectContaining({ key: "reports/beta" }),
+    ]));
+    expect(matched.data.artifacts).toHaveLength(2);
+    expect(matched.data.more).toBeUndefined();
+
+    const limited = await tool(testApi.baseUrl, alice, "list_artifacts", { limit: 1 });
+    expect(limited.data.artifacts).toHaveLength(1);
+    expect(limited.data.more).toContain("2 more artifacts match");
+  });
 });

@@ -243,8 +243,10 @@ model then answers "I can't do that" without ever calling `list_tools`. Three
 prompt changes close this gap:
 
 - **`list_tools` names every service in its description**
-  (`Available services: github, gmail, ...`), computed per session from the
+  (`Installed services: github, gmail, ...`), computed per session from the
   catalog's static entries plus its dynamic (`resolveActions`-backed) plugins.
+  The line does not probe the person's own connection, so it says so and tells
+  the model to call `list_tools` before it reports a service as connected.
   The tool catalog is re-sent on every turn, so the service index is a
   zero-cost, always-fresh signal. The description also carries the rule: check
   here before you say a request is not possible.

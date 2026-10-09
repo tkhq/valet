@@ -506,7 +506,10 @@ async function computeResult(
         error: `invalid params: ${prepared.error}`,
       });
     }
-    return { ok: false, error: prepared.error };
+    // A bare schema path ("/: must have required properties repo") names no
+    // fix. Workflow nodes and external callers share this text, so the fix is
+    // worded for both: an agent changes its call, a person edits the node.
+    return { ok: false, error: `Invalid params for ${policyActionId}: ${prepared.error}. Change the params to match the tool's parameter schema.` };
   }
 
   const actionCtx = buildActionContext(req, ctx, credentials, action.id, opts.db);

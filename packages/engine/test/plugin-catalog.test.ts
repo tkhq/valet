@@ -169,13 +169,14 @@ describe("pluginCatalogTools: registration", () => {
       plugins: [{ ...a.plugin, service: "github" }, dynamic],
     });
     const listTool = tools.find((t) => t.name === "list_tools");
-    expect(listTool?.description).toContain("Available services: github, linear.");
+    expect(listTool?.description).toContain("Installed services: github, linear.");
+    expect(listTool?.description).toContain("call list_tools before you say a service is connected");
   });
 
   it("omits the service line when the catalog is empty", () => {
     const tools = pluginCatalogTools({ plugins: [] });
     const listTool = tools.find((t) => t.name === "list_tools");
-    expect(listTool?.description).not.toContain("Available services:");
+    expect(listTool?.description).not.toContain("Installed services:");
   });
 });
 
@@ -1282,6 +1283,7 @@ describe("pluginCatalogTools: call_tool param validation", () => {
       makeCtx(),
     );
     expect(result.text).toContain("invalid params for test.needs_num");
+    expect(result.text).toContain('Call list_tools (service: "test") to read its parameter schema');
     expect(executeCalled).toBe(false);
   });
 
