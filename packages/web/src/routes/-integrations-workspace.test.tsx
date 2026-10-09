@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -16,9 +17,14 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
 });
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
-  useSearch: () => ({}),
+  useSearch: () => searchState,
   useNavigate: () => vi.fn(),
+  useRouter: () => ({ history: { back: vi.fn() } }),
+  Link: ({ to, children, className }: { to: string; children: ReactNode; className?: string }) => <a href={to} className={className}>{children}</a>,
 }));
+
+/** The personal page's open detail panel (`?service=`). */
+let searchState: Record<string, string> = {};
 
 function team(id: string, name: string, callerRole: TeamSummary["callerRole"]): TeamSummary {
   return { id, name, callerRole, orgId: "org", origin: "local", externalId: null,
@@ -59,6 +65,18 @@ const PERSONAL_PLUGINS: ListPluginsResponse = { plugins: [{
 const A: CredentialSummary = { service: "linear", type: "oauth2", connectedAt: "2026-09-10", delegatedFrom: "u1" };
 const B: CredentialSummary = { service: "sentry", type: "api_key", connectedAt: "2026-09-10" };
 
+/** True when one of `elements` has no ancestor that Tailwind hides below
+ * `sm`. jsdom applies no CSS, so the classes are the only evidence. */
+function shownOnPhones(elements: HTMLElement[]): boolean {
+  return elements.some((element) => {
+    for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+      const classes = node.className.split(" ");
+      if (classes.includes("hidden") || classes.includes("max-sm:hidden")) return false;
+    }
+    return true;
+  });
+}
+
 function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
   if (realWorkspace) {
@@ -75,6 +93,7 @@ function mount() {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  searchState = {};
   window.history.replaceState(null, "", "/integrations");
   setKey.mockClear();
   teamId = undefined;
@@ -96,6 +115,7 @@ beforeEach(() => {
 
 describe("Integrations workspace isolation", () => {
   it("switches Personal -> team A -> team B -> Personal without retaining forms or team dialogs", async () => {
+    searchState = { service: "typefully" };
     const view = mount();
     fireEvent.click(await screen.findByRole("button", { name: "Connect Typefully" }));
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -120,8 +140,9 @@ describe("Integrations workspace isolation", () => {
     expect(api.listPlugins).toHaveBeenCalledWith("a");
     expect(api.listPlugins).toHaveBeenCalledWith("b");
 
+    searchState = {};
     view.switchTo();
-    expect(await screen.findByRole("button", { name: "Connect Typefully" })).toBeTruthy();
+    expect(await screen.findByRole("link", { name: /Typefully/ })).toBeTruthy();
     expect(screen.queryByText("Sentry")).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(api.deleteCredential).not.toHaveBeenCalled();
@@ -237,6 +258,7 @@ describe("Team account connection", () => {
   it("discards the open form after a failed credential read and does not reopen it on recovery", async () => {
     teamId = "a";
     const put = vi.spyOn(api, "putCredential").mockResolvedValue({ ok: true });
+    searchState = { service: "typefully" };
     const view = mount();
     fireEvent.click(await screen.findByRole("button", { name: "Connect Typefully" }));
     expect(screen.getByText("Paste a token for the account intended for this team. Everyone on this team can use its permissions.")).toBeTruthy();
@@ -273,6 +295,7 @@ describe("Team account connection", () => {
   it("requires confirmation and writes only to the selected team's empty slot", async () => {
     teamId = "a";
     const put = vi.spyOn(api, "putCredential").mockResolvedValue({ ok: true });
+    searchState = { service: "typefully" };
     const view = mount();
     fireEvent.click(await screen.findByRole("button", { name: "Connect Typefully" }));
     fireEvent.change(screen.getByLabelText("Team account token"), { target: { value: "team-test-token" } });
@@ -332,10 +355,66 @@ describe("Team account connection", () => {
     window.history.replaceState(null, "", "/integrations?teamId=gone&error=team_access_changed");
     mount();
     expect(await screen.findByText("Team access changed. Ask a team admin to restart the connection.")).toBeTruthy();
-    expect(await screen.findByRole("button", { name: "Connect Typefully" })).toBeTruthy();
+    expect(await screen.findByRole("link", { name: /Typefully/ })).toBeTruthy();
     expect(window.sessionStorage.getItem("valet:workspace")).toBe("user");
     expect(screen.queryByText("Team unavailable")).toBeNull();
-    expect(api.listCredentials).not.toHaveBeenCalled();
+    // Only the personal list (for saved credentials no row covers) loads.
+    expect(api.listCredentials).not.toHaveBeenCalledWith("team", expect.anything());
+  });
+
+  it("names a blocked team service's visible label and states the reason at every width", async () => {
+    teamId = "a";
+    vi.mocked(api.listPlugins).mockResolvedValue({ plugins: [{ name: "gmail", version: "1", actionCount: 0,
+      services: [{ service: "gmail", type: "oauth2", configKeys: ["accessToken"], connected: false, connect: "unconfigured", connectBlockedBy: "deployment", actions: [] }],
+    }] });
+    mount();
+    // WCAG 2.5.3: the accessible name starts with the label a reader sees.
+    const button = await screen.findByRole("button", { name: "Set up Gmail" });
+    expect(button.textContent).toBe("Set up");
+    expect(button.hasAttribute("disabled")).toBe(true);
+    expect(shownOnPhones(screen.getAllByText("Ask an organization admin to configure OAuth for this service."))).toBe(true);
+  });
+
+  it("tells a plain member on a phone why Connect is disabled", async () => {
+    teamId = "a";
+    teams = [team("a", "Team A", "member")];
+    mount();
+    expect((await screen.findByRole("button", { name: "Connect Typefully" })).hasAttribute("disabled")).toBe(true);
+    expect(shownOnPhones(screen.getAllByText("Team admin required"))).toBe(true);
+  });
+
+  it("shows the team 1Password fallback status on phones", async () => {
+    teamId = "a";
+    vi.spyOn(api, "getTeamOnePasswordStatus").mockResolvedValue({ tokenConnected: false });
+    mount();
+    expect(shownOnPhones(await screen.findAllByText("Uses the organization token"))).toBe(true);
+  });
+
+  it("lists a connected team 1Password with the team's connections, not under Available", async () => {
+    teamId = "a";
+    vi.spyOn(api, "getTeamOnePasswordStatus").mockResolvedValue({ tokenConnected: true });
+    mount();
+    const connected = await screen.findByRole("list", { name: "Team connections" });
+    expect(await within(connected).findByText("1Password")).toBeTruthy();
+    expect(within(screen.getByRole("list", { name: "Available" })).queryByText("1Password")).toBeNull();
+  });
+
+  it("offers an unconnected team 1Password under Available", async () => {
+    teamId = "a";
+    vi.spyOn(api, "getTeamOnePasswordStatus").mockResolvedValue({ tokenConnected: false });
+    mount();
+    const available = await screen.findByRole("list", { name: "Available" });
+    expect(await within(available).findByText("1Password")).toBeTruthy();
+    expect(within(screen.getByRole("list", { name: "Team connections" })).queryByText("1Password")).toBeNull();
+  });
+
+  it("ignores a personal ?service= panel link in the team view", async () => {
+    teamId = "a";
+    searchState = { service: "typefully" };
+    mount();
+    expect(await screen.findByRole("list", { name: "Available" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Connect Typefully" })).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("keeps Slack organization-managed while blocking missing OAuth configuration", async () => {
@@ -348,8 +427,8 @@ describe("Team account connection", () => {
       ],
     }] });
     mount();
-    expect((await screen.findByRole("button", { name: "Connect Gmail" })).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByText("Ask an organization admin to configure OAuth for this service.")).toBeTruthy();
+    expect((await screen.findByRole("button", { name: "Set up Gmail" })).hasAttribute("disabled")).toBe(true);
+    expect(screen.getAllByText("Ask an organization admin to configure OAuth for this service.").length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
   });

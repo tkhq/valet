@@ -1,12 +1,14 @@
 /**
- * Cards for `/integrations` (two-column facelift of the Task-15 connect
- * surface).
+ * Rows and the detail panel for `/integrations` (settings-redesign spec,
+ * "Integrations").
  *
- * One tile per plugin: the service's brand mark, name + connection state,
- * the description, and a footer with the mono "reach" meta (tool count /
- * "tools load on connect" / "no key needed") and the connect controls.
- * Built-in plugins get quieter wash tiles — present but visibly not asking
- * anything of you.
+ * A row is one line: the brand mark, the name, a badge only when the
+ * connection needs attention, one line of description, and what the row
+ * offers (Connect, Set up, or the organization's). The row opens the
+ * detail panel, which holds everything else: who owns the connection, its
+ * reach (tool count / "tools load on connect" / "no key needed"), the
+ * account, repair notes, the connect and disconnect controls, and the
+ * tools. A page of twenty services stays one screen tall.
  *
  * A connected service also shows what its credential is worth: the account
  * it belongs to, and — when the token expired, failed to refresh, or
@@ -35,9 +37,11 @@ import { IntegrationDetails } from "./integration-details";
 import { useState } from "react";
 import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
 import { Badge, Button, ConfirmDialog } from "~/components/primitives";
-import { useDisconnectCredential } from "~/api/integrations";
+import { useCredentials, useDisconnectCredential } from "~/api/integrations";
 import { errorText } from "~/lib/error-text";
-import { CardHeading, CardFooter, IntegrationCard } from "./integration-card";
+import { Link } from "@tanstack/react-router";
+import { ChevronRight } from "lucide-react";
+import { CardHeading } from "./integration-card";
 import { ConnectDialog } from "./connect-dialog";
 import { ShareWithTeam } from "./share-with-team";
 import { displayName, pluginDisplayName } from "./display-name";
@@ -70,7 +74,15 @@ export function isVisibleService(service: PluginServiceSummary): boolean {
   return service.connected || (service.missingEnv?.length ?? 0) > 0;
 }
 
-/** True when the plugin has anything left to show in the Services grid. */
+/** The list a plugin's row belongs in on `/integrations`: Connected when
+ * the caller or the organization already provides one of its services,
+ * Built in when it needs no account, and Available otherwise. */
+export function integrationGroup(plugin: PluginSummary): "connected" | "available" | "builtin" {
+  if (plugin.services.length === 0) return "builtin";
+  return plugin.services.some((service) => service.connected || service.connect === "org") ? "connected" : "available";
+}
+
+/** True when the plugin has anything left to show in the Services list. */
 export function hasVisibleSurface(plugin: PluginSummary): boolean {
   return plugin.services.length === 0 || plugin.services.some(isVisibleService);
 }
@@ -124,14 +136,77 @@ function orgNoteFor(service: PluginServiceSummary): React.ReactNode {
   return service.service === "github" ? <GithubOrgAppLine /> : undefined;
 }
 
-// ── Tiles ────────────────────────────────────────────────────────────────
+// ── Rows ─────────────────────────────────────────────────────────────────
 
-export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
+/** What a row shows on its right: the attention badge, or what it offers. */
+function rowState(plugin: PluginSummary): { badge?: { label: string; variant: "warning" | "danger" }; offer?: string } {
+  const services = plugin.services.filter(isVisibleService);
+  if (services.length === 0) return {};
+  // A leftover credential on a service nobody configured cannot be used or
+  // reconnected. The panel says why; the row must not read as healthy.
+  if (services.some((service) => service.connected && service.connect === "unconfigured")) {
+    return { badge: { label: "Not configured", variant: "warning" } };
+  }
+  for (const service of services) {
+    const badge = healthBadge(serviceHealth(service));
+    if (badge && badge.variant !== "success") return { badge: { label: badge.label, variant: badge.variant } };
+  }
+  if (services.some((service) => service.connected)) return {};
+  if (services.some((service) => service.connect === "org")) return { offer: "Organization" };
+  if (services.every((service) => service.connect === "unconfigured")) return { offer: "Set up" };
+  return { offer: "Connect" };
+}
+
+/**
+ * One integration as one line. The row is a link to its own detail panel
+ * (`?service=`), so the panel is linkable and Back closes it.
+ */
+export function IntegrationRow({ plugin, search, onOpen }: {
+  plugin: PluginSummary;
+  search: Record<string, string>;
+  /** Runs when a plain click opens the panel in this tab. */
+  onOpen?: () => void;
+}) {
+  const title = pluginDisplayName(plugin);
+  const state = rowState(plugin);
+  return (
+    <li>
+      {/* py-2 around the compact row's 32px makes a 48px touch target. */}
+      <Link
+        to="/integrations"
+        search={{ ...search, service: plugin.name }}
+        onClick={(event) => {
+          // A modified click opens a new tab and pushes nothing here.
+          if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) onOpen?.();
+        }}
+        className="-mx-4 block px-4 py-2 transition-colors hover:bg-ink-wash-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-500/40 touch-manipulation"
+      >
+        <CardHeading
+          compact
+          title={title}
+          slug={iconSlug(plugin)}
+          description={plugin.description}
+          right={
+            <span className="flex items-center gap-2 text-xs">
+              {state.badge && <Badge variant={state.badge.variant}>{state.badge.label}</Badge>}
+              {state.offer && <span className={state.offer === "Connect" ? "text-moss" : "text-muted"}>{state.offer}</span>}
+              <ChevronRight className="h-4 w-4 text-muted" aria-hidden />
+            </span>
+          }
+        />
+      </Link>
+    </li>
+  );
+}
+
+/** Everything about one integration: owner, reach, account, repair notes,
+ * controls, and its tools. The body of the detail panel. */
+export function IntegrationDetail({ plugin }: { plugin: PluginSummary }) {
   const meta = reachMeta(plugin);
   const single = plugin.services.length === 1 ? plugin.services[0] : undefined;
 
   return (
-    <IntegrationCard>
+    <div className="min-w-0">
       {single ? (
         <ServiceBlock
           service={single}
@@ -147,12 +222,12 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
             title={pluginDisplayName(plugin)}
             slug={iconSlug(plugin)}
             description={plugin.description}
+            meta={meta}
           />
-          <CardFooter meta={meta} />
           {/* Multi-service plugins (none in the current fleet, but the manifest
               allows it): each credential service gets its own quiet sub-row. */}
           {plugin.services.length > 1 && (
-            <ul className="mt-3 space-y-3 border-t border-line pt-3">
+            <ul className="mt-3 space-y-3 pl-12">
               {plugin.services.filter(isVisibleService).map((service) => (
                 <li key={service.service}>
                   <ServiceBlock
@@ -167,8 +242,8 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
           )}
         </>
       )}
-      <IntegrationDetails plugin={plugin} />
-    </IntegrationCard>
+      <IntegrationDetails plugin={plugin} expanded />
+    </div>
   );
 }
 
@@ -196,6 +271,10 @@ function ServiceBlock({
   // one of their dialogs at once.
   const [disconnecting, setDisconnecting] = useState(false);
   const disconnect = useDisconnectCredential();
+  // A reference-backed credential stores only an `op://` reference, so
+  // disconnecting it leaves the 1Password item in place. The plugin summary
+  // does not carry the reference; the caller's credential list does.
+  const reference = useCredentials().data?.credentials.find((cred) => cred.service === service.service)?.onepasswordRef;
   const health = serviceHealth(service);
   const badge = healthBadge(health);
   const note = healthNote(health);
@@ -308,7 +387,7 @@ function ServiceBlock({
           has no GitHub App" is the reason Connect is about to fail — so the
           stack no longer hangs off `service.connected` alone. */}
       {(orgNote || unconfiguredNote || pairing || orgProvidedNote || (service.connected && (service.health?.login || note))) && (
-        <div className="mt-1.5 space-y-1 pl-12">
+        <div className="mt-2 space-y-1 pl-12">
           {unconfiguredNote}
           {pairing ? <IdentityLinkBlock link={pairing} title={title} /> : orgProvidedNote}
           {service.connected && service.health?.login && (
@@ -337,10 +416,10 @@ function ServiceBlock({
         slug={slug}
         description={description}
         state={badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : undefined}
+        meta={[orgProvided ? "Managed by your organization" : "Your account", meta].filter(Boolean).join(" · ")}
+        right={controls}
       />
-      <p className="mt-2 text-xs text-muted">{orgProvided ? "Organization-managed connection" : "Your account · team access requires sharing"}</p>
       {connectionDetails}
-      <CardFooter meta={meta} right={controls} />
       <ConnectDialog
         service={service}
         title={title}
@@ -355,7 +434,9 @@ function ServiceBlock({
         open={disconnecting}
         onOpenChange={setDisconnecting}
         title={`Disconnect ${title}?`}
-        description={`This deletes the saved ${title} credential and any team share that rides on it. The assistant cannot reach ${title} until you connect it again.`}
+        description={reference
+          ? `This deletes the stored ${title} reference and any team share that rides on it. The item in 1Password is not deleted. The assistant cannot reach ${title} until you connect it again.`
+          : `This deletes the saved ${title} credential and any team share that rides on it. The assistant cannot reach ${title} until you connect it again.`}
         confirmLabel="Disconnect"
         pendingLabel="Disconnecting…"
         pending={disconnect.isPending}

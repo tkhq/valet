@@ -1,9 +1,9 @@
 /**
- * The Library card grid with its filter chips, scope select, and search box.
+ * The Library skill list with its filter chips, scope select, and search box.
  *
  * Extracted from `/skills` so the org Library settings page reuses the exact
- * same grid. `/skills` renders it over the full catalog; the settings page
- * pins the org and hides the scope select (every card is an org card there).
+ * same list. `/skills` renders it over the full catalog; the settings page
+ * pins the org and hides the scope select (every row is an org row there).
  *
  * The controls are CONTROLLED: the page owns the filter set, keeps it in the
  * URL, and sends it to the server with the page request. They used to filter
@@ -12,9 +12,9 @@
  * slice would report "No skills match your search" for a skill sitting on the
  * next page. `~/api/skills` documents the query the filters become.
  *
- * The cards keep the order the server sent, which is delivery order: the
+ * The rows keep the order the server sent, which is delivery order: the
  * plugin skills, then personal, then team, then org. Re-sorting a page in the
- * browser would order that page alone and put a card in a different place
+ * browser would order that page alone and put a row in a different place
  * depending on where the page boundary fell.
  */
 import type { SkillSummary } from "@valet/api/wire";
@@ -134,14 +134,14 @@ export function SkillGrid({
       )}
 
       {!failed && skills.length > 0 && (
-        <div className="mt-8 grid gap-3 sm:grid-cols-2">
+        <ul aria-label="Skills" className="mt-6 divide-y divide-line rounded-2xl bg-ink-wash">
           {skills.map((skill) => (
             <SkillCard
               key={skill.origin === "plugin" ? `plugin:${skill.name}` : skill.id}
               skill={skill}
             />
           ))}
-        </div>
+        </ul>
       )}
 
       {!failed && skills.length === 0 && !filtering && (

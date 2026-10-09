@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * `/integrations` (post-facelift): Services vs Built-in grouping, friendly
+ * `/integrations`: Connected and Available groups, friendly
  * display names, honest reach meta ("N tools" / "no key needed" /
  * "built in"), the token reveal-form Connect flow (the action is named
  * "Connect" end to end), and confirm-gated Disconnect. Mocks
@@ -8,8 +8,9 @@
  * api module — this suite cares that the page renders from query data and
  * calls the right mutation, not that TanStack Query works.
  */
+import { useSyncExternalStore, type ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { ApiError } from "~/api/client";
 import { SEARCH_DEBOUNCE_MS } from "~/components/search-input";
 import type {
@@ -77,7 +78,7 @@ const pluginsData = {
     },
     {
       // Dynamic tools, no credential declaration (the deepwiki shape) —
-      // must land in Services with "no key needed", not in Built in.
+      // is listed with "no key needed", in the Built in group.
       name: "deepwiki",
       version: "0.1.0",
       description: "DeepWiki integration for repository knowledge base",
@@ -171,6 +172,19 @@ let currentOrg: OrgResponse | undefined;
 /** The search params the page is rendered with, and where it navigates.
  * The settled query lives here, never in component state. */
 let searchParams: Record<string, string> = {};
+const searchListeners = new Set<() => void>();
+/** The router's search state, live: a row link or `navigate` changes it and
+ * the page re-renders, as the real router does. */
+function setSearch(next: Record<string, string>): void {
+  searchParams = next;
+  for (const listener of searchListeners) listener();
+}
+function useMockSearch(): Record<string, string> {
+  return useSyncExternalStore((listener) => {
+    searchListeners.add(listener);
+    return () => searchListeners.delete(listener);
+  }, () => searchParams);
+}
 const navigate = vi.fn();
 
 const connectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
@@ -179,8 +193,14 @@ const disconnectMutate = vi.fn();
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
-  useSearch: () => searchParams,
+  useSearch: () => useMockSearch(),
   useNavigate: () => navigate,
+  // Only a row click pushes a panel entry, and the Link stub here does not
+  // report one, so closing navigates and never goes back.
+  useRouter: () => ({ history: { back: vi.fn() } }),
+  Link: ({ to, search, className, children }: { to: string; search: Record<string, string>; className?: string; children: ReactNode }) => (
+    <a href={to} className={className} onClick={(event) => { event.preventDefault(); setSearch(search); }}>{children}</a>
+  ),
 }));
 
 vi.mock("~/api/settings", () => ({
@@ -270,6 +290,7 @@ import { IntegrationsPage } from "./integrations";
 beforeEach(() => {
   searchParams = {};
   navigate.mockReset();
+  navigate.mockImplementation(({ search }: { search: Record<string, string> }) => setSearch(search));
 });
 
 function org(callerRole: "admin" | "member", organizations = true): OrgResponse {
@@ -283,6 +304,13 @@ function org(callerRole: "admin" | "member", organizations = true): OrgResponse 
     plugins: [],
     callerRole,
   };
+}
+
+/** Renders the page with one integration's detail panel open, as a click on
+ * its row (or a link to `?service=`) does. */
+function openIntegration(service: string) {
+  searchParams = { ...searchParams, service };
+  return render(<IntegrationsPage />);
 }
 
 describe("IntegrationsPage", () => {
@@ -305,7 +333,7 @@ describe("IntegrationsPage", () => {
       suspendedCount: 0,
       personalInstallUrl: "https://github.example/apps/valet/installations/new",
     };
-    render(<IntegrationsPage />);
+    openIntegration("github");
     const link = screen.getByRole("link", { name: "Install on personal account" });
     expect(link.getAttribute("href")).toBe("https://github.example/apps/valet/installations/new");
     expect(link.getAttribute("target")).toBe("_blank");
@@ -317,6 +345,17 @@ describe("IntegrationsPage", () => {
     expect(screen.queryByRole("link", { name: "Install on personal account" })).toBeNull();
   });
 
+  it("lists connected services first, one row each, then the rest, then built-ins", () => {
+    render(<IntegrationsPage />);
+    const rowNames = (label: string) =>
+      within(screen.getByRole("list", { name: label }))
+        .getAllByRole("listitem")
+        .map((row) => row.querySelector(".font-medium")?.textContent);
+    expect(rowNames("Connected")).toEqual(["Slack"]);
+    expect(rowNames("Available")).toEqual(["GitHub", "Typefully"]);
+    expect(rowNames("Built in")).toEqual(["DeepWiki"]);
+  });
+
   it("lists connectable services only, with friendly names and honest reach meta", () => {
     render(<IntegrationsPage />);
 
@@ -326,23 +365,33 @@ describe("IntegrationsPage", () => {
     expect(screen.getByText("DeepWiki")).toBeTruthy();
     expect(screen.queryByText("github")).toBeNull();
 
-    // Reach meta per shape.
-    expect(screen.getByText("29 tools")).toBeTruthy();
-    expect(screen.getByText("tools load on connect")).toBeTruthy(); // typefully: dynamic + credential
-    expect(screen.getByText("no key needed")).toBeTruthy(); // deepwiki: dynamic, no credential
-
     // Content-only plugins are not listed at all. They need no credential
     // and offer no action, so their row was one nobody could use.
     expect(screen.queryByText("Sandbox tunnels")).toBeNull();
-    expect(screen.queryByText("built in")).toBeNull();
-    expect(screen.queryByText("Built in")).toBeNull();
 
-    expect(screen.getByText("Services")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Connected" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Available" })).toBeTruthy();
     expect(screen.queryByText("Nothing to connect for this plugin.")).toBeNull();
     expect(screen.queryByText(/0 actions/)).toBeNull();
+  });
 
-    // Connected state.
-    expect(screen.getByText("Connected")).toBeTruthy();
+  it("states each integration's reach in its panel, not on the row", () => {
+    const { unmount } = openIntegration("github");
+    expect(screen.getByText(/· 29 tools$/)).toBeTruthy();
+    unmount();
+    const typefully = openIntegration("typefully");
+    expect(screen.getByText(/· tools load on connect$/)).toBeTruthy(); // dynamic + credential
+    typefully.unmount();
+    openIntegration("deepwiki");
+    expect(screen.getByText("no key needed")).toBeTruthy(); // dynamic, no credential
+  });
+
+  it("keeps rows one line: a healthy connection carries no badge, and the row opens its panel", () => {
+    render(<IntegrationsPage />);
+    expect(screen.queryByText("Connected", { selector: "[class*='badge'], span:not(h2 *)" })).toBeNull();
+    fireEvent.click(screen.getByRole("link", { name: /Slack/ }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Disconnect Slack" })).toBeTruthy();
   });
 
   it("shows a config-declared MCP server by its displayName, never the mcp-config: id", () => {
@@ -396,15 +445,14 @@ describe("IntegrationsPage", () => {
 
   it("built-in plugins get no connect affordance; deepwiki (keyless) gets none either", () => {
     render(<IntegrationsPage />);
-    // Only github + typefully are connectable → exactly two Connect buttons.
-    // Each names its own service, so a screen reader can tell them apart.
-    expect(screen.getAllByRole("button", { name: /^Connect / })).toHaveLength(2);
-    expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Connect Typefully" })).toBeTruthy();
+    // Only github + typefully are connectable → exactly two rows offer Connect.
+    expect(screen.getAllByText("Connect")).toHaveLength(2);
+    expect(screen.getByRole("link", { name: /GitHub.*Connect/ })).toBeTruthy();
+    expect(screen.getByRole("link", { name: /Typefully.*Connect/ })).toBeTruthy();
   });
 
   it("connects via PUT after the pre-connect screen — the action is named Connect throughout", async () => {
-    render(<IntegrationsPage />);
+    openIntegration("typefully");
 
     fireEvent.click(screen.getByRole("button", { name: "Connect Typefully" }));
 
@@ -427,7 +475,7 @@ describe("IntegrationsPage", () => {
   });
 
   it("confirms then disconnects a connected service", async () => {
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     // The row's button only OPENS the dialog. Nothing is disconnected yet —
     // this is the assertion that a native confirm() could not carry, because
@@ -446,7 +494,7 @@ describe("IntegrationsPage", () => {
   });
 
   it("cancelling the disconnect dialog disconnects nothing", () => {
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     fireEvent.click(screen.getByRole("button", { name: "Disconnect Slack" }));
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -456,7 +504,7 @@ describe("IntegrationsPage", () => {
   });
 
   it("offers Share with a team on a connected personal service", () => {
-    render(<IntegrationsPage />);
+    openIntegration("slack");
     expect(screen.getByRole("button", { name: "Share Slack with a team" })).toBeTruthy();
   });
 
@@ -464,7 +512,7 @@ describe("IntegrationsPage", () => {
     // This used to be a bare anchor straight at /api/credentials/:s/connect,
     // which left no moment to say what the credential gives away.
     currentPluginsData = oauthPluginsData;
-    render(<IntegrationsPage />);
+    openIntegration("linear");
 
     expect(screen.queryByRole("link", { name: "Connect Linear" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Connect Linear" }));
@@ -477,7 +525,7 @@ describe("IntegrationsPage", () => {
 
   it("oauth services still offer manual token entry, behind the disclosure", () => {
     currentPluginsData = oauthPluginsData;
-    render(<IntegrationsPage />);
+    openIntegration("linear");
     fireEvent.click(screen.getByRole("button", { name: "Connect Linear" }));
     fireEvent.click(screen.getByRole("button", { name: "Enter a token instead" }));
     expect(screen.getByLabelText("Access token")).toBeTruthy();
@@ -485,7 +533,7 @@ describe("IntegrationsPage", () => {
 
   it("manual services render the token-entry Connect button, not an anchor", () => {
     currentPluginsData = manualOnlyPluginsData;
-    render(<IntegrationsPage />);
+    openIntegration("typefully");
     expect(screen.queryByRole("link", { name: "Connect Typefully" })).toBeNull();
     expect(screen.getByRole("button", { name: "Connect Typefully" })).toBeTruthy();
   });
@@ -547,9 +595,9 @@ describe("brand marks", () => {
     };
     const { container } = render(<IntegrationsPage />);
     const services = [...container.querySelectorAll("section")].find(
-      (section) => section.querySelector("h2")?.textContent === "Services",
+      (section) => section.querySelector("h2")?.textContent === "Available",
     );
-    const paths = [...(services?.querySelectorAll("svg path") ?? [])].map((p) => p.getAttribute("d"));
+    const paths = [...(services?.querySelectorAll("[data-brand-mark] svg path") ?? [])].map((p) => p.getAttribute("d"));
     expect(paths).toHaveLength(3);
     expect(new Set(paths).size).toBe(3);
   });
@@ -582,18 +630,18 @@ describe("connection health", () => {
 
   it("names the connected account", () => {
     currentPluginsData = connectedGmail({ login: "someone@example.com" });
-    render(<IntegrationsPage />);
+    openIntegration("gmail");
     expect(screen.getByText(/someone@example.com/)).toBeTruthy();
-    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(screen.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Reconnect Gmail" })).toBeNull();
   });
 
   it("shows the fix and a Reconnect control when the token expired", () => {
     currentPluginsData = connectedGmail({ login: "someone@example.com", expiresAt: Date.now() - 1000 });
-    render(<IntegrationsPage />);
+    openIntegration("gmail");
 
-    expect(screen.getByText("Expired")).toBeTruthy();
-    expect(screen.queryByText("Connected")).toBeNull();
+    expect(within(screen.getByRole("dialog")).getByText("Expired")).toBeTruthy();
+    expect(screen.queryByText("Connected", { selector: ":not(h2)" })).toBeNull();
     expect(screen.getByText(/Select Reconnect to sign in again/)).toBeTruthy();
     // The repair opens the same pre-connect screen, and Disconnect stays available.
     expect(screen.queryByRole("link", { name: "Reconnect Gmail" })).toBeNull();
@@ -603,22 +651,22 @@ describe("connection health", () => {
 
   it("shows the fix when the last refresh failed", () => {
     currentPluginsData = connectedGmail({ refreshFailed: true });
-    render(<IntegrationsPage />);
-    expect(screen.getByText("Refresh failed")).toBeTruthy();
+    openIntegration("gmail");
+    expect(within(screen.getByRole("dialog")).getByText("Refresh failed")).toBeTruthy();
     expect(screen.getByText(/The last token refresh failed/)).toBeTruthy();
   });
 
   it("shows the fix when the grant carries identity only", () => {
     currentPluginsData = connectedGmail({ identityOnly: true });
-    render(<IntegrationsPage />);
-    expect(screen.getByText("Sign-in only")).toBeTruthy();
+    openIntegration("gmail");
+    expect(within(screen.getByRole("dialog")).getByText("Sign-in only")).toBeTruthy();
     expect(screen.getByText(/add the permissions the tools need/)).toBeTruthy();
   });
 
   it("keeps the plain Connected badge when the wire reports no health", () => {
     currentPluginsData = connectedGmail(undefined);
-    render(<IntegrationsPage />);
-    expect(screen.getByText("Connected")).toBeTruthy();
+    openIntegration("gmail");
+    expect(screen.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Reconnect Gmail" })).toBeNull();
   });
 });
@@ -647,9 +695,9 @@ describe("connected dynamic service tool count", () => {
         },
       ],
     };
-    render(<IntegrationsPage />);
-    expect(screen.getByText(/^52 tools$/)).toBeTruthy();
-    expect(screen.queryByText("tools load on connect")).toBeNull();
+    openIntegration("linear");
+    expect(screen.getByText(/· 52 tools$/)).toBeTruthy();
+    expect(screen.queryByText(/tools load on connect/)).toBeNull();
   });
 
   it("keeps the static label when connected but toolCount is absent (resolution failed)", () => {
@@ -674,8 +722,8 @@ describe("connected dynamic service tool count", () => {
         },
       ],
     };
-    render(<IntegrationsPage />);
-    expect(screen.getByText(/^tools load on connect$/)).toBeTruthy();
+    openIntegration("linear");
+    expect(screen.getByText(/· tools load on connect$/)).toBeTruthy();
   });
 });
 
@@ -697,7 +745,7 @@ describe("the organisation's GitHub App", () => {
   });
 
   it("counts the accounts the App reaches, and says the App is not the user", () => {
-    render(<IntegrationsPage />);
+    openIntegration("github");
     expect(screen.getByText("Org App installed")).toBeTruthy();
     expect(
       screen.getByText(/GitHub App reaches 2 GitHub accounts\. It acts as your organisation, not as you\./),
@@ -709,7 +757,7 @@ describe("the organisation's GitHub App", () => {
     // App with no installation is the state people actually land in.
     currentOrgStatus = { configured: true, installationCount: 0, suspendedCount: 0 };
     currentOrg = org("admin");
-    render(<IntegrationsPage />);
+    openIntegration("github");
 
     expect(screen.getByText("Org App not installed")).toBeTruthy();
     expect(screen.getByText(/nobody installed it on a GitHub account/)).toBeTruthy();
@@ -719,7 +767,7 @@ describe("the organisation's GitHub App", () => {
 
   it("tells a member who to ask, rather than linking to a page they cannot open", () => {
     currentOrgStatus = { configured: true, installationCount: 0, suspendedCount: 0 };
-    render(<IntegrationsPage />);
+    openIntegration("github");
 
     expect(screen.getByText(/Ask an org admin to install it\./)).toBeTruthy();
     expect(screen.queryByRole("link", { name: "Finish the install" })).toBeNull();
@@ -733,7 +781,7 @@ describe("the organisation's GitHub App", () => {
 
   it("says the organisation has no App on a disconnected card, where Connect is about to fail", () => {
     currentOrgStatus = { configured: false, installationCount: 0, suspendedCount: 0 };
-    render(<IntegrationsPage />);
+    openIntegration("github");
 
     // The card is disconnected, so the note stack used to render nothing at
     // all — which is the state that most needed the explanation.
@@ -744,7 +792,7 @@ describe("the organisation's GitHub App", () => {
 
   it("reports a suspended App as reaching nothing, not as installed", () => {
     currentOrgStatus = { configured: true, installationCount: 2, suspendedCount: 2 };
-    render(<IntegrationsPage />);
+    openIntegration("github");
     expect(screen.getByText("Org App suspended")).toBeTruthy();
     expect(screen.queryByText(/reaches \d+ GitHub/)).toBeNull();
   });
@@ -758,10 +806,10 @@ describe("the organisation's GitHub App", () => {
         },
       ],
     };
-    render(<IntegrationsPage />);
+    openIntegration("github");
     // Two connections, two badges. "Connected" is this user's credential;
     // the App carries its own label and never borrows that one.
-    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(screen.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
     expect(screen.getByText("Org App installed")).toBeTruthy();
   });
 
@@ -775,9 +823,9 @@ describe("the organisation's GitHub App", () => {
 
   it("leaves every other service's card alone", () => {
     currentPluginsData = pluginsData;
-    render(<IntegrationsPage />);
-    // One GitHub card, one org line — Slack and Typefully have no org half.
-    expect(screen.getAllByText(/Org App/)).toHaveLength(1);
+    openIntegration("slack");
+    // Slack has no org half, so its panel carries no org App line.
+    expect(screen.queryByText(/Org App/)).toBeNull();
   });
 });
 
@@ -855,9 +903,9 @@ describe("unconfigured services", () => {
   });
 
   it("keeps a connected-but-unconfigured service visible for Disconnect, with the admin note", () => {
-    render(<IntegrationsPage />);
+    openIntegration("gmail");
 
-    expect(screen.getByText("Gmail")).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Gmail" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Disconnect Gmail" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Connect Gmail/ })).toBeNull();
     expect(screen.getByText(/Not configured for this organization/)).toBeTruthy();
@@ -912,9 +960,9 @@ describe("an unconfigured service an org admin can fix", () => {
 
   it("shows the tile and names both variables when the wire carries them", () => {
     currentPluginsData = calendarPlugins({ missingEnv: bothUnset });
-    render(<IntegrationsPage />);
+    openIntegration("google-calendar");
 
-    expect(screen.getByText("Google Calendar")).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Google Calendar" })).toBeTruthy();
     expect(screen.getByText("GOOGLE_CLIENT_ID")).toBeTruthy();
     expect(screen.getByText("GOOGLE_CLIENT_SECRET")).toBeTruthy();
     expect(screen.getByText(/Then restart the server/)).toBeTruthy();
@@ -922,7 +970,7 @@ describe("an unconfigured service an org admin can fix", () => {
 
   it("names only the unset half of a half-set pair", () => {
     currentPluginsData = calendarPlugins({ missingEnv: ["GOOGLE_CLIENT_SECRET"] });
-    render(<IntegrationsPage />);
+    openIntegration("google-calendar");
 
     expect(screen.getByText("GOOGLE_CLIENT_SECRET")).toBeTruthy();
     expect(screen.queryByText("GOOGLE_CLIENT_ID")).toBeNull();
@@ -930,7 +978,7 @@ describe("an unconfigured service an org admin can fix", () => {
 
   it("prints whatever variables the wire names, with no hardcoded Google knowledge", () => {
     currentPluginsData = calendarPlugins({ missingEnv: ["DROPBOX_CLIENT_ID", "DROPBOX_CLIENT_SECRET"] });
-    render(<IntegrationsPage />);
+    openIntegration("google-calendar");
 
     expect(screen.getByText("DROPBOX_CLIENT_ID")).toBeTruthy();
     expect(screen.getByText("DROPBOX_CLIENT_SECRET")).toBeTruthy();
@@ -961,7 +1009,7 @@ describe("an unconfigured service an org admin can fix", () => {
     // server variable.
     currentPluginsData = calendarPlugins({ connected: true });
     currentOrg = org("member");
-    render(<IntegrationsPage />);
+    openIntegration("google-calendar");
 
     expect(screen.getByText(/Ask an org admin to set it up/)).toBeTruthy();
     expect(screen.queryByText(/Settings → Organization/)).toBeNull();
@@ -991,7 +1039,7 @@ describe("an unconfigured service an org admin can fix", () => {
       ],
     };
     currentOrg = org("member");
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     expect(screen.getByText(/Not configured for this organization/)).toBeTruthy();
     expect(screen.queryByText(/Ask an org admin/)).toBeNull();
@@ -1017,7 +1065,7 @@ describe("an unconfigured service an org admin can fix", () => {
         },
       ],
     };
-    render(<IntegrationsPage />);
+    openIntegration("google-calendar");
 
     expect(screen.getByRole("button", { name: "Connect Google Calendar" })).toBeTruthy();
     expect(screen.queryByText(/restart the server/)).toBeNull();
@@ -1077,7 +1125,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
 
   it("offers pairing instead of token entry when the provider declares an identity link", () => {
     identityLinksData = { links: [slackLink()] };
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     expect(screen.getByRole("button", { name: "Link Slack account" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Connect Slack/ })).toBeNull();
@@ -1091,7 +1139,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
       instructions: "In Slack, open a DM with the Valet app and send: link <code>",
       expiresInSeconds: 600,
     });
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     fireEvent.click(screen.getByRole("button", { name: "Link Slack account" }));
 
@@ -1103,7 +1151,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
 
   it("a linked account reads as linked, with a confirm-gated Unlink", () => {
     identityLinksData = { links: [slackLink({ linked: true, externalId: "U0123ABCD" })] };
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     expect(screen.getByText("U0123ABCD")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Link Slack account" })).toBeNull();
@@ -1117,7 +1165,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
 
   it("falls back to the generic org note when the provider declares no identity link", () => {
     identityLinksData = { links: [] };
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     expect(screen.getByText(/Provided by your organization/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Link .* account/ })).toBeNull();
@@ -1125,7 +1173,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
 
   it("holds both the note and the pairing block while the link list loads — no flash", () => {
     identityLinksLoading = true;
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     expect(screen.queryByText(/Provided by your organization/)).toBeNull();
     expect(screen.queryByRole("button", { name: /Link .* account/ })).toBeNull();
@@ -1133,7 +1181,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
 
   it("offers 'DM me on Slack' when the provider reports codeDelivery", () => {
     identityLinksData = { links: [slackLink({ codeDelivery: true, memberSearch: true })] };
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     expect(screen.getByRole("button", { name: "DM me on Slack" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Find my Slack account by name" })).toBeTruthy();
@@ -1150,7 +1198,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
       displayName: "conner",
       expiresInSeconds: 600,
     });
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
 
@@ -1171,7 +1219,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
       displayName: "conner",
       expiresInSeconds: 1,
     });
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
     await waitFor(() => expect(screen.getByRole("textbox", { name: "Slack link code" })).toBeTruthy());
@@ -1184,7 +1232,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
     identityLinksData = { links: [slackLink({ codeDelivery: true, memberSearch: true })] };
     deliverLinkMutateAsync.mockResolvedValueOnce({ reason: "email_not_in_workspace" });
     linkMembersData = { members: [{ externalId: "U888", displayName: "Pat", handle: "pat" }] };
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
 
@@ -1221,7 +1269,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
       instructions: "In Slack, open a DM with the Valet app and send: link <code>",
       expiresInSeconds: 600,
     });
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
 
@@ -1237,7 +1285,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
       instructions: "In Slack, open a DM with the Valet app and send: link <code>",
       expiresInSeconds: 600,
     });
-    render(<IntegrationsPage />);
+    openIntegration("slack");
 
     fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
 
@@ -1308,7 +1356,8 @@ describe("IntegrationsPage — the search box", () => {
     expect(screen.getByText("No integrations match your search.")).toBeTruthy();
     // Hiding the box on an empty page would leave no way to clear the search.
     expect(screen.getByLabelText("Search integrations")).toBeTruthy();
-    expect(screen.queryByText("Services")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Connected" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Available" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "1Password" })).toBeNull();
   });
 

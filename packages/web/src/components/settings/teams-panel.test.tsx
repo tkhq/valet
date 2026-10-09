@@ -42,9 +42,13 @@ vi.mock("./team-deletion-requests", () => ({
     <section aria-label="Deletion requests" data-team-id={teamId} data-can-manage={canManage} />,
 }));
 
+const navigate = vi.fn();
 vi.mock("@tanstack/react-router", () => ({
   Link: RouterLinkStub,
+  useNavigate: () => navigate,
 }));
+
+const removeMemberMutate = vi.fn();
 
 /** Shared across renders so the add-member tests can assert on the call. */
 const addMemberMutate = vi.fn();
@@ -90,7 +94,7 @@ let teamDefaultReasoning: string | null = null;
 
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: selectedTeamsOverride ? { teams: selectedTeamsOverride } : teamsData(), isLoading: selectedTeamsLoading, error: selectedTeamsError }),
-  useMe: () => ({ data: { orgRole }, isLoading: false, error: null }),
+  useMe: () => ({ data: { id: "u1", orgRole }, isLoading: false, error: null }),
   useTeamMembers: () => ({
     data: {
       members: [
@@ -113,7 +117,7 @@ vi.mock("~/api/settings", () => ({
     isPending: addMemberPending,
     error: addMemberError,
   }),
-  useRemoveTeamMember: () => ({ mutate: vi.fn(), isPending: false }),
+  useRemoveTeamMember: () => ({ mutate: removeMemberMutate, isPending: false }),
   useSetTeamMemberRole: () => ({ mutate: vi.fn(), isPending: false }),
   usePatchTeam: () => ({ mutate: patchTeamMutate, isPending: false, error: null }),
   // The default-model combobox reads the org catalog through this hook.
@@ -808,21 +812,12 @@ describe("TeamsPanel — removing a team credential", () => {
   });
 });
 
-describe("TeamsPanel — team assistant link", () => {
-  beforeEach(() => {
-    callerRole = "member";
-    orgRole = "member";
-  });
-
-  it("shows the Assistant link to a plain member in the active team", () => {
-    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" showAssistantLink />);
-    expect(screen.getByRole("link", { name: /Threads/ })).toBeTruthy();
-  });
-
-  it("opens the active team's assistants list", () => {
-    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" showAssistantLink />);
-    const link = screen.getByRole("link", { name: /Threads/ });
-    expect(link.getAttribute("href")).toBe("/chat?workspace=team_1");
+describe("TeamsPanel — team settings page", () => {
+  it("drops the collapsible header the page already shows, and stays open", () => {
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    expect(screen.queryByRole("button", { name: /^(Collapse|Expand) / })).toBeNull();
+    expect(screen.getByRole("region", { name: "Deletion requests" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
   });
 });
 
@@ -913,3 +908,53 @@ vi.mock("~/api/onepassword", () => ({
   useTeamOnePasswordStatus: () => ({ data: { tokenConnected: false }, isPending: false, isError: false, isSuccess: true }),
   useTeamOnePasswordToken: () => ({ mutate: vi.fn(), isPending: false, reset: vi.fn() }),
 }));
+
+describe("TeamsPanel — leaving a team's own page", () => {
+  beforeEach(() => {
+    callerRole = "admin";
+    orgRole = "member";
+    navigate.mockClear();
+    deleteTeamMutate.mockImplementation((_id: string, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.());
+    removeMemberMutate.mockImplementation((_vars: unknown, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.());
+  });
+
+  afterEach(() => {
+    deleteTeamMutate.mockReset();
+    removeMemberMutate.mockReset();
+  });
+
+  async function deleteFromMenu(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("button", { name: "Platform actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete team" }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete team" }));
+  }
+
+  it("opens Profile once the team is deleted, so the page does not refuse a gone team", async () => {
+    const user = userEvent.setup();
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    await deleteFromMenu(user);
+    expect(navigate).toHaveBeenCalledWith({ to: "/settings/profile", replace: true });
+  });
+
+  it("stays on the Organization list after a delete there", async () => {
+    const user = userEvent.setup();
+    render(<TeamsPanel orgMembers={orgMembers} />);
+    await deleteFromMenu(user);
+    expect(deleteTeamMutate).toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("opens Profile once you remove yourself from the team", () => {
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    fireEvent.click(screen.getByRole("button", { name: "Remove One from Platform" }));
+    expect(removeMemberMutate).toHaveBeenCalledWith({ teamId: "team_1", userId: "u1" }, expect.anything());
+    expect(navigate).toHaveBeenCalledWith({ to: "/settings/profile", replace: true });
+  });
+
+  it("stays after removing another member", () => {
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    fireEvent.click(screen.getByRole("button", { name: "Remove Two from Platform" }));
+    expect(removeMemberMutate).toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+});

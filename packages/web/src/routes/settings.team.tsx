@@ -1,40 +1,27 @@
-import { createFileRoute, Link, Navigate } from "@tanstack/react-router";
-import { useOrgDirectory } from "~/api/settings";
-import { ErrorRow, LoadingRow } from "~/components/primitives";
-import { Section } from "~/components/settings/section";
-import { TeamsPanel } from "~/components/settings/teams-panel";
+import { Navigate, createFileRoute } from "@tanstack/react-router";
+import { useOrg, useTeams } from "~/api/settings";
+import { LoadingRow } from "~/components/primitives";
+import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 
+/**
+ * `/settings/team` predates per-team settings pages. It opens the team the
+ * switcher holds, or Profile when the switcher is on the personal workspace.
+ */
 export const Route = createFileRoute("/settings/team")({
-  component: TeamSettingsPage,
+  component: TeamSettingsRedirect,
 });
 
-export function TeamSettingsPage() {
+export function TeamSettingsRedirect() {
   const { teamId } = useWorkspaceScope();
+  const teamsQ = useTeams();
+  const orgQ = useOrg();
   if (teamId === undefined) return <Navigate to="/settings/profile" replace />;
-  // Drop drafts and open confirmation dialogs before changing their target.
-  return <SelectedTeamSettings key={teamId} teamId={teamId} />;
-}
-
-function SelectedTeamSettings({ teamId }: { teamId: string }) {
-  const directory = useOrgDirectory();
-
-  return (
-    <Section title="Team" description="Settings for the selected team workspace.">
-      <div className="py-3">
-        <Link to="/chat" search={{ workspace: teamId }} className="text-sm text-moss underline-offset-2 hover:underline">
-          Open threads
-        </Link>
-      </div>
-      {directory.isLoading ? (
-        <LoadingRow label="Loading team settings…" />
-      ) : directory.error != null ? (
-        <ErrorRow>Failed to load the member directory. Reload the page to try again.</ErrorRow>
-      ) : directory.data ? (
-        <TeamsPanel orgMembers={directory.data.users} teamId={teamId} showAssistantLink />
-      ) : (
-        <ErrorRow>Team settings are unavailable. Select another workspace or reload the page.</ErrorRow>
-      )}
-    </Section>
-  );
+  // The switcher keeps a stored team while membership loads, and that team
+  // can be one the caller left or that was deleted. Redirect only to a team
+  // the caller is on, or the team page would refuse the caller.
+  if (teamsQ.isLoading || orgQ.isLoading) return <LoadingRow label="Loading team settings…" />;
+  const member = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations).some((team) => team.id === teamId);
+  if (!member) return <Navigate to="/settings/profile" replace />;
+  return <Navigate to="/settings/teams/$teamId" params={{ teamId }} replace />;
 }

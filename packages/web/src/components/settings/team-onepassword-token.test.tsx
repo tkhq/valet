@@ -20,7 +20,7 @@ describe("team 1Password connection", () => {
   it("reports a status error instead of offering controls", async () => {
     vi.mocked(api.getTeamOnePasswordStatus).mockRejectedValue(new Error("offline"));
     view();
-    expect(await screen.findByText("Could not load the connection. Reload the page to try again.")).toBeTruthy();
+    expect(await screen.findAllByText("Could not load the connection. Reload the page to try again.")).not.toHaveLength(0);
     expect(screen.queryByRole("button", { name: "Connect 1Password" })).toBeNull();
   });
 
@@ -31,7 +31,7 @@ describe("team 1Password connection", () => {
       return { ok: true };
     });
     view();
-    expect(await screen.findByText("Uses the organization token")).toBeTruthy();
+    expect(await screen.findAllByText("Uses the organization token")).not.toHaveLength(0);
     fireEvent.click(screen.getByRole("button", { name: "Connect 1Password" }));
     fireEvent.change(screen.getByLabelText("Service account token"), { target: { value: "fake-team-token" } });
     fireEvent.click(screen.getByRole("button", { name: "Connect token" }));
@@ -58,7 +58,7 @@ describe("team 1Password connection", () => {
   it("shows status but no controls to a member", async () => {
     vi.mocked(api.getTeamOnePasswordStatus).mockResolvedValue({ tokenConnected: false });
     view("c", false);
-    expect(await screen.findByText("Uses the organization token")).toBeTruthy();
+    expect(await screen.findAllByText("Uses the organization token")).not.toHaveLength(0);
     expect(screen.getByText("Team admin required")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Connect 1Password" })).toBeNull();
   });

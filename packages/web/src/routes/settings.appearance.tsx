@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { Navigate, createFileRoute } from "@tanstack/react-router";
 import { Monitor, Sun, Moon } from "lucide-react";
 import { Section } from "~/components/settings/section";
 import { RadioCard } from "~/components/settings/radio-card";
@@ -33,8 +33,9 @@ import {
  * two above it. It writes through `setToolCardDefault`, so this page adds
  * no persistence path of its own.
  */
+/** Appearance now lives on Preferences; the old path redirects there. */
 export const Route = createFileRoute("/settings/appearance")({
-  component: AppearancePage,
+  component: () => <Navigate to="/settings/preferences" replace />,
 });
 
 const THEME_OPTIONS: { value: ThemeChoice; label: string; description: string; icon: typeof Monitor }[] = [

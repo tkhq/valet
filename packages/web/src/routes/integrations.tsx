@@ -1,10 +1,14 @@
-import { useEffect, useState } from "react";
-import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
+import { useEffect, useRef, useState } from "react";
+import { createFileRoute, useNavigate, useRouter, useSearch } from "@tanstack/react-router";
 import { usePlugins } from "~/api/integrations";
 import { Spinner, pageClass } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 import { SearchInput } from "~/components/search-input";
 import { Section } from "~/components/settings/section";
-import { hasVisibleSurface, IntegrationRow, isService } from "~/components/integrations/integration-row";
+import { hasVisibleSurface, IntegrationDetail, IntegrationRow, integrationGroup, isService } from "~/components/integrations/integration-row";
+import { Dialog, DialogContent, DialogTitle } from "~/components/primitives";
+import { IntegrationList } from "~/components/integrations/integration-card";
+import { OrphanCredentials } from "~/components/integrations/orphan-credentials";
 import { pluginDisplayName } from "~/components/integrations/display-name";
 import { matchesNeedle } from "~/lib/text-match";
 import { textParam } from "~/lib/search-params";
@@ -14,8 +18,9 @@ import { IntegrationLimitNotice } from "~/components/integrations/integration-li
 import { useListOwner } from "~/lib/use-list-owner";
 
 /**
- * `/integrations` — the services a person can connect, in the settings
- * visual idiom (open hairline stacks, no card boxes). Content-only plugins
+ * `/integrations` — the services a person can connect, as grouped lists in
+ * the settings visual idiom: Connected first, then Available, then Built in
+ * (settings-redesign spec, "Integrations"). Content-only plugins
  * are not listed: they need no credential and offer no action, so a row for
  * one was a row nobody could use. OAuth connect for services declaring
  * `oauth` metadata redirects
@@ -30,13 +35,19 @@ import { useListOwner } from "~/lib/use-list-owner";
  */
 interface IntegrationsSearch {
   q?: string;
+  /** The plugin whose detail panel is open. */
+  service?: string;
+  /** The workspace to show, as on `/chat`: `"user"` or a team id. The
+   * scope provider reads it, so a link from a personal settings page opens
+   * your own Integrations whatever the switcher holds. */
+  workspace?: string;
 }
 
 /** Reads the search params, keeping only strings. The OAuth round trip's
  * `?connected=`/`?error=` stay off this schema: `useConnectResult` reads
  * and clears them from `window.location` on mount. */
 function readIntegrationsSearch(raw: unknown): IntegrationsSearch {
-  return { q: textParam(raw, "q") };
+  return { q: textParam(raw, "q"), service: textParam(raw, "service"), workspace: textParam(raw, "workspace") };
 }
 
 export const Route = createFileRoute("/integrations")({
@@ -118,6 +129,12 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
   // this module and never builds a real router context.
   const search = readIntegrationsSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
+  const router = useRouter();
+  // True while the open panel came from a row click on this page, which
+  // pushed its entry. Closing it then goes back to the list entry, so
+  // open and close cycles add no history. A panel reached by a link has no
+  // list entry behind it on this page, so closing replaces its entry.
+  const pushedPanel = useRef(false);
   const query = search.q ?? "";
 
   // `hasVisibleSurface` drops plugins whose every service is unconfigured,
@@ -129,15 +146,38 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
   const services = reachable
     .filter((plugin) => matchesNeedle(query, [pluginDisplayName(plugin), plugin.name, plugin.description]))
     .sort((a, b) => pluginDisplayName(a).localeCompare(pluginDisplayName(b)));
+  const connected = services.filter((plugin) => integrationGroup(plugin) === "connected");
+  const available = services.filter((plugin) => integrationGroup(plugin) === "available");
+  const builtin = services.filter((plugin) => integrationGroup(plugin) === "builtin");
   const searching = query.trim().length > 0;
-  // The box stays up through an empty match — hiding it would leave the
-  // search with no box to clear it in.
+  // Rows keep the search when they open a panel; closing it keeps it too.
+  const rowSearch: Record<string, string> = searching ? { q: query } : {};
+  const detail = search.service ? reachable.find((plugin) => plugin.name === search.service) : undefined;
   const showSearch = reachable.length > 0 || searching;
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className={pageClass}>
-        <h1 className="font-display text-2xl text-ink">Integrations</h1>
+      <div className={cn(pageClass, "max-w-3xl")}>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <h1 className="text-2xl font-medium text-ink">Integrations</h1>
+          {/* The box stays up through an empty match — hiding it would leave
+              the search with no box to clear it in. */}
+          {!isLoading && !error && showSearch && (
+            <div className="w-full sm:w-56">
+              <SearchInput
+                value={query}
+                onSettled={(next) =>
+                  void navigate({
+                    to: "/integrations",
+                    search: next.trim().length === 0 ? {} : { q: next },
+                  })
+                }
+                placeholder="Search integrations…"
+                aria-label="Search integrations"
+              />
+            </div>
+          )}
+        </div>
         {owner && <IntegrationLimitNotice owner={owner} canClear />}
 
         {/* The live region is on the page from the first paint, and stays
@@ -161,7 +201,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
           )}
         </div>
 
-        <div className="mt-10 space-y-12">
+        <div className="mt-8 space-y-10">
           {isLoading && (
             <div className="flex items-center gap-2 text-sm text-muted">
               <Spinner size={14} /> Loading integrations…
@@ -177,36 +217,62 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
           )}
 
           {!isLoading && !error && showSearch && (
-            <div className="space-y-4">
-              <div className="ml-auto w-full sm:w-56">
-                <SearchInput
-                  value={query}
-                  onSettled={(next) =>
-                    void navigate({
-                      to: "/integrations",
-                      search: next.trim().length === 0 ? {} : { q: next },
-                    })
-                  }
-                  placeholder="Search integrations…"
-                  aria-label="Search integrations"
-                />
-              </div>
-
+            <div className="space-y-10">
               {searching && services.length === 0 && (
                 <div className="text-sm text-muted">No integrations match your search.</div>
               )}
 
-              {services.length > 0 && (
-                <Section title="Services" description="Most need a key to connect.">
-                  <div className="grid gap-3 pt-4 sm:grid-cols-2">
-                    {services.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} />
+              {connected.length > 0 && (
+                <Section title="Connected" description="Services your assistant can reach now.">
+                  <IntegrationList label="Connected">
+                    {connected.map((plugin) => (
+                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
                     ))}
-                  </div>
+                  </IntegrationList>
+                </Section>
+              )}
+              {available.length > 0 && (
+                <Section title="Available" description="Connect a service to let your assistant use it.">
+                  <IntegrationList label="Available">
+                    {available.map((plugin) => (
+                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
+                    ))}
+                  </IntegrationList>
+                </Section>
+              )}
+              {builtin.length > 0 && (
+                <Section title="Built in" description="Ready to use. These need no account.">
+                  <IntegrationList label="Built in">
+                    {builtin.map((plugin) => (
+                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
+                    ))}
+                  </IntegrationList>
                 </Section>
               )}
             </div>
           )}
+          {!isLoading && !error && <OrphanCredentials plugins={plugins} />}
+          <Dialog
+            open={detail !== undefined}
+            onOpenChange={(open) => {
+              if (open) return;
+              if (pushedPanel.current) {
+                pushedPanel.current = false;
+                router.history.back();
+                return;
+              }
+              // Replace, not push: a pushed close leaves the open panel one
+              // entry back, so Back would reopen what the reader just closed.
+              void navigate({ to: "/integrations", search: rowSearch, replace: true });
+            }}
+          >
+            {detail && (
+              <DialogContent className="max-w-xl" aria-describedby={undefined}>
+                <DialogTitle className="sr-only">{pluginDisplayName(detail)}</DialogTitle>
+                <IntegrationDetail plugin={detail} />
+              </DialogContent>
+            )}
+          </Dialog>
         </div>
       </div>
     </div>

@@ -361,11 +361,13 @@ Frontend regression tests cover successful creation in both scopes, actual-key s
 
 A report said that a regular user cannot create a proxy token and that no organization setting enables it. The gate is the workspace, not an organization setting. In a personal workspace every signed-in user creates a proxy key. In a team workspace only a team admin or an organization admin creates the shared key, because the key bills and authorizes as the team. No organization toggle changes this rule, and none is added.
 
-The blocked state on `/settings/proxy` states three things:
+The blocked state on a team's API keys and proxy tab (`/settings/teams/$teamId/access`) states three things:
 
 1. Only a team admin or an organization admin can create a shared key for this team.
 2. Ask an admin of this team to create the key.
-3. To create your own key, set the workspace switcher to Personal.
+3. To create your own key, open Personal workspace → API keys and proxy (`/settings/api-keys`). Team settings pin the team, so the workspace switcher cannot make that tab personal.
+
+The API refusal for the same member (`TEAM_KEY_ADMIN_REQUIRED`, code `team_admin_required`) states the same three things.
 
 In pass-through mode the third statement adds that the member must also supply a provider key, because a personal proxy key alone forwards no credential.
 
