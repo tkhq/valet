@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import type { ReactNode } from "react";
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { ListWorkflowActionRequiredResponse, WorkflowActionRequiredItem } from "@valet/api/wire";
 import { api, ApiError } from "~/api/client";
-import { qk, useResolveDecisions } from "~/api/queries";
+import { qk, useNotificationDecisions, useResolveDecision, useResolveDecisions } from "~/api/queries";
 import { qkWorkflows, useResolveWorkflowApprovals } from "~/api/workflows";
 import type { BulkTarget } from "./bulk-answers";
 import { useBulkAnswerRun } from "./needs-action-header";
@@ -22,7 +22,7 @@ function item(runId: string, nodeId: string): WorkflowActionRequiredItem {
 
 beforeEach(() => vi.restoreAllMocks());
 
-it("useResolveDecisions invalidates the session's gates and the bell inbox after each answer", async () => {
+it("useResolveDecisions invalidates the session's gates but leaves the bell inbox to the batch's one refresh", async () => {
   const { client, wrapper } = harness();
   client.setQueryData(qk.decisions("s1"), { gates: [] });
   client.setQueryData(qk.decisions("s2"), { gates: [] });
@@ -33,7 +33,35 @@ it("useResolveDecisions invalidates the session's gates and the bell inbox after
   expect(resolve).toHaveBeenCalledWith("s1", "g1", { actionId: "approve" });
   expect(client.getQueryState(qk.decisions("s1"))?.isInvalidated).toBe(true);
   expect(client.getQueryState(qk.decisions("s2"))?.isInvalidated).toBe(false);
-  expect(client.getQueryState(["notification-decisions", undefined])?.isInvalidated).toBe(true);
+  expect(client.getQueryState(["notification-decisions", undefined])?.isInvalidated).toBe(false);
+});
+
+it("a 40-item batch fetches the bell inbox once, at its final refresh", async () => {
+  const { wrapper } = harness();
+  const list = vi.spyOn(api, "listNotificationDecisions").mockResolvedValue({ items: [] });
+  vi.spyOn(api, "resolveDecision").mockResolvedValue({ ok: true });
+  const { result } = renderHook(() => {
+    const inbox = useNotificationDecisions();
+    const run = useBulkAnswerRun(async () => { await inbox.refetch(); return new Set<string>(); });
+    return { inbox, run };
+  }, { wrapper });
+  await waitFor(() => expect(result.current.inbox.isSuccess).toBe(true));
+  list.mockClear();
+  const targets: BulkTarget[] = Array.from({ length: 40 }, (_, i) => ({ kind: "decision", key: `decision:g${i}`, title: `G${i}`, sessionId: `s${i}`, gateId: `g${i}` }));
+  await act(() => result.current.run.start("approve", targets));
+  expect(result.current.run.summary).toBe("Approved 40.");
+  expect(list).toHaveBeenCalledTimes(1);
+});
+
+it("a single answer from a gate card still refreshes the bell inbox", async () => {
+  const { wrapper } = harness();
+  const list = vi.spyOn(api, "listNotificationDecisions").mockResolvedValue({ items: [] });
+  vi.spyOn(api, "resolveDecision").mockResolvedValue({ ok: true });
+  const { result } = renderHook(() => ({ inbox: useNotificationDecisions(), resolve: useResolveDecision("s1") }), { wrapper });
+  await waitFor(() => expect(result.current.inbox.isSuccess).toBe(true));
+  list.mockClear();
+  await act(() => result.current.resolve.mutateAsync({ gateId: "g1", body: { actionId: "approve" } }));
+  await waitFor(() => expect(list).toHaveBeenCalledTimes(1));
 });
 
 it("useResolveWorkflowApprovals removes an answered gate, and invalidates the list after an error", async () => {

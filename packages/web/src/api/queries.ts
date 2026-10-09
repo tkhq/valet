@@ -478,7 +478,9 @@ export function useResolveDecision(sessionId: string) {
 }
 
 /** `useResolveDecision` for gates in many sessions: the bell's bulk answer
- * resolves each gate through the same endpoint. */
+ * resolves each gate through the same endpoint. It invalidates only the
+ * session's gates. The inbox scan is expensive, so the bulk run refetches it
+ * once after its last answer instead of once per answer. */
 export function useResolveDecisions() {
   const qc = useQueryClient();
   return useMutation<
@@ -487,7 +489,7 @@ export function useResolveDecisions() {
     { sessionId: string; gateId: string; body: ResolveDecisionRequest }
   >({
     mutationFn: ({ sessionId, gateId, body }) => api.resolveDecision(sessionId, gateId, body),
-    onSuccess: (_data, { sessionId }) => invalidateDecisionState(qc, sessionId),
+    onSuccess: (_data, { sessionId }) => { void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) }); },
   });
 }
 

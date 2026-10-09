@@ -421,7 +421,7 @@ The bell opens a confirmation dialog before it sends anything. The dialog lists 
 
 At most four answers are in flight at one time. One failure does not stop the others. A `404` or `409` means the item is no longer waiting for this caller: another answer or a timeout settled it, or the caller lost access. The summary reports it as "no longer waiting", never as answered.
 
-After the last answer, the bell refetches the lists it covered. An item that the refetched lists still show is reported as "still waiting", whatever its response said. If the refetch fails, the bell keeps the response-based summary. A status line shows progress ("Approving 3 of 12…") and then the summary ("Approved 10. 1 was no longer waiting. 1 failed: title: error").
+A bulk answer to a thread gate invalidates only that session's gates, not the notification inbox. The inbox scan is expensive, so a batch fetches it once, at the end. A single answer from a gate card still refreshes the inbox. After the last answer, the bell refetches the lists it covered. An item that the refetched lists still show is reported as "still waiting", whatever its response said. If the refetch fails, the bell keeps the response-based summary. A status line shows progress ("Approving 3 of 12…") and then the summary ("Approved 10. 1 was no longer waiting. 1 failed: title: error").
 
 The dialog says what an approval does. A tool action runs once, and Valet saves no rule. A workflow approval node lets its run continue to the next steps. After a confirmed run, focus moves to the status line. After Cancel, focus returns to the button that opened the dialog. When the bell closes after a run has settled, the summary clears.
 
