@@ -1,15 +1,16 @@
-import type { Hono, Handler } from 'hono';
+import type { Context, Hono, Handler } from 'hono';
 import { validatePluginHttpRoutes, type PluginHttpCaller, type PluginHttpRequest, type PluginHttpRoute, type ValetPlugin } from '@valet/engine';
 import type { AppEnv } from '../env.js';
-import { requireActingUser } from '../middleware/auth.js';
+import { isValidInternalToken } from '../lib/internal-auth.js';
+import { requireActingUser, requirePrincipal } from '../middleware/auth.js';
 import { requireOrgAdmin } from '../routes/_org-admin.js';
 import { isOrgMember } from '../services/org.js';
 import { ingestEvent } from '../events/ingest.js';
 import { writeDropLog } from '../orchestrator/signals.js';
 import { httpInstallationResolvers } from './http-installations.js';
-import { httpBindingMismatch, httpRouteBinding, httpRouteBindings } from './http-bindings.js';
+import { httpBindingMismatch, httpRouteBinding, httpRouteBindings, type PluginHttpRefusals } from './http-bindings.js';
 
-interface LegacyRoute {
+export interface LegacyRoute {
   path: string;
   method: PluginHttpRoute['method'];
   auth: PluginHttpRoute['auth'];
@@ -48,6 +49,11 @@ const LEGACY_ROUTES: Readonly<Record<string, Readonly<Record<string, LegacyRoute
     // The web client reads the setup view here.
     app: { path: '/api/org/slack', method: 'GET', auth: 'org-admin' },
   },
+  security: {
+    // The web client files issues from a Security session here.
+    'finding-issue': { path: '/api/sessions/:id/security/findings/:findingId/issues', method: 'POST', auth: 'user' },
+    'issue-digest': { path: '/api/sessions/:id/security/issues/digest', method: 'POST', auth: 'user' },
+  },
 };
 
 /**
@@ -66,6 +72,33 @@ export function undeclaredHostRoutes(plugin: ValetPlugin): string | undefined {
   if (!missing.length) return undefined;
   return `Plugin ${plugin.name} declares no HTTP route for host route ID(s) ${missing.join(', ')}. ` +
     'Restore the route IDs, or update the host bindings and compatibility routes to match.';
+}
+
+const pathParameters = (path: string) => path.split('/').filter((segment) => segment.startsWith(':')).sort().join('/');
+
+/** Names the host configuration fix when a compatibility URL cannot serve the route it aliases. */
+export function compatibilityRouteIssue(route: PluginHttpRoute, legacy: LegacyRoute): string | undefined {
+  if (route.auth !== legacy.auth || route.method !== legacy.method) {
+    return `Compatibility route ${legacy.method} ${legacy.path} requires ${legacy.auth} authentication.`;
+  }
+  // The host authentication middleware covers only `/api/*`.
+  if ((legacy.auth === 'user' || legacy.auth === 'org-admin') && !legacy.path.startsWith('/api/')) {
+    return `Compatibility route ${legacy.path} must stay under /api/ for authentication.`;
+  }
+  // Handlers and bindings read path parameters by name.
+  if (pathParameters(legacy.path) !== pathParameters(route.path)) {
+    return `Compatibility route ${legacy.path} must use the path parameters of ${route.path}.`;
+  }
+  return undefined;
+}
+
+/** A request without an acting user. Refusal bodies only refuse; they never admit. */
+function refuseWithoutUser(c: Context<AppEnv>, refusals: PluginHttpRefusals | undefined): Response {
+  if (refusals?.teamKey && requirePrincipal(c)?.type === 'team') return c.json({ error: refusals.teamKey }, 403);
+  if (refusals?.internalToken && isValidInternalToken(c.req.header('x-valet-internal'))) {
+    return c.json({ error: refusals.internalToken }, 403);
+  }
+  return c.json({ error: 'Sign in to use this plugin route.' }, 401);
 }
 
 const tooLarge = () => Response.json({ error: 'payload too large' }, { status: 413 });
@@ -122,7 +155,7 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
         let caller: PluginHttpCaller | undefined;
         if (!publicRoute) {
           const user = requireActingUser(c);
-          if (!user) return c.json({ error: 'Sign in to use this plugin route.' }, 401);
+          if (!user) return refuseWithoutUser(c, binding?.refusals);
           if (!(await isOrgMember(c.var.providers.db, user.orgId, user.id))) {
             return c.json({ error: 'Organization membership required. Ask an administrator for access.' }, 403);
           }
@@ -176,9 +209,8 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
       const aliases = Object.hasOwn(LEGACY_ROUTES, plugin.name) ? LEGACY_ROUTES[plugin.name] : undefined;
       const legacy = aliases && Object.hasOwn(aliases, route.id) ? aliases[route.id] : undefined;
       if (legacy) {
-        if (route.auth !== legacy.auth || route.method !== legacy.method) {
-          throw new Error(`Compatibility route ${legacy.method} ${legacy.path} requires ${legacy.auth} authentication.`);
-        }
+        const issue = compatibilityRouteIssue(route, legacy);
+        if (issue) throw new Error(issue);
         app.on(route.method, legacy.path, handler);
       }
     }

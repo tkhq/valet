@@ -2,6 +2,7 @@ import type { PluginHttpCaller, PluginHttpRequest, PluginHttpRoute } from '@vale
 import type { Providers } from '../providers/types.js';
 import { githubHttpBindings } from './http-github.js';
 import { linearHttpBindings } from './http-linear-connection.js';
+import { securityHttpBindings } from './http-security.js';
 import { slackHttpBindings } from './http-slack.js';
 
 export interface PluginHttpBindingContext {
@@ -25,13 +26,30 @@ export interface PluginHttpBinding {
   method: PluginHttpRoute['method'];
   path: string;
   auth: PluginHttpRoute['auth'];
+  /** Existing 403 bodies for credentials that an authenticated route never admits. */
+  refusals?: PluginHttpRefusals;
   bind(context: PluginHttpBindingContext): Promise<Response>;
+}
+
+/**
+ * The mount answers 401 to a request without an acting user. A legacy URL
+ * under `/api/sessions/` also admits team API keys and the internal token to
+ * the mount, and its old router refused each with its own 403 body. These
+ * messages keep those bodies. They only refuse: the binding still runs only
+ * for an acting user who passed every host check.
+ */
+export interface PluginHttpRefusals {
+  /** A team API key. */
+  teamKey?: string;
+  /** A valid `x-valet-internal` token. */
+  internalToken?: string;
 }
 
 /** Host-owned bindings by plugin name, then route ID. Only bundled plugins appear here. */
 export const httpRouteBindings: Readonly<Record<string, Readonly<Record<string, PluginHttpBinding>>>> = {
   github: githubHttpBindings,
   linear: linearHttpBindings,
+  security: securityHttpBindings,
   slack: slackHttpBindings,
 };
 

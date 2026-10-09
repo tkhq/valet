@@ -4,7 +4,7 @@
 
 **Goal:** Move the Security HTTP routes that the generic plugin route mount can serve into the Security plugin. Keep every existing URL, status code, and response body. Record why each remaining route stays in the API.
 
-**Architecture:** The plugin declares its routes, parses requests, and shapes responses. The API authorizes the caller for the session in the path, then binds a narrow Security capability to that one request. The capability reads and writes the existing relational tables through the existing services.
+**Architecture:** The plugin declares its routes and exports handlers that parse requests and shape responses. The API binds each route in the shared host binding table (`packages/api/src/plugins/http-bindings.ts`), the same table that Slack, GitHub, and Linear use. The binding authorizes the caller for the session in the path, then calls the handler with a narrow Security capability. The capability reads and writes the existing relational tables through the existing services.
 
 **Tech Stack:** TypeScript, Hono, Drizzle, Vitest, portable Request and Response types.
 
@@ -97,12 +97,12 @@ The digest limit holds several thousand finding IDs. Request handling runs in th
 4. Other callers without an acting user get the generic 401.
 5. A caller without organization membership gets 403.
 6. A body above the route limit gets 413 `payload too large`.
-7. The host binder loads the session. A missing session, or a caller without `canViewSession`, gets 404 `session not found`.
-8. The binder loads the engagement and binds the capability to the request object.
+7. The host binding loads the session. A missing session, or a caller without `canViewSession`, gets 404 `session not found`.
+8. The binding loads the engagement and calls the plugin handler with a capability for it.
 9. The plugin answers 404 with the existing message when the session has no engagement.
 10. The plugin validates the body, files through the capability, and shapes the response.
 
-Steps 2 and 3 are host-owned compatibility refusals. They only refuse requests, so they do not widen the mount.
+Steps 2 and 3 are refusal bodies that the host binding declares. They only refuse requests, so they do not widen the mount.
 
 ## Capability
 
@@ -118,9 +118,9 @@ interface SecurityEngagementIssues {
 }
 ```
 
-The host adapter keeps the finding lookup scoped to the bound engagement, the `(finding, provider)` idempotency index, the action invoker with the caller's credentials, and the error classification. Results are discriminated outcomes: filed, unknown finding, foreign findings, refused (400), and provider failure (502).
+The host adapter scopes each finding lookup to the bound engagement. It keeps the `(finding, provider)` idempotency index, the action invoker with the caller's credentials, and the error classification. Each method returns one outcome: filed, unknown finding, foreign findings, refused (400), or provider failure (502).
 
-The capability is a `PluginHttpCapability` key that the plugin owns. The host binds a value to the request object that the mount created. Plugin code cannot bind identity to a request that the host did not authorize.
+The binding passes the capability as an argument to the exported handler. The declared manifest handlers answer 501, so a host without the binding fails closed, and plugin code never receives a capability that the host did not build.
 
 ## Behavior differences
 
@@ -134,7 +134,7 @@ These differences come from the generic mount. They apply only to the two moved 
 ## Review focus
 
 - A team API key, the internal token, and a non-viewer must not reach the capability.
-- A finding ID from another engagement must not be filed.
+- The capability must refuse a finding ID from another engagement.
 - A request body cannot choose the user, organization, session, or engagement.
 - Oversized and malformed bodies must not call a provider or write a link.
 - Legacy URLs must keep status codes, bodies, and content types.
@@ -143,29 +143,32 @@ These differences come from the generic mount. They apply only to the two moved 
 
 Files: create `packages/api/src/integration/security-issue-routes.test.ts`.
 
-- [x] Assert exact status and body for an unknown session, a foreign viewer, a session without an engagement, a malformed body, each invalid field, a foreign finding, foreign digest IDs, an empty digest, a missing integration, the internal token, and an idempotent repeat.
+- [x] Assert the exact status and body for each refusal: an unknown session, a foreign viewer, a session without an engagement, and the internal token.
+- [x] Assert the exact status and body for each invalid input: a malformed body, each invalid field, a foreign finding, foreign digest IDs, an empty digest, and a missing integration.
+- [x] Assert the filed link, the idempotent repeat, and the digest URL.
 - [x] Run the suite against the legacy router before any route moves.
 
-## Task 2: Add the binding seam
+## Task 2: Extend the shared host binding table
 
-Files: update `packages/engine/src/plugin-http.ts`, `packages/api/src/plugins/http-routes.ts`; create `packages/api/src/plugins/http-capabilities.ts`.
+Files: update `packages/api/src/plugins/http-bindings.ts` and `packages/api/src/plugins/http-routes.ts`.
 
-- [ ] Add `PluginHttpCapability<T>`, a typed key that binds a value to one request object.
-- [ ] Let the host compatibility map give authenticated routes a legacy alias. Require the alias to repeat the route's parameter names.
-- [ ] Add host-owned team-key and internal-token refusal messages to the compatibility map.
-- [ ] Run a host binder after authentication, membership, administration, and body checks. A binder response stops the request before the plugin runs.
-- [ ] Test that refused callers never reach the binder or the handler.
+The Slack adoption created the binding table. The Security routes need two general additions and no second mechanism.
+
+- [x] Let `LEGACY_ROUTES` give authenticated routes a session alias. Require the alias to stay under `/api/` and to repeat the route's parameter names.
+- [x] Let a binding declare team-key and internal-token refusal bodies. The mount uses them only in place of its 401 for a request without an acting user.
+- [x] Check session access inside the binding, after authentication, membership, and body checks. A binding response stops the request before the plugin handler runs.
+- [x] Test that refused callers and callers without session access never reach the plugin handler.
 
 ## Task 3: Move issue filing into the plugin
 
 Files: create `packages/plugin-security/src/http.ts` and `packages/api/src/plugins/http-security.ts`; update `packages/plugin-security/src/plugin.ts`, `packages/api/src/routes/security.ts`, and the HTTP design spec.
 
-- [ ] Declare `finding-issue` and `issue-digest` with `user` authentication and the limits above.
-- [ ] Move body parsing, validation messages, outcome-to-status mapping, and response shaping into the plugin.
-- [ ] Implement the host binder and adapter over the existing tables and issue service.
-- [ ] Delete both handlers from the API router.
-- [ ] Run the parity suite against both URLs, plus the membership, body limit, and cross-user cases.
-- [ ] Run the Security, team-key, plugin mount, and loader suites, typecheck, and `make e2e`.
+- [x] Declare `finding-issue` and `issue-digest` with `user` authentication and the limits above.
+- [x] Move body parsing, validation messages, outcome-to-status mapping, and response shaping into the plugin.
+- [x] Implement the host bindings and adapter over the existing tables and issue service.
+- [x] Delete both handlers from the API router.
+- [x] Run the parity suite against both URLs, plus the membership, body limit, and cross-user cases.
+- [x] Run the Security, team-key, plugin mount, and loader suites, typecheck, and `make e2e`.
 
 ## Remaining Security adoption
 

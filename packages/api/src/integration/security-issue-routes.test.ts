@@ -4,13 +4,15 @@
  * host-owned aliases (docs/plans/2026-10-09-security-plugin-adoption.md).
  * Every case runs against each URL form.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { Type } from "typebox";
 import type { PluginAction, ValetPlugin } from "@valet/engine";
 import linearPlugin from "@valet/plugin-linear/plugin";
+import type { SecurityDigestIssueBody, SecurityFileIssueBody } from "@valet/plugin-security";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { internalToken } from "../lib/internal-auth.js";
-import { securityFindingLinks, securityFindings } from "../schema/index.js";
+import { eq } from "drizzle-orm";
+import { orgMembers, securityFindingLinks, securityFindings } from "../schema/index.js";
 import type {
   CreateSessionResponse,
   GetSessionSecurityResponse,
@@ -28,7 +30,12 @@ const LEGACY: RouteForm = {
   digest: (sessionId) => `/api/sessions/${sessionId}/security/issues/digest`,
 };
 
-const ROUTE_FORMS: Array<[string, RouteForm]> = [["legacy", LEGACY]];
+const CANONICAL: RouteForm = {
+  issue: (sessionId, findingId) => `/api/plugins/security/http/sessions/${sessionId}/findings/${findingId}/issues`,
+  digest: (sessionId) => `/api/plugins/security/http/sessions/${sessionId}/issues/digest`,
+};
+
+const ROUTE_FORMS: Array<[string, RouteForm]> = [["legacy", LEGACY], ["canonical", CANONICAL]];
 
 const NO_ENGAGEMENT =
   "This session has no security engagement. Create the session with kind 'security' to start one.";
@@ -107,6 +114,10 @@ async function expectError(response: Response, status: number, error: string): P
   expect(response.headers.get("content-type")).toMatch(/^application\/json/);
   expect(await response.json()).toEqual({ error });
 }
+
+// The plugin shapes these bodies; the web client reads them as the wire types.
+expectTypeOf<SecurityFileIssueBody>().toEqualTypeOf<SecurityFileIssueResponse>();
+expectTypeOf<SecurityDigestIssueBody>().toEqualTypeOf<SecurityDigestIssueResponse>();
 
 describe.each(ROUTE_FORMS)("security issue filing at the %s URL", (_name, routes) => {
   it("hides sessions the caller cannot view and names a missing engagement", async () => {
@@ -239,5 +250,28 @@ describe.each(ROUTE_FORMS)("security issue filing at the %s URL", (_name, routes
     expect(github.calls[1]).toMatchObject({ owner: "acme", repo: "tracker" });
     expect(String(github.calls[1].body)).toContain("Finding fnd_2");
     expect(await api.providers.db.select().from(securityFindingLinks)).toHaveLength(1);
+  });
+
+  it("refuses oversized bodies and former organization members before filing", async () => {
+    const github = fakeGithubPlugin();
+    api = await bootTestApi({ plugins: [github.plugin] });
+    const { sessionId, engagementId } = await createSecuritySession(api);
+    await seedFinding(api, engagementId, "fnd_1");
+    const issue = `${api.baseUrl}${routes.issue(sessionId, "fnd_1")}`;
+    const digest = `${api.baseUrl}${routes.digest(sessionId)}`;
+
+    const padding = "x".repeat(16 * 1024);
+    await expectError(await post(issue, JSON.stringify({ provider: "github", padding })), 413, "payload too large");
+    const manyIds = Array.from({ length: 30_000 }, (_, index) => `fnd_${index}`);
+    await expectError(await post(digest, JSON.stringify({ provider: "github", findingIds: manyIds })), 413, "payload too large");
+
+    // The route mount checks organization membership before session access.
+    await api.providers.db.delete(orgMembers).where(eq(orgMembers.userId, "local-user"));
+    const membership = "Organization membership required. Ask an administrator for access.";
+    await expectError(await post(issue, JSON.stringify({ provider: "github" })), 403, membership);
+    await expectError(await post(digest, JSON.stringify({ provider: "github", findingIds: ["fnd_1"] })), 403, membership);
+
+    expect(github.calls).toHaveLength(0);
+    expect(await api.providers.db.select().from(securityFindingLinks)).toHaveLength(0);
   });
 });

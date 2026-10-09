@@ -9,7 +9,9 @@ import { orgMembers } from '../schema/index.js';
 import githubPlugin from '@valet/plugin-github/plugin';
 import linearPlugin from '@valet/plugin-linear/plugin';
 import slackPlugin from '@valet/plugin-slack/plugin';
-import { mountPluginHttpRoutes, readPluginBody } from './http-routes.js';
+import { internalToken } from '../lib/internal-auth.js';
+import type { RequestPrincipal } from '../lib/request-principal.js';
+import { compatibilityRouteIssue, mountPluginHttpRoutes, readPluginBody } from './http-routes.js';
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -180,6 +182,77 @@ describe('host-bound routes', () => {
     const response = await fetch(`${api.baseUrl}/api/plugins/linear/http/connection`);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ configured: false, connected: false, ready: false });
+    expect(declaredHandler).not.toHaveBeenCalled();
+  });
+});
+
+describe('compatibility URLs', () => {
+  const route: PluginHttpRoute = {
+    id: 'item', method: 'POST', path: '/items/:id', auth: 'user', maxBodyBytes: 0, handle: () => new Response(),
+  };
+
+  it.each([
+    ['a different parameter name', '/api/legacy/:itemId', 'Compatibility route /api/legacy/:itemId must use the path parameters of /items/:id.'],
+    ['a missing parameter', '/api/legacy', 'Compatibility route /api/legacy must use the path parameters of /items/:id.'],
+    ['a path outside /api/', '/legacy/:id', 'Compatibility route /legacy/:id must stay under /api/ for authentication.'],
+  ])('refuses an authenticated alias with %s', (_case, path, issue) => {
+    expect(compatibilityRouteIssue(route, { path, method: 'POST', auth: 'user' })).toBe(issue);
+  });
+
+  it('accepts an authenticated alias that repeats the parameter names', () => {
+    expect(compatibilityRouteIssue(route, { path: '/api/legacy/:id/items', method: 'POST', auth: 'user' })).toBeUndefined();
+  });
+});
+
+describe('binding refusals and session authorization', () => {
+  const declaredHandler = vi.fn(() => new Response('plugin'));
+  const security: ValetPlugin = { name: 'security', version: '1', httpRoutes: [
+    { id: 'finding-issue', method: 'POST', path: '/sessions/:id/findings/:findingId/issues', auth: 'user', maxBodyBytes: 1024, handle: declaredHandler },
+    { id: 'issue-digest', method: 'POST', path: '/sessions/:id/issues/digest', auth: 'user', maxBodyBytes: 1024, handle: declaredHandler },
+  ] };
+  const URLS = ['/api/sessions/s_missing/security/issues/digest', '/api/plugins/security/http/sessions/s_missing/issues/digest'];
+
+  async function mounted(principal: RequestPrincipal | undefined) {
+    api = await bootTestApi();
+    const { providers } = api;
+    const app = new Hono<AppEnv>();
+    app.use('*', async (c, next) => {
+      c.set('providers', providers);
+      if (principal) {
+        c.set('principal', principal);
+        c.set('user', { id: 'local-user', email: 'local@dev', role: 'admin', orgId: 'local-org' });
+      }
+      await next();
+    });
+    mountPluginHttpRoutes(app, [security], 'authenticated');
+    return app;
+  }
+
+  it.each([
+    ['a team key', { type: 'team', id: 'team_1' } as const, {}, 403,
+      'A team API key cannot file issues. Sign in and file them from the session.'],
+    ['the internal token', undefined, { 'x-valet-internal': internalToken() }, 403,
+      'This is a human action. Sign in and call it as a user — the internal token is refused here.'],
+    ['no identity', undefined, {}, 401, 'Sign in to use this plugin route.'],
+  ])('refuses %s with the binding refusal body on both URLs', async (_case, principal, headers, status, error) => {
+    const app = await mounted(principal);
+    declaredHandler.mockClear();
+    for (const url of URLS) {
+      const response = await app.request(url, { method: 'POST', headers, body: '{}' });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({ error });
+    }
+    expect(declaredHandler).not.toHaveBeenCalled();
+  });
+
+  it('answers 404 for a session the caller cannot view, before the plugin runs', async () => {
+    const app = await mounted({ type: 'user', id: 'local-user' });
+    declaredHandler.mockClear();
+    for (const url of URLS) {
+      const response = await app.request(url, { method: 'POST', body: '{}' });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: 'session not found' });
+    }
     expect(declaredHandler).not.toHaveBeenCalled();
   });
 });
