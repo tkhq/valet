@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import type { CredentialSummary, IdentityLinkStatus } from "@valet/api/wire";
 import { useIdentityLinks, useSetLinkNotify, useUnlinkIdentity } from "~/api/queries";
 import { useConnectGithub, useDisconnectGithub } from "~/api/repos";
-import { useCredentials, useDisconnectCredential } from "~/api/integrations";
+import { useCredentials } from "~/api/integrations";
 import { useGithubApp } from "~/api/settings";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
@@ -16,8 +16,11 @@ import { OnePasswordTokenRow } from "~/components/integrations/onepassword-setup
 import { IdentityLinkBlock } from "~/components/integrations/identity-link-block";
 
 /**
- * `/settings/connected-accounts` — You · Connected accounts. Renders one
+ * `/settings/connected-accounts` — Account · Connected accounts: the chat
+ * channels, GitHub, and 1Password token tied to you. Renders one
  * `LinkAccountCard` per provider returned by `GET /api/me/identity-links`.
+ * Service credentials live on Integrations only, so this page links there
+ * instead of listing them a second time.
  */
 export const Route = createFileRoute("/settings/connected-accounts")({
   component: ConnectedAccountsPage,
@@ -36,8 +39,8 @@ function LinkAccountCard({ link }: LinkAccountCardProps) {
     return (
       <FieldRow label={label}>
         <p className="text-sm text-muted">
-          {label} isn't configured for this organization yet. An admin can add a bot token
-          under Integrations.
+          {label} isn't configured for this organization yet. An admin can connect it in
+          Settings → Organization.
         </p>
       </FieldRow>
     );
@@ -92,7 +95,6 @@ export function ConnectedAccountsPage() {
   const linksQ = useIdentityLinks();
 
   return (
-    <>
     <Section
       title="Connected accounts"
       description="Link other channels to your account to chat with your assistant there."
@@ -112,10 +114,12 @@ export function ConnectedAccountsPage() {
 
       <GithubRow />
       <OnePasswordRow />
+      <FieldRow label="Other services" hint="Connect services for your assistant on the Integrations page.">
+        <Link to="/integrations" className="text-sm text-moss underline underline-offset-2">
+          Open Integrations
+        </Link>
+      </FieldRow>
     </Section>
-
-    <CredentialsListSection />
-    </>
   );
 }
 
@@ -315,104 +319,5 @@ function GithubRow() {
         />
       </div>
     </FieldRow>
-  );
-}
-
-/** A reference-backed row stores only the `op://` reference, so revoking it
- * leaves the 1Password item itself in place. */
-function revokeDescription(cred: CredentialSummary): string {
-  const removed = cred.onepasswordRef
-    ? `Valet deletes its stored ${cred.service} reference. The item in 1Password is not deleted.`
-    : `Valet deletes the stored ${cred.service} credential.`;
-  return (
-    `${removed} The assistant can no longer act on ${cred.service}, and teams you shared it ` +
-    `with lose it too. Connect ${cred.service} again to restore access.`
-  );
-}
-
-/** Generic credentials list — every service from `GET /api/credentials`
- * except `github` (already surfaced above with its own richer row). */
-function CredentialsListSection() {
-  const credentialsQ = useCredentials();
-  const disconnect = useDisconnectCredential();
-  // The row being confirmed, not a bare boolean: the rows share one dialog,
-  // which a boolean would open for every row at once.
-  const [confirmRevoke, setConfirmRevoke] = useState<CredentialSummary | null>(null);
-
-  // `github` gets its own richer row above, and `onepassword` (the reserved
-  // service holding the personal service-account token itself) gets the
-  // 1Password section above. This list is every OTHER credential, including
-  // the 1Password reference-backed ones (badge below).
-  const others = (credentialsQ.data?.credentials ?? []).filter(
-    (c) => c.service !== "github" && c.service !== "onepassword",
-  );
-
-  return (
-    <Section title="Other credentials" description="Manually connected services.">
-      {credentialsQ.isLoading && (
-        <div className="flex items-center gap-2 py-4 text-sm text-muted">
-          <Spinner size={14} /> Loading…
-        </div>
-      )}
-      {credentialsQ.error && (
-        <div className="py-4 text-sm text-danger-500">Failed to load credentials.</div>
-      )}
-      {!credentialsQ.isLoading && !credentialsQ.error && others.length === 0 && (
-        <div className="py-4 text-sm text-muted">No other services connected.</div>
-      )}
-      {others.map((cred) => (
-        <FieldRow key={cred.service} label={cred.service}>
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="neutral">{cred.type}</Badge>
-            {cred.identityOnly && <Badge variant="neutral">Identity only</Badge>}
-            {cred.refreshFailedAt && <Badge variant="danger">Refresh failed</Badge>}
-            {isExpired(cred) && <Badge variant="danger">Expired</Badge>}
-            {/* Reference-backed credentials have no inline secret to edit —
-                only the reference itself, shown as a badge, and deletion via
-                the same Revoke control every other credential uses. */}
-            {cred.onepasswordRef && <Badge variant="accent">{cred.onepasswordRef}</Badge>}
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={disconnect.isPending}
-              onClick={() => {
-                // Clear the previous row's refusal as this dialog opens.
-                disconnect.reset();
-                setConfirmRevoke(cred);
-              }}
-            >
-              {disconnect.isPending ? "Revoking…" : `Revoke ${cred.service}`}
-            </Button>
-          </div>
-        </FieldRow>
-      ))}
-      {confirmRevoke && (
-        <ConfirmDialog
-          open
-          onOpenChange={(next) => {
-            if (!next) setConfirmRevoke(null);
-          }}
-          title={`Revoke ${confirmRevoke.service}?`}
-          description={revokeDescription(confirmRevoke)}
-          confirmLabel="Revoke"
-          pendingLabel="Revoking…"
-          pending={disconnect.isPending}
-          // The list shares one mutation, so a failure belongs to the row it
-          // was fired for — never to the next row somebody opens.
-          error={
-            disconnect.error != null && disconnect.variables?.service === confirmRevoke.service
-              ? errorText(disconnect.error)
-              : undefined
-          }
-          onConfirm={() =>
-            disconnect.mutate(
-              { service: confirmRevoke.service },
-              { onSuccess: () => setConfirmRevoke(null) },
-            )
-          }
-        />
-      )}
-    </Section>
   );
 }
