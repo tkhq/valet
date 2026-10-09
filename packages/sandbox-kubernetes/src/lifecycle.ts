@@ -985,6 +985,10 @@ export interface SandboxMetadataListing {
   name: string;
   annotations?: Record<string, string>;
   creationTimestamp?: string;
+  /** `spec.operatingMode`, when the CR sets one. */
+  operatingMode?: string;
+  /** The template's `scratch` emptyDir sizeLimit, when declared. */
+  scratch?: string;
 }
 
 /**
@@ -1028,6 +1032,10 @@ export async function listSandboxMetadata(
     if (typeof metadata.creationTimestamp === "string") {
       listing.creationTimestamp = metadata.creationTimestamp;
     }
+    const spec = isRecord(item) && isRecord(item.spec) ? item.spec : undefined;
+    if (typeof spec?.operatingMode === "string") listing.operatingMode = spec.operatingMode;
+    const scratch = sandboxCpuMemoryResources(spec?.podTemplate).scratch;
+    if (scratch !== undefined) listing.scratch = scratch;
     listings.push(listing);
   }
   return listings;

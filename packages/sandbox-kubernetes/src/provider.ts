@@ -883,13 +883,19 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * sweep). */
   async list(): Promise<SandboxListing[]> {
     const items = await listSandboxMetadata(this.deps.objectsApi, this.cfg);
-    const rows: SandboxListing[] = items.map((item) => {
+    // `scratchBytes` feeds the reconcile sweep's fleet scratch gauge. Only a
+    // running CR counts: a suspended one has no pod and no emptyDir.
+    const rows: Array<SandboxListing & { scratchBytes?: number }> = items.map((item) => {
       const createdAtMs = item.creationTimestamp ? Date.parse(item.creationTimestamp) : Number.NaN;
+      const scratchBytes = item.scratch !== undefined && item.operatingMode !== "Suspended"
+        ? parseStorageQuantity(item.scratch) ?? undefined
+        : undefined;
       return {
         id: item.name,
         sessionId: item.annotations?.[SESSION_ANNOTATION_KEY] ?? null,
         browserEnabled: Boolean(item.annotations?.[RUNTIME_STATE_ANNOTATION]),
         createdAtMs: Number.isNaN(createdAtMs) ? null : createdAtMs,
+        ...(scratchBytes !== undefined ? { scratchBytes } : {}),
       };
     });
     if (this.deps.runtimeStateApi) {

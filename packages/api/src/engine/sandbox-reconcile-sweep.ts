@@ -26,6 +26,7 @@
  * immediately before the destroy. Providers without `list()` (docker/local
  * — process-local handles) make this sweep a no-op.
  */
+import { metrics } from "@opentelemetry/api";
 import { eq } from "drizzle-orm";
 import { recordSandboxDestroyed, recordSandboxFlagged, type SandboxProvider } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
@@ -47,6 +48,26 @@ export interface SweepReport {
   /** Sandboxes with no session annotation (created before stamping).
    * Unverifiable ownership; reported, never destroyed here. */
   unowned: number;
+  /** Sum of the declared `/scratch` size over running sandboxes, in bytes. */
+  liveScratchBytes: number;
+}
+
+let liveScratchGauge: ReturnType<ReturnType<typeof metrics.getMeter>["createGauge"]> | undefined;
+
+/** Records `valet.sandbox.scratch.live_bytes`: the declared `/scratch` of
+ * every running sandbox, summed. It shows node-local disk across the fleet
+ * (security review M1), and an alert on it pages a human. Nothing caps it. */
+function recordLiveScratchGauge(bytes: number): void {
+  liveScratchGauge ??= metrics.getMeter("@valet/api").createGauge("valet.sandbox.scratch.live_bytes", {
+    unit: "By",
+    description: "Declared /scratch size summed over running sandboxes",
+  });
+  liveScratchGauge.record(bytes);
+}
+
+/** A listing's scratch size. Providers that know it add `scratchBytes`. */
+function listingScratchBytes(listing: object): number {
+  return "scratchBytes" in listing && typeof listing.scratchBytes === "number" ? listing.scratchBytes : 0;
 }
 
 export interface SandboxReconcileSweepDeps {
@@ -74,6 +95,8 @@ export interface SandboxReconcileSweepDeps {
   ageReportMs: number;
   /** Override for tests. */
   sweepIntervalMs?: number;
+  /** Records the fleet scratch gauge. Defaults to the OpenTelemetry gauge. */
+  recordLiveScratchBytes?: (bytes: number) => void;
 }
 
 export class SandboxReconcileSweep {
@@ -82,13 +105,14 @@ export class SandboxReconcileSweep {
   constructor(private readonly deps: SandboxReconcileSweepDeps) {}
 
   async sweep(now = Date.now()): Promise<SweepReport> {
-    const report: SweepReport = { orphansDestroyed: 0, overAge: 0, unowned: 0 };
+    const report: SweepReport = { orphansDestroyed: 0, overAge: 0, unowned: 0, liveScratchBytes: 0 };
     const list = this.deps.provider.list;
     if (!list) return report;
     const listed = await list.call(this.deps.provider);
     const overAgeIds: string[] = [];
     const orphanCandidates: Array<{ id: string; sessionId: string }> = [];
     for (const sb of listed) {
+      report.liveScratchBytes += listingScratchBytes(sb);
       try {
         const ageMs = this.deps.ageReportMs;
         if (ageMs > 0 && sb.createdAtMs != null && sb.createdAtMs <= now - ageMs) {
@@ -121,6 +145,8 @@ export class SandboxReconcileSweep {
     if (orphanCandidates.length > 0) {
       report.orphansDestroyed = await this.destroyConfirmedOrphans(orphanCandidates, list);
     }
+    const recordScratch = this.deps.recordLiveScratchBytes ?? recordLiveScratchGauge;
+    recordScratch(report.liveScratchBytes);
     recordSandboxFlagged("over_age", report.overAge);
     recordSandboxFlagged("unowned", report.unowned);
     if (report.overAge > 0) {
