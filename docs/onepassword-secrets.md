@@ -64,8 +64,9 @@ In Valet, a token lives on the page that owns it.
 | Organization | Settings → Organization → 1Password | An org admin | Vaults the whole org shares |
 | Team | Settings → Organization → Teams | A team admin | Vaults one team shares |
 
-Each page has a **Connect 1Password** button. It opens the same dialog: the
-setup steps, the links into 1Password, and the field for the token.
+Each page has a **Connect 1Password** button. Each button opens a dialog
+with the same setup steps, the same links into 1Password, and a field for the
+token. The Teams page uses its own dialog, but it shows the same steps.
 
 Every org member can set, replace, and remove a **personal** token. No admin
 has to allow it first, and you never need to open Organization settings to do

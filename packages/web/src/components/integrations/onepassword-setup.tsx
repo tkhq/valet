@@ -56,7 +56,8 @@ const SCOPE_COPY: Record<OnePasswordTokenScope, { title: string; reach: string; 
 };
 
 /**
- * The numbered setup steps. Rendered inside the dialog on both pages.
+ * The numbered setup steps. Rendered inside the setup dialog below on both
+ * token pages, and inside the team dialog on Organization · Teams.
  *
  * Step 2 can be refused: creating a service account needs a 1Password
  * account permission, and 1Password answers "contact your administrator"
