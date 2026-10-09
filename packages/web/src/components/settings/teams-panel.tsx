@@ -1,5 +1,5 @@
 import { AutomationWizard } from "~/components/events/automation-wizard";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import type { OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 import { ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
@@ -209,6 +209,11 @@ function TeamRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deletionRequest, setDeletionRequest] = useState<string | null>(null);
   const deleteTeam = useDeleteTeam();
+  const navigate = useNavigate();
+  // On the team's own page, a team the caller deleted or left would read as
+  // "not a member" there. Profile is the settings landing page. Replace, so
+  // Back does not return to the gone team.
+  const leavePage = page ? () => void navigate({ to: "/settings/profile", replace: true }) : undefined;
   const idpBacked = team.origin === "idp";
   const declared = team.origin === "config";
 
@@ -297,7 +302,7 @@ function TeamRow({
 
       {open && (
         <div className={page ? "mt-6 space-y-10" : "ml-6 mt-3 space-y-8 border-l border-line pl-4"}>
-          <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} />
+          <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} onSelfRemoved={leavePage} />
           <TeamDefaults team={team} canMutate={canMutate} />
           <TeamSlack key={team.id} team={team} canMutate={canMutate} />
           <SubSection title="Connections">
@@ -322,7 +327,12 @@ function TeamRow({
         pendingLabel="Deleting…"
         pending={deleteTeam.isPending}
         error={deleteTeam.error != null ? errorText(deleteTeam.error) : undefined}
-        onConfirm={() => deleteTeam.mutate(team.id, { onSuccess: () => setConfirmDelete(false) })}
+        onConfirm={() => deleteTeam.mutate(team.id, {
+          onSuccess: () => {
+            setConfirmDelete(false);
+            leavePage?.();
+          },
+        })}
       />
     </div>
   );
@@ -407,11 +417,15 @@ function TeamMembers({
   team,
   orgMembers,
   canMutate,
+  onSelfRemoved,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
+  /** Runs once the caller removes their own membership. */
+  onSelfRemoved?: () => void;
 }) {
+  const meQ = useMe();
   const teamId = team.id;
   const teamName = team.name;
   const declared = team.origin === "config";
@@ -470,7 +484,10 @@ function TeamMembers({
                     variant="ghost"
                     size="icon"
                     aria-label={`Remove ${name} from ${teamName}`}
-                    onClick={() => removeMember.mutate({ teamId, userId: member.userId })}
+                    onClick={() => removeMember.mutate(
+                      { teamId, userId: member.userId },
+                      { onSuccess: () => { if (member.userId === meQ.data?.id) onSelfRemoved?.(); } },
+                    )}
                   >
                     <X className="h-3.5 w-3.5" aria-hidden />
                   </Button>
