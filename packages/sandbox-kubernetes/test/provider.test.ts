@@ -2341,6 +2341,31 @@ describe("KubernetesSandboxProvider eviction protection", () => {
     expect(seenSelector).toBe(`${LEASED_LABEL}=true`);
   });
 
+  it("setEvictionProtection reads only this sandbox's pods, never the whole namespace (M9)", async () => {
+    const pods = new FakeEvictionPodsApi();
+    const selectors: (string | undefined)[] = [];
+    pods.listNamespacedPod = async (params) => {
+      selectors.push(params.labelSelector);
+      return { items: [podSummary({ name: "sb-1-abc" })] };
+    };
+    // The controller's pod-name annotation resolves the pod without a list.
+    const objectsApi = new FakeObjectsApi();
+    objectsApi.getNamespacedCustomObject = async (params: GetSandboxParams) => ({
+      apiVersion: SANDBOX_CR_API_VERSION,
+      kind: "Sandbox",
+      metadata: { name: params.name, uid: "cr-uid-123", resourceVersion: "1", annotations: { "agents.x-k8s.io/pod-name": "sb-1-abc" } },
+      spec: { podTemplate: {}, volumeClaimTemplates: [] },
+    });
+    const provider = new KubernetesSandboxProvider(
+      { objectsApi, podsApi: pods, execApi: fakePodExecApi, livenessApi: new FakeLivenessApi() },
+      providerCfg,
+    );
+
+    expect(await provider.setEvictionProtection("sb-1", true)).toEqual({ changed: true });
+
+    expect(selectors).toEqual([`${SESSION_LABEL_KEY}=sb-1`]);
+  });
+
   it("setEvictionProtection on a sandbox with no pod returns changed:false", async () => {
     const pods = new FakeEvictionPodsApi();
     const provider = makeEvictionProvider(pods);
