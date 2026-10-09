@@ -20,6 +20,7 @@ import type {
   ListWorkflowActionRequiredResponse,
   ListWorkflowsResponse,
   ShareArtifactResponse,
+  RetryWorkflowRunResponse,
   StartWorkflowRunResponse,
   WorkflowRunOutcome,
   WorkflowRunStatus,
@@ -31,6 +32,8 @@ const MAX_TEXT_CHARS = 20_000;
 // Under a 60-second ingress timeout; see mcp-tools.ts.
 const DEFAULT_RUN_WAIT_SECONDS = 45;
 const MAX_WAIT_SECONDS = 55;
+/** A cancelled run settles in about a second. A slower one reports its current status. */
+const CANCEL_WAIT_SECONDS = 10;
 const POLL_MS = 1_000;
 
 class ApiError extends Error {}
@@ -52,7 +55,7 @@ function run<A>(fn: (args: A) => Promise<unknown>, capNote?: string): (args: A) 
   };
 }
 
-async function call<T>(deps: McpToolDeps, method: "GET" | "POST" | "PUT", path: string, what: string, body?: unknown): Promise<T> {
+async function call<T>(deps: McpToolDeps, method: "GET" | "POST" | "PUT" | "DELETE", path: string, what: string, body?: unknown): Promise<T> {
   const res = await deps.api(method, path, body);
   if (res.status >= 200 && res.status < 300) return res.body as T;
   const detail = res.body && typeof res.body === "object" && "error" in res.body && typeof res.body.error === "string" ? res.body.error : undefined;
@@ -114,14 +117,16 @@ function runView(deps: McpToolDeps, detail: GetWorkflowRunResponse): RunView {
 }
 
 /** Wait for a run to settle or stop on an approval. A timeout returns the current state. */
-async function waitForRun(deps: McpToolDeps, runId: string, waitSeconds: number): Promise<RunView> {
+/** Waits until the run settles or stops on a gate. A cancel waits for settled only: the gate it cancels stays pending until then. */
+async function waitForRun(deps: McpToolDeps, runId: string, waitSeconds: number, opts: { stopOnGate?: boolean } = {}): Promise<RunView> {
+  const stopOnGate = opts.stopOnGate ?? true;
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const deadline = now() + waitSeconds * 1000;
   for (;;) {
     const detail = await call<GetWorkflowRunResponse>(deps, "GET", `/api/workflows/runs/${encodeURIComponent(runId)}`, "Workflow run");
     const view = runView(deps, detail);
-    if (detail.run.status === "settled" || detail.pendingGates.length > 0 || now() >= deadline) return view;
+    if (detail.run.status === "settled" || (stopOnGate && detail.pendingGates.length > 0) || now() >= deadline) return view;
     await sleep(Math.min(POLL_MS, Math.max(0, deadline - now())));
   }
 }
@@ -264,6 +269,63 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     }),
   );
 
+  server.registerTool(
+    "patch_memory",
+    {
+      description:
+        "Replaces one exact passage in a memory file and keeps the rest. Use it to append to or correct a file " +
+        "without rewriting it, so a concurrent edit to another part survives. old_string must appear in the file exactly once.",
+      inputSchema: {
+        path: z.string().min(1).describe('Memory path, e.g. "journal/2026-10-08.md".'),
+        old_string: z.string().min(1).describe("The exact text to replace. Read the file first with read_memory."),
+        new_string: z.string().describe("The replacement text. An empty string deletes the passage."),
+        workspace: workspaceArg,
+      },
+      annotations: { destructiveHint: true },
+    },
+    run(async ({ path, old_string, new_string, workspace }: { path: string; old_string: string; new_string: string; workspace?: string }) => {
+      const res = await call<{ file?: { path?: string; version?: number } }>(deps, "POST", withQuery("/api/memory/patch", ownerParams(workspace)), "Memory patch", {
+        path, oldString: old_string, newString: new_string,
+      });
+      return { path: res.file?.path ?? path, ...(res.file?.version !== undefined ? { version: res.file.version } : {}), patched: true };
+    }),
+  );
+
+  server.registerTool(
+    "move_memory",
+    {
+      description: "Moves or renames a memory file. The destination must not exist; to merge two files, patch one and delete the other.",
+      inputSchema: {
+        from: z.string().min(1).describe("Current memory path."),
+        to: z.string().min(1).describe("New memory path."),
+        workspace: workspaceArg,
+      },
+      annotations: { destructiveHint: false },
+    },
+    run(async ({ from, to, workspace }: { from: string; to: string; workspace?: string }) => {
+      await call<unknown>(deps, "POST", withQuery("/api/memory/move", ownerParams(workspace)), "Memory move", { from, to });
+      return { from, to, moved: true };
+    }),
+  );
+
+  server.registerTool(
+    "delete_memory",
+    {
+      description:
+        "Deletes a memory file. Read it first with read_memory, and delete only a file that is wrong, stale, or duplicated: " +
+        "other agents and teammates may rely on it. Deleting from a team workspace needs team admin rights.",
+      inputSchema: {
+        path: z.string().min(1).describe("Memory path to delete."),
+        workspace: workspaceArg,
+      },
+      annotations: { destructiveHint: true },
+    },
+    run(async ({ path, workspace }: { path: string; workspace?: string }) => {
+      await call<unknown>(deps, "DELETE", withQuery("/api/memory", ownerParams(workspace, new URLSearchParams({ path }))), "Memory delete");
+      return { path, deleted: true };
+    }),
+  );
+
   // ── Workflows ─────────────────────────────────────────────────────────
 
   server.registerTool(
@@ -316,6 +378,36 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
       annotations: { readOnlyHint: true },
     },
     run(async ({ run_id, wait_seconds }: { run_id: string; wait_seconds?: number }) => waitForRun(deps, run_id, wait_seconds ?? 0)),
+  );
+
+  server.registerTool(
+    "cancel_workflow_run",
+    {
+      description: `Cancels a workflow run that has not finished, and waits briefly for it to stop. Steps that already ran are not undone. ${RUN_STATUSES}`,
+      inputSchema: { run_id: z.string().min(1).describe("Run id from run_workflow or list_workflows.") },
+      annotations: { destructiveHint: true },
+    },
+    run(async ({ run_id }: { run_id: string }) => {
+      await call<unknown>(deps, "POST", `/api/workflows/runs/${encodeURIComponent(run_id)}/cancel`, "Workflow run");
+      // Cancel is asynchronous: the run passes through terminalizing first.
+      return waitForRun(deps, run_id, CANCEL_WAIT_SECONDS, { stopOnGate: false });
+    }),
+  );
+
+  server.registerTool(
+    "retry_workflow_run",
+    {
+      description: `Starts a failed or cancelled workflow run again with its original input, and by default waits for it. ${RUN_STATUSES}`,
+      inputSchema: {
+        run_id: z.string().min(1).describe("Run id of a failed or cancelled run."),
+        wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional().describe(`Seconds to wait (0-${MAX_WAIT_SECONDS}). Default: ${DEFAULT_RUN_WAIT_SECONDS}.`),
+      },
+      annotations: { destructiveHint: true, openWorldHint: true },
+    },
+    run(async ({ run_id, wait_seconds }: { run_id: string; wait_seconds?: number }) => {
+      const retried = await call<RetryWorkflowRunResponse>(deps, "POST", `/api/workflows/runs/${encodeURIComponent(run_id)}/retry`, "Workflow run");
+      return waitForRun(deps, retried.runId, wait_seconds ?? DEFAULT_RUN_WAIT_SECONDS);
+    }),
   );
 
   // ── Approvals inbox ───────────────────────────────────────────────────
@@ -383,7 +475,7 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
       const shown = matched.slice(0, cap);
       return {
         artifacts: shown.map((a) => ({
-          key: a.path, title: a.title, format: a.format, version: a.version, visibility: a.visibility, url: a.url,
+          artifact_id: a.id, key: a.path, title: a.title, format: a.format, version: a.version, visibility: a.visibility, url: a.url,
           updated_at: new Date(a.updatedAt).toISOString(),
         })),
         // No cursor: past the 100 cap, only a narrower query reaches later rows.
@@ -421,6 +513,21 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
         key: res.path, url: res.url, version: res.version, visibility: res.visibility,
         visible_to: res.visibility === "public" ? "anyone with the link" : "every member of your Valet organization",
       };
+    }),
+  );
+
+  server.registerTool(
+    "unpublish_artifact",
+    {
+      description:
+        "Unpublishes an artifact: its link stops working for everyone. Use it to take down a page published by mistake. " +
+        "You can unpublish an artifact you published, or one in a workspace you manage.",
+      inputSchema: { artifact_id: z.string().min(1).describe("artifact_id from list_artifacts.") },
+      annotations: { destructiveHint: true },
+    },
+    run(async ({ artifact_id }: { artifact_id: string }) => {
+      await call<unknown>(deps, "DELETE", `/api/artifacts/${encodeURIComponent(artifact_id)}`, "Artifact");
+      return { artifact_id, unpublished: true };
     }),
   );
 }
