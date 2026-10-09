@@ -32,7 +32,8 @@ export async function listWorkspaceOutcomes(
   db: AppDb, orgId: string, owner: Principal, limit: number, cursor?: OutcomeCursor,
   shared?: (threadKey: SQL) => SQL,
 ): Promise<WorkspaceOutcomesResponse> {
-  const owned = sql`(s.id IS NULL OR s.status<>'deleted') AND COALESCE(s.org_id,d.org_id) = ${orgId}
+  // A run carries its org, so its outcomes outlive the workflow's deletion.
+  const owned = sql`(s.id IS NULL OR s.status<>'deleted') AND COALESCE(s.org_id,r.org_id) = ${orgId}
     AND COALESCE(s.owner_type,r.owner_type) = ${owner.type}
     AND COALESCE(NULLIF(s.owner_id,''), CASE WHEN s.owner_type='user' THEN s.user_id END,r.owner_id) = ${owner.id}`;
   const conditions = [
@@ -75,7 +76,6 @@ export async function listWorkspaceOutcomes(
     LEFT JOIN agent_sessions s ON s.id=f.session_id
     LEFT JOIN workflow_runs r ON r.id=COALESCE(f.workflow_execution_id,
       CASE WHEN f.session_id LIKE 'wf:%' THEN split_part(f.session_id,':',2) END)
-    LEFT JOIN workflow_definitions d ON d.id=r.workflow_id
     WHERE f.org_id=${orgId}
       AND f.outcome_kind IN ('pull_request_created','review_submitted','slack_message_sent','slack_dm_sent') AND ${owned} AND ${sharedRun}
     UNION ALL
@@ -88,7 +88,6 @@ export async function listWorkspaceOutcomes(
     FROM usage_entry_facts f
     LEFT JOIN agent_sessions s ON s.id=f.session_id
     LEFT JOIN workflow_runs r ON r.id=f.workflow_run_id
-    LEFT JOIN workflow_definitions d ON d.id=r.workflow_id
     JOIN engine_entries e ON e.id=f.entry_id
     CROSS JOIN LATERAL jsonb_array_elements(replace(e.parts,chr(92)||'u0000',chr(92)||'uFFFD')::jsonb)
       WITH ORDINALITY AS p(part,ordinality)

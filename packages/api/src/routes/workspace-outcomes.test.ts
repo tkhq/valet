@@ -58,6 +58,22 @@ describe("workspace confirmed outcomes", () => {
     expect((await list(target, "team")).items.map(i => i.id)).not.toContain("action:wf-step-pr");
   });
 
+  it("lists a Thread step's pull request, which bills to its step, and keeps it after the workflow is deleted", async () => {
+    const target = await setup(); const db = target.providers.db;
+    await db.insert(workflowDefinitions).values({ id: "wf-thread", orgId: "local-org", ownerType: "user", ownerId: "local-user", name: "Thread", definition: {}, createdAt: 1, updatedAt: 1 });
+    await db.insert(workflowRuns).values({ id: "run-thread", workflowId: "wf-thread", definitionVersionId: "v1", definition: {}, ownerType: "user", ownerId: "local-user", params: {}, createdAt: 1, updatedAt: 1 });
+    // The step prompts the assistant session; its queue item names the step.
+    await db.execute(sql`INSERT INTO engine_queue_items (id, session_id, thread_id, dispatch_id, status, content, attempt_count, max_attempts, timeout_at, created_at, updated_at)
+      VALUES ('q-thread-step', 'own', 'th', 'workflow:run-thread:think', 'settled', 'prompt', 1, 1, 1, 1, 1)`);
+    const parts = JSON.stringify([{ type: "tool_call", toolName: "bash", status: "completed", result: { details: { outcome: { kind: "pull_request_created", url: "https://github.com/acme/app/pull/7" } } } }]);
+    await db.execute(sql`INSERT INTO engine_entries (id,session_id,thread_id,entry_type,role,parts,queue_item_id,created_at)
+      VALUES ('thread-step-pr','own','th','message','assistant',${parts},'q-thread-step',100)`);
+    const listed = async () => (await list(target)).items.filter((i) => i.id.startsWith("terminal:thread-step-pr"));
+    expect((await listed()).map((i) => [i.kind, i.url, i.workflowRunId])).toEqual([["pull_request", "https://github.com/acme/app/pull/7", "run-thread"]]);
+    await db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, "wf-thread"));
+    expect(await listed()).toHaveLength(1);
+  });
+
   it("hides private Slack event outcomes from nonmembers for actions and terminal writes", async () => {
     const target = await setup(); const db = target.providers.db;
     await db.insert(slackChannelPrivacy).values({ orgId: "local-org", channelId: "CPRIV", isPrivate: true, checkedAt: Date.now() });
