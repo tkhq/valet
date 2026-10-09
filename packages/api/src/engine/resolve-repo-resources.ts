@@ -5,8 +5,8 @@ import type { PrebuildResources } from "../prebuilds/recipe.js";
 import { imageSources } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
 
-type ResourceField = keyof Pick<PrebuildResources, "cpu" | "memory">;
-const RESOURCE_FIELDS: readonly ResourceField[] = ["cpu", "memory"];
+type ResourceField = keyof Pick<PrebuildResources, "cpu" | "memory" | "scratch">;
+const RESOURCE_FIELDS: readonly ResourceField[] = ["cpu", "memory", "scratch"];
 
 export interface ResolvedRepoPrebuildFlags extends RepoPrebuildFlags {
   /** Fresh compute can use these values even when existing compute must be preserved. */

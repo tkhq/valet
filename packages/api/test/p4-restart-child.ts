@@ -108,7 +108,11 @@ async function main(): Promise<void> {
     builder: null,
     githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey("test-key") },
   });
-  const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(pgDataDir, "children") };
+  const childrenDeps = {
+    db, engineHost, engineStore, prebuildService,
+    workspaceRoot: join(pgDataDir, "children"),
+    scratchCaps: {},
+  };
   const watcher = new ChildWatcher(childrenDeps);
   const spawner = buildChildSpawner(childrenDeps, watcher);
   spawnerRef = spawner;

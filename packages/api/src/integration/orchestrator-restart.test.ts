@@ -98,7 +98,11 @@ async function bootRestoredProviders(pgDataDir: string) {
     builder: null,
     githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey("test-key") },
   });
-  const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(dirname(pgDataDir), "children") };
+  const childrenDeps = {
+    db, engineHost, engineStore, prebuildService,
+    workspaceRoot: join(dirname(pgDataDir), "children"),
+    scratchCaps: {},
+  };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
 

@@ -519,7 +519,7 @@ describe("acceptance scenario B: api restart is a non-event", () => {
       }
       // A new process's watcher has no in-memory arms; rearm() re-observes
       // every unsettled durable watch (spec B.2 — ChildWatcher.rearm).
-      const rebootWatcher = new ChildWatcher({ db, engineHost, engineStore, prebuildService });
+      const rebootWatcher = new ChildWatcher({ db, engineHost, engineStore, prebuildService, scratchCaps: {} });
       await rebootWatcher.rearm();
 
       // B.4: no re-dispatch happened — same attempt, same child, cell 1

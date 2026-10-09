@@ -169,7 +169,7 @@ export function specHash(
         }
       : {}),
     ...(preserveResourceFields !== undefined
-      ? { preserveResourceFields: (["cpu", "memory"] as const).filter((field) => preserveResourceFields.includes(field)) }
+      ? { preserveResourceFields: (["cpu", "memory", "scratch"] as const).filter((field) => preserveResourceFields.includes(field)) }
       : {}),
   };
   return sha256(JSON.stringify(canonicalSpec));

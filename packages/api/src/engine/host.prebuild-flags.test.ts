@@ -314,6 +314,7 @@ describe("childSessionFor repo prebuild flags", () => {
     const deps = {
       db, engineHost, engineStore: api.providers.engineStore,
       prebuildService: api.providers.prebuildService, workspaceRoot: "/tmp",
+      scratchCaps: {},
     };
     const spawn = buildChildSpawner(deps, new ChildWatcher(deps));
     const childIds: string[] = [];
