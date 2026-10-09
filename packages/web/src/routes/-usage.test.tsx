@@ -800,7 +800,8 @@ describe("UsagePage — by-use-case table", () => {
     expect(screen.getByText("Deploy pipeline").closest("a")?.getAttribute("href")).toBe("/workflows/$workflowId");
     expect(screen.getByText("4 runs")).toBeTruthy();
     expect(screen.getByText("summarize").closest("a")).toBeNull();
-    expect(screen.getByText("$0.0020 per run · 4 runs")).toBeTruthy();
+    // The average is over the runs the step ran in, and the label says so.
+    expect(screen.getByText("$0.0020 avg over 4 runs")).toBeTruthy();
   });
 
   it("expanding Proxy row shows proxy items (not linked)", async () => {

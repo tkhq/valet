@@ -23,7 +23,7 @@ import { WorkflowPreview } from "~/components/workflows/preview";
 import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { formatWhen } from "~/lib/format-when";
-import { formatStepUsd } from "~/lib/format-usage";
+import { formatUsdPrecise } from "~/lib/format-usage";
 
 /**
  * `/workflows/runs/$runId` — the settled run's result first, then
@@ -238,7 +238,9 @@ export function RunDetailBody({
             Steps
             {stepCosts.length > 0 && (
               <span className="normal-case tracking-normal tabular-nums">
-                {formatStepUsd(stepCosts.reduce((sum, cost) => sum + cost.costUsd, 0))} model spend
+                {/* A + marks a lower bound: some calls had no price. */}
+                {formatUsdPrecise(stepCosts.reduce((sum, cost) => sum + cost.costUsd, 0))}
+                {stepCosts.some((cost) => cost.unpricedTurns > 0) ? "+" : ""} model spend
               </span>
             )}
           </h2>

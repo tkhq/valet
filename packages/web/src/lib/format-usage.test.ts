@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatStepUsd, formatTokens, formatUsd } from "./format-usage";
+import { formatTokens, formatUsd, formatUsdPrecise } from "./format-usage";
 
 describe("formatTokens", () => {
   it("formats across magnitudes", () => {
@@ -11,11 +11,12 @@ describe("formatTokens", () => {
   });
 });
 
-describe("formatStepUsd", () => {
-  it("keeps sub-cent precision for step costs", () => {
-    expect(formatStepUsd(0)).toBe("$0");
-    expect(formatStepUsd(0.00421)).toBe("$0.0042");
-    expect(formatStepUsd(3.456)).toBe("$3.46");
+describe("formatUsdPrecise", () => {
+  it("keeps four decimals and never shows a nonzero cost as zero", () => {
+    expect(formatUsdPrecise(0)).toBe("$0.0000");
+    expect(formatUsdPrecise(0.00001)).toBe("<$0.0001");
+    expect(formatUsdPrecise(0.00421)).toBe("$0.0042");
+    expect(formatUsdPrecise(3.456)).toBe("$3.4560");
   });
 });
 

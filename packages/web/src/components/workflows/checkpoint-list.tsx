@@ -4,7 +4,7 @@ import { Link } from "@tanstack/react-router";
 import { RUN_STATUS_GLYPH, type NodeRunStatus } from "./editor/flow-node";
 import { formatRunOutput } from "./run-detail-helpers";
 import type { WorkflowStepCost } from "@valet/api/wire";
-import { formatStepUsd, formatTokens } from "~/lib/format-usage";
+import { formatTokens, formatUsdPrecise } from "~/lib/format-usage";
 
 export interface CheckpointLike {
   nodeId: string;
@@ -169,7 +169,7 @@ function StepCost({ cost }: { cost: WorkflowStepCost }) {
     + (unpriced ? ` · ${cost.unpricedTurns} unpriced` : "");
   return (
     <span className="shrink-0 text-xs tabular-nums text-muted" title={detail}>
-      {formatStepUsd(cost.costUsd)}{unpriced ? "+" : ""}
+      {formatUsdPrecise(cost.costUsd)}{unpriced ? "+" : ""}
       <span className="sr-only"> model spend, {detail}</span>
     </span>
   );
