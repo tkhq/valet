@@ -86,9 +86,11 @@ export async function listWorkspaceOutcomes(
       CASE WHEN s.id IS NOT NULL THEN e.thread_id ELSE r.params->'origin'->>'threadId' END,r.id,NULL::text,
       p.part->'result'->'details'->'outcome'->>'url'
     FROM usage_entry_facts f
-    LEFT JOIN agent_sessions s ON s.id=f.session_id
-    LEFT JOIN workflow_runs r ON r.id=f.workflow_run_id
     JOIN engine_entries e ON e.id=f.entry_id
+    -- The session that ran the turn, not the billing key: a Thread step's
+    -- turn bills to its step but ran in a workspace session and thread.
+    LEFT JOIN agent_sessions s ON s.id=e.session_id
+    LEFT JOIN workflow_runs r ON r.id=f.workflow_run_id
     CROSS JOIN LATERAL jsonb_array_elements(replace(e.parts,chr(92)||'u0000',chr(92)||'uFFFD')::jsonb)
       WITH ORDINALITY AS p(part,ordinality)
     WHERE (f.pull_requests>0 OR f.reviews>0) AND ${owned} AND ${sharedRun}

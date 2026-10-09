@@ -209,6 +209,33 @@ describe("durable workspace briefing cache", () => {
     expect(await started).toMatchObject({ briefings: [], unavailable: true });
     expect((await db.select().from(workspaceBriefingCache).where(and(eq(workspaceBriefingCache.orgId,"local-org"),eq(workspaceBriefingCache.ownerId,owner.id))))[0].response).toBeNull();
   });
+  it("links an unattended Thread step's pull request to the conversation that made it, and reads it from the cache", async () => {
+    const db = await setup();
+    // An unattended run's Thread step runs in a workspace execution session, on the run's own thread.
+    await db.insert(agentSessions).values({ id: "exec", orgId: "local-org", userId: owner.id, ownerType: "user", ownerId: owner.id, workspace: "w", createdAt: 1, updatedAt: 1 });
+    await db.insert(sessionThreads).values({ id: "run-thread", sessionId: "exec", createdAt: 1 });
+    await db.insert(workflowDefinitions).values({ id: "w-thread", orgId: "local-org", ownerType: "user", ownerId: owner.id, name: "w", definition: {}, createdAt: 1, updatedAt: 1 });
+    await db.insert(workflowRuns).values({ id: "run-t", workflowId: "w-thread", definitionVersionId: "v", definition: {}, params: {}, ownerType: "user", ownerId: owner.id, createdAt: 1, updatedAt: 1 });
+    await db.execute(sql`INSERT INTO engine_queue_items (id, session_id, thread_id, dispatch_id, status, content, attempt_count, max_attempts, timeout_at, created_at, updated_at)
+      VALUES ('q-think', 'exec', 'run-thread', 'workflow:run-t:think', 'settled', 'prompt', 1, 1, 1, 1, 1)`);
+    const parts = JSON.stringify([{ type: "tool_call", toolName: "bash", status: "completed",
+      result: { details: { outcome: { kind: "pull_request_created", url: "https://github.com/acme/app/pull/5" } } } }]);
+    await db.execute(sql`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, parts, queue_item_id, created_at)
+      VALUES ('thread-pr', 'exec', 'run-thread', 'message', 'assistant', ${parts}, 'q-think', ${Date.now()})`);
+
+    const pr = (await collectWorkspaceBriefingSources(db, "local-org", owner)).find(item => item.source.id === "terminal:thread-pr:1")?.source;
+    expect(pr).toMatchObject({ sessionId: "exec", threadId: "run-thread", runId: "run-t" });
+    const cite = (source: NonNullable<typeof pr>): WorkspaceBriefingsResponse =>
+      ({ ...snapshot, briefings: [{ ...snapshot.briefings[0], latestThread: null, sources: [source] }] });
+    expect(await canReadCachedBriefingSources(db, "local-org", owner, cite(pr!))).toBe(true);
+    // A source that names only the run, as the step's billing does, reads too.
+    const { sessionId: _session, threadId: _thread, ...runOnly } = pr!;
+    expect(await canReadCachedBriefingSources(db, "local-org", owner, cite(runOnly))).toBe(true);
+    // The run keeps its org, so deleting the workflow keeps both readable.
+    await db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, "w-thread"));
+    expect(await canReadCachedBriefingSources(db, "local-org", owner, cite(pr!))).toBe(true);
+    expect(await canReadCachedBriefingSources(db, "local-org", owner, cite(runOnly))).toBe(true);
+  });
   it("rejects revoked artifact sources and moved workflow sources without scanning their bodies", async () => {
     const db = await setup();
     await db.insert(artifacts).values({ id: "a", token: "token", orgId: "local-org", ownerType: "user", ownerId: owner.id, actorUserId: owner.id, sourceMemoryPath: "a", content: "private", createdAt: 1, updatedAt: 1 });
