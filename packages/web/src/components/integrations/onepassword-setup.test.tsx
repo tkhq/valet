@@ -97,7 +97,7 @@ describe("OnePasswordTokenRow", () => {
     await user.click(screen.getByRole("button", { name: "Connect 1Password" }));
     const note = within(screen.getByRole("dialog")).getByText(/contact your administrator/i);
     expect(note.textContent).toMatch(/permission to create and manage service accounts/i);
-    expect(note.textContent).toMatch(/a service account scoped to that vault alone/i);
+    expect(note.textContent).toMatch(/a service account with read-only access to that vault alone/i);
     expect(note.textContent).toMatch(/ask a 1Password owner or administrator/i);
     expect(note.textContent).toMatch(/no Valet setting changes that/i);
     expect(note.textContent).toMatch(/send the token to you with a 1Password share link, not in Slack or a chat/i);

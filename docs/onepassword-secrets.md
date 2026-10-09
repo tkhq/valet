@@ -45,7 +45,9 @@ setting changes that: the permission lives in 1Password. Ask a 1Password
 owner or administrator for either of two things.
 
 - Permission to create and manage service accounts, so you make your own.
-- A service account scoped to that vault alone.
+- A service account with read-only access to that vault alone. 1Password
+  cannot change a service account after it is created, so ask for read
+  access from the start.
 
 The second keeps the token's reach narrow, which is the point of a service
 account. Have them send the token to you with a
