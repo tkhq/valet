@@ -133,7 +133,48 @@ describe("the integration detail panel", () => {
   });
 });
 
+/** The row's link inside one of the page's lists. */
+async function rowIn(list: string, name: RegExp) {
+  return within(await screen.findByRole("list", { name: list })).getByRole("link", { name });
+}
+
 describe("integration rows", () => {
+  it("flag a connected credential on a service this organization has not configured", async () => {
+    plugins = { plugins: [plugin("drive", [service("drive", { connected: true, connect: "unconfigured", connectBlockedBy: "org" })])] };
+    mount();
+    const row = await rowIn("Connected", /Drive/);
+    expect(within(row).getByText("Not configured")).toBeTruthy();
+    fireEvent.click(row);
+    expect(within(await screen.findByRole("dialog")).getByText(/Not configured for this organization/)).toBeTruthy();
+  });
+
+  it("show the attention badge of a broken connection on the row", async () => {
+    plugins = { plugins: [plugin("notion", [service("notion", { connected: true, health: { refreshFailed: true } })])] };
+    mount();
+    expect(within(await rowIn("Connected", /Notion/)).getByText("Refresh failed")).toBeTruthy();
+  });
+
+  it("show no badge for a healthy connection", async () => {
+    mount();
+    const row = await rowIn("Connected", /Notion/);
+    expect(row.textContent).not.toMatch(/Connected|Not configured|Refresh failed|Expired/);
+  });
+
+  it("name what an unconnected row offers", async () => {
+    plugins = {
+      plugins: [
+        plugin("slack", [service("slack", { type: "bot_token", connect: "org" })]),
+        plugin("gmail", [service("gmail", { connect: "unconfigured", connectBlockedBy: "deployment", missingEnv: ["GOOGLE_CLIENT_ID"] })]),
+        plugin("typefully", [service("typefully")]),
+      ],
+    };
+    mount();
+    // The organization provides Slack, so it is connected for the caller.
+    expect(within(await rowIn("Connected", /Slack/)).getByText("Organization")).toBeTruthy();
+    expect(within(await rowIn("Available", /Gmail/)).getByText("Set up")).toBeTruthy();
+    expect(within(await rowIn("Available", /Typefully/)).getByText("Connect")).toBeTruthy();
+  });
+
   it("let a long name shrink, so the row fits a phone screen", async () => {
     plugins = { plugins: [plugin("gw", [service("gw", { connected: true })], "Calendar and Drive")] };
     plugins.plugins[0]!.displayName = "Google Workspace Calendar and Drive (MCP)";

@@ -142,6 +142,11 @@ function orgNoteFor(service: PluginServiceSummary): React.ReactNode {
 function rowState(plugin: PluginSummary): { badge?: { label: string; variant: "warning" | "danger" }; offer?: string } {
   const services = plugin.services.filter(isVisibleService);
   if (services.length === 0) return {};
+  // A leftover credential on a service nobody configured cannot be used or
+  // reconnected. The panel says why; the row must not read as healthy.
+  if (services.some((service) => service.connected && service.connect === "unconfigured")) {
+    return { badge: { label: "Not configured", variant: "warning" } };
+  }
   for (const service of services) {
     const badge = healthBadge(serviceHealth(service));
     if (badge && badge.variant !== "success") return { badge: { label: badge.label, variant: badge.variant } };
