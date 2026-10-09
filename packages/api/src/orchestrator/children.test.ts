@@ -2569,7 +2569,7 @@ describe("buildChildSender", () => {
     // A person's steer, or the parent's own child_send with the real sender's options.
     const receipt = await child!.prompt("changed my mind — do it differently", humanTakeover
       ? { author: { id: "local-user" }, queueMode: "steer" }
-      : childSendPromptOptions({ parentSessionId: "parent-heal", actorUserId: "local-user" }, false));
+      : childSendPromptOptions({ parentSessionId: "parent-heal", parentThreadId: parentThread.id, actorUserId: "local-user" }, false));
 
     // The stale watcher wakes on the superseded original and must move the
     // watch to the successor instead of going silent (or reporting it).

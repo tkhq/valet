@@ -269,14 +269,21 @@ function parseOriginJson(raw: string | null): ChannelOrigin | undefined {
  */
 export const PARENT_DELEGATION_METADATA_KEY = "parentDelegation";
 
-export function parentDelegationMetadata(parentSessionId: string): Record<string, unknown> {
-  return { [PARENT_DELEGATION_METADATA_KEY]: { parentSessionId } };
+export function parentDelegationMetadata(parentSessionId: string, parentThreadId: string): Record<string, unknown> {
+  return { [PARENT_DELEGATION_METADATA_KEY]: { parentSessionId, parentThreadId } };
 }
 
 /** True when the submission is work the parent delegated, not input from a person. */
 export function isParentDelegation(item: { metadata?: Record<string, unknown> } | null | undefined): boolean {
   const provenance = item?.metadata?.[PARENT_DELEGATION_METADATA_KEY];
   return provenance !== null && typeof provenance === "object";
+}
+
+/** The parent thread that delegated the submission, when its provenance names one. */
+function delegatingThreadId(item: { metadata?: Record<string, unknown> } | null | undefined): string | undefined {
+  const provenance = item?.metadata?.[PARENT_DELEGATION_METADATA_KEY];
+  if (provenance === null || typeof provenance !== "object" || !("parentThreadId" in provenance)) return undefined;
+  return typeof provenance.parentThreadId === "string" ? provenance.parentThreadId : undefined;
 }
 
 /**
@@ -295,7 +302,7 @@ function settlementOrigin(originJson: string | null, replyRoute: string | null):
 
 /** The prompt options of a parent `child_send`. Tests use them to model the real sender. */
 export function childSendPromptOptions(
-  ctx: { parentSessionId: string; actorUserId: string },
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
   queue: boolean,
 ): { author: { id: string; name: string }; queueMode: "followup" | "steer"; metadata: Record<string, unknown> } {
   return {
@@ -304,7 +311,7 @@ export function childSendPromptOptions(
     // the spawner.
     author: { id: ctx.actorUserId, name: "Valet" },
     queueMode: queue ? "followup" : "steer",
-    metadata: parentDelegationMetadata(ctx.parentSessionId),
+    metadata: parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId),
   };
 }
 
@@ -467,7 +474,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       // Per-turn role overlay (the security dispatch names the persona
       // role; the claimed child's build registered it in options.roles).
       ...(req.role !== undefined ? { role: req.role } : {}),
-      metadata: parentDelegationMetadata(ctx.parentSessionId),
+      metadata: parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId),
     }).catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
     await deps.db
@@ -777,10 +784,16 @@ export class ChildWatcher {
       const successorItem = await this.deps.engineStore.getQueueItem(watch.childSessionId, successor);
       if (!successorItem) throw new Error(`Missing child successor submission ${successor}`);
       // A successor the parent did not delegate is a person taking over the
-      // child: a different task, so it has no reply route. This watcher owns
-      // that decision. It reads the submission's provenance, because parent
-      // work also names an author. The stored origin never changes.
-      const replyRoute: ChildReplyRoute | null = !isParentDelegation(successorItem) ? "none" : null;
+      // child: a different task, so it has no reply route. Delegated work
+      // from another parent thread (a `child_send` whose sender stopped
+      // before it stored the route) gets a manual route. This watcher owns
+      // the takeover decision. It reads the submission's provenance, because
+      // parent work also names an author. The stored origin never changes.
+      const replyRoute: ChildReplyRoute | null = !isParentDelegation(successorItem)
+        ? "none"
+        : row.replyRoute === null && delegatingThreadId(successorItem) !== watch.parentThreadId
+          ? "manual"
+          : null;
       await this.deps.db
         .update(childWatches)
         .set({ queueItemId: successor, settled: false, ...(replyRoute !== null ? { replyRoute } : {}) })

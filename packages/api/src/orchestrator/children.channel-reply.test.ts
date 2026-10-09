@@ -64,12 +64,12 @@ afterEach(async () => {
 });
 
 /** A delegated child submission, stamped as the real spawner stamps it. */
-function delegatedItem(id: string, threadId: string, parentSessionId: string): QueueItem {
+function delegatedItem(id: string, threadId: string, parent: { sessionId: string; threadId: string }): QueueItem {
   const now = Date.now();
   return {
     id, threadId, content: "delegated work", status: "queued", attemptCount: 0,
     maxAttempts: 10, timeoutAt: now + 3_600_000, createdAt: now, updatedAt: now,
-    metadata: parentDelegationMetadata(parentSessionId),
+    metadata: parentDelegationMetadata(parent.sessionId, parent.threadId),
   };
 }
 
@@ -120,7 +120,7 @@ async function bootDelegation(childId: string) {
   const childThread = child.thread("web:default");
   await child.pause();
   const queueItemId = `qi-${childId}`;
-  await engineStore.admitSubmission(childId, childThread.id, delegatedItem(queueItemId, childThread.id, parentId));
+  await engineStore.admitSubmission(childId, childThread.id, delegatedItem(queueItemId, childThread.id, { sessionId: parentId, threadId: parentThread.id }));
 
   const now = Date.now();
   await db.insert(agentSessions).values({
@@ -266,7 +266,7 @@ describe("delegated child completion over a channel", () => {
     // The parent's child_send admitted its steer, then the process stopped
     // before the sender moved the watch. The watcher follows the steer.
     const steer = await run.child.prompt("one more thing: add tests",
-      childSendPromptOptions({ parentSessionId: run.parentId, actorUserId: USER_ID }, false));
+      childSendPromptOptions({ parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID }, false));
     await vi.waitFor(async () => {
       const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-crash"));
       expect(watch?.queueItemId).toBe(steer.queueItemId);
@@ -278,6 +278,31 @@ describe("delegated child completion over a channel", () => {
     expect(run.transport.sent).toHaveLength(1);
     expect(run.transport.sent[0]?.conversationKey).toBe("fake:dm:C1");
     expect((await childSettledSignals(run.parentId)).map((signal) => signal.content.origin)).toEqual([ORIGIN]);
+  });
+
+  it("does not post automatically after recovering an interrupted child_send from another parent thread", async () => {
+    const run = await bootDelegation("child-crash-elsewhere");
+    const { db, engineStore } = api!.providers;
+    // Another parent thread sent a steer, then the process stopped before
+    // the sender moved the watch and stored the manual route.
+    const steer = await run.child.prompt("use the private numbers I gave you",
+      childSendPromptOptions({ parentSessionId: run.parentId, parentThreadId: "th-elsewhere", actorUserId: USER_ID }, false));
+    await vi.waitFor(async () => {
+      const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-crash-elsewhere"));
+      expect(watch?.queueItemId).toBe(steer.queueItemId);
+    }, { timeout: 30_000, interval: 20 });
+
+    await engineStore.settleUnclaimed("child-crash-elsewhere", run.childThreadId, steer.queueItemId, { outcome: "completed" });
+    const signals = await vi.waitFor(async () => {
+      const found = await childSettledSignals(run.parentId);
+      if (found.length < 1) throw new Error("the settlement is not admitted yet");
+      return found;
+    }, { timeout: 30_000, interval: 20 });
+    await run.parentThread.awaitResult(signals[0]!.id);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(0);
+    expect(signals.map((signal) => signal.content.origin)).toEqual([{ ...ORIGIN, reply: "manual" }]);
+    expect(await db.select().from(childReplyDeliveries)).toHaveLength(0);
   });
 
   it("keeps the origin thread when a person sends the queued delegated work now", async () => {

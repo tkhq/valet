@@ -348,7 +348,11 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   original channel thread automatically. The parent can still reply there
   explicitly.
   The spawner and `child_send` stamp each child submission with parent
-  delegation provenance (`metadata.parentDelegation`). Promotion copies
+  delegation provenance (`metadata.parentDelegation`): the parent session
+  and the parent thread that sent it. When the watcher follows delegated
+  work from another parent thread, it sets `reply_route` to `manual`. This
+  covers a `child_send` whose sender stopped before it stored the route.
+  Promotion copies
   metadata, so delegated work that a person sends now keeps it. The watcher
   is the only owner of the takeover decision. When the watched submission
   is superseded, the watcher follows its successor and sets `reply_route`
