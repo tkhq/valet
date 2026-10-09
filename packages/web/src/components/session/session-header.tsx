@@ -53,6 +53,7 @@ import {
   type ConnectionStatus,
 } from "~/stores/stream";
 import { BackgroundWorkBadge } from "./background-work-badge";
+import { useBackgroundWorkGuard, type GuardedAction } from "./background-work-confirm";
 import { ModelPicker } from "./model-picker";
 import { MoveSessionDialog } from "./move-session-dialog";
 import { ShareThreadDialog } from "./share-thread-dialog";
@@ -79,6 +80,19 @@ export function shortenWorkspace(workspace: string): string {
  * ready to pause" }` for the documented 409s (pause and sandbox-replace);
  * fall back to the mutation's own message for anything else (network
  * failure, capability-off 409, unexpected shape). */
+const STOP_AND_PAUSE: GuardedAction = {
+  title: "Stop background work and pause?",
+  confirmLabel: "Stop background work and pause",
+};
+const STOP_AND_REPLACE: GuardedAction = {
+  title: "Stop background work and replace the sandbox?",
+  confirmLabel: "Stop background work and replace",
+};
+const STOP_AND_RESTART: GuardedAction = {
+  title: "Stop background work and restart the sandbox?",
+  confirmLabel: "Stop background work and restart",
+};
+
 function extractActionError(err: unknown, fallback: string): string {
   if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
     const message = (err.payload as Record<string, unknown>).error;
@@ -154,6 +168,10 @@ export function SessionHeader({
   // switch confirm first, and their modal covers this row, so each reports
   // its own failure inside its dialog.
   const [actionError, setActionError] = useState<string | null>(null);
+  // Pause, replace, and the profile switch stop background work. The server
+  // refuses them with a 409 that lists the work; the guard asks, then
+  // resends with `force` (fix wave 3, H3).
+  const guard = useBackgroundWorkGuard();
   // Delete and the Terminal/VS Code switch confirm in a `ConfirmDialog`, not
   // in `window.confirm`: the native prompt shows no pending state, drops the
   // server's refusal, and browser automation accepts it before a person sees
@@ -195,7 +213,7 @@ export function SessionHeader({
   async function pauseSession() {
     setActionError(null);
     try {
-      await pause.mutateAsync();
+      await guard.attempt(STOP_AND_PAUSE, (force) => pause.mutateAsync(force ? { force: true } : undefined));
     } catch (err) {
       setActionError(extractActionError(err, "Failed to pause the sandbox. Try again."));
     }
@@ -204,7 +222,7 @@ export function SessionHeader({
   async function replaceSandbox() {
     setActionError(null);
     try {
-      await replace.mutateAsync();
+      await guard.attempt(STOP_AND_REPLACE, (force) => replace.mutateAsync(force ? { force: true } : undefined));
     } catch (err) {
       setActionError(extractActionError(err, "Failed to replace the sandbox."));
     }
@@ -219,7 +237,11 @@ export function SessionHeader({
   async function applyInteractiveServices() {
     setServicesError(null);
     try {
-      await setProfile.mutateAsync(turningOnServices ? "full" : "headless");
+      const profile = turningOnServices ? "full" : "headless";
+      // On a background-work refusal the guard's dialog takes over, so this one closes.
+      await guard.attempt(STOP_AND_RESTART, (force) =>
+        setProfile.mutateAsync({ profile, ...(force ? { force: true } : {}) }),
+      );
       setConfirmServices(false);
     } catch (err) {
       setServicesError(
@@ -550,6 +572,7 @@ export function SessionHeader({
       {canShare && sharing && (
         <ShareThreadDialog sessionId={session.id} threadId={activeThread.id} share={activeThread.share} open={sharing} onOpenChange={setSharing} />
       )}
+      {guard.dialog}
       {moving && (
         <MoveSessionDialog
           sessionId={session.id}

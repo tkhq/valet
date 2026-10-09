@@ -14,6 +14,9 @@ export interface BackgroundItem {
   deadlineAt?: number;
   /** When a timer fires. */
   fireAt?: number;
+  createdAt: number;
+  /** `pending` while a process or watch is still starting. A hold is always running. */
+  status: WakeupSummary["status"];
 }
 
 /** Pure: the rows a person sees. A process or watch lease shows through its wakeup. */
@@ -25,10 +28,19 @@ export function backgroundItems(data: ListSessionWakeupsResponse | undefined): B
     reason: w.reason,
     ...(w.deadlineAt !== undefined ? { deadlineAt: w.deadlineAt } : {}),
     ...(w.fireAt !== undefined ? { fireAt: w.fireAt } : {}),
+    createdAt: w.createdAt,
+    status: w.status,
   }));
   const holds: BackgroundItem[] = data.leases
     .filter((l: LeaseSummary) => l.ownerKind === "hold")
-    .map((l) => ({ id: l.id, kind: "hold", reason: l.reason, deadlineAt: l.deadlineAt }));
+    .map((l) => ({
+      id: l.id,
+      kind: "hold",
+      reason: l.reason,
+      deadlineAt: l.deadlineAt,
+      createdAt: l.createdAt,
+      status: "running",
+    }));
   return [...wakeups, ...holds];
 }
 
@@ -43,6 +55,15 @@ export function timeUntil(ts: number, now: number = Date.now()): string {
   if (diff < HOUR) return `in ${Math.floor(diff / MINUTE)}m`;
   if (diff < DAY) return `in ${Math.floor(diff / HOUR)}h`;
   return `in ${Math.floor(diff / DAY)}d`;
+}
+
+/** Pure: how long ago `ts` was, as "under 1m", "5m", "3h", or "2d". */
+export function timeSince(ts: number, now: number = Date.now()): string {
+  const diff = now - ts;
+  if (diff < MINUTE) return "under 1m";
+  if (diff < HOUR) return `${Math.floor(diff / MINUTE)}m`;
+  if (diff < DAY) return `${Math.floor(diff / HOUR)}h`;
+  return `${Math.floor(diff / DAY)}d`;
 }
 
 /** Pure: the badge text, such as "2 background · next deadline in 3h". */
@@ -62,6 +83,22 @@ const KIND_LABEL: Record<BackgroundItem["kind"], string> = {
   timer: "Timer",
   hold: "Hold",
 };
+
+/**
+ * Pure: one row's detail, such as "Process · running 3h · deadline in 2d".
+ * A process or watch still starting reads "starting". The deadline is when
+ * the work is stopped, not when it is expected to finish.
+ */
+export function itemDetail(item: BackgroundItem, now: number = Date.now()): string {
+  const parts = [KIND_LABEL[item.kind]];
+  if (item.kind === "timer") {
+    if (item.fireAt !== undefined) parts.push(`fires ${timeUntil(item.fireAt, now)}`);
+    return parts.join(" · ");
+  }
+  parts.push(item.status === "pending" ? "starting" : `running ${timeSince(item.createdAt, now)}`);
+  if (item.deadlineAt !== undefined) parts.push(`deadline ${timeUntil(item.deadlineAt, now)}`);
+  return parts.join(" · ");
+}
 
 function cancelError(err: unknown): string {
   if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
@@ -112,11 +149,7 @@ export function BackgroundWorkBadge({ sessionId, canCancel }: { sessionId: strin
                 <li key={item.id} className="flex items-start gap-2 text-xs">
                   <div className="min-w-0 flex-1">
                     <p className="break-words text-ink">{item.reason}</p>
-                    <p className="text-muted">
-                      {KIND_LABEL[item.kind]}
-                      {item.deadlineAt !== undefined && ` · deadline ${timeUntil(item.deadlineAt)}`}
-                      {item.fireAt !== undefined && ` · fires ${timeUntil(item.fireAt)}`}
-                    </p>
+                    <p className="text-muted">{itemDetail(item)}</p>
                   </div>
                   {canCancel && (
                     <Button
