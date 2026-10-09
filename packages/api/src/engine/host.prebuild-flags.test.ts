@@ -279,6 +279,98 @@ describe("childSessionFor repo prebuild flags", () => {
     expect(fixture.calls.filter((c) => c.path.includes("/contents/.valet/prebuild.yaml"))).toHaveLength(1);
   });
 
+  /**
+   * Scratch caps (sandbox-scratch-wakeups plan, Task 14): a repo that
+   * declares a `scratch` above the deploy cap gets it DROPPED, not clamped.
+   * The rest of `.valet/prebuild.yaml` is still honored, and the drop
+   * surfaces as a `startupWarnings` entry on the child instead of silently
+   * shrinking the request.
+   */
+  it("drops a repo-declared scratch above the deploy cap and warns", async () => {
+    const prevScratchMax = process.env.VALET_SANDBOX_SCRATCH_MAX;
+    process.env.VALET_SANDBOX_SCRATCH_MAX = "1Ti";
+    try {
+      fixture = startGithubFixture({
+        createInstallationToken: (id) => ({
+          body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
+        }),
+        getContents: (_owner, _repo, path) =>
+          path === ".valet/prebuild.yaml"
+            ? contentsBody("resources:\n  scratch: 2Ti\n", "blob-scratch-cap")
+            : { status: 404, body: { message: "Not Found" } },
+      });
+      const recorder = new RecordingSandboxProvider();
+      api = await bootTestApi({
+        sandboxProvider: recorder,
+        githubTokenDeps: {
+          key: deriveSecretKey("test-key"),
+          apiUrl: fixture.url,
+          githubUrl: fixture.url,
+        },
+      });
+      const { engineHost, db, engineCredentials } = api.providers;
+      await saveAppConfig({ credentials: engineCredentials }, "local-org", appConfig);
+      const now = Date.now();
+      await db.insert(githubInstallations).values({
+        id: "ghi_scratch_cap",
+        orgId: "local-org",
+        installationId: 444,
+        accountLogin: "tkhq",
+        accountType: "Organization",
+        repositorySelection: "all",
+        suspended: false,
+        cachedToken: null,
+        cachedTokenExpiresAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const childId = "child-scratch-cap";
+      await db.insert(agentSessions).values({
+        id: childId, userId: "local-user", orgId: "local-org", workspace: `/tmp/${childId}`,
+        status: "active", ownerType: "user", ownerId: "local-user", profile: "headless",
+        createdAt: now, updatedAt: now,
+      });
+      await db.insert(sessionRepos).values({
+        sessionId: childId,
+        host: "github",
+        fullName: "tkhq/mono",
+        cloneUrl: "https://github.com/tkhq/mono.git",
+        ref: null,
+        auth: "auto",
+        position: 0,
+        targetDir: "mono",
+      });
+
+      const parent = await engineHost.sessionFor("parent-scratch-cap", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp/parent-scratch-cap",
+      });
+      const parentThread = parent.thread("web:default");
+      const startupWarnings: string[] = [];
+      const child = await engineHost.childSessionFor(childId, {
+        parentSessionId: "parent-scratch-cap",
+        parentThreadId: parentThread.id,
+        actorUserId: "local-user",
+        orgId: "local-org",
+        owner: { type: "user", id: "local-user" },
+        workspace: `/tmp/${childId}`,
+        startupWarnings,
+      });
+      await child.attachment.ensureReady({ timeoutMs: 5_000 });
+
+      expect(startupWarnings).toEqual([
+        "Valet did not apply the repository's scratch setting. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or ask an admin to raise the cap.",
+      ]);
+      const call = recorder.createCalls.find((c) => c.sessionId === childId);
+      expect(call?.resources).toEqual({});
+    } finally {
+      if (prevScratchMax === undefined) delete process.env.VALET_SANDBOX_SCRATCH_MAX;
+      else process.env.VALET_SANDBOX_SCRATCH_MAX = prevScratchMax;
+    }
+  });
+
   it("pins mutable private-repo flags and checkout to one authenticated commit", async () => {
     const oldSha = "9ae8720066b8af545eec68ad64789dd75b014687";
     const newSha = "afbbbca285b504f6f43781f77c68817522c4bd4d";

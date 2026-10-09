@@ -68,6 +68,7 @@ describe("handleFollowedMessage", () => {
     await appDb.insert(orgMembers).values({ orgId: ORG, userId: USER, role: "member" });
     await linkIdentity(appDb, { provider: "slack", externalId: "U9", userId: USER });
     engineHost = new EngineHost({
+      scratchCaps: {},
       engineStore: new PgSessionStore(pgdb),
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new PgEventStream(pgdb),

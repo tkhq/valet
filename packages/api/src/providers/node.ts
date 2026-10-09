@@ -481,6 +481,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     eventStream,
     engineCredentials,
     blobs,
+    scratchCaps,
     anthropicApiKey: opts.anthropicApiKey,
     defaultImage: resolveDefaultImage(process.env),
     // Single image lineage: one stock image for every session shape.

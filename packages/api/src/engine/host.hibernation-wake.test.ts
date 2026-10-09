@@ -111,6 +111,7 @@ describe("EngineHost cross-restart hibernation clear", () => {
     // drives it ready, then `evictAll()` — dropping the cache WITHOUT
     // touching durable state, exactly like a process shutdown.
     const hostA = new EngineHost({
+      scratchCaps: {},
       engineStore,
       sandboxProvider: provider,
       eventStream: new InMemoryEventStream(),
@@ -141,6 +142,7 @@ describe("EngineHost cross-restart hibernation clear", () => {
     // restores it, which mints a BRAND NEW SandboxAttachment starting
     // `detached` (never `suspended` in this instance's lifetime).
     const hostB = new EngineHost({
+      scratchCaps: {},
       engineStore,
       sandboxProvider: provider,
       eventStream: new InMemoryEventStream(),

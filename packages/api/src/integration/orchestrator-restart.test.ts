@@ -78,6 +78,7 @@ async function bootRestoredProviders(pgDataDir: string) {
 
   let spawnerRef: ChildSpawner | undefined;
   const engineHost = new EngineHost({
+    scratchCaps: {},
     engineStore,
     sandboxProvider,
     eventStream,

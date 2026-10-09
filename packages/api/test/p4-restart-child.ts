@@ -84,6 +84,7 @@ async function main(): Promise<void> {
 
   let spawnerRef: ChildSpawner | undefined;
   const engineHost = new EngineHost({
+    scratchCaps: {},
     engineStore,
     sandboxProvider,
     eventStream,

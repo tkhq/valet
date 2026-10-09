@@ -46,6 +46,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     testDb = await freshTestPgDb();
     const { pgdb, appDb } = testDb;
     engineHost = new EngineHost({
+      scratchCaps: {},
       engineStore: new PgSessionStore(pgdb),
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new PgEventStream(pgdb),
@@ -348,6 +349,7 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     testDb = await freshTestPgDb();
     const { pgdb, appDb } = testDb;
     engineHost = new EngineHost({
+      scratchCaps: {},
       engineStore: new PgSessionStore(pgdb),
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new PgEventStream(pgdb),

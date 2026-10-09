@@ -38,6 +38,7 @@ import {
   type PluginStore,
 } from "@valet/engine";
 import type { CredentialUse, ValetPlugin } from "@valet/engine";
+import type { ScratchCaps } from "@valet/shared";
 import { canBorrowCredential } from "../services/credential-borrow.js";
 import { membersSharing } from "../services/credential-shares.js";
 import { pluginStore } from "../services/plugin-store.js";
@@ -85,6 +86,7 @@ import {
   resolveRepoResources,
   type ResolvedRepoPrebuildFlags,
 } from "./resolve-repo-resources.js";
+import { applyScratchCaps } from "./apply-scratch-caps.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import { securityToolPrepSteps } from "./security-bootstrap.js";
@@ -260,6 +262,13 @@ export interface EngineHostOpts {
   eventStream: EventStream;
   engineCredentials: CredentialStore;
   blobs?: BlobStore;
+  /**
+   * Deploy scratch caps (`resolveScratchCaps(process.env)` at boot), applied
+   * to a repository's `.valet/prebuild.yaml` scratch declaration by
+   * `applyScratchCaps` inside `resolveRepoPrebuildFlags`. A declared value
+   * over the cap is dropped, never clamped.
+   */
+  scratchCaps: ScratchCaps;
   /** Anthropic API key required for prompts. Without it, prompts fail. */
   anthropicApiKey?: string;
   /** pi-ai model id or tier token; defaults to tier "s" when unset. */
@@ -2073,7 +2082,16 @@ export class EngineHost {
     const effective = resolved.outcome === "error"
       ? { ...resolved, kubernetes: meta.kubernetes === true }
       : resolved;
-    const result = applySandboxResourceOverrides(effective, meta.sandboxResourceOverrides);
+    const overridden = applySandboxResourceOverrides(effective, meta.sandboxResourceOverrides);
+    // `applyScratchCaps` records the refusal metric itself (it has the
+    // `ScratchRequestError.reason`); this call site only logs and surfaces
+    // the warning text to callers (REST sessions log it; children push it
+    // onto `startupWarnings` in `childSessionFor`).
+    const capped = applyScratchCaps(overridden, this.opts.scratchCaps);
+    if (capped.warning) {
+      console.warn(`EngineHost: session ${sessionId}: ${capped.warning}`);
+    }
+    const result = { ...capped.flags, ...(capped.warning ? { scratchWarning: capped.warning } : {}) };
     if (primary) {
       const warningKey = `${meta.orgId}/${primary.host ?? "github"}/${primary.fullName}`;
       if (result.resourcesWithheld) {
@@ -3759,6 +3777,9 @@ export class EngineHost {
       opts.startupWarnings?.push(
         "Valet could not read the repository sandbox settings. Check GitHub access, then retry the task.",
       );
+    }
+    if (repoFlags.scratchWarning) {
+      opts.startupWarnings?.push(repoFlags.scratchWarning);
     }
     const dockerFlag = opts.docker === true || repoFlags.docker;
     const kubernetesFlag = repoFlags.kubernetes;

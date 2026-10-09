@@ -82,6 +82,7 @@ function buildHost(
   extra: Partial<EngineHostOpts> = {},
 ): EngineHost {
   return new EngineHost({
+    scratchCaps: {},
     engineStore: store,
     sandboxProvider: provider,
     eventStream: new InMemoryEventStream(),

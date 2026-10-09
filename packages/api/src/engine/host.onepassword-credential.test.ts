@@ -67,6 +67,7 @@ describe("EngineHost session 1Password credential resolution", () => {
     extra: Partial<EngineHostOpts> = {},
   ): EngineHost {
     const h = new EngineHost({
+      scratchCaps: {},
       engineStore: new InMemorySessionStore(),
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new InMemoryEventStream(),

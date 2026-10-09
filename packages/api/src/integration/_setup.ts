@@ -308,12 +308,17 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     createOnePasswordService({
       credentials: engineCredentials,
     });
+  // Env-driven, same as real boot. A test that wants a non-default cap sets
+  // `process.env.VALET_SANDBOX_SCRATCH_MAX`/`VALET_SANDBOX_SCRATCH_AGENT_MAX`
+  // before calling `bootTestApi()` and restores it afterward.
+  const scratchCaps = resolveScratchCaps(process.env);
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
     eventStream,
     engineCredentials,
     blobs,
+    scratchCaps,
     anthropicApiKey: ANTHROPIC_API_KEY,
     defaultImage: opts.defaultImage,
     prebuildPreflight: opts.prebuildPreflight,
@@ -378,11 +383,6 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     builder: opts.imageBuilder ?? null,
     githubTokenDeps,
   });
-
-  // Env-driven, same as real boot. A test that wants a non-default cap sets
-  // `process.env.VALET_SANDBOX_SCRATCH_MAX`/`VALET_SANDBOX_SCRATCH_AGENT_MAX`
-  // before calling `bootTestApi()` and restores it afterward.
-  const scratchCaps = resolveScratchCaps(process.env);
 
   // Child workspaces under the test tmp dir (cleaned up with it) instead of
   // the real ~/.valet/children.

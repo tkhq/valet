@@ -15,6 +15,9 @@ export interface ResolvedRepoPrebuildFlags extends RepoPrebuildFlags {
   resourcesWithheld?: boolean;
   /** Live fields to preserve because repository authority was unavailable. */
   preserveResourceFields?: readonly ResourceField[];
+  /** Set when `applyScratchCaps` dropped a declared scratch value. Surfaced
+   * to a child build as a startup warning; a REST session logs it instead. */
+  scratchWarning?: string;
 }
 
 /** Apply one child's resource request after repository and saved defaults.

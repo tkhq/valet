@@ -87,6 +87,7 @@ describe("ChannelHost.start() 1Password bot-token resolution", () => {
       transports: [{ channelType: "fake", create }],
     };
     engineHost = new EngineHost({
+      scratchCaps: {},
       engineStore,
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream,
