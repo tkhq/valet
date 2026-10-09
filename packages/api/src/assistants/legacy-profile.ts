@@ -62,11 +62,11 @@ export async function loadLegacyAssistantProfile(
   orgId: string,
   owner: Principal,
 ): Promise<LegacyAssistantProfile | undefined> {
-  const result = await db.execute(sql`SELECT to_jsonb(a)->>'name' AS name,
-      to_jsonb(a)->>'avatar_url' AS avatar_url, to_jsonb(a)->>'personality' AS personality,
+  const result = await db.execute(sql`SELECT p->>'name' AS name, p->>'avatar_url' AS avatar_url,
+      p->>'personality' AS personality,
       (SELECT m.applied_at FROM __valet_app_migrations m WHERE m.filename = ${LEGACY_RUNTIME_MARKER}) AS upgraded_at
-    FROM assistants a WHERE a.org_id = ${orgId} AND a.owner_type = ${owner.type}
-      AND a.owner_id = ${owner.id} AND a.archived_at IS NULL LIMIT 1`) as {
+    FROM (SELECT to_jsonb(a) AS p FROM assistants a WHERE a.org_id = ${orgId} AND a.owner_type = ${owner.type}
+      AND a.owner_id = ${owner.id} AND a.archived_at IS NULL LIMIT 1) live`) as {
     rows: Array<{ name: unknown; avatar_url: unknown; personality: unknown; upgraded_at: unknown }>;
   };
   const row = result.rows[0];

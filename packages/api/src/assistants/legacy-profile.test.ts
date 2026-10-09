@@ -42,6 +42,10 @@ describe("carried-over assistant profile", () => {
   });
 
   it("reads nothing, and does not fail, on a database without the old columns", async () => {
+    // A fresh schema must keep these names free (0000_app.sql reserves them).
+    const columns = await db.execute(sql`SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'assistants' AND column_name IN ('name', 'avatar_url', 'personality')`) as { rows: unknown[] };
+    expect(columns.rows).toEqual([]);
     expect(await loadLegacyAssistantProfile(db, ORG, TEAM)).toBeUndefined();
     expect(await workspaceSenderIdentity(db, ORG, TEAM)).toEqual({ displayName: "platform" });
     expect(await workspaceSenderIdentity(db, ORG, USER)).toBeUndefined();

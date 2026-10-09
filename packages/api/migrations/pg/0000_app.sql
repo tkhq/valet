@@ -320,6 +320,10 @@ CREATE TABLE "assistants" (
 	-- An integration allow-list carried over from before one assistant per
 	-- workspace (`assistants/integration-limit.ts`).
 	"behavior" text,
+	-- `name`, `avatar_url`, and `personality` are reserved legacy names. A
+	-- database upgraded from before one assistant per workspace still holds
+	-- them, and `assistants/legacy-profile.ts` reads them by name. Do not add
+	-- a column with any of these names.
 	"session_id" text NOT NULL,
 	"created_at" bigint NOT NULL,
 	"archived_at" bigint
