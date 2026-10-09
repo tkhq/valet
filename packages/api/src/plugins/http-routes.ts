@@ -7,7 +7,7 @@ import { isOrgMember } from '../services/org.js';
 import { ingestEvent } from '../events/ingest.js';
 import { writeDropLog } from '../orchestrator/signals.js';
 import { httpInstallationResolvers } from './http-installations.js';
-import { httpRouteBinding } from './http-bindings.js';
+import { httpRouteBinding, httpRouteBindings } from './http-bindings.js';
 
 interface LegacyRoute {
   path: string;
@@ -43,6 +43,24 @@ const LEGACY_ROUTES: Readonly<Record<string, Readonly<Record<string, LegacyRoute
     app: { path: '/api/org/slack', method: 'GET', auth: 'org-admin' },
   },
 };
+
+/**
+ * Names the route IDs that a host binding or compatibility URL serves but the
+ * plugin does not declare. Mounting skips such an entry, so a renamed route
+ * would otherwise answer 404 at a URL that existing Apps and installs still
+ * call. A plugin that declares no HTTP routes mounts nothing and is not
+ * checked: test fixtures reuse bundled plugin names without routes.
+ */
+export function undeclaredHostRoutes(plugin: ValetPlugin): string | undefined {
+  if (!plugin.httpRoutes?.length) return undefined;
+  const declared = new Set(plugin.httpRoutes.map((route) => route.id));
+  const bindings = Object.hasOwn(httpRouteBindings, plugin.name) ? Object.keys(httpRouteBindings[plugin.name]) : [];
+  const aliases = Object.hasOwn(LEGACY_ROUTES, plugin.name) ? Object.keys(LEGACY_ROUTES[plugin.name]) : [];
+  const missing = [...new Set([...bindings, ...aliases])].filter((id) => !declared.has(id));
+  if (!missing.length) return undefined;
+  return `Plugin ${plugin.name} declares no HTTP route for host route ID(s) ${missing.join(', ')}. ` +
+    'Restore the route IDs, or update the host bindings and compatibility routes to match.';
+}
 
 const tooLarge = () => Response.json({ error: 'payload too large' }, { status: 413 });
 
@@ -159,5 +177,7 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
         app.on(route.method, legacy.path, handler);
       }
     }
+    const undeclared = undeclaredHostRoutes(plugin);
+    if (undeclared) throw new Error(undeclared);
   }
 }

@@ -84,6 +84,20 @@ describe("loadNodeModulesPlugins", () => {
     expect((await app.request("/plugins/signed-plugin/http/events", { method: "POST" })).status).toBe(404);
   });
 
+  it("quarantines a package that omits a route ID the host binds or aliases", async () => {
+    await writePackage(root, "slack-shadow", {
+      entryContent: `export default { name: "slack", version: "1", httpRoutes: [{
+        id: "events-renamed", path: "/events", method: "POST", auth: "public", maxBodyBytes: 1024,
+        handle: () => new Response("ok"),
+      }] };`,
+    });
+    const result = await loadNodeModulesPlugins({ searchPaths: [root] });
+    expect(result.plugins).toEqual([]);
+    expect(result.quarantined).toEqual([{
+      pkg: "slack-shadow", reason: expect.stringContaining("Plugin slack declares no HTTP route for host route ID(s) events, app."),
+    }]);
+  });
+
   it("skips a denylisted package even though it is otherwise valid", async () => {
     await writePackage(root, "good-plugin", {
       entryContent: `export default { name: "good-plugin", version: "1.0.0" };\n`,

@@ -6,6 +6,9 @@ import type { PluginHttpRequest, PluginHttpCaller, ValetPlugin } from '@valet/en
 import { bootTestApi, type TestApi } from '../integration/_setup.js';
 import type { CreateTeamResponse, CreateTeamApiKeyResponse } from '../wire/types.js';
 import { orgMembers } from '../schema/index.js';
+import githubPlugin from '@valet/plugin-github/plugin';
+import linearPlugin from '@valet/plugin-linear/plugin';
+import slackPlugin from '@valet/plugin-slack/plugin';
 import { mountPluginHttpRoutes, readPluginBody } from './http-routes.js';
 
 let api: TestApi | undefined;
@@ -47,9 +50,35 @@ describe('plugin route mounting', () => {
     mountPluginHttpRoutes(app, [{ name: 'linear', version: '1', httpRoutes: [{
       id: 'constructor', method: 'GET', path: '/status', auth: 'public', maxBodyBytes: 0,
       handle: () => new Response('ok'),
+    }, {
+      id: 'events', method: 'POST', path: '/events', auth: 'signature', maxBodyBytes: 64, acknowledgementStatus: 200,
+      installationKey: () => null, verify: () => ({ accepted: true, events: [] }),
     }] }], 'public');
     expect(await (await app.request('/plugins/linear/http/status')).text()).toBe('ok');
     expect((await app.request('/webhooks/events/linear')).status).toBe(404);
+  });
+
+  it.each([
+    { bundled: githubPlugin, id: 'callback' },
+    { bundled: githubPlugin, id: 'webhook' },
+    { bundled: slackPlugin, id: 'app' },
+    { bundled: linearPlugin, id: 'events' },
+  ])('refuses to boot when $bundled.name renames route $id, which the host still binds or aliases', ({ bundled, id }) => {
+    const renamed: ValetPlugin = {
+      ...bundled,
+      httpRoutes: bundled.httpRoutes?.map((route) => (route.id === id ? { ...route, id: `${id}-renamed` } : route)),
+    };
+    for (const phase of ['public', 'authenticated'] as const) {
+      expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [renamed], phase)).toThrow(
+        `Plugin ${bundled.name} declares no HTTP route for host route ID(s) ${id}.`,
+      );
+    }
+  });
+
+  it('boots the bundled plugins, whose routes cover every host binding and compatibility URL', () => {
+    for (const phase of ['public', 'authenticated'] as const) {
+      expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [githubPlugin, slackPlugin, linearPlugin], phase)).not.toThrow();
+    }
   });
 
   it('refuses Slack bindings and compatibility URLs with a different method or authentication', () => {

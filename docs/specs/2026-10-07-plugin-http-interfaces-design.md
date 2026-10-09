@@ -170,6 +170,7 @@ The host keeps `/api/org/github-app/*`, `/api/me/github/*`, and `/webhooks/githu
 GitHub uses the host binding table in `packages/api/src/plugins/http-bindings.ts`, keyed by plugin name and route ID. The Slack adoption uses the same table.
 The mount runs a binding where it would call the manifest handler: after authentication, membership, administration, and the streaming body limit.
 The mount refuses a binding whose authentication differs from the declaration. Each compatibility URL also pins its method and authentication.
+The mount also refuses to boot when a loaded plugin with HTTP routes does not declare a route ID that a host binding or compatibility URL names. Without this check, a renamed route would leave its existing URL answering 404. The node_modules loader quarantines such a package instead.
 The manifest handlers answer 501, so a host without the binding fails closed.
 
 `packages/api/src/plugins/http-github.ts` binds four capabilities. No capability method accepts a user or organization ID.
