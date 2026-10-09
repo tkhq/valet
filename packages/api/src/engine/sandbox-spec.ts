@@ -148,13 +148,15 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
  *
  * Canonical JSON: image first, then steps in array order with each step's
  * keys in fixed order (id, hash, critical). When an authoritative resource
- * opinion exists, resources follow with cpu before memory. A field-preservation
- * mask follows in fixed CPU and memory order. An absent opinion and mask keep
- * the legacy JSON and hash unchanged.
+ * opinion exists, resources follow in cpu, memory, scratch order. A
+ * field-preservation mask follows in the same order. An absent opinion,
+ * scratch, and mask keep the legacy JSON and hash unchanged. Scratch counts
+ * so a corrected scratch value after a failed replace is a new spec, not a
+ * repeat of the failed one waiting out the backoff.
  */
 export function specHash(
   spec: SandboxSpec,
-  resources?: Pick<SandboxResources, "cpu" | "memory">,
+  resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">,
   preserveResourceFields?: readonly SandboxResourceField[],
 ): string {
   const canonicalSpec = {
@@ -165,6 +167,7 @@ export function specHash(
           resources: {
             ...(resources.cpu !== undefined ? { cpu: resources.cpu } : {}),
             ...(resources.memory !== undefined ? { memory: resources.memory } : {}),
+            ...(resources.scratch !== undefined ? { scratch: resources.scratch } : {}),
           },
         }
       : {}),
