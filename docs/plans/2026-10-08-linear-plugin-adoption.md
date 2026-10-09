@@ -69,20 +69,19 @@ interface LinearConnectionCapability {
 
 Files: update `packages/plugin-linear/src/plugin.ts`, `packages/api/src/plugins/http-routes.ts`, and `packages/api/src/app.ts`; remove `packages/api/src/routes/linear-connect.ts`.
 
-- [ ] Move secret validation, token request, workspace lookup, refusal messages, URL presentation, and legacy webhook deletion into the plugin factory.
-- [ ] Declare three org-admin routes at `/connection`; retain a 1 MiB body cap for PUT and zero-byte caps for GET and DELETE.
-- [ ] Add fixed method-and-auth compatibility aliases for `/api/org/linear`.
-- [ ] Delete the manual Linear router import and mount from `app.ts`.
-- [ ] Preserve every existing response status, body field, error action, and client-credentials scope.
-- [ ] Run the Linear connection, token-store, webhook, plugin-mount, and loader tests.
-- [ ] Run typecheck and the full `make e2e` scorecard.
-- [ ] Review the diff, update the HTTP design spec, and create a stacked PR. Do not merge either PR.
+- [x] Move secret validation, token request, workspace lookup, refusal messages, URL presentation, and legacy webhook deletion into the plugin factory.
+- [x] Declare three org-admin routes at `/connection`; retain a 1 MiB body cap for PUT and zero-byte caps for GET and DELETE.
+- [x] Add fixed method-and-auth compatibility aliases for `/api/org/linear`.
+- [x] Delete the manual Linear router import and mount from `app.ts`.
+- [x] Preserve every existing response status, body field, error action, and client-credentials scope.
+- [x] Run the Linear connection, token-store, webhook, plugin-mount, and loader tests.
+- [x] Run typecheck and the full `make e2e` scorecard.
+- [x] Review the diff and update the HTTP design spec.
+- [ ] Create a stacked PR. Do not merge either PR.
 
-## Remaining provider adoption
+## Other provider adoption
 
-GitHub: personal connect, organization status, callback, disconnect; organization app status, manifest, setup, credential, refresh, disconnect; public app webhook. Preserve signed state, the callback user, installation ownership, and webhook deduplication.
-
-Slack: organization app status and the shared Events API/interactivity webhook. Preserve challenge responses, signature verification, durable inbox admission, retry ownership, channel consumers, and event fan-out. See [the Slack adoption plan](2026-10-09-slack-plugin-adoption.md).
+GitHub and Slack moved before this plan's connection routes, through the same host binding table. See [the GitHub adoption plan](2026-10-09-github-plugin-adoption.md) and [the Slack adoption plan](2026-10-09-slack-plugin-adoption.md).
 
 Security: the session-scoped Security routes in `packages/api/src/routes/security.ts`, including preview, execution, findings, coverage, exports, handoffs, issue publication, cancellation, and resume. Preserve session authorization and relational persistence through narrow domain capabilities.
 

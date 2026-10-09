@@ -125,14 +125,14 @@ describe('Linear connection save', () => {
 describe('Linear connection status', () => {
   it('presents setup URLs from the public URL and offers only an HTTPS webhook URL', async () => {
     const { capability } = fakeCapability();
-    const secure = await createLinearConnectionHandlers(capability, { publicUrl: 'https://valet.example' })['connection-status'](request());
+    const secure = await createLinearConnectionHandlers(capability, { ...ENDPOINTS, publicUrl: 'https://valet.example' })['connection-status'](request());
     expect(await secure.json()).toEqual({
       ...READY,
       redirectUri: 'https://valet.example/api/org/linear/callback',
       webhookUrl: 'https://valet.example/webhooks/events/linear',
       webhookResourceTypes: ['Issue', 'Comment', 'Project', 'Cycle', 'IssueLabel', 'Reaction'],
     });
-    const plain = await createLinearConnectionHandlers(capability, { publicUrl: 'http://valet.internal' })['connection-status'](request());
+    const plain = await createLinearConnectionHandlers(capability, { ...ENDPOINTS, publicUrl: 'http://valet.internal' })['connection-status'](request());
     expect(await plain.json()).not.toHaveProperty('webhookUrl');
   });
 });

@@ -19,6 +19,7 @@ import {
   type LinearConnectionEndpoints,
   type LinearConnectionRouteId,
 } from "@valet/plugin-linear/connection";
+import { resolveLinearApiUrl } from "@valet/plugin-linear/service";
 import { publicUrlFromEnv } from "../channels/host.js";
 import type { Providers } from "../providers/types.js";
 import { orgs, linearInstallations } from "../schema/index.js";
@@ -32,12 +33,10 @@ import {
 import { getLinearIngressStatus } from "../services/linear-ingress.js";
 import type { PluginHttpBinding } from "./http-bindings.js";
 
+/** The plugin has no environment default: the host always names the Linear origin. */
 export function linearConnectionEndpoints(env: NodeJS.ProcessEnv): LinearConnectionEndpoints {
   const publicUrl = publicUrlFromEnv(env);
-  return {
-    ...(publicUrl ? { publicUrl } : {}),
-    ...(env.LINEAR_API_URL ? { linearApiUrl: env.LINEAR_API_URL } : {}),
-  };
+  return { ...(publicUrl ? { publicUrl } : {}), linearApiUrl: resolveLinearApiUrl(env) };
 }
 
 export function createLinearConnectionCapability(

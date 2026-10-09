@@ -70,8 +70,9 @@ export interface LinearConnectionCapability {
 export interface LinearConnectionEndpoints {
   /** The configured public URL of the API. Absent in local development. */
   publicUrl?: string;
-  /** Overrides the Linear API origin. Tests point it at a fixture. */
-  linearApiUrl?: string;
+  /** The Linear API origin. The host resolves it, so a fixture override
+   * reaches every provider call that carries the pasted client secret. */
+  linearApiUrl: string;
 }
 
 export type LinearConnectionRouteId = "connection-status" | "connection-save" | "connection-delete";

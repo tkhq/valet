@@ -21,7 +21,13 @@ interface LegacyRoute {
  * access to an existing URL by changing its declaration.
  */
 const LEGACY_ROUTES: Readonly<Record<string, Readonly<Record<string, LegacyRoute>>>> = {
-  linear: { events: { path: '/webhooks/events/linear', method: 'POST', auth: 'signature' } },
+  linear: {
+    events: { path: '/webhooks/events/linear', method: 'POST', auth: 'signature' },
+    // The web client's Linear settings read and write the organization connection here.
+    'connection-status': { path: '/api/org/linear', method: 'GET', auth: 'org-admin' },
+    'connection-save': { path: '/api/org/linear', method: 'PUT', auth: 'org-admin' },
+    'connection-delete': { path: '/api/org/linear', method: 'DELETE', auth: 'org-admin' },
+  },
   github: {
     // Existing GitHub Apps store the setup, callback, and webhook URLs.
     'app-status': { path: '/api/org/github-app', method: 'GET', auth: 'org-admin' },

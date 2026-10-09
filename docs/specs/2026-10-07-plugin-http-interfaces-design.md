@@ -1,6 +1,6 @@
 # Plugin HTTP interfaces
 
-Status: first iteration implemented for TKAI-377. Provider adoption remains in progress.
+Status: first iteration implemented for TKAI-377. Slack, GitHub, and Linear routes use the registry. Security adoption remains.
 
 ## Intent and scope
 
@@ -13,7 +13,7 @@ Existing webhook URLs, OAuth callbacks, saved credentials, installation records 
 ## Current evidence
 
 - `packages/engine/src/valet-plugin.ts` has no HTTP route declaration.
-- `packages/api/src/app.ts` explicitly mounted Slack, GitHub, Linear and Security route families. GitHub now mounts through the registry.
+- `packages/api/src/app.ts` explicitly mounted Slack, GitHub, Linear and Security route families. Slack, GitHub, and the Linear connection now mount through the registry.
 - `packages/api/src/routes/event-webhooks.ts` resolves Linear installations and signing secrets in a service-name branch.
 - `packages/api/src/services/plugin-store.ts` already supports scoped documents and indexes.
 - Linear setup now uses client credentials. The ticket's older OAuth flow description must not replace the current connection behavior.
@@ -107,7 +107,7 @@ Triggers from other services cannot participate in Linear verification.
 A temporary host adapter reads existing Linear installations and signing metadata without refreshing credentials.
 The installation's stored organization determines event ownership after verification. Request bodies cannot override it.
 
-This iteration does not move connection handlers or Security routes. The Slack and GitHub adoption sections below describe those moves.
+This iteration does not move Security routes. The Slack, GitHub, and Linear connection sections below describe the later moves.
 It does not implement arbitrary callback state capabilities, plugin-owned storage, lifecycle hooks, or the complete event-emission interface.
 New signed plugins currently need an installation adapter. This restriction remains until plugin-owned installation storage is available.
 No database migration or existing-data rewrite is required.
@@ -137,9 +137,8 @@ The mount refuses to boot when a loaded plugin with HTTP routes does not declare
 
 The Linear plugin owns the provider HTTP client for token creation, workspace lookup, and legacy webhook deletion.
 The API compatibility module keeps host environment defaults and shares the plugin's token error constructor.
-Connection route mounting, persistence, and token renewal ownership remain in the API host.
-The next adoption step is described in [the Linear adoption plan](../plans/2026-10-08-linear-plugin-adoption.md).
-This preparation does not complete Linear connection route adoption or TKAI-377.
+Token renewal ownership remains in the API host.
+[The Linear adoption plan](../plans/2026-10-08-linear-plugin-adoption.md) describes the connection route move.
 
 ## Slack adoption
 
@@ -215,8 +214,10 @@ PUT accepts at most 1 MiB. GET and DELETE accept no body.
 
 The plugin exports a handler factory and the `LinearConnectionCapability` type.
 The factory receives only a capability and endpoint configuration: the public URL and the Linear API origin.
+The host always supplies the Linear API origin from `LINEAR_API_URL` or the public default. The plugin has no default, so a fixture override also covers the pasted client secret.
 The capability has `status`, `save`, `legacyWebhooks`, and `disconnect`. No method takes an organization or user ID.
 
+The plugin owns secret validation, the token request, the workspace lookup, refusal messages, setup URL presentation, and legacy webhook deletion.
 `packages/api/src/plugins/http-linear-connection.ts` binds the three route IDs through the host bindings described above.
 After the mount checks identity, membership, administration, and the body limit, the binding calls `createLinearConnectionCapability`.
 That capability binds the existing tables to the caller's organization and user. The binding then runs the factory's handler for the route ID.
@@ -224,3 +225,10 @@ The plugin's declared handlers never receive the capability. They answer 501 on 
 
 `save` keeps the organization row lock, the one-workspace conflict check, and the shared connection ID on both credential rows.
 `disconnect` deletes the app configuration first, then the installation, then the token.
+A failed legacy webhook deletion does not stop the disconnection.
+
+The host keeps GET, PUT, and DELETE `/api/org/linear` as aliases in `LEGACY_ROUTES`. Each alias pins its method and `org-admin` authentication.
+Both URLs share one handler, so status codes, bodies, and errors match.
+`app.ts` no longer mounts a Linear router. If the Linear plugin is not loaded, neither URL exists.
+The displayed redirect URI stays `/api/org/linear/callback`. It is metadata for Linear's app form, not a browser OAuth flow.
+No schema, credential, or installation data changes.

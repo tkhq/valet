@@ -2,7 +2,8 @@
  * The organization Linear connection, served by the Linear plugin through the
  * host route mount. Route-level: real Hono app via `bootTestApi`, real HTTP
  * requests, a fake Linear API server (`startLinearFixture`) subbed in via
- * `LINEAR_API_URL`.
+ * `LINEAR_API_URL`. Every behavior runs against the canonical plugin route
+ * and the `/api/org/linear` compatibility alias.
  */
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
@@ -10,14 +11,16 @@ import linearPlugin from "@valet/plugin-linear/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startLinearFixture, type LinearFixture, type LinearFixtureCall } from "../test-helpers/linear-fixture.js";
 import { credentials, linearInstallations, orgMembers } from "../schema/index.js";
-import { linearConnectionAdapter } from "./http-linear-connection.js";
+import { linearConnectionAdapter, linearConnectionEndpoints } from "./http-linear-connection.js";
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
 const APP = { clientId: "lin-client-id", clientSecret: "lin-client-secret", webhookSecret: "lin-webhook-secret" };
 const ORG = { type: "org" as const, id: "local-org" };
+const ALIAS = "/api/org/linear";
 const CANONICAL = "/api/plugins/linear/http/connection";
 const ROUTES = [
+  { name: "compatibility alias", path: ALIAS },
   { name: "canonical route", path: CANONICAL },
 ] as const;
 
@@ -268,6 +271,33 @@ describe.each(ROUTES)("Linear connection through the $name", ({ path }) => {
   });
 });
 
+describe("Linear connection route parity", () => {
+  it("returns the same status, errors, and refusals through both URLs", async () => {
+    const target = await boot();
+    api = target;
+    useFixture();
+    const read = async (path: string, init: RequestInit = { headers: HEADERS }) => {
+      const res = await fetch(`${target.baseUrl}${path}`, init);
+      return { status: res.status, type: res.headers.get("content-type"), body: await res.text() };
+    };
+    const put = (body: string, headers: Record<string, string> = HEADERS): RequestInit => ({ method: "PUT", headers, body });
+    for (const init of [undefined, put("{}"), put("{not json"), put(JSON.stringify(APP), MEMBER_HEADERS)]) {
+      expect(await read(CANONICAL, init)).toEqual(await read(ALIAS, init));
+    }
+    await read(ALIAS, put(JSON.stringify(APP)));
+    expect(await read(CANONICAL)).toEqual(await read(ALIAS));
+  });
+
+  it("serves neither URL when the Linear plugin is not loaded", async () => {
+    api = await bootTestApi();
+    for (const path of [ALIAS, CANONICAL]) {
+      for (const method of ["GET", "PUT", "DELETE"]) {
+        expect((await fetch(`${api.baseUrl}${path}`, { method, headers: HEADERS })).status).toBe(404);
+      }
+    }
+  });
+});
+
 describe("Linear connection adapter binding", () => {
   // Pass-through spy: the host must not build the adapter for a refused caller.
   const capability = vi.spyOn(linearConnectionAdapter, "create");
@@ -277,7 +307,7 @@ describe("Linear connection adapter binding", () => {
     api = await boot();
     const f = useFixture();
     capability.mockClear();
-    for (const path of [CANONICAL]) {
+    for (const path of [ALIAS, CANONICAL]) {
       for (const method of ["GET", "PUT", "DELETE"]) {
         const res = await fetch(`${api.baseUrl}${path}`, { method, headers: MEMBER_HEADERS, ...(method === "PUT" ? { body: JSON.stringify(APP) } : {}) });
         expect(res.status).toBe(403);
@@ -286,7 +316,7 @@ describe("Linear connection adapter binding", () => {
       expect(oversized.status).toBe(413);
     }
     await api.providers.db.delete(orgMembers).where(eq(orgMembers.userId, "local-user"));
-    for (const path of [CANONICAL]) {
+    for (const path of [ALIAS, CANONICAL]) {
       expect((await fetch(`${api.baseUrl}${path}`, { headers: HEADERS })).status).toBe(403);
     }
     expect(capability).not.toHaveBeenCalled();
@@ -296,10 +326,28 @@ describe("Linear connection adapter binding", () => {
   it("refuses anonymous callers before it builds the adapter", async () => {
     api = await boot({ auth: true });
     capability.mockClear();
-    for (const path of [CANONICAL]) {
+    for (const path of [ALIAS, CANONICAL]) {
       expect((await fetch(`${api.baseUrl}${path}`, { headers: HEADERS })).status).toBe(401);
     }
     expect(capability).not.toHaveBeenCalled();
+  });
+
+  it("sends every provider call to the LINEAR_API_URL origin through the binding", async () => {
+    for (const path of [ALIAS, CANONICAL]) {
+      api = await boot();
+      const f = useFixture();
+      expect((await fetch(`${api.baseUrl}${path}`, { method: "PUT", headers: HEADERS, body: JSON.stringify(APP) })).status).toBe(200);
+      await api.providers.db.update(linearInstallations).set({ webhookId: "wh-legacy" }).where(eq(linearInstallations.orgId, "local-org"));
+      expect((await fetch(`${api.baseUrl}${path}`, { method: "DELETE", headers: HEADERS })).status).toBe(204);
+      expect(f.calls.map((call) => call.path)).toEqual(["/oauth/token", "/graphql", "/graphql"]);
+      await api.cleanup(); api = undefined;
+      await f.close(); fixture = undefined;
+    }
+  });
+
+  it("resolves the Linear origin in the host, with no plugin default", () => {
+    expect(linearConnectionEndpoints({ LINEAR_API_URL: "http://127.0.0.1:9" })).toEqual({ linearApiUrl: "http://127.0.0.1:9" });
+    expect(linearConnectionEndpoints({})).toEqual({ linearApiUrl: "https://api.linear.app" });
   });
 
   it("binds the adapter to the host caller for an administrator", async () => {
@@ -309,4 +357,15 @@ describe("Linear connection adapter binding", () => {
     expect(capability).toHaveBeenCalledOnce();
     expect(capability.mock.calls[0][1]).toEqual({ userId: "local-user", orgId: "local-org" });
   });
+});
+
+it("reserves Linear application credentials from generic mutation routes", async () => {
+  api = await boot();
+  for (const method of ["PUT", "DELETE"]) {
+    const response = await fetch(`${api.baseUrl}/api/credentials/linear_app?scope=org`, {
+      method, headers: HEADERS,
+      ...(method === "PUT" ? { body: JSON.stringify({ scope: "org", type: "api_key", apiKey: "secret" }) } : {}),
+    });
+    expect(response.status).toBe(400);
+  }
 });

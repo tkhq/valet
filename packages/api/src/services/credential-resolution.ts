@@ -21,7 +21,7 @@
  *
  * That line is deliberate. Org-ownership is an addressing detail for
  * machinery, not a statement of sharing: an org-owned `linear` row carries
- * `metadata.webhookSecret` (`routes/linear-connect.ts`), which the inbound
+ * `metadata.webhookSecret` (`plugins/http-linear-connection.ts`), which the inbound
  * webhook verifies HMACs with, so handing whole org rows to member sessions
  * would hand out that secret. Reads are not free either —
  * `OAuthRefreshingCredentialStore.get` refreshes and writes back under the
@@ -186,7 +186,7 @@ export async function resolveUserCredentialRead(
   const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
   if (!orgRow) return lookupInOnePassword(deps, ctx, service);
   // A plain org row stays invisible. An org-owned `linear` row carries
-  // `metadata.webhookSecret` (`routes/linear-connect.ts`), so returning the
+  // `metadata.webhookSecret` (`plugins/http-linear-connection.ts`), so returning the
   // whole row to every member's session would hand out the webhook HMAC.
   if (orgFallback === "reference-only" && !onePasswordMeta(orgRow)) {
     return lookupInOnePassword(deps, ctx, service);
