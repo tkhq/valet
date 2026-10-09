@@ -42,6 +42,21 @@ const FULL_PROFILE_COMMAND = [
   "[ -f /start-full.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-full.sh || exec /bin/bash /start-full.sh; } || exec tail -f /dev/null",
 ];
 
+/** The bare, non-terminating placeholder command — no profile, no docker. */
+const BARE_PLACEHOLDER_COMMAND = ["sh", "-c", "tail -f /dev/null"];
+
+/** Bootstraps `/scratch` on a plain headless pod (no docker, no full
+ * profile) when `resources.scratch` is set. `start-full.sh` and
+ * `start-headless.sh` already create `/scratch/tmp` and
+ * `/scratch/valet-jobs` and symlink `/tmp/valet-jobs`; a bare placeholder
+ * pod runs no start script, so without this TMPDIR points at a directory
+ * that never exists. */
+export const SCRATCH_PLACEHOLDER_COMMAND = [
+  "sh",
+  "-c",
+  "mkdir -p /scratch/tmp /scratch/valet-jobs && chmod 1777 /scratch/tmp && ln -sfn /scratch/valet-jobs /tmp/valet-jobs; exec tail -f /dev/null",
+];
+
 export const WORKSPACE_VOLUME_NAME = "workspace";
 export const WORKSPACE_MOUNT_PATH = "/workspace";
 /** Node-local scratch emptyDir, wiped when the pod stops (spec Part A). */
@@ -186,6 +201,11 @@ function memoryLimitFor(request: string): string {
   return formatStorageQuantity(bytes * MEMORY_LIMIT_FACTOR);
 }
 
+/** True when two container commands are the same sequence of strings. */
+function commandEquals(a: string[] | undefined, b: string[]): boolean {
+  return a !== undefined && a.length === b.length && a.every((part, i) => part === b[i]);
+}
+
 /** Bytes for a quantity string, or 0 for an absent/unparseable one. An
  * absent term contributes nothing to a sum, and an unparseable one degrades
  * to 0 rather than poisoning the whole sum (the raw string still reaches
@@ -328,7 +348,7 @@ export function buildSandboxManifest(
     // `sh -c "tail -f /dev/null"` idiom (packages/sandbox-docker/src/sandbox.ts).
     // The controller/exec surface does the actual work; this just keeps the
     // container's PID 1 alive.
-    command: ["sh", "-c", "tail -f /dev/null"],
+    command: [...BARE_PLACEHOLDER_COMMAND],
     volumeMounts: [{ name: WORKSPACE_VOLUME_NAME, mountPath: WORKSPACE_MOUNT_PATH, subPath: WORKSPACE_SUBPATH }],
     // See SandboxContainer.workingDir's docblock (types.ts) — the k8s
     // pods/exec API has no per-call --workdir, so this container-level
@@ -459,7 +479,15 @@ export function buildSandboxManifest(
     }
   }
 
-  container.command = withHomeLinks(container.command ?? ["sh", "-c", "tail -f /dev/null"]);
+  // A plain headless pod never runs a start script (its command is still
+  // the bare placeholder at this point), so scratch bootstrap has no other
+  // owner. The full-profile and docker commands are already replaced above
+  // and keep their own start-script-driven setup.
+  if (resourceOpts?.scratch && commandEquals(container.command, BARE_PLACEHOLDER_COMMAND)) {
+    container.command = SCRATCH_PLACEHOLDER_COMMAND;
+  }
+
+  container.command = withHomeLinks(container.command ?? [...BARE_PLACEHOLDER_COMMAND]);
   container.volumeMounts = [...persistentHomeMounts(), ...(container.volumeMounts ?? [])];
   const podSpec: SandboxCR["spec"]["podTemplate"]["spec"] = {
     initContainers: [homeInitContainer(image)],
