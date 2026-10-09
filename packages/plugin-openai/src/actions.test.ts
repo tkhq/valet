@@ -199,11 +199,11 @@ describe("openaiPlugin", () => {
     const [url, init] = mockFetch().mock.calls[0];
     expect(url).toBe(`${OPENAI_API_URL}/v1/responses`);
     if (!init) throw new Error("missing request");
-    const body = JSON.parse(String(init.body));
+    const body: unknown = JSON.parse(String(init.body));
     expect(body).toMatchObject({ model: "gpt-5.4-mini", store: false, max_tool_calls: 1, tool_choice: { type: "image_generation" },
       tools: [{ type: "image_generation", model: "gpt-image-2.5-flare", action: id === "openai.edit_image" ? "edit" : "generate", output_format: "png", quality: "auto" }] });
-    expect(body.input[0].content[0]).toEqual({ type: "input_text", text: "a blue fox" });
-    if (id === "openai.edit_image") expect(body.input[0].content[1]).toMatchObject({ type: "input_image", image_url: `data:image/png;base64,${PNG_B64}` });
+    expect(body).toMatchObject({ input: [{ content: expect.arrayContaining([{ type: "input_text", text: "a blue fox" }]) }] });
+    if (id === "openai.edit_image") expect(body).toMatchObject({ input: [{ content: expect.arrayContaining([{ type: "input_image", image_url: `data:image/png;base64,${PNG_B64}`, detail: "auto" }]) }] });
     expect(init.signal).toBe(ctx.signal);
   });
 
