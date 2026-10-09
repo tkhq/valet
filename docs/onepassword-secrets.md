@@ -41,12 +41,12 @@ In 1Password:
 
 Step 3 needs a 1Password account permission. If 1Password tells you to contact
 your administrator, your account cannot create service accounts, and no Valet
-setting changes that: the permission lives in 1Password. Ask an admin for
-either of two things.
+setting changes that: the permission lives in 1Password. Ask a 1Password
+owner or administrator for either of two things.
 
 - Permission to create and manage service accounts, so you make your own.
-- A service account scoped to that vault alone, with the token sent to you
-  privately.
+- A service account scoped to that vault alone. Have them share the token
+  with you as a 1Password item.
 
 The second keeps the token's reach narrow, which is the point of a service
 account. Do not paste a token into Slack, a Valet chat, memory, or a

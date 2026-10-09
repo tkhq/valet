@@ -88,10 +88,11 @@ export function OnePasswordInstructions() {
         <li>Paste the token below. Valet encrypts it and never shows it again.</li>
       </ol>
       <p>
-        If 1Password tells you to contact your administrator, your account cannot create service
-        accounts. Ask an admin for either of two things: permission to create and manage service
-        accounts, or a service account scoped to that vault alone, with the token sent to you
-        privately.
+        If 1Password tells you to contact your administrator, your 1Password account cannot create
+        service accounts, and no Valet setting changes that. Ask a 1Password owner or administrator
+        for either of two things: permission to create and manage service accounts, or a service
+        account scoped to that vault alone. Have them share the token with you as a 1Password item,
+        not in Slack or a chat.
       </p>
       <p>
         An item is addressed by a{" "}

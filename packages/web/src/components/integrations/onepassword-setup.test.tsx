@@ -98,7 +98,9 @@ describe("OnePasswordTokenRow", () => {
     const note = within(screen.getByRole("dialog")).getByText(/contact your administrator/i);
     expect(note.textContent).toMatch(/permission to create and manage service accounts/i);
     expect(note.textContent).toMatch(/a service account scoped to that vault alone/i);
-    expect(note.textContent).toMatch(/token sent to you privately/i);
+    expect(note.textContent).toMatch(/ask a 1Password owner or administrator/i);
+    expect(note.textContent).toMatch(/no Valet setting changes that/i);
+    expect(note.textContent).toMatch(/share the token with you as a 1Password item, not in Slack/i);
   });
 
   it("a personal token saves with no scope field", async () => {
