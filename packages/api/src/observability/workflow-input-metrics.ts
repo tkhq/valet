@@ -13,7 +13,7 @@ export function recordWorkflowInputCleanupSkipped(scope: "node" | "run", reason:
 }
 
 /** Capped or failed sweeps leave data for a later write or sandbox destruction. */
-export function recordWorkflowInputSweepSkipped(reason: "listing" | "budget" | "marker"): void {
+export function recordWorkflowInputSweepSkipped(reason: "listing" | "budget" | "marker" | "removal"): void {
   sweepSkippedCounter ??= metrics.getMeter("@valet/api").createCounter("valet.workflow.inputs.sweep_skipped", {
     description: "Workflow input residual sweep skipped work because of limits or unreadable metadata",
   });

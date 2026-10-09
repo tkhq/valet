@@ -27,7 +27,7 @@ describe("workflow input cleanup metrics", () => {
 
     recordWorkflowInputCleanupSkipped("node", "suspended");
     recordWorkflowInputCleanupSkipped("run", "uncached");
-    for (const reason of ["listing", "budget", "marker"] as const) recordWorkflowInputSweepSkipped(reason);
+    for (const reason of ["listing", "budget", "marker", "removal"] as const) recordWorkflowInputSweepSkipped(reason);
     await provider.forceFlush();
 
     const metric = exporter
@@ -46,9 +46,9 @@ describe("workflow input cleanup metrics", () => {
       .find(candidate => candidate.descriptor.name === "valet.workflow.inputs.sweep_skipped");
     if (!sweep || sweep.dataPointType !== DataPointType.SUM) throw new Error("expected a sweep counter");
     expect(sweep.dataPoints.map(point => point.attributes)).toEqual([
-      { reason: "listing" }, { reason: "budget" }, { reason: "marker" },
+      { reason: "listing" }, { reason: "budget" }, { reason: "marker" }, { reason: "removal" },
     ]);
-    expect(sweep.dataPoints.map(point => point.value)).toEqual([1, 1, 1]);
+    expect(sweep.dataPoints.map(point => point.value)).toEqual([1, 1, 1, 1]);
     await provider.shutdown();
   });
 });

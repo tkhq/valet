@@ -18,10 +18,10 @@ import * as piAi from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { linkIdentity } from "../channels/identity-links.js";
-import { agentInputPrompt, SHARED_ASSISTANT_INPUT_ERROR } from "./agent-files.js";
+import { agentInputPrompt, UNVERIFIED_INPUT_AUDIENCE_ERROR, SHARED_ASSISTANT_INPUT_ERROR } from "./agent-files.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage, workflowRunThreadKey } from "./engine-deps.js";
 import { eq } from "drizzle-orm";
-import { legacyAssistantRuntimes, legacyWorkflowRuntimes, legacyWorkflowAdmissions, assistants, orgs, sessionThreads, workflowDefinitions } from "../schema/index.js";
+import { legacyAssistantRuntimes, legacyWorkflowRuntimes, legacyWorkflowAdmissions, assistants, orgs, teamMembers, sessionThreads, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { ensureDefaultAssistantSession, loadAssistantBySessionId, resolveDefaultAssistant } from "../assistants/service.js";
@@ -479,6 +479,36 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     expect(await engineStore.listUnsettledSubmissions(root.sessionId)).toEqual([]);
   });
 
+  it("returns admitted receipt after actor loses team access without filesystem work", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { createTeam } = await import("../services/teams.js");
+    const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "Replay files", creatorUserId: LOCAL_USER.id });
+    const definition = { version: "dag/v1" as const, nodes: [], edges: [] };
+    const now = Date.now();
+    await db.insert(workflowDefinitions).values({ id: "replay-wf", orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "Replay", definition, createdAt: now, updatedAt: now });
+    await workflowStore.createRun("replay-files", { workflowId: "replay-wf", definitionVersionId: "v1" },
+      definition, "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    const options = { dispatchId: "workflow:replay-files:build", queueMode: "followup" as const,
+      ownerHint: { ownerType: "team", ownerId: team.id }, files: [{ path: "private.txt", content: "input" }] };
+    const receipt = await deps.promptOrchestrator("Read", options);
+    const session = engineHost.liveSession(receipt.sessionId);
+    const sandbox = session?.attachment.current();
+    if (!session || !sandbox) throw new Error("Missing input session");
+    await db.delete(teamMembers).where(eq(teamMembers.teamId, team.id));
+    const ready = vi.spyOn(session.attachment, "ensureReady");
+    const operations = [vi.spyOn(sandbox, "exec"), vi.spyOn(sandbox, "readFile"), vi.spyOn(sandbox, "readBinary"),
+      vi.spyOn(sandbox, "writeBinary"), vi.spyOn(sandbox, "stat"), vi.spyOn(sandbox, "rm"), vi.spyOn(sandbox, "readdir"), vi.spyOn(sandbox, "mkdir")];
+    await expect(deps.promptOrchestrator("Read", options)).resolves.toEqual(receipt);
+    expect(ready).not.toHaveBeenCalled();
+    for (const operation of operations) expect(operation).not.toHaveBeenCalled();
+    await expect(deps.promptOrchestrator("Read", { ...options, dispatchId: "workflow:replay-files:new" }))
+      .rejects.toMatchObject({ name: "AgentInputFileError", message: UNVERIFIED_INPUT_AUDIENCE_ERROR });
+    for (const operation of operations) expect(operation).not.toHaveBeenCalled();
+  });
+
   it("rejects a team Slack execution whose resource audience cannot be verified", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
@@ -495,7 +525,7 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
     await expect(deps.promptOrchestrator("Read", { dispatchId: `workflow:${runId}:build`, queueMode: "followup",
       ownerHint: { ownerType: "team", ownerId: team.id }, files: [{ path: "private.txt", content: "secret" }] }))
-      .rejects.toMatchObject({ name: "AgentInputFileError", message: SHARED_ASSISTANT_INPUT_ERROR });
+      .rejects.toMatchObject({ name: "AgentInputFileError", message: UNVERIFIED_INPUT_AUDIENCE_ERROR });
     const sessions = await engineStore.listSessions(LOCAL_USER.id);
     for (const session of sessions) {
       expect(await engineStore.listUnsettledSubmissions(session.id)).toEqual([]);

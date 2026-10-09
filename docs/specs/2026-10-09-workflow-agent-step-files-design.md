@@ -68,7 +68,8 @@ A one-time provisioning failure must leave an intent checkpoint and complete on 
 The existing intent checkpoint precedes input writes and prompt admission.
 The engine store exposes dispatch-admission lookup through its portable contract.
 Before admission, each attempt freely replaces files through same-filesystem reserved staging and atomic rename. This repairs partial transport writes.
-After admission, replay performs no filesystem checks, writes, sweep, readiness calls, or timestamp updates.
+After admission, file replay returns the receipt before target or audience checks. It does not reauthorize an existing turn.
+Replay performs no filesystem checks, writes, sweep, readiness calls, or timestamp updates. Lost team membership cannot trigger input cleanup for that turn.
 The host reconstructs the manifest in memory. Engine prompt admission remains the authority for prompt-content conflicts and returns the deduplicated receipt.
 Before attempting writes, the host reports the resolved session through an awaited `onInputTarget` callback.
 The executor records that session and `inputFilesAttempted` under the drive's attempt fence. The host never mutates workflow checkpoints.
@@ -81,13 +82,14 @@ After attention and origin reporting, the run-settled hook starts best-effort cl
 Cleanup uses only cached sessions with ready attachments. It never creates, restores, or wakes a sandbox.
 Run cleanup skips `wf:` sessions because the workflow sandbox reclaimer destroys them.
 Cleanup logs failures and never changes the node or run outcome.
-Timeout and signal-interrupted rename results retain normal drive retries. Real command failures settle the node with an actionable error.
+Timeout and signal-interrupted rename results retain normal drive retries. Real command failures settle the node with an actionable error. Resolved exit 126 is deterministic.
+Docker client transport/setup failures are provider rejections, not live-command results.
 Local `EISDIR` and `ERR_FS_EISDIR` errors use the same deterministic failure classification.
 Skipped cleanup emits a warning and the `valet.workflow.inputs.cleanup_skipped` counter, labeled by node/run scope and attachment state.
 Cleanup does not wake residual sandboxes. Inputs persist until a later write-time sweep or sandbox destruction.
 If the sandbox never receives files again, no write-time sweep runs. Retention is not a seven-day deletion deadline.
 Crash windows can miss cleanup. Each new input write scans up to `AGENT_INPUT_SWEEP_LIMIT` (100) sibling run directories.
-The scan rotates across siblings. It excludes the current run and preserves live siblings in the sandbox's organization and owner scope.
+The scan rotates across siblings. Its cursor advances only for visited candidates, including when the budget stops a small batch. It excludes the current run and preserves live siblings in the sandbox's organization and owner scope.
 The status lookup joins the run's definition and filters organization, owner type, and owner ID in the database.
 A foreign run counts as absent, even when its ID matches a sandbox directory. Its existence or state never changes retention.
 Only absent or settled runs with markers older than `AGENT_INPUT_RETENTION_MS` (7 days) can be removed.
@@ -96,15 +98,19 @@ Team execution sandboxes are conversation-scoped, not run-owned. They can outliv
 The workflow reclaimer destroys only `wf:` sandboxes. It does not destroy team executions at run settlement.
 The sweep lists names through one exec with a 64 KiB output cap and a one-second timeout. Truncated listings are skipped.
 Each marker read uses `head -c 32` with a 32-byte output cap and a one-second timeout. Invalid markers are preserved.
-The sweep checks a five-second budget before each candidate. Already-started status lookups and removals can finish after that budget.
-At most 100 candidates, 100 marker reads, 100 status lookups, and 200 removals occur per sweep.
+The sweep checks a five-second budget before each candidate. Already-started status lookups can finish after that budget.
+Each candidate removal uses one capped `rm -rf` exec for its input and staging trees, with a timeout of at most one second.
+At most 100 candidates, 100 marker reads, 100 status lookups, and 100 removal execs occur per sweep.
 Shell commands contain quoted paths only. No unbounded marker contents enter the API process. Duplicate admission never triggers sweeping.
-The `valet.workflow.inputs.sweep_skipped` counter records listing, marker, and budget skips. Warnings name the failed operation.
+The `valet.workflow.inputs.sweep_skipped` counter records listing, marker, budget, and removal skips, including removal timeouts. Warnings name the failed operation.
 This feature adds no reverse output-file interface.
 
 ## Audience isolation
 
 File delivery reuses `canAccessSessionResources` to verify the resolved execution's governing audience and ancestry.
+A proper team execution with failed resource access uses a distinct audience-verification error.
+Check the actor's team membership or channel privacy, or use a session step.
+Slack visibility exposes only a boolean. Transient Slack errors cannot be distinguished here, so unverified access remains fail-closed.
 The existing `isLegacyAssistantRuntime` predicate identifies retained shared team sandboxes, which are rejected even when legacy resource access permits them.
 Personal assistant roots and legacy shared team runtimes cannot receive orchestrator input files, regardless of DM ownership or sidebar archive state.
 Channel delivery can still reach an archived thread. Event authors also cannot prove the sandbox's full audience.

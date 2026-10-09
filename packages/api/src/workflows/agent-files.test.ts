@@ -213,7 +213,7 @@ describe("workflow sandbox input dispatch", () => {
   });
 
   it.each([
-    { exitCode: 124, timedOut: true }, { exitCode: 124 }, { exitCode: 125 }, { exitCode: 126 }, { exitCode: 137 },
+    { exitCode: 124, timedOut: true }, { exitCode: 124 }, { exitCode: 125 }, { exitCode: 137 },
   ])("retries interrupted rename result %j and recovers", async failure => {
     const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read", files: { "data.txt": "v1" } });
     const attempt = await h.createRun("rename-retry");
@@ -229,15 +229,15 @@ describe("workflow sandbox input dispatch", () => {
     expect(faux?.state.callCount).toBe(1);
   });
 
-  it("settles a real rename command failure even without stderr", async () => {
+  it.each([1, 126])("settles real rename exit %s even without stderr", async exitCode => {
     const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read", files: { "data.txt": "v1" } });
     const attempt = await h.createRun("rename-failed");
     const session = await ensureWorkflowSession(h.opts, "wf:rename-failed:build");
     const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
-    vi.spyOn(sandbox, "exec").mockResolvedValueOnce({ stdout: "", stderr: "", exitCode: 1 });
+    vi.spyOn(sandbox, "exec").mockResolvedValueOnce({ stdout: "", stderr: "", exitCode });
     expect((await h.drive("rename-failed", attempt)).outcome).toBe("failed");
     expect((await h.workflowStore.getCheckpoints("rename-failed")).find(cp => cp.nodeId === "build")?.error)
-      .toContain("Could not rename workflow input (exit 1): command failed without stderr");
+      .toContain(`Could not rename workflow input (exit ${exitCode}): command failed without stderr`);
   });
 
   it.each(["EISDIR", "ERR_FS_EISDIR"])("settles deterministic local directory error %s", async code => {
@@ -532,6 +532,55 @@ describe("workflow sandbox input dispatch", () => {
       expect(exec).toHaveBeenCalledTimes(1);
       expect(skipped).toHaveBeenCalledWith("budget");
     } finally { clock.mockRestore(); warn.mockRestore(); skipped.mockRestore(); }
+  });
+
+  it("bounds sweep removal and counts timeout results without failing delivery", async () => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
+    await h.createRun("remove-timeout");
+    const session = await ensureWorkflowSession(h.opts, "wf:remove-timeout:build");
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    const old = "/workspace/.valet/workflow-inputs/old";
+    await sandbox.mkdir(old);
+    await sandbox.writeFile(`${old}/.created-at`, "1");
+    const original = sandbox.exec.bind(sandbox);
+    const exec = vi.spyOn(sandbox, "exec").mockImplementation((command, opts) => command.startsWith("rm -rf")
+      ? Promise.resolve({ stdout: "", stderr: "", exitCode: 124, timedOut: true }) : original(command, opts));
+    const skipped = vi.spyOn(inputMetrics, "recordWorkflowInputSweepSkipped");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await writeAgentInputFiles(session, "/workspace", "Read", { dispatchId: "workflow:remove-timeout:build",
+        files: [{ path: "data.txt", content: "input" }] }, h.db);
+      expect(exec).toHaveBeenCalledWith(expect.stringContaining("rm -rf --"), { timeout: expect.any(Number), maxOutputBytes: 1024 });
+      expect(skipped).toHaveBeenCalledWith("removal");
+      expect(await sandbox.readFile(`${inputRoot("remove-timeout")}/data.txt`)).toBe("input");
+      expect((await sandbox.stat(old)).isDirectory).toBe(true);
+    } finally { skipped.mockRestore(); warn.mockRestore(); }
+  });
+
+  it("rotates past invalid markers when the budget stops a small batch early", async () => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
+    await h.createRun("rotate-budget");
+    const session = await ensureWorkflowSession(h.opts, "wf:rotate-budget:build");
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    const root = "/workspace/.valet/workflow-inputs";
+    for (let i = 0; i < 30; i++) await sandbox.mkdir(`${root}/a-${String(i).padStart(2, "0")}`);
+    await sandbox.mkdir(`${root}/z-old`);
+    await sandbox.writeFile(`${root}/z-old/.created-at`, "1");
+    const original = sandbox.exec.bind(sandbox);
+    let clock = 10_000;
+    vi.spyOn(sandbox, "exec").mockImplementation(async (command, opts) => {
+      clock += 250;
+      return original(command, opts);
+    });
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const scope = { orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id };
+      await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db, scope, AGENT_INPUT_RETENTION_MS + 10_000);
+      expect((await sandbox.stat(`${root}/z-old`)).isDirectory).toBe(true);
+      await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db, scope, AGENT_INPUT_RETENTION_MS + 10_000);
+      await expect(sandbox.stat(`${root}/z-old`)).rejects.toThrow("ENOENT");
+    } finally { now.mockRestore(); warn.mockRestore(); }
   });
 
   it("sweeps old sibling runs in bounded rotating batches and retains fresh/current inputs", async () => {

@@ -8,6 +8,8 @@ import { posix } from "node:path";
 
 export const SHARED_ASSISTANT_INPUT_ERROR = "Workflow input files cannot be delivered into a shared assistant sandbox. Use a session step for agent work that needs input files.";
 
+export const UNVERIFIED_INPUT_AUDIENCE_ERROR = "Workflow input audience could not be verified. Check the actor's team membership or channel privacy, or use a session step.";
+
 /** Crash windows can miss settlement cleanup. Bound that residual retention. */
 export const AGENT_INPUT_RETENTION_MS = 7 * 24 * 60 * 60_000;
 export const AGENT_INPUT_SWEEP_LIMIT = 100;
@@ -95,8 +97,9 @@ async function atomicWrite(sandbox: Sandbox, path: string, bytes: Uint8Array, st
     const result = await sandbox.exec(`mv -f -- ${quote(temporary)} ${quote(path)}`);
     // Providers reject dead-container/socket failures. Timeouts and signal
     // interruption can instead resolve as results (including k8s abort 124).
-    // Docker CLI setup failures use 125/126, not a live mv command's exit.
-    if (result.timedOut || (result.exitCode >= 124 && result.exitCode <= 126) || result.exitCode >= 128 || result.exitCode < 0) {
+    // Docker providers throw client transport/setup failures. A resolved 126
+    // is a real command execution failure, not a transport signal.
+    if (result.timedOut || (result.exitCode === 124 || result.exitCode === 125) || result.exitCode >= 128 || result.exitCode < 0) {
       throw new Error(`Workflow input rename did not complete (exit ${result.exitCode}${result.timedOut ? ", timed out" : ", interrupted"}). Retry the run.`);
     }
     if (result.exitCode !== 0) throw new AgentInputFileError(`Could not rename workflow input (exit ${result.exitCode}): ${result.stderr.trim() || "command failed without stderr"}. Check sandbox permissions and retry the run.`);
@@ -158,13 +161,15 @@ export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, 
     if (!names.length) return;
     const offset = (sweepOffsets.get(sandbox) ?? 0) % names.length;
     const count = Math.min(names.length, AGENT_INPUT_SWEEP_LIMIT);
-    sweepOffsets.set(sandbox, offset + count);
     for (let i = 0; i < count; i++) {
       if (Date.now() >= deadline) {
         recordWorkflowInputSweepSkipped("budget");
         console.warn("workflow input sweep stopped at its time budget");
         break;
       }
+      // Advance only for visited candidates. A budget stop must rotate even
+      // when the candidate count is smaller than the batch limit.
+      sweepOffsets.set(sandbox, offset + i + 1);
       const directory = posix.join(root, names[(offset + i) % names.length]);
       try {
         // Never buffer sandbox-controlled marker contents in the API.
@@ -178,8 +183,13 @@ export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, 
         if (Number.isFinite(createdAt) && createdAt > 0 && createdAt < now - AGENT_INPUT_RETENTION_MS) {
           const status = await scopedInputRunStatus(db, scope, names[(offset + i) % names.length]);
           if (!status || status === "settled") {
-            await sandbox.rm(directory, { recursive: true });
-            await sandbox.rm(posix.resolve(workspace, STAGING_ROOT, names[(offset + i) % names.length]), { recursive: true });
+            const staging = posix.resolve(workspace, STAGING_ROOT, names[(offset + i) % names.length]);
+            const removed = await sandbox.exec(`rm -rf -- ${quote(directory)} ${quote(staging)}`,
+              { timeout: Math.min(1_000, Math.max(1, deadline - Date.now())), maxOutputBytes: 1024 });
+            if (removed.timedOut || removed.exitCode !== 0) {
+              recordWorkflowInputSweepSkipped("removal");
+              throw new Error(`Workflow input sweep removal failed (exit ${removed.exitCode}${removed.timedOut ? ", timed out" : ""})`);
+            }
           }
         }
       } catch (err) {

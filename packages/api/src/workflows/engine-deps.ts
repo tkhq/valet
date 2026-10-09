@@ -31,7 +31,7 @@
  * than assuming the session `createSession` warmed is still cached.
  */
 
-import { agentInputPrompt, cleanupAgentInputFiles, logInputCleanupSkipped, SHARED_ASSISTANT_INPUT_ERROR, writeAgentInputFiles } from "./agent-files.js";
+import { agentInputPrompt, cleanupAgentInputFiles, logInputCleanupSkipped, UNVERIFIED_INPUT_AUDIENCE_ERROR, SHARED_ASSISTANT_INPUT_ERROR, writeAgentInputFiles } from "./agent-files.js";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import type { Usage } from "@earendil-works/pi-ai/compat";
@@ -656,6 +656,11 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         }
         ({ session, thread } = target);
       }
+      // Admission owns this dispatch. Replaying it must not reauthorize or
+      // fail a node whose existing turn can still be consuming its inputs.
+      const admitted = promptOpts.files?.length
+        ? await opts.engineStore.getSubmissionByDispatchId(session.id, promptOpts.dispatchId) : null;
+      if (admitted) return { sessionId: session.id, threadId: admitted.threadId, queueItemId: admitted.id };
       // `runId` as an attribute, so the client can render a link back to the
       // run instead of the bare signal type. `attributes` is flat and
       // string-valued by contract (`SignalContent`), and nothing set it
@@ -672,7 +677,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
           { ...data, ownerType: data.owner.type, ownerId: data.owner.id },
           principal.type === "team" && ctx.actorUserId === `team:${principal.id}`
             ? { type: "team", id: principal.id } : { type: "user", id: ctx.actorUserId });
-        if (!audienceAccess) throw new AgentInputFileError(SHARED_ASSISTANT_INPUT_ERROR);
+        if (!audienceAccess) throw new AgentInputFileError(UNVERIFIED_INPUT_AUDIENCE_ERROR);
       }
       const deliveredText = await deliverInputs(opts, session, promptText, promptOpts);
       const content: SignalContent = {

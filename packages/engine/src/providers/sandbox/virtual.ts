@@ -262,6 +262,13 @@ async function runVirtualCommand(
     };
   }
 
+  const remove = trimmed.match(/^rm -rf -- '([^']*)' '([^']*)'$/);
+  if (remove) {
+    await sb.rm(remove[1], { recursive: true });
+    await sb.rm(remove[2], { recursive: true });
+    return ok("");
+  }
+
   const headMatch = trimmed.match(/^head -c (\d+) -- '([^']*)'$/);
   if (headMatch) {
     try {

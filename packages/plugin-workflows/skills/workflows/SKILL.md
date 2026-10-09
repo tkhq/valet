@@ -99,16 +99,18 @@ A bounded sweep removes crash leftovers older than 7 days. Cleanup failures are 
 Shared legacy team sandboxes and unverifiable audiences cannot receive files. Use a session step.
 Provisioning, transport, and interrupted rename failures retain normal retries. Before admission, retries replace incomplete inputs atomically. Files stage in a reserved sibling tree on the same filesystem, outside user input paths.
 Staging cleanup recursively removes only lower-attempt directories. Node and run cleanup remove both trees.
-After admission, duplicate dispatch skips all file operations, even if the agent edited or deleted an input.
+After admission, duplicate dispatch returns the receipt before target or audience checks. It skips all file operations, even after access changes.
 Personal assistant roots never receive orchestrator files. Channel delivery can reach their shared sandbox even after sidebar archival.
 Use a session step instead. Team ownership is not sufficient if routing selects a legacy or shared runtime.
 The error is: "Workflow input files cannot be delivered into a shared assistant sandbox. Use a session step for agent work that needs input files."
-Known user-owned definitions receive the same error at save/patch time. Other routes must pass the runtime execution-scope check.
+A proper team execution can fail audience verification. Check the actor's team membership or channel privacy, or use a session step.
+Slack visibility errors remain fail-closed because the access check does not expose their cause.
+Known user-owned definitions receive the shared-sandbox error at save/patch time. Other routes must pass the runtime execution-scope check.
 Cleanup never wakes a sandbox. Skips emit a warning and `valet.workflow.inputs.cleanup_skipped`.
 Residual sweeps protect only live runs with the same org and owner. Foreign runs count as absent.
 Team executions can outlive a run, so residual sweeping remains. Only `wf:` sandboxes are reclaimed with their run.
-Sweeps cap listings at 64 KiB and marker reads at 32 bytes. They check a five-second budget before each candidate.
-The `valet.workflow.inputs.sweep_skipped` counter records listing, marker, and budget skips. Invalid metadata remains untouched.
+Sweeps cap listings at 64 KiB and marker reads at 32 bytes. They check a five-second budget before each candidate. Removal execs have a timeout of at most one second.
+The `valet.workflow.inputs.sweep_skipped` counter records listing, marker, budget, and removal skips, including removal timeouts. Invalid metadata remains untouched.
 Sweeps apply a seven-day floor to absent or settled runs. Without another file write, residual inputs persist until sandbox destruction.
 `llm` and `tool` nodes do not accept `files`.
 
