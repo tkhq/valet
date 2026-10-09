@@ -11,7 +11,9 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import type { Message } from "@valet/api/wire";
 import {
   SignalCard,
+  WatchEventsCard,
   childCardTitle,
+  groupWatchEvents,
   formatDurationSeconds,
   isLongBody,
   isWakeupSignal,
@@ -225,5 +227,46 @@ describe("SignalCard: wakeup signals (fix wave 2, H5)", () => {
     expect(formatDurationSeconds("45")).toBe("45s");
     expect(formatDurationSeconds("90000")).toBe("1d 1h");
     expect(formatDurationSeconds("x")).toBeUndefined();
+  });
+});
+
+describe("wakeup signal origin and watch event grouping (fix wave 3, UX)", () => {
+  function signalMessage(id: string, signalType: string, attributes: Record<string, string>, content: string, extra: Partial<Message> = {}): Message {
+    return baseMessage({ id, content, parts: [{ kind: "text", text: content }], signal: { signalType, attributes }, ...extra });
+  }
+
+  it("shows where a wakeup came from when the signal carries an origin", () => {
+    const message = signalMessage("o1", "timer.fired", { wakeupId: "wk_o", reason: "remind Alice" }, "Check the deploy.");
+    render(<SignalCard message={{ ...message, signal: { signalType: "timer.fired", attributes: { wakeupId: "wk_o", reason: "remind Alice" }, origin: { channelType: "slack" } } }} />);
+    expect(screen.getByText("from Slack")).toBeTruthy();
+  });
+
+  it("groups consecutive watch events of one watch, and absorbs quiet turns between them", () => {
+    const quiet = baseMessage({ id: "q1", role: "assistant", content: "", parts: [] });
+    const items = groupWatchEvents([
+      signalMessage("e1", "watch.event", { wakeupId: "wk_w", reason: "tail build" }, "line 1"),
+      quiet,
+      signalMessage("e2", "watch.event", { wakeupId: "wk_w", reason: "tail build" }, "line 2"),
+      signalMessage("e3", "watch.event", { wakeupId: "wk_other", reason: "other" }, "x"),
+      baseMessage({ id: "a1", role: "assistant", content: "The build is at 50%.", parts: [{ kind: "text", text: "The build is at 50%." }] }),
+      signalMessage("e4", "watch.event", { wakeupId: "wk_w", reason: "tail build" }, "line 3"),
+    ]);
+    expect(items.map((i) => (i.kind === "watch" ? `watch:${i.events.map((e) => e.id).join(",")}` : i.message.id))).toEqual([
+      "watch:e1,e2",
+      "e3",
+      "a1",
+      "e4",
+    ]);
+  });
+
+  it("renders a group as one card with the latest event, expandable to all", () => {
+    const events = [1, 2, 3].map((n) => signalMessage(`e${n}`, "watch.event", { wakeupId: "wk_w", reason: "tail build" }, `event ${n}`));
+    render(<WatchEventsCard events={events} />);
+    expect(screen.getByText("tail build")).toBeTruthy();
+    expect(screen.getByText("3 events")).toBeTruthy();
+    expect(screen.getByText("event 3")).toBeTruthy();
+    expect(screen.queryByText("event 1")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show all 3 events" }));
+    expect(screen.getByText("event 1")).toBeTruthy();
   });
 });
