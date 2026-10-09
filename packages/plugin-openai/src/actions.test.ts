@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import sharp from "sharp";
 import { MAX_IMAGE_BYTES } from "./images.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -342,8 +343,28 @@ describe("openaiPlugin", () => {
     await expect(getAction("openai.generate_image").execute({ prompt: "fox" }, ctx)).rejects.toThrow("oversized");
     const large = await sharp({ create: { width: 4097, height: 4096, channels: 3, background: "red" } }).png().toBuffer();
     mockFetch().mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ b64_json: large.toString("base64") }] })));
-    await expect(getAction("openai.generate_image").execute({ prompt: "fox" }, ctx)).rejects.toThrow("too large to decode");
+    await expect(getAction("openai.generate_image").execute({ prompt: "fox" }, ctx)).rejects.toThrow("resize it");
     expect(files.size).toBe(0);
+  });
+
+  it.each(["generate_image", "edit_image"])("%s preserves large files but bounds model attachments", async (action) => {
+    const original = await sharp(randomBytes(1536 * 1024 * 4), { raw: { width: 1536, height: 1024, channels: 4 } }).png().toBuffer();
+    expect(original.byteLength).toBeGreaterThan(5 * 1024 * 1024);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: original.toString("base64") }] })));
+    const { ctx, files } = makeCtx({ credential: { accessToken: "sk-test" }, files: new Map([["/workspace/in.png", PNG_BYTES]]) });
+    const result = await getAction(`openai.${action}`).execute({ prompt: "fox", output_path: "/workspace/large.png",
+      ...(action === "edit_image" ? { image_path: "/workspace/in.png" } : {}) }, ctx);
+    expect(result.success).toBe(true);
+    const saved = files.get("/workspace/large.png");
+    if (!saved) throw new Error("missing saved image");
+    expect(Buffer.from(saved).equals(original)).toBe(true);
+    const attachment = result.attachments?.[0];
+    if (attachment?.type !== "image") throw new Error("missing image attachment");
+    expect(attachment.data.byteLength).toBeLessThanOrEqual(5 * 1024 * 1024);
+    expect(attachment.mimeType).toBe("image/png");
+    const metadata = await sharp(attachment.data).metadata();
+    expect(metadata.width).toBe(1024);
+    expect(metadata.height).toBeLessThanOrEqual(1024);
   });
 
   it("uses the native binary's supplied Sharp runtime for validation", async () => {

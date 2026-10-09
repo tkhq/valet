@@ -16,6 +16,7 @@ const IMAGE_MODELS = [
 ] as const;
 const RESPONSES_MODELS = ["gpt-6.1-sol", "gpt-6-astra", "gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano"] as const;
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 1024 * 1024;
 const MAX_IMAGE_PIXELS = 4096 * 4096;
 const FORMATS = { png: { mime: "image/png", ext: "png" }, jpeg: { mime: "image/jpeg", ext: "jpg" }, webp: { mime: "image/webp", ext: "webp" } };
@@ -98,8 +99,21 @@ async function validateImage(bytes: Uint8Array, expectedFormat?: string): Promis
     await image.stats();
     return metadata.format;
   } catch {
-    throw new Error("The image is malformed, too large to decode, or has the wrong format. Supply a valid PNG, JPEG, or WebP image.");
+    throw new Error("The image is malformed, too large to decode, or has the wrong format. Use a valid PNG, JPEG, or WebP image. If it exceeds 16,777,216 pixels, resize it.");
   }
+}
+
+/** Keep the original file, but bound the preview replayed to the session model. */
+async function imageAttachment(bytes: Uint8Array, format: "png" | "jpeg" | "webp"): Promise<Uint8Array> {
+  if (bytes.byteLength <= MAX_ATTACHMENT_BYTES) return bytes;
+  const sharp = globalThis.__VALET_SHARP__ ?? (await import("sharp")).default;
+  const preview = new Uint8Array(await sharp(bytes, { failOn: "warning", limitInputPixels: MAX_IMAGE_PIXELS })
+    .resize({ width: 1024, height: 1024, fit: "inside", withoutEnlargement: true })
+    .toFormat(format).toBuffer());
+  if (!preview.length || preview.byteLength > MAX_ATTACHMENT_BYTES) {
+    throw new Error("Cannot create an image preview smaller than 5 MB. Request a smaller image.");
+  }
+  return preview;
 }
 
 async function readJson(res: Response, signal: AbortSignal): Promise<unknown> {
@@ -195,6 +209,7 @@ export async function executeImage(args: ImageArgs, ctx: PluginActionContext, ke
     throw new Error("OpenAI returned an unexpected output format. Retry with the requested PNG, JPEG, or WebP format.");
   }
   await validateImage(bytes, format);
+  const attachment = await imageAttachment(bytes, format);
   ctx.signal.throwIfAborted();
   try {
     await ctx.sandbox.mkdir(posix.dirname(path));
@@ -210,6 +225,6 @@ export async function executeImage(args: ImageArgs, ctx: PluginActionContext, ke
     data: { path, bytes: bytes.byteLength, mimeType: FORMATS[format].mime, model,
       ...(args.responses_model ? { responses_model: args.responses_model } : {}),
       ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {}) },
-    attachments: [{ type: "image", data: bytes, mimeType: FORMATS[format].mime, name: posix.basename(path) }],
+    attachments: [{ type: "image", data: attachment, mimeType: FORMATS[format].mime, name: posix.basename(path) }],
   };
 }
