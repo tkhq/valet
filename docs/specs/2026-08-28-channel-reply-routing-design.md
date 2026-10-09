@@ -337,22 +337,27 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   to the original channel thread. A manual settlement does not post
   automatically. It uses the same once-per-thread silence reminder as other
   manual turns. The child result itself does not post directly.
-  `child_send` from the parent thread that delegated the work, and restart
-  recovery, retain the stored origin. A `child_send` from another parent
-  thread changes the stored policy to `manual`, so that thread's context
-  never posts to the original channel thread automatically. The parent can
-  still reply there explicitly.
+  The watch stores the spawning origin in `origin_json`, which never
+  changes, because it also decides whether the child shares its transcript.
+  Reply-route state is a separate `reply_route` column. Null follows the
+  origin's own policy, `manual` downgrades the settlement to a manual reply,
+  and `none` sends the settlement with no origin.
+  A `child_send` from the parent thread that delegated the work, and restart
+  recovery, keep the route. A `child_send` from another parent thread sets
+  `reply_route` to `manual`, so that thread's context never posts to the
+  original channel thread automatically. The parent can still reply there
+  explicitly.
   The spawner and `child_send` stamp each child submission with parent
   delegation provenance (`metadata.parentDelegation`). Promotion copies
   metadata, so delegated work that a person sends now keeps it. The watcher
-  is the only owner of the route clear. When the watched submission is
-  superseded, the watcher follows its successor and clears the stored
-  origin only when the successor has no parent delegation provenance: a
+  is the only owner of the takeover decision. When the watched submission
+  is superseded, the watcher follows its successor and sets `reply_route`
+  to `none` only when the successor has no parent delegation provenance: a
   person took over the child. It does not read `author`, because a
   `child_send` names the steering member as its author. A followup, input on
   another child thread, and a rejected prompt never supersede the watched
-  submission, so they leave the origin intact. Parent-directed steering
-  retains the origin, including recovery after an interrupted `child_send`.
+  submission, so they leave the route intact. Parent-directed steering
+  keeps the route, including recovery after an interrupted `child_send`.
 - **Automatic child completion replies have durable delivery intents.** The
   watcher stores an intent before it submits `child.settled`. It stores the
   parent submission ID before it marks the watch settled. Restart recovery

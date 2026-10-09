@@ -355,7 +355,8 @@ CREATE TABLE "child_watches" (
 	"settled_at" bigint,
 	"sandbox_reclaimed_at" bigint,
 	"parked_sandbox_id" text,
-	"origin_json" text
+	"origin_json" text,
+	"reply_route" text
 );
 --> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");

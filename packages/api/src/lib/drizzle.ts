@@ -807,6 +807,13 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "origin_json" text',
   },
   {
+    // Reply-route state of a child watch. Null on older rows: those follow
+    // their stored origin's own reply policy.
+    describe: "child_watches.reply_route column",
+    probe: { kind: "column", table: "child_watches", column: "reply_route" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "reply_route" text',
+  },
+  {
     // The last delivered message ts on a followed thread, read by the
     // follow-router's gap re-hydration. Null on rows from before the column:
     // the next delivery starts tracking, with no back-hydration.

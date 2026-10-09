@@ -279,6 +279,20 @@ export function isParentDelegation(item: { metadata?: Record<string, unknown> } 
   return provenance !== null && typeof provenance === "object";
 }
 
+/**
+ * Reply-route state of a child watch (`child_watches.reply_route`). The
+ * stored origin never changes, because it also decides transcript sharing.
+ * Null follows the origin's own reply policy.
+ */
+export type ChildReplyRoute = "manual" | "none";
+
+/** The origin a settlement carries: the stored origin with its reply-route state applied. */
+function settlementOrigin(originJson: string | null, replyRoute: string | null): ChannelOrigin | undefined {
+  const origin = parseOriginJson(originJson);
+  if (origin === undefined || replyRoute === "none") return undefined;
+  return replyRoute === "manual" ? { ...origin, reply: "manual" } : origin;
+}
+
 /** The prompt options of a parent `child_send`. Tests use them to model the real sender. */
 export function childSendPromptOptions(
   ctx: { parentSessionId: string; actorUserId: string },
@@ -730,7 +744,10 @@ export class ChildWatcher {
     // pluggable contracts (the spawner's prompt-then-insert window is the
     // same shape).
     const rows = await this.deps.db
-      .select({ queueItemId: childWatches.queueItemId, settled: childWatches.settled, originJson: childWatches.originJson })
+      .select({
+        queueItemId: childWatches.queueItemId, settled: childWatches.settled,
+        originJson: childWatches.originJson, replyRoute: childWatches.replyRoute,
+      })
       .from(childWatches)
       .where(eq(childWatches.childSessionId, watch.childSessionId))
       .limit(1);
@@ -760,13 +777,13 @@ export class ChildWatcher {
       const successorItem = await this.deps.engineStore.getQueueItem(watch.childSessionId, successor);
       if (!successorItem) throw new Error(`Missing child successor submission ${successor}`);
       // A successor the parent did not delegate is a person taking over the
-      // child: a different task, so remove its external reply route durably.
-      // This watcher is the only owner of that decision. It reads the
-      // submission's provenance, because parent work also names an author.
-      const takeover = !isParentDelegation(successorItem);
+      // child: a different task, so it has no reply route. This watcher owns
+      // that decision. It reads the submission's provenance, because parent
+      // work also names an author. The stored origin never changes.
+      const replyRoute: ChildReplyRoute | null = !isParentDelegation(successorItem) ? "none" : null;
       await this.deps.db
         .update(childWatches)
-        .set({ queueItemId: successor, settled: false, ...(takeover ? { originJson: null } : {}) })
+        .set({ queueItemId: successor, settled: false, ...(replyRoute !== null ? { replyRoute } : {}) })
         .where(
           and(
             eq(childWatches.childSessionId, watch.childSessionId),
@@ -794,7 +811,7 @@ export class ChildWatcher {
           )
         : undefined;
 
-    const origin = parseOriginJson(row.originJson);
+    const origin = settlementOrigin(row.originJson, row.replyRoute);
     const replyId = namespaceInternalDispatchId(watch.childSessionId, `settled:${watch.childSessionId}:${watch.queueItemId}`);
     const automaticReply = origin !== undefined && origin.reply !== "manual";
     // Write the intent before the parent can finish. Dispatch-ID lookup recovers a lost receipt.
@@ -1188,7 +1205,7 @@ export async function resolveChildSettlement(
   parentSessionId: string,
 ): Promise<{ settled: boolean; lastActivityAt: number | null } | null> {
   const rows = await deps.db
-    .select({ settled: childWatches.settled, originJson: childWatches.originJson })
+    .select({ settled: childWatches.settled, originJson: childWatches.originJson, replyRoute: childWatches.replyRoute })
     .from(childWatches)
     .where(
       and(
@@ -1229,7 +1246,7 @@ export async function resolveChildSettlement(
   // window it names, not a silent invariant repair. Best-effort: a write
   // failure logs and never fails the read.
   // Channel watches remain recoverable until the watcher stores the parent receipt.
-  if (settled && rows[0].originJson === null) {
+  if (settled && settlementOrigin(rows[0].originJson, rows[0].replyRoute) === undefined) {
     try {
       await deps.db
         .update(childWatches)
@@ -1376,11 +1393,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // to its channel thread. Work continued from another parent thread can
     // carry that thread's context, so from then on the parent replies to the
     // channel thread only when it chooses to (`reply: "manual"`).
-    const origin = parseOriginJson(watchRow.originJson);
-    const keepsAutomaticReply = ctx.parentThreadId === watchRow.parentThreadId;
-    const downgradedOrigin = origin !== undefined && origin.reply !== "manual" && !keepsAutomaticReply
-      ? JSON.stringify({ ...origin, reply: "manual" })
-      : undefined;
+    const downgrade = watchRow.replyRoute === null && ctx.parentThreadId !== watchRow.parentThreadId;
 
     // Re-point BEFORE arming: the fresh watcher must find the row already
     // tracking its submission, and the stale watcher (if any) must find it
@@ -1393,7 +1406,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
         queueItemId: receipt.queueItemId,
         settled: false,
         dismissedAt: null,
-        ...(downgradedOrigin !== undefined ? { originJson: downgradedOrigin } : {}),
+        ...(downgrade ? { replyRoute: "manual" satisfies ChildReplyRoute } : {}),
       })
       .where(eq(childWatches.childSessionId, req.childSessionId));
 

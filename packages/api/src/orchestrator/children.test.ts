@@ -2595,8 +2595,14 @@ describe("buildChildSender", () => {
     expect(content.attributes?.outcome).toBe("completed");
     expect(content.origin).toEqual(humanTakeover ? undefined : { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" });
     const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-heal"));
-    expect(watch?.originJson === null).toBe(humanTakeover);
+    // The channel provenance never changes. Only the reply route records the takeover.
+    expect(watch?.originJson).toBe(JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }));
+    expect(watch?.replyRoute).toBe(humanTakeover ? "none" : null);
     expect(await db.select().from(childReplyDeliveries)).toHaveLength(humanTakeover ? 0 : 1);
+    // A rebuilt child is still a channel-started child with a shared transcript.
+    engineHost.evictCache("child-heal");
+    const rebuilt = await engineHost.sessionFor("child-heal", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    expect(rebuilt.options.sharedTranscript).toBe(true);
   });
 
   it("re-opens a failed reply intent when it admits the parent update", async () => {

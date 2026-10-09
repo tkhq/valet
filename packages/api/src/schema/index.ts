@@ -609,6 +609,11 @@ export const childWatches = pgTable(
     // child.settled signal so the settlement turn can reach the channel
     // that asked. Null for spawns from non-channel turns.
     originJson: text("origin_json"),
+    // Reply-route state, kept apart from the origin above, which never
+    // changes and also decides transcript sharing. Null: the origin's own
+    // reply policy. "manual": another parent thread continued the work.
+    // "none": a person took over the child.
+    replyRoute: text("reply_route"),
     // Display-state only: a dismissed watch leaves the thread tree. The
     // child session row and its history stay reachable from Sessions.
     dismissedAt: bigint("dismissed_at", { mode: "number" }),
