@@ -702,6 +702,19 @@ describe("1Password row", () => {
     expect(row.getByRole("button", { name: "Connect 1Password" })).toBeTruthy();
   });
 
+  // A member is the reader most likely to lack the 1Password permission
+  // that creating a service account needs, so the dialog this page opens
+  // names that permission and the alternative.
+  it("the setup dialog says what to ask an admin for when 1Password refuses", () => {
+    render(<ConnectedAccountsPage />);
+    const row = within(screen.getByRole("group", { name: "1Password" }));
+    fireEvent.click(row.getByRole("button", { name: "Connect 1Password" }));
+    const note = within(screen.getByRole("dialog")).getByText(/contact your administrator/i);
+    expect(note.textContent).toMatch(/permission to create and manage service accounts/i);
+    expect(note.textContent).toMatch(/a service account scoped to that vault alone/i);
+    expect(note.textContent).toMatch(/token sent to you privately/i);
+  });
+
   it("shows the connected state with Replace and Remove", () => {
     onePasswordSettings = { orgTokenConnected: true, personalTokenConnected: true };
     render(<ConnectedAccountsPage />);

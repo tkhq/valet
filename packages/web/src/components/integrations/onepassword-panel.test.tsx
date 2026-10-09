@@ -7,7 +7,7 @@
  * mutation it fires.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { OnePasswordSettingsResponse } from "@valet/api/wire";
 
@@ -69,6 +69,19 @@ describe("OnePasswordPanel", () => {
   it("admin with no token gets the connect control", () => {
     render(<OnePasswordPanel />);
     expect(screen.getByRole("button", { name: "Connect 1Password" })).toBeTruthy();
+  });
+
+  // The organization dialog carries the same refusal guidance as the
+  // personal one: holding the admin role here says nothing about holding
+  // the 1Password permission that creating a service account needs.
+  it("the admin's setup dialog says what to ask for when 1Password refuses", async () => {
+    const user = userEvent.setup();
+    render(<OnePasswordPanel />);
+    await user.click(screen.getByRole("button", { name: "Connect 1Password" }));
+    const note = within(screen.getByRole("dialog")).getByText(/contact your administrator/i);
+    expect(note.textContent).toMatch(/permission to create and manage service accounts/i);
+    expect(note.textContent).toMatch(/a service account scoped to that vault alone/i);
+    expect(note.textContent).toMatch(/token sent to you privately/i);
   });
 
   it("admin with a token connected gets the badge, Replace and Remove", () => {
