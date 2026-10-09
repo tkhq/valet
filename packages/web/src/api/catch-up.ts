@@ -40,11 +40,16 @@ export function useWaitingThreads(owner: OwnerFilter) {
   });
 }
 
-/** Marks a waiting thread done by archiving it. It leaves the list at once. */
+/**
+ * Marks a waiting thread done by archiving it. It leaves the list at once.
+ * A thread with background work comes back: the server refuses the archive
+ * (409 `background_work`) unless `force` is set, and the caller asks first.
+ */
 export function useFinishWaitingThread(owner: OwnerFilter) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (thread: { sessionId: string; threadId: string }) => api.patchThread(thread.threadId, { archived: true }),
+    mutationFn: (thread: { sessionId: string; threadId: string; force?: boolean }) =>
+      api.patchThread(thread.threadId, { archived: true, ...(thread.force ? { force: true } : {}) }),
     onMutate: (thread) => {
       qc.setQueryData<WaitingThreadsResponse>(qkCatchUp.waiting(owner), (current) => current && ({
         threads: current.threads.filter((row) => row.threadId !== thread.threadId),
