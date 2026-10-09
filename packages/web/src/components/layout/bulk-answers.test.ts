@@ -101,6 +101,21 @@ describe("planBulkAnswers warnings", () => {
   });
 });
 
+describe("planBulkAnswers thread gate risk", () => {
+  it("skips thread gates for high or critical risk tool calls", () => {
+    const plan = planBulkAnswers([], [
+      decision("risk-default", { provenance: { baseMode: "require_approval", source: "risk_default" } }),
+      decision("critical", { riskLevel: "critical", provenance: { baseMode: "require_approval", source: "org_policy" } }),
+      decision("high", { riskLevel: "high" }),
+      decision("medium", { riskLevel: "medium", provenance: { baseMode: "require_approval", source: "org_policy" } }),
+    ], "me");
+    expect(plan.targets.map(t => t.key)).toEqual(["decision:medium"]);
+    expect(plan.skipped.map(s => [s.key, s.reason])).toEqual([
+      ["decision:risk-default", "high_risk"], ["decision:critical", "high_risk"], ["decision:high", "high_risk"],
+    ]);
+  });
+});
+
 describe("workflowRequest", () => {
   const node: WorkflowTarget = { kind: "workflow", key: "k", title: "t", runId: "r", nodeId: "n", iteration: 3, policy: false };
   const policy: WorkflowTarget = { ...node, policy: true };

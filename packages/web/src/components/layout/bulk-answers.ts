@@ -64,6 +64,9 @@ function decisionSkipReason({ gate }: DecisionItem, meId: string | undefined): S
   if (approver) return approver;
   // The per-item card warns that the policy may have denied this action.
   if (gate.provenance?.source === "resolver_error") return "policy_check_failed";
+  // The per-item card shows the tool id and arguments; the dialog shows only
+  // the title. A risk_default gate opened because its risk is high or critical.
+  if (gate.provenance?.source === "risk_default" || gate.riskLevel === "high" || gate.riskLevel === "critical") return "high_risk";
   const ids = new Set(gate.actions.map(a => a.id));
   if (gate.oneShot !== true || !ids.has(ONE_TIME_APPROVE) || !ids.has(DENY)) return "not_one_shot";
   return undefined;

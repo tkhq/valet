@@ -1351,6 +1351,8 @@ export interface DecisionGate {
    * this one call and writes no grant. A bulk answer covers only these.
    * Absent on `ask_approval`, `sec_start`, and shared-account gates. */
   oneShot?: true;
+  /** The gated tool action's risk level, on tool approval gates only. */
+  riskLevel?: "low" | "medium" | "high" | "critical";
 }
 
 export interface DecisionResolution {

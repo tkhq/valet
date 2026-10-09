@@ -427,3 +427,21 @@ describe("engineGateToWire oneShot", () => {
     expect(engineGateToWire(gate({ oneShot: true })).oneShot).toBeUndefined();
   });
 });
+
+describe("engineGateToWire riskLevel", () => {
+  const gate = (context?: Record<string, unknown>): DecisionGate => ({
+    id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "k", ordinal: 0, type: "approval",
+    title: "Approve?", actions: [{ id: "approve", label: "Approve" }, { id: "deny", label: "Deny" }],
+    status: "pending", createdAt: 1, updatedAt: 1, ...(context ? { context } : {}),
+  });
+
+  it("carries the tool action's risk level", () => {
+    expect(engineGateToWire(gate({ tool_id: "github.delete_repo", riskLevel: "critical" })).riskLevel).toBe("critical");
+    expect(engineGateToWire(gate({ tool_id: "github.get_issue", riskLevel: "low" })).riskLevel).toBe("low");
+  });
+
+  it("omits an unknown level and gates without tool context", () => {
+    expect(engineGateToWire(gate({ tool_id: "github.get_issue", riskLevel: "extreme" })).riskLevel).toBeUndefined();
+    expect(engineGateToWire(gate({ riskLevel: "high" })).riskLevel).toBeUndefined();
+  });
+});
