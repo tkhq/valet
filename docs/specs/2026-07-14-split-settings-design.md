@@ -30,6 +30,8 @@ Does NOT cover: real login / identity providers (auth design pass, separate); in
 
 ## Routes & navigation
 
+> **Superseded 2026-10-08** by `2026-10-08-settings-redesign-design.md`: the rail lists every scope at once and no longer follows the workspace switcher. Team settings live at `/settings/teams/$teamId`.
+
 ```
 /settings                    → redirect to /settings/profile
 /settings/profile            YOU · Profile
@@ -150,9 +152,13 @@ Creating an org makes the creator its `org_members.role = "admin"`. First login 
 
 ### Narrow settings navigation (2026-09-11)
 
+> **Superseded 2026-10-08** by `2026-10-08-settings-redesign-design.md`: the rail lists every scope at once and no longer follows the workspace switcher. Team settings live at `/settings/teams/$teamId`.
+
 Below the small-screen breakpoint, each settings group uses a horizontal list so the selected page stays near the top. Navigation keeps the active link in view. Desktop retains the left rail and the same route and permission gates.
 
 ### Personal settings with a selected team (2026-09-14)
+
+> **Superseded 2026-10-08** by `2026-10-08-settings-redesign-design.md`: the rail lists every scope at once and no longer follows the workspace switcher. Team settings live at `/settings/teams/$teamId`.
 
 The settings rail keeps the You group visible when a team is selected. Profile,
 Appearance, Assistant, Notifications, and Connected accounts remain reachable.

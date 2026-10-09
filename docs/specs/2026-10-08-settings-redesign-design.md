@@ -88,6 +88,13 @@ Integrations becomes a list, like Claude's Connectors page:
 
 - Two groups: **Connected** and **Available**. Each row shows the icon, name,
   a one-line status, and its primary action on the right.
+- Connected holds a plugin that needs no key, and a plugin with a service
+  that the caller connected or the organization provides. Available holds
+  the rest.
+- A saved credential that no listed service covers, for example one left by
+  a removed plugin, gets a row with Revoke under **Other saved credentials**.
+  The removed Connected accounts list was the only Revoke control for such a
+  credential, so Integrations keeps one.
 - The details (pairing, account, tools and skills) open below the row.
 - A team or organization-provided connection shows its scope on the row.
 - The team view uses the same row and group components.
