@@ -23,11 +23,15 @@ afterEach(async () => {
 });
 
 function responseStream(id: string, item: Record<string, unknown>): Response {
+  const reasoning = { type: "reasoning", id: `rs_${id}`, summary: [{ type: "summary_text", text: "Create the requested image" }], encrypted_content: "fixture-encrypted-reasoning" };
+  const items = item.type === "image_generation_call" ? [reasoning, item] : [item];
   const events = [
     { type: "response.created", response: { id } },
-    { type: "response.output_item.added", output_index: 0, item },
-    { type: "response.output_item.done", output_index: 0, item },
-    { type: "response.completed", response: { id, status: "completed", output: [item],
+    ...items.flatMap((output, output_index) => [
+      { type: "response.output_item.added", output_index, item: output },
+      { type: "response.output_item.done", output_index, item: output },
+    ]),
+    { type: "response.completed", response: { id, status: "completed", output: items,
       usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } } } },
   ];
   return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
@@ -107,6 +111,9 @@ it("the selected OpenAI model generates and edits natively with sandbox files, l
     }
     expect(JSON.stringify(requests[2].input)).toContain(`data:image/png;base64,${b64}`);
     expect(JSON.stringify(requests[2].input)).toContain("generated-images/");
+    expect(JSON.stringify(requests[1].input)).not.toContain("rs_resp_1");
+    expect(JSON.stringify(requests[2].input)).not.toContain("rs_resp_1");
+    expect(JSON.stringify(requests[1].input)).not.toContain('"name":"openai_native_image"');
   } finally { ws.close(); }
 });
 

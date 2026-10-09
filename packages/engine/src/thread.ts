@@ -10,7 +10,7 @@ import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
 import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL } from "./native-images.js";
-import { bundledModel, supportsNativeImageGeneration } from "./model-catalog.js";
+import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
@@ -3796,6 +3796,7 @@ export class Thread {
     this.aborted = false;
     this.credentialError = undefined;
     this.turnAgentError = undefined;
+    this.nativeImages.beginTurn();
     // Per-turn: the next turn may hold a transcript compaction can help.
     this.turnCompactionBlocked = false;
     this.currentAssistantMessageId = undefined;
@@ -4221,6 +4222,8 @@ export class Thread {
     let fallbackExhausted = false;
 
     for (;;) {
+      // Recheck after every attempt: a retry can itself save a paid image.
+      if (this.nativeImages.savedInTurn) return;
       const last = this.agent.state.messages[this.agent.state.messages.length - 1];
       if (!last || last.role !== "assistant" || last.stopReason !== "error") return;
       const error = last.errorMessage ?? "";
@@ -4967,8 +4970,7 @@ export class Thread {
       streamFn: async (model, context, options) => {
         this.lastRequestModel = model;
         await this.persistSkillContextAttributions();
-        const runtimeModelContext = this.modelSystemPrompt(undefined, model) + (!this.runningItem?.author?.externalSender && supportsNativeImageGeneration(model)
-          ? "\nUse native image_generation to generate images and edit images already in context. Images are saved automatically and receipts return their paths. For an existing sandbox image not in context, use openai.edit_image. Do not call plugin image generation." : "");
+        const runtimeModelContext = this.modelSystemPrompt(undefined, model);
         const initialSystemIndex = context.messages.findIndex((message) => message.role === "system");
         const runtimeSystem = {
           role: "system" as const,
@@ -5109,7 +5111,7 @@ export class Thread {
     return {
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
-      nativeImageGeneration: !this.runningItem?.author?.externalSender && supportsNativeImageGeneration(this.lastRequestModel ?? this.agent.state.model),
+      nativeImageGeneration: !this.runningItem?.author?.externalSender && this.nativeImages.enabled(this.lastRequestModel ?? this.agent.state.model),
       userId: actorId,
       ...(this.runningItem?.author && !this.runningItem.author.externalSender &&
         runningContent !== undefined && !isSignalContent(runningContent) &&

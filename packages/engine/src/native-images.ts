@@ -6,16 +6,35 @@ import { decodeImageBase64, imageAttachment, imageDecoder, validateImage, IMAGE_
 import type { Sandbox, ToolDef, ToolResult } from "./types.js";
 
 export const NATIVE_IMAGE_RESULT_TOOL = "openai_native_image";
-const DUPLICATE_TOOLS = new Set(["openai__generate_image"]);
 const NATIVE_PATH = /^generated-images\/[a-f0-9-]+\.(png|jpg|webp)$/;
+const IMAGE_INSTRUCTIONS = "Use native image_generation to generate images and edit images already in context. Images are saved automatically and receipts return their paths. For an existing sandbox image not in context, use openai.edit_image. Do not call plugin image generation.";
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Only request-time image-tool access/availability errors qualify, not auth, quota, or stream errors. */
+function imageToolRejected(message: string): boolean {
+  return /\b(?:400|403|404|422)\b/.test(message)
+    && /image[_ -]generation|gpt-image-[\w.-]+/i.test(message)
+    && /not[_ ](?:supported|available|found)|unsupported|unavailable|does not (?:exist|support)|access|permission|model_not_found|must be verified/i.test(message)
+    && !/api[_ -]?key|authentication|quota|billing|rate[_ -]?limit/i.test(message);
+}
+
 /** One thread owns this bridge. The engine stores its results through ordinary tool persistence. */
 export class NativeImageBridge {
   private saved = new Map<string, ToolResult>();
+  private unavailable = false;
+  savedInTurn = false;
+
+  beginTurn(): void {
+    this.savedInTurn = false;
+    this.unavailable = false;
+  }
+
+  enabled(model: Model<Api>): boolean {
+    return !this.unavailable && supportsNativeImageGeneration(model);
+  }
 
   tool(): ToolDef {
     return {
@@ -28,6 +47,7 @@ export class NativeImageBridge {
         if (!record(args) || typeof args.path !== "string" || !NATIVE_PATH.test(args.path) || typeof args.image_id !== "string") {
           throw new Error("Invalid native image receipt. Request the image again.");
         }
+        this.savedInTurn = true;
         const key = `${args.image_id}:${args.path}`;
         const saved = this.saved.get(key);
         if (saved) { this.saved.delete(key); return saved; }
@@ -40,33 +60,65 @@ export class NativeImageBridge {
     };
   }
 
+  private receipt(bytes: Uint8Array, path: string, id: string, format: string, warning?: string): ToolResult {
+    return { text: JSON.stringify({ path, bytes: bytes.byteLength, mimeType: `image/${format}`, image_id: id, model: "gpt-image-2.5-sunburst", ...(warning ? { warning } : {}) }) };
+  }
+
   private async result(bytes: Uint8Array, path: string, id: string, signal?: AbortSignal): Promise<ToolResult> {
     const sharp = await imageDecoder();
     const format = await validateImage(bytes, sharp);
     if (format !== "png" && format !== "jpeg" && format !== "webp") throw new Error("Unsupported image format. Request PNG, JPEG, or WebP.");
     if (path.slice(path.lastIndexOf(".")) !== `.${IMAGE_FORMATS[format].ext}`) throw new Error("The saved image format differs from its filename. Request the image again.");
-    const preview = await imageAttachment(bytes, format, sharp);
-    signal?.throwIfAborted();
-    return {
-      text: JSON.stringify({ path, bytes: bytes.byteLength, mimeType: IMAGE_FORMATS[format].mime, image_id: id, model: "gpt-image-2.5-sunburst" }),
-      attachments: [{ type: "image", data: preview, mimeType: IMAGE_FORMATS[format].mime, name: path.slice(path.lastIndexOf("/") + 1) }],
-    };
+    const result = this.receipt(bytes, path, id, format);
+    try {
+      const preview = await imageAttachment(bytes, format, sharp);
+      signal?.throwIfAborted();
+      return { ...result, attachments: [{ type: "image", data: preview, mimeType: IMAGE_FORMATS[format].mime, name: path.slice(path.lastIndexOf("/") + 1) }] };
+    } catch {
+      return this.receipt(bytes, path, id, format, "Image saved without a preview. Use the saved original; do not regenerate it.");
+    }
   }
 
-  stream(model: Model<Api>, context: { messages: Message[] }, options: SimpleStreamOptions, sandbox: Sandbox, enabled = true) {
+  stream(model: Model<Api>, context: { messages: Message[] }, options: SimpleStreamOptions, sandbox: Sandbox, allowed = true) {
     this.saved.clear();
-    const native = enabled && supportsNativeImageGeneration(model);
-    // Execution-only receipts are never advertised to any model. Native models also lose pinned duplicates.
-    const hidden = (name: string) => name === NATIVE_IMAGE_RESULT_TOOL || (native && DUPLICATE_TOOLS.has(name));
-    const transcript: { messages: Message[] } = { messages: context.messages.map((message) => message.role === "system"
-      ? { ...message, toolsAdded: message.toolsAdded?.filter((tool) => !hidden(tool.name)), toolsRemoved: message.toolsRemoved?.filter((tool) => !hidden(tool.name)) }
-      : message) };
-    if (!native) return streamSimple(model, transcript, options);
-
+    // Pi preserves rs_* signatures but drops their following hosted image item. The image guide
+    // permits edits from image context alone. Omit this turn's reasoning, not unrelated reasoning.
+    const orphanedReasoning = new Set<string>();
+    const receiptCalls = new Set<string>();
+    for (const message of context.messages) {
+      if (message.role !== "assistant" || !message.content.some((block) => block.type === "toolCall" && block.name === NATIVE_IMAGE_RESULT_TOOL)) continue;
+      for (const block of message.content) {
+        if (block.type === "toolCall" && block.name === NATIVE_IMAGE_RESULT_TOOL) receiptCalls.add(block.id.split("|")[0]);
+        if (block.type !== "thinking" || !block.thinkingSignature) continue;
+        const signature: unknown = JSON.parse(block.thinkingSignature);
+        if (record(signature) && signature.type === "reasoning" && typeof signature.id === "string") orphanedReasoning.add(signature.id);
+      }
+    }
     const output = createAssistantMessageEventStream();
     const receipts: Array<{ path: string; image_id: string }> = [];
     const seen = new Map<string, string>();
     let partial: AssistantMessage | undefined;
+    const deliver = (message: AssistantMessage, interrupted: boolean) => {
+      // Once originals exist, turn a failed stream into receipts, not a retryable assistant error.
+      if (interrupted) {
+        this.unavailable = true;
+        for (const receipt of receipts) {
+          const key = `${receipt.image_id}:${receipt.path}`;
+          const result = this.saved.get(key);
+          if (result) this.saved.set(key, { ...result, text: JSON.stringify({ ...JSON.parse(result.text), stream_warning: "The image stream failed after saving this original. Use saved originals; do not regenerate them." }) });
+        }
+      }
+      delete message.errorMessage;
+      for (const receipt of receipts) {
+        const toolCall = { type: "toolCall" as const, id: `call_${crypto.randomUUID().replaceAll("-", "")}`, name: NATIVE_IMAGE_RESULT_TOOL, arguments: receipt };
+        const contentIndex = message.content.length;
+        message.content.push(toolCall);
+        output.push({ type: "toolcall_start", contentIndex, partial: message });
+        output.push({ type: "toolcall_end", contentIndex, toolCall, partial: message });
+      }
+      message.stopReason = "toolUse";
+      output.push({ type: "done", reason: "toolUse", message });
+    };
     const capture = async (item: unknown) => {
       if (!record(item) || item.type !== "image_generation_call") return;
       if (item.status !== "completed" || typeof item.id !== "string" || !item.id || item.id.length > 200) {
@@ -83,57 +135,100 @@ export class NativeImageBridge {
       if (format !== "png" && format !== "jpeg" && format !== "webp") throw new Error("Unsupported image format. Request PNG, JPEG, or WebP.");
       if (item.output_format != null && item.output_format !== format) throw new Error("OpenAI returned a mismatched image format. Request the image again.");
       const path = `generated-images/${crypto.randomUUID()}.${IMAGE_FORMATS[format].ext}`;
-      const result = await this.result(bytes, path, item.id, options.signal);
       options.signal?.throwIfAborted();
       try {
         await sandbox.mkdir("generated-images");
         options.signal?.throwIfAborted();
         await sandbox.writeBinary(path, bytes);
       } catch { options.signal?.throwIfAborted(); throw new Error("Cannot save the generated image. Check the sandbox storage and request it again."); }
-      options.signal?.throwIfAborted();
-      this.saved.set(`${item.id}:${path}`, result);
-      seen.set(item.id, hash);
+      // Register the original immediately. Preview work or a later abort cannot erase its receipt.
+      this.savedInTurn = true;
       receipts.push({ path, image_id: item.id });
+      seen.set(item.id, hash);
+      const key = `${item.id}:${path}`;
+      this.saved.set(key, this.receipt(bytes, path, item.id, format, "Image saved. Use the saved original; do not regenerate it."));
+      this.saved.set(key, await this.result(bytes, path, item.id, options.signal));
     };
-    const upstream = streamSimple(model, transcript, {
-      ...options,
-      onPayload: async (payload, requestModel) => {
-        const transformed = (await options.onPayload?.(payload, requestModel)) ?? payload;
-        if (!record(transformed)) throw new Error("Invalid Responses payload. Restart this turn.");
-        // Fail before any paid request if native image decoding is unavailable.
-        await imageDecoder();
-        return { ...transformed, tools: [...(Array.isArray(transformed.tools) ? transformed.tools : []),
-          { type: "image_generation", model: "gpt-image-2.5-sunburst", output_format: "png", quality: "auto" }] };
-      },
-      onProviderStreamEvent: async (event, requestModel) => {
-        await options.onProviderStreamEvent?.(event, requestModel);
-        if (!record(event)) return;
-        if (event.type === "response.output_item.done") await capture(event.item);
-        if (event.type === "response.completed" && record(event.response) && Array.isArray(event.response.output)) {
-          for (const item of event.response.output) await capture(item);
-        }
-      },
-    });
+    const request = (native: boolean) => {
+      let instructed = false;
+      const transcript: { messages: Message[] } = { messages: context.messages.map((message) => {
+        if (message.role !== "system") return message;
+        const hidden = (name: string) => name === NATIVE_IMAGE_RESULT_TOOL || (native && name === "openai__generate_image");
+        const addInstruction = native && !instructed;
+        instructed = true;
+        return { ...message, toolsAdded: message.toolsAdded?.filter((tool) => !hidden(tool.name)), toolsRemoved: message.toolsRemoved?.filter((tool) => !hidden(tool.name)),
+          ...(addInstruction ? { sections: { ...message.sections, "valet-native-images": IMAGE_INSTRUCTIONS } } : {}) };
+      }) };
+      let started = false;
+      const upstream = streamSimple(model, transcript, {
+        ...options,
+        onResponse: async (response, requestModel) => {
+          started = true;
+          await options.onResponse?.(response, requestModel);
+        },
+        onPayload: async (payload, requestModel) => {
+          const transformed = (await options.onPayload?.(payload, requestModel)) ?? payload;
+          if (!record(transformed)) throw new Error("Invalid Responses payload. Restart this turn.");
+          const replay = receiptCalls.size && Array.isArray(transformed.input)
+            ? { ...transformed, input: transformed.input.flatMap((item): unknown[] => {
+              if (!record(item)) return [item];
+              if (item.type === "reasoning" && typeof item.id === "string" && orphanedReasoning.has(item.id)) return [];
+              // Internal receipts are not provider function calls. Replay their text/vision as user context.
+              if (item.type === "function_call" && item.name === NATIVE_IMAGE_RESULT_TOOL) return [];
+              if (item.type === "function_call_output" && typeof item.call_id === "string" && receiptCalls.has(item.call_id)) {
+                return [{ role: "user", content: Array.isArray(item.output) ? item.output : [{ type: "input_text", text: item.output }] }];
+              }
+              return [item];
+            }) }
+            : transformed;
+          if (!native) return replay;
+          await imageDecoder();
+          return { ...replay, tools: [...(Array.isArray(transformed.tools) ? transformed.tools : []),
+            { type: "image_generation", model: "gpt-image-2.5-sunburst", output_format: "png", quality: "auto" }] };
+        },
+        onProviderStreamEvent: async (event, requestModel) => {
+          await options.onProviderStreamEvent?.(event, requestModel);
+          if (!native || !record(event)) return;
+          if (event.type === "response.output_item.done") await capture(event.item);
+          if (event.type === "response.completed" && record(event.response) && Array.isArray(event.response.output)) {
+            for (const item of event.response.output) await capture(item);
+          }
+        },
+      });
+      return { upstream, started: () => started };
+    };
+    let native = allowed && this.enabled(model);
+    let current = request(native);
     void (async () => {
       try {
-        for await (const event of upstream) {
-          if ("partial" in event) partial = event.partial;
-          if (event.type === "done" && receipts.length) {
-            options.signal?.throwIfAborted();
-            for (const receipt of receipts) {
-              const toolCall = { type: "toolCall" as const, id: `call_${crypto.randomUUID().replaceAll("-", "")}`, name: NATIVE_IMAGE_RESULT_TOOL, arguments: receipt };
-              const contentIndex = event.message.content.length;
-              event.message.content.push(toolCall);
-              output.push({ type: "toolcall_start", contentIndex, partial: event.message });
-              output.push({ type: "toolcall_end", contentIndex, toolCall, partial: event.message });
+        for (;;) {
+          let retryWithoutImages = false;
+          for await (const event of current.upstream) {
+            if ("partial" in event) partial = event.partial;
+            if (event.type === "error") partial = event.error;
+            if (event.type === "error" && native && !current.started() && !options.signal?.aborted && !receipts.length && imageToolRejected(event.error.errorMessage ?? "")) {
+              this.unavailable = true;
+              retryWithoutImages = true;
+              break;
             }
-            event.message.stopReason = "toolUse";
-            output.push({ type: "done", reason: "toolUse", message: event.message });
-          } else output.push(event);
+            if ((event.type === "done" || event.type === "error") && receipts.length) {
+              const message = event.type === "done" ? event.message : event.error;
+              if (options.signal?.aborted) {
+                message.errorMessage = `Image originals saved at ${receipts.map((receipt) => receipt.path).join(", ")}. The turn was aborted. Use these files; do not regenerate them.`;
+                output.push({ type: "error", reason: "aborted", error: { ...message, stopReason: "aborted" } });
+              } else deliver(message, event.type === "error");
+            } else output.push(event);
+          }
+          if (!retryWithoutImages) break;
+          native = false;
+          current = request(false);
         }
       } catch (error) {
-        if (partial) output.push({ type: "error", reason: options.signal?.aborted ? "aborted" : "error",
-          error: { ...partial, stopReason: options.signal?.aborted ? "aborted" : "error", errorMessage: error instanceof Error ? error.message : "Image delivery failed. Request the image again." } });
+        if (partial && receipts.length && !options.signal?.aborted) deliver(partial, true);
+        else if (partial) output.push({ type: "error", reason: options.signal?.aborted ? "aborted" : "error",
+          error: { ...partial, stopReason: options.signal?.aborted ? "aborted" : "error", errorMessage: receipts.length
+            ? `Image originals saved at ${receipts.map((receipt) => receipt.path).join(", ")}. Use these files; do not regenerate them.`
+            : error instanceof Error ? error.message : "Image delivery failed. Request the image again." } });
       } finally {
         output.end();
         seen.clear();

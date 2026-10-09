@@ -80,6 +80,19 @@ describe("sandbox-backed image preview", () => {
     expect(screen.getByRole("img").getAttribute("src")).toBe("data:image/png;base64,aGVsbG8=");
   });
 
+  it("shows a saved native path even when its preview failed", () => {
+    setToolCardDefault("always-collapsed");
+    const native = message("generate_image", "completed");
+    const part = native.parts[0];
+    if (part.kind !== "tool_call") throw new Error("missing tool call");
+    part.toolName = "openai_native_image";
+    part.result = { text: JSON.stringify({ path: "generated-images/saved.png", warning: "Image saved without a preview. Use the saved original; do not regenerate it." }) };
+    render(tree(native));
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(screen.getByText("generated-images/saved.png")).toBeTruthy();
+    expect(screen.getByText(/do not regenerate it/)).toBeTruthy();
+  });
+
   it("smart policy auto-collapse does not hide the finished image", () => {
     const view = render(tree(message("generate_image", "running", false)));
     view.rerender(tree(message("generate_image", "completed")));

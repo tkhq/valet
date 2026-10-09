@@ -102,16 +102,18 @@ function Preview({ args, result, status, error, toolName }: ToolRendererProps) {
   const action = openaiActionId(args, toolName);
   if (action !== "openai.generate_image" && action !== "openai.edit_image" && action !== "openai.native_image") return null;
   const imageUrl = imageDataUrl(result);
-  if (!imageUrl) return null;
   const data = openaiResultData(result);
+  if (!imageUrl && typeof data.path !== "string") return null;
   const prompt = openaiParams(args, toolName).prompt;
   return (
     <figure className="space-y-2">
-      <img
+      {imageUrl ? <img
         src={imageUrl}
         alt={typeof prompt === "string" ? prompt : "generated image"}
         className="max-h-96 max-w-full rounded border border-line object-contain"
-      />
+      /> : null}
+      {typeof data.warning === "string" ? <p className="text-xs text-muted">{data.warning}</p> : null}
+      {typeof data.stream_warning === "string" ? <p className="text-xs text-muted">{data.stream_warning}</p> : null}
       {typeof data.path === "string" ? (
         <figcaption className="break-all font-mono text-xs text-muted">{data.path}</figcaption>
       ) : null}

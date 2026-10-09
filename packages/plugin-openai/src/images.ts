@@ -74,8 +74,11 @@ function validateArgs(args: ImageArgs) {
 }
 
 async function readJson(res: Response, signal: AbortSignal): Promise<unknown> {
-  const body = await readResponseBytes(res, MAX_RESPONSE_BYTES, signal);
-  if (!body.ok) throw new Error("OpenAI returned an oversized image response. Request a smaller output.");
+  const body = await readResponseBytes(res, res.ok ? MAX_RESPONSE_BYTES : 64 * 1024, signal);
+  if (!body.ok) {
+    if (!res.ok) return undefined;
+    throw new Error("OpenAI returned an oversized image response. Request a smaller output.");
+  }
   try { return JSON.parse(new TextDecoder().decode(body.data)); }
   catch {
     if (!res.ok) return undefined;
@@ -95,6 +98,9 @@ function returnedImage(body: unknown) {
 /** Direct Images API fallback for models without native image generation. */
 export async function executeImage(args: ImageArgs, ctx: PluginActionContext, key: string, apiUrl: string): Promise<PluginActionResult> {
   ctx.signal.throwIfAborted();
+  if (ctx.sessionPurpose === "workflow") {
+    throw new Error("Image generation needs a session sandbox. Run this action in an agent session, not a workflow tool node.");
+  }
   const { model, format, path, options } = validateArgs(args);
   const sharp = await imageDecoder();
   let source: Uint8Array | undefined;
@@ -127,11 +133,19 @@ export async function executeImage(args: ImageArgs, ctx: PluginActionContext, ke
     endpoint = "/v1/images/generations";
     body = JSON.stringify({ ...options, prompt: args.prompt, n: 1 });
   }
+  // Fail before spending credits if this invocation has no usable sandbox.
+  await ctx.sandbox.mkdir(posix.dirname(path));
+  ctx.signal.throwIfAborted();
   const res = await fetch(`${apiUrl}${endpoint}`, {
     method: "POST", headers: { authorization: `Bearer ${key}`, ...(typeof body === "string" ? { "content-type": "application/json" } : {}) },
     body, signal: ctx.signal,
   });
-  const json = await readJson(res, ctx.signal);
+  let json: unknown;
+  try { json = await readJson(res, ctx.signal); }
+  catch (error) {
+    ctx.signal.throwIfAborted();
+    if (res.ok) throw error;
+  }
   if (!res.ok) {
     const detail = record(json) && record(json.error) && typeof json.error.message === "string"
       ? json.error.message.replaceAll(key, "[redacted]").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]").slice(0, 600) : "";
@@ -145,12 +159,11 @@ export async function executeImage(args: ImageArgs, ctx: PluginActionContext, ke
   const attachment = await imageAttachment(bytes, format, sharp);
   ctx.signal.throwIfAborted();
   try {
-    await ctx.sandbox.mkdir(posix.dirname(path));
-    ctx.signal.throwIfAborted();
     await ctx.sandbox.writeBinary(path, bytes);
-  } catch {
+  } catch (cause) {
     ctx.signal.throwIfAborted();
-    throw new Error(`Cannot save the image at ${path}. Use a writable file path inside /workspace.`);
+    const reason = cause instanceof Error ? cause.message.replaceAll(key, "[redacted]").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]") : "Sandbox write failed";
+    throw new Error(`Cannot save the image at ${path}: ${reason}. Use a writable file path inside /workspace.`);
   }
   ctx.signal.throwIfAborted();
   return {

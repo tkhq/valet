@@ -107,6 +107,34 @@ describe("openaiPlugin", () => {
     ]);
   });
 
+  it("refuses workflow image generation before any paid request", async () => {
+    const { ctx } = makeCtx({ credential: { accessToken: "sk-test" } });
+    ctx.sessionPurpose = "workflow";
+    ctx.sandbox.mkdir = async () => { throw new Error("sandbox unavailable in workflow action invocation"); };
+    await expect(getAction("openai.generate_image").execute({ prompt: "fox" }, ctx)).rejects.toThrow("session sandbox");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves sandbox preparation errors before spending credits", async () => {
+    const { ctx } = makeCtx({ credential: { accessToken: "sk-test" } });
+    ctx.sandbox.mkdir = async () => { throw new Error("sandbox unavailable in this invocation"); };
+    await expect(getAction("openai.generate_image").execute({ prompt: "fox" }, ctx)).rejects.toThrow("sandbox unavailable in this invocation");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("includes HTTP status when a capped error response is oversized", async () => {
+    const { ctx } = makeCtx({ credential: { accessToken: "sk-test" } });
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) { controller.enqueue(new Uint8Array(65 * 1024)); },
+      cancel() { cancelled = true; },
+    });
+    fetchMock.mockResolvedValue(new Response(body, { status: 429 }));
+    const result = await getAction("openai.generate_image").execute({ prompt: "fox" }, ctx);
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining("429") });
+    expect(cancelled).toBe(true);
+  });
+
   it("generate_image saves the PNG and returns an image attachment", async () => {
     mockFetch().mockResolvedValue(
       new Response(JSON.stringify({ data: [{ b64_json: PNG_B64, revised_prompt: "a red fox" }] }), { status: 200 }),
@@ -280,7 +308,7 @@ describe("openaiPlugin", () => {
     mockFetch().mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: PNG_B64 }] })));
     const { ctx } = makeCtx({ credential: { accessToken: "sk-test" } });
     ctx.sandbox.writeBinary = async () => { throw new Error("disk full"); };
-    await expect(getAction("openai.generate_image").execute({ prompt: "fox" }, ctx)).rejects.toThrow("Use a writable file path");
+    await expect(getAction("openai.generate_image").execute({ prompt: "fox" }, ctx)).rejects.toThrow("disk full");
   });
 
   it("propagates abort before fetching and before writing", async () => {

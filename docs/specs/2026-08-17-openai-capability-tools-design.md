@@ -80,7 +80,30 @@ The plugin has no `responses_model` parameter or Responses code path.
 
 Native generation uses the existing provider's host-side auth. It does not resolve another credential or start another model.
 Untrusted external-sender turns do not receive the native hosted tool.
-Requests preserve existing sampling, retry, timeout, and abort settings.
+Requests preserve existing sampling, timeout, and abort settings.
+A request-time 400, 403, 404, or 422 error naming image-tool access or availability triggers one request without the hosted tool.
+That turn uses plugin generation, including catalog and pinned tools. Authentication, quota, unrelated model errors, and stream errors do not trigger this fallback.
+The next turn can try native generation again.
+
+### Saved originals and failed streams
+
+The adapter writes validated original bytes before making the preview. It registers the receipt as soon as the write completes.
+If the preview fails, the receipt returns the saved path and a warning instead of asking for another paid generation.
+The web renderer keeps that path visible without a preview.
+If a later stream event fails, completed images still produce receipts with a stream warning.
+An abort after saving reports the paths in its error. A turn that saved an image cannot use transient-turn retries or provider fallback.
+
+### Responses replay
+
+Pi-ai replays reasoning signatures but does not replay their following hosted image items.
+The payload hook omits reasoning from native-image turns and converts internal receipt function pairs into ordinary text/vision user context.
+It preserves unrelated reasoning and ordinary assistant phases. The next request contains no orphaned image-turn reasoning or fabricated receipt function pair.
+The [image guide](https://developers.openai.com/api/docs/guides/image-generation) supports edits from image inputs without prior reasoning.
+The [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) requires complete output when preserving reasoning; this adapter does not preserve image-turn reasoning.
+A scripted SSE test includes reasoning and checks the exact next-turn input sequence.
+
+No live OpenAI validation was done. The owner chose to skip it.
+Replay and organization-access behavior are mitigated by scripted tests, not live-verified.
 
 ## Shared output validation
 
@@ -97,7 +120,10 @@ Native receipts can recover from an interrupted turn by reading the saved file, 
 
 Relative input and output paths stay relative to the sandbox working directory, including on LocalSandbox.
 Absolute container paths must resolve inside `/workspace`. Sandbox providers retain their own isolation and filesystem policy.
-The fallback response reader bounds bytes before JSON parsing. Input size is checked before and after the sandbox read.
+The fallback response reader bounds bytes before JSON parsing. Error bodies are capped at 64 KB and retain their HTTP status.
+Workflow tool nodes have no session sandbox and refuse image generation before any paid request.
+Other invocations prepare the target directory before the request. Sandbox preparation failures retain their real cause.
+Input size is checked before and after the sandbox read.
 The plugin does not retry paid image requests automatically. Provider errors redact credential values.
 
 Durable transcript images and sandbox files are separate outputs. Sandbox files follow the session's storage lifecycle.
