@@ -72,7 +72,8 @@ Wire event types are listed in
 | `/api/plugins` | GET | Installed plugins and their capabilities |
 | `/api/credentials` | GET / POST / DELETE | Integration credentials (manual entry) |
 | `/api/credentials/...connect` | GET/POST | OAuth connect flow (per-service, driven by plugin credential declarations) |
-| `/api/me/github` | — | GitHub App user-OAuth connect |
+| `/api/me/github` | — | GitHub App user-OAuth connect. Alias of `/api/plugins/github/http/connection` |
+| `/api/plugins/:name/http/*` | varies | Authenticated routes that a plugin declares |
 | `/api/me/identity-links` | GET / DELETE | Chat identity links (e.g. Telegram) + link codes |
 | `/api/repos` | GET | Repos available for session binding |
 
@@ -88,7 +89,7 @@ Wire event types are listed in
 | `/api/org` | GET / PATCH | Org settings (admin) |
 | `/api/org/invites` | GET / POST / DELETE | Invites (admin) |
 | `/api/org/llm-providers` | GET / POST / DELETE | BYO LLM provider keys (admin) |
-| `/api/org/github-app` | — | GitHub App manifest setup (admin) |
+| `/api/org/github-app` | — | GitHub App manifest setup (admin). Alias of `/api/plugins/github/http/app` |
 | `/api/org/sources/health` | GET | Org cache bytes, registry capacity, reserve status, and recent push failures (admin) |
 | `/api/org/sources` | GET / POST / PATCH / DELETE | Sandbox image sources and their bakes (admin) |
 | `/api/admin` | — | Operator submission surface (admin) |
@@ -101,7 +102,8 @@ Wire event types are listed in
 | `/api/auth-config` | GET | Which auth methods the login page should show |
 | `/mcp` | ALL | MCP endpoint (streamable HTTP, OAuth Bearer) |
 | `/api/channels/:channelType/webhook` | POST | Channel webhook ingress |
-| `/webhooks/github-app` | POST | GitHub App events |
+| `/webhooks/github-app` | POST | GitHub App events. Alias of `/plugins/github/http/webhook` |
+| `/plugins/:name/http/*` | varies | Public routes that a plugin declares |
 | `/api/sandbox/git-credential` | — | Git credential helper callback (sandbox token) |
 
 Errors are JSON. Anything else under `/` serves the web client's static build

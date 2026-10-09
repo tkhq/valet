@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import githubPlugin from "@valet/plugin-github/plugin";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { githubInstallations } from "../schema/index.js";
 import type { GetReposResponse, PostGithubAppManifestResponse } from "../wire/types.js";
@@ -107,7 +108,7 @@ function rawRepo(overrides: Record<string, unknown>): Record<string, unknown> {
 
 describe("GET /api/repos", () => {
   it("soft-empties when nothing is configured (no App, no personal connection)", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await fetch(`${api.baseUrl}/api/repos`, { headers: HEADERS });
     expect(res.status).toBe(200);
     const body = (await res.json()) as GetReposResponse;
@@ -115,7 +116,7 @@ describe("GET /api/repos", () => {
   });
 
   it("unions installation + personal repos, dedupes by fullName (installation wins), sorts by updatedAt desc", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({
       listInstallations: () => ({ body: [] }),
       convertManifest: () => ({
@@ -176,7 +177,7 @@ describe("GET /api/repos", () => {
   });
 
   it("soft-degrades when the installation-repositories call fails: still 200, partial results", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({
       listInstallations: () => ({ body: [] }),
       convertManifest: () => ({
@@ -212,7 +213,7 @@ describe("GET /api/repos", () => {
   });
 
   it("soft-degrades a single failing installation among several: still 200, partial results from the healthy one", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({
       listInstallations: () => ({ body: [] }),
       convertManifest: () => ({
@@ -258,7 +259,7 @@ describe("GET /api/repos", () => {
   });
 
   it("falls back to the org-owned PAT for personal-tier listing when the user has no connection", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({
       listUserRepos: () => ({ body: [rawRepo({ id: 5, full_name: "org/pat-repo", updated_at: "2026-01-02T00:00:00Z" })] }),
     });
@@ -274,7 +275,7 @@ describe("GET /api/repos", () => {
   });
 
   it("never leaks token material into the response body", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({
       listInstallations: () => ({ body: [] }),
       convertManifest: () => ({

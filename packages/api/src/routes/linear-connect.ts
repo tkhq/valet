@@ -44,9 +44,8 @@ import { orgs, linearInstallations } from "../schema/index.js";
 
 export const linearConnectRouter = new Hono<AppEnv>();
 
-/** Same fallback `github-app.ts`'s manifest route uses: the configured
- * public URL when there is one, else the request's own origin (local dev /
- * tests, where the API is reached directly). */
+/** The configured public URL when there is one, else the request's own
+ * origin (local dev / tests, where the API is reached directly). */
 function apiBase(c: Context<AppEnv>): string {
   return publicUrlFromEnv(process.env) ?? new URL(c.req.url).origin;
 }

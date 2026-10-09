@@ -125,14 +125,14 @@ async function postWebhook(baseUrl: string, event: string, payload: unknown, sig
 
 describe("GET /api/org/github-app", () => {
   it("403s for a non-admin org member", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: MEMBER_HEADERS });
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "org admin required" });
   });
 
   it("reports unconfigured with an empty installations list and manual webhook mode", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
     expect(res.status).toBe(200);
     const body = (await res.json()) as GetGithubAppResponse;
@@ -146,7 +146,7 @@ describe("GET /api/org/github-app", () => {
   });
 
   it("reports public webhook mode when VALET_PUBLIC_URL is set", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     process.env.VALET_PUBLIC_URL = "https://valet.example.com";
     const res = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
     const body = (await res.json()) as GetGithubAppResponse;
@@ -156,7 +156,7 @@ describe("GET /api/org/github-app", () => {
 
 describe("POST /api/org/github-app/manifest", () => {
   it("403s for a non-admin org member", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await fetch(`${api.baseUrl}/api/org/github-app/manifest`, {
       method: "POST",
       headers: MEMBER_HEADERS,
@@ -166,7 +166,7 @@ describe("POST /api/org/github-app/manifest", () => {
   });
 
   it("builds a manual-mode manifest (no VALET_PUBLIC_URL): empty default_events, inactive placeholder hook", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await fetch(`${api.baseUrl}/api/org/github-app/manifest`, {
       method: "POST",
       headers: HEADERS,
@@ -199,7 +199,7 @@ describe("POST /api/org/github-app/manifest", () => {
   });
 
   it("permission/event overrides replace the defaults verbatim, bad levels 400", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await fetch(`${api.baseUrl}/api/org/github-app/manifest`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -252,7 +252,7 @@ describe("POST /api/org/github-app/manifest", () => {
   });
 
   it("routes an org target to the organization app-creation URL", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await fetch(`${api.baseUrl}/api/org/github-app/manifest`, {
       method: "POST",
       headers: HEADERS,
@@ -265,13 +265,13 @@ describe("POST /api/org/github-app/manifest", () => {
 
 describe("GET /api/org/github-app/setup", () => {
   it("400s when code or state is missing", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await fetch(`${api.baseUrl}/api/org/github-app/setup?code=abc`, { redirect: "manual" });
     expect(res.status).toBe(400);
   });
 
   it("400s on a tampered state", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const state = await fetchManifestState(api.baseUrl);
     const tampered = `${state.slice(0, -1)}${state.endsWith("A") ? "B" : "A"}`;
     const res = await fetch(
@@ -283,7 +283,7 @@ describe("GET /api/org/github-app/setup", () => {
   });
 
   it("409s when GitHub rejects the manifest code", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({ convertManifest: () => ({ status: 404, body: { message: "not found" } }) });
     const state = await fetchManifestState(api.baseUrl);
     const res = await fetch(
@@ -294,7 +294,7 @@ describe("GET /api/org/github-app/setup", () => {
   });
 
   it("502s when GitHub's conversion endpoint 5xxs", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({ convertManifest: () => ({ status: 503, body: { message: "unavailable" } }) });
     const state = await fetchManifestState(api.baseUrl);
     const res = await fetch(
@@ -305,7 +305,7 @@ describe("GET /api/org/github-app/setup", () => {
   });
 
   it("exchanges the code, saves the app config with no secrets ever surfaced, and runs discovery", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const { fixture: f } = await setupConfiguredOrg(api.baseUrl, {
       listInstallations: () => ({
         body: [{ id: 111, account: { login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
@@ -333,7 +333,7 @@ describe("GET /api/org/github-app/setup", () => {
   });
 
   it("accepts a webhook-less conversion (webhook_secret: null) — the no-public-URL path", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     await setupConfiguredOrg(api.baseUrl, {
       convertManifest: () => ({
         body: {
@@ -381,14 +381,14 @@ describe("POST /api/org/github-app/credential", () => {
   }
 
   it("403s for a non-admin org member", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await postCredential(api.baseUrl, { appId: "4242", privateKey: TEST_PEM }, MEMBER_HEADERS);
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "org admin required" });
   });
 
   it("saves a pasted credential, fills the app fields from GitHub, and reports it configured", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const f = useFixture({
       getApp: () => ({ body: APP_RECORD }),
       listInstallations: () => ({
@@ -431,7 +431,7 @@ describe("POST /api/org/github-app/credential", () => {
   });
 
   it("never echoes the pasted secrets back, on the save reply or on a later read", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({ getApp: () => ({ body: APP_RECORD }) });
 
     const res = await postCredential(api.baseUrl, {
@@ -453,7 +453,7 @@ describe("POST /api/org/github-app/credential", () => {
   });
 
   it("accepts a base64-encoded private key, the same as the environment fallback", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({ getApp: () => ({ body: APP_RECORD }) });
 
     const res = await postCredential(api.baseUrl, {
@@ -466,7 +466,7 @@ describe("POST /api/org/github-app/credential", () => {
   });
 
   it("refuses a key GitHub rejects, and stores nothing", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({ getApp: () => ({ status: 401, body: { message: "A JSON web token could not be decoded" } }) });
 
     const res = await postCredential(api.baseUrl, { appId: "999", privateKey: TEST_PEM });
@@ -487,7 +487,7 @@ describe("POST /api/org/github-app/credential", () => {
   });
 
   it("refuses a private key that is not a PEM without calling GitHub", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const f = useFixture({ getApp: () => ({ body: APP_RECORD }) });
 
     const res = await postCredential(api.baseUrl, { appId: "4242", privateKey: "not a key at all" });
@@ -498,7 +498,7 @@ describe("POST /api/org/github-app/credential", () => {
   });
 
   it("refuses a missing app id or private key, naming both fields", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await postCredential(api.baseUrl, {});
     expect(res.status).toBe(400);
     const { error } = (await res.json()) as { error: string };
@@ -511,7 +511,7 @@ describe("POST /api/org/github-app/credential", () => {
   });
 
   it("falls back to the supplied slug and client id when GitHub reports neither", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({ getApp: () => ({ body: { id: 4242, name: "Existing App", permissions: {}, events: [] } }) });
 
     const res = await postCredential(api.baseUrl, {
@@ -528,7 +528,7 @@ describe("POST /api/org/github-app/credential", () => {
   });
 
   it("refuses when GitHub reports no slug and none was supplied", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({ getApp: () => ({ body: { id: 4242, name: "Existing App", permissions: {}, events: [] } }) });
 
     const res = await postCredential(api.baseUrl, { appId: "4242", privateKey: TEST_PEM });
@@ -537,7 +537,7 @@ describe("POST /api/org/github-app/credential", () => {
   });
 
   it("a pasted credential shadows the environment fallback, the same as the manifest flow", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     setEnvApp();
     useFixture({ getApp: () => ({ body: APP_RECORD }) });
 
@@ -551,7 +551,7 @@ describe("POST /api/org/github-app/credential", () => {
   });
 
   it("the stored credential works: the webhook verifies against the pasted secret", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({ getApp: () => ({ body: APP_RECORD }) });
     expect(
       (await postCredential(api.baseUrl, { appId: "4242", privateKey: TEST_PEM, webhookSecret: "pasted-webhook-secret" }))
@@ -585,13 +585,13 @@ describe("POST /api/org/github-app/credential", () => {
 
 describe("POST /api/org/github-app/refresh", () => {
   it("403s for a non-admin org member", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await fetch(`${api.baseUrl}/api/org/github-app/refresh`, { method: "POST", headers: MEMBER_HEADERS });
     expect(res.status).toBe(403);
   });
 
   it("re-runs discovery and returns the refreshed list", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     let installations: unknown[] = [];
     await setupConfiguredOrg(api.baseUrl, { listInstallations: () => ({ body: installations }) });
 
@@ -606,13 +606,13 @@ describe("POST /api/org/github-app/refresh", () => {
 
 describe("DELETE /api/org/github-app", () => {
   it("403s for a non-admin org member", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await fetch(`${api.baseUrl}/api/org/github-app`, { method: "DELETE", headers: MEMBER_HEADERS });
     expect(res.status).toBe(403);
   });
 
   it("removes the config and every installation row, degrading gracefully (no refusal)", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     await setupConfiguredOrg(api.baseUrl, {
       listInstallations: () => ({
         body: [{ id: 111, account: { login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
@@ -636,7 +636,7 @@ describe("DELETE /api/org/github-app", () => {
 
 describe("GITHUB_APP_* env fallback (admin routes)", () => {
   it("GET reports the env app as configured with source environment", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     setEnvApp();
     const res = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
     expect(res.status).toBe(200);
@@ -654,7 +654,7 @@ describe("GITHUB_APP_* env fallback (admin routes)", () => {
   });
 
   it("an app saved through the manifest flow shadows the env fallback (source org)", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     setEnvApp();
     await setupConfiguredOrg(api.baseUrl);
     const res = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
@@ -664,7 +664,7 @@ describe("GITHUB_APP_* env fallback (admin routes)", () => {
   });
 
   it("refresh discovers installations with the env app", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     setEnvApp();
     useFixture({
       listInstallations: () => ({
@@ -679,7 +679,7 @@ describe("GITHUB_APP_* env fallback (admin routes)", () => {
   });
 
   it("DELETE removes installation rows but cannot remove the env config (still configured)", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     setEnvApp();
     const delRes = await fetch(`${api.baseUrl}/api/org/github-app`, { method: "DELETE", headers: HEADERS });
     expect(delRes.status).toBe(204);
@@ -708,7 +708,7 @@ describe("POST /webhooks/github-app", () => {
   }
 
   it("403s on a bad signature", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
     const payload = { action: "suspend", installation: { id: 999, account: { login: "acme", type: "Organization" } } };
     const badSig = signWebhookBody(JSON.stringify(payload), `${webhookSecret}-wrong`);
@@ -717,7 +717,7 @@ describe("POST /webhooks/github-app", () => {
   });
 
   it("403s with no signature header at all", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     await setupConfiguredOrg(api.baseUrl);
     const res = await fetch(`${api.baseUrl}/webhooks/github-app`, {
       method: "POST",
@@ -728,7 +728,7 @@ describe("POST /webhooks/github-app", () => {
   });
 
   it("204s and ignores unknown event types", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
     const payload = { hello: "world" };
     const sig = signWebhookBody(JSON.stringify(payload), webhookSecret);
@@ -737,7 +737,7 @@ describe("POST /webhooks/github-app", () => {
   });
 
   it("flips suspended=true on installation.suspend, suspended=false on installation.unsuspend", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
     await seedInstallationRow();
 
@@ -759,7 +759,7 @@ describe("POST /webhooks/github-app", () => {
   });
 
   it("removes the row on installation.deleted", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
     await seedInstallationRow();
 
@@ -773,7 +773,7 @@ describe("POST /webhooks/github-app", () => {
   });
 
   it("re-derives repositorySelection and touches updatedAt on installation_repositories", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
     await seedInstallationRow({ repositorySelection: "all", updatedAt: 1_000 });
 
@@ -792,7 +792,7 @@ describe("POST /webhooks/github-app", () => {
   });
 
   it("upserts a new row via discovery on installation.created", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
       listInstallations: () => ({
         body: [{ id: 555, account: { login: "newco", type: "Organization" }, repository_selection: "all", suspended_at: null }],
@@ -814,7 +814,7 @@ describe("POST /webhooks/github-app", () => {
   // skipped on the reasoning that it often has no App installation; true, and
   // it only moves that source's next poll forward.
   it("a push marks every matching source due and syncs none inline", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
     const orgSource = await createContentSource(
       api.providers.db,
@@ -855,7 +855,7 @@ describe("POST /webhooks/github-app", () => {
   });
 
   it("204s with no app configured anywhere", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const payload = { action: "suspend", installation: { id: 1 } };
     const res = await postWebhook(api.baseUrl, "installation", payload, "sha256=irrelevant");
     expect(res.status).toBe(204);
@@ -984,7 +984,7 @@ describe("POST /webhooks/github-app", () => {
   });
 
   it("routes by installation row and verifies with the env secret when only the env fallback is configured", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     setEnvApp();
     await api.providers.db.insert(githubInstallations).values({
       id: "ghi_env",
@@ -1010,7 +1010,7 @@ describe("POST /webhooks/github-app", () => {
   });
 
   it("routes to the deployment's org when the env fallback has no matching installation row yet", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     setEnvApp();
     useFixture({
       listInstallations: () => ({
@@ -1027,7 +1027,7 @@ describe("POST /webhooks/github-app", () => {
   });
 
   it("413s a body over the 1 MiB cap", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     await setupConfiguredOrg(api.baseUrl);
     const big = "a".repeat(1_048_577);
     const res = await fetch(`${api.baseUrl}/webhooks/github-app`, {

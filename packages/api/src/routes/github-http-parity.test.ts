@@ -1,6 +1,7 @@
 /**
- * Route parity for the GitHub HTTP surface. Each case pins the status and
- * body that a legacy URL answers. The deeper behavior suites (`github-app.test.ts`,
+ * Route parity for the GitHub HTTP surface. Each case runs against the legacy
+ * URL and the canonical plugin URL, so both answer with the same status and
+ * body. The deeper behavior suites (`github-app.test.ts`,
  * `github-connect.test.ts`) exercise the legacy URLs only.
  */
 import { afterEach, describe, expect, it } from "vitest";
@@ -72,8 +73,23 @@ const LEGACY: Record<RouteId, string> = {
   webhook: "/webhooks/github-app",
 };
 
+const CANONICAL: Record<RouteId, string> = {
+  "app-status": "/api/plugins/github/http/app",
+  "app-manifest": "/api/plugins/github/http/app/manifest",
+  "app-setup": "/api/plugins/github/http/app/setup",
+  "app-credential": "/api/plugins/github/http/app/credential",
+  "app-refresh": "/api/plugins/github/http/app/refresh",
+  "app-disconnect": "/api/plugins/github/http/app",
+  connect: "/api/plugins/github/http/connection/connect",
+  "org-status": "/api/plugins/github/http/connection/org-status",
+  callback: "/api/plugins/github/http/connection/callback",
+  disconnect: "/api/plugins/github/http/connection",
+  webhook: "/plugins/github/http/webhook",
+};
+
 const SURFACES = [
   { name: "legacy", url: LEGACY },
+  { name: "canonical", url: CANONICAL },
 ] as const;
 
 function sign(body: string | Uint8Array, secret: string): string {
@@ -158,6 +174,19 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
     const rows = await api.providers.db.select({ ownerId: credentials.ownerId }).from(credentials)
       .where(and(eq(credentials.ownerType, "org"), eq(credentials.service, "github_app")));
     expect(rows).toEqual([{ ownerId: "local-org" }]);
+  });
+
+  it("reaches no capability for a non-admin or an oversized body", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const f = useFixture({ getApp: () => ({ body: { id: 4242, slug: "existing-app" } }) });
+    const body = JSON.stringify({ appId: "4242", privateKey: TEST_PEM });
+    expect((await call("app-credential", { method: "POST", headers: MEMBER, body })).status).toBe(403);
+    expect((await call("app-credential", { method: "POST", headers: ADMIN, body: JSON.stringify({ appId: "4242", privateKey: TEST_PEM, pad: "x".repeat(64 * 1024) }) })))
+      .toEqual({ status: 413, body: { error: "payload too large" } });
+    expect(f.calls).toEqual([]);
+    const rows = await api.providers.db.select({ ownerId: credentials.ownerId }).from(credentials)
+      .where(eq(credentials.service, "github_app"));
+    expect(rows).toEqual([]);
   });
 
   it("refuses a connect state minted for another user without calling GitHub", async () => {

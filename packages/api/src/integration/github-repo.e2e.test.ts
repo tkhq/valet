@@ -43,6 +43,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { bootTestApi, type TestApi } from "./_setup.js";
+import githubPlugin from "@valet/plugin-github/plugin";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
@@ -140,7 +141,7 @@ describe("GitHub/repo integration — full API loop e2e (fixture)", () => {
     // The action-invoke-level seam needs a REAL `credentialResolver` wired
     // through the full API boot — see `_setup.ts`'s `githubTokenDeps` option
     // doc comment.
-    api = await bootTestApi({ githubTokenDeps: { key: deriveSecretKey("test-key") } });
+    api = await bootTestApi({ plugins: [githubPlugin], githubTokenDeps: { key: deriveSecretKey("test-key") } });
 
     // ── 1. Manifest mint ─────────────────────────────────────────────────
     const manifestRes = await fetch(`${api.baseUrl}/api/org/github-app/manifest`, {

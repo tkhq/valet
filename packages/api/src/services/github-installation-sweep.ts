@@ -58,7 +58,7 @@
  *
  * ── Candidate set (a limit inherited, not introduced) ────────────────────
  * `discoverInstallations(deps, orgId)` files EVERY installation under the org
- * it is called for — the single-org limitation `routes/github-app.ts`
+ * it is called for — the single-org limitation `plugins/http-github.ts`
  * documents. Sweeping every org on one environment-supplied App would repeat
  * identical GitHub calls and give each org a full copy of the list. So the
  * candidate set is: orgs with a `github_app` credential row, plus orgs that

@@ -7,6 +7,7 @@ import { listTeamShares, shareCredential } from "../services/credential-shares.j
 import { afterEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import githubPlugin from "@valet/plugin-github/plugin";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { credentials, githubInstallations, orgs } from "../schema/index.js";
 import { createTeam } from "../services/teams.js";
@@ -68,13 +69,13 @@ async function configureOrgApp(baseUrl: string): Promise<void> {
 
 describe("POST /api/me/github/connect", () => {
   it("409s when no GitHub App is configured for the org", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await fetch(`${api.baseUrl}/api/me/github/connect`, { method: "POST", headers: HEADERS });
     expect(res.status).toBe(409);
   });
 
   it("returns the App authorize URL with a signed state once the App is configured", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture();
     await configureOrgApp(api.baseUrl);
 
@@ -102,7 +103,7 @@ describe("GET /api/me/github/org-status", () => {
   }
 
   it("reports no App before an admin sets one up, matching the 409 from /connect", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     expect(await readStatus(api.baseUrl)).toEqual({
       configured: false,
       installationCount: 0,
@@ -111,7 +112,7 @@ describe("GET /api/me/github/org-status", () => {
   });
 
   it("reports an App that nobody installed yet — the state people get stuck in", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture();
     await configureOrgApp(api.baseUrl);
 
@@ -124,7 +125,7 @@ describe("GET /api/me/github/org-status", () => {
   });
 
   it("counts the installations, and how many of them GitHub suspended", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const now = Date.now();
     await api.providers.db.insert(githubInstallations).values([
       {
@@ -159,7 +160,7 @@ describe("GET /api/me/github/org-status", () => {
   });
 
   it("answers a member, where the detail read is admin-only", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture();
     await configureOrgApp(api.baseUrl);
 
@@ -172,7 +173,7 @@ describe("GET /api/me/github/org-status", () => {
   });
 
   it("gives members a personal install URL without app details", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture();
     await configureOrgApp(api.baseUrl);
 
@@ -187,7 +188,7 @@ describe("GET /api/me/github/org-status", () => {
   });
 
   it("does not give members a personal install URL when the org disables it", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture();
     await configureOrgApp(api.baseUrl);
     await api.providers.db
@@ -205,13 +206,13 @@ describe("GET /api/me/github/org-status", () => {
 
 describe("GET /api/me/github/callback", () => {
   it("400s when code or state is missing", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     const res = await fetch(`${api.baseUrl}/api/me/github/callback?code=abc`, { redirect: "manual" });
     expect(res.status).toBe(400);
   });
 
   it("400s on a tampered state", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture();
     await configureOrgApp(api.baseUrl);
 
@@ -228,7 +229,7 @@ describe("GET /api/me/github/callback", () => {
   });
 
   it("400s when the state's userId doesn't match the authenticated caller", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture();
     await configureOrgApp(api.baseUrl);
 
@@ -247,7 +248,7 @@ describe("GET /api/me/github/callback", () => {
   });
 
   it("exchanges the code, saves the credential with login + expiresAt, and redirects", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({
       oauthAccessToken: () => ({
         body: {
@@ -286,7 +287,7 @@ describe("GET /api/me/github/callback", () => {
   });
 
   it("returns an Integrations GitHub reconnect to Integrations after replacing an unhealthy token", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({
       oauthAccessToken: () => ({ body: { access_token: "replacement-token", token_type: "bearer" } }),
       getUser: () => ({ body: { login: "octouser", id: 99 } }),
@@ -321,7 +322,7 @@ describe("GET /api/me/github/callback", () => {
   });
 
   it("ignores an unsafe GitHub connect post-auth destination", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({
       oauthAccessToken: () => ({ body: { access_token: "connect-access-token", token_type: "bearer" } }),
       getUser: () => ({ body: { login: "octouser", id: 99 } }),
@@ -345,7 +346,7 @@ describe("GET /api/me/github/callback", () => {
   });
 
   it("overwrites a prior identity-only social-login credential (repo-capable after connect)", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({
       oauthAccessToken: () => ({ body: { access_token: "connect-access-token", token_type: "bearer" } }),
       getUser: () => ({ body: { login: "octouser", id: 99 } }),
@@ -374,7 +375,7 @@ describe("GET /api/me/github/callback", () => {
   });
 
   it("re-links a matching installation's linkedUserId after connect", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({
       oauthAccessToken: () => ({ body: { access_token: "connect-access-token", token_type: "bearer" } }),
       getUser: () => ({ body: { login: "octouser", id: 99 } }),
@@ -413,7 +414,7 @@ describe("GET /api/me/github/callback", () => {
 
 describe("DELETE /api/me/github", () => {
   it("deletes the user credential and clears linkedUserId on matching installations, 204", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
 
     await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
       type: "oauth2",
@@ -451,7 +452,7 @@ describe("DELETE /api/me/github", () => {
   // decision 4). This route deletes the same user row `DELETE
   // /api/credentials/github` does, so it cascades the same way.
   it("deletes the team references delegated from the user's github connection", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
     await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
       type: "oauth2",
       accessToken: "connect-access-token",
@@ -472,7 +473,7 @@ describe("DELETE /api/me/github", () => {
 
 describe("GET /api/credentials — GitHub connect health surfacing", () => {
   it("surfaces expiresAt/login/identityOnly/refreshFailedAt without any secret material", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [githubPlugin] });
 
     await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
       type: "oauth2",

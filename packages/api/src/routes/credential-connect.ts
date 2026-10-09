@@ -1,6 +1,6 @@
 /**
  * Generic integration OAuth connect (docs/specs/2026-07-20-integration-oauth-design.md).
- * Server-side flow modeled on routes/github-connect.ts: HMAC-signed
+ * Server-side flow modeled on the GitHub connect routes: HMAC-signed
  * stateless state (lib/oauth-state.ts) carrying the PKCE verifier, code
  * exchange server-side, tokens straight into the credential store — never
  * through the browser. GitHub is excluded (dedicated App flow).

@@ -22,6 +22,20 @@ interface LegacyRoute {
  */
 const LEGACY_ROUTES: Readonly<Record<string, Readonly<Record<string, LegacyRoute>>>> = {
   linear: { events: { path: '/webhooks/events/linear', method: 'POST', auth: 'signature' } },
+  github: {
+    // Existing GitHub Apps store the setup, callback, and webhook URLs.
+    'app-status': { path: '/api/org/github-app', method: 'GET', auth: 'org-admin' },
+    'app-manifest': { path: '/api/org/github-app/manifest', method: 'POST', auth: 'org-admin' },
+    'app-setup': { path: '/api/org/github-app/setup', method: 'GET', auth: 'user' },
+    'app-credential': { path: '/api/org/github-app/credential', method: 'POST', auth: 'org-admin' },
+    'app-refresh': { path: '/api/org/github-app/refresh', method: 'POST', auth: 'org-admin' },
+    'app-disconnect': { path: '/api/org/github-app', method: 'DELETE', auth: 'org-admin' },
+    connect: { path: '/api/me/github/connect', method: 'POST', auth: 'user' },
+    'org-status': { path: '/api/me/github/org-status', method: 'GET', auth: 'user' },
+    callback: { path: '/api/me/github/callback', method: 'GET', auth: 'user' },
+    disconnect: { path: '/api/me/github', method: 'DELETE', auth: 'user' },
+    webhook: { path: '/webhooks/github-app', method: 'POST', auth: 'public' },
+  },
   slack: {
     // Installed Slack apps call this URL for Events API and interactivity deliveries.
     events: { path: '/api/channels/slack/webhook', method: 'POST', auth: 'public' },

@@ -305,4 +305,4 @@ such as `Error: Invalid input` as text.
 
 ## Plugin HTTP routes
 
-The [HTTP interfaces design](2026-10-07-plugin-http-interfaces-design.md) defines `ValetPlugin.httpRoutes`. The host owns authentication, namespace assignment, and streaming body limits. Linear webhook ingress uses this interface. Existing connection handlers and other providers remain unchanged.
+The [HTTP interfaces design](2026-10-07-plugin-http-interfaces-design.md) defines `ValetPlugin.httpRoutes`. The host owns authentication, namespace assignment, and streaming body limits. Linear webhook ingress uses this interface. GitHub's App setup, user connection, and App webhook routes use it with capabilities from the host binding table. Other connection handlers and providers remain unchanged.

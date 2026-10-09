@@ -2,8 +2,8 @@
  * HMAC-signed `state` string helpers, shared by every GitHub App flow that
  * needs to hand a browser-redirect callback a tamper/expiry-checked payload
  * without server-side session storage: the app-manifest setup callback
- * (GitHub/repo integration plan Task 5, `routes/github-app.ts`) and the
- * user App-OAuth connect callback (Task 6, `routes/github-connect.ts`).
+ * and the user App-OAuth connect callback. The GitHub plugin owns both
+ * routes; `plugins/http-github.ts` signs and verifies their state here.
  * Extracted here once a second caller needed the identical
  * sign-a-small-JSON-payload/verify-signature-and-expiry shape — a third
  * caller should reuse this too rather than hand-rolling a fourth copy.
