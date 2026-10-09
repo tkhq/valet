@@ -223,6 +223,60 @@ describe("buildWakeupsSeam", () => {
     expect(result.eof).toBe(true);
   });
 
+  it("readLog throws naming the id when it does not resolve to an active wakeup", async () => {
+    const store = new InMemorySessionStore();
+    const sandbox = fakeSandbox();
+    const seam = buildWakeupsSeam(
+      { engineStore: store, limits: LIMITS, now: () => NOW },
+      "session-1",
+      () => fakeSession(sandbox),
+    );
+
+    await expect(seam.readLog("wk_doesnotexist", 0, 4096)).rejects.toThrow(
+      "[process_read] wk_doesnotexist is not an active wakeup. Call wakeup_list to see active ids.",
+    );
+  });
+
+  it("readLog throws when the id is a timer, which has no log", async () => {
+    const store = new InMemorySessionStore();
+    const sandbox = fakeSandbox();
+    const seam = buildWakeupsSeam(
+      { engineStore: store, limits: LIMITS, now: () => NOW },
+      "session-1",
+      () => fakeSession(sandbox),
+    );
+
+    const { wakeup } = await seam.create("thread-1", { kind: "timer", prompt: "ping", fireAt: NOW + 1000 });
+
+    await expect(seam.readLog(wakeup.id, 0, 4096)).rejects.toThrow(
+      `[process_read] ${wakeup.id} is a timer and has no log. Only a background process or watch has a log.`,
+    );
+  });
+
+  it("readLog throws when the sandbox backend cannot read background logs", async () => {
+    const store = new InMemorySessionStore();
+    const sandbox = fakeSandbox({
+      execJob: vi.fn().mockResolvedValue({ execId: "exec-6" } satisfies ExecJobHandle),
+      pollJob: undefined,
+    });
+    const seam = buildWakeupsSeam(
+      { engineStore: store, limits: LIMITS, now: () => NOW },
+      "session-1",
+      () => fakeSession(sandbox),
+    );
+
+    const { wakeup } = await seam.create("thread-1", {
+      kind: "process",
+      command: "echo hi",
+      reason: "r",
+      deadlineHours: 1,
+    });
+
+    await expect(seam.readLog(wakeup.id, 0, 4096)).rejects.toThrow(
+      "[process_read] this sandbox backend cannot read background logs.",
+    );
+  });
+
   it("list returns pending/running wakeups and active leases for the session", async () => {
     const store = new InMemorySessionStore();
     const sandbox = fakeSandbox({
@@ -256,5 +310,6 @@ describe("buildWakeupsSeam", () => {
     expect(lease.ownerKind).toBe("hold");
     expect(lease.deadlineAt).toBe(NOW + 3 * 3_600_000);
     expect(lease.sandboxId).toBe("sb-1");
+    expect((await seam.list()).wakeups).toHaveLength(0);
   });
 });

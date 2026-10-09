@@ -179,12 +179,19 @@ export function buildWakeupsSeam(
 
     async readLog(id: string, offset: number, bytes: number) {
       const wakeup = await engineStore.getWakeup(id);
-      const execId = wakeup?.execId;
-      const sb = session()?.sandbox;
-      if (!execId || !sb?.pollJob) {
-        return { text: "", nextOffset: offset, eof: true };
+      if (!wakeup) {
+        throw new Error(`[process_read] ${id} is not an active wakeup. Call wakeup_list to see active ids.`);
       }
-      const poll = await sb.pollJob(execId, offset);
+      if (!wakeup.execId) {
+        throw new Error(
+          `[process_read] ${id} is a timer and has no log. Only a background process or watch has a log.`,
+        );
+      }
+      const sb = session()?.sandbox;
+      if (!sb?.pollJob) {
+        throw new Error("[process_read] this sandbox backend cannot read background logs.");
+      }
+      const poll = await sb.pollJob(wakeup.execId, offset);
       const text = poll.output.slice(0, bytes);
       const nextOffset = offset + Buffer.byteLength(text);
       const eof = poll.status !== "running" && text.length === poll.output.length;
