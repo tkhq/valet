@@ -43,3 +43,39 @@ describe('Linear provider client', () => {
       .rejects.toThrow('mutation did not succeed');
   });
 });
+
+describe('Linear provider client environment', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('defaults to the public API host and does not read the process environment', async () => {
+    vi.stubEnv('LINEAR_API_URL', 'https://ambient.example');
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      urls.push(url);
+      return Response.json({ access_token: 'token', expires_in: 60 });
+    });
+    await createLinearService(config).clientCredentialsToken();
+    expect(urls).toEqual(['https://api.linear.app/oauth/token']);
+  });
+});
+
+describe('Linear provider client malformed responses', () => {
+  const cases: Array<[string, () => Response, string]> = [
+    ['a JSON null body', () => Response.json(null), 'Linear fetchWorkspace: response has no data'],
+    ['a JSON array body', () => Response.json([]), 'Linear fetchWorkspace: response has no data'],
+    ['a JSON string body', () => Response.json('ok'), 'Linear fetchWorkspace: response has no data'],
+    ['a non-JSON body', () => new Response('<html>', { status: 200 }), 'Linear fetchWorkspace: malformed (non-JSON) response'],
+    ['a body without data', () => Response.json({}), 'Linear fetchWorkspace: response has no data'],
+    ['a null organization', () => Response.json({ data: { organization: null } }), 'Linear fetchWorkspace: malformed organization in response'],
+    ['GraphQL errors with HTTP 200', () => Response.json({ errors: [{ message: 'denied' }] }), 'Linear fetchWorkspace: GraphQL errors: [{"message":"denied"}]'],
+    ['an HTTP error', () => Response.json({}, { status: 503 }), 'Linear fetchWorkspace: API returned 503'],
+  ];
+
+  it.each(cases)('reports %s as a provider diagnostic', async (_label, respond, message) => {
+    vi.stubGlobal('fetch', async () => respond());
+    const err = await createLinearService(config, environment).fetchWorkspace('token').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(TypeError);
+    expect((err as Error).message).toBe(message);
+  });
+});
