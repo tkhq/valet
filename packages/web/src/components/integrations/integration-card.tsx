@@ -14,6 +14,7 @@ export function CardHeading({
   state,
   meta,
   right,
+  compact = false,
 }: {
   title: string;
   slug: string;
@@ -22,7 +23,20 @@ export function CardHeading({
   /** One muted line under the description: who owns the connection and what it reaches. */
   meta?: React.ReactNode;
   right?: React.ReactNode;
+  /** A list row: one line at every width, with the controls kept on it. */
+  compact?: boolean;
 }) {
+  if (compact) {
+    return (
+      <div className="flex min-h-8 items-center gap-3">
+        <ServiceIcon slug={slug} label={title} size="sm" />
+        <span className="min-w-0 shrink truncate text-sm font-medium text-ink">{title}</span>
+        {state}
+        <span className="hidden min-w-0 flex-1 truncate text-xs text-muted sm:block">{description}</span>
+        {right && <div className="ml-auto flex shrink-0 items-center gap-2">{right}</div>}
+      </div>
+    );
+  }
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
       <div className="flex min-w-0 flex-1 items-start gap-3">
@@ -32,7 +46,7 @@ export function CardHeading({
             <span className="truncate text-sm font-medium text-ink">{title}</span>
             {state}
           </div>
-          {description && <p className="mt-0.5 line-clamp-1 text-xs leading-relaxed text-muted">{description}</p>}
+          {description && <p className="mt-0.5 text-pretty text-xs leading-relaxed text-muted">{description}</p>}
           {meta && <p className="mt-0.5 text-xs text-muted">{meta}</p>}
         </div>
       </div>

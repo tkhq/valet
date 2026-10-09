@@ -33,21 +33,22 @@ export function TeamOnePasswordToken({ teamId, teamName, canMutate }: {
 
   return <IntegrationCard>
     <CardHeading
+      compact
       title="1Password"
       slug="onepassword"
       description={status.isError
         ? "Could not load the connection. Reload the page to try again."
         : "A service account for this team. Valet finds credentials in the vaults it can access."}
       state={status.isSuccess
-        ? <Badge variant={connected ? "success" : "neutral"}>{connected ? "Connected" : "Uses the organization token"}</Badge>
+        // The long fallback badge gives way on a phone so the row stays one line.
+        ? <span className={connected ? undefined : "max-sm:hidden"}><Badge variant={connected ? "success" : "neutral"}>{connected ? "Connected" : "Uses the organization token"}</Badge></span>
         : undefined}
-      meta={canMutate ? "Team connection" : "Team admin required"}
       right={canMutate && status.isSuccess ? <div className="flex items-center gap-1">
         {connected && <Button size="sm" variant="ghost" disabled={mutation.isPending}
           onClick={() => { setFailed(false); setDisconnecting(true); }}>Disconnect</Button>}
-        <Button size="sm" variant="secondary" disabled={mutation.isPending}
-          onClick={() => { setFailed(false); setConnecting(true); }}>{connected ? "Replace token" : "Connect 1Password"}</Button>
-      </div> : undefined}
+        <Button size="sm" variant="secondary" disabled={mutation.isPending} aria-label={connected ? "Replace token" : "Connect 1Password"}
+          onClick={() => { setFailed(false); setConnecting(true); }}>{connected ? "Replace" : "Connect"}</Button>
+      </div> : status.isSuccess ? <span className="text-xs text-muted">Team admin required</span> : undefined}
     />
     <Dialog open={connecting} onOpenChange={(open) => { setConnecting(open); if (!open) setDraft(""); }}>
       <DialogContent

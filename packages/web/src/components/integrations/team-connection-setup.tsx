@@ -52,10 +52,9 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
           {available.map((service) => {
             const blocked = service.connect === "unconfigured" && service.connectBlockedBy !== "org";
             return <IntegrationCard key={service.service}>
-              <CardHeading title={displayName(service.service)} slug={service.iconSlug ?? service.service}
-                description={blocked ? "Ask an organization admin to configure OAuth for this service." : undefined}
-                meta={blocked ? undefined : canManage ? "Team connection" : "Team admin required"}
-                right={<Button size="sm" variant="secondary" disabled={blocked || !canConnect} onClick={() => setSelected(service)}>{`Connect ${displayName(service.service)}`}</Button>} />
+              <CardHeading compact title={displayName(service.service)} slug={service.iconSlug ?? service.service}
+                description={blocked ? "Ask an organization admin to configure OAuth for this service." : canManage ? undefined : "Team admin required"}
+                right={<Button size="sm" variant="secondary" disabled={blocked || !canConnect} aria-label={`Connect ${displayName(service.service)}`} title={blocked ? "Ask an organization admin to configure OAuth for this service." : undefined} onClick={() => setSelected(service)}>{blocked ? "Set up" : "Connect"}</Button>} />
             </IntegrationCard>;
           })}
         </IntegrationList>

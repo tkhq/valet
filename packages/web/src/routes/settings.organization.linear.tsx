@@ -3,10 +3,9 @@ import { createFileRoute } from "@tanstack/react-router";
 import type { GetLinearConnectionResponse } from "@valet/api/wire";
 import { useDisconnectLinear, useLinearConnection, useSaveLinearConnection } from "~/api/linear";
 import { apiErrorMessage } from "~/api/policies";
-import { Badge, Button, ConfirmDialog, ErrorRow, Input, LoadingRow, cardClass } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, ErrorRow, Input, LoadingRow } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { ServiceIcon } from "~/components/service-icon";
-import { cn } from "~/lib/cn";
 
 export const Route = createFileRoute("/settings/organization/linear")({ component: OrganizationLinearPage });
 
@@ -88,7 +87,7 @@ function SetupCards({ data }: { data: GetLinearConnectionResponse }) {
   const createUrl = linearAppCreationUrl(data);
   const incomplete = !clientId.trim() || !clientSecret.trim() || !webhookSecret.trim();
 
-  return <form className={cn(cardClass, "max-w-2xl")} onSubmit={event => {
+  return <form className="-mx-4" onSubmit={event => {
       event.preventDefault();
       save.mutate({ clientId: clientId.trim(), clientSecret: clientSecret.trim(), webhookSecret: webhookSecret.trim() });
     }}>
