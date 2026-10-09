@@ -633,20 +633,19 @@ export function createUsageTurnExportStream(
             WHERE ${scopeWhere("ce.", period, opts.scope)} ${cursorWhere}
             ORDER BY ce.created_at DESC, ce.use_case DESC, ce.entry_id DESC
             LIMIT ${TURN_EXPORT_BATCH_SIZE}
-          ), page_repositories AS (
-            SELECT sr.session_id, string_agg(sr.full_name, ';' ORDER BY sr.position) AS repository
-            FROM session_repos sr
-            JOIN (SELECT DISTINCT session_id FROM page WHERE session_id IS NOT NULL) ps
-              ON ps.session_id = sr.session_id
-            GROUP BY sr.session_id
           )
           SELECT page.*, u.name AS employee_name, u.email AS employee_email,
                  pr.repository, q.channel::jsonb->>'channelType' AS channel_type,
                  q.channel::jsonb->>'channelId' AS channel_id
           FROM page
           LEFT JOIN "user" u ON u.id = page.user_id
-          LEFT JOIN page_repositories pr ON pr.session_id = page.session_id
-          LEFT JOIN engine_entries e ON e.id = page.entry_id AND e.session_id = page.session_id
+          -- By entry id alone: a Thread step's turn bills to its step's id,
+          -- but the assistant session ran it and holds its channel and repos.
+          LEFT JOIN engine_entries e ON page.use_case <> 'proxy' AND e.id = page.entry_id
+          LEFT JOIN LATERAL (
+            SELECT string_agg(sr.full_name, ';' ORDER BY sr.position) AS repository
+            FROM session_repos sr WHERE sr.session_id = e.session_id
+          ) pr ON true
           LEFT JOIN engine_queue_items q ON q.id = e.queue_item_id AND q.session_id = e.session_id
           ORDER BY page.created_at DESC, page.use_case DESC, page.entry_id DESC
         `)) as { rows: TurnExportRow[] };

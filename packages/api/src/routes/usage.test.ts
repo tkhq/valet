@@ -745,6 +745,32 @@ describe("GET /api/usage/export.csv", () => {
     expect(shared).toContain(",proxy,gpt,,,,10,2,0,0,12,0.01,true,,,,,");
   });
 
+  it("keeps a Thread step's channel and repositories from the session that ran the turn", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    const db = api.providers.db;
+    await db.insert(agentSessions).values({ id: "orchestrator:local-user", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now });
+    await db.execute(sql`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at) VALUES ('wf-csv','local-org','user','local-user','CSV','{}'::jsonb,${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at) VALUES ('run-csv','wf-csv','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now})`);
+    await db.execute(sql`
+      INSERT INTO engine_queue_items (id, session_id, thread_id, dispatch_id, status, content, channel,
+        attempt_count, max_attempts, timeout_at, created_at, updated_at)
+      VALUES ('q-csv-step', 'orchestrator:local-user', 'th', 'workflow:run-csv:think', 'settled', 'prompt',
+              ${JSON.stringify({ channelType: "slack", channelId: "C42" })}, 1, 1, ${now}, ${now}, ${now})
+    `);
+    await db.execute(sql`
+      INSERT INTO session_repos (session_id, full_name, clone_url, position)
+      VALUES ('orchestrator:local-user', 'acme/assistant-repo', 'https://example.test/assistant', 0)
+    `);
+    await seedEngineEntry(api, "e-csv-step", "orchestrator:local-user", now, "q-csv-step");
+
+    const lines = (await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&granularity=turn`)).text()).trim().split("\n");
+    const step = lines.find((line) => line.includes("wf:run-csv:think"));
+    expect(step).toBeDefined();
+    expect(step).toContain(",run-csv,");
+    expect(step).toMatch(/,acme\/assistant-repo,slack,C42$/);
+  });
+
   it("streams every row over 100,000 without gaps or duplicates at tied timestamps", async () => {
     api = await bootTestApi();
     const now = Date.now();
