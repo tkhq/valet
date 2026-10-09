@@ -175,7 +175,7 @@ The manifest handlers answer 501, so a host without the binding fails closed.
 `packages/api/src/plugins/http-github.ts` binds four capabilities. No capability method accepts a user or organization ID.
 
 - App administration binds to the caller's organization.
-- App setup opens a grant only for a state the host signed. The grant binds to the organization in that state.
+- App setup opens a grant only for a setup state the host signed. The state names the org admin who started setup, and the grant opens only for that caller while they are still an admin of the organization in the state. The grant binds to that organization.
 - User connection binds to the caller. A callback grant opens only when the signed state names the caller.
 - Webhook delivery exposes the App webhook secret first. It binds organization effects only after the plugin verifies the signature.
 

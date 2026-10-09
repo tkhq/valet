@@ -64,7 +64,7 @@ export interface GithubAppCapability {
   status(): Promise<GithubAppStatus>;
   /** The organization name, or its ID when the organization row is missing. */
   orgName(): Promise<string>;
-  /** Signs a 15-minute setup state for the caller's organization and return origin. */
+  /** Signs a 15-minute setup state for the calling admin, their organization, and the return origin. */
   signSetupState(): string;
   /** Asks GitHub whether the App ID and key match. Stores nothing and never throws. */
   checkCredential(credential: { appId: string; privateKeyPem: string }): Promise<GithubAppCredentialCheck>;
@@ -77,9 +77,16 @@ export interface GithubAppCapability {
 }
 
 export interface GithubSetupCapability {
-  /** Null for a tampered, malformed, or expired state. */
-  open(state: string): GithubSetupGrant | null;
+  /** Opens the state for the signed-in caller. Never calls GitHub or stores anything. */
+  open(state: string): Promise<GithubSetupOpening>;
 }
+
+export type GithubSetupOpening =
+  /** A tampered, malformed, or expired state, or a state another flow signed. */
+  | { status: "invalid" }
+  /** The state is valid, but the caller is not the org admin who started setup, or is no longer an org admin. */
+  | { status: "refused" }
+  | { status: "open"; grant: GithubSetupGrant };
 
 export interface GithubSetupGrant {
   /** Allow-listed browser origin, or empty for same-origin redirects. */

@@ -7,9 +7,14 @@
  * Each capability is bound to one host-derived identity:
  *
  *   - App administration: the authenticated caller's organization.
- *   - App setup: the organization in a state this host signed.
+ *   - App setup: the organization in a setup state this host signed. The
+ *     state also names the org admin who started setup, and a grant opens
+ *     only for that caller while they are still an admin of that organization.
  *   - User connection: the authenticated caller. A callback grant opens only
  *     when the signed state names that caller.
+ *
+ * Each flow signs its state for its own purpose (`lib/oauth-state.ts`), so a
+ * connect state or a credential-connect state never opens App setup.
  *   - Webhook effects: the organization that owns the App credential, or,
  *     for the `GITHUB_APP_*` fallback, the organization that synced the
  *     verified installation, else the oldest organization.
@@ -69,6 +74,7 @@ import {
   type GithubAppDeps,
 } from "../services/github-app.js";
 import { invalidateWorkflowSources } from "../services/content-sync/invalidation.js";
+import { isOrgAdmin } from "../services/org.js";
 import { refreshCredentialReadiness } from "../services/credential-readiness.js";
 import { deleteSharesFrom } from "../services/credential-shares.js";
 import { setPullRequestState } from "../services/thread-pull-requests.js";
@@ -111,8 +117,12 @@ export const githubHttpBindings: Readonly<Record<string, PluginHttpBinding>> = {
       context.request, app(context), endpoints(), githubTriggers(context.providers).map((trigger) => trigger.id),
     ),
   },
-  // The signed state, not the caller, names the organization.
-  "app-setup": { auth: "user", bind: (context) => appSetup(context.request, setupCapability(context.providers), endpoints()) },
+  // The signed state names the organization. GitHub's redirect cannot carry
+  // the org-admin check, so the capability repeats it for the admin the state names.
+  "app-setup": {
+    auth: "user",
+    bind: (context) => appSetup(context.request, setupCapability(context.providers, callerOf(context)), endpoints()),
+  },
   "app-credential": { auth: "org-admin", bind: (context) => appCredential(context.request, app(context)) },
   "app-refresh": { auth: "org-admin", bind: (context) => appRefresh(app(context)) },
   "app-disconnect": { auth: "org-admin", bind: (context) => appDisconnect(app(context)) },
@@ -197,7 +207,7 @@ async function saveApp(providers: Providers, orgId: string, input: GithubAppConf
 }
 
 function appCapability(providers: Providers, caller: PluginHttpCaller, request: PluginHttpRequest): GithubAppCapability {
-  const { orgId } = caller;
+  const { orgId, userId } = caller;
   return {
     status: () => readAppStatus(appDeps(providers), orgId),
     orgName: async () => {
@@ -207,7 +217,8 @@ function appCapability(providers: Providers, caller: PluginHttpCaller, request: 
     signSetupState: () => {
       const returnTo = returnOrigin(request);
       return signState(
-        { orgId, nonce: randomBytes(16).toString("hex"), exp: Date.now() + STATE_TTL_MS, ...(returnTo ? { returnTo } : {}) },
+        "github-app-setup",
+        { userId, orgId, nonce: randomBytes(16).toString("hex"), exp: Date.now() + STATE_TTL_MS, ...(returnTo ? { returnTo } : {}) },
         stateKey(providers),
       );
     },
@@ -236,28 +247,43 @@ function appCapability(providers: Providers, caller: PluginHttpCaller, request: 
   };
 }
 
-/** Verifies signature and expiry. The nonce is not tracked: GitHub's code is
- * single-use, so a replayed state alone cannot complete setup twice. */
-function verifySetupState(state: string, key: Buffer): { orgId: string; returnTo: string } | null {
+/** What a setup state names: the org admin who started setup, their organization, and the return origin. */
+interface SetupState {
+  userId: string;
+  orgId: string;
+  returnTo: string;
+}
+
+/** Verifies purpose, signature, and expiry. The nonce is not tracked: GitHub's
+ * code is single-use, so a replayed state alone cannot complete setup twice. */
+function verifySetupState(state: string, key: Buffer): SetupState | null {
   const now = Date.now();
-  return verifyState<{ orgId: string; returnTo: string }>(state, key, (payload) => {
+  return verifyState<SetupState>("github-app-setup", state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { orgId, exp, returnTo } = payload;
-    if (typeof orgId !== "string" || typeof exp !== "number") return null;
+    const { userId, orgId, nonce, exp, returnTo } = payload;
+    if (typeof userId !== "string" || typeof orgId !== "string") return null;
+    if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (exp < now) return null;
     // The origin was allow-listed before signing.
-    return { orgId, returnTo: typeof returnTo === "string" ? returnTo : "" };
+    return { userId, orgId, returnTo: typeof returnTo === "string" ? returnTo : "" };
   });
 }
 
-function setupCapability(providers: Providers): GithubSetupCapability {
+/** Setup storage opens only for the admin who signed the state, while they
+ * are still an admin of the organization it names. */
+function setupCapability(providers: Providers, caller: PluginHttpCaller): GithubSetupCapability {
   return {
-    open: (state) => {
+    open: async (state) => {
       const verified = verifySetupState(state, stateKey(providers));
-      if (!verified) return null;
+      if (!verified) return { status: "invalid" };
+      if (verified.userId !== caller.userId) return { status: "refused" };
+      if (!(await isOrgAdmin(providers.db, verified.orgId, caller.userId))) return { status: "refused" };
       return {
-        returnTo: verified.returnTo,
-        saveApp: (input) => saveApp(providers, verified.orgId, input, "github-app setup"),
+        status: "open",
+        grant: {
+          returnTo: verified.returnTo,
+          saveApp: (input) => saveApp(providers, verified.orgId, input, "github-app setup"),
+        },
       };
     },
   };
@@ -272,7 +298,7 @@ interface ConnectState {
 
 function verifyConnectState(state: string, key: Buffer): ConnectState | null {
   const now = Date.now();
-  return verifyState<ConnectState>(state, key, (payload) => {
+  return verifyState<ConnectState>("github-connect", state, key, (payload) => {
     if (!isRecord(payload)) return null;
     const { userId, orgId, nonce, exp, returnTo, postAuthDestination } = payload;
     if (typeof userId !== "string" || typeof orgId !== "string") return null;
@@ -296,6 +322,7 @@ function connectionCapability(
     signConnectState: (postAuthDestination) => {
       const returnTo = returnOrigin(request);
       return signState(
+        "github-connect",
         {
           userId,
           orgId,

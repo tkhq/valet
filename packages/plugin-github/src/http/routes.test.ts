@@ -88,12 +88,17 @@ describe("GitHub App setup", () => {
     });
   });
 
-  it("refuses an invalid setup state before calling GitHub", async () => {
+  it.each([
+    ["invalid", 400, "invalid or expired state"],
+    ["refused", 403, "Only the org admin who started this GitHub App setup can finish it. Ask an org admin to start the setup again."],
+  ] as const)("refuses an %s setup state before calling GitHub", async (status, code, error) => {
     const fetchSpy = vi.fn<typeof fetch>();
     vi.stubGlobal("fetch", fetchSpy);
-    const response = await appSetup(request("https://valet.test/api/org/github-app/setup?code=c&state=s"), { open: () => null }, ENDPOINTS);
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: "invalid or expired state" });
+    const response = await appSetup(
+      request("https://valet.test/api/org/github-app/setup?code=c&state=s"), { open: async () => ({ status }) }, ENDPOINTS,
+    );
+    expect(response.status).toBe(code);
+    expect(await response.json()).toEqual({ error });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -105,7 +110,7 @@ describe("GitHub App setup", () => {
     const saveApp = vi.fn<GithubAppCapability["saveApp"]>(async () => {});
     const response = await appSetup(
       request("https://valet.test/api/org/github-app/setup?code=c&state=s"),
-      { open: () => ({ returnTo: "http://localhost:5173", saveApp }) },
+      { open: async () => ({ status: "open", grant: { returnTo: "http://localhost:5173", saveApp } }) },
       ENDPOINTS,
     );
     expect(response.status).toBe(302);

@@ -1,7 +1,8 @@
 /**
  * Generic integration OAuth connect (docs/specs/2026-07-20-integration-oauth-design.md).
  * Server-side flow modeled on the GitHub connect routes: HMAC-signed
- * stateless state (lib/oauth-state.ts) carrying the PKCE verifier, code
+ * stateless state (lib/oauth-state.ts, purpose "integration-connect", so no
+ * other flow's state verifies here) carrying the PKCE verifier, code
  * exchange server-side, tokens straight into the credential store — never
  * through the browser. GitHub is excluded (dedicated App flow).
  *
@@ -65,7 +66,7 @@ interface OAuthConnectState {
 }
 
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
-  return verifyState<OAuthConnectState>(state, key, (payload) => {
+  return verifyState<OAuthConnectState>("integration-connect", state, key, (payload) => {
     if (!isRecord(payload)) return null;
     const { userId, service, codeVerifier, returnTo, nonce, exp, teamId, orgId, landing } = payload;
     if (teamId !== undefined && (typeof teamId !== "string" || !teamId || typeof orgId !== "string" || !orgId)) return null;
@@ -173,7 +174,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       return c.redirect(`${returnTo}/integrations?${teamId ? `teamId=${encodeURIComponent(teamId)}&` : ""}error=oauth_failed`, 302);
     }
     const { codeVerifier, codeChallenge } = await generatePkceChallenge();
-    const state = signState<OAuthConnectState>({ ...base, codeVerifier }, key);
+    const state = signState<OAuthConnectState>("integration-connect", { ...base, codeVerifier }, key);
     const url = buildAuthorizationUrl({
       authorizationEndpoint: clientRow.authorizationEndpoint,
       clientId: clientRow.clientId,
@@ -204,7 +205,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       503,
     );
   }
-  const state = signState<OAuthConnectState>(base, key);
+  const state = signState<OAuthConnectState>("integration-connect", base, key);
   const scopesKey = found.oauth.scopesParam ?? "scope";
   const query = new URLSearchParams({
     client_id: process.env[found.oauth.clientIdEnv] ?? "",

@@ -707,15 +707,21 @@ describe("identity auto-link (slackish plugin)", () => {
 describe("verifyOAuthConnectState", () => {
   const key = Buffer.from("test-key-material-32-bytes-long");
 
+  const payload = { userId: "u1", orgId: "o1", teamId: "t1", service: "linear", nonce: "n1", exp: Date.now() + 10_000 };
+
   it("accepts a validly signed, unexpired payload", () => {
-    const state = signState({ userId: "u1", service: "linear", nonce: "n1", exp: Date.now() + 10_000 }, key);
+    const state = signState("integration-connect", payload, key);
     const verified = verifyOAuthConnectState(state, key, Date.now());
     expect(verified).toMatchObject({ userId: "u1", service: "linear" });
   });
 
   it("rejects an expired payload", () => {
-    const state = signState({ userId: "u1", service: "linear", nonce: "n1", exp: Date.now() - 1000 }, key);
+    const state = signState("integration-connect", { ...payload, exp: Date.now() - 1000 }, key);
     expect(verifyOAuthConnectState(state, key, Date.now())).toBeNull();
+  });
+
+  it.each(["github-app-setup", "github-connect"] as const)("rejects a %s state with a matching payload", (purpose) => {
+    expect(verifyOAuthConnectState(signState(purpose, payload, key), key, Date.now())).toBeNull();
   });
 });
 

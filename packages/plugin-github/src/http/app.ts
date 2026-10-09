@@ -129,6 +129,9 @@ export async function appManifest(
   return json({ url, manifest, state: app.signSetupState() });
 }
 
+const SETUP_REFUSED =
+  "Only the org admin who started this GitHub App setup can finish it. Ask an org admin to start the setup again.";
+
 /** Validates GitHub's `POST /app-manifests/{code}/conversions` reply. Null
  * when malformed, so the caller never stores a half-populated config. */
 export function parseManifestConversion(payload: unknown): GithubAppConfigInput | null {
@@ -163,8 +166,9 @@ export function parseManifestConversion(payload: unknown): GithubAppConfigInput 
 
 /**
  * GitHub's browser redirect after App creation. The host requires a signed-in
- * user. The signed state, bound to the admin who started the flow and valid
- * for 15 minutes, names the organization.
+ * user. The signed state names the organization and the org admin who started
+ * setup, and is valid for 15 minutes. The host opens it only for that admin
+ * while they are still an org admin, before this route calls GitHub.
  */
 export async function appSetup(
   request: PluginHttpRequest,
@@ -175,8 +179,10 @@ export async function appSetup(
   const state = queryParam(request, "state");
   if (!code || !state) return json({ error: "missing code or state" }, 400);
 
-  const grant = setup.open(state);
-  if (!grant) return json({ error: "invalid or expired state" }, 400);
+  const opening = await setup.open(state);
+  if (opening.status === "invalid") return json({ error: "invalid or expired state" }, 400);
+  if (opening.status === "refused") return json({ error: SETUP_REFUSED }, 403);
+  const { grant } = opening;
 
   let res: Response;
   try {
