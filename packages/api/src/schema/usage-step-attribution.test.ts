@@ -17,6 +17,7 @@ import { pgDbFromPglite, type PgDb } from "@valet/store-postgres";
 import { applyAppMigrations, missingSchemaRepairs, type AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { prepareUsageStepAttribution } from "../lib/usage-step-attribution.js";
+import { usageAnalyticsInstallSql } from "../lib/usage-analytics-migration.js";
 import { recordLlmStepUsage, stepUsageEntry } from "../workflows/step-usage.js";
 import { getDailyAgentActivity, getUsageBreakdown } from "../services/usage.js";
 import { getMemberAgentDays } from "../services/usage-member-activity.js";
@@ -181,6 +182,45 @@ describe("stepUsageEntry", () => {
     expect(stepUsageEntry(piUsage(0, 0))).toBeNull();
     expect(stepUsageEntry(piUsage(10, 0))).toEqual({ usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, total: 10 } });
     expect(stepUsageEntry(piUsage(10, 0.5))?.cost?.total).toBe(0.5);
+  });
+});
+
+describe("a step attribution repair that fails", () => {
+  let db: PgDb | undefined;
+  afterEach(async () => { await db?.close(); db = undefined; });
+
+  it("stays pending through other usage repairs and finishes on the next boot", async () => {
+    db = pgDbFromPglite(new PGlite());
+    const pg = db;
+    await applyAppMigrations(pg);
+    await pg.query("INSERT INTO orgs (id, name, created_at) VALUES ('org-a', 'Org A', $1)", [NOW]);
+    await pg.query(`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at)
+      VALUES ('wf-user', 'org-a', 'user', 'u-alice', 'Triage', '{}'::jsonb, $1, $1)`, [NOW]);
+    await pg.query(`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at)
+      VALUES ('run-1', 'wf-user', 'v1', '{}'::jsonb, '{}'::jsonb, 'user', 'u-alice', $1, $1)`, [NOW]);
+    await queueItem(pg, "q-thread", "workflow:run-1:think");
+    await assistantTurn(pg, "e-thread", "q-thread");
+    // A deployed database before the rule: the turn bills to the assistant.
+    await pg.query("UPDATE usage_entry_facts SET session_id = $1, workflow_run_id = NULL WHERE entry_id = 'e-thread'", [ASSISTANT]);
+    await pg.query("DROP VIEW usage_step_attribution_ready");
+
+    const interrupted: PgDb = {
+      ...pg,
+      async query(text, params) {
+        if (text.startsWith("WITH items")) throw new Error("Interrupted upgrade");
+        return pg.query(text, params);
+      },
+    };
+    await expect(applyAppMigrations(interrupted)).rejects.toThrow("Interrupted upgrade");
+    // Another usage repair installs the shared projection functions again.
+    await pg.query(`DO $install$ BEGIN ${usageAnalyticsInstallSql} END $install$`);
+    expect((await missingSchemaRepairs(pg)).map((r) => r.describe)).toEqual(["usage workflow step attribution"]);
+    expect(await factFor(pg, "e-thread")).toEqual({ session_id: ASSISTANT, workflow_run_id: null });
+
+    await applyAppMigrations(pg);
+
+    expect(await missingSchemaRepairs(pg)).toEqual([]);
+    expect(await factFor(pg, "e-thread")).toEqual({ session_id: "wf:run-1:think", workflow_run_id: "run-1" });
   });
 });
 

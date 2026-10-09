@@ -7,7 +7,9 @@ import { usageHourlyPublishSql } from "./usage-hourly-migration.js";
  * Deployed databases receive the Thread-step billing rule
  * (`valet_usage_billing_session` in 0000_app.sql) through this repair. A
  * fresh database installs it with the usage projection and creates the
- * ready view there, so this repair never runs on one.
+ * ready view at the end of the migration, so this repair never runs on one.
+ * On a deployed database only this repair's publish step creates the view,
+ * after the backfill finishes.
  *
  * The backfill moves existing Thread-step facts from the assistant session
  * to their step. Each fact update fires the hourly trigger, which subtracts

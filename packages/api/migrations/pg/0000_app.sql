@@ -1610,7 +1610,6 @@ BEGIN
       ELSE '[]'::jsonb END) p
   $fact$;
   -- usage step attribution end
-  CREATE OR REPLACE VIEW usage_step_attribution_ready AS SELECT 1 AS version WHERE false;
 
   DROP TRIGGER IF EXISTS engine_entries_usage_fact ON engine_entries;
   CREATE OR REPLACE FUNCTION valet_sync_usage_fact() RETURNS trigger LANGUAGE plpgsql AS $sync$
@@ -2516,6 +2515,13 @@ INSERT INTO usage_member_facts
 CREATE OR REPLACE VIEW usage_member_activity_ready AS SELECT 1 AS version FROM usage_member_facts,usage_member_hourly WHERE false;
 
 END $member$;
+
+--> statement-breakpoint
+-- A fresh database has no Thread-step turns to move, so it is ready here.
+-- A deployed database gets this view only from the completed repair
+-- (lib/usage-step-attribution.ts): no install section other repairs run
+-- creates it, so an interrupted backfill stays pending until it finishes.
+CREATE OR REPLACE VIEW usage_step_attribution_ready AS SELECT 1 AS version WHERE false;
 
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "event_receipts" (
