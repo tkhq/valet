@@ -243,7 +243,7 @@ by hand as each user signs in. No wipe and no re-import is needed.
 | `VALET_LEASE_MAX_HOURS` | Max hours a lease (a background process, a watch, or `hold_sandbox`) keeps a sandbox alive (default `72`). Must be a positive integer. |
 | `VALET_TIMER_MAX_HOURS` | Max hours ahead a `wake_at` timer may fire (default `720`). Must be a positive integer. |
 | `VALET_WAKEUPS_PER_SESSION` | Max active wakeups and leases one session may hold at once (default `20`). Must be a positive integer. |
-| `VALET_WATCH_MAX_EVENTS_PER_HOUR` | Max `watch.event` signals one `watch` wakeup may emit per hour (default `120`). Must be a positive integer. |
+| `VALET_WATCH_MAX_EVENTS_PER_HOUR` | Max `watch.event` signals one `watch` wakeup may emit in one hour (default `120`). A watch emits at most one signal per WakeWatcher tick. The hour window starts at the first signal after the previous window ends. A watch over the limit stops with `cause=rate`. Must be a positive integer. |
 
 The Helm chart maps `sandbox.resources.cpu` and `sandbox.resources.memory` to
 these defaults. Repository YAML overrides saved repository defaults, which override
