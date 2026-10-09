@@ -81,18 +81,17 @@ function preservesEveryField(fields: readonly SandboxResourceField[] | undefined
 }
 
 /**
- * The provider's override record, with scratch taken from the applied file
- * when the record has none. A record written before scratch was recorded
- * lacks it, while the applied file knows the scratch the pod booted with.
- * A pod replace always deletes the file, so a scratch in it is current.
+ * The applied file's resources without `scratch`. The file lives in the
+ * sandbox, where the agent can write it, and a scratch value from it would
+ * reach the next pod spec with no cap check. The live pod and the
+ * provider's record are the only sources for scratch (fix wave 4,
+ * security N2). Undefined when nothing else is in the file.
  */
-function withAppliedScratch(
-  record: Sandbox["resourceOverrides"],
-  applied: AppliedState | null,
-): Sandbox["resourceOverrides"] {
-  if (record === undefined || record === null || record.scratch !== undefined) return record;
-  const scratch = applied?.resources?.scratch;
-  return scratch === undefined ? record : { ...record, scratch };
+function fileResourcesWithoutScratch(applied: AppliedState | null): AppliedState["resources"] {
+  const resources = applied?.resources;
+  if (resources === undefined) return undefined;
+  const { scratch: _scratch, ...rest } = resources;
+  return Object.keys(rest).length > 0 ? rest : undefined;
 }
 
 function createResourceOpinion(resources: SandboxCreateOpts["resources"]): AppliedState["resources"] {
@@ -1158,7 +1157,7 @@ export class SandboxAttachment {
           // restart. Null forbids a fallback to stale rebuilt create options.
           const fallbackResources = sandbox.resourceOverrides === null
             ? undefined
-            : withAppliedScratch(sandbox.resourceOverrides, applied) ?? applied?.resources ??
+            : sandbox.resourceOverrides ?? fileResourcesWithoutScratch(applied) ??
               (sandbox.adopted ? undefined : createResourceOpinion(this.createOpts.resources));
           let resources = effectiveResources(desired, fallbackResources);
           if (resources === undefined && applied === null && sandbox.resourceOverrides !== null) {

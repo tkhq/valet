@@ -777,8 +777,14 @@ export class KubernetesSandbox implements Sandbox {
     if (phase === null) {
       throw podUnavailableError(this.id, `pod ${podName} not found — the job's backing pod was recreated or removed`);
     }
-    if (phase !== undefined && phase !== "Running") {
+    if (phase === "Pending" || phase === "Succeeded" || phase === "Failed") {
       throw podUnavailableError(this.id, `pod ${podName} is ${phase} — the job's backing pod was recreated or removed`);
+    }
+    if (phase !== undefined && phase !== "Running") {
+      // `Unknown`: the kubelet lost contact. The process may still run, so
+      // this is a transient probe error, not a gone sandbox; the deadline
+      // still bounds the row.
+      throw new Error(`pod ${podName} phase is ${phase}; the job poll retries on the next tick`);
     }
   }
 
