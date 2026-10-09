@@ -122,7 +122,11 @@ summary stays: an unconfigured-but-connected service still reports
 a service that resolves `"unconfigured"` or `"org"` is rejected with an
 error that names the corrective action. Org-scope saves are exempt — an
 admin's org-scope Slack save is exactly how the service becomes configured.
-Unknown services (no declaration) stay accepted, as before.
+Unknown services (no declaration) stay accepted, as before. A personal
+1Password token (`onepassword`) is exempt by name, whatever a plugin
+declares. It reads the member's own vaults for the member's own sessions, so
+an org token is never a substitute for it
+(`docs/onepassword-secrets.md`).
 
 **3. Session builds (agent tools).** `EngineHost.sessionExtras` — the one
 funnel for all four session builders — filters the plugin set through

@@ -534,6 +534,49 @@ describe("PUT /api/credentials/onepassword — a personal token is never gated",
     expect(personal.status).toBe(200);
   });
 
+  // The cases above boot with no plugin that declares `onepassword`, so the
+  // availability gate never sees the service. This one declares it as an
+  // org-provided credential, the shape that gate refuses for a member, and
+  // proves the route exempts 1Password before and after the org token
+  // exists.
+  it("a member connects a personal token even when a plugin declares onepassword as org-provided", async () => {
+    const declaring: ValetPlugin = {
+      name: "declares-onepassword",
+      version: "0.1.0",
+      credentials: [
+        { service: "onepassword", type: "service_account", configKeys: ["apiKey"], requires: { orgCredential: true } },
+      ],
+    };
+    api = await bootTestApi({ plugins: [declaring] });
+    api.providers.onePassword = new FakeOnePasswordService();
+
+    const before = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "service_account", apiKey: "ops_personal_before" }),
+    });
+    expect(before.status).toBe(200);
+
+    const org = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "service_account", apiKey: "ops_org_token", scope: "org" }),
+    });
+    expect(org.status).toBe(200);
+
+    const after = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "service_account", apiKey: "ops_personal_after" }),
+    });
+    expect(after.status).toBe(200);
+    const stored = await api.providers.engineCredentials.get(
+      { type: "user", id: "test-member" },
+      "onepassword",
+    );
+    expect(stored?.apiKey).toBe("ops_personal_after");
+  });
+
   it("a member removes their own personal token", async () => {
     api = await bootTestApi();
     api.providers.onePassword = new FakeOnePasswordService();
