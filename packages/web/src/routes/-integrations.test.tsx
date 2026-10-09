@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * `/integrations` (post-facelift): Services vs Built-in grouping, friendly
+ * `/integrations`: Connected and Available groups, friendly
  * display names, honest reach meta ("N tools" / "no key needed" /
  * "built in"), the token reveal-form Connect flow (the action is named
  * "Connect" end to end), and confirm-gated Disconnect. Mocks
@@ -9,7 +9,7 @@
  * calls the right mutation, not that TanStack Query works.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { ApiError } from "~/api/client";
 import { SEARCH_DEBOUNCE_MS } from "~/components/search-input";
 import type {
@@ -77,7 +77,7 @@ const pluginsData = {
     },
     {
       // Dynamic tools, no credential declaration (the deepwiki shape) —
-      // must land in Services with "no key needed", not in Built in.
+      // is listed with "no key needed", in the Connected group.
       name: "deepwiki",
       version: "0.1.0",
       description: "DeepWiki integration for repository knowledge base",
@@ -317,6 +317,16 @@ describe("IntegrationsPage", () => {
     expect(screen.queryByRole("link", { name: "Install on personal account" })).toBeNull();
   });
 
+  it("lists connected services first, one row each, then the rest", () => {
+    render(<IntegrationsPage />);
+    const rowNames = (label: string) =>
+      within(screen.getByRole("list", { name: label }))
+        .getAllByRole("listitem")
+        .map((row) => row.querySelector(".font-medium")?.textContent);
+    expect(rowNames("Connected")).toEqual(["DeepWiki", "Slack"]);
+    expect(rowNames("Available")).toEqual(["GitHub", "Typefully"]);
+  });
+
   it("lists connectable services only, with friendly names and honest reach meta", () => {
     render(<IntegrationsPage />);
 
@@ -327,8 +337,8 @@ describe("IntegrationsPage", () => {
     expect(screen.queryByText("github")).toBeNull();
 
     // Reach meta per shape.
-    expect(screen.getByText("29 tools")).toBeTruthy();
-    expect(screen.getByText("tools load on connect")).toBeTruthy(); // typefully: dynamic + credential
+    expect(screen.getByText(/· 29 tools$/)).toBeTruthy();
+    expect(screen.getByText(/· tools load on connect$/)).toBeTruthy(); // typefully: dynamic + credential
     expect(screen.getByText("no key needed")).toBeTruthy(); // deepwiki: dynamic, no credential
 
     // Content-only plugins are not listed at all. They need no credential
@@ -337,12 +347,13 @@ describe("IntegrationsPage", () => {
     expect(screen.queryByText("built in")).toBeNull();
     expect(screen.queryByText("Built in")).toBeNull();
 
-    expect(screen.getByText("Services")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Connected" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Available" })).toBeTruthy();
     expect(screen.queryByText("Nothing to connect for this plugin.")).toBeNull();
     expect(screen.queryByText(/0 actions/)).toBeNull();
 
     // Connected state.
-    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(screen.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
   });
 
   it("shows a config-declared MCP server by its displayName, never the mcp-config: id", () => {
@@ -547,7 +558,7 @@ describe("brand marks", () => {
     };
     const { container } = render(<IntegrationsPage />);
     const services = [...container.querySelectorAll("section")].find(
-      (section) => section.querySelector("h2")?.textContent === "Services",
+      (section) => section.querySelector("h2")?.textContent === "Available",
     );
     const paths = [...(services?.querySelectorAll("svg path") ?? [])].map((p) => p.getAttribute("d"));
     expect(paths).toHaveLength(3);
@@ -584,7 +595,7 @@ describe("connection health", () => {
     currentPluginsData = connectedGmail({ login: "someone@example.com" });
     render(<IntegrationsPage />);
     expect(screen.getByText(/someone@example.com/)).toBeTruthy();
-    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(screen.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Reconnect Gmail" })).toBeNull();
   });
 
@@ -593,7 +604,7 @@ describe("connection health", () => {
     render(<IntegrationsPage />);
 
     expect(screen.getByText("Expired")).toBeTruthy();
-    expect(screen.queryByText("Connected")).toBeNull();
+    expect(screen.queryByText("Connected", { selector: ":not(h2)" })).toBeNull();
     expect(screen.getByText(/Select Reconnect to sign in again/)).toBeTruthy();
     // The repair opens the same pre-connect screen, and Disconnect stays available.
     expect(screen.queryByRole("link", { name: "Reconnect Gmail" })).toBeNull();
@@ -618,7 +629,7 @@ describe("connection health", () => {
   it("keeps the plain Connected badge when the wire reports no health", () => {
     currentPluginsData = connectedGmail(undefined);
     render(<IntegrationsPage />);
-    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(screen.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Reconnect Gmail" })).toBeNull();
   });
 });
@@ -648,8 +659,8 @@ describe("connected dynamic service tool count", () => {
       ],
     };
     render(<IntegrationsPage />);
-    expect(screen.getByText(/^52 tools$/)).toBeTruthy();
-    expect(screen.queryByText("tools load on connect")).toBeNull();
+    expect(screen.getByText(/· 52 tools$/)).toBeTruthy();
+    expect(screen.queryByText(/tools load on connect/)).toBeNull();
   });
 
   it("keeps the static label when connected but toolCount is absent (resolution failed)", () => {
@@ -675,7 +686,7 @@ describe("connected dynamic service tool count", () => {
       ],
     };
     render(<IntegrationsPage />);
-    expect(screen.getByText(/^tools load on connect$/)).toBeTruthy();
+    expect(screen.getByText(/· tools load on connect$/)).toBeTruthy();
   });
 });
 
@@ -761,7 +772,7 @@ describe("the organisation's GitHub App", () => {
     render(<IntegrationsPage />);
     // Two connections, two badges. "Connected" is this user's credential;
     // the App carries its own label and never borrows that one.
-    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(screen.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
     expect(screen.getByText("Org App installed")).toBeTruthy();
   });
 
@@ -1308,7 +1319,8 @@ describe("IntegrationsPage — the search box", () => {
     expect(screen.getByText("No integrations match your search.")).toBeTruthy();
     // Hiding the box on an empty page would leave no way to clear the search.
     expect(screen.getByLabelText("Search integrations")).toBeTruthy();
-    expect(screen.queryByText("Services")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Connected" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Available" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "1Password" })).toBeNull();
   });
 

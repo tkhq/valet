@@ -1,12 +1,10 @@
 /**
- * Cards for `/integrations` (two-column facelift of the Task-15 connect
- * surface).
+ * Rows for `/integrations` (settings-redesign spec, "Integrations").
  *
- * One tile per plugin: the service's brand mark, name + connection state,
- * the description, and a footer with the mono "reach" meta (tool count /
- * "tools load on connect" / "no key needed") and the connect controls.
- * Built-in plugins get quieter wash tiles — present but visibly not asking
- * anything of you.
+ * One row per plugin: the service's brand mark, name + connection state,
+ * one line of description, a muted line naming who owns the connection and
+ * its reach (tool count / "tools load on connect" / "no key needed"), and
+ * the connect controls on the right.
  *
  * A connected service also shows what its credential is worth: the account
  * it belongs to, and — when the token expired, failed to refresh, or
@@ -37,7 +35,7 @@ import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
 import { Badge, Button, ConfirmDialog } from "~/components/primitives";
 import { useDisconnectCredential } from "~/api/integrations";
 import { errorText } from "~/lib/error-text";
-import { CardHeading, CardFooter, IntegrationCard } from "./integration-card";
+import { CardHeading, IntegrationCard } from "./integration-card";
 import { ConnectDialog } from "./connect-dialog";
 import { ShareWithTeam } from "./share-with-team";
 import { displayName, pluginDisplayName } from "./display-name";
@@ -70,7 +68,13 @@ export function isVisibleService(service: PluginServiceSummary): boolean {
   return service.connected || (service.missingEnv?.length ?? 0) > 0;
 }
 
-/** True when the plugin has anything left to show in the Services grid. */
+/** True when the plugin belongs in the Connected group: it needs no key,
+ * or the caller or the organization already provides one of its services. */
+export function isConnectedService(plugin: PluginSummary): boolean {
+  return plugin.services.length === 0 || plugin.services.some((service) => service.connected || service.connect === "org");
+}
+
+/** True when the plugin has anything left to show in the Services list. */
 export function hasVisibleSurface(plugin: PluginSummary): boolean {
   return plugin.services.length === 0 || plugin.services.some(isVisibleService);
 }
@@ -147,12 +151,12 @@ export function IntegrationRow({ plugin }: { plugin: PluginSummary }) {
             title={pluginDisplayName(plugin)}
             slug={iconSlug(plugin)}
             description={plugin.description}
+            meta={meta}
           />
-          <CardFooter meta={meta} />
           {/* Multi-service plugins (none in the current fleet, but the manifest
               allows it): each credential service gets its own quiet sub-row. */}
           {plugin.services.length > 1 && (
-            <ul className="mt-3 space-y-3 border-t border-line pt-3">
+            <ul className="mt-3 space-y-3 pl-12">
               {plugin.services.filter(isVisibleService).map((service) => (
                 <li key={service.service}>
                   <ServiceBlock
@@ -308,7 +312,7 @@ function ServiceBlock({
           has no GitHub App" is the reason Connect is about to fail — so the
           stack no longer hangs off `service.connected` alone. */}
       {(orgNote || unconfiguredNote || pairing || orgProvidedNote || (service.connected && (service.health?.login || note))) && (
-        <div className="mt-1.5 space-y-1 pl-12">
+        <div className="mt-2 space-y-1 pl-12">
           {unconfiguredNote}
           {pairing ? <IdentityLinkBlock link={pairing} title={title} /> : orgProvidedNote}
           {service.connected && service.health?.login && (
@@ -337,10 +341,10 @@ function ServiceBlock({
         slug={slug}
         description={description}
         state={badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : undefined}
+        meta={[orgProvided ? "Managed by your organization" : "Your account", meta].filter(Boolean).join(" · ")}
+        right={controls}
       />
-      <p className="mt-2 text-xs text-muted">{orgProvided ? "Organization-managed connection" : "Your account · team access requires sharing"}</p>
       {connectionDetails}
-      <CardFooter meta={meta} right={controls} />
       <ConnectDialog
         service={service}
         title={title}

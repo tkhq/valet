@@ -335,7 +335,8 @@ describe("Team account connection", () => {
     expect(await screen.findByRole("button", { name: "Connect Typefully" })).toBeTruthy();
     expect(window.sessionStorage.getItem("valet:workspace")).toBe("user");
     expect(screen.queryByText("Team unavailable")).toBeNull();
-    expect(api.listCredentials).not.toHaveBeenCalled();
+    // Only the personal list (for saved credentials no row covers) loads.
+    expect(api.listCredentials).not.toHaveBeenCalledWith("team", expect.anything());
   });
 
   it("keeps Slack organization-managed while blocking missing OAuth configuration", async () => {

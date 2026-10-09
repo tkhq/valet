@@ -4,15 +4,15 @@ import type { PluginServiceSummary } from "@valet/api/wire";
 import { useConnectCredential, useCredentials, usePlugins } from "~/api/integrations";
 import { Button, Dialog, DialogContent, ErrorRow, Textarea } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
-import { SubSection } from "~/components/settings/section";
-import { CardHeading, CardFooter, IntegrationCard } from "./integration-card";
+import { Section } from "~/components/settings/section";
+import { CardHeading, IntegrationCard, IntegrationList } from "./integration-card";
 import { errorText } from "~/lib/error-text";
 import { displayName, pluginDisplayName } from "./display-name";
 
 /** Connect an account intended for one team. Organization connections live in Organization settings. */
 export function TeamConnectionSetup({ teamId, canManage, children }: {
   teamId: string; canManage: boolean;
-  /** Team connections with their own card, such as 1Password, shown first in the grid. */
+  /** Team connections with their own row, such as 1Password, shown first in the list. */
   children?: ReactNode;
 }) {
   // The team catalog reports effective credentials for this team. In
@@ -41,33 +41,38 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
     .sort((a, b) => displayName(a.service).localeCompare(displayName(b.service)));
 
   const available = choices.filter((s) => displayName(s.service).toLowerCase().includes(query.toLowerCase()));
-  return <div className="space-y-6">
-    <SubSection title="Connect a service" description="Connect an account intended for this team."
-      actions={<div className="w-56"><SearchInput value={query} onSettled={setQuery} placeholder="Search integrations…" /></div>}>
-      {credentials.error && <ErrorRow>Could not check team connections. Reload the page.</ErrorRow>}
-      {!plugins.isLoading && !plugins.error && available.length === 0 && <p className="text-sm text-muted">No available integrations match.</p>}
-      <div className="grid gap-3 sm:grid-cols-2">
-        {children}
-        {available.map((service) => {
-          const blocked = service.connect === "unconfigured" && service.connectBlockedBy !== "org";
-          return <IntegrationCard key={service.service}>
-            <CardHeading title={displayName(service.service)} slug={service.iconSlug ?? service.service}
-              description={blocked ? "Ask an organization admin to configure OAuth for this service." : "Connect an account this team can use."} />
-            <CardFooter meta={blocked ? undefined : canManage ? "Team connection" : "Team admin required"}
-              right={<Button size="sm" variant="secondary" disabled={blocked || !canConnect} onClick={() => setSelected(service)}>{`Connect ${displayName(service.service)}`}</Button>} />
-          </IntegrationCard>;
-        })}
-      </div>
-      {canConnect && selected && <TeamConnectionDialog key={selected.service} teamId={teamId} service={selected} onClose={() => setSelected(null)} />}
-    </SubSection>
-    <SubSection title="Tools and skills" description="Installed capabilities for this team. Connection details appear above.">
+  const withTools = plugins.error ? [] : (plugins.data?.plugins ?? []).filter((plugin) => plugin.services.length > 0);
+  return <>
+    <div className="space-y-3">
+      <div className="ml-auto w-full sm:w-56"><SearchInput value={query} onSettled={setQuery} placeholder="Search integrations…" aria-label="Search integrations" /></div>
+      <Section title="Available" description="Connect an account intended for this team.">
+        {credentials.error && <ErrorRow>Could not check team connections. Reload the page.</ErrorRow>}
+        <IntegrationList label="Available">
+          {children}
+          {available.map((service) => {
+            const blocked = service.connect === "unconfigured" && service.connectBlockedBy !== "org";
+            return <IntegrationCard key={service.service}>
+              <CardHeading title={displayName(service.service)} slug={service.iconSlug ?? service.service}
+                description={blocked ? "Ask an organization admin to configure OAuth for this service." : "Connect an account this team can use."}
+                meta={blocked ? undefined : canManage ? "Team connection" : "Team admin required"}
+                right={<Button size="sm" variant="secondary" disabled={blocked || !canConnect} onClick={() => setSelected(service)}>{`Connect ${displayName(service.service)}`}</Button>} />
+            </IntegrationCard>;
+          })}
+        </IntegrationList>
+        {!plugins.isLoading && !plugins.error && available.length === 0 && <p className="py-3.5 text-sm text-muted">No available integrations match.</p>}
+      </Section>
+    </div>
+    {canConnect && selected && <TeamConnectionDialog key={selected.service} teamId={teamId} service={selected} onClose={() => setSelected(null)} />}
+    <Section title="Tools and skills" description="Installed capabilities for this team.">
       {plugins.error && <ErrorRow>Could not load plugin details. Reload the page to try again.</ErrorRow>}
-      {!plugins.error && plugins.data?.plugins.filter((plugin) => plugin.services.length > 0).map((plugin) => <div key={plugin.name}>
-        <h4 className="mt-4 text-sm font-medium">{pluginDisplayName(plugin)}</h4>
-        <IntegrationDetails plugin={plugin} />
-      </div>)}
-    </SubSection>
-  </div>;
+      {withTools.length > 0 && <IntegrationList label="Tools and skills">
+        {withTools.map((plugin) => <IntegrationCard key={plugin.name}>
+          <CardHeading title={pluginDisplayName(plugin)} slug={plugin.services[0]?.iconSlug ?? plugin.name} description={plugin.description} />
+          <IntegrationDetails plugin={plugin} />
+        </IntegrationCard>)}
+      </IntegrationList>}
+    </Section>
+  </>;
 }
 
 function TeamConnectionDialog({ teamId, service, onClose }: {

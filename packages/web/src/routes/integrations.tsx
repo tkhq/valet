@@ -2,9 +2,12 @@ import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { usePlugins } from "~/api/integrations";
 import { Spinner, pageClass } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 import { SearchInput } from "~/components/search-input";
 import { Section } from "~/components/settings/section";
-import { hasVisibleSurface, IntegrationRow, isService } from "~/components/integrations/integration-row";
+import { hasVisibleSurface, IntegrationRow, isConnectedService, isService } from "~/components/integrations/integration-row";
+import { IntegrationList } from "~/components/integrations/integration-card";
+import { OrphanCredentials } from "~/components/integrations/orphan-credentials";
 import { pluginDisplayName } from "~/components/integrations/display-name";
 import { matchesNeedle } from "~/lib/text-match";
 import { textParam } from "~/lib/search-params";
@@ -14,8 +17,9 @@ import { IntegrationLimitNotice } from "~/components/integrations/integration-li
 import { useListOwner } from "~/lib/use-list-owner";
 
 /**
- * `/integrations` — the services a person can connect, in the settings
- * visual idiom (open hairline stacks, no card boxes). Content-only plugins
+ * `/integrations` — the services a person can connect, as two grouped lists
+ * in the settings visual idiom: Connected first, then Available
+ * (settings-redesign spec, "Integrations"). Content-only plugins
  * are not listed: they need no credential and offer no action, so a row for
  * one was a row nobody could use. OAuth connect for services declaring
  * `oauth` metadata redirects
@@ -129,6 +133,8 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
   const services = reachable
     .filter((plugin) => matchesNeedle(query, [pluginDisplayName(plugin), plugin.name, plugin.description]))
     .sort((a, b) => pluginDisplayName(a).localeCompare(pluginDisplayName(b)));
+  const connected = services.filter(isConnectedService);
+  const available = services.filter((plugin) => !isConnectedService(plugin));
   const searching = query.trim().length > 0;
   // The box stays up through an empty match — hiding it would leave the
   // search with no box to clear it in.
@@ -136,8 +142,8 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className={pageClass}>
-        <h1 className="font-display text-2xl text-ink">Integrations</h1>
+      <div className={cn(pageClass, "max-w-3xl")}>
+        <h1 className="text-2xl font-medium text-ink">Integrations</h1>
         {owner && <IntegrationLimitNotice owner={owner} canClear />}
 
         {/* The live region is on the page from the first paint, and stays
@@ -161,7 +167,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
           )}
         </div>
 
-        <div className="mt-10 space-y-12">
+        <div className="mt-8 space-y-10">
           {isLoading && (
             <div className="flex items-center gap-2 text-sm text-muted">
               <Spinner size={14} /> Loading integrations…
@@ -177,7 +183,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
           )}
 
           {!isLoading && !error && showSearch && (
-            <div className="space-y-4">
+            <div className="space-y-10">
               <div className="ml-auto w-full sm:w-56">
                 <SearchInput
                   value={query}
@@ -196,17 +202,27 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                 <div className="text-sm text-muted">No integrations match your search.</div>
               )}
 
-              {services.length > 0 && (
-                <Section title="Services" description="Most need a key to connect.">
-                  <div className="grid gap-3 pt-4 sm:grid-cols-2">
-                    {services.map((plugin) => (
+              {connected.length > 0 && (
+                <Section title="Connected" description="Services your assistant can reach now.">
+                  <IntegrationList label="Connected">
+                    {connected.map((plugin) => (
                       <IntegrationRow key={plugin.name} plugin={plugin} />
                     ))}
-                  </div>
+                  </IntegrationList>
+                </Section>
+              )}
+              {available.length > 0 && (
+                <Section title="Available" description="Connect a service to let your assistant use it.">
+                  <IntegrationList label="Available">
+                    {available.map((plugin) => (
+                      <IntegrationRow key={plugin.name} plugin={plugin} />
+                    ))}
+                  </IntegrationList>
                 </Section>
               )}
             </div>
           )}
+          {!isLoading && !error && <OrphanCredentials plugins={plugins} />}
         </div>
       </div>
     </div>

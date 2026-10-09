@@ -6,8 +6,8 @@ export function IntegrationDetails({ plugin }: { plugin: PluginSummary }) {
   const services = plugin.actionServices ?? plugin.services.map((service) => ({
     service: service.service, actions: service.actions, dynamic: service.dynamic,
   }));
-  return <details className="mt-4 min-w-0 border-t border-line pt-3 text-sm">
-    <summary className="cursor-pointer py-1 text-muted">Tools and skills</summary>
+  return <details className="mt-2 min-w-0 pl-12 text-sm">
+    <summary className="cursor-pointer py-1 text-xs text-muted hover:text-ink">Tools and skills</summary>
     <div className="mt-3 space-y-4">
       <p className="text-xs text-muted">Tools that use an account need a usable connection and access to the requested files or resources.</p>
       {services.map((service) => <div key={service.service}>
