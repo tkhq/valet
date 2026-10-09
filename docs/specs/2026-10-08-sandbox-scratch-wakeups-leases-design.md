@@ -809,3 +809,43 @@ Implementation gaps become errata to this file in the same PR.
 - **Part G, scratch requested gauge.** `valet_sandbox_scratch_requested_bytes`
   uses `session_class` `repo` for an accepted `.valet/prebuild.yaml`
   request and `task` for an accepted `task` request.
+- **B: A2, scratch on adoption.** This entry supersedes the two A2 entries
+  above. An adopt keeps the live fingerprint when the preserve mask names
+  every resource field, in any order. A legacy CR without a fingerprint
+  keeps none. When the mask names `scratch`, the adopt keeps the live
+  scratch state. That state is the emptyDir size, the mount, `TMPDIR`, the
+  scratch init container, and the ephemeral-storage values. A failed
+  repository read therefore no longer deletes a live `/scratch`.
+- **B: A2, fingerprint back-compat.** The resource fingerprint gets a
+  scratch slot only when scratch is set. A CR without scratch keeps its
+  pre-scratch hash, so the upgrade does not roll every pod.
+- **B: A4, Pending grace.** The 10-minute Pending grace runs from the
+  pod's own creation time. A resumed CR is older than its new pod, so the
+  CR's age no longer applies. A pod with no creation time uses the start of
+  the readiness wait. A `TriggeredScaleUp` event in the last 10 minutes
+  keeps the pod retryable until the pod is 30 minutes old. A later
+  `NotTriggerScaleUp` or `FailedScaleUp` event ends that deferral.
+- **B: A3, scratch bootstrap.** A scratch pod gets a `valet-scratch-init`
+  init container. It creates `/scratch/tmp` and `/scratch/valet-jobs` with
+  mode 1777, whatever the image. The start scripts and the plain-headless
+  command still create both directories. Mode 1777 lets the `dockerd`
+  workload user write job logs.
+- **B: A4, capacity error text.** When the shortage is ephemeral-storage
+  and the pod has scratch, the error adds `(scratch <value>)`. It lists the
+  ephemeral-storage request with cpu and memory. It tells the user to lower
+  `resources.scratch` in `.valet/prebuild.yaml` or `task.resources.scratch`.
+  It also names the admin option: a node pool with enough local disk.
+- **B: A4, refusal texts and the REST warning.** This entry supersedes the
+  REST entry above. The disabled and deploy-cap refusals tell the reader to
+  set `sandbox.scratchMax` in the Valet chart, an admin task. The agent-cap
+  refusal keeps the `.valet/prebuild.yaml` advice. The host writes a REST
+  warning on the thread that `SessionMeta.warningThreadKey` names. Without
+  it, the warning goes on `web:default`. No route sets `warningThreadKey`
+  yet. The coding system prompt also carries the warning, so the model
+  knows that `/scratch` is absent.
+- **B: Part D, knob ranges.** The integer knobs accept plain digits only.
+  Hours run from 1 to 8760, `VALET_WAKEUPS_PER_SESSION` from 1 to 1000, and
+  `VALET_WATCH_MAX_EVENTS_PER_HOUR` from 1 to 100000. Any other value
+  stops the api at boot with a message that names the variable and the range.
+- **B: C5, pod read.** `setEvictionProtection` reads only the pods that
+  carry the sandbox's `valet.dev/session-id` label.
