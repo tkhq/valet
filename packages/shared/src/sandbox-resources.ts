@@ -30,6 +30,9 @@ export type ScratchRefusalReason = "invalid" | "disabled" | "deploy_cap" | "agen
 
 export const MIN_SCRATCH_BYTES = 2 ** 30;
 
+/** Whole bytes, or a whole number with a binary suffix. */
+const SCRATCH_FORM = /^\d+(?:Ki|Mi|Gi|Ti)?$/;
+
 export class ScratchRequestError extends Error {
   readonly code = "scratch_refused";
   constructor(readonly reason: ScratchRefusalReason, message: string) {
@@ -55,6 +58,14 @@ export function validateScratchRequest(value: unknown, source: ScratchSource, ca
     throw new ScratchRequestError(
       "invalid",
       `scratch "${String(value)}" is not a Kubernetes quantity of at least 1Gi. Use a form like "200Gi".`,
+    );
+  }
+  // The value reaches the emptyDir sizeLimit verbatim. The CRD rejects some
+  // forms the parser accepts (an uppercase "K"), so only the plain forms pass.
+  if (!SCRATCH_FORM.test(text)) {
+    throw new ScratchRequestError(
+      "invalid",
+      `scratch "${text}" uses an unsupported form. Use whole bytes or a Ki, Mi, Gi, or Ti suffix, like "200Gi".`,
     );
   }
   const maxBytes = caps.max ? parseResourceQuantity(caps.max) : null;

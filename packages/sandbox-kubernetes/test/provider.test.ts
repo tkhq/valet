@@ -1508,7 +1508,7 @@ describe("create() capacity retention and diagnosis", () => {
       await vi.advanceTimersByTimeAsync(9 * 60_000);
       const error = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
       expect(error).toBeInstanceOf(SandboxStartupError);
-      expect(error.message).toContain("over 10 minutes");
+      expect(error.message).toMatch(/Pending for 1[01] minutes/);
       expect(error.message).toContain(schedulerReason);
       expect(error.message).toContain("cpu=4");
       expect(error.message).toContain("memory=8Gi");
@@ -1754,6 +1754,22 @@ describe("pending grace measured from the pod (B5)", () => {
       const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
       expect(error).toBeInstanceOf(SandboxStartupError);
       expect(error.message).toContain("(scratch 800Gi)");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the terminal text names the pod's real Pending time, not the 10-minute grace (fix wave 3, L-5)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:25:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt } = makeHibernated();
+      setPodCreatedAt("2026-09-07T12:00:00.000Z");
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toMatch(/Pending for (25|26) minutes/);
+      expect(error.message).not.toContain("over 10 minutes");
     } finally {
       vi.useRealTimers();
     }

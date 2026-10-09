@@ -198,6 +198,9 @@ const SCALE_UP_DEFERRAL_CAP_MS = 30 * 60_000;
 
 interface PendingPodDiagnosis {
   detail: string;
+  /** How long the pod has been Pending. A scale-up deferral can push the
+   * verdict past the 10-minute grace, up to `SCALE_UP_DEFERRAL_CAP_MS`. */
+  ageMs: number;
   requests: {
     cpu?: string | number;
     memory?: string | number;
@@ -1596,6 +1599,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
     return {
       detail,
+      ageMs,
       requests: pod?.sandboxResources?.requests ?? {},
       ...(pod?.ephemeralStorageRequest !== undefined ? { ephemeralStorage: pod.ephemeralStorageRequest } : {}),
       ...(pod?.sandboxResources?.scratch !== undefined ? { scratch: pod.sandboxResources.scratch } : {}),
@@ -1636,7 +1640,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     const action = actions.length === 0 ? "Free or add node capacity. Then retry." : actions.join(" ");
     const schedulerDetail = pending.detail.replace(/[.!?]+$/, "");
     const scratchDetail = scratchShortage ? ` (scratch ${pending.scratch})` : "";
-    const message = `pod has been Pending for over ${Math.round(PENDING_TERMINAL_GRACE_MS / 60_000)} minutes ` +
+    const message = `pod has been Pending for ${Math.floor(pending.ageMs / 60_000)} minutes ` +
       `(${schedulerDetail})${scratchDetail}.${requestDetail} The cluster has no schedulable capacity for this sandbox. ${action}`;
     return new PendingTerminalStartupError(name, message);
   }
