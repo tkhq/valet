@@ -54,6 +54,6 @@ describe("sleepRefusal", () => {
 
 describe("wakeupsLimitRefusal", () => {
   it("names the knob", () => {
-    expect(wakeupsLimitRefusal(20, 20)).toBe("[wakeups_limit] This session already has 20 active wakeups and leases (limit 20, sandbox.wakeupsPerSession). Cancel one with wakeup_cancel.");
+    expect(wakeupsLimitRefusal(20, 20)).toBe("[wakeups_limit] This thread already has 20 active wakeups and holds (limit 20, sandbox.wakeupsPerSession). Cancel one of them with wakeup_cancel.");
   });
 });
