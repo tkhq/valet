@@ -7,6 +7,7 @@ import { TeamConnectionSetup } from "./team-connection-setup";
 import { TeamCredentials } from "./team-credentials";
 import { PullFromPersonal } from "./pull-from-personal";
 import { TeamOnePasswordToken } from "~/components/settings/team-onepassword-token";
+import { useTeamOnePasswordStatus } from "~/api/onepassword";
 
 /** Team summaries come from the member-visible endpoint, never the personal catalog. */
 export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: string }) {
@@ -17,6 +18,11 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
   const loading = teamsQ.isLoading || meQ.isLoading;
   const failed = teamsQ.error || meQ.error;
   const canMutate = meQ.data?.orgRole === "admin" || team?.callerRole === "admin";
+  // The team's own 1Password service account is what makes op:// references
+  // and valet-secrets work for its sessions. It sits with the connections
+  // once connected, and under Available until then (or while unknown).
+  const onePasswordConnected = useTeamOnePasswordStatus(teamId).data?.tokenConnected === true;
+  const onePassword = team && <TeamOnePasswordToken key={teamId} teamId={teamId} teamName={team.name} canMutate={canMutate} />;
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -51,17 +57,16 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                   team={team}
                   orgMembers={directoryQ.error ? [] : directoryQ.data?.users ?? []}
                   canMutate={canMutate}
-                />
+                >
+                  {onePasswordConnected && onePassword}
+                </TeamCredentials>
                 <div className="flex flex-wrap items-center gap-3 pt-3">
                   <PullFromPersonal teamId={teamId} teamName={team.name} />
                   <p className="text-sm text-muted">Shares one of your own connections with this team.</p>
                 </div>
               </Section>
-              {/* The team's own 1Password service account sits with the other
-                  connections: it is what makes op:// references and
-                  valet-secrets work for this team's sessions. */}
               <TeamConnectionSetup teamId={teamId} canManage={canMutate}>
-                <TeamOnePasswordToken key={teamId} teamId={teamId} teamName={team.name} canMutate={canMutate} />
+                {!onePasswordConnected && onePassword}
               </TeamConnectionSetup>
             </>
           )}

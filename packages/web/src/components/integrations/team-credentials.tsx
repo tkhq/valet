@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { CredentialSummary, OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 import { useCredentials, useDisconnectCredential, useRevokeDelegation } from "~/api/integrations";
 import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
@@ -45,11 +45,14 @@ export function TeamCredentials({
   orgMembers,
   canMutate,
   cards = false,
+  children,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
   cards?: boolean;
+  /** Connected team rows that own their controls, such as 1Password, listed first. */
+  children?: ReactNode;
 }) {
   const credsQ = useCredentials("team", { teamId: team.id });
   const disconnect = useDisconnectCredential();
@@ -85,12 +88,13 @@ export function TeamCredentials({
           Team actions use the acting member's own account first, then the team connection. Using another member's account asks them first.
         </p>
       )}
-      {!credsQ.isLoading && !credsQ.error && rows.length === 0 && (
+      {!credsQ.isLoading && !credsQ.error && rows.length === 0 && !children && (
         <EmptyRow>
           No connections added to this team yet. Connect an account for this team.
         </EmptyRow>
       )}
       <ul aria-label="Team connections" className={cards ? "divide-y divide-line" : "mt-1 space-y-3"}>
+        {children}
         {byService(rows).map((group) => (
           <li key={group.service} className={cards ? "py-3.5 first:pt-0.5 last:pb-0.5" : undefined}>
             <div className={cards ? undefined : "py-2"}>

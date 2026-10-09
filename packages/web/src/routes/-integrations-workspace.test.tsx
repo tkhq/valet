@@ -389,6 +389,24 @@ describe("Team account connection", () => {
     expect(shownOnPhones(await screen.findAllByText("Uses the organization token"))).toBe(true);
   });
 
+  it("lists a connected team 1Password with the team's connections, not under Available", async () => {
+    teamId = "a";
+    vi.spyOn(api, "getTeamOnePasswordStatus").mockResolvedValue({ tokenConnected: true });
+    mount();
+    const connected = await screen.findByRole("list", { name: "Team connections" });
+    expect(await within(connected).findByText("1Password")).toBeTruthy();
+    expect(within(screen.getByRole("list", { name: "Available" })).queryByText("1Password")).toBeNull();
+  });
+
+  it("offers an unconnected team 1Password under Available", async () => {
+    teamId = "a";
+    vi.spyOn(api, "getTeamOnePasswordStatus").mockResolvedValue({ tokenConnected: false });
+    mount();
+    const available = await screen.findByRole("list", { name: "Available" });
+    expect(await within(available).findByText("1Password")).toBeTruthy();
+    expect(within(screen.getByRole("list", { name: "Team connections" })).queryByText("1Password")).toBeNull();
+  });
+
   it("keeps Slack organization-managed while blocking missing OAuth configuration", async () => {
     teamId = "a";
     vi.mocked(api.listPlugins).mockResolvedValue({ plugins: [{ name: "demo", version: "1", actionCount: 0,
