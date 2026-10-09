@@ -1227,6 +1227,22 @@ describe('slack actions', () => {
   );
 
   it.each(['slack.send_message', 'slack.update_message', 'slack.dm_user'])(
+    '%s falls back to Markdown only once when Slack rejects every attempt', async (name) => {
+      if (name === 'slack.dm_user') {
+        fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }));
+      } else {
+        mockGuardAllowsPublicChannel(fetchMock);
+      }
+      fetchMock.mockImplementation(async () => jsonResponse(200, { ok: false, error: 'invalid_blocks' }));
+      const text = '| PR | Related |\n|---|---|\n| a | b<br>c |';
+      const result = await action(name).execute({ channel: 'C1', user: 'U123', ts: '123.456', text }, pluginCtx());
+      expect(result).toEqual({ success: false, error: 'Slack API error: invalid_blocks' });
+      const posts = fetchMock.mock.calls.slice(1).map(([, init]) => JSON.parse((init as RequestInit).body as string) as { blocks?: { type: string }[] });
+      expect(posts.map((post) => post.blocks?.map((block) => block.type))).toEqual([['table'], ['markdown']]);
+    },
+  );
+
+  it.each(['slack.send_message', 'slack.update_message', 'slack.dm_user'])(
     '%s preserves native links and mentions in readable table rows', async (name) => {
       if (name === 'slack.dm_user') {
         fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }));
