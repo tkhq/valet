@@ -78,6 +78,7 @@ interface Instruments {
   compactionCoverageGaps: Counter;
   wakeupsTotal: Counter;
   wakeupSignalsLost: Counter;
+  wakeupKillsFailed: Counter;
   wakeupsActive: ObservableGauge;
   leasesActive: ObservableGauge;
   leaseNodeSeconds: Counter;
@@ -173,6 +174,10 @@ function inst(): Instruments {
     wakeupSignalsLost: meter.createCounter("valet.wakeups.signal_lost", {
       description:
         "Wakeup signals the WakeWatcher could not deliver after the row moved, by kind (process/watch/timer/hold). The row does not retry, so each count is a turn the agent never got. Any sustained rate needs a human.",
+    }),
+    wakeupKillsFailed: meter.createCounter("valet.wakeups.kill_failed", {
+      description:
+        "Best-effort kills that threw after a wakeup row moved to a terminal status, by kind (process/watch). The row does not retry, so the process may run untracked until its container stops. Any count needs a human.",
     }),
     wakeupsActive: meter.createObservableGauge("valet.wakeups.active", {
       description:
@@ -367,6 +372,13 @@ export function recordWakeupEnded(kind: WakeupKind, cause: WakeupCause | "sessio
  * for `lease.expired`. */
 export function recordWakeupSignalLost(kind: WakeupKind | "hold"): void {
   inst().wakeupSignalsLost.add(1, { kind });
+}
+
+/** A best-effort kill that threw after the row's terminal CAS (fix wave 4
+ * re-review, F5). Nothing retries it: the process may run untracked until
+ * its container stops, so an alert on this counter pages. */
+export function recordWakeupKillFailed(kind: WakeupKind): void {
+  inst().wakeupKillsFailed.add(1, { kind });
 }
 
 /** Wakeups currently pending or running, by kind. The caller (the host's

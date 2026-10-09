@@ -8,6 +8,7 @@ import {
   recordWakeupBadRow,
   recordWakeupEnded,
   recordWakeupSignalLost,
+  recordWakeupKillFailed,
   recordWakeupsActive,
   recordWakeupSweepFailed,
   recordWakeupSweepOk,
@@ -76,6 +77,8 @@ type OrphanReleaseReason = Parameters<typeof recordLeaseOrphanReleased>[1];
 export interface WakeWatcherMetrics {
   wakeupEnded(kind: WakeupKind, cause: WakeupCause): void;
   signalLost(kind: WakeupKind | "hold"): void;
+  /** A best-effort kill after a terminal transition threw; the process may run untracked. */
+  killFailed(kind: WakeupKind): void;
   leasesUnannotated(count: number): void;
   orphanReleased(ownerKind: LeaseOwnerKind, reason: OrphanReleaseReason): void;
   nodeSeconds(ownerKind: LeaseOwnerKind, seconds: number): void;
@@ -89,6 +92,7 @@ export interface WakeWatcherMetrics {
 const DEFAULT_METRICS: WakeWatcherMetrics = {
   wakeupEnded: recordWakeupEnded,
   signalLost: recordWakeupSignalLost,
+  killFailed: recordWakeupKillFailed,
   leasesUnannotated: recordLeasesUnannotated,
   orphanReleased: recordLeaseOrphanReleased,
   nodeSeconds: recordLeaseNodeSeconds,
@@ -365,12 +369,14 @@ export class WakeWatcher {
     // another sweep already ended is never killed twice. The kill runs
     // after the delivery: a kill exec can take a minute, and a shutdown
     // that cuts this row then loses the kill, not the signal (fix wave 4,
-    // concurrency M6). The next start's prune and the deadline still bound
-    // a process that outlives a lost kill.
+    // concurrency M6). The row is terminal by now, so nothing retries a
+    // lost kill: the process runs untracked until its container stops.
+    // The counter is the record, and an alert on it pages (spec Part G).
     if (decision.kill && sandbox?.cancelJob && row.execId !== undefined) {
       try {
         await sandbox.cancelJob(row.execId);
       } catch (err) {
+        this.metrics.killFailed(updated.kind);
         console.error(`WakeWatcher: kill of wakeup ${row.id} (exec ${row.execId}) failed after the row moved to ${decision.to}:`, err);
       }
     }

@@ -66,8 +66,10 @@ const DETACHED_OUTPUT_TOTAL_MAX_BYTES = 256 * 1024 * 1024;
  * fits `capBytes`, and returns the dropped ids. A running job is never
  * dropped, so the total can stay over the cap while jobs run. A finished
  * job whose exit no terminal poll has read is never dropped either: the
- * WakeWatcher would read it as an unknown job and lose its exit code (fix
- * wave 4, data N3). A dropped job's poll then reads as an unknown job.
+ * WakeWatcher would lose its tail (fix wave 4, data N3). A drop empties the
+ * job's output and keeps its status and exit code, so a later poll (an
+ * agent `process_read` can mark a job polled before the watcher reads it)
+ * still reports the real exit instead of an unknown job (re-review F6).
  */
 export function dropFinishedDetachedOutputs<
   J extends { detached: boolean; status: string; output: string; terminalPolled?: boolean },
@@ -80,9 +82,9 @@ export function dropFinishedDetachedOutputs<
   const dropped: string[] = [];
   for (const [id, job] of jobs) {
     if (total <= capBytes) break;
-    if (!job.detached || job.status === "running" || !job.terminalPolled) continue;
+    if (!job.detached || job.status === "running" || !job.terminalPolled || job.output === "") continue;
     total -= Buffer.byteLength(job.output);
-    jobs.delete(id);
+    job.output = "";
     dropped.push(id);
   }
   return dropped;

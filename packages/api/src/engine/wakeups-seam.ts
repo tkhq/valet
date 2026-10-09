@@ -258,8 +258,11 @@ export function buildWakeupsSeam(
     if (!running) {
       const current = await engineStore.getWakeup(wakeupId).catch(() => null);
       // The WakeWatcher adopted the job while the start ran: the row tracks
-      // it, so it is started and must not be killed (fix wave 4, UX N4).
-      if (current?.status === "running") return { wakeup: current, lease };
+      // it (running, or already ended with its exit), so it is started and
+      // must not be killed or run again (fix wave 4, UX N4 and F8).
+      if (current?.status === "running" || current?.status === "done") {
+        return { wakeup: current, lease };
+      }
       // Another writer ended the pending row while the start ran. Nothing
       // tracks this job now, so stop it.
       await killJob(wakeupId, handle.execId, sandboxId);

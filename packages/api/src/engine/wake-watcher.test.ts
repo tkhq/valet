@@ -359,6 +359,21 @@ describe("WakeWatcher", () => {
     expect(content).not.toHaveProperty("origin");
   });
 
+  it("counts a kill that throws after the terminal CAS (re-review F5)", async () => {
+    const h = harness(async () => ({ status: "running", output: "", nextOffset: 0 }));
+    h.cancelJob.mockRejectedValue(new Error("exec refused"));
+    await seedProcess(h.store, { deadlineAt: NOW - 1 });
+    const killFailed = vi.fn((_kind: WakeupKind) => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await h.watcher({ metrics: { killFailed } }).sweep();
+
+    expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "expired", cause: "deadline" });
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    expect(killFailed).toHaveBeenCalledWith("process");
+    error.mockRestore();
+  });
+
   it("logs a delivery failure with the wakeup id and keeps the terminal row", async () => {
     const h = harness();
     h.prompt.mockRejectedValue(new Error("engine down"));

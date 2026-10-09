@@ -377,7 +377,7 @@ An api sweep (`packages/api/src/engine/wake-watcher.ts`), DB-driven like
 `ChildWatcher`, interval 30s, started in `main.ts`, with the
 sandbox provider and the pod patch api injected.
 
-Each tick reads every due row in pages of 200. It stops at a short page.
+Each tick reads every due row in pages of 200. It stops when a page of raw rows is short, so an unreadable row never ends the pass early.
 For each due row:
 
 | Kind | Probe | Transition |
@@ -605,6 +605,7 @@ otherwise, like the existing workspace default/max check.
 | `valet_wakeups_sweep_ok_at_seconds` | gauge | Unix time of the last finished WakeWatcher pass, or of the watcher start |
 | `valet_wakeups_sweep_failed_total` | counter | |
 | `valet_wakeups_signal_lost_total` | counter | `kind` |
+| `valet_wakeups_kill_failed_total` | counter | `kind`; a best-effort kill that threw after the terminal CAS, so the process may run untracked |
 | `valet_wakeups_bad_rows_total` | counter | `table` |
 | `valet_leases_orphan_released_total` | counter | `owner_kind`, `reason` (`missing_owner`, `terminal_owner`, `deadline`) |
 | `valet_jobs_logs_pruned_total` | counter | |
@@ -629,6 +630,8 @@ valet_leases_over_deadline > 0                                     for 5m
   + (sum(valet_wakeups_bad_rows_total unless valet_wakeups_bad_rows_total offset 1h) or vector(0)) > 0
 (sum(increase(valet_wakeups_signal_lost_total[1h])) or vector(0))
   + (sum(valet_wakeups_signal_lost_total unless valet_wakeups_signal_lost_total offset 1h) or vector(0)) > 0
+(sum(increase(valet_wakeups_kill_failed_total[1h])) or vector(0))
+  + (sum(valet_wakeups_kill_failed_total unless valet_wakeups_kill_failed_total offset 1h) or vector(0)) > 0
 ```
 
 UI: a wakeups strip on the session page lists active wakeups and leases

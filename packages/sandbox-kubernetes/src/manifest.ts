@@ -76,7 +76,8 @@ const SCRATCH_SIZE_FORM = /^\d+(?:Ki|Mi|Gi|Ti)?$/;
 export function scratchSizeLimit(scratch: string): string {
   if (!SCRATCH_SIZE_FORM.test(scratch)) {
     throw new Error(
-      `scratch "${scratch}" is not a supported quantity. Use whole bytes or a Ki, Mi, Gi, or Ti suffix, like "200Gi".`,
+      `scratch "${scratch}" is not a supported quantity. Set resources.scratch in .valet/prebuild.yaml ` +
+        `(or the saved source) as whole bytes or a Ki, Mi, Gi, or Ti suffix, like "200Gi", then replace the sandbox.`,
     );
   }
   return scratch;
