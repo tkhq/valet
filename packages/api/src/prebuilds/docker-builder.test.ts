@@ -14,7 +14,7 @@ function baseSpec(overrides: Partial<PrebuildSpec> = {}): PrebuildSpec {
     prebuildId: "pb-1",
     cloneUrl: "https://github.com/octocat/Hello-World.git",
     commitSha: "abc123",
-    baseImage: "alpine:3",
+    baseImage: "public.ecr.aws/docker/library/alpine:3",
     recipe: [],
     imageRef: "valet-prebuild/octocat-hello-world:abc123",
     ...overrides,
@@ -449,13 +449,12 @@ describeDocker("DockerImageBuilder (live docker)", () => {
       prebuildId: "pb-live",
       cloneUrl: "https://github.com/octocat/Hello-World.git",
       commitSha: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11",
-      // Plain `alpine:3` has no `git` binary — the generated Dockerfile's
-      // clone step needs one already present in the base image (recipe.ts,
-      // Task 1, doesn't install git itself). `alpine/git` is alpine + git
-      // with an `ENTRYPOINT ["git"]`; that's irrelevant here since `RUN`
-      // always executes via `/bin/sh -c`, never through the image's
-      // entrypoint.
-      baseImage: "alpine/git:latest",
+      // Plain `alpine:3` has no `git` binary, and the generated Dockerfile's
+      // clone step needs one already present in the base image (recipe.ts
+      // does not install git). `buildpack-deps:bookworm-scm` is the official
+      // Debian image with git. It comes from the ECR Public mirror because
+      // anonymous Docker Hub pulls hit the shared CI runner rate limit.
+      baseImage: "public.ecr.aws/docker/library/buildpack-deps:bookworm-scm",
       recipe: [],
       imageRef,
     });
@@ -485,7 +484,7 @@ describeDocker("DockerImageBuilder (live docker)", () => {
       prebuildId: "pb-live-fail",
       cloneUrl: "https://github.com/octocat/Hello-World.git",
       commitSha: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11",
-      baseImage: "this-image-definitely-does-not-exist-anywhere:v999",
+      baseImage: "public.ecr.aws/docker/library/this-image-definitely-does-not-exist-anywhere:v999",
       recipe: [],
       imageRef,
     });
