@@ -1117,6 +1117,99 @@ describe("ChildWatcher", () => {
     expect(content.attributes?.outcome).toBe("completed");
   });
 
+  it("holds off child.settled while an active lease exists; delivers it once the lease is released", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api, { leasePollMs: 1 });
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const parent = await engineHost.sessionFor("parent-leased", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+
+    const child = await engineHost.childSessionFor("child-leased", {
+      parentSessionId: "parent-leased",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+
+    const itemId = "qi-leased-1";
+    await engineStore.admitSubmission("child-leased", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-leased", childThread.id, itemId, { outcome: "completed" });
+
+    // The child's background process still owns a lease. Settlement is
+    // not owed to the parent yet, even though the tracked submission
+    // already settled.
+    await engineStore.createLease({
+      id: "lease-leased-1",
+      sessionId: "child-leased",
+      ownerKind: "process",
+      reason: "long build",
+      createdAt: Date.now(),
+      deadlineAt: Date.now() + 3_600_000,
+    });
+
+    await db.insert(agentSessions).values({
+      id: "child-leased",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      status: "active",
+      ownerType: "user",
+      ownerId: "local-user",
+      profile: "headless",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const watch = {
+      childSessionId: "child-leased",
+      queueItemId: itemId,
+      parentSessionId: "parent-leased",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
+
+    watcher.arm(watch);
+
+    // Give the lease-wait loop several polls; it must still be unsettled.
+    await new Promise((r) => setTimeout(r, 100));
+    const stillUnsettled = await db
+      .select()
+      .from(childWatches)
+      .where(eq(childWatches.childSessionId, "child-leased"))
+      .limit(1);
+    expect(stillUnsettled[0]?.settled).toBe(false);
+
+    await engineStore.releaseLease("lease-leased-1", "owner_ended", Date.now());
+
+    await waitFor(async () => {
+      const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-leased")).limit(1);
+      return rows[0]?.settled === true;
+    });
+
+    const unsettled = await engineStore.listUnsettledSubmissions("parent-leased");
+    const settledSignals = unsettled.filter(
+      (i) =>
+        typeof i.content === "object" &&
+        i.content !== null &&
+        "kind" in i.content &&
+        i.content.kind === "signal" &&
+        (i.content as SignalContent).signalType === "child.settled",
+    );
+    expect(settledSignals).toHaveLength(1);
+  });
+
   it.each(["failed", "aborted"] as const)(
     "includes a continuation checkpoint when a compacted child is %s",
     async (outcome) => {

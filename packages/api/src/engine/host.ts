@@ -859,6 +859,9 @@ export class EngineHost {
     const unsettled = await this.opts.engineStore.listUnsettledSubmissions(sessionId);
     if (unsettled.length > 0) return;
 
+    // A lease (wakeups spec C3) keeps the sandbox out of idle suspension.
+    if ((await this.opts.engineStore.countActiveLeases(sessionId)) > 0) return;
+
     let sinceMs = await this.opts.engineStore.latestActivityAt(sessionId);
     if (sinceMs == null) {
       const data = await this.opts.engineStore.getSession(sessionId);

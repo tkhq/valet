@@ -96,6 +96,8 @@ export interface ChildrenDeps {
   retentionMs?: number;
   /** Override for the retention sweep cadence. Tests only. */
   retentionSweepIntervalMs?: number;
+  /** Poll interval for `ChildWatcher`'s active-lease wait. Tests only. */
+  leasePollMs?: number;
   /**
    * Deploy and agent caps for a `task`-requested `/scratch` volume
    * (`resolveScratchCaps(process.env)` at real boot). `buildChildSpawner`
@@ -696,6 +698,25 @@ export class ChildWatcher {
     // The spawner always prompts the child's default thread — see
     // `buildChildSpawner`'s `childSession.prompt(...)` call.
     const result = await childSession.thread().awaitResult(watch.queueItemId);
+
+    // A child with an active lease is not settled (wakeups spec C4): its
+    // background process still runs and its terminal signal still owes a
+    // turn. Wait here; a lease always has a deadline, so this loop ends.
+    // Gated on having seen a lease at all. An unrelated unsettled
+    // submission (a user prompt admitted after settlement) is not a signal
+    // turn and must not delay this watcher. `parkChildSandbox` already
+    // owns skipping teardown for that case.
+    let waitedOnLease = false;
+    for (;;) {
+      while ((await this.deps.engineStore.countActiveLeases(watch.childSessionId)) > 0) {
+        waitedOnLease = true;
+        await new Promise((resolve) => setTimeout(resolve, this.deps.leasePollMs ?? 30_000).unref());
+      }
+      if (!waitedOnLease) break;
+      const owedTurn = await this.deps.engineStore.listUnsettledSubmissions(watch.childSessionId);
+      if (owedTurn.length === 0) break;
+      await childSession.thread().awaitResult(owedTurn[owedTurn.length - 1]!.id);
+    }
 
     // Re-point guard (`child_send`): the sender moves the watch row to its
     // new submission and arms a fresh watcher on it. A watcher that wakes
