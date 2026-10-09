@@ -12,6 +12,7 @@ import {
   buildShellCommand,
   execInPod,
   exitCodeFromStatus,
+  ROOT_TMPDIR_PREFIX,
   shQuote,
   wrapAsWorkloadUser,
   type ExecDeps,
@@ -161,19 +162,19 @@ describe("execInPod workload-user wrapping", () => {
     expect(api.commands[0]).toEqual(["/bin/sh", "-c", `${SETPRIV_PREFIX}${shQuote("echo hi")}`]);
   });
 
-  it("docker-enabled + privileged stays unwrapped", async () => {
+  it("docker-enabled + privileged stays unwrapped and uses the root temp dir", async () => {
     const { deps: d, api } = deps(true);
     await execInPod(d, "pod-1", "echo hi", { privileged: true });
-    expect(api.commands[0]).toEqual(["/bin/sh", "-c", "echo hi"]);
+    expect(api.commands[0]).toEqual(["/bin/sh", "-c", `${ROOT_TMPDIR_PREFIX}echo hi`]);
   });
 
-  it("non-docker sandboxes stay unwrapped either way", async () => {
+  it("non-docker sandboxes stay unwrapped either way and use the root temp dir", async () => {
     const { deps: d, api } = deps(false);
     await execInPod(d, "pod-1", "echo hi");
     await execInPod(d, "pod-1", "echo hi", { privileged: true });
     expect(api.commands).toEqual([
-      ["/bin/sh", "-c", "echo hi"],
-      ["/bin/sh", "-c", "echo hi"],
+      ["/bin/sh", "-c", `${ROOT_TMPDIR_PREFIX}echo hi`],
+      ["/bin/sh", "-c", `${ROOT_TMPDIR_PREFIX}echo hi`],
     ]);
   });
 
