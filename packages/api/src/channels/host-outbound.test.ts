@@ -1140,6 +1140,61 @@ describe("ChannelHost outbound delivery", () => {
     expect(delivered?.completedAt).not.toBeNull();
   });
 
+  it("leaves an automatic child reply to its durable intent, so a failed send is retried", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    // The first send of the child reply fails. Every other send succeeds.
+    let failNextChildReply = true;
+    const realSend = fakeTransport.send.bind(fakeTransport);
+    const send = vi.spyOn(fakeTransport, "send").mockImplementation(async (conversationKey, message) => {
+      if (failNextChildReply && message.markdown === "Delegated result") {
+        failNextChildReply = false;
+        throw new Error("temporary Slack failure");
+      }
+      return realSend(conversationKey, message);
+    });
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId: "qi-owned", signal: {
+        signalType: "child.settled", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" },
+      } }),
+      { type: "message", id: "reply-owned", sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "Delegated result", queueItemId: "qi-owned", stopReason: "end_turn" },
+      userEntry({ sessionId: session.id, threadId, queueItemId: "qi-marker", signal: {
+        signalType: "fake.message", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" },
+      } }),
+      { type: "message", id: "reply-marker", sessionId: session.id, threadId, parentId: null,
+        createdAt: Date.now(), role: "assistant", content: "Marker reply", queueItemId: "qi-marker", stopReason: "end_turn" },
+    ]);
+    // The live path handles one thread's events in order, so the marker turn
+    // posting proves the child reply's event was handled first.
+    for (const messageId of ["reply-owned", "reply-marker"]) {
+      await eventStream.append({ sessionId: session.id, threadId, timestamp: Date.now(), event: {
+        type: "message_end", threadId, messageId, reason: "end_turn",
+      } }, `owned-${messageId}`);
+    }
+    await vi.waitFor(() => expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["Marker reply"]));
+    expect(send.mock.calls.some(([, message]) => message.markdown === "Delegated result")).toBe(false);
+
+    // Only the dispatcher sends the child reply. Stop its timer so each pass below is explicit.
+    host.stopOutbound();
+    await host.retryChildReplies();
+    await testDb.appDb.insert(childReplyDeliveries).values({
+      id: "owned-reply", orgId: ORG_ID, sessionId: session.id, threadId, queueItemId: "qi-owned", nextAttemptAt: 0,
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await host.retryChildReplies();
+    const [retrying] = await testDb.appDb.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, "owned-reply"));
+    expect(retrying).toMatchObject({ attempts: 1, completedAt: null });
+    expect(retrying?.lastError).toContain("temporary Slack failure");
+    error.mockRestore();
+
+    await testDb.appDb.update(childReplyDeliveries).set({ nextAttemptAt: 0 }).where(eq(childReplyDeliveries.id, "owned-reply"));
+    await host.retryChildReplies();
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["Marker reply", "Delegated result"]);
+    const [delivered] = await testDb.appDb.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, "owned-reply"));
+    expect(delivered?.completedAt).not.toBeNull();
+  });
+
   it("a feedback turn can reply once without creating a second feedback turn", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("events").id;

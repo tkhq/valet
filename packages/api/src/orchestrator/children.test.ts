@@ -1452,6 +1452,52 @@ describe("ChildWatcher", () => {
     expect(engineHost.liveSession("child-real-denial")).not.toBeNull();
   });
 
+  it("fails the automatic reply intent when the parent can never receive the settlement", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const child = await engineHost.childSessionFor("child-denied-reply", {
+      parentSessionId: "parent-does-not-exist",
+      parentThreadId: "th-does-not-exist",
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    const itemId = "qi-denied-reply";
+    await engineStore.admitSubmission("child-denied-reply", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-denied-reply", childThread.id, itemId, { outcome: "completed" });
+
+    const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" };
+    const watch = {
+      childSessionId: "child-denied-reply",
+      queueItemId: itemId,
+      parentSessionId: "parent-does-not-exist",
+      parentThreadId: "th-does-not-exist",
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now(), originJson: JSON.stringify(origin) });
+
+    watcher.arm({ ...watch, origin });
+    await waitFor(async () => {
+      const [row] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-denied-reply"));
+      return row?.settled === true;
+    });
+
+    // The intent was written before admission. With no parent update to
+    // post, it must end failed now, not wait out the admission window.
+    const [intent] = await db.select().from(childReplyDeliveries);
+    expect(intent?.id).toBe(`child-denied-reply:settled:child-denied-reply:${itemId}`);
+    expect(intent?.queueItemId).toBeNull();
+    expect(intent?.completedAt).toBeNull();
+    expect(intent?.failedAt).not.toBeNull();
+    expect(intent?.lastError).toContain("parent-does-not-exist");
+  });
+
   it("tears down the child's sandbox and evicts its cached session on settle, keeping session data", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
