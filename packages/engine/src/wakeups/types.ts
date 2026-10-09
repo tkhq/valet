@@ -168,11 +168,15 @@ export interface WakeupsSeam {
   list(threadId: string): Promise<WakeupsListing>;
   /** Null for an unknown, ended, or foreign id. `refused` carries the text the tool returns. */
   cancel(id: string): Promise<{ kind: "wakeup" | "lease" } | { kind: "refused"; text: string } | null>;
-  /** `tail` reads the last `bytes` of the log instead of reading forward from `offset`. */
+  /**
+   * `tail` reads the last `bytes` of the log instead of reading forward from
+   * `offset`. `capped` is true when the provider dropped output at its log
+   * cap without writing the marker line (docker).
+   */
   readLog(
     id: string,
     offset: number,
     bytes: number,
     opts?: { tail?: boolean },
-  ): Promise<{ text: string; nextOffset: number; eof: boolean }>;
+  ): Promise<{ text: string; nextOffset: number; eof: boolean; capped?: boolean }>;
 }
