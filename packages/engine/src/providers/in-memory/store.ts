@@ -4,6 +4,8 @@ import type {
   DecisionGate,
   DecisionGateEntry,
   DecisionGateRef,
+  Lease,
+  LeaseReleaseCause,
   ListOpts,
   MessageQuery,
   QueueItem,
@@ -17,8 +19,14 @@ import type {
   SubmissionOutcome,
   SuspendedTurnState,
   ThreadData,
+  Wakeup,
+  WakeupCount,
+  WakeupPatch,
+  WakeupCursor,
+  WakeupStatus,
   WriteFence,
 } from "../../types.js";
+import { recordWakeupEnded } from "../../metrics.js";
 
 const DEFAULT_LEASE_MS = 30_000;
 
@@ -39,6 +47,10 @@ export class InMemorySessionStore implements SessionStore {
   private rows = new Map<string, SessionRow>();
   /** Attempt markers are global evidence keyed by `${itemId}:${attemptId}`; no sessionId in the contract. */
   private attemptMarkers = new Set<string>();
+  /** Wakeups and leases are global maps, not per-session rows: listDueWakeups
+   * and listAllActiveLeases scan across every session. */
+  private wakeups = new Map<string, Wakeup>();
+  private leases = new Map<string, Lease>();
 
   private row(sessionId: string): SessionRow {
     const row = this.rows.get(sessionId);
@@ -267,6 +279,152 @@ export class InMemorySessionStore implements SessionStore {
 
   async deleteSession(id: string): Promise<void> {
     this.rows.delete(id);
+    // A deleted session has no sandbox left to probe, so its open wakeups
+    // end here (spec C2), and its rows go with the rest of the session
+    // (fix wave 2, M12). The watcher reads a missing row as a lost CAS.
+    for (const w of [...this.wakeups.values()]) {
+      if (w.sessionId !== id) continue;
+      if (w.status === "pending" || w.status === "running") recordWakeupEnded(w.kind, "session_deleted");
+      this.wakeups.delete(w.id);
+    }
+    for (const l of [...this.leases.values()]) {
+      if (l.sessionId === id) this.leases.delete(l.id);
+    }
+  }
+
+  // ── wakeups and leases ──────────────────────────────────────────
+
+  async createWakeup(wakeup: Wakeup): Promise<void> {
+    if (this.wakeups.has(wakeup.id)) throw new ConflictError(`wakeup ${wakeup.id} already exists`);
+    this.wakeups.set(wakeup.id, { ...wakeup });
+  }
+
+  async createWakeupWithLease(wakeup: Wakeup, lease: Lease): Promise<void> {
+    // Check both before writing either, so a refusal writes nothing.
+    if (this.wakeups.has(wakeup.id)) throw new ConflictError(`wakeup ${wakeup.id} already exists`);
+    if (this.leases.has(lease.id)) throw new ConflictError(`lease ${lease.id} already exists`);
+    this.leases.set(lease.id, { ...lease });
+    this.wakeups.set(wakeup.id, { ...wakeup });
+  }
+
+  async countWakeupsByKindAndStatus(statuses: readonly WakeupStatus[]): Promise<WakeupCount[]> {
+    const groups = new Map<string, WakeupCount>();
+    for (const w of this.wakeups.values()) {
+      if (!statuses.includes(w.status)) continue;
+      const key = `${w.kind}:${w.status}`;
+      const g = groups.get(key) ?? { kind: w.kind, status: w.status, count: 0 };
+      g.count++;
+      groups.set(key, g);
+    }
+    return [...groups.values()];
+  }
+
+  async transitionWakeupAndReleaseLease(
+    id: string,
+    from: readonly WakeupStatus[],
+    to: WakeupStatus,
+    patch: WakeupPatch,
+    updatedAt: number,
+    releaseCause: LeaseReleaseCause,
+  ): Promise<Wakeup | null> {
+    // Both writes happen here, with no await between them, so they land
+    // together like the Postgres single statement.
+    const w = this.wakeups.get(id);
+    if (!w || !from.includes(w.status)) return null;
+    const next: Wakeup = { ...w, ...patch, status: to, updatedAt };
+    this.wakeups.set(id, next);
+    const l = next.leaseId === undefined ? undefined : this.leases.get(next.leaseId);
+    if (l && l.releasedAt === undefined) this.leases.set(l.id, { ...l, releasedAt: updatedAt, releaseCause });
+    return { ...next };
+  }
+
+  async getWakeup(id: string): Promise<Wakeup | null> {
+    const w = this.wakeups.get(id);
+    return w ? { ...w } : null;
+  }
+
+  async listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]> {
+    return [...this.wakeups.values()]
+      .filter((w) => w.sessionId === sessionId && (!statuses || statuses.length === 0 || statuses.includes(w.status)))
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((w) => ({ ...w }));
+  }
+
+  async listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<{ rows: Wakeup[]; next: WakeupCursor | null }> {
+    const rows = [...this.wakeups.values()]
+      .filter(
+        (w) =>
+          ((w.status === "running" || w.status === "pending") && (w.kind === "process" || w.kind === "watch")) ||
+          (w.status === "pending" && w.kind === "timer" && w.fireAt !== undefined && w.fireAt <= now),
+      )
+      .filter((w) => !after || w.createdAt > after.createdAt || (w.createdAt === after.createdAt && w.id > after.id))
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .slice(0, limit)
+      .map((w) => ({ ...w }));
+    const last = rows[rows.length - 1];
+    return { rows, next: rows.length < limit || !last ? null : { createdAt: last.createdAt, id: last.id } };
+  }
+
+  async transitionWakeup(
+    id: string,
+    from: readonly WakeupStatus[],
+    to: WakeupStatus,
+    patch: WakeupPatch,
+    updatedAt: number,
+  ): Promise<Wakeup | null> {
+    const w = this.wakeups.get(id);
+    if (!w || !from.includes(w.status)) return null;
+    const next: Wakeup = { ...w, ...patch, status: to, updatedAt };
+    this.wakeups.set(id, next);
+    return { ...next };
+  }
+
+  async createLease(lease: Lease): Promise<void> {
+    if (this.leases.has(lease.id)) throw new ConflictError(`lease ${lease.id} already exists`);
+    this.leases.set(lease.id, { ...lease });
+  }
+
+  async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null> {
+    const l = this.leases.get(id);
+    if (!l || l.releasedAt !== undefined) return null;
+    const next: Lease = { ...l, releasedAt, releaseCause: cause };
+    this.leases.set(id, next);
+    return { ...next };
+  }
+
+  async getLease(id: string): Promise<Lease | null> {
+    const l = this.leases.get(id);
+    return l ? { ...l } : null;
+  }
+
+  async deleteWakeupRows(sessionId: string, rows: { wakeupId?: string; leaseId?: string }): Promise<void> {
+    if (rows.wakeupId !== undefined && this.wakeups.get(rows.wakeupId)?.sessionId === sessionId) {
+      this.wakeups.delete(rows.wakeupId);
+    }
+    if (rows.leaseId !== undefined && this.leases.get(rows.leaseId)?.sessionId === sessionId) {
+      this.leases.delete(rows.leaseId);
+    }
+  }
+
+  async listActiveLeases(sessionId: string): Promise<Lease[]> {
+    return [...this.leases.values()]
+      .filter((l) => l.sessionId === sessionId && l.releasedAt === undefined)
+      .map((l) => ({ ...l }));
+  }
+
+  async listAllActiveLeases(): Promise<Lease[]> {
+    return [...this.leases.values()].filter((l) => l.releasedAt === undefined).map((l) => ({ ...l }));
+  }
+
+  async countActiveLeases(sessionId: string): Promise<number> {
+    return (await this.listActiveLeases(sessionId)).length;
+  }
+
+  async setLeaseSandboxId(id: string, sandboxId: string): Promise<boolean> {
+    const l = this.leases.get(id);
+    if (!l || l.releasedAt !== undefined || l.sandboxId !== undefined) return false;
+    this.leases.set(id, { ...l, sandboxId });
+    return true;
   }
 
   // ── submission lifecycle ───────────────────────────────────────
@@ -512,6 +670,13 @@ export class InMemorySessionStore implements SessionStore {
   async getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null> {
     const r = this.row(sessionId);
     const item = r.queueItems.get(itemId);
+    return item ? { ...item } : null;
+  }
+
+  async getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null> {
+    const r = this.rows.get(sessionId);
+    const itemId = r?.dispatchIndex.get(dispatchId);
+    const item = itemId === undefined ? undefined : r?.queueItems.get(itemId);
     return item ? { ...item } : null;
   }
 

@@ -199,6 +199,44 @@ sandbox:
   ephemeralStorageRequest: "2Gi"
   ephemeralStorageLimit: "30Gi"
 
+  # Node-local /scratch per sandbox (spec 2026-10-08 Part A). scratchMax "0"
+  # disables scratch. scratchAgentMax bounds what a `task` child may request;
+  # a repo's .valet/prebuild.yaml may declare up to scratchMax.
+  # WARNING: if you set scratchMax, keep scratchAgentMax at or below it, or
+  # the api fails at boot. Example: scratchMax "50Gi" with the default
+  # scratchAgentMax "100Gi" crash-loops; set scratchAgentMax "50Gi" too.
+  # A scratch pod needs a node with that much free local disk. Without a
+  # node pool that fits, the session fails after 10 to 30 minutes Pending
+  # (a cluster autoscaler scale-up extends the wait).
+  # WARNING: keep scratchMax "0" until a local-NVMe scratch node pool
+  # exists. A small scratch request otherwise lands on a node's shared root
+  # disk, and heavy writes there made nodes NotReady (2026-08-28).
+  scratchMax: "0"
+  scratchAgentMax: "100Gi"
+  # Set true once the scratch node pool exists. While scratchMax is above
+  # "0" and this is false, the api logs a WARNING at boot.
+  scratchPoolReady: false
+  # Wakeups and leases (spec Part D). A lease keeps a sandbox awake and
+  # unevictable until its deadline; leaseMaxHours caps every deadline, so
+  # it is also the longest time one background process can hold a node.
+  # Integer knobs take plain digits: hours 1 to 8760, wakeupsPerSession 1
+  # to 1000, watchMaxEventsPerHour 1 to 100000, watchMinIntervalMs 1 to
+  # 86400000. Other values fail at boot.
+  leaseMaxHours: 72
+  timerMaxHours: 720
+  wakeupsPerSession: 20
+  watchMaxEventsPerHour: 120
+  # Shortest time in milliseconds between two watch signal turns.
+  watchMinIntervalMs: 120000
+  # Cap on one background job's log file in the sandbox (a quantity, read
+  # as VALET_JOB_LOG_MAX_BYTES). On a scratch pod the logs live on /scratch
+  # and count against its size. When the logs of all jobs pass the scratch
+  # size, the kubelet evicts the pod, so the cap alone does not protect
+  # /scratch. Keep jobLogMaxBytes below scratchMax and below the scratch a
+  # repo declares. The api fails at boot when jobLogMaxBytes exceeds a
+  # non-zero scratchMax.
+  jobLogMaxBytes: "2Gi"
+
   # Size of the PERSISTENT /workspace claim each sandbox provisions. This
   # is the volume that survives pod recreation and hibernation, and it
   # holds the repo clone and uncommitted work. Node-local scratch (docker

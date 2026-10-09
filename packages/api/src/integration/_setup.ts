@@ -38,6 +38,7 @@ import {
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { WakeWatcher } from "../engine/wake-watcher.js";
 import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import { submitSessionPrompt } from "../routes/messages.js";
 import { ChannelHost } from "../channels/host.js";
@@ -51,6 +52,7 @@ import { channelThreadContextFetcher } from "../events/channel-thread-context.js
 import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
+import { resolveScratchCaps, resolveWakeupLimits } from "../providers/sandbox-backend.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { createOnePasswordService } from "../services/onepassword.js";
@@ -307,12 +309,19 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     createOnePasswordService({
       credentials: engineCredentials,
     });
+  // Env-driven, same as real boot. A test that wants a non-default cap sets
+  // `process.env.VALET_SANDBOX_SCRATCH_MAX`/`VALET_SANDBOX_SCRATCH_AGENT_MAX`
+  // before calling `bootTestApi()` and restores it afterward.
+  const scratchCaps = resolveScratchCaps(process.env);
+  const wakeupLimits = resolveWakeupLimits(process.env);
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
     eventStream,
     engineCredentials,
     blobs,
+    scratchCaps,
+    wakeupLimits,
     anthropicApiKey: ANTHROPIC_API_KEY,
     defaultImage: opts.defaultImage,
     prebuildPreflight: opts.prebuildPreflight,
@@ -380,7 +389,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
 
   // Child workspaces under the test tmp dir (cleaned up with it) instead of
   // the real ~/.valet/children.
-  const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(blobsRoot, "children") };
+  const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(blobsRoot, "children"), scratchCaps };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
@@ -404,6 +413,17 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // idleMs 0 disables the sweep; behavior is tested in
   // engine/idle-hibernation-sweep.test.ts.
   const idleHibernationSweep = new IdleHibernationSweep({ db, engineHost, engineStore, idleMs: 0 });
+
+  // sweepIntervalMs 0 disables the timer; a test drives `sweep()` directly.
+  // Behavior is tested in engine/wake-watcher.test.ts.
+  const wakeWatcher = new WakeWatcher({
+    db,
+    engineStore,
+    engineHost,
+    provider: sandboxProvider,
+    limits: wakeupLimits,
+    sweepIntervalMs: 0,
+  });
 
   // sweepIntervalMs 0 disables the sweep; behavior is tested in
   // orchestrator/security-runner-driver.test.ts.
@@ -567,6 +587,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
     idleHibernationSweep,
+    wakeWatcher,
     securityRunnerDriver,
     channelHost,
     workflowStore,
@@ -579,6 +600,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
     prebuildService,
+    scratchCaps,
   };
 
   let authWiring: AuthWiring = {};

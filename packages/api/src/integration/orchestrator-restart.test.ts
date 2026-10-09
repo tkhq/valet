@@ -78,6 +78,8 @@ async function bootRestoredProviders(pgDataDir: string) {
 
   let spawnerRef: ChildSpawner | undefined;
   const engineHost = new EngineHost({
+    scratchCaps: {},
+    wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
     engineStore,
     sandboxProvider,
     eventStream,
@@ -98,7 +100,11 @@ async function bootRestoredProviders(pgDataDir: string) {
     builder: null,
     githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey("test-key") },
   });
-  const childrenDeps = { db, engineHost, engineStore, prebuildService, workspaceRoot: join(dirname(pgDataDir), "children") };
+  const childrenDeps = {
+    db, engineHost, engineStore, prebuildService,
+    workspaceRoot: join(dirname(pgDataDir), "children"),
+    scratchCaps: {},
+  };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
 

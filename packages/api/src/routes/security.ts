@@ -1078,7 +1078,7 @@ securityRouter.get("/:id/security/status", async (c) => {
   const loaded = await loadEngagementOr404(c, sessionId);
   if ("failure" in loaded) return loaded.failure;
   const { security, result } = loaded;
-  const { db, engineHost, engineStore, prebuildService } = c.var.providers;
+  const { db, engineHost, engineStore, prebuildService, scratchCaps } = c.var.providers;
 
   const progress = await security.getRunningCellProgress(result.engagement.id);
 
@@ -1105,7 +1105,7 @@ securityRouter.get("/:id/security/status", async (c) => {
   let runningChild: GetSecurityStatusResponse["runningChild"] = null;
   const running = result.cells.find((cell) => cell.status === "running");
   if (running?.childSessionId) {
-    const statusReader = buildChildStatusReader({ db, engineHost, engineStore, prebuildService });
+    const statusReader = buildChildStatusReader({ db, engineHost, engineStore, prebuildService, scratchCaps });
     const status = await statusReader(
       { childSessionId: running.childSessionId },
       { parentSessionId: sessionId },
@@ -1667,7 +1667,7 @@ securityRouter.post("/:id/security/cells/:cellId/complete", async (c) => {
   const loaded = await loadEngagementOr404(c, sessionId);
   if ("failure" in loaded) return loaded.failure;
   const { security, result } = loaded;
-  const { db, engineHost, engineStore, prebuildService } = c.var.providers;
+  const { db, engineHost, engineStore, prebuildService, scratchCaps } = c.var.providers;
 
   // `settled` comes from the SAME durable settlement definition the
   // `child_status` reader uses — `resolveChildSettlement` — not a raw read of
@@ -1683,7 +1683,7 @@ securityRouter.post("/:id/security/cells/:cellId/complete", async (c) => {
   let settled = false;
   if (cell.childSessionId) {
     const resolved = await resolveChildSettlement(
-      { db, engineHost, engineStore, prebuildService },
+      { db, engineHost, engineStore, prebuildService, scratchCaps },
       cell.childSessionId,
       sessionId,
     );

@@ -76,8 +76,69 @@ export function homeInitContainer(image: string): SandboxContainer {
     volumeMounts: [{ name: "workspace", mountPath: INIT_VOLUME_ROOT }] };
 }
 
-export function withHomeLinks(command: string[]): string[] {
-  return ["sh", "-c", `${homeLinkScript()}exec "$@"`, "valet-home-start", ...command];
+export const SCRATCH_ROOT = "/scratch";
+export const JOB_LOG_LINK = "/tmp/valet-jobs";
+
+/**
+ * Creates the scratch directories as root. The root is sticky (1777), so
+ * the workload user cannot rename or replace a root-owned entry in it
+ * (H-1). `tmp` and `valet-jobs` are sticky and world-writable for the
+ * `dockerd` workload user. `tmp-root` is the root-only temp dir for root
+ * services (H-2). A symlink in place of a directory is removed, never
+ * followed. Does nothing when `root` is absent.
+ */
+export function scratchDirsScript(root = SCRATCH_ROOT): string {
+  return `scratch=${shQuote(root)}
+if [ -d "$scratch" ] && [ ! -L "$scratch" ]; then
+  chmod 1777 "$scratch"
+  for dir in "$scratch/tmp" "$scratch/valet-jobs" "$scratch/tmp-root"; do
+    [ ! -L "$dir" ] || rm -f "$dir"
+    mkdir -p "$dir"
+  done
+  chmod 1777 "$scratch/tmp" "$scratch/valet-jobs"
+  chmod 700 "$scratch/tmp-root"
+fi
+`;
+}
+
+/**
+ * Scratch setup for each container start: the directories, the job log
+ * link, and a `.dead` marker for each job with no exit code. A container
+ * restart kills every job but keeps /scratch, so a reused pid must not
+ * look alive (M-A). This runs before the image command, so a job started
+ * during image startup still logs on /scratch (L-1). The init container
+ * cannot make the link, because /tmp is on this container's own rootfs.
+ */
+export function scratchStartScript(root = SCRATCH_ROOT, jobLogLink = JOB_LOG_LINK): string {
+  return `${scratchDirsScript(root)}if [ -d "$scratch" ] && [ ! -L "$scratch" ]; then
+  link=${shQuote(jobLogLink)}
+  if [ -d "$link" ] && [ ! -L "$link" ]; then rmdir "$link" 2>/dev/null || :; fi
+  ln -sfn "$scratch/valet-jobs" "$link"
+  stamp=$(mktemp 2>/dev/null) || stamp=
+  for pidfile in "$scratch"/valet-jobs/*.pid; do
+    [ -e "$pidfile" ] || continue
+    if [ -n "$stamp" ] && [ "$pidfile" -nt "$stamp" ]; then continue; fi
+    dead="\${pidfile%.pid}.dead"
+    [ -e "\${pidfile%.pid}.exit" ] || [ -e "$dead" ] || [ -L "$dead" ] || : > "$dead" 2>/dev/null || :
+  done
+  [ -z "$stamp" ] || rm -f "$stamp"
+  export VALET_SCRATCH_DEAD_MARKED=1
+fi
+`;
+}
+
+/** The Valet start prefix. With `scratch`, it also runs the scratch setup
+ * on every container start. A scratch-less pod keeps the old prefix byte
+ * for byte. */
+export function withHomeLinks(command: string[], opts: { scratch?: boolean } = {}): string[] {
+  const scratch = opts.scratch === true ? scratchStartScript() : "";
+  return ["sh", "-c", `${homeLinkScript()}${scratch}exec "$@"`, "valet-home-start", ...command];
+}
+
+/** True when a pod template declares the `scratch` volume. */
+function hasScratchVolume(spec: Record<string, unknown>): boolean {
+  return Array.isArray(spec.volumes) &&
+    spec.volumes.some((volume: unknown) => isRecord(volume) && volume.name === "scratch");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -101,7 +162,7 @@ export function withPersistentHomes(template: unknown): Record<string, unknown> 
   const homePaths = new Set([...homeMounts.map((mount) => mount.mountPath), "/workspace"]);
   const env: unknown[] = Array.isArray(sandbox.env) ? sandbox.env : [];
   const upgraded = { ...sandbox, env: [...env.filter((entry) => !isRecord(entry) || entry.name !== HOME_LAYOUT_ENV),
-    { name: HOME_LAYOUT_ENV, value: HOME_LAYOUT_VERSION }], command: withHomeLinks(original), volumeMounts: [
+    { name: HOME_LAYOUT_ENV, value: HOME_LAYOUT_VERSION }], command: withHomeLinks(original, { scratch: hasScratchVolume(template.spec) }), volumeMounts: [
     { name: "workspace", mountPath: "/workspace", subPath: WORKSPACE_SUBPATH },
     ...homeMounts,
     ...mounts.filter((mount) => !isRecord(mount) || !homePaths.has(String(mount.mountPath))),

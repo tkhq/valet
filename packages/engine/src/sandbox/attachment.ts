@@ -21,7 +21,14 @@ import {
   WorkspaceProvisioningError,
   formatSandboxErrorLog,
 } from "../errors.js";
-import { type AppliedState, applyPlan, diffSteps, readAppliedState, writeAppliedState } from "./applied-state.js";
+import {
+  type AppliedState,
+  applyPlan,
+  diffSteps,
+  DRIFT_FIELDS,
+  readAppliedState,
+  writeAppliedState,
+} from "./applied-state.js";
 import { nestedKubernetesDecision, NESTED_KUBERNETES_UNSUPPORTED } from "./nested-kubernetes.js";
 
 /**
@@ -34,14 +41,18 @@ export const OBSERVE_TTL_MS = 5 * 60_000;
 /** Max backoff between failed replacement retries (spec decision 6). */
 const REPLACE_BACKOFF_CAP_MS = 30 * 60_000;
 
-/** Missing applied resources and an empty opinion both mean no overrides. */
-function resourceDrift(
+/**
+ * Missing applied resources and an empty opinion both mean no overrides.
+ * Exported for a direct unit test of the scratch-only drift case. No other
+ * consumer should import this from outside the sandbox package.
+ */
+export function resourceDrift(
   desired: DesiredSandboxSpec["resources"],
   applied: AppliedState["resources"],
   preserved: readonly SandboxResourceField[] = [],
 ): boolean {
   if (desired === undefined && preserved.length === 0) return false;
-  return (["cpu", "memory"] as const).some((field) =>
+  return DRIFT_FIELDS.some((field) =>
     !preserved.includes(field) && desired?.[field] !== applied?.[field]);
 }
 
@@ -50,16 +61,37 @@ function effectiveResources(
   fallback: AppliedState["resources"],
 ): AppliedState["resources"] {
   const preserved = desired.preserveResourceFields ??
-    (desired.resources === undefined ? (["cpu", "memory"] as const) : []);
+    (desired.resources === undefined ? DRIFT_FIELDS : []);
   const result: NonNullable<AppliedState["resources"]> = {};
   const cpu = preserved.includes("cpu") ? fallback?.cpu : desired.resources?.cpu;
   const memory = preserved.includes("memory") ? fallback?.memory : desired.resources?.memory;
+  const scratch = preserved.includes("scratch") ? fallback?.scratch : desired.resources?.scratch;
   if (cpu !== undefined) result.cpu = cpu;
   if (memory !== undefined) result.memory = memory;
+  if (scratch !== undefined) result.scratch = scratch;
   if (Object.keys(result).length === 0 && desired.resources === undefined && fallback === undefined) {
     return undefined;
   }
   return result;
+}
+
+/** True when the preserve mask names every drift field, in any order. */
+function preservesEveryField(fields: readonly SandboxResourceField[] | undefined): boolean {
+  return fields !== undefined && DRIFT_FIELDS.every((field) => fields.includes(field));
+}
+
+/**
+ * The applied file's resources without `scratch`. The file lives in the
+ * sandbox, where the agent can write it, and a scratch value from it would
+ * reach the next pod spec with no cap check. The live pod and the
+ * provider's record are the only sources for scratch (fix wave 4,
+ * security N2). Undefined when nothing else is in the file.
+ */
+function fileResourcesWithoutScratch(applied: AppliedState | null): AppliedState["resources"] {
+  const resources = applied?.resources;
+  if (resources === undefined) return undefined;
+  const { scratch: _scratch, ...rest } = resources;
+  return Object.keys(rest).length > 0 ? rest : undefined;
 }
 
 function createResourceOpinion(resources: SandboxCreateOpts["resources"]): AppliedState["resources"] {
@@ -67,6 +99,7 @@ function createResourceOpinion(resources: SandboxCreateOpts["resources"]): Appli
   const result: NonNullable<AppliedState["resources"]> = {};
   if (resources.cpu !== undefined) result.cpu = resources.cpu;
   if (resources.memory !== undefined) result.memory = resources.memory;
+  if (resources.scratch !== undefined) result.scratch = resources.scratch;
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
@@ -161,7 +194,14 @@ export class SandboxAttachment {
   private releaseInFlight: Promise<void> | null = null;
   private pendingReadyEpoch: number | null = null;
 
-  constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, specProvider?: SpecProvider, private readonly lifecycle?: SandboxLifecycle) {
+  constructor(
+    provider: SandboxProvider,
+    createOpts: SandboxCreateOpts,
+    specProvider?: SpecProvider,
+    private readonly lifecycle?: SandboxLifecycle,
+    /** True while a lease holds the sandbox (spec INV-8). Defers pod-replacing changes. */
+    private readonly isLeased?: () => Promise<boolean>,
+  ) {
     this.provider = provider;
     this.createOpts = createOpts;
     this.specProvider = specProvider;
@@ -458,6 +498,17 @@ export class SandboxAttachment {
   }
 
   /**
+   * The resource overrides the live sandbox has applied, per the most recent
+   * cached observation. `null` when nothing has been observed yet, or when
+   * the applied file carried no resources. The wakeups seam reads `scratch`
+   * from it to cap a detached job log at a quarter of `/scratch`. Does not
+   * trigger an observation.
+   */
+  observedResources(): NonNullable<AppliedState["resources"]> | null {
+    return this.observation?.applied.resources ?? null;
+  }
+
+  /**
    * Converge the live sandbox toward the desired spec (spec decisions 3-7).
    * The caller gates idleness — this only runs the observe/diff/apply cycle.
    *
@@ -521,7 +572,12 @@ export class SandboxAttachment {
       } else {
         this.ignoredResourceDriftKey = null;
       }
-      if (this.replacementNeeded(desired, observed)) {
+      const wantsReplace = this.replacementNeeded(desired, observed);
+      if (wantsReplace && await this.isLeased?.()) {
+        // A multi-hour leased process must keep its pod (spec INV-8). Prep
+        // steps that do not replace the pod still run below.
+        console.warn(`sandbox ${sandbox.id}: deferring image/resource change while a lease is active`);
+      } else if (wantsReplace) {
         // Backoff: skip the replace when the SAME desired spec already failed
         // to replace within its exponential window (spec decision 6). A
         // repeatedly-failing spec must not re-provision on every idle sweep.
@@ -627,7 +683,7 @@ export class SandboxAttachment {
     );
   }
 
-  /** Replace only the repository CPU/memory opinion; keep other resources. */
+  /** Replace only the repository resource opinion (DRIFT_FIELDS); keep other resources. */
   private persistResources(
     resources: DesiredSandboxSpec["resources"],
     preserved: readonly SandboxResourceField[] = [],
@@ -642,6 +698,17 @@ export class SandboxAttachment {
       delete next.memory;
       if (resources.memory !== undefined) next.memory = resources.memory;
     }
+    if (!preserved.includes("scratch")) {
+      delete next.scratch;
+      if (resources.scratch !== undefined) next.scratch = resources.scratch;
+    }
+    this.createOpts = { ...this.createOpts, resources: next };
+  }
+
+  private persistScratch(scratch: string | undefined): void {
+    const next = { ...this.createOpts.resources };
+    delete next.scratch;
+    if (scratch !== undefined) next.scratch = scratch;
     this.createOpts = { ...this.createOpts, resources: next };
   }
 
@@ -659,6 +726,19 @@ export class SandboxAttachment {
       return cache.applied;
     }
     const read = await readAppliedState(sandbox);
+    // A container restart (an OOM kill, for one) deletes the rootfs file
+    // but keeps the pod and its /scratch. The epoch is unchanged, so the
+    // pod still runs the resources this attachment recorded. Keep them, so
+    // the restart does not read as resource drift and replace the pod.
+    // Steps are not kept: the rootfs lost them, so they run again. This
+    // carry is expected in normal operation, hence a log, not an alert.
+    const carried = read === null && cache?.epoch === epoch ? cache.applied.resources : undefined;
+    if (carried !== undefined) {
+      console.warn(
+        `SandboxAttachment: sandbox ${sandbox.id} lost its applied-state file within one epoch (container restart?); ` +
+          "keeping the recorded resources and re-running preparation steps",
+      );
+    }
     // Use the file's image when non-empty (it may know better than createOpts
     // after an api restart, which rebuilds createOpts from the host default).
     // Fall back to createOpts.image when the file is absent or has an empty
@@ -666,7 +746,7 @@ export class SandboxAttachment {
     const resolvedImage = (read?.image || undefined) ?? this.createOpts.image ?? "";
     const applied: AppliedState = read
       ? { ...read, image: resolvedImage }
-      : { image: resolvedImage, specHash: "", steps: {} };
+      : { image: resolvedImage, specHash: "", steps: {}, ...(carried !== undefined ? { resources: carried } : {}) };
     this.observation = { applied, at: Date.now(), epoch };
     return applied;
   }
@@ -1043,9 +1123,15 @@ export class SandboxAttachment {
       }
       this.persistResources(desired?.resources, desired?.preserveResourceFields);
       const preserveResourceFieldsOnAdopt = desired?.preserveResourceFields ??
-        (desired !== undefined && desired.resources === undefined ? (["cpu", "memory"] as const) : undefined);
+        (desired !== undefined && desired.resources === undefined ? DRIFT_FIELDS : undefined);
+      // A cold attachment (api restart, cache eviction) adopts the live pod
+      // here, not in reconcile. While a lease is active the provider keeps
+      // that pod as is. The change waits for a run-start window after the
+      // last lease releases (spec INV-8).
+      const leased = this.isLeased ? await this.isLeased() : false;
       const sandbox = await provider.create({
         ...this.createOpts,
+        ...(leased ? { preserveLivePod: true } : {}),
         image: bootImage,
         preserveResourcesOnAdopt: desired !== undefined && desired.resources === undefined,
         preserveResourceFieldsOnAdopt,
@@ -1071,7 +1157,7 @@ export class SandboxAttachment {
           // restart. Null forbids a fallback to stale rebuilt create options.
           const fallbackResources = sandbox.resourceOverrides === null
             ? undefined
-            : sandbox.resourceOverrides ?? applied?.resources ??
+            : sandbox.resourceOverrides ?? fileResourcesWithoutScratch(applied) ??
               (sandbox.adopted ? undefined : createResourceOpinion(this.createOpts.resources));
           let resources = effectiveResources(desired, fallbackResources);
           if (resources === undefined && applied === null && sandbox.resourceOverrides !== null) {
@@ -1080,10 +1166,20 @@ export class SandboxAttachment {
               resources = { ...(cpu !== undefined ? { cpu } : {}), ...(memory !== undefined ? { memory } : {}) };
             }
           }
-          if (sandbox.resourceOverrides === null && preserveResourceFieldsOnAdopt?.length === 2) {
+          if (sandbox.resourceOverrides === null && preservesEveryField(preserveResourceFieldsOnAdopt)) {
             // Discard rejected options now so a later no-opinion replacement
             // cannot revive them. Keep any recovered applied opinion instead.
             this.persistResources(resources ?? {});
+          }
+          if (preserveResourceFieldsOnAdopt?.includes("scratch")) {
+            // Keep the live scratch for a later re-create, so a recovery
+            // does not drop /scratch and then replace again to restore it.
+            this.persistScratch(resources?.scratch);
+          }
+          if (leased && sandbox.adopted) {
+            // The kept pod runs its live resources. Record those, not the
+            // desired ones, so the deferred change still reads as drift.
+            resources = applied?.resources;
           }
           const landed = await applyPlan(sandbox, { ...desired, resources }, appliedImage, applied);
           // Cache what the returned sandbox ACTUALLY has applied (spec decision
@@ -1095,7 +1191,12 @@ export class SandboxAttachment {
         } catch (prepErr) {
           // Failed prep does not own adopted storage. Retain it, or release
           // compute non-terminally. An explicit session destroy still wins.
-          if (sandbox.adopted && !this.destroyed) {
+          // A leased pod keeps running: a release would stop its background
+          // process and drop node-local scratch (PR review, finding 5). The
+          // next attach retries the steps on the same pod.
+          if (leased && sandbox.adopted && !this.destroyed) {
+            console.warn(`sandbox ${sandbox.id}: prep failed while leased; the pod is kept for its background work`);
+          } else if (sandbox.adopted && !this.destroyed) {
             await provider.release?.(sandbox.id).catch(() => {});
           } else {
             await provider.destroy(sandbox.id).catch(() => {});

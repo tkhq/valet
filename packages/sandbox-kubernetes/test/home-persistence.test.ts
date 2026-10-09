@@ -141,3 +141,107 @@ it("recovers the empty-directory migration crash window", async () => {
   run(migrateWorkspaceScript(volume));
   expect(await readFile(join(volume, ".valet-storage", "workspace", "work"), "utf8")).toBe("keep");
 });
+
+describe("scratch bootstrap on every container start (fix wave 3, M-A, L-1, H-1)", () => {
+  async function scratchFixture() {
+    const root = await mkdtemp(join(tmpdir(), "valet-scratch-"));
+    cleanup.push(root);
+    const scratch = join(root, "scratch");
+    await mkdir(scratch);
+    await chmod(scratch, 0o777);
+    return { root, scratch, link: join(root, "tmp-valet-jobs") };
+  }
+
+  it("the start prefix runs the scratch bootstrap before the image command", async () => {
+    const { withHomeLinks } = await import("../src/home-persistence.js");
+    expect(withHomeLinks(["sh", "-c", "tail -f /dev/null"])[2]).not.toContain("scratch");
+    const command = withHomeLinks(["sh", "-c", "tail -f /dev/null"], { scratch: true });
+    expect(command[3]).toBe("valet-home-start");
+    const script = command[2] ?? "";
+    expect(script).toContain('chmod 1777 "$scratch"');
+    expect(script).toContain('ln -sfn "$scratch/valet-jobs"');
+    expect(script).toContain(".dead");
+    expect(script.indexOf("valet-jobs")).toBeLessThan(script.indexOf('exec "$@"'));
+  });
+
+  it("a resumed template keeps the scratch setup in its prefix", async () => {
+    const { withPersistentHomes } = await import("../src/home-persistence.js");
+    const template = { spec: {
+      containers: [{ name: "sandbox", image: "custom:v1", command: ["sh", "-c", "tail -f /dev/null"] }],
+      volumes: [{ name: "scratch", emptyDir: { sizeLimit: "100Gi" } }],
+    } };
+    const upgraded = withPersistentHomes(template);
+    expect(JSON.stringify(upgraded)).toContain('ln -sfn \\"$scratch/valet-jobs\\"');
+    const plain = withPersistentHomes({ spec: { containers: template.spec.containers } });
+    expect(JSON.stringify(plain)).not.toContain("valet-jobs");
+  });
+
+  it("creates the dirs with sticky modes, a root-only temp dir, and the job log link", async () => {
+    const { scratchStartScript } = await import("../src/home-persistence.js");
+    const { scratch, link } = await scratchFixture();
+
+    run(scratchStartScript(scratch, link));
+
+    expect((await lstat(scratch)).mode & 0o7777).toBe(0o1777);
+    expect((await lstat(join(scratch, "tmp"))).mode & 0o7777).toBe(0o1777);
+    expect((await lstat(join(scratch, "valet-jobs"))).mode & 0o7777).toBe(0o1777);
+    expect((await lstat(join(scratch, "tmp-root"))).mode & 0o7777).toBe(0o700);
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+  });
+
+  it("marks each job without an exit code dead and never writes through a planted link", async () => {
+    const { scratchStartScript } = await import("../src/home-persistence.js");
+    const { root, scratch, link } = await scratchFixture();
+    const jobs = join(scratch, "valet-jobs");
+    await mkdir(jobs);
+    await writeFile(join(jobs, "job-a.pid"), "41");
+    await writeFile(join(jobs, "job-b.pid"), "42");
+    await writeFile(join(jobs, "job-b.exit"), "0");
+    await writeFile(join(jobs, "job-c.pid"), "43");
+    const target = join(root, "victim");
+    await writeFile(target, "keep");
+    await symlink(target, join(jobs, "job-c.dead"));
+
+    run(scratchStartScript(scratch, link));
+
+    expect((await lstat(join(jobs, "job-a.dead"))).isFile()).toBe(true);
+    await expect(lstat(join(jobs, "job-b.dead"))).rejects.toThrow();
+    expect(await readFile(target, "utf8")).toBe("keep");
+  });
+
+  it("a planted .dead entry never stops the start, and a pid newer than the start is not stamped (fix wave 4)", async () => {
+    const { scratchStartScript } = await import("../src/home-persistence.js");
+    const { scratch, link } = await scratchFixture();
+    const jobs = join(scratch, "valet-jobs");
+    await mkdir(jobs);
+    await writeFile(join(jobs, "job-a.pid"), "41");
+    await writeFile(join(jobs, "job-d.pid"), "44");
+    await mkdir(join(jobs, "job-d.dead"));
+    // The prefix runs under `set -eu`; a failed stamp must not exit it.
+    run(`set -eu\n${scratchStartScript(scratch, link)}echo reached-exec`);
+
+    expect((await lstat(join(jobs, "job-a.dead"))).isFile()).toBe(true);
+    expect((await lstat(join(jobs, "job-d.dead"))).isDirectory()).toBe(true);
+  });
+
+  it("replaces a planted symlink in place of a scratch dir instead of following it", async () => {
+    const { scratchStartScript } = await import("../src/home-persistence.js");
+    const { root, scratch, link } = await scratchFixture();
+    const elsewhere = join(root, "elsewhere");
+    await mkdir(elsewhere);
+    await chmod(elsewhere, 0o755);
+    await symlink(elsewhere, join(scratch, "tmp"));
+
+    run(scratchStartScript(scratch, link));
+
+    expect((await lstat(join(scratch, "tmp"))).isDirectory()).toBe(true);
+    expect((await lstat(elsewhere)).mode & 0o7777).toBe(0o755);
+  });
+
+  it("does nothing when the scratch root is absent", async () => {
+    const { scratchStartScript } = await import("../src/home-persistence.js");
+    const { root, link } = await scratchFixture();
+    run(scratchStartScript(join(root, "missing"), link));
+    await expect(lstat(link)).rejects.toThrow();
+  });
+});

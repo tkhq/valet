@@ -107,6 +107,8 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/plugin-entitlements.test.ts",
   "src/integration/profile-pictures.test.ts",
   "src/integration/workflow-avatar.test.ts",
+  // Wakeups acceptance runs keyless: a faux model and a scripted virtual sandbox.
+  "src/integration/wakeups-acceptance.test.ts",
   // Valet Security integration suites run keyless: the virtual sandbox
   // provider and abort-based settlement need no model key.
   "src/integration/security-settlement.test.ts",

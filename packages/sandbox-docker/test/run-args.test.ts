@@ -42,12 +42,13 @@ describe("buildDockerRunArgs (pure)", () => {
 
   it("mounts retained execution paths containing colons without parsing them as volume modes", () => {
     const path = '/tmp/team,work/"private"/execution:abc';
-    const args = buildDockerRunArgs({ ...baseOpts, workspaceHostPath: path, runtimeStateDir: path, credsHostDir: path });
+    const args = buildDockerRunArgs({ ...baseOpts, workspaceHostPath: path, runtimeStateDir: path, credsHostDir: path, scratchHostDir: path });
     expect(args).not.toContain("-v");
     expect(args.filter((_, i) => args[i - 1] === "--mount")).toEqual([
       'type=bind,"src=/tmp/team,work/""private""/execution:abc",dst=/workspace',
       'type=bind,"src=/tmp/team,work/""private""/execution:abc",dst=/var/lib/valet',
       'type=bind,"src=/tmp/team,work/""private""/execution:abc",dst=/etc/valet/creds,readonly',
+      'type=bind,"src=/tmp/team,work/""private""/execution:abc",dst=/scratch',
     ]);
   });
 
@@ -182,6 +183,40 @@ describe("buildDockerRunArgs (pure)", () => {
     // Exactly two -v flags total.
     const allVFlags = args.reduce((n, a) => n + (a === "-v" ? 1 : 0), 0);
     expect(allVFlags).toBe(2);
+  });
+
+  it("without scratchHostDir — no /scratch mount and no TMPDIR", () => {
+    const args = buildDockerRunArgs(baseOpts);
+    expect(args.join(" ")).not.toContain("/scratch");
+    expect(args.join(" ")).not.toContain("TMPDIR");
+  });
+
+  it("with scratchHostDir — mounts /scratch read-write and sets TMPDIR=/scratch/tmp", () => {
+    const args = buildDockerRunArgs({ ...baseOpts, scratchHostDir: "/home/user/.valet/docker-runtime/scratch/dsb-1" });
+    const wsIdx = args.indexOf("-v");
+    expect(args[wsIdx + 1]).toBe("/tmp/valet-ws:/workspace");
+    const scratchIdx = args.indexOf("-v", wsIdx + 1);
+    expect(scratchIdx).toBeGreaterThan(wsIdx);
+    expect(args[scratchIdx + 1]).toBe("/home/user/.valet/docker-runtime/scratch/dsb-1:/scratch");
+    // Read-write: no ":ro" suffix.
+    expect(args[scratchIdx + 1]).not.toContain(":ro");
+    expect(args).toEqual(expect.arrayContaining(["--env", "TMPDIR=/scratch/tmp"]));
+  });
+
+  it("scratchHostDir and credsHostDir together add two distinct -v flags after the workspace volume", () => {
+    const args = buildDockerRunArgs({
+      ...baseOpts,
+      credsHostDir: "/home/user/.valet/docker-runtime/creds/dsb-1",
+      scratchHostDir: "/home/user/.valet/docker-runtime/scratch/dsb-1",
+    });
+    const allVFlags = args.reduce((n, a) => n + (a === "-v" ? 1 : 0), 0);
+    expect(allVFlags).toBe(3);
+    expect(args).toEqual(
+      expect.arrayContaining([
+        "/home/user/.valet/docker-runtime/creds/dsb-1:/etc/valet/creds:ro",
+        "/home/user/.valet/docker-runtime/scratch/dsb-1:/scratch",
+      ]),
+    );
   });
 });
 

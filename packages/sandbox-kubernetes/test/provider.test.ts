@@ -6,13 +6,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { Engine, InMemoryEventStream, InMemorySessionStore, SandboxAttachment, SandboxStartupError, VirtualSandboxProvider } from "@valet/engine";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
+import { newExecId } from "@valet/engine/wakeups-ids";
 import { assertSafeExecId, looksSignalKilled, KubernetesSandbox, KubernetesSandboxProvider } from "../src/provider.js";
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
 import { SANDBOX_CR_API_VERSION } from "../src/index.js";
-import { buildSandboxManifest, credsSecretName, BROWSER_LABEL_KEY, DOCKER_LABEL_KEY, NESTED_KUBERNETES_LABEL_KEY, sandboxCrName } from "../src/manifest.js";
+import { buildSandboxManifest, credsSecretName, BROWSER_LABEL_KEY, DOCKER_LABEL_KEY, NESTED_KUBERNETES_LABEL_KEY, sandboxCrName, SESSION_LABEL_KEY } from "../src/manifest.js";
 import { RUNTIME_STATE_ANNOTATION } from "../src/runtime-state.js";
-import { wrapAsWorkloadUser, type ExecStatus } from "../src/exec.js";
+import { ROOT_TMPDIR_PREFIX, wrapAsWorkloadUser, type ExecStatus } from "../src/exec.js";
 import type { K8sProviderConfig, ResourceRequirements, SandboxCR, SandboxCRRead } from "../src/types.js";
 import type {
   CreateSandboxParams,
@@ -29,7 +30,8 @@ import type {
   SandboxCpuMemoryResources,
   PodStatusInfo,
 } from "../src/lifecycle.js";
-import { imageFingerprint, resourceFingerprint, sandboxCpuMemoryResources } from "../src/lifecycle.js";
+import { EVICTION_PROTECT_ANNOTATION, imageFingerprint, LEASED_LABEL, resourceFingerprint, sandboxCpuMemoryResources, SANDBOX_KIND } from "../src/lifecycle.js";
+import type { PodSummary } from "../src/types.js";
 import type { PodLivenessApi } from "../src/provider.js";
 import type { PodExecApi } from "../src/exec.js";
 
@@ -67,6 +69,11 @@ describe("assertSafeExecId", () => {
     expect(() => assertSafeExecId("job-1")).not.toThrow();
     expect(() => assertSafeExecId("job-42")).not.toThrow();
     expect(() => assertSafeExecId("job-999999")).not.toThrow();
+    // Fix wave 2, B1: ids are unique per job, not a per-handle counter.
+    expect(() => assertSafeExecId("job-lq3x8k2a-a1b2c3d4")).not.toThrow();
+    expect(() => assertSafeExecId(newExecId())).not.toThrow();
+    expect(() => assertSafeExecId("job-Lq3x-a1")).toThrow();
+    expect(() => assertSafeExecId("job-a--b")).toThrow();
   });
 
   it("rejects ids containing a path separator (no /tmp traversal)", () => {
@@ -114,7 +121,7 @@ describe("preparation transport diagnostics", () => {
       objectsApi: new FakeObjectsApi(),
       podsApi: { listNamespacedPod: async () => ({ items: [
         { name: "prep-pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] },
-      ] }) },
+      ] }), patchNamespacedPod: async () => ({}) },
       execApi: { exec: async () => { throw event; } },
       livenessApi: { getPodUid: async () => "uid" }, cfg: providerCfg,
     }, "sandbox");
@@ -254,6 +261,10 @@ class FakePodsApi implements SandboxPodsApi {
   async listNamespacedPod(_params: ListPodsParams): Promise<{ items: never[] }> {
     return { items: [] };
   }
+
+  async patchNamespacedPod(_params: { name: string; namespace: string; body: unknown }): Promise<unknown> {
+    throw new Error("FakePodsApi.patchNamespacedPod not implemented for this test");
+  }
 }
 
 /** Minimal fake PodLivenessApi — returns a fixed uid. */
@@ -280,6 +291,34 @@ function makeProvider(secretsApi: SandboxSecretsApi, objectsApi?: FakeObjectsApi
     providerCfg,
   );
 }
+
+describe("KubernetesSandboxProvider.list scratch (fix wave 3, M1)", () => {
+  class ScratchListObjectsApi extends FakeObjectsApi {
+    override async listNamespacedCustomObject(_params: ListSandboxParams): Promise<unknown> {
+      const running = buildSandboxManifest(providerCfg, "ws-running", { resources: { scratch: "100Gi" } });
+      const suspended = buildSandboxManifest(providerCfg, "ws-suspended", { resources: { scratch: "1Ti" } });
+      const plain = buildSandboxManifest(providerCfg, "ws-plain", {});
+      return { items: [
+        { metadata: running.metadata, spec: running.spec },
+        { metadata: suspended.metadata, spec: { ...suspended.spec, operatingMode: "Suspended" } },
+        { metadata: plain.metadata, spec: plain.spec },
+      ] };
+    }
+  }
+
+  it("reports the scratch size of running sandboxes only", async () => {
+    const secretsApi: SandboxSecretsApi = { upsertSecret: vi.fn(), writeSecret: vi.fn(), deleteSecret: vi.fn(), patchOwnerReference: vi.fn() };
+    const provider = makeProvider(secretsApi, new ScratchListObjectsApi());
+
+    const rows = await provider.list();
+
+    expect(rows.map((row) => ["scratchBytes" in row ? row.scratchBytes : undefined, row.id])).toEqual([
+      [100 * 2 ** 30, "ws-running"],
+      [undefined, "ws-suspended"],
+      [undefined, "ws-plain"],
+    ]);
+  });
+});
 
 describe("KubernetesSandboxProvider creds Secret lifecycle", () => {
   it("create() with credsFiles upserts the Secret BEFORE applySandbox (order matters)", async () => {
@@ -558,14 +597,14 @@ describe("exec identity threading (docker flag → exec layer)", () => {
     const { provider, execApi } = makeExecProvider({ [DOCKER_LABEL_KEY]: "true" });
     const sandbox = await provider.restore("sb-docker");
     await sandbox.exec("echo hi", { privileged: true });
-    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", "echo hi"]);
+    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", `${ROOT_TMPDIR_PREFIX}echo hi`]);
   });
 
   it("restore() of an unlabeled CR keeps exec unwrapped", async () => {
     const { provider, execApi } = makeExecProvider(undefined);
     const sandbox = await provider.restore("sb-plain");
     await sandbox.exec("echo hi");
-    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", "echo hi"]);
+    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", `${ROOT_TMPDIR_PREFIX}echo hi`]);
   });
 
   it("create({ nestedKubernetes: true }) threads the workload user into exec", async () => {
@@ -756,6 +795,19 @@ describe("create() resource adoption and pod rollout", () => {
     expect(objectsApi.calls.slice(0, 4)).toEqual(["get", "create", "get", "replace"]);
   });
 
+  it("an authoritative create records scratch in the override annotation (fix wave 3, H-A)", async () => {
+    const { provider, objectsApi } = setup(prior);
+
+    const sandbox = await provider.create({
+      workspace: "/ws/resources", resources: { cpu: 2, memory: "4Gi", scratch: "100Gi" },
+      preserveResourceFieldsOnAdopt: [],
+    });
+
+    const recorded: unknown = JSON.parse(objectsApi.cr.metadata.annotations?.["valet.dev/resource-overrides"] ?? "null");
+    expect(recorded).toEqual({ cpu: 2, memory: "4Gi", scratch: "100Gi" });
+    expect(sandbox.resourceOverrides).toEqual({ cpu: 2, memory: "4Gi", scratch: "100Gi" });
+  });
+
   it("partial authority applies CPU and preserves live memory on adoption", async () => {
     const { provider, objectsApi, deletedPods } = setup(prior, { cpu: 1, memory: "2Gi" });
 
@@ -786,6 +838,43 @@ describe("create() resource adoption and pod rollout", () => {
 
     expect(deletedPods).toEqual(["pod-existing"]);
     expectFingerprintedTemplate(objectsApi.cr.spec.podTemplate, buildSandboxManifest(cfg, sandboxCrName("/ws/resources"), { resources }).spec.podTemplate);
+  });
+
+  it("adding scratch to authoritative resources rolls the live pod (TKAI drift: scratch is authoritative)", async () => {
+    const { provider, objectsApi, deletedPods, cfg } = setup({
+      requests: { cpu: "4", memory: "8Gi" }, limits: { cpu: "4", memory: "8Gi" },
+    });
+    const resources = { cpu: 4, memory: "8Gi", scratch: "50Gi" };
+
+    await provider.create({ workspace: "/ws/resources", resources });
+
+    expect(deletedPods).toEqual(["pod-existing"]);
+    expectFingerprintedTemplate(objectsApi.cr.spec.podTemplate, buildSandboxManifest(cfg, sandboxCrName("/ws/resources"), { resources }).spec.podTemplate);
+  });
+
+  it("unchanged scratch does not roll on repeated authoritative adoption", async () => {
+    const { provider, deletedPods } = setup({
+      requests: { cpu: "4", memory: "8Gi" }, limits: { cpu: "4", memory: "8Gi" },
+    });
+    const resources = { cpu: 4, memory: "8Gi", scratch: "50Gi" };
+
+    await provider.create({ workspace: "/ws/resources", resources });
+    expect(deletedPods).toEqual(["pod-existing"]);
+    await provider.create({ workspace: "/ws/resources", resources });
+
+    expect(deletedPods).toEqual(["pod-existing"]);
+  });
+
+  it("dropping scratch after it was authoritative rolls the pod again", async () => {
+    const { provider, deletedPods } = setup({
+      requests: { cpu: "4", memory: "8Gi" }, limits: { cpu: "4", memory: "8Gi" },
+    });
+
+    await provider.create({ workspace: "/ws/resources", resources: { cpu: 4, memory: "8Gi", scratch: "50Gi" } });
+    expect(deletedPods).toEqual(["pod-existing"]);
+    await provider.create({ workspace: "/ws/resources", resources: { cpu: 4, memory: "8Gi" } });
+
+    expect(deletedPods).toEqual(["pod-existing", "pod-existing"]);
   });
 
   it.each([undefined, { cpu: 1, memory: "2Gi" }])("authoritative empty resources roll onto deployment defaults %j", async (defaultResources) => {
@@ -895,6 +984,26 @@ describe("create() resource adoption and pod rollout", () => {
     expect(objectsApi.cr.spec.podTemplate).toMatchObject({
       spec: { containers: [{ image: "image:new", resources: prior }] },
     });
+  });
+
+  it("preserveLivePod keeps a leased pod and its template through image and resource drift (INV-8)", async () => {
+    const { provider, objectsApi, deletedPods } = setup(prior);
+    const templateBefore = JSON.parse(JSON.stringify(objectsApi.cr.spec.podTemplate)) as unknown;
+
+    const sandbox = await provider.create({
+      workspace: "/ws/resources", image: "image:new", resources: { cpu: 8, memory: "16Gi", scratch: "50Gi" }, preserveLivePod: true,
+    });
+
+    expect(deletedPods).toEqual([]);
+    expect(objectsApi.calls).not.toContain("replace");
+    expect(objectsApi.cr.spec.podTemplate).toEqual(templateBefore);
+    expect(sandbox.adopted).toBe(true);
+  });
+
+  it("without preserveLivePod the same drift rolls the pod", async () => {
+    const { provider, deletedPods } = setup(prior);
+    await provider.create({ workspace: "/ws/resources", image: "image:new", resources: { cpu: 8, memory: "16Gi" } });
+    expect(deletedPods.length).toBeGreaterThan(0);
   });
 
   it("accepts a live image rewritten by admission when its requested-image fingerprint matches", async () => {
@@ -1265,6 +1374,10 @@ class CapacityPendingObjectsApi implements SandboxCustomObjectsApi {
   }
 
   async patchNamespacedCustomObject(params: PatchSandboxParams): Promise<unknown> {
+    if (this.cr !== null && "spec" in params.body) {
+      this.cr.spec = { ...this.cr.spec, operatingMode: params.body.spec.operatingMode };
+      return this.cr;
+    }
     if (this.cr !== null && "metadata" in params.body && "annotations" in params.body.metadata) {
       this.cr.metadata.annotations = Object.fromEntries(Object.entries({
         ...this.cr.metadata.annotations,
@@ -1279,9 +1392,15 @@ function makeCapacityPendingProvider(opts: {
   createdAt?: string;
   schedulerMessage?: string | null;
   requests?: { cpu?: string | number; memory?: string | number };
+  scratch?: string;
+  ephemeralStorageRequest?: string;
 }) {
   const objectsApi = new CapacityPendingObjectsApi(opts.createdAt);
   let schedulerMessage = opts.schedulerMessage;
+  // The pod's own creation time. Undefined follows the CR (the pod was
+  // created with it); null means the pod reports no timestamp.
+  let podCreatedAt: string | null | undefined;
+  const podEvents: { reason?: string; message?: string; timestamp?: number }[] = [];
   const podIdentity = { name: "pod-capacity-1", uid: "pod-capacity-uid-1" };
   const podReads: { name: string; uid: string }[] = [];
   const podStatusApi: SandboxPodStatusApi = {
@@ -1298,10 +1417,16 @@ function makeCapacityPendingProvider(opts: {
           conditions: [{ type: "Ready", status: "True" }],
         };
       }
+      const createdAt = podCreatedAt === undefined ? objectsApi.cr?.metadata.creationTimestamp : podCreatedAt ?? undefined;
       return {
         phase: "Pending",
+        ...(createdAt !== undefined ? { createdAt } : {}),
         sandboxImage: providerCfg.defaultImage,
-        sandboxResources: opts.requests === undefined ? {} : { requests: opts.requests },
+        sandboxResources: {
+          ...(opts.requests === undefined ? {} : { requests: opts.requests }),
+          ...(opts.scratch === undefined ? {} : { scratch: opts.scratch }),
+        },
+        ...(opts.ephemeralStorageRequest === undefined ? {} : { ephemeralStorageRequest: opts.ephemeralStorageRequest }),
         resourceFingerprint: resourceFingerprint({}),
         conditions: schedulerMessage === null ? [] : [{
           type: "PodScheduled",
@@ -1310,6 +1435,9 @@ function makeCapacityPendingProvider(opts: {
           message: schedulerMessage ?? "0/3 nodes are available: 3 Insufficient cpu.",
         }],
       };
+    },
+    async listPodEvents() {
+      return podEvents;
     },
   };
   const podDeleteApi: SandboxPodDeleteApi = {
@@ -1342,7 +1470,10 @@ function makeCapacityPendingProvider(opts: {
   const setSchedulerMessage = (message: string | null): void => {
     schedulerMessage = message;
   };
-  return { provider, restart, objectsApi, podDeleteApi, podReads, setSchedulerMessage };
+  const setPodCreatedAt = (value: string | null): void => {
+    podCreatedAt = value;
+  };
+  return { provider, restart, objectsApi, podDeleteApi, podReads, podEvents, setSchedulerMessage, setPodCreatedAt };
 }
 
 async function captureAfter(promise: Promise<unknown>, elapsedMs: number): Promise<unknown> {
@@ -1405,7 +1536,7 @@ describe("create() capacity retention and diagnosis", () => {
       await vi.advanceTimersByTimeAsync(9 * 60_000);
       const error = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
       expect(error).toBeInstanceOf(SandboxStartupError);
-      expect(error.message).toContain("over 10 minutes");
+      expect(error.message).toMatch(/Pending for 1[01] minutes/);
       expect(error.message).toContain(schedulerReason);
       expect(error.message).toContain("cpu=4");
       expect(error.message).toContain("memory=8Gi");
@@ -1581,6 +1712,154 @@ describe("create() capacity retention and diagnosis", () => {
       expect(error.message).toMatch(/deployment.*ephemeral-storage request/i);
       expect(error.message).not.toMatch(/lower (CPU|memory)/i);
       expect(error.message).not.toContain("task.resources");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names the scratch value, the ephemeral request, and the scratch knob on an ephemeral-storage shortage (M8)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:10:00.000Z"));
+    try {
+      const { provider } = makeCapacityPendingProvider({
+        createdAt: "2026-09-07T12:00:00.000Z",
+        schedulerMessage: "0/3 nodes are available: 3 Insufficient ephemeral-storage.",
+        requests: { cpu: "4", memory: "8Gi" },
+        scratch: "800Gi",
+        ephemeralStorageRequest: "802Gi",
+      });
+
+      const error = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toContain("3 Insufficient ephemeral-storage) (scratch 800Gi).");
+      expect(error.message).toContain("Pod requests: cpu=4, memory=8Gi, ephemeral-storage=802Gi.");
+      expect(error.message).toContain(
+        "Lower resources.scratch in .valet/prebuild.yaml or task.resources.scratch, or ask an admin to add a node pool with enough local disk.",
+      );
+      expect(error.message).not.toMatch(/deployment.*ephemeral-storage request/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("pending grace measured from the pod (B5)", () => {
+  /** A hibernated CR from two hours ago whose template survives a resume. */
+  function makeHibernated() {
+    const fixture = makeCapacityPendingProvider({
+      createdAt: "2026-09-07T10:00:00.000Z",
+      schedulerMessage: "0/3 nodes are available: 3 Insufficient ephemeral-storage.",
+      scratch: "800Gi",
+    });
+    const cr = fixture.objectsApi.cr;
+    if (cr === null) throw new Error("fixture CR missing");
+    cr.spec = { ...cr.spec, operatingMode: "Suspended", podTemplate: buildSandboxManifest(providerCfg, "ws-capacity", {}).spec.podTemplate };
+    return fixture;
+  }
+
+  it("a resume of an old CR with a young pending pod stays retryable", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:00:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt } = makeHibernated();
+      setPodCreatedAt("2026-09-07T12:00:00.000Z");
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).not.toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toContain("did not become ready within 60000ms");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a resume fails terminally once the pod itself is past the grace", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:11:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt } = makeHibernated();
+      setPodCreatedAt("2026-09-07T12:00:00.000Z");
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toContain("(scratch 800Gi)");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the terminal text names the pod's real Pending time, not the 10-minute grace (fix wave 3, L-5)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:25:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt } = makeHibernated();
+      setPodCreatedAt("2026-09-07T12:00:00.000Z");
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toMatch(/Pending for (25|26) minutes/);
+      expect(error.message).not.toContain("over 10 minutes");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a pod with no creation time measures the grace from the call", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:00:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt } = makeHibernated();
+      setPodCreatedAt(null);
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).not.toBeInstanceOf(SandboxStartupError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a recent TriggeredScaleUp event keeps an old pending pod retryable", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:11:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt, podEvents } = makeHibernated();
+      setPodCreatedAt("2026-09-07T12:00:00.000Z");
+      podEvents.push({ reason: "TriggeredScaleUp", message: "pod triggered scale-up", timestamp: Date.parse("2026-09-07T12:08:00.000Z") });
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).not.toBeInstanceOf(SandboxStartupError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a later NotTriggerScaleUp event ends the scale-up deferral", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:11:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt, podEvents } = makeHibernated();
+      setPodCreatedAt("2026-09-07T12:00:00.000Z");
+      podEvents.push(
+        { reason: "TriggeredScaleUp", timestamp: Date.parse("2026-09-07T12:05:00.000Z") },
+        { reason: "NotTriggerScaleUp", timestamp: Date.parse("2026-09-07T12:09:00.000Z") },
+      );
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a scale-up stops deferring the verdict after the cap", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:31:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt, podEvents } = makeHibernated();
+      setPodCreatedAt("2026-09-07T12:00:00.000Z");
+      podEvents.push({ reason: "TriggeredScaleUp", timestamp: Date.parse("2026-09-07T12:30:00.000Z") });
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
     } finally {
       vi.useRealTimers();
     }
@@ -1920,7 +2199,7 @@ describe("confirmed eviction reporting", () => {
     }) };
     const sandbox = new KubernetesSandbox({
       objectsApi: new FakeObjectsApi(),
-      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }) },
+      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
       execApi, livenessApi: { getPodUid: async () => "uid" }, cfg: providerCfg,
       evictionApi: {
         getPod: async () => disappear && evicted ? null : { uid: "uid", reason: evicted ? "Evicted" : undefined, message: "docker-state exceeded 8Gi" },
@@ -1948,7 +2227,7 @@ describe("confirmed eviction reporting", () => {
     // A fresh instance without eviction evidence models an ordinary command failure.
     const ordinary = new KubernetesSandbox({
       objectsApi: new FakeObjectsApi(),
-      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }) },
+      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
       execApi: { exec: async (_ns, _pod, _c, _cmd, _o, _e, _i, _t, cb) => {
         cb?.({ status: "Failure", details: { causes: [{ reason: "ExitCode", message: "1" }] } });
         return { close() {} };
@@ -1973,7 +2252,7 @@ describe("job pod identity", () => {
     });
     const sandbox = new KubernetesSandbox({
       objectsApi: new FakeObjectsApi(),
-      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }) },
+      podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
       execApi: { exec }, livenessApi: { getPodUid: async () => uid }, cfg: providerCfg,
       evictionApi: {
         getPod: async () => ({ uid }),
@@ -2001,6 +2280,61 @@ describe("job pod identity", () => {
     expect(exec).toHaveBeenCalledTimes(2);
   });
 
+  it("gives two handles on one pod distinct exec ids, and honors a requested id (fix wave 2, B1)", async () => {
+    const first = setup(false).sandbox;
+    const second = setup(false).sandbox;
+    const a = await first.execJob("one");
+    const b = await second.execJob("two");
+    expect(a.execId).not.toBe(b.execId);
+    expect(a.execId).toMatch(/^job-[0-9a-z]+-[0-9a-z]{8}$/);
+    const requested = newExecId();
+    await expect(setup(false).sandbox.execJob("three", { execId: requested })).resolves.toEqual({ execId: requested });
+    await expect(setup(false).sandbox.execJob("four", { execId: "../etc" })).rejects.toThrow("invalid execId");
+  });
+
+  describe("a handle with no kickoff identity checks the backing pod (fix wave 3, concurrency P1)", () => {
+    function restored(phase: string | null) {
+      const exec = vi.fn<PodExecApi["exec"]>(async (_ns, _pod, _container, _command, _stdout, stderr, _stdin, _tty, cb) => {
+        stderr?.write("running");
+        cb?.({ status: "Success" });
+        return { close() {} };
+      });
+      const sandbox = new KubernetesSandbox({
+        objectsApi: new FakeObjectsApi(),
+        podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
+        execApi: { exec }, livenessApi: { getPodUid: async () => "uid", getPodPhase: async () => phase }, cfg: providerCfg,
+      }, "sandbox");
+      return { sandbox, exec };
+    }
+
+    it("polls the job when the pod is Running", async () => {
+      const { sandbox, exec } = restored("Running");
+      await expect(sandbox.pollJob(newExecId(), 0)).resolves.toMatchObject({ status: "running" });
+      expect(exec).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["Pending", "Failed", "Succeeded"])("reports the job gone without an exec when the pod is %s", async (phase) => {
+      const { sandbox, exec } = restored(phase);
+      await expect(sandbox.pollJob(newExecId(), 0)).rejects.toThrow("the job's backing pod was recreated or removed");
+      await expect(sandbox.cancelJob(newExecId())).rejects.toThrow("the job's backing pod was recreated or removed");
+      expect(exec).not.toHaveBeenCalled();
+    });
+
+    it("treats an Unknown phase as a transient error, not a gone sandbox", async () => {
+      const { sandbox, exec } = restored("Unknown");
+      const poll = sandbox.pollJob(newExecId(), 0);
+      await expect(poll).rejects.toThrow("phase is Unknown");
+      await expect(poll).rejects.not.toThrow("recreated or removed");
+      expect(exec).not.toHaveBeenCalled();
+    });
+
+    it("reports the job gone when the pod no longer exists", async () => {
+      const { sandbox, exec } = restored(null);
+      await expect(sandbox.pollJob(newExecId(), 0)).rejects.toThrow("the job's backing pod was recreated or removed");
+      expect(exec).not.toHaveBeenCalled();
+    });
+  });
+
   it("releases the kickoff identity after a terminal poll", async () => {
     const { sandbox, replace, finish } = setup();
     const { execId } = await sandbox.execJob("side-effect");
@@ -2008,5 +2342,153 @@ describe("job pod identity", () => {
     await expect(sandbox.pollJob(execId, 0)).resolves.toMatchObject({ status: "done", exitCode: 0 });
     replace();
     await expect(sandbox.pollJob(execId, 0)).resolves.toMatchObject({ status: "failed" });
+  });
+});
+
+// ── Kubernetes eviction protection (Task 11, 2026-10-08 wakeups/leases) ──
+
+/** Builds a `PodSummary` that `resolvePodName`'s list-fallback can match:
+ * an `ownerReferences` entry naming the Sandbox CR (default "sb-1"), plus
+ * whatever annotations/labels the eviction-protection comparison reads. */
+function podSummary(opts: {
+  name: string;
+  crName?: string;
+  annotations?: Record<string, string>;
+  labels?: Record<string, string>;
+}): PodSummary {
+  return {
+    name: opts.name,
+    ownerReferences: [{ kind: SANDBOX_KIND, name: opts.crName ?? "sb-1", controller: true }],
+    annotations: opts.annotations,
+    labels: opts.labels,
+  };
+}
+
+/** Fake SandboxPodsApi for eviction-protection tests: a mutable single-pod
+ * list (`setPod`) plus a recorded log of every patch call. Unlike
+ * `FakePodsApi`, `patchNamespacedPod` does NOT mutate the held pod. Tests
+ * call `setPod` explicitly to simulate the apiserver's merge having landed,
+ * so a test can assert on the pre-patch state before advancing it. */
+class FakeEvictionPodsApi implements SandboxPodsApi {
+  private pod: PodSummary | null = null;
+  readonly patches: { name: string; namespace: string; body: unknown }[] = [];
+
+  setPod(pod: PodSummary | null): void {
+    this.pod = pod;
+  }
+
+  async listNamespacedPod(_params: ListPodsParams): Promise<{ items: PodSummary[] }> {
+    return { items: this.pod ? [this.pod] : [] };
+  }
+
+  async patchNamespacedPod(params: { name: string; namespace: string; body: unknown }): Promise<unknown> {
+    this.patches.push(params);
+    return {};
+  }
+}
+
+function makeEvictionProvider(podsApi: SandboxPodsApi): KubernetesSandboxProvider {
+  return new KubernetesSandboxProvider(
+    { objectsApi: new FakeObjectsApi(), podsApi, execApi: fakePodExecApi, livenessApi: new FakeLivenessApi() },
+    providerCfg,
+  );
+}
+
+describe("KubernetesSandboxProvider eviction protection", () => {
+  it("setEvictionProtection patches the annotation and label once, then reports unchanged", async () => {
+    const pods = new FakeEvictionPodsApi();
+    pods.setPod(podSummary({ name: "sb-1-abc" }));
+    const provider = makeEvictionProvider(pods);
+
+    expect(await provider.setEvictionProtection("sb-1", true)).toEqual({ changed: true });
+    expect(pods.patches).toHaveLength(1);
+    expect(pods.patches[0]).toEqual({
+      name: "sb-1-abc",
+      namespace: providerCfg.namespace,
+      body: {
+        metadata: {
+          annotations: { [EVICTION_PROTECT_ANNOTATION]: "false" },
+          labels: { [LEASED_LABEL]: "true" },
+        },
+      },
+    });
+
+    // Simulate the apiserver having applied that merge patch.
+    pods.setPod(podSummary({
+      name: "sb-1-abc",
+      annotations: { [EVICTION_PROTECT_ANNOTATION]: "false" },
+      labels: { [LEASED_LABEL]: "true" },
+    }));
+    expect(await provider.setEvictionProtection("sb-1", true)).toEqual({ changed: false });
+    expect(pods.patches).toHaveLength(1);
+  });
+
+  it("setEvictionProtection false removes both with a null merge patch", async () => {
+    const pods = new FakeEvictionPodsApi();
+    pods.setPod(podSummary({
+      name: "sb-1-abc",
+      annotations: { [EVICTION_PROTECT_ANNOTATION]: "false" },
+      labels: { [LEASED_LABEL]: "true" },
+    }));
+    const provider = makeEvictionProvider(pods);
+
+    expect(await provider.setEvictionProtection("sb-1", false)).toEqual({ changed: true });
+    expect(pods.patches[0]?.body).toEqual({
+      metadata: {
+        annotations: { [EVICTION_PROTECT_ANNOTATION]: null },
+        labels: { [LEASED_LABEL]: null },
+      },
+    });
+  });
+
+  it("listEvictionProtected returns the CR names of labelled pods", async () => {
+    const pods = new FakeEvictionPodsApi();
+    let seenSelector: string | undefined;
+    pods.listNamespacedPod = async (params) => {
+      seenSelector = params.labelSelector;
+      return {
+        items: [
+          podSummary({ name: "sb-1-abc", crName: "sb-1", labels: { [SESSION_LABEL_KEY]: "sb-1", [LEASED_LABEL]: "true" } }),
+          podSummary({ name: "sb-2-xyz", crName: "sb-2", labels: { [SESSION_LABEL_KEY]: "sb-2", [LEASED_LABEL]: "true" } }),
+        ],
+      };
+    };
+    const provider = makeEvictionProvider(pods);
+
+    expect(await provider.listEvictionProtected()).toEqual(["sb-1", "sb-2"]);
+    expect(seenSelector).toBe(`${LEASED_LABEL}=true`);
+  });
+
+  it("setEvictionProtection reads only this sandbox's pods, never the whole namespace (M9)", async () => {
+    const pods = new FakeEvictionPodsApi();
+    const selectors: (string | undefined)[] = [];
+    pods.listNamespacedPod = async (params) => {
+      selectors.push(params.labelSelector);
+      return { items: [podSummary({ name: "sb-1-abc" })] };
+    };
+    // The controller's pod-name annotation resolves the pod without a list.
+    const objectsApi = new FakeObjectsApi();
+    objectsApi.getNamespacedCustomObject = async (params: GetSandboxParams) => ({
+      apiVersion: SANDBOX_CR_API_VERSION,
+      kind: "Sandbox",
+      metadata: { name: params.name, uid: "cr-uid-123", resourceVersion: "1", annotations: { "agents.x-k8s.io/pod-name": "sb-1-abc" } },
+      spec: { podTemplate: {}, volumeClaimTemplates: [] },
+    });
+    const provider = new KubernetesSandboxProvider(
+      { objectsApi, podsApi: pods, execApi: fakePodExecApi, livenessApi: new FakeLivenessApi() },
+      providerCfg,
+    );
+
+    expect(await provider.setEvictionProtection("sb-1", true)).toEqual({ changed: true });
+
+    expect(selectors).toEqual([`${SESSION_LABEL_KEY}=sb-1`]);
+  });
+
+  it("setEvictionProtection on a sandbox with no pod returns changed:false", async () => {
+    const pods = new FakeEvictionPodsApi();
+    const provider = makeEvictionProvider(pods);
+
+    expect(await provider.setEvictionProtection("sb-1", true)).toEqual({ changed: false });
+    expect(pods.patches).toHaveLength(0);
   });
 });

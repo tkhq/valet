@@ -211,6 +211,32 @@ describe("buildRunThreadArchive", () => {
     };
   }
 
+  it("leaves a settled run's thread open while background work runs on it (fix wave 3)", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const deps = buildWorkflowEngineDeps({
+      host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials,
+    });
+    await seedRun(api, "run_bg", "wf_archive");
+    const done = await deps.promptOrchestrator("report", {
+      dispatchId: "workflow:run_bg:node1", queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id },
+    });
+    await recordDispatch(api, "run_bg", done);
+    await engineStore.forceSettle(done.sessionId, done.queueItemId, "failed");
+    const now = Date.now();
+    await engineStore.createWakeup({
+      id: "wk_runbg", sessionId: done.sessionId, threadId: done.threadId, kind: "timer", status: "pending",
+      reason: "check the deploy", prompt: "check the deploy", fireAt: now + 3_600_000,
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now,
+    });
+
+    await buildRunThreadArchive({ db, store: workflowStore, engineStore })(settledRun("run_bg", "wf_archive"));
+
+    expect(await db.select().from(sessionThreads)).toEqual([]);
+    expect(await engineStore.getWakeup("wk_runbg")).toMatchObject({ status: "pending" });
+  });
+
   it("archives the settled run's own thread and leaves a live run's thread alone", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;

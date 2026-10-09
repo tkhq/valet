@@ -1692,6 +1692,90 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "engine_threads" ADD COLUMN IF NOT EXISTS "reasoning" text',
   },
   {
+    // engine_wakeups table (spec 2026-10-08: sandbox scratch, wakeups, and
+    // leases). Engine table: the same ENGINE_SCHEMA_VERSION caveat as above.
+    describe: "engine_wakeups table (spec 2026-10-08)",
+    probe: { kind: "table", table: "engine_wakeups" },
+    sql: `CREATE TABLE IF NOT EXISTS "engine_wakeups" (
+  "id" text PRIMARY KEY NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
+  "kind" text NOT NULL, "status" text NOT NULL, "reason" text NOT NULL,
+  "command" text, "prompt" text, "exec_id" text, "lease_id" text,
+  "fire_at" bigint, "deadline_at" bigint, "exit_code" integer, "cause" text,
+  "log_offset" bigint NOT NULL DEFAULT 0, "log_tail" text NOT NULL DEFAULT '', "event_count" integer NOT NULL DEFAULT 0,
+  "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL, "ended_at" bigint,
+  "origin_json" text, "window_start_at" bigint, "window_count" integer,
+  "watch_buffer" text, "last_emit_at" bigint
+)`,
+  },
+  {
+    // Fix wave 2 (H3): the channel origin a wakeup signal replies to.
+    // Engine table: the same ENGINE_SCHEMA_VERSION caveat as above.
+    describe: "engine_wakeups.origin_json column",
+    probe: { kind: "column", table: "engine_wakeups", column: "origin_json" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "origin_json" text',
+  },
+  {
+    // Fix wave 2 (B7): the watch rate window.
+    describe: "engine_wakeups.window_start_at column",
+    probe: { kind: "column", table: "engine_wakeups", column: "window_start_at" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "window_start_at" bigint',
+  },
+  {
+    describe: "engine_wakeups.window_count column",
+    probe: { kind: "column", table: "engine_wakeups", column: "window_count" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "window_count" integer',
+  },
+  {
+    // Fix wave 3 (M1): lines a watch holds between coalesced emits.
+    // Engine table: the same ENGINE_SCHEMA_VERSION caveat as above.
+    describe: "engine_wakeups.watch_buffer column",
+    probe: { kind: "column", table: "engine_wakeups", column: "watch_buffer" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "watch_buffer" text',
+  },
+  {
+    describe: "engine_wakeups.last_emit_at column",
+    probe: { kind: "column", table: "engine_wakeups", column: "last_emit_at" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "last_emit_at" bigint',
+  },
+  {
+    describe: "engine_wakeups_session index (spec 2026-10-08)",
+    probe: { kind: "index", index: "engine_wakeups_session" },
+    sql: 'CREATE INDEX IF NOT EXISTS "engine_wakeups_session" ON "engine_wakeups" ("session_id","status")',
+  },
+  {
+    describe: "engine_wakeups_due index (spec 2026-10-08)",
+    probe: { kind: "index", index: "engine_wakeups_due" },
+    sql: 'CREATE INDEX IF NOT EXISTS "engine_wakeups_due" ON "engine_wakeups" ("status","kind","fire_at")',
+  },
+  {
+    // engine_leases table (spec 2026-10-08). Engine table: the same caveat.
+    describe: "engine_leases table (spec 2026-10-08)",
+    probe: { kind: "table", table: "engine_leases" },
+    sql: `CREATE TABLE IF NOT EXISTS "engine_leases" (
+  "id" text PRIMARY KEY NOT NULL, "session_id" text NOT NULL, "sandbox_id" text,
+  "owner_kind" text NOT NULL, "owner_id" text, "reason" text NOT NULL,
+  "created_at" bigint NOT NULL, "deadline_at" bigint NOT NULL, "released_at" bigint, "release_cause" text,
+  "thread_id" text, "origin_json" text
+)`,
+  },
+  {
+    // Fix wave 2 (M17): the thread that receives `lease.expired`.
+    describe: "engine_leases.thread_id column",
+    probe: { kind: "column", table: "engine_leases", column: "thread_id" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "thread_id" text',
+  },
+  {
+    // Fix wave 2 (H3).
+    describe: "engine_leases.origin_json column",
+    probe: { kind: "column", table: "engine_leases", column: "origin_json" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "origin_json" text',
+  },
+  {
+    describe: "engine_leases_active index (spec 2026-10-08)",
+    probe: { kind: "index", index: "engine_leases_active" },
+    sql: 'CREATE INDEX IF NOT EXISTS "engine_leases_active" ON "engine_leases" ("session_id") WHERE "released_at" IS NULL',
+  },
+  {
     // Team `vlt_` key pin (TKAI-396). Nullable: a personal key has none.
     // Pre-1.0 there are no team keys to backfill; the team route writes
     // the column and `metadata.teamId` in one statement from now on.

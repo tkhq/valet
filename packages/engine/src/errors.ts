@@ -340,6 +340,20 @@ export class SandboxUnavailableError extends Error {
   }
 }
 
+/**
+ * A provider's `restore` found that the sandbox no longer exists or no
+ * longer runs (fix wave 2, M2). The WakeWatcher ends a wakeup on it at once
+ * with `cause=sandbox_unavailable` instead of waiting for its deadline.
+ */
+export class SandboxGoneError extends Error {
+  readonly code = "sandbox_gone";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "SandboxGoneError";
+  }
+}
+
 /** A provider confirmed that the sandbox was evicted. Never replay the failed command. */
 export class SandboxEvictedError extends Error {
   readonly code = "sandbox_evicted";

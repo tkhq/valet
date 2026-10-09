@@ -1,0 +1,207 @@
+import { useState } from "react";
+import { Clock } from "lucide-react";
+import type { LeaseSummary, ListSessionWakeupsResponse, WakeupSummary } from "@valet/api/wire";
+import { ApiError } from "~/api/client";
+import { useCancelSessionWakeup, useSessionWakeups } from "~/api/queries";
+import { Button, ConfirmDialog, Popover, PopoverContent, PopoverTrigger } from "~/components/primitives";
+
+/** One row of background work: a wakeup, or a hold lease (no wakeup owns it). */
+export interface BackgroundItem {
+  id: string;
+  kind: WakeupSummary["kind"] | "hold";
+  reason: string;
+  /** When the work is stopped (process, watch, hold). */
+  deadlineAt?: number;
+  /** When a timer fires. */
+  fireAt?: number;
+  createdAt: number;
+  /** `pending` while a process or watch is still starting. A hold is always running. */
+  status: WakeupSummary["status"];
+}
+
+/** Pure: the rows a person sees. A process or watch lease shows through its wakeup. */
+export function backgroundItems(data: ListSessionWakeupsResponse | undefined): BackgroundItem[] {
+  if (!data) return [];
+  const wakeups: BackgroundItem[] = data.wakeups.map((w) => ({
+    id: w.id,
+    kind: w.kind,
+    reason: w.reason,
+    ...(w.deadlineAt !== undefined ? { deadlineAt: w.deadlineAt } : {}),
+    ...(w.fireAt !== undefined ? { fireAt: w.fireAt } : {}),
+    createdAt: w.createdAt,
+    status: w.status,
+  }));
+  const holds: BackgroundItem[] = data.leases
+    .filter((l: LeaseSummary) => l.ownerKind === "hold")
+    .map((l) => ({
+      id: l.id,
+      kind: "hold",
+      reason: l.reason,
+      deadlineAt: l.deadlineAt,
+      createdAt: l.createdAt,
+      status: "running",
+    }));
+  return [...wakeups, ...holds];
+}
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+/**
+ * Pure: a future time as "in 5m", "in 3h", or "in 2d", rounded to the
+ * nearest unit: 47h reads "in 2d" and 90m reads "in 2h". A time under a
+ * minute away, or past, reads "now".
+ */
+export function timeUntil(ts: number, now: number = Date.now()): string {
+  const diff = ts - now;
+  if (diff < MINUTE) return "now";
+  const minutes = Math.round(diff / MINUTE);
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.round(diff / HOUR);
+  if (hours < 24) return `in ${hours}h`;
+  return `in ${Math.round(diff / DAY)}d`;
+}
+
+/** Pure: how long ago `ts` was, as "under 1m", "5m", "3h", or "2d". */
+export function timeSince(ts: number, now: number = Date.now()): string {
+  const diff = now - ts;
+  if (diff < MINUTE) return "under 1m";
+  if (diff < HOUR) return `${Math.floor(diff / MINUTE)}m`;
+  if (diff < DAY) return `${Math.floor(diff / HOUR)}h`;
+  return `${Math.floor(diff / DAY)}d`;
+}
+
+/**
+ * Pure: the badge text, such as "2 background · next deadline in 3h". It
+ * names the soonest event of any kind: a deadline, or a timer that fires
+ * ("next wakeup").
+ */
+export function badgeLabel(items: BackgroundItem[], now: number = Date.now()): string {
+  const events = items.flatMap((i) => [
+    ...(i.deadlineAt !== undefined ? [{ at: i.deadlineAt, word: "deadline" }] : []),
+    ...(i.fireAt !== undefined ? [{ at: i.fireAt, word: "wakeup" }] : []),
+  ]);
+  if (events.length === 0) return `${items.length} background`;
+  const next = events.reduce((a, b) => (b.at < a.at ? b : a));
+  return `${items.length} background · next ${next.word} ${timeUntil(next.at, now)}`;
+}
+
+const KIND_LABEL: Record<BackgroundItem["kind"], string> = {
+  process: "Process",
+  watch: "Watch",
+  timer: "Timer",
+  hold: "Hold",
+};
+
+/**
+ * Pure: one row's detail, such as "Process · running 3h · deadline in 2d".
+ * A process or watch still starting reads "starting". The deadline is when
+ * the work is stopped, not when it is expected to finish.
+ */
+export function itemDetail(item: BackgroundItem, now: number = Date.now()): string {
+  const parts = [KIND_LABEL[item.kind]];
+  if (item.kind === "timer") {
+    if (item.fireAt !== undefined) parts.push(`fires ${timeUntil(item.fireAt, now)}`);
+    return parts.join(" · ");
+  }
+  parts.push(item.status === "pending" ? "starting" : `running ${timeSince(item.createdAt, now)}`);
+  if (item.deadlineAt !== undefined) parts.push(`deadline ${timeUntil(item.deadlineAt, now)}`);
+  return parts.join(" · ");
+}
+
+function cancelError(err: unknown): string {
+  if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
+    const message = (err.payload as Record<string, unknown>).error;
+    if (typeof message === "string" && message) return message;
+  }
+  return "Could not stop this work. Try again.";
+}
+
+/**
+ * Session header badge for background work (spec 2026-10-08, fix wave 2
+ * H8): "N background · next deadline in 3h". It opens a list of the work,
+ * with a Cancel button per row when the person may stop it. Renders nothing
+ * while the session has no background work.
+ */
+export function BackgroundWorkBadge({ sessionId, canCancel }: { sessionId: string; canCancel: boolean }) {
+  const { data } = useSessionWakeups(sessionId);
+  const cancel = useCancelSessionWakeup(sessionId);
+  const [confirming, setConfirming] = useState<BackgroundItem | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const items = backgroundItems(data);
+  if (items.length === 0 && !confirming) return null;
+
+  async function stop(item: BackgroundItem) {
+    setError(null);
+    try {
+      await cancel.mutateAsync(item.id);
+      setConfirming(null);
+    } catch (err) {
+      setError(cancelError(err));
+    }
+  }
+
+  return (
+    <>
+      {items.length > 0 && (
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="ghost" size="sm" className="shrink-0 gap-1.5 text-xs text-muted" aria-label="Background work">
+              <Clock className="h-3.5 w-3.5" aria-hidden />
+              <span>{badgeLabel(items)}</span>
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-80">
+            <p className="mb-2 text-xs font-medium text-ink">Background work</p>
+            <ul className="space-y-2">
+              {items.map((item) => (
+                <li key={item.id} className="flex items-start gap-2 text-xs">
+                  <div className="min-w-0 flex-1">
+                    <p className="break-words text-ink">{item.reason}</p>
+                    <p className="text-muted">{itemDetail(item)}</p>
+                  </div>
+                  {canCancel && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        setError(null);
+                        setConfirming(item);
+                      }}
+                      aria-label={`Cancel ${item.reason}`}
+                    >
+                      Cancel
+                    </Button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </PopoverContent>
+        </Popover>
+      )}
+      <ConfirmDialog
+        open={confirming !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setConfirming(null);
+            setError(null);
+          }
+        }}
+        title="Stop this background work?"
+        description={
+          confirming
+            ? `This stops "${confirming.reason}". The agent gets a message that you stopped it.`
+            : ""
+        }
+        confirmLabel="Stop it"
+        pendingLabel="Stopping…"
+        pending={cancel.isPending}
+        error={error ?? undefined}
+        onConfirm={() => {
+          if (confirming) void stop(confirming);
+        }}
+      />
+    </>
+  );
+}

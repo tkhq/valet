@@ -119,6 +119,12 @@ export interface SandboxResourceOpts {
   memory?: string;
   ephemeralStorage?: string;
   ephemeralStorageLimit?: string;
+  /** Node-local /scratch emptyDir size, as a Kubernetes quantity string
+   * (e.g. "100Gi"). Mirrors `SandboxResources.scratch` (@valet/engine).
+   * Adds to `ephemeralStorage`/`ephemeralStorageLimit` on the sandbox
+   * container's `ephemeral-storage` requests/limits: the scratch volume's
+   * usage counts against the same node-disk accounting (TKAI-349). */
+  scratch?: string;
 }
 
 /** `corev1.ResourceList` subset — quantities as strings, the wire format
@@ -383,4 +389,10 @@ export interface PodOwnerReference {
 export interface PodSummary {
   name: string;
   ownerReferences?: PodOwnerReference[];
+  /** The pod's current annotations, when the caller's projection includes
+   * them. Populated for eviction-protection reads (lifecycle.ts's
+   * `setEvictionProtection`/`listEvictionProtected`), absent otherwise. */
+  annotations?: Record<string, string>;
+  /** The pod's current labels, same conditions as `annotations`. */
+  labels?: Record<string, string>;
 }

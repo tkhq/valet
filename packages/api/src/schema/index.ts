@@ -381,8 +381,8 @@ export const agentSessions = pgTable(
     docker: boolean("docker").notNull().default(false),
     // Persisted repository capability. Failed YAML reads preserve this value.
     kubernetes: boolean("kubernetes").notNull().default(false),
-    // Per-child CPU and memory overrides from the task tool. Null means the
-    // session uses repository or deployment defaults.
+    // Per-child CPU, memory, and scratch overrides from the task tool. Null
+    // means the session uses repository or deployment defaults.
     sandboxResourceOverrides: jsonb("sandbox_resource_overrides").$type<PrebuildResources>(),
     // Which authoring surface the session drives ('code' default,
     // 'security' = engagement runner). Distinct from the engine's

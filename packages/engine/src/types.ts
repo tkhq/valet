@@ -4,6 +4,20 @@ import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
+import type {
+  Lease,
+  LeaseReleaseCause,
+  Wakeup,
+  WakeupCount,
+  WakeupCursor,
+  WakeupPatch,
+  WakeupsSeam,
+  WakeupStatus,
+} from "./wakeups/types.js";
+
+// Wakeup and lease contracts (spec 2026-10-08). Types and plain constants
+// only, with no node imports, so the engine barrel stays browser-safe.
+export * from "./wakeups/types.js";
 
 // ── Identity / authoring ──────────────────────────────────────────
 
@@ -771,6 +785,9 @@ export interface ToolContext {
     signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
+  /** Host seam for wakeups and leases (spec 2026-10-08). Absent === the host
+   * wires no wakeups, and tools that need it must degrade or refuse. */
+  wakeups?: WakeupsSeam;
   /**
    * Optional host policy resolver consulted by `call_tool` before invoking a
    * plugin action. Absent === the engine's built-in riskLevel→approvalMode
@@ -1218,6 +1235,14 @@ export interface ExecOpts {
    * effect — every exec keeps the container's default user.
    */
   privileged?: boolean;
+  /** Not tracked as a pending job; the caller owns its lifetime. */
+  detached?: boolean;
+  /**
+   * `execJob` only: the exec id to use, from `newExecId()`. The wakeups seam
+   * writes its rows with this id before the job starts. A provider that
+   * gets none generates its own.
+   */
+  execId?: string;
 }
 
 export interface ExecResult {
@@ -1250,6 +1275,22 @@ export interface JobPoll {
   /** True when the job's capped output buffer (maxOutputBytes) dropped
    * bytes. Optional: a provider that cannot detect the drop omits it. */
   truncated?: boolean;
+}
+
+/** Read bounds for one `Sandbox.pollJob` call (spec B4). */
+export interface JobPollOpts {
+  /**
+   * Most output bytes this poll returns. Without `tail`, the poll reads from
+   * `offset` forward. While bytes remain past the cap, it reports
+   * `status: "running"` so the caller polls again from `nextOffset`.
+   */
+  maxBytes?: number;
+  /**
+   * With `maxBytes`: return only the last `maxBytes` bytes between `offset`
+   * and the end of the log, and set `nextOffset` to the end. For a caller
+   * that needs only the tail of a long log.
+   */
+  tail?: boolean;
 }
 
 export interface GatewayEndpoint {
@@ -1304,7 +1345,7 @@ export interface Sandbox {
    * Null means adopted compute has no recoverable override record. Undefined
    * means the provider does not report this metadata. Providers must persist a
    * known record before replacing compute so retries can return the same record. */
-  resourceOverrides?: Pick<SandboxResources, "cpu" | "memory"> | null;
+  resourceOverrides?: Pick<SandboxResources, "cpu" | "memory" | "scratch"> | null;
   readFile(path: string): Promise<string>;
   readBinary(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: string): Promise<void>;
@@ -1322,7 +1363,7 @@ export interface Sandbox {
   /** Job-mode exec (decision 9). Optional — providers that support long-running,
    * detached commands implement all three of execJob/pollJob/cancelJob. */
   execJob?(command: string, opts?: ExecOpts): Promise<ExecJobHandle>;
-  pollJob?(execId: string, offset: number): Promise<JobPoll>;
+  pollJob?(execId: string, offset: number, opts?: JobPollOpts): Promise<JobPoll>;
   cancelJob?(execId: string): Promise<void>;
   /**
    * The in-sandbox auth gateway's reachable endpoint, or null when this
@@ -1360,9 +1401,11 @@ export interface SandboxResources {
    * failing. Independent of `ephemeralStorage` — an absent side is
    * omitted, never inferred from the other. */
   ephemeralStorageLimit?: string;
+  /** Node-local /scratch emptyDir size (spec Part A). Wiped when the pod stops. */
+  scratch?: string;
 }
 
-export type SandboxResourceField = "cpu" | "memory";
+export type SandboxResourceField = "cpu" | "memory" | "scratch";
 
 export interface SandboxCreateOpts {
   browser?: { enabled: boolean; viewer?: boolean };
@@ -1399,6 +1442,14 @@ export interface SandboxCreateOpts {
    * Undefined means no record exists; it must not become stale create resources.
    * A read error aborts adoption before replacement. Fresh creation skips it. */
   readResourceOverrides?: (sandbox: Sandbox) => Promise<Pick<SandboxResources, "cpu" | "memory"> | undefined>;
+  /**
+   * Internal lease intent (spec INV-8). If true and live compute exists, an
+   * adopting provider returns it unchanged: it keeps the live pod and its
+   * template and ignores image and resource drift. With no live compute,
+   * the provider creates from these options as usual. The attachment sets
+   * this when the session holds an active lease.
+   */
+  preserveLivePod?: boolean;
   metadata?: Record<string, unknown>;
   /**
    * The owning session's id. `Engine.materializeSandbox` stamps this on
@@ -1536,6 +1587,9 @@ export interface SandboxListing {
    * report one. The reconcile sweep's over-age report skips sandboxes
    * without it. */
   createdAtMs: number | null;
+  /** The sandbox's `/scratch` size limit in bytes, when the backend reports
+   * one. The reconcile sweep sums it into `valet.sandbox.scratch.live_bytes`. */
+  scratchBytes?: number;
 }
 
 export interface SandboxProvider {
@@ -1597,6 +1651,15 @@ export interface SandboxProvider {
    * (SandboxCapabilities.credsMount is false or absent).
    */
   updateCreds?(id: string, files: Record<string, string>): Promise<void>;
+  /**
+   * Optional eviction-protection seam (spec 2026-10-08, wakeups/leases). When
+   * enabled, the provider marks the sandbox so the backend's own eviction or
+   * idle-reap paths leave it running while a lease holds it open. Absent ===
+   * no eviction-protection support; callers must treat it as a no-op.
+   */
+  setEvictionProtection?(id: string, enabled: boolean): Promise<{ changed: boolean }>;
+  /** Every sandbox id this provider currently marks eviction-protected. */
+  listEvictionProtected?(): Promise<string[]>;
 }
 
 // ── Blob store ─────────────────────────────────────────────────────
@@ -1977,6 +2040,8 @@ export interface SessionStore {
   /** Settled queue items whose updatedAt is strictly before `cutoff`. Used by the event-retention prune. */
   listSettledSubmissionsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]>;
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
+  /** The session's queue item admitted with this exact `dispatchId`, or null. */
+  getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null>;
   /**
    * Max last-touched timestamp across the session's queue items, or null when
    * the session has no items. Reads the `updatedAt` column: it is stamped on
@@ -2134,7 +2199,72 @@ export interface SessionStore {
     queueItemId: string,
   ): Promise<DecisionGate[]>;
   getSuspendedTurn(sessionId: string, threadId: string): Promise<SuspendedTurnState | null>;
+  /**
+   * Deletes the session in one transaction. Its `pending` and `running`
+   * wakeups end (counted in `valet.wakeups.total` with
+   * `cause=sandbox_unavailable`), and then its wakeup and lease rows are
+   * deleted with every other row of the session (spec C2, fix wave 2 M12).
+   */
   deleteSession(id: string): Promise<void>;
+
+  // === Wakeups and leases (spec 2026-10-08) ===
+  createWakeup(wakeup: Wakeup): Promise<void>;
+  /** Writes a process or watch wakeup and its lease in one transaction (spec C2). */
+  createWakeupWithLease(wakeup: Wakeup, lease: Lease): Promise<void>;
+  getWakeup(id: string): Promise<Wakeup | null>;
+  /** An empty or absent `statuses` returns every row of the session. */
+  listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]>;
+  /**
+   * Running process/watch wakeups (always due), pending process/watch
+   * wakeups (a start that has not finished, or one a crash cut short), and
+   * pending timer wakeups whose fireAt <= now, in (createdAt, id) order.
+   * `after` pages: it returns only rows strictly after that position, so a
+   * caller reads every due row. `rows` skips an unreadable row (counted in
+   * `valet.wakeups.bad_rows`). `next` is the position of the last row the
+   * page read, readable or not, or null when the page read fewer than
+   * `limit` rows. A caller pages on `next`, so one unreadable row never ends
+   * the scan early (fix wave 4, data N1).
+   */
+  listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<{ rows: Wakeup[]; next: WakeupCursor | null }>;
+  /** Wakeup counts per (kind, status) over `statuses`. Groups with no rows are absent. */
+  countWakeupsByKindAndStatus(statuses: readonly WakeupStatus[]): Promise<WakeupCount[]>;
+  /** CAS: succeeds only when the row's current status is in `from`. Null when the CAS loses. */
+  transitionWakeup(
+    id: string,
+    from: readonly WakeupStatus[],
+    to: WakeupStatus,
+    patch: WakeupPatch,
+    updatedAt: number,
+  ): Promise<Wakeup | null>;
+  /**
+   * `transitionWakeup`, and when the CAS matches, the release of the row's
+   * `lease_id` with `releaseCause` at `updatedAt`, in one statement. A lost
+   * CAS returns null and releases nothing.
+   */
+  transitionWakeupAndReleaseLease(
+    id: string,
+    from: readonly WakeupStatus[],
+    to: WakeupStatus,
+    patch: WakeupPatch,
+    updatedAt: number,
+    releaseCause: LeaseReleaseCause,
+  ): Promise<Wakeup | null>;
+  createLease(lease: Lease): Promise<void>;
+  /** CAS release: succeeds only when the lease is not already released. Null when already released. */
+  releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null>;
+  /** The lease with `id`, released or not, or null for an unknown or unreadable row. */
+  getLease(id: string): Promise<Lease | null>;
+  /**
+   * Deletes one wakeup row and one lease row of `sessionId`, when they
+   * exist. For a create that landed after its session was deleted: it
+   * removes only what that create wrote, never the session's other rows.
+   */
+  deleteWakeupRows(sessionId: string, rows: { wakeupId?: string; leaseId?: string }): Promise<void>;
+  listActiveLeases(sessionId: string): Promise<Lease[]>;
+  listAllActiveLeases(): Promise<Lease[]>;
+  countActiveLeases(sessionId: string): Promise<number>;
+  /** Fills `sandboxId` on an active lease that has none. False when the lease is released or already has one. */
+  setLeaseSandboxId(id: string, sandboxId: string): Promise<boolean>;
 }
 
 // ── Sandbox spec / prep steps ─────────────────────────────────────
@@ -2167,7 +2297,7 @@ export interface DesiredSandboxSpec {
   image?: string;
   /** Repository resource overrides. Undefined gives no authoritative opinion;
    * an empty object authoritatively declares no repository overrides. */
-  resources?: Pick<SandboxResources, "cpu" | "memory">;
+  resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">;
   /** Resource fields whose authority was unavailable. Adoption keeps their
    * live values while applying the other fields from resources. */
   preserveResourceFields?: readonly SandboxResourceField[];
@@ -2439,6 +2569,14 @@ export interface CreateSessionOptions {
    */
   specProvider?: SpecProvider;
   /**
+   * Optional host-provided lease check. Absent === no lease gate; existing
+   * replace behavior unchanged. When present, `reconcile` calls it before a
+   * pod-replacing image or resource change; a `true` result defers the
+   * change until a later run-start window finds the lease released (spec
+   * INV-8). It never blocks an in-place step apply.
+   */
+  isLeased?: () => Promise<boolean>;
+  /**
    * Optional host-provided credential resolver. Absent === raw store read —
    * existing paths unchanged (the session-scoped `CredentialProvider`
    * `Session.credentialProvider()` returns reads `providers.credentials`
@@ -2490,6 +2628,9 @@ export interface CreateSessionOptions {
     name?: string;
     signal?: AbortSignal;
   }) => Promise<{ markdown: string } | null>;
+  /** Threaded onto `ToolContext.wakeups` via `buildToolContext`. Absent ===
+   * plugin actions and tools get no wakeups seam. */
+  wakeups?: WakeupsSeam;
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;
@@ -2739,8 +2880,8 @@ export interface SpawnChildRequest {
   repo?: string;
   branch?: string;
   model?: string;
-  /** CPU and memory overrides for the child's sandbox. Omitted fields use host defaults. */
-  resources?: Pick<SandboxResources, "cpu" | "memory">;
+  /** CPU, memory, and scratch overrides for the child's sandbox. Omitted fields use host defaults. */
+  resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">;
   /** Interactive-service profile for the child's sandbox (default "headless"). */
   profile?: "headless" | "full";
   /** Request a rootless docker daemon inside the child's sandbox

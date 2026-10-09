@@ -171,6 +171,11 @@ import type {
   PatchSessionRequest,
   PatchSessionResponse,
   PauseSessionResponse,
+  ReplaceSandboxResponse,
+  BackgroundWorkConflict,
+  BackgroundWorkItem,
+  ListSessionWakeupsResponse,
+  CancelSessionWakeupResponse,
   GetSessionRatingsResponse,
   PutRatingRequest,
   PutRatingResponse,
@@ -321,6 +326,49 @@ export function memoryCopyConflict(error: unknown): { version: string | null; ch
   const version = payload.destinationVersion;
   if (changed && version === null) return { version, changed };
   return typeof version === "string" && version.length > 0 ? { version, changed } : null;
+}
+
+const WORK_KINDS: ReadonlySet<string> = new Set(["process", "watch", "timer", "hold"]);
+
+function isWorkKind(kind: string): kind is BackgroundWorkItem["kind"] {
+  return WORK_KINDS.has(kind);
+}
+
+/** One work item of a 409 body, or null when it is malformed. A missing `status` reads as running. */
+function toWorkItem(value: unknown): BackgroundWorkItem | null {
+  if (typeof value !== "object" || value === null) return null;
+  if (!("id" in value) || typeof value.id !== "string") return null;
+  if (!("kind" in value) || typeof value.kind !== "string" || !isWorkKind(value.kind)) return null;
+  if (!("reason" in value) || typeof value.reason !== "string") return null;
+  if (!("createdAt" in value) || typeof value.createdAt !== "number") return null;
+  return {
+    id: value.id,
+    kind: value.kind,
+    status: "status" in value && value.status === "pending" ? "pending" : "running",
+    reason: value.reason,
+    ...("threadId" in value && typeof value.threadId === "string" ? { threadId: value.threadId } : {}),
+    ...("deadlineAt" in value && typeof value.deadlineAt === "number" ? { deadlineAt: value.deadlineAt } : {}),
+    ...("fireAt" in value && typeof value.fireAt === "number" ? { fireAt: value.fireAt } : {}),
+    createdAt: value.createdAt,
+  };
+}
+
+/**
+ * The structured 409 an action returns while background work would stop
+ * (pause, replace, a profile change, a move, a thread archive). Null for
+ * any other error. A caller shows the work and resends with `force`.
+ */
+export function backgroundWorkConflict(error: unknown): BackgroundWorkConflict | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const payload = error.payload;
+  if (typeof payload !== "object" || payload === null) return null;
+  if (!("code" in payload) || payload.code !== "background_work") return null;
+  if (!("error" in payload) || typeof payload.error !== "string") return null;
+  if (!("work" in payload) || !Array.isArray(payload.work)) return null;
+  const work: unknown[] = payload.work;
+  const hiddenCount = "hiddenCount" in payload && typeof payload.hiddenCount === "number" ? payload.hiddenCount : 0;
+  const forceAllowed = "forceAllowed" in payload && payload.forceAllowed === true;
+  return { error: payload.error, code: "background_work", work: work.flatMap((v) => { const item = toWorkItem(v); return item ? [item] : []; }), hiddenCount, forceAllowed };
 }
 
 // `GET /api/auth-config` is unauthenticated and doesn't change without a
@@ -714,10 +762,27 @@ export const api = {
     ),
   mintSandboxJwt: (id: string) =>
     request<SandboxJwtResponse>("POST", `/sessions/${encodeURIComponent(id)}/sandbox-jwt`),
-  pauseSession: (id: string) =>
-    request<PauseSessionResponse>("POST", `/sessions/${encodeURIComponent(id)}/pause`),
-  replaceSandbox: (id: string) =>
-    request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(id)}/sandbox/replace`),
+  /** `force` stops background work that would block the pause. */
+  pauseSession: (id: string, opts?: { force?: boolean }) =>
+    request<PauseSessionResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/pause`,
+      opts?.force ? { force: true } : undefined,
+    ),
+  /** `force` stops background work that would block the replace. */
+  replaceSandbox: (id: string, opts?: { force?: boolean }) =>
+    request<ReplaceSandboxResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/sandbox/replace`,
+      opts?.force ? { force: true } : undefined,
+    ),
+  listSessionWakeups: (id: string) =>
+    request<ListSessionWakeupsResponse>("GET", `/sessions/${encodeURIComponent(id)}/wakeups`),
+  cancelSessionWakeup: (id: string, wakeupId: string) =>
+    request<CancelSessionWakeupResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/wakeups/${encodeURIComponent(wakeupId)}/cancel`,
+    ),
   // workspace runtime: these entry points take a workspace key, never a raw
   // session id, and only ensure the runtime exists
   ensureWorkspaceConversation: (workspace: string) =>

@@ -19,7 +19,8 @@ import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import { isPgUniqueViolation } from "@valet/store-postgres";
-import { isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange } from "@valet/shared";
+import { isScratchRequestError, isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange, validateScratchRequest } from "@valet/shared";
+import { recordScratchRefused } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { imageSources, bakes, type ImageSourceRow } from "../schema/index.js";
@@ -248,7 +249,7 @@ sourcesRouter.patch("/:id", async (c) => {
   const gate = await requireOrgAdmin(c);
   if (gate) return gate;
 
-  const { db } = c.var.providers;
+  const { db, scratchCaps } = c.var.providers;
   const id = c.req.param("id");
   const existing = await getOwnedSource(db, id, c.var.user.orgId);
   if (!existing) return c.json({ error: "source not found" }, 404);
@@ -285,10 +286,10 @@ sourcesRouter.patch("/:id", async (c) => {
       patch.sandboxResources = null;
     } else {
       if (!isRecord(resources) || Array.isArray(resources)) {
-        return c.json({ error: "Set sandboxResources to an object with optional cpu and memory fields, or null to clear defaults." }, 400);
+        return c.json({ error: "Set sandboxResources to an object with optional cpu, memory, and scratch fields, or null to clear defaults." }, 400);
       }
-      if (Object.keys(resources).some((field) => field !== "cpu" && field !== "memory")) {
-        return c.json({ error: "Remove unsupported sandboxResources fields. Use cpu and memory only." }, 400);
+      if (Object.keys(resources).some((field) => field !== "cpu" && field !== "memory" && field !== "scratch")) {
+        return c.json({ error: "Remove unsupported sandboxResources fields. Use cpu, memory, and scratch only." }, 400);
       }
       const parsed: NonNullable<ImageSourceRow["sandboxResources"]> = {};
       if (resources.cpu !== undefined) {
@@ -304,6 +305,17 @@ sourcesRouter.patch("/:id", async (c) => {
           return c.json({ error: "Set sandboxResources.memory to a positive Kubernetes quantity, such as 8Gi or 500Mi." }, 400);
         }
         parsed.memory = memory;
+      }
+      if (resources.scratch !== undefined) {
+        try {
+          parsed.scratch = validateScratchRequest(resources.scratch, "saved", scratchCaps);
+        } catch (err) {
+          if (isScratchRequestError(err)) {
+            recordScratchRefused("saved", err.reason);
+            return c.json({ error: err.message }, 400);
+          }
+          throw err;
+        }
       }
       patch.sandboxResources = Object.keys(parsed).length > 0 ? parsed : null;
     }

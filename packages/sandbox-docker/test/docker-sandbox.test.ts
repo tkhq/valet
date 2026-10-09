@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { access, mkdtemp, readdir, rm, readFile, writeFile, symlink } from "node:fs/promises";
+import { access, mkdtemp, readdir, rm, readFile, stat, writeFile, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { omittedMarker } from "@valet/engine";
+import { omittedMarker, SandboxGoneError } from "@valet/engine";
 import { DockerSandboxProvider, type DockerSandboxCreateOpts, createSandboxWorkspace } from "../src/index.js";
+import { dropFinishedDetachedOutputs, jobGroupKillCommand, jobOutputLimit, jobWithProcessGroup, sliceUtf8 } from "../src/sandbox.js";
 import { buildFullProfileTestImage } from "./full-profile-test-image.js";
 
 /** Skip the whole suite when Docker isn't available locally. */
@@ -215,6 +216,133 @@ describeDocker("DockerSandbox", () => {
       expect(poll.status).toBe("done");
       expect(poll.exitCode).toBe(0);
       expect(output).toContain("hello");
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  it("job-mode: exec ids are unique per job and a requested id is used as given (fix wave 2, B1)", async () => {
+    const sb = await makeSandbox();
+    try {
+      const a = await sb.execJob("true");
+      const b = await sb.execJob("true");
+      expect(a.execId).toMatch(/^job-[0-9a-z]+-[0-9a-z]{8}$/);
+      expect(a.execId).not.toBe(b.execId);
+      await expect(sb.execJob("true", { execId: "job-abc-12345678" })).resolves.toEqual({ execId: "job-abc-12345678" });
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  async function pollUntilDone(sb: { pollJob(id: string, o: number, opts?: { maxBytes?: number; tail?: boolean }): Promise<{ status: string }> }, execId: string, opts: { maxBytes?: number; tail?: boolean }) {
+    let poll = await sb.pollJob(execId, 0, opts);
+    for (let i = 0; i < 100 && poll.status === "running"; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      poll = await sb.pollJob(execId, 0, opts);
+    }
+    return poll;
+  }
+
+  it("job-mode: cancelJob kills the command inside the container, not only the exec client (PR review, finding 3)", async () => {
+    const sb = await makeSandbox();
+    try {
+      // Children of the job, not only its leader, must die with the cancel.
+      const { execId } = await sb.execJob("sleep 300 & sleep 300 & wait", { detached: true });
+      // Give the wrapper time to record its process group.
+      await new Promise((r) => setTimeout(r, 300));
+      // Live `sleep` processes only: the alpine keepalive (`tail`) is PID 1
+      // and never reaps, so a killed sleep stays in /proc as a zombie.
+      const count = `ps -o stat=,comm= | awk '$2 == "sleep" && $1 !~ /^Z/' | wc -l`;
+      const before = await sb.exec(count);
+      expect(Number(before.stdout.trim())).toBe(2);
+      await sb.cancelJob(execId);
+      const after = await sb.exec(count);
+      expect(Number(after.stdout.trim())).toBe(0);
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  it("job-mode: a terminal poll of a detached job keeps its state for later reads (fix wave 2, H1)", async () => {
+    const sb = await makeSandbox();
+    try {
+      const { execId } = await sb.execJob("printf 'line one\\nline two\\n'; exit 3", { detached: true });
+      // The watcher's tail read sees the exit first.
+      const watcherRead = await pollUntilDone(sb, execId, { maxBytes: 4096, tail: true });
+      expect(watcherRead).toMatchObject({ status: "done", exitCode: 3 });
+      // A later process_read still gets the whole log and the exit.
+      const agentRead = await sb.pollJob(execId, 0, { maxBytes: 4096 });
+      expect(agentRead).toMatchObject({ status: "done", exitCode: 3, output: "line one\nline two\n" });
+      // And the watcher's next poll does not turn the clean exit into a lost job.
+      expect(await sb.pollJob(execId, 0, { maxBytes: 4096, tail: true })).toMatchObject({ status: "done", exitCode: 3 });
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  it("job-mode: bounds a detached job's in-memory output (fix wave 2, H2)", async () => {
+    const sb = await makeSandbox();
+    try {
+      const { execId } = await sb.execJob("head -c 20000 /dev/zero | tr '\\0' 'a'", { detached: true, maxOutputBytes: 1000 });
+      const poll = await pollUntilDone(sb, execId, { maxBytes: 100_000 });
+      expect(poll).toMatchObject({ status: "done", truncated: true });
+      const full = await sb.pollJob(execId, 0, { maxBytes: 100_000 });
+      expect(Buffer.byteLength(full.output)).toBeLessThan(2000);
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  it("job-mode: offsets count UTF-8 bytes, like the kubernetes provider (fix wave 2, L4)", async () => {
+    const sb = await makeSandbox();
+    try {
+      const { execId } = await sb.execJob("printf '\\303\\251\\342\\234\\223\\nx\\n'", { detached: true });
+      await pollUntilDone(sb, execId, { maxBytes: 4096, tail: true });
+      // "é" is 2 bytes and "✓" is 3. A 4-byte read stops before the split "✓".
+      const first = await sb.pollJob(execId, 0, { maxBytes: 4 });
+      expect(first).toMatchObject({ status: "running", output: "é", nextOffset: 2 });
+      const rest = await sb.pollJob(execId, 2, { maxBytes: 4096 });
+      expect(rest).toMatchObject({ status: "done", output: "✓\nx\n", nextOffset: 8 });
+      const tail = await sb.pollJob(execId, 0, { maxBytes: 4, tail: true });
+      expect(tail).toMatchObject({ output: "\nx\n", nextOffset: 8 });
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  it("restore of a released sandbox throws SandboxGoneError (fix wave 2, M2)", async () => {
+    const sb = await makeSandbox();
+    await provider.destroy(sb.id);
+    await expect(provider.restore(sb.id)).rejects.toBeInstanceOf(SandboxGoneError);
+  });
+
+  it("job-mode: pollJob bounds a forward read and a tail read (spec B4)", async () => {
+    const sb = await makeSandbox();
+    try {
+      const { execId } = await sb.execJob("printf 0123456789", { detached: true });
+      // Wait until the job finished, reading only the tail so nothing is evicted.
+      let tailPoll = await sb.pollJob(execId, 0, { maxBytes: 3, tail: true });
+      for (let i = 0; i < 100 && tailPoll.status === "running"; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        tailPoll = await sb.pollJob(execId, 0, { maxBytes: 3, tail: true });
+      }
+      // A finished job is evicted after a terminal poll, so the forward
+      // checks use a second job.
+      expect(tailPoll).toMatchObject({ status: "done", exitCode: 0, output: "789", nextOffset: 10 });
+
+      const second = await sb.execJob("printf 0123456789", { detached: true });
+      let first = await sb.pollJob(second.execId, 0, { maxBytes: 4 });
+      for (let i = 0; i < 100 && first.output.length < 4; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        first = await sb.pollJob(second.execId, 0, { maxBytes: 4 });
+      }
+      expect(first).toMatchObject({ status: "running", output: "0123", nextOffset: 4 });
+      let rest = await sb.pollJob(second.execId, 4, { maxBytes: 100 });
+      for (let i = 0; i < 100 && rest.status === "running"; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        rest = await sb.pollJob(second.execId, 4, { maxBytes: 100 });
+      }
+      expect(rest).toMatchObject({ status: "done", exitCode: 0, output: "456789", nextOffset: 10 });
     } finally {
       await provider.destroy(sb.id);
     }
@@ -457,6 +585,41 @@ describeDocker("DockerSandbox", () => {
     await expect(access(credsDir)).rejects.toThrow();
   });
 
+  it("resources.scratch: create mounts /scratch read-write with TMPDIR, destroy removes host dir", async () => {
+    const sb = await makeSandbox({ resources: { scratch: "1Gi" } });
+    const sbId = sb.id;
+    const scratchDir = sb.scratchHostDir!;
+    expect(scratchDir).toBeTruthy();
+    // Sticky, so the workload user cannot replace a root-owned path in it
+    // (fix wave 3, security H-1).
+    expect((await stat(scratchDir)).mode & 0o7777).toBe(0o1777);
+    try {
+      const write = await sb.exec("echo hi > /scratch/test && cat /scratch/test");
+      expect(write.exitCode).toBe(0);
+      expect(write.stdout.trim()).toBe("hi");
+
+      const tmpdir = await sb.exec("echo $TMPDIR");
+      expect(tmpdir.exitCode).toBe(0);
+      expect(tmpdir.stdout.trim()).toBe("/scratch/tmp");
+    } finally {
+      await provider.destroy(sbId);
+    }
+
+    // After destroy, the host scratch dir must be gone.
+    await expect(access(scratchDir)).rejects.toThrow();
+  });
+
+  it("without resources.scratch — no /scratch mount and no TMPDIR override", async () => {
+    const sb = await makeSandbox();
+    try {
+      expect(sb.scratchHostDir).toBeUndefined();
+      const probe = await sb.exec("test -d /scratch");
+      expect(probe.exitCode).not.toBe(0);
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
   it("updateCreds removes files absent from the new map (stale key rotation)", async () => {
     // Create with two creds files: cred-a and cred-b.
     // Use same-length values for initial and updated cred-a so a VirtioFS
@@ -488,5 +651,84 @@ describeDocker("DockerSandbox", () => {
 
   it("capabilities() reports credsMount: true", () => {
     expect(provider.capabilities().credsMount).toBe(true);
+  });
+});
+
+describe("docker job output helpers (fix wave 2)", () => {
+  it("slices by UTF-8 bytes and never splits a codepoint (L4)", () => {
+    const buf = Buffer.from("é✓\nx\n", "utf8");
+    expect(sliceUtf8(buf, 0, { maxBytes: 4 })).toEqual({ text: "é", nextOffset: 2, more: true });
+    expect(sliceUtf8(buf, 2, { maxBytes: 4096 })).toEqual({ text: "✓\nx\n", nextOffset: 8, more: false });
+    expect(sliceUtf8(buf, 0, { maxBytes: 4, tail: true })).toEqual({ text: "\nx\n", nextOffset: 8, more: false });
+    expect(sliceUtf8(buf, 2, { maxBytes: 1 })).toEqual({ text: "✓", nextOffset: 5, more: true });
+  });
+
+  it("caps a detached job at the docker maximum, and leaves a foreground cap alone (H2)", () => {
+    expect(jobOutputLimit({ detached: true })).toBe(64 * 1024 * 1024);
+    expect(jobOutputLimit({ detached: true, maxOutputBytes: 2 * 1024 ** 3 })).toBe(64 * 1024 * 1024);
+    expect(jobOutputLimit({ detached: true, maxOutputBytes: 1000 })).toBe(1000);
+    expect(jobOutputLimit({ maxOutputBytes: 5 })).toBe(5);
+    expect(jobOutputLimit()).toBeUndefined();
+  });
+});
+
+describe("job process group wrapper (PR review, finding 3)", () => {
+  it("records the group id before the command and kills the group from the file", () => {
+    const wrapped = jobWithProcessGroup("job-x-12345678", "echo 'hi'");
+    expect(wrapped).toContain("setsid -w sh -c");
+    expect(wrapped).toContain("echo $$ > ");
+    expect(wrapped).toContain(".valet-job-job-x-12345678.pid");
+    const kill = jobGroupKillCommand("job-x-12345678");
+    expect(kill).toContain('[ "$3" = "$p" ]');
+    expect(kill).toContain('kill -9 "$pid"');
+    expect(kill).toContain('kill -9 "$p"');
+    expect(kill).toContain("rm -f '/tmp/.valet-job-job-x-12345678.pid'");
+  });
+
+  it("round-trips the command through a real shell", () => {
+    const wrapped = jobWithProcessGroup("job-y-12345678", "printf '%s' \"it's quoted\"");
+    // Replace the pid file with a temp path and run the wrapper locally.
+    const script = wrapped.replaceAll("/tmp/.valet-job-job-y-12345678.pid", `${process.env.TMPDIR ?? "/tmp"}/valet-test-${process.pid}.pid`);
+    const result = spawnSync("/bin/sh", ["-c", script], { encoding: "utf8" });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("it's quoted");
+  });
+});
+
+describe("dropFinishedDetachedOutputs (fix wave 3, security L4)", () => {
+  type Job = { detached: boolean; status: "running" | "done" | "failed"; output: string; terminalPolled?: boolean };
+  it("drops the oldest finished detached buffers until the total fits, and keeps running jobs", () => {
+    const jobs = new Map<string, Job>([
+      ["a", { detached: true, status: "done", output: "x".repeat(40), terminalPolled: true }],
+      ["b", { detached: true, status: "running", output: "x".repeat(40) }],
+      ["c", { detached: true, status: "failed", output: "x".repeat(40), terminalPolled: true }],
+      ["d", { detached: false, status: "done", output: "x".repeat(40) }],
+      ["e", { detached: true, status: "done", output: "x".repeat(40), terminalPolled: true }],
+    ]);
+    expect(dropFinishedDetachedOutputs(jobs, 100)).toEqual(["a", "c"]);
+    // A drop empties the output and keeps the job, so its exit stays readable.
+    expect([...jobs.keys()]).toEqual(["a", "b", "c", "d", "e"]);
+    expect(jobs.get("a")).toMatchObject({ status: "done", output: "" });
+    expect(jobs.get("c")).toMatchObject({ status: "failed", output: "" });
+    expect(jobs.get("e")?.output).toHaveLength(40);
+    expect(dropFinishedDetachedOutputs(jobs, 100)).toEqual([]);
+  });
+
+  it("keeps a finished job whose exit no terminal poll has read yet (fix wave 4, data N3)", () => {
+    const jobs = new Map<string, Job>([
+      ["a", { detached: true, status: "done", output: "x".repeat(40) }],
+      ["b", { detached: true, status: "done", output: "x".repeat(40), terminalPolled: true }],
+      ["c", { detached: true, status: "done", output: "x".repeat(40) }],
+    ]);
+    expect(dropFinishedDetachedOutputs(jobs, 50)).toEqual(["b"]);
+    expect(jobs.get("a")?.output).toHaveLength(40);
+    expect(jobs.get("b")?.output).toBe("");
+    expect(jobs.get("c")?.output).toHaveLength(40);
+  });
+
+  it("drops nothing under the cap, and nothing it may not drop over it", () => {
+    const jobs = new Map<string, Job>([["a", { detached: true, status: "running", output: "x".repeat(500) }]]);
+    expect(dropFinishedDetachedOutputs(jobs, 100)).toEqual([]);
+    expect(dropFinishedDetachedOutputs(new Map<string, Job>(), 100)).toEqual([]);
   });
 });

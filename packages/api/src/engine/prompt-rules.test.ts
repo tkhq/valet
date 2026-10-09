@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ACTION_RULES,
+  BACKGROUND_WORK_RULES,
   CODING_CRAFT_RULES,
   CODING_PERSISTENCE_RULES,
   CODING_SYSTEM_PROMPT,
@@ -8,7 +9,9 @@ import {
   MODEL_SWITCH_CORE,
   SECRETS_RULES,
   TOOL_USE_RULES,
+  childTimerBoundMs,
   codingSystemPrompt,
+  resolveChildTimerHours,
   SECRETS_RULES_NO_CLI,
 } from "./prompt-rules.js";
 
@@ -97,6 +100,48 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     expect(withCli).toContain("valet-secrets find <name>");
     expect(withCli).toContain("only after find has come back with nothing");
     expect(codingSystemPrompt({ secretsCli: false })).not.toContain("valet-secrets find");
+  });
+
+  // Background work (spec 2026-10-08): the model must be told to use the
+  // background-work tools instead of blocking a turn or polling.
+  it("tells the model to background long commands and use wake_at instead of sleep", () => {
+    expect(flat(CODING_SYSTEM_PROMPT)).toContain(flat(BACKGROUND_WORK_RULES));
+    expect(CODING_SYSTEM_PROMPT).toContain("background: true");
+    expect(CODING_SYSTEM_PROMPT).toContain("deadline_hours");
+    expect(CODING_SYSTEM_PROMPT).toContain("do not poll it");
+  });
+
+  // Fix wave 3 (UX prompt 8): only a session with /scratch hears about it.
+  it("names /scratch only when the host says the session has it", () => {
+    expect(codingSystemPrompt({ secretsCli: true })).not.toContain("/scratch");
+    expect(codingSystemPrompt({ secretsCli: true, scratchEnabled: false })).not.toContain("/scratch");
+    expect(codingSystemPrompt({ secretsCli: true, scratchEnabled: true })).toContain("`/scratch` is wiped when the sandbox stops");
+  });
+
+  // Fix wave 3 (UX prompts 1, 9, M6): end the turn after a start, cover
+  // watch and holds, and bound the child timer promise.
+  it("tells the model to end its turn after a start and bounds the child wake_at promise", () => {
+    expect(CODING_SYSTEM_PROMPT).toContain("end your turn with a one-line status");
+    expect(CODING_SYSTEM_PROMPT).toContain("`watch`");
+    expect(CODING_SYSTEM_PROMPT).toContain("`hold_sandbox`");
+    expect(CODING_SYSTEM_PROMPT).not.toContain("Use `wake_at` to pause instead of `sleep`");
+    expect(CODING_SYSTEM_PROMPT).toContain(
+      "In a child session, a pending `wake_at` that fires within 24 hours keeps the child unsettled until that turn ends",
+    );
+    expect(CODING_SYSTEM_PROMPT).toContain("A later timer does not hold the parent");
+  });
+
+  // Fix wave 4 (UX N10): the child timer bound is the deploy's retention.
+  it("builds the child wake_at bound from the resolved retention hours", () => {
+    const six = codingSystemPrompt({ secretsCli: true, childTimerHours: 6 });
+    expect(six).toContain("a pending `wake_at` that fires within 6 hours keeps the child unsettled");
+    expect(six).not.toContain("24 hours");
+    expect(codingSystemPrompt({ secretsCli: true, childTimerHours: 1 })).toContain("fires within 1 hour keeps");
+    expect(childTimerBoundMs(0)).toBe(24 * 3_600_000);
+    expect(childTimerBoundMs(6 * 3_600_000)).toBe(6 * 3_600_000);
+    expect(resolveChildTimerHours({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "6" })).toBe(6);
+    expect(resolveChildTimerHours({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "0" })).toBe(24);
+    expect(resolveChildTimerHours({})).toBe(24);
   });
 
   it("composes the secrets paragraph from whether prep installs the CLI", () => {

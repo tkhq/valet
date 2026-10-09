@@ -120,6 +120,7 @@ describe("quantity math", () => {
   });
 
   it("formats bytes as the largest evenly-dividing binary suffix", () => {
+    expect(formatStorageQuantity(2 ** 40)).toBe("1Ti");
     expect(formatStorageQuantity(2 ** 31)).toBe("2Gi");
     expect(formatStorageQuantity(3 * 2 ** 20)).toBe("3Mi");
     expect(formatStorageQuantity(2 ** 10)).toBe("1Ki");
@@ -333,7 +334,7 @@ const inertObjectsApi: SandboxCustomObjectsApi = {
   listNamespacedCustomObject: unusedAsync,
   patchNamespacedCustomObject: unusedAsync,
 };
-const inertPodsApi: SandboxPodsApi = { listNamespacedPod: unusedAsync };
+const inertPodsApi: SandboxPodsApi = { listNamespacedPod: unusedAsync, patchNamespacedPod: unusedAsync };
 const inertExecApi: PodExecApi = { exec: unusedAsync };
 const inertLivenessApi: PodLivenessApi = { getPodUid: unusedAsync };
 

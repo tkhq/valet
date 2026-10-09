@@ -16,7 +16,8 @@ vi.mock("./message-item", () => ({
     <div data-testid="message-item">{message.id}</div>
   ),
 }));
-vi.mock("./signal-card", () => ({
+vi.mock("./signal-card", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./signal-card")>()),
   SignalCard: ({ message }: { message: StreamMessage }) => (
     <div data-testid="signal-card">{message.id}</div>
   ),

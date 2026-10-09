@@ -309,10 +309,15 @@ describe("withSandboxCapacityGate", () => {
     expect(gatedBare.list).toBeUndefined();
     expect(gatedBare.suspend).toBeUndefined();
     expect(gatedBare.readBrowserAudit).toBeUndefined();
+    expect(gatedBare.setEvictionProtection).toBeUndefined();
+    expect(gatedBare.listEvictionProtected).toBeUndefined();
 
     const full = fakeInner({
       deriveId: (key) => `d-${key}`,
       updateCreds: async () => {},
+      // The lease eviction protection must pass through the gate (PR review, finding 1).
+      setEvictionProtection: async (id, enabled) => ({ changed: id === "leased" && enabled }),
+      listEvictionProtected: async () => ["leased"],
       async readBrowserAudit(id) {
         expect(this.backend).toBe('fake');
         expect(id).toBe('retained');
@@ -324,5 +329,7 @@ describe("withSandboxCapacityGate", () => {
     expect(gatedFull.updateCreds).toBeDefined();
     expect(gatedFull.list).toBeUndefined();
     await expect(gatedFull.readBrowserAudit?.('retained')).resolves.toEqual({ entries: [], total: 4 });
+    await expect(gatedFull.setEvictionProtection?.("leased", true)).resolves.toEqual({ changed: true });
+    await expect(gatedFull.listEvictionProtected?.()).resolves.toEqual(["leased"]);
   });
 });

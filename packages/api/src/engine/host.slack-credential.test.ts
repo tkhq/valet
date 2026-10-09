@@ -55,6 +55,8 @@ describe("EngineHost session slack credential resolution", () => {
     plugins = [slackPlugin],
   ): EngineHost {
     const h = new EngineHost({
+      scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore: new InMemorySessionStore(),
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new InMemoryEventStream(),

@@ -5,8 +5,8 @@ import type { PrebuildResources } from "../prebuilds/recipe.js";
 import { imageSources } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
 
-type ResourceField = keyof Pick<PrebuildResources, "cpu" | "memory">;
-const RESOURCE_FIELDS: readonly ResourceField[] = ["cpu", "memory"];
+type ResourceField = keyof Pick<PrebuildResources, "cpu" | "memory" | "scratch">;
+const RESOURCE_FIELDS: readonly ResourceField[] = ["cpu", "memory", "scratch"];
 
 export interface ResolvedRepoPrebuildFlags extends RepoPrebuildFlags {
   /** Fresh compute can use these values even when existing compute must be preserved. */
@@ -15,6 +15,9 @@ export interface ResolvedRepoPrebuildFlags extends RepoPrebuildFlags {
   resourcesWithheld?: boolean;
   /** Live fields to preserve because repository authority was unavailable. */
   preserveResourceFields?: readonly ResourceField[];
+  /** Set when `applyScratchCaps` dropped a declared scratch value. Surfaced
+   * to a child build as a startup warning; a REST session logs it instead. */
+  scratchWarning?: string;
 }
 
 /** Apply one child's resource request after repository and saved defaults.

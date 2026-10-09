@@ -8,6 +8,7 @@ import type {
   SessionStore,
   ValetPlugin,
 } from "@valet/engine";
+import type { ScratchCaps } from "@valet/shared";
 import type { RunHost, WorkflowStore } from "@valet/workflow";
 import type { ImageBuilder } from "../prebuilds/builder.js";
 import type { SourceService } from "../bakes/source-service.js";
@@ -19,6 +20,7 @@ import type { HibernationReaper } from "../engine/hibernation-reaper.js";
 import type { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import type { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import type { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import type { WakeWatcher } from "../engine/wake-watcher.js";
 import type { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import type { ChannelHost } from "../channels/host.js";
 import type { EventDispatcher } from "../events/dispatcher.js";
@@ -82,6 +84,8 @@ export interface Providers {
   sandboxReconcileSweep: SandboxReconcileSweep;
   /** Hibernates idle active sessions evicted from the host cache; `start()`/`stop()` called from main.ts. */
   idleHibernationSweep: IdleHibernationSweep;
+  /** Owns wakeups and leases (spec 2026-10-08, B5); `start()`/`stop()` called from main.ts. */
+  wakeWatcher: WakeWatcher;
   /** Autonomy nudge sweep — re-drives an idle security runner with work
    * remaining, capped by a stall budget; `start()`/`stop()` called from
    * main.ts (valet-security spec §Autonomy). */
@@ -119,4 +123,10 @@ export interface Providers {
   /** TTL-cached resolved tool counts for connected dynamic services
    * (`/api/plugins`'s `toolCount` field — see `plugins/dynamic-tool-count.ts`). */
   dynamicToolCounts: DynamicToolCounts;
+
+  /** Deploy and agent caps for the node-local `/scratch` volume
+   * (`resolveScratchCaps(process.env)` at boot). Threaded into
+   * `ChildrenDeps.scratchCaps` and read directly by the sources route's
+   * saved-default PATCH validation. */
+  scratchCaps: ScratchCaps;
 }

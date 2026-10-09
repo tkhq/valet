@@ -20,6 +20,7 @@ import type {
   SandboxStatus,
   PluginActionContext,
   SignalContent,
+  Wakeup,
 } from "@valet/engine";
 import { VirtualSandbox } from "@valet/engine";
 import { startGithubFixture } from "../test-helpers/github-fixture.js";
@@ -31,6 +32,7 @@ import {
   buildChildStatusReader,
   ChildWatcher,
   ChildLimitError,
+  childParkAction,
   classifyWatcherError,
   resolveChildSettlement,
   type ChildrenDeps,
@@ -41,6 +43,7 @@ import {
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
 import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos, teams, teamMembers } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
+import { isScratchRequestError } from "@valet/shared";
 import { SignalEdgeDeniedError } from "./signals.js";
 import { shareCredential } from "../services/credential-shares.js";
 import { eventsActionPlugin } from "../events/actions.js";
@@ -62,6 +65,7 @@ function childrenDeps(a: TestApi, overrides: Partial<ChildrenDeps> = {}): Childr
     engineStore: a.providers.engineStore,
     prebuildService: a.providers.prebuildService,
     workspaceRoot: mkdtempSync(join(tmpdir(), "valet-children-test-")),
+    scratchCaps: {},
     ...overrides,
   };
 }
@@ -421,6 +425,61 @@ describe("buildChildSpawner", () => {
       .from(agentSessions)
       .where(eq(agentSessions.id, inherited.childSessionId));
     expect(inheritedRow?.resources).toBeNull();
+  });
+
+  it("rejects a task scratch request over the agent cap and inserts no agent_sessions row", async () => {
+    api = await bootTestApi();
+    const recordScratchRefused = vi.fn();
+    const deps = childrenDeps(api, { scratchCaps: { max: "1Ti", agentMax: "100Gi" }, recordScratchRefused });
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const parent = await api.providers.engineHost.sessionFor("parent-scratch-refused", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const ctx = {
+      parentSessionId: "parent-scratch-refused",
+      parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user",
+      owner: { type: "user" as const, id: "local-user" },
+    };
+
+    let err: unknown;
+    try {
+      await spawner({ sessionId: "child-scratch-refused", prompt: "work", resources: { scratch: "200Gi" } }, ctx);
+    } catch (e) {
+      err = e;
+    }
+    expect(isScratchRequestError(err)).toBe(true);
+    expect(
+      await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, "child-scratch-refused")),
+    ).toHaveLength(0);
+    // Fix wave 3 (data L5): the task source counts its refusals too.
+    expect(recordScratchRefused).toHaveBeenCalledWith("task", expect.any(String));
+  });
+
+  it("persists a task scratch request inside both caps", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api, { scratchCaps: { max: "1Ti", agentMax: "100Gi" } });
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const parent = await api.providers.engineHost.sessionFor("parent-scratch-ok", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const ctx = {
+      parentSessionId: "parent-scratch-ok",
+      parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user",
+      owner: { type: "user" as const, id: "local-user" },
+    };
+
+    const spawned = await spawner({ prompt: "work", resources: { scratch: "50Gi" } }, ctx);
+    const [row] = await api.providers.db
+      .select({ resources: agentSessions.sandboxResourceOverrides })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, spawned.childSessionId));
+    expect(row?.resources).toEqual({ scratch: "50Gi" });
   });
 
   it("removes the authoritative row, repo binding, and directory when the first build fails", async () => {
@@ -1063,6 +1122,422 @@ describe("ChildWatcher", () => {
     expect(content.attributes?.outcome).toBe("completed");
   });
 
+  it("holds off child.settled while an active lease exists; delivers it once the lease is released", async () => {
+    api = await bootTestApi();
+    // No owed turn ever shows up here (the tracked submission already
+    // settled, and nothing new is admitted), so a short grace window keeps
+    // this test fast once the lease clears.
+    const deps = childrenDeps(api, { leasePollMs: 1, leaseSettleGraceMs: 50 });
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const parent = await engineHost.sessionFor("parent-leased", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+
+    const child = await engineHost.childSessionFor("child-leased", {
+      parentSessionId: "parent-leased",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+
+    const itemId = "qi-leased-1";
+    await engineStore.admitSubmission("child-leased", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-leased", childThread.id, itemId, { outcome: "completed" });
+
+    // The child's background process still owns a lease. Settlement is
+    // not owed to the parent yet, even though the tracked submission
+    // already settled.
+    await engineStore.createLease({
+      id: "lease-leased-1",
+      sessionId: "child-leased",
+      ownerKind: "process",
+      reason: "long build",
+      createdAt: Date.now(),
+      deadlineAt: Date.now() + 3_600_000,
+    });
+
+    await db.insert(agentSessions).values({
+      id: "child-leased",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      status: "active",
+      ownerType: "user",
+      ownerId: "local-user",
+      profile: "headless",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const watch = {
+      childSessionId: "child-leased",
+      queueItemId: itemId,
+      parentSessionId: "parent-leased",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
+
+    watcher.arm(watch);
+
+    // Give the lease-wait loop several polls; it must still be unsettled.
+    await new Promise((r) => setTimeout(r, 100));
+    const stillUnsettled = await db
+      .select()
+      .from(childWatches)
+      .where(eq(childWatches.childSessionId, "child-leased"))
+      .limit(1);
+    expect(stillUnsettled[0]?.settled).toBe(false);
+
+    await engineStore.releaseLease("lease-leased-1", "owner_ended", Date.now());
+
+    await waitFor(async () => {
+      const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-leased")).limit(1);
+      return rows[0]?.settled === true;
+    });
+
+    const unsettled = await engineStore.listUnsettledSubmissions("parent-leased");
+    const settledSignals = unsettled.filter(
+      (i) =>
+        typeof i.content === "object" &&
+        i.content !== null &&
+        "kind" in i.content &&
+        i.content.kind === "signal" &&
+        (i.content as SignalContent).signalType === "child.settled",
+    );
+    expect(settledSignals).toHaveLength(1);
+  });
+
+  it("waits out the grace window for a signal turn admitted after the lease clears", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api, { leasePollMs: 1, leaseSettleGraceMs: 200 });
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const parent = await engineHost.sessionFor("parent-leased-gap", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+
+    const child = await engineHost.childSessionFor("child-leased-gap", {
+      parentSessionId: "parent-leased-gap",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    // Keep the queue from running the signal item into a real (failing)
+    // turn. It must stay queued until this test settles it explicitly.
+    await child.pause();
+
+    const itemId = "qi-leased-gap-1";
+    await engineStore.admitSubmission("child-leased-gap", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-leased-gap", childThread.id, itemId, { outcome: "completed" });
+
+    await engineStore.createLease({
+      id: "lease-leased-gap-1",
+      sessionId: "child-leased-gap",
+      ownerKind: "process",
+      reason: "long build",
+      createdAt: Date.now(),
+      deadlineAt: Date.now() + 3_600_000,
+    });
+
+    await db.insert(agentSessions).values({
+      id: "child-leased-gap",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      status: "active",
+      ownerType: "user",
+      ownerId: "local-user",
+      profile: "headless",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const watch = {
+      childSessionId: "child-leased-gap",
+      queueItemId: itemId,
+      parentSessionId: "parent-leased-gap",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
+
+    watcher.arm(watch);
+
+    // Give the lease-wait loop time to observe the active lease before it
+    // is released, so the watcher actually waits on it instead of racing
+    // past an already-cleared count.
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Real WakeWatcher ordering: the row ends and the lease releases in one
+    // write, and the terminal signal is admitted as a later step.
+    await engineStore.createWakeup({
+      id: "wk_gap", sessionId: "child-leased-gap", threadId: childThread.id, kind: "process", status: "done",
+      reason: "long build", command: "make", execId: "job-gap-12345678", leaseId: "lease-leased-gap-1", cause: "exit",
+      exitCode: 0, logOffset: 0, logTail: "", eventCount: 0, createdAt: Date.now(), updatedAt: Date.now(), endedAt: Date.now(),
+    });
+    await engineStore.releaseLease("lease-leased-gap-1", "owner_ended", Date.now());
+
+    // Longer than leasePollMs (1ms), shorter than leaseSettleGraceMs
+    // (200ms). The admission lands inside the grace window.
+    await new Promise((r) => setTimeout(r, 50));
+    const signalItemId = "qi-leased-gap-signal";
+    await engineStore.admitSubmission("child-leased-gap", childThread.id, {
+      ...queuedItem(signalItemId, childThread.id, "wakeup signal"),
+      dispatchId: "wakeup:wk_gap:terminal",
+    });
+
+    // The signal turn is still unsettled: child.settled must not fire yet.
+    await new Promise((r) => setTimeout(r, 100));
+    const stillUnsettled = await db
+      .select()
+      .from(childWatches)
+      .where(eq(childWatches.childSessionId, "child-leased-gap"))
+      .limit(1);
+    expect(stillUnsettled[0]?.settled).toBe(false);
+
+    // The post-exit turn fails. child.settled must report this turn, not
+    // the first turn's "completed" (fix wave 1, I3).
+    await engineStore.settleUnclaimed("child-leased-gap", childThread.id, signalItemId, {
+      outcome: "failed",
+      error: "post-exit turn: 3 tests failed",
+    });
+
+    await waitFor(async () => {
+      const rows = await db
+        .select()
+        .from(childWatches)
+        .where(eq(childWatches.childSessionId, "child-leased-gap"))
+        .limit(1);
+      return rows[0]?.settled === true;
+    });
+
+    const unsettled = await engineStore.listUnsettledSubmissions("parent-leased-gap");
+    const settledSignals = unsettled.filter(
+      (i) =>
+        typeof i.content === "object" &&
+        i.content !== null &&
+        "kind" in i.content &&
+        i.content.kind === "signal" &&
+        (i.content as SignalContent).signalType === "child.settled",
+    );
+    expect(settledSignals).toHaveLength(1);
+    const settled = settledSignals[0]?.content as SignalContent;
+    expect(settled.attributes?.outcome).toBe("failed");
+    expect(settled.body).toContain("post-exit turn: 3 tests failed");
+  });
+
+  describe("fix wave 2: settle on facts (B2, H6, H9)", () => {
+    /** A parent, a paused child whose watched turn already settled, and an armed watch. */
+    async function armedChild(name: string, overrides: Partial<ChildrenDeps> = {}) {
+      api = await bootTestApi();
+      const deps = childrenDeps(api, { leasePollMs: 1, leaseSettleGraceMs: 200, ...overrides });
+      const watcher = new ChildWatcher(deps);
+      const { engineHost, engineStore, db } = api.providers;
+      const parent = await engineHost.sessionFor(`parent-${name}`, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+      const parentThread = parent.thread("web:default");
+      await parent.pause();
+      const child = await engineHost.childSessionFor(`child-${name}`, {
+        parentSessionId: `parent-${name}`,
+        parentThreadId: parentThread.id,
+        actorUserId: "local-user",
+        orgId: "local-org",
+        owner: { type: "user", id: "local-user" },
+        workspace: "/tmp",
+      });
+      const childThread = child.thread("web:default");
+      await child.pause();
+      const itemId = `qi-${name}-1`;
+      await engineStore.admitSubmission(`child-${name}`, childThread.id, queuedItem(itemId, childThread.id, "work"));
+      await engineStore.settleUnclaimed(`child-${name}`, childThread.id, itemId, { outcome: "completed" });
+      await db.insert(agentSessions).values({
+        id: `child-${name}`, userId: "local-user", orgId: "local-org", workspace: "/tmp", status: "active",
+        ownerType: "user", ownerId: "local-user", profile: "headless", createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      const watch = {
+        childSessionId: `child-${name}`, queueItemId: itemId, parentSessionId: `parent-${name}`,
+        parentThreadId: parentThread.id, actorUserId: "local-user", orgId: "local-org",
+      };
+      await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
+      const settled = async () =>
+        (await db.select().from(childWatches).where(eq(childWatches.childSessionId, `child-${name}`)).limit(1))[0]?.settled === true;
+      const settledSignal = async () =>
+        (await engineStore.listUnsettledSubmissions(`parent-${name}`))
+          .map((i) => i.content)
+          .find((c): c is SignalContent => typeof c === "object" && c !== null && "kind" in c && c.kind === "signal" && c.signalType === "child.settled");
+      return { watcher, watch, engineStore, childThread, settled, settledSignal };
+    }
+
+    function terminalWakeup(sessionId: string, threadId: string, id: string, over: Partial<Wakeup> = {}): Wakeup {
+      const now = Date.now();
+      return {
+        id, sessionId, threadId, kind: "process", status: "done", reason: "build", command: "make", execId: "job-x-12345678",
+        cause: "exit", exitCode: 0, logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now, endedAt: now, ...over,
+      };
+    }
+
+    it("waits for the signal turn of a process that ended during the first turn, with no lease seen (H9)", async () => {
+      const c = await armedChild("first-turn-exit");
+      await c.engineStore.createWakeup(terminalWakeup(c.watch.childSessionId, c.childThread.id, "wk_fast"));
+      const signalItem = "qi-first-turn-exit-signal";
+      await c.engineStore.admitSubmission(c.watch.childSessionId, c.childThread.id, {
+        ...queuedItem(signalItem, c.childThread.id, "process.exited"),
+        dispatchId: "wakeup:wk_fast:terminal",
+      });
+
+      c.watcher.arm(c.watch);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(await c.settled()).toBe(false);
+
+      await c.engineStore.settleUnclaimed(c.watch.childSessionId, c.childThread.id, signalItem, { outcome: "failed", error: "tests failed after exit" });
+      await waitFor(c.settled);
+      expect((await c.settledSignal())?.body).toContain("tests failed after exit");
+    });
+
+    it("holds the settle while a timer is pending, then reports the timer's turn (H6)", async () => {
+      const c = await armedChild("timer");
+      const fireAt = Date.now() + 60_000;
+      await c.engineStore.createWakeup({
+        id: "wk_timer", sessionId: c.watch.childSessionId, threadId: c.childThread.id, kind: "timer", status: "pending",
+        reason: "check CI", prompt: "check CI", fireAt, logOffset: 0, logTail: "", eventCount: 0, createdAt: Date.now(), updatedAt: Date.now(),
+      });
+
+      c.watcher.arm(c.watch);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(await c.settled()).toBe(false);
+
+      // The timer fires: the row ends and its signal turn runs.
+      await c.engineStore.transitionWakeup("wk_timer", ["pending"], "done", { cause: "fired", endedAt: Date.now() }, Date.now());
+      const signalItem = "qi-timer-signal";
+      await c.engineStore.admitSubmission(c.watch.childSessionId, c.childThread.id, {
+        ...queuedItem(signalItem, c.childThread.id, "timer.fired"),
+        dispatchId: "wakeup:wk_timer:terminal",
+      });
+      await c.engineStore.settleUnclaimed(c.watch.childSessionId, c.childThread.id, signalItem, { outcome: "failed", error: "CI is red" });
+
+      await waitFor(c.settled);
+      expect((await c.settledSignal())?.body).toContain("CI is red");
+    });
+
+    it("does not wait for a timer set beyond the retention window", async () => {
+      const c = await armedChild("far-timer", { retentionMs: 60_000 });
+      await c.engineStore.createWakeup({
+        id: "wk_far", sessionId: c.watch.childSessionId, threadId: c.childThread.id, kind: "timer", status: "pending",
+        reason: "next week", prompt: "next week", fireAt: Date.now() + 7 * 24 * 3_600_000, logOffset: 0, logTail: "",
+        eventCount: 0, createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes("timer(s) set to fire after"))).toBe(true);
+      warn.mockRestore();
+    });
+
+    it("settles a child whose lease stays past its deadline instead of waiting forever (B2)", async () => {
+      const c = await armedChild("stuck-lease");
+      await c.engineStore.createLease({
+        id: "ls_stuck", sessionId: c.watch.childSessionId, ownerKind: "process", ownerId: "wk_gone", reason: "build",
+        createdAt: Date.now() - 3_600_000, deadlineAt: Date.now() - 60_000,
+      });
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      expect(error.mock.calls.some((call) => String(call[0]).includes("past their deadline"))).toBe(true);
+      error.mockRestore();
+    });
+
+    it("keeps waiting while the child's sandbox is provisioning, as a forced replace does (fix wave 4, concurrency N1)", async () => {
+      const c = await armedChild("replacing");
+      await c.engineStore.createWakeup(terminalWakeup(c.watch.childSessionId, c.childThread.id, "wk_rx", { status: "cancelled", cause: "cancelled" }));
+      const live = api?.providers.engineHost.liveSession(c.watch.childSessionId);
+      if (!live) throw new Error("expected a live child session");
+      const state = vi.spyOn(live.attachment, "state", "get").mockReturnValue("provisioning");
+      try {
+        c.watcher.arm(c.watch);
+        // Past the 200 ms grace: without the provisioning wait it settles here.
+        await new Promise((r) => setTimeout(r, 500));
+        expect(await c.settled()).toBe(false);
+      } finally {
+        state.mockRestore();
+      }
+      await waitFor(c.settled);
+    });
+
+    it("does not wait past the grace for an agent-cancelled wakeup, which sends no signal", async () => {
+      const c = await armedChild("cancelled");
+      await c.engineStore.createWakeup(terminalWakeup(c.watch.childSessionId, c.childThread.id, "wk_cx", { status: "cancelled", cause: "cancelled" }));
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+    });
+
+    it("waits for the signal turn of a human-cancelled wakeup (fix wave 3, concurrency L3, UX M5)", async () => {
+      const c = await armedChild("human-cancel");
+      await c.engineStore.createWakeup(terminalWakeup(c.watch.childSessionId, c.childThread.id, "wk_hc", { status: "cancelled", cause: "cancelled" }));
+      const signalItem = "qi-human-cancel-signal";
+      await c.engineStore.admitSubmission(c.watch.childSessionId, c.childThread.id, {
+        ...queuedItem(signalItem, c.childThread.id, "process.exited"),
+        dispatchId: "wakeup:wk_hc:terminal",
+      });
+      c.watcher.arm(c.watch);
+      await new Promise((r) => setTimeout(r, 300));
+      expect(await c.settled()).toBe(false);
+      await c.engineStore.settleUnclaimed(c.watch.childSessionId, c.childThread.id, signalItem, { outcome: "failed", error: "build stopped by a person" });
+      await waitFor(c.settled);
+      expect((await c.settledSignal())?.body).toContain("build stopped by a person");
+    });
+
+    it("awaits a wakeup created after admission even when its endedAt is older (fix wave 3, concurrency M1)", async () => {
+      const c = await armedChild("stale-stamp");
+      const admitted = (await c.engineStore.getQueueItem(c.watch.childSessionId, c.watch.queueItemId))?.createdAt ?? Date.now();
+      await c.engineStore.createWakeup(
+        terminalWakeup(c.watch.childSessionId, c.childThread.id, "wk_stale", { createdAt: admitted + 1, endedAt: admitted - 5_000 }),
+      );
+      const signalItem = "qi-stale-stamp-signal";
+      await c.engineStore.admitSubmission(c.watch.childSessionId, c.childThread.id, {
+        ...queuedItem(signalItem, c.childThread.id, "process.exited"),
+        dispatchId: "wakeup:wk_stale:terminal",
+      });
+      c.watcher.arm(c.watch);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(await c.settled()).toBe(false);
+      await c.engineStore.settleUnclaimed(c.watch.childSessionId, c.childThread.id, signalItem, { outcome: "failed", error: "late result" });
+      await waitFor(c.settled);
+      expect((await c.settledSignal())?.body).toContain("late result");
+    });
+
+    it("keeps waiting on a lease inside its deadline plus two watcher intervals (fix wave 3, concurrency L7)", async () => {
+      const c = await armedChild("lease-bound");
+      await c.engineStore.createLease({
+        id: "ls_bound", sessionId: c.watch.childSessionId, ownerKind: "process", ownerId: "wk_b", reason: "build",
+        createdAt: Date.now() - 3_600_000, deadlineAt: Date.now() - 10_000,
+      });
+      c.watcher.arm(c.watch);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(await c.settled()).toBe(false);
+      await c.engineStore.releaseLease("ls_bound", "deadline", Date.now());
+      await waitFor(c.settled);
+    });
+  });
+
   it.each(["failed", "aborted"] as const)(
     "includes a continuation checkpoint when a compacted child is %s",
     async (outcome) => {
@@ -1600,6 +2075,19 @@ describe("ChildWatcher", () => {
 
     expect(engineHost.liveSession("child-busy")).not.toBeNull();
     expect(child.attachment.state).toBe("ready");
+  });
+});
+
+describe("childParkAction (fix wave 4, concurrency N1)", () => {
+  it("leaves a provisioning sandbox alone, so a replace in flight keeps its sandbox", () => {
+    expect(childParkAction("provisioning", true)).toBe("skip");
+    expect(childParkAction("provisioning", false)).toBe("skip");
+  });
+  it("parks a retainable ready or suspended sandbox and destroys the rest", () => {
+    expect(childParkAction("ready", true)).toBe("suspend");
+    expect(childParkAction("suspended", true)).toBe("record_suspended");
+    expect(childParkAction("ready", false)).toBe("destroy");
+    expect(childParkAction("detached", true)).toBe("destroy");
   });
 });
 
@@ -2793,6 +3281,40 @@ describe("child sandbox retention", () => {
 
     // Idempotent: a second pass finds nothing to do.
     await watcher.sweepRetention(Date.now() + RETENTION_MS + 2);
+  });
+
+  it("retention sweep: skips a child while it holds a lease or a pending timer (fix wave 3, concurrency M2)", async () => {
+    const provider = new HibernatingChildProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const deps = childrenDeps(api, { retentionMs: RETENTION_MS });
+    const watcher = new ChildWatcher(deps);
+    const { engineStore } = api.providers;
+
+    const { watch, childThread } = await seedParkableChild(api, "child-leased", "parent-leased");
+    watcher.arm(watch);
+    await waitFor(async () => provider.suspendCalls.length === 1);
+
+    // A person asked the settled child for a 48h build after the settle.
+    await engineStore.createLease({
+      id: "ls_long", sessionId: "child-leased", ownerKind: "process", ownerId: "wk_long", reason: "long build",
+      createdAt: Date.now(), deadlineAt: Date.now() + 48 * 3_600_000,
+    });
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await watcher.sweepRetention(Date.now() + RETENTION_MS + 1);
+    expect((await watchRow(api, "child-leased"))?.sandboxReclaimedAt).toBeNull();
+
+    await engineStore.releaseLease("ls_long", "owner_ended", Date.now());
+    await engineStore.createWakeup({
+      id: "wk_timer", sessionId: "child-leased", threadId: childThread.id, kind: "timer", status: "pending", reason: "later",
+      prompt: "later", fireAt: Date.now() + 3_600_000, logOffset: 0, logTail: "", eventCount: 0, createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    await watcher.sweepRetention(Date.now() + RETENTION_MS + 2);
+    expect((await watchRow(api, "child-leased"))?.sandboxReclaimedAt).toBeNull();
+
+    await engineStore.transitionWakeup("wk_timer", ["pending"], "cancelled", { cause: "cancelled" }, Date.now());
+    await watcher.sweepRetention(Date.now() + RETENTION_MS + 3);
+    expect((await watchRow(api, "child-leased"))?.sandboxReclaimedAt).not.toBeNull();
+    log.mockRestore();
   });
 
   it("retention sweep: skips a parked child a user has since woken", async () => {

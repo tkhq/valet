@@ -5,7 +5,7 @@ import { ArrowDown } from "lucide-react";
 import type { StreamMessage } from "~/stores/stream";
 import type { MessageReplyReference } from "@valet/api/wire";
 import { MessageItem } from "./message-item";
-import { SignalCard } from "./signal-card";
+import { SignalCard, WatchEventsCard, groupWatchEvents } from "./signal-card";
 import { CommandResult } from "./command-result";
 import { CompactionDivider } from "./compaction-divider";
 
@@ -165,8 +165,12 @@ export function MessageList({
           </div>
         ) : (
           <div className="shrink-0 space-y-2 py-4">
-            {visible.map((m, i) =>
-              m.compaction ? (
+            {groupWatchEvents(visible).map((item, i, items) => {
+              if (item.kind === "watch") {
+                return <WatchEventsCard key={item.events[0]?.id ?? i} events={item.events} />;
+              }
+              const m = item.message;
+              return m.compaction ? (
                 <CompactionDivider key={m.id} message={m} />
               ) : m.signal ? (
                 <SignalCard key={m.id} message={m} onOpenChild={onOpenChild} />
@@ -176,12 +180,12 @@ export function MessageList({
                 <MessageItem
                   key={m.id}
                   message={m}
-                  suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
+                  suppressEmptyPlaceholder={agentBusy && i === items.length - 1}
                   viewerId={viewerId}
                   onReply={onReply}
                 />
-              ),
-            )}
+              );
+            })}
           </div>
         )}
       </div>

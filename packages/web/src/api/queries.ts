@@ -9,6 +9,7 @@ import { isAppAssistantThread } from "~/lib/thread-default";
 import {
   useInfiniteQuery,
   isCancelledError,
+  skipToken,
   type InfiniteData,
   useMutation,
   useQuery,
@@ -39,6 +40,9 @@ import type {
   PatchSessionResponse,
   PatchThreadResponse,
   PauseSessionResponse,
+  ReplaceSandboxResponse,
+  ListSessionWakeupsResponse,
+  CancelSessionWakeupResponse,
   PutRatingResponse,
   RatingValue,
   ResolveDecisionRequest,
@@ -67,6 +71,7 @@ export const qk = {
       : (["sessions", id, "messages"] as const),
   decisions: (id: string) => ["sessions", id, "decisions"] as const,
   ratings: (id: string) => ["sessions", id, "ratings"] as const,
+  wakeups: (id: string) => ["sessions", id, "wakeups"] as const,
   notifications: () => ["notifications"] as const,
   notificationPreferences: () => ["notifications", "preferences"] as const,
   identityLinks: () => ["identityLinks"] as const,
@@ -239,13 +244,21 @@ export function useDeleteSession() {
  * session detail query still needs an explicit invalidation. */
 export function usePauseSession(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PauseSessionResponse, Error, void>({
-    mutationFn: () => api.pauseSession(sessionId),
+  return useMutation<PauseSessionResponse, Error, ForceOption | void>({
+    mutationFn: (opts) => api.pauseSession(sessionId, opts ?? undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
     },
+    // A forced pause can stop background work and still fail (a turn
+    // started), so the badge refreshes on every outcome.
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) }),
   });
+}
+
+/** `force: true` stops the background work that blocks an action (409 `background_work`). */
+export interface ForceOption {
+  force?: boolean;
 }
 
 /** POST /:id/sandbox/replace — re-provision the session's sandbox in
@@ -254,10 +267,55 @@ export function usePauseSession(sessionId: string) {
  * needed beyond the session row. */
 export function useReplaceSandbox(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<{ ok: true }, Error, void>({
-    mutationFn: () => api.replaceSandbox(sessionId),
+  return useMutation<ReplaceSandboxResponse, Error, ForceOption | void>({
+    mutationFn: (opts) => api.replaceSandbox(sessionId, opts ?? undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+    },
+    // A forced replace can stop background work and still fail.
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) }),
+  });
+}
+
+/** GET /:id/wakeups: the session's open background work (wakeups and
+ * leases). Nothing pushes changes over the stream, so the header badge
+ * polls once a minute while it is mounted. */
+export function useSessionWakeups(sessionId: string | undefined) {
+  return useQuery<ListSessionWakeupsResponse>({
+    queryKey: qk.wakeups(sessionId ?? ""),
+    queryFn: sessionId ? () => api.listSessionWakeups(sessionId) : skipToken,
+    refetchInterval: 60_000,
+  });
+}
+
+/** POST /:id/wakeups/:wakeupId/cancel: a person stops one wakeup or hold.
+ * Optimistic: the row leaves the list at once and comes back on error. */
+export function useCancelSessionWakeup(sessionId: string) {
+  const qc = useQueryClient();
+  const key = qk.wakeups(sessionId);
+  return useMutation<
+    CancelSessionWakeupResponse,
+    Error,
+    string,
+    { previous?: ListSessionWakeupsResponse }
+  >({
+    mutationFn: (wakeupId) => api.cancelSessionWakeup(sessionId, wakeupId),
+    onMutate: async (wakeupId) => {
+      await qc.cancelQueries({ queryKey: key });
+      const previous = qc.getQueryData<ListSessionWakeupsResponse>(key);
+      if (previous) {
+        qc.setQueryData<ListSessionWakeupsResponse>(key, {
+          wakeups: previous.wakeups.filter((w) => w.id !== wakeupId),
+          leases: previous.leases.filter((l) => l.id !== wakeupId && l.ownerId !== wakeupId),
+        });
+      }
+      return { previous };
+    },
+    onError: (_err, _wakeupId, context) => {
+      if (context?.previous) qc.setQueryData(key, context.previous);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: key });
     },
   });
 }
@@ -338,12 +396,14 @@ export function useRenameSession(sessionId: string) {
  * it joined. */
 export function useMoveSession(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PatchSessionResponse, Error, string | null>({
-    mutationFn: (teamId) => api.patchSession(sessionId, { teamId }),
+  return useMutation<PatchSessionResponse, Error, { teamId: string | null } & ForceOption>({
+    mutationFn: ({ teamId, force }) => api.patchSession(sessionId, { teamId, ...(force ? { force: true } : {}) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
     },
+    // A forced change can stop background work and still fail.
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) }),
   });
 }
 
@@ -352,12 +412,14 @@ export function useMoveSession(sessionId: string) {
  * row and the live `sandbox.status` both change. */
 export function useSetSessionProfile(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PatchSessionResponse, Error, SandboxProfile>({
-    mutationFn: (profile) => api.patchSession(sessionId, { profile }),
+  return useMutation<PatchSessionResponse, Error, { profile: SandboxProfile } & ForceOption>({
+    mutationFn: ({ profile, force }) => api.patchSession(sessionId, { profile, ...(force ? { force: true } : {}) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
     },
+    // A forced change can stop background work and still fail.
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) }),
   });
 }
 
@@ -417,10 +479,12 @@ export function useMarkThreadsRead(sessionId: string) {
 
 export function useSetThreadArchived(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean }>({
-    mutationFn: ({ threadId, archived }) =>
-      api.patchThread(threadId, { archived }),
-    onSuccess: async (_saved, { threadId }) => {
+  return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean } & ForceOption>({
+    mutationFn: ({ threadId, archived, force }) =>
+      api.patchThread(threadId, { archived, ...(force ? { force: true } : {}) }),
+    onSuccess: async (saved, { threadId }) => {
+      // A forced archive stopped the thread's background work.
+      if (saved.cancelledWork) qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) });
       // An older supplemental activity read must not reinsert the archived row.
       await qc.cancelQueries({ predicate: query => query.queryKey[0] === "sessions"
         && query.queryKey[2] === "threads" && query.queryKey[3] === "activity" && query.queryKey[4] === threadId });

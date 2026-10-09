@@ -11,17 +11,19 @@
  * cluster gate.
  */
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   cancelCommand,
   decodeUtf8HoldingTail,
+  execJobInPod,
   jobKickoffCommand,
   parseJobStatus,
   pollCommand,
+  pollJobInPod,
 } from "../src/jobs.js";
-import { JOBS_DIR } from "../src/exec.js";
+import { JOBS_DIR, type ExecDeps, type ExecStatus, type PodExecApi, type PodExecSocket } from "../src/exec.js";
 
 function sh(command: string): { stdout: string; stderr: string; status: number | null } {
   const r = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8" });
@@ -251,8 +253,9 @@ describe.skipIf(!hasSetsid || !hasBase64W0)("job-mode shell protocol against a r
     expect(kickoff.status).toBe(0);
 
     const { output, exitCode } = await pollToCompletion(execId);
-    expect(output).toBe("x".repeat(100));
-    expect(output.length).toBe(100);
+    // The cap keeps the first 100 bytes and then appends one marker line
+    // (fix wave 3, k8s M-B), so a tail read shows the log stopped there.
+    expect(output).toBe(`${"x".repeat(100)}\n[valet: log capped at 100 bytes; later output dropped]\n`);
     expect(exitCode).toBe(0);
   }, 10_000);
 
@@ -344,4 +347,189 @@ describe.skipIf(!hasSetsid || !hasBase64W0)("job-mode shell protocol against a r
     expect(status.status).toBe("done");
     expect(status.exitCode).not.toBe(0);
   }, 10_000);
+});
+
+/** Runs `execInPod`'s composed command on the local `/bin/sh`, so
+ * `pollJobInPod` parses real shell output without a cluster. */
+class LocalShellPodExecApi implements PodExecApi {
+  async exec(
+    _namespace: string,
+    _podName: string,
+    _containerName: string,
+    command: string[],
+    stdout: NodeJS.WritableStream | null,
+    stderr: NodeJS.WritableStream | null,
+    _stdin: NodeJS.ReadableStream | null,
+    _tty: boolean,
+    statusCallback?: (status: ExecStatus) => void,
+  ): Promise<PodExecSocket> {
+    const [file = "/bin/sh", ...args] = command;
+    const r = spawnSync(file, args, { encoding: "utf8" });
+    stdout?.write(r.stdout);
+    stderr?.write(r.stderr);
+    statusCallback?.(
+      r.status === 0
+        ? { status: "Success" }
+        : { status: "Failure", details: { causes: [{ reason: "ExitCode", message: String(r.status) }] } },
+    );
+    return { close: () => {} };
+  }
+}
+
+const localDeps: ExecDeps = { api: new LocalShellPodExecApi(), namespace: "ns", containerName: "sandbox" };
+
+/** A process group id that no longer exists: a finished child's own pid. */
+function deadPgid(): number {
+  return Number(sh("sh -c 'echo $$'").stdout.trim());
+}
+
+/** `pollJobInPod` trims stdout before it decodes, so a `base64 -w0` that
+ * adds a trailing newline (FreeBSD, macOS) still works for these tests. */
+const hasBase64W0Trimmed = spawnSync("/bin/sh", ["-c", "printf ab | base64 -w0"], { encoding: "utf8" }).stdout.trim() === "YWI=";
+
+describe.skipIf(!hasBase64W0Trimmed)("pollJobInPod: dead-process detection and read bounds (spec B4)", () => {
+  afterEach(async () => {
+    for (const id of execIds) await rm(`${JOBS_DIR}/${id}.dead`, { force: true });
+  });
+
+  it("reports failed with no exit code when the pid group is gone and no .exit exists", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    await writeFile(`${JOBS_DIR}/${execId}.out`, "partial\n");
+    await writeFile(`${JOBS_DIR}/${execId}.pid`, `${deadPgid()}\n`);
+    const poll = await pollJobInPod(localDeps, "pod-1", execId, 0);
+    expect(poll.status).toBe("failed");
+    expect(poll.exitCode).toBeUndefined();
+    expect(poll.output).toBe("partial\n");
+  }, 10_000);
+
+  it("reports failed for a job the start script marked dead, even with a live pid", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    const child = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+    try {
+      await writeFile(`${JOBS_DIR}/${execId}.out`, "");
+      // A live group stands in for a pid that a new container reused.
+      await writeFile(`${JOBS_DIR}/${execId}.pid`, `${child.pid}\n`);
+      await writeFile(`${JOBS_DIR}/${execId}.dead`, "");
+      const poll = await pollJobInPod(localDeps, "pod-1", execId, 0);
+      expect(poll.status).toBe("failed");
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  it("reports running while the pid group is alive", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    const child = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+    try {
+      await writeFile(`${JOBS_DIR}/${execId}.out`, "");
+      await writeFile(`${JOBS_DIR}/${execId}.pid`, `${child.pid}\n`);
+      const poll = await pollJobInPod(localDeps, "pod-1", execId, 0);
+      expect(poll.status).toBe("running");
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  it("caps a forward read at maxBytes and stays running until the rest is read", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    await writeFile(`${JOBS_DIR}/${execId}.out`, "0123456789");
+    await writeFile(`${JOBS_DIR}/${execId}.exit`, "0\n");
+    const first = await pollJobInPod(localDeps, "pod-1", execId, 0, { maxBytes: 4 });
+    expect(first).toEqual({ status: "running", output: "0123", nextOffset: 4 });
+    const last = await pollJobInPod(localDeps, "pod-1", execId, 8, { maxBytes: 4 });
+    expect(last).toEqual({ status: "done", exitCode: 0, output: "89", nextOffset: 10 });
+  });
+
+  it("reads only the tail in tail mode and moves nextOffset to the end", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    await writeFile(`${JOBS_DIR}/${execId}.out`, "0123456789");
+    await writeFile(`${JOBS_DIR}/${execId}.exit`, "3\n");
+    const poll = await pollJobInPod(localDeps, "pod-1", execId, 2, { maxBytes: 3, tail: true });
+    expect(poll).toEqual({ status: "done", exitCode: 3, output: "789", nextOffset: 10 });
+    const short = await pollJobInPod(localDeps, "pod-1", execId, 8, { maxBytes: 3, tail: true });
+    expect(short).toEqual({ status: "done", exitCode: 3, output: "89", nextOffset: 10 });
+  });
+
+  it("drops a cut codepoint's continuation bytes at the start of a tail read", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    // "€" is 3 bytes. The last 4 bytes start inside it.
+    await writeFile(`${JOBS_DIR}/${execId}.out`, "ab€cde");
+    await writeFile(`${JOBS_DIR}/${execId}.exit`, "0\n");
+    const poll = await pollJobInPod(localDeps, "pod-1", execId, 0, { maxBytes: 4, tail: true });
+    expect(poll.output).toBe("cde");
+    expect(poll.nextOffset).toBe(Buffer.byteLength("ab€cde"));
+  });
+});
+
+// Fix wave 2, B1 and L9. The refusal and the guarded kill run before any
+// setsid call, so these run on every machine.
+describe("job file reuse guards (fix wave 2)", () => {
+  afterEach(async () => {
+    for (const id of execIds) await rm(`${JOBS_DIR}/${id}.dead`, { force: true });
+  });
+
+  it.each(["out", "pid", "exit", "dead"])("kickoff refuses when %s already exists and keeps the old log", async (ext) => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    await writeFile(`${JOBS_DIR}/${execId}.out`, "old log\n");
+    if (ext !== "out") await writeFile(`${JOBS_DIR}/${execId}.${ext}`, "1\n");
+    const result = sh(jobKickoffCommand(execId, "echo new"));
+    expect(result.status).toBe(17);
+    expect(result.stderr).toContain(execId);
+    expect(await readFile(`${JOBS_DIR}/${execId}.out`, "utf8")).toBe("old log\n");
+  });
+
+  it("a kickoff prunes the files of a job that ended more than a day ago and keeps newer ones (fix wave 3, k8s M-B)", async () => {
+    const old = newExecId();
+    const fresh = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    for (const ext of ["out", "pid", "exit"]) {
+      await writeFile(`${JOBS_DIR}/${old}.${ext}`, "x\n");
+      await writeFile(`${JOBS_DIR}/${fresh}.${ext}`, "x\n");
+    }
+    sh(`touch -t 202001010000 ${JOBS_DIR}/${old}.exit`);
+    // A refused kickoff still runs the prune, so this needs no setsid.
+    const refusedId = fresh;
+    const result = sh(jobKickoffCommand(refusedId, "echo new"));
+    expect(result.status).toBe(17);
+    expect(result.stdout).toMatch(/pruned=[1-9]/);
+    await expect(readFile(`${JOBS_DIR}/${old}.out`, "utf8")).rejects.toThrow();
+    expect(await readFile(`${JOBS_DIR}/${fresh}.out`, "utf8")).toBe("x\n");
+  });
+
+  it("execJobInPod surfaces the refusal as an error that names the id", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    await writeFile(`${JOBS_DIR}/${execId}.exit`, "0\n");
+    await writeFile(`${JOBS_DIR}/${execId}.out`, "");
+    await expect(execJobInPod(localDeps, "pod-1", execId, "echo new")).rejects.toThrow(
+      new RegExp(`job id ${execId} already has files`),
+    );
+  });
+
+  it("cancelCommand does not kill the recorded group when .exit already exists (L9)", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    // A live group stands in for an unrelated group that reused the pid.
+    const child = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+    try {
+      await writeFile(`${JOBS_DIR}/${execId}.out`, "");
+      await writeFile(`${JOBS_DIR}/${execId}.pid`, `${child.pid}\n`);
+      await writeFile(`${JOBS_DIR}/${execId}.exit`, "0\n");
+      sh(cancelCommand(execId));
+      // A killed child stays in `ps` as a zombie until node reaps it, so
+      // read the exit event instead.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(child.signalCode).toBeNull();
+      expect(child.exitCode).toBeNull();
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
 });

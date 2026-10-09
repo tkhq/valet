@@ -10,6 +10,7 @@ import type { DismissWorkspaceBriefingResponse, WorkspaceBriefing, WorkspaceBrie
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 import { isSharedThreadKey } from "../services/thread-read-state.js";
 import { keepVisibleThreads } from "./_thread-access.js";
+import { listBackgroundWork, selectWork } from "../engine/wakeups-admin.js";
 
 /** Dismissals stop mattering once their brief ids stop appearing. */
 const DISMISSAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -80,6 +81,7 @@ workspaceBriefingsRouter.post("/:workspace/briefings/:briefingId/dismiss", async
 
   let archived = 0;
   let keptWaiting = 0;
+  let keptRunning = 0;
   for (const { sessionId, threadId } of threads) {
     const [session] = await db.select().from(agentSessions).where(and(eq(agentSessions.id,sessionId), eq(agentSessions.orgId,c.var.user.orgId))).limit(1);
     // Only a thread in this workspace that the caller may see.
@@ -89,10 +91,13 @@ workspaceBriefingsRouter.post("/:workspace/briefings/:briefingId/dismiss", async
     // A brief cached before private threads were left out may still name one.
     if (!thread || !isSharedThreadKey(thread.key, c.var.user.id)) continue;
     if ((await engineStore.listDecisionGates(sessionId,threadId,"pending")).length > 0) { keptWaiting += 1; continue; }
+    // Background work still reports on the thread. A dismissal does not stop
+    // it, so the thread stays open (fix wave 3, group C).
+    if (selectWork(await listBackgroundWork(engineStore, sessionId), { threadId }).length > 0) { keptRunning += 1; continue; }
     await db.insert(sessionThreads).values({ id: threadId, sessionId, createdAt: thread.createdAt, archivedAt: now })
       .onConflictDoUpdate({ target: sessionThreads.id, set: { archivedAt: now } });
     archived += 1;
   }
-  const response: DismissWorkspaceBriefingResponse = { dismissed: true, archived, keptWaiting };
+  const response: DismissWorkspaceBriefingResponse = { dismissed: true, archived, keptWaiting, keptRunning };
   return c.json(response);
 });

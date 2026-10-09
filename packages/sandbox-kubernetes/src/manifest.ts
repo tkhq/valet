@@ -7,7 +7,10 @@
  */
 import { createHash } from "node:crypto";
 import { RUNTIME_STATE_ANNOTATION, runtimeStateClaimName } from "./runtime-state.js";
-import { homeInitContainer, persistentHomeMounts, withHomeLinks, WORKSPACE_SUBPATH, HOME_LAYOUT_ENV, HOME_LAYOUT_VERSION } from "./home-persistence.js";
+import {
+  homeInitContainer, persistentHomeMounts, scratchDirsScript, scratchStartScript, withHomeLinks,
+  WORKSPACE_SUBPATH, HOME_LAYOUT_ENV, HOME_LAYOUT_VERSION,
+} from "./home-persistence.js";
 import { NESTED_KUBERNETES_IDENTITY, type SandboxCreateOpts } from "@valet/engine";
 import { DEFAULT_WORKSPACE_STORAGE_MAX, clampStorageRequest, formatStorageQuantity, parseStorageQuantity } from "./quantity.js";
 import type {
@@ -16,6 +19,7 @@ import type {
   ResourceRequirements,
   SandboxContainer,
   SandboxCR,
+  SandboxPodTemplate,
   SandboxResourceOpts,
   Volume,
 } from "./types.js";
@@ -42,8 +46,131 @@ const FULL_PROFILE_COMMAND = [
   "[ -f /start-full.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-full.sh || exec /bin/bash /start-full.sh; } || exec tail -f /dev/null",
 ];
 
+/** The bare, non-terminating placeholder command — no profile, no docker. */
+const BARE_PLACEHOLDER_COMMAND = ["sh", "-c", "tail -f /dev/null"];
+
+/** Bootstraps `/scratch` on a plain headless pod (no docker, no full
+ * profile) when `resources.scratch` is set. The `withHomeLinks` prefix
+ * already runs the same setup on every container start; this command keeps
+ * the plain-headless pod distinct from the bare placeholder, so
+ * `withScratchState` can switch between the two. */
+export const SCRATCH_PLACEHOLDER_COMMAND = [
+  "sh",
+  "-c",
+  `set -eu\n${scratchStartScript()}exec tail -f /dev/null`,
+];
+
+export const SCRATCH_INIT_NAME = "valet-scratch-init";
+
+/** The scratch forms the api accepts (`validateScratchRequest`): whole
+ * bytes or a Ki, Mi, Gi, or Ti suffix. */
+const SCRATCH_SIZE_FORM = /^\d+(?:Ki|Mi|Gi|Ti)?$/;
+
+/**
+ * The emptyDir `sizeLimit` for a scratch request. The api validates every
+ * request against the caps before it reaches a provider; this is the last
+ * line for a value that arrived another way (a preserved record, a file).
+ * It refuses a form the CRD would reject, so a bad value fails here with
+ * a named cause instead of in the controller.
+ */
+export function scratchSizeLimit(scratch: string): string {
+  if (!SCRATCH_SIZE_FORM.test(scratch)) {
+    throw new Error(
+      `scratch "${scratch}" is not a supported quantity. Set resources.scratch in .valet/prebuild.yaml ` +
+        `(or the saved source) as whole bytes or a Ki, Mi, Gi, or Ti suffix, like "200Gi", then replace the sandbox.`,
+    );
+  }
+  return scratch;
+}
+
+/** Creates `/scratch/tmp`, `/scratch/valet-jobs`, and `/scratch/tmp-root`
+ * and makes the `/scratch` root sticky before the workload starts,
+ * whatever the image. Old bakes, images without the new start
+ * scripts, and pods that degrade to `tail -f` still get a valid TMPDIR. */
+export function scratchInitContainer(image: string): SandboxContainer {
+  return {
+    name: SCRATCH_INIT_NAME,
+    image,
+    command: ["sh", "-c", `set -eu\n${scratchDirsScript()}`],
+    volumeMounts: [{ name: SCRATCH_VOLUME_NAME, mountPath: SCRATCH_MOUNT_PATH }],
+  };
+}
+
+const SCRATCH_TMPDIR = "/scratch/tmp";
+
+/**
+ * Sets a template's scratch state to `scratch` (undefined removes it): the
+ * emptyDir, the sandbox container's mount and TMPDIR, the init container,
+ * the plain-headless placeholder command, and the container's
+ * ephemeral-storage values (`ephemeral`, copied verbatim). Adoption uses it
+ * to keep the live pod's scratch when the preserve mask names scratch.
+ */
+export function withScratchState(
+  template: SandboxPodTemplate,
+  scratch: string | undefined,
+  ephemeral: { request?: string; limit?: string },
+): SandboxPodTemplate {
+  const containers = template.spec.containers.map((container) => {
+    if (container.name !== SANDBOX_CONTAINER_NAME) return container;
+    const volumeMounts = (container.volumeMounts ?? []).filter((mount) => mount.name !== SCRATCH_VOLUME_NAME);
+    const env = (container.env ?? []).filter((entry) => !(entry.name === "TMPDIR" && entry.value === SCRATCH_TMPDIR));
+    if (scratch !== undefined) {
+      volumeMounts.push({ name: SCRATCH_VOLUME_NAME, mountPath: SCRATCH_MOUNT_PATH });
+      env.push({ name: "TMPDIR", value: SCRATCH_TMPDIR });
+    }
+    let command = container.command;
+    // Rebuild the Valet start prefix, so it runs the scratch setup exactly
+    // when the pod has scratch. A plain-headless pod also switches between
+    // the bare and the scratch placeholder commands.
+    if (command !== undefined && command[3] === "valet-home-start") {
+      let inner = command.slice(4);
+      if (scratch !== undefined && commandEquals(inner, BARE_PLACEHOLDER_COMMAND)) inner = [...SCRATCH_PLACEHOLDER_COMMAND];
+      if (scratch === undefined && commandEquals(inner, SCRATCH_PLACEHOLDER_COMMAND)) inner = [...BARE_PLACEHOLDER_COMMAND];
+      command = withHomeLinks(inner, { scratch: scratch !== undefined });
+    }
+    const requests: ResourceList = { ...container.resources?.requests };
+    const limits: ResourceList = { ...container.resources?.limits };
+    delete requests["ephemeral-storage"];
+    delete limits["ephemeral-storage"];
+    if (ephemeral.request !== undefined) requests["ephemeral-storage"] = ephemeral.request;
+    if (ephemeral.limit !== undefined) limits["ephemeral-storage"] = ephemeral.limit;
+    const resources: ResourceRequirements = {
+      ...(Object.keys(requests).length > 0 ? { requests } : {}),
+      ...(Object.keys(limits).length > 0 ? { limits } : {}),
+    };
+    const { resources: _previousResources, ...rest } = container;
+    return {
+      ...rest,
+      ...(command !== undefined ? { command } : {}),
+      ...(Object.keys(resources).length > 0 ? { resources } : {}),
+      ...(volumeMounts.length > 0 ? { volumeMounts } : {}),
+      ...(env.length > 0 ? { env } : {}),
+    };
+  });
+  const initContainers = (template.spec.initContainers ?? []).filter((c) => c.name !== SCRATCH_INIT_NAME);
+  const volumes = (template.spec.volumes ?? []).filter((volume) => volume.name !== SCRATCH_VOLUME_NAME);
+  const sandboxImage = containers.find((c) => c.name === SANDBOX_CONTAINER_NAME)?.image;
+  if (scratch !== undefined) {
+    if (sandboxImage !== undefined) initContainers.push(scratchInitContainer(sandboxImage));
+    volumes.push({ name: SCRATCH_VOLUME_NAME, emptyDir: { sizeLimit: scratchSizeLimit(scratch) } });
+  }
+  const { initContainers: _init, volumes: _volumes, ...spec } = template.spec;
+  return {
+    ...template,
+    spec: {
+      ...spec,
+      containers,
+      ...(initContainers.length > 0 ? { initContainers } : {}),
+      ...(volumes.length > 0 ? { volumes } : {}),
+    },
+  };
+}
+
 export const WORKSPACE_VOLUME_NAME = "workspace";
 export const WORKSPACE_MOUNT_PATH = "/workspace";
+/** Node-local scratch emptyDir, wiped when the pod stops (spec Part A). */
+export const SCRATCH_VOLUME_NAME = "scratch";
+export const SCRATCH_MOUNT_PATH = "/scratch";
 export const SESSION_LABEL_KEY = "valet.dev/session-id";
 export const IMAGE_FINGERPRINT_ENV = "VALET_SANDBOX_IMAGE_FINGERPRINT";
 export const NESTED_KUBERNETES_ANNOTATION_KEY = "valet.dev/capability.nested-kubernetes";
@@ -159,6 +286,7 @@ function mergeResourceOpts(
   if (overrides?.ephemeralStorageLimit !== undefined) {
     merged.ephemeralStorageLimit = overrides.ephemeralStorageLimit;
   }
+  if (overrides?.scratch !== undefined) merged.scratch = overrides.scratch;
   return merged;
 }
 
@@ -182,6 +310,47 @@ function memoryLimitFor(request: string): string {
   return formatStorageQuantity(bytes * MEMORY_LIMIT_FACTOR);
 }
 
+/** True when two container commands are the same sequence of strings. */
+function commandEquals(a: string[] | undefined, b: string[]): boolean {
+  return a !== undefined && a.length === b.length && a.every((part, i) => part === b[i]);
+}
+
+/** Bytes for a quantity string, or 0 for an absent/unparseable one. An
+ * absent term contributes nothing to a sum, and an unparseable one degrades
+ * to 0 rather than poisoning the whole sum (the raw string still reaches
+ * admission unmodified when scratch is absent, see `ephemeralStorageSums`). */
+function termBytes(value: string | undefined): number {
+  if (value === undefined) return 0;
+  return parseStorageQuantity(value) ?? 0;
+}
+
+/**
+ * Adds the scratch emptyDir size onto the deploy's ephemeral-storage
+ * request/limit knobs, since scratch usage counts against the same
+ * node-disk accounting (TKAI-349) as those knobs. Without scratch, the
+ * deploy knob passes through VERBATIM (not reformatted): this keeps the
+ * manifest byte-identical to before scratch existed. A side is included
+ * only when scratch or that side's own knob is defined; both absent omits
+ * the side entirely (an operator can still disable ephemeral-storage
+ * accounting with no scratch configured).
+ */
+export function ephemeralStorageSums(
+  scratch: string | undefined,
+  request: string | undefined,
+  limit: string | undefined,
+): { request?: string; limit?: string } {
+  const scratchBytes = scratch !== undefined ? parseStorageQuantity(scratch) : null;
+  const hasScratch = scratchBytes !== null && scratchBytes > 0;
+  const result: { request?: string; limit?: string } = {};
+  if (hasScratch || request !== undefined) {
+    result.request = hasScratch ? formatStorageQuantity(scratchBytes + termBytes(request)) : request;
+  }
+  if (hasScratch || limit !== undefined) {
+    result.limit = hasScratch ? formatStorageQuantity(scratchBytes + termBytes(limit)) : limit;
+  }
+  return result;
+}
+
 /** Maps merged resource opts to `corev1.ResourceRequirements`. cpu request
  * equals limit (unchanged). The memory limit is `MEMORY_LIMIT_FACTOR` x the
  * request — the request schedules, the limit only stops a runaway.
@@ -190,7 +359,8 @@ function memoryLimitFor(request: string): string {
  * node; the limit makes the kubelet evict one runaway sandbox instead of
  * the node going NotReady. An absent side is omitted — no fallback from one
  * to the other, so an operator can disable either knob ("0" in
- * sandbox-backend.ts) alone. */
+ * sandbox-backend.ts) alone. `scratch` adds onto both sides via
+ * `ephemeralStorageSums` (the scratch emptyDir is node-local disk too). */
 function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequirements | undefined {
   const requests: ResourceList = {};
   const limits: ResourceList = {};
@@ -202,12 +372,9 @@ function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequi
     requests.memory = resources.memory;
     limits.memory = memoryLimitFor(resources.memory);
   }
-  if (resources.ephemeralStorage !== undefined) {
-    requests["ephemeral-storage"] = resources.ephemeralStorage;
-  }
-  if (resources.ephemeralStorageLimit !== undefined) {
-    limits["ephemeral-storage"] = resources.ephemeralStorageLimit;
-  }
+  const ephemeralSums = ephemeralStorageSums(resources.scratch, resources.ephemeralStorage, resources.ephemeralStorageLimit);
+  if (ephemeralSums.request !== undefined) requests["ephemeral-storage"] = ephemeralSums.request;
+  if (ephemeralSums.limit !== undefined) limits["ephemeral-storage"] = ephemeralSums.limit;
   if (Object.keys(requests).length === 0 && Object.keys(limits).length === 0) return undefined;
   return {
     ...(Object.keys(requests).length > 0 ? { requests } : {}),
@@ -290,7 +457,7 @@ export function buildSandboxManifest(
     // `sh -c "tail -f /dev/null"` idiom (packages/sandbox-docker/src/sandbox.ts).
     // The controller/exec surface does the actual work; this just keeps the
     // container's PID 1 alive.
-    command: ["sh", "-c", "tail -f /dev/null"],
+    command: [...BARE_PLACEHOLDER_COMMAND],
     volumeMounts: [{ name: WORKSPACE_VOLUME_NAME, mountPath: WORKSPACE_MOUNT_PATH, subPath: WORKSPACE_SUBPATH }],
     // See SandboxContainer.workingDir's docblock (types.ts) — the k8s
     // pods/exec API has no per-call --workdir, so this container-level
@@ -305,6 +472,14 @@ export function buildSandboxManifest(
 
   if (resourceRequirements) {
     container.resources = resourceRequirements;
+  }
+
+  if (resourceOpts?.scratch) {
+    container.volumeMounts = [
+      ...(container.volumeMounts ?? []),
+      { name: SCRATCH_VOLUME_NAME, mountPath: SCRATCH_MOUNT_PATH },
+    ];
+    container.env = [...(container.env ?? []), { name: "TMPDIR", value: SCRATCH_TMPDIR }];
   }
 
   const isFullProfile = opts.profile === "full";
@@ -413,10 +588,18 @@ export function buildSandboxManifest(
     }
   }
 
-  container.command = withHomeLinks(container.command ?? ["sh", "-c", "tail -f /dev/null"]);
+  // A plain headless pod never runs a start script (its command is still
+  // the bare placeholder at this point), so scratch bootstrap has no other
+  // owner. The full-profile and docker commands are already replaced above
+  // and keep their own start-script-driven setup.
+  if (resourceOpts?.scratch && commandEquals(container.command, BARE_PLACEHOLDER_COMMAND)) {
+    container.command = SCRATCH_PLACEHOLDER_COMMAND;
+  }
+
+  container.command = withHomeLinks(container.command ?? [...BARE_PLACEHOLDER_COMMAND], { scratch: Boolean(resourceOpts?.scratch) });
   container.volumeMounts = [...persistentHomeMounts(), ...(container.volumeMounts ?? [])];
   const podSpec: SandboxCR["spec"]["podTemplate"]["spec"] = {
-    initContainers: [homeInitContainer(image)],
+    initContainers: [homeInitContainer(image), ...(resourceOpts?.scratch ? [scratchInitContainer(image)] : [])],
     containers: [container, ...(browserContainer ? [browserContainer] : [])],
     ...(companion ? { automountServiceAccountToken: false } : {}),
     restartPolicy: "Always",
@@ -475,6 +658,13 @@ export function buildSandboxManifest(
     podSpec.volumes = [credsVolume];
   }
   if (browserClaim) podSpec.volumes = [...(podSpec.volumes ?? []), { name: "runtime-state", persistentVolumeClaim: { claimName: browserClaim } }];
+
+  if (resourceOpts?.scratch) {
+    podSpec.volumes = [
+      ...(podSpec.volumes ?? []),
+      { name: SCRATCH_VOLUME_NAME, emptyDir: { sizeLimit: scratchSizeLimit(resourceOpts.scratch) } },
+    ];
+  }
 
   if (opts.docker) {
     // sizeLimit pins the docker-state emptyDir (image layers + container

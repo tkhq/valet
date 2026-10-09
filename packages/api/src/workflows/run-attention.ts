@@ -31,6 +31,7 @@ import { principalFromOwner, routeAttention, type AttentionChannelDeliverer, typ
 import { assistantExecutions, sessionThreads, workflowDefinitions } from "../schema/index.js";
 import { resolveWorkflowReportTarget } from "./report-target.js";
 import { workflowRunThreadKey } from "./engine-deps.js";
+import { selectWork } from "../engine/wakeups-admin.js";
 
 export function workflowApprovalHref(runId: string, nodeId: string): string {
   return `/workflows/runs/${encodeURIComponent(runId)}?gate=${encodeURIComponent(nodeId)}`;
@@ -204,7 +205,10 @@ export interface RunThreadArchiveDeps {
   store: Pick<WorkflowStore, "getCheckpoints">;
   /** The engine's own session store, for the thread's key and creation time,
    * and for the state of the submission the node dispatched onto it. */
-  engineStore: Pick<SessionStore, "getThread" | "getQueueItem" | "listUnsettledSubmissions" | "listDecisionGates">;
+  engineStore: Pick<
+    SessionStore,
+    "getThread" | "getQueueItem" | "listUnsettledSubmissions" | "listDecisionGates" | "listWakeups" | "listActiveLeases"
+  >;
   engineHost?: Pick<EngineHost, "liveSession" | "evictCache">;
 }
 
@@ -279,6 +283,21 @@ export function buildRunThreadArchive(deps: RunThreadArchiveDeps): OnRunSettled 
             `workflow run thread archive: run ${info.runId} settled while submission ` +
               `${dispatch.queueItemIds[open]} is ${items[open]?.status ?? "no longer recorded"} — ` +
               `leaving thread ${dispatch.threadId} in the list.`,
+          );
+          continue;
+        }
+        // Background work on the thread (a process, a watch, a timer, a
+        // hold) still reports there. Archiving would hide its signals, and
+        // stopping it is a person's choice, so the thread stays in the list
+        // (fix wave 3, group C).
+        const [wakeups, leases] = await Promise.all([
+          deps.engineStore.listWakeups(dispatch.sessionId, ["pending", "running"]),
+          deps.engineStore.listActiveLeases(dispatch.sessionId),
+        ]);
+        if (selectWork({ wakeups, leases }, { threadId: thread.id }).length > 0) {
+          console.debug(
+            `workflow run thread archive: run ${info.runId} settled with background work open on ` +
+              `thread ${dispatch.threadId}; leaving the thread in the list.`,
           );
           continue;
         }

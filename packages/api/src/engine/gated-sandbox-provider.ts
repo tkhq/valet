@@ -154,5 +154,10 @@ export function withSandboxCapacityGate(
   if (inner.suspend) gated.suspend = inner.suspend.bind(inner);
   if (inner.resume) gated.resume = inner.resume.bind(inner);
   if (inner.updateCreds) gated.updateCreds = inner.updateCreds.bind(inner);
+  // The WakeWatcher's lease eviction protection (spec INV-3) reads these
+  // through the gate; dropping them left every leased pod unprotected on
+  // the kubernetes backend (PR review, finding 1).
+  if (inner.setEvictionProtection) gated.setEvictionProtection = inner.setEvictionProtection.bind(inner);
+  if (inner.listEvictionProtected) gated.listEvictionProtected = inner.listEvictionProtected.bind(inner);
   return gated;
 }

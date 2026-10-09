@@ -12,7 +12,9 @@ import { render, screen, within, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { TooltipProvider } from "~/components/primitives";
+import { ApiError } from "~/api/client";
 import type {
+  BackgroundWorkConflict,
   DecisionGate,
   GetModelTiersResponse,
   ModelInfo,
@@ -329,6 +331,68 @@ describe("ThreadTree — thread context menu", () => {
     await user.click(screen.getByRole("menuitem", { name: /replace sandbox/i }));
 
     expect(replaceMutateAsync).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ThreadTree: background work blocks archive and replace (fix wave 3, H1, H3)", () => {
+  const conflict: BackgroundWorkConflict = {
+    error: 'This thread has background work running: "full proof build" (process).',
+    code: "background_work",
+    work: [{ id: "wk_1", kind: "process", status: "running", reason: "full proof build", threadId: "thread-1", createdAt: Date.now() }],
+    hiddenCount: 0,
+    forceAllowed: true,
+  };
+
+  it("archive asks first, names the work, and archives with force on confirm", async () => {
+    setArchivedMutateAsync.mockRejectedValueOnce(new ApiError(409, "PATCH → 409", conflict));
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.click(screen.getByRole("menuitem", { name: /archive thread/i }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Stop background work and archive?" });
+    expect(within(dialog).getByText("full proof build")).toBeTruthy();
+    // Nothing left the list yet, so the view stays on the thread.
+    expect(navigate).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole("button", { name: "Stop background work and archive" }));
+    expect(setArchivedMutateAsync).toHaveBeenLastCalledWith({ threadId: "thread-1", archived: true, force: true });
+    expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it("the A hotkey path asks the same way", async () => {
+    setArchivedMutateAsync.mockRejectedValueOnce(new ApiError(409, "PATCH → 409", conflict));
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.keyboard("a");
+
+    expect(await screen.findByRole("dialog", { name: "Stop background work and archive?" })).toBeTruthy();
+  });
+
+  it("Replace sandbox asks first under background work, then resends with force", async () => {
+    replaceMutateAsync.mockRejectedValueOnce(new ApiError(409, "POST → 409", conflict));
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.click(screen.getByRole("menuitem", { name: /replace sandbox/i }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Stop background work and replace the sandbox?" });
+    await user.click(within(dialog).getByRole("button", { name: "Stop background work and replace" }));
+    expect(replaceMutateAsync).toHaveBeenLastCalledWith({ force: true });
+  });
+
+  it("Replace sandbox shows a failure instead of dropping it", async () => {
+    replaceMutateAsync.mockRejectedValueOnce(new ApiError(502, "POST → 502", { error: "sandbox replacement failed to provision. Check the sandbox backend, then retry." }));
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.click(screen.getByRole("menuitem", { name: /replace sandbox/i }));
+
+    expect(await screen.findByText(/sandbox replacement failed to provision/)).toBeTruthy();
   });
 });
 

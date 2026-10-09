@@ -2,6 +2,10 @@
  * Pure unit tests for jobs.ts's command builders and status parsing — no
  * cluster required.
  */
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   cancelCommand,
@@ -9,6 +13,7 @@ import {
   incompleteUtf8TailLength,
   jobKickoffCommand,
   parseJobStatus,
+  pruneOldJobFilesScript,
   pollCommand,
   utf8SequenceLength,
 } from "../src/jobs.js";
@@ -19,6 +24,20 @@ describe("jobKickoffCommand", () => {
     const cmd = jobKickoffCommand("job-1", "echo hi");
     expect(cmd).toContain(`mkdir -p ${shQuote(JOBS_DIR)}`);
     expect(cmd).toContain(`: > ${shQuote(`${JOBS_DIR}/job-1.out`)}`);
+  });
+
+  it("refuses to start when any job file for the id already exists (fix wave 2, B1)", () => {
+    const cmd = jobKickoffCommand("job-1", "echo hi");
+    for (const ext of ["pid", "exit", "dead", "out"]) {
+      expect(cmd).toContain(`[ -e ${shQuote(`${JOBS_DIR}/job-1.${ext}`)} ]`);
+    }
+    // The refusal runs before `: > OUT`, so it never truncates a live log.
+    expect(cmd.indexOf("exit 17")).toBeLessThan(cmd.indexOf(`: > ${shQuote(`${JOBS_DIR}/job-1.out`)}`));
+  });
+
+  it("caps the detached .out with head -c when given a limit (fix wave 2, M6)", () => {
+    const cmd = jobKickoffCommand("job-1", "yes", 2 * 1024 ** 3);
+    expect(cmd).toContain(`head -c ${2 * 1024 ** 3}`);
   });
 
   it("groups the backgrounded work in parens so the WHOLE sequence backgrounds, not just the trailing echo", () => {
@@ -115,25 +134,75 @@ describe("jobKickoffCommand", () => {
   it("with maxOutputBytes, the exit code is still captured from setsid's own $? AFTER it returns, not from inside the killed group — this is what makes cancelJob's EXIT write prompt (DEFECT 2 fix)", () => {
     const cmd = jobKickoffCommand("job-1", "exit 5", 1024);
     // Ordering: mkfifo -> background capping filter (captures $! as
-    // filterpid) -> setsid runs the job, writing to the fifo -> ONLY AFTER
-    // setsid returns is $? written to EXIT -> then (and only then) do we
-    // wait for the capping filter and clean up the fifo. Critically, the
-    // `echo $? > EXIT` write happens OUTSIDE setsid's own process group, so
-    // cancelJob's SIGKILL to that group can never prevent it from running.
+    // filterpid) -> setsid runs the job, writing to the fifo -> its $? is
+    // saved -> the filter is awaited so OUT is complete -> ONLY THEN is the
+    // saved status written to EXIT (PR review, finding 6) -> fifo cleanup.
+    // Critically, the EXIT write happens OUTSIDE setsid's own process
+    // group, so cancelJob's SIGKILL to that group can never prevent it.
     const mkfifoIdx = cmd.indexOf("mkfifo");
     const filterpidIdx = cmd.indexOf("filterpid=$!");
     const setsidIdx = cmd.indexOf("setsid sh -c");
-    const echoExitIdx = cmd.indexOf("echo $?");
+    const rcIdx = cmd.indexOf("rc=$?");
     const waitIdx = cmd.indexOf('wait "$filterpid"');
+    const echoExitIdx = cmd.indexOf('echo "$rc" >');
     expect(mkfifoIdx).toBeGreaterThan(-1);
     expect(filterpidIdx).toBeGreaterThan(-1);
     expect(setsidIdx).toBeGreaterThan(-1);
-    expect(echoExitIdx).toBeGreaterThan(-1);
+    expect(rcIdx).toBeGreaterThan(-1);
     expect(waitIdx).toBeGreaterThan(-1);
+    expect(echoExitIdx).toBeGreaterThan(-1);
     expect(mkfifoIdx).toBeLessThan(filterpidIdx);
     expect(filterpidIdx).toBeLessThan(setsidIdx);
-    expect(setsidIdx).toBeLessThan(echoExitIdx);
-    expect(echoExitIdx).toBeLessThan(waitIdx);
+    expect(setsidIdx).toBeLessThan(rcIdx);
+    expect(rcIdx).toBeLessThan(waitIdx);
+    expect(waitIdx).toBeLessThan(echoExitIdx);
+  });
+
+  it("appends the cap marker to .out once output passes the cap (fix wave 3, k8s M-B)", () => {
+    const cmd = jobKickoffCommand("job-1", "echo hi", 1024);
+    expect(cmd).toContain("head -c 1 | wc -c");
+    expect(cmd).toContain("[valet: log capped at 1024 bytes; later output dropped]");
+  });
+
+  it("prunes the files of jobs that ended more than a day ago, and reports the count (fix wave 3, k8s M-B)", () => {
+    const cmd = jobKickoffCommand("job-1", "echo hi");
+    expect(cmd).toContain("-mmin +1440");
+    expect(cmd).toContain("pruned=");
+    expect(cmd.indexOf("-mmin +1440")).toBeLessThan(cmd.indexOf("already has files"));
+  });
+
+  it("prunes without word splitting, counts only jobs whose files are gone, and counts each job once (fix wave 4, security N6, k8s N-3)", () => {
+    const root = mkdtempSync(join(tmpdir(), "valet-prune-"));
+    const jobs = join(root, "jobs");
+    const cwd = join(root, "cwd");
+    mkdirSync(jobs);
+    mkdirSync(cwd);
+    const old = new Date(Date.now() - 2 * 24 * 3_600_000);
+    const touchOld = (name: string) => {
+      writeFileSync(join(jobs, name), "");
+      utimesSync(join(jobs, name), old, old);
+    };
+    // A name with a space and a glob: split words would glob in the cwd.
+    touchOld("a b*.exit");
+    writeFileSync(join(jobs, "a b*.out"), "log");
+    writeFileSync(join(cwd, "b-keep.txt"), "keep");
+    // One job with both stamps counts once.
+    touchOld("j1.exit");
+    touchOld("j1.dead");
+    writeFileSync(join(jobs, "j1.out"), "log");
+    // A stamp rm cannot delete (here a directory) is not counted.
+    mkdirSync(join(jobs, "stuck.dead"));
+    utimesSync(join(jobs, "stuck.dead"), old, old);
+    // A recent job stays.
+    writeFileSync(join(jobs, "fresh.exit"), "0");
+
+    const r = spawnSync("/bin/sh", ["-c", pruneOldJobFilesScript(jobs)], { cwd, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("pruned=2");
+    expect(readdirSync(jobs).sort()).toEqual(["fresh.exit", "stuck.dead"]);
+    expect(readdirSync(cwd)).toEqual(["b-keep.txt"]);
+    const again = spawnSync("/bin/sh", ["-c", pruneOldJobFilesScript(jobs)], { cwd, encoding: "utf8" });
+    expect(again.stdout.trim()).toBe("");
   });
 
   it("floors and clamps a fractional/negative maxOutputBytes to a safe non-negative integer", () => {
@@ -155,7 +224,24 @@ describe("pollCommand", () => {
   it("reports an unknown execId distinctly from running/done", () => {
     const cmd = pollCommand("job-1", 0);
     expect(cmd).toContain("echo unknown 1>&2");
-    expect(cmd).toContain("echo running 1>&2");
+    expect(cmd).toContain("st=running");
+    expect(cmd).toContain(`echo "$st" 1>&2`);
+  });
+
+  it("checks the pid group with kill -0 (no `--`) and the start-script dead marker when no exit file exists", () => {
+    const cmd = pollCommand("job-1", 0);
+    expect(cmd).toContain(`kill -0 -"$(cat ${shQuote(`${JOBS_DIR}/job-1.pid`)})"`);
+    expect(cmd).toContain(`-f ${shQuote(`${JOBS_DIR}/job-1.dead`)}`);
+    expect(cmd).toContain("st=dead");
+    // Status before output: a present exit file means the output is complete.
+    expect(cmd.indexOf("st=")).toBeLessThan(cmd.indexOf("base64 -w0"));
+  });
+
+  it("caps a forward read one byte past maxBytes, and reads the size in tail mode", () => {
+    expect(pollCommand("job-1", 0, { maxBytes: 100 })).toContain("| head -c 101 |");
+    const tailCmd = pollCommand("job-1", 5, { maxBytes: 100, tail: true });
+    expect(tailCmd).toContain("size=$(wc -c <");
+    expect(tailCmd).toContain("| tail -c +6 | tail -c 100 | base64 -w0");
   });
 
   it("base64-encodes the tail output (-w0, no line wrap) so raw bytes survive execInPod's own UTF-8 decode", () => {
@@ -195,6 +281,10 @@ describe("parseJobStatus", () => {
 
   it("parses 'unknown' as failed (job never started / lost)", () => {
     expect(parseJobStatus("unknown\n")).toEqual({ status: "failed" });
+  });
+
+  it("parses 'dead' as failed with no exit code (pid group gone, no exit file)", () => {
+    expect(parseJobStatus("dead\n")).toEqual({ status: "failed" });
   });
 
   it("throws on garbage", () => {

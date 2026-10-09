@@ -1,12 +1,20 @@
 import type {
   BranchSummaryEntry,
+  ChannelOrigin,
   CommandResultEntry,
   CompactionEntry,
   DecisionGate,
   DecisionGateEntry,
+  Lease,
+  LeaseOwnerKind,
+  LeaseReleaseCause,
   MessageEntry,
   SessionEntry,
   SettlePatchRef,
+  Wakeup,
+  WakeupCause,
+  WakeupKind,
+  WakeupStatus,
 } from "@valet/engine";
 
 export function jsonOrNull<T>(value: T | undefined | null): string | null {
@@ -699,5 +707,203 @@ export function rawToSuspendedTurnRow(raw: Record<string, unknown>): SuspendedTu
     ordinal: toNum(raw.ordinal, "ordinal"),
     attempt: toNum(raw.attempt, "attempt"),
     createdAt: toNum(raw.created_at, "created_at"),
+  };
+}
+
+/** Raw column shape of a `SELECT * FROM engine_wakeups` row. */
+export interface WakeupRow {
+  id: string;
+  session_id: string;
+  thread_id: string;
+  kind: string;
+  status: string;
+  reason: string;
+  command: string | null;
+  prompt: string | null;
+  exec_id: string | null;
+  lease_id: string | null;
+  fire_at: number | null;
+  deadline_at: number | null;
+  exit_code: number | null;
+  cause: string | null;
+  log_offset: number;
+  log_tail: string;
+  event_count: number;
+  created_at: number;
+  updated_at: number;
+  ended_at: number | null;
+  origin_json: string | null;
+  window_start_at: number | null;
+  window_count: number | null;
+  watch_buffer: string | null;
+  last_emit_at: number | null;
+}
+
+/**
+ * Narrows a stored `origin_json` to a `ChannelOrigin`. Null or unreadable
+ * JSON reads as no origin: a signal then goes out without one, never a throw.
+ */
+export function parseOriginJson(raw: string | null): ChannelOrigin | undefined {
+  if (raw === null) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object") return undefined;
+  const o: Record<string, unknown> = { ...parsed };
+  if (typeof o.channelType !== "string" || typeof o.threadKey !== "string") return undefined;
+  return {
+    channelType: o.channelType,
+    threadKey: o.threadKey,
+    ...(o.reply === "auto" || o.reply === "manual" ? { reply: o.reply } : {}),
+    ...(typeof o.messageTs === "string" ? { messageTs: o.messageTs } : {}),
+  };
+}
+
+export function rawToWakeupRow(raw: Record<string, unknown>): WakeupRow {
+  return {
+    id: asString(raw.id, "id"),
+    session_id: asString(raw.session_id, "session_id"),
+    thread_id: asString(raw.thread_id, "thread_id"),
+    kind: asString(raw.kind, "kind"),
+    status: asString(raw.status, "status"),
+    reason: asString(raw.reason, "reason"),
+    command: asStringOrNull(raw.command, "command"),
+    prompt: asStringOrNull(raw.prompt, "prompt"),
+    exec_id: asStringOrNull(raw.exec_id, "exec_id"),
+    lease_id: asStringOrNull(raw.lease_id, "lease_id"),
+    fire_at: toNumOrNull(raw.fire_at, "fire_at"),
+    deadline_at: toNumOrNull(raw.deadline_at, "deadline_at"),
+    exit_code: toNumOrNull(raw.exit_code, "exit_code"),
+    cause: asStringOrNull(raw.cause, "cause"),
+    log_offset: toNum(raw.log_offset, "log_offset"),
+    log_tail: asString(raw.log_tail, "log_tail"),
+    event_count: toNum(raw.event_count, "event_count"),
+    created_at: toNum(raw.created_at, "created_at"),
+    updated_at: toNum(raw.updated_at, "updated_at"),
+    ended_at: toNumOrNull(raw.ended_at, "ended_at"),
+    origin_json: asStringOrNull(raw.origin_json, "origin_json"),
+    window_start_at: toNumOrNull(raw.window_start_at, "window_start_at"),
+    window_count: toNumOrNull(raw.window_count, "window_count"),
+    watch_buffer: asStringOrNull(raw.watch_buffer, "watch_buffer"),
+    last_emit_at: toNumOrNull(raw.last_emit_at, "last_emit_at"),
+  };
+}
+
+function isWakeupKind(v: string): v is WakeupKind {
+  return v === "process" || v === "watch" || v === "timer";
+}
+
+function isWakeupStatus(v: string): v is WakeupStatus {
+  return ["pending", "running", "done", "cancelled", "expired", "lost"].includes(v);
+}
+
+function isWakeupCause(v: string): v is WakeupCause {
+  return ["exit", "deadline", "cancelled", "pid_missing", "sandbox_unavailable", "rate", "fired"].includes(v);
+}
+
+export function rowToWakeup(row: WakeupRow): Wakeup {
+  if (!isWakeupKind(row.kind)) throw new Error(`engine_wakeups.kind "${row.kind}" is not a known kind`);
+  if (!isWakeupStatus(row.status)) throw new Error(`engine_wakeups.status "${row.status}" is not a known status`);
+  if (row.cause !== null && !isWakeupCause(row.cause)) {
+    throw new Error(`engine_wakeups.cause "${row.cause}" is not a known cause`);
+  }
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    threadId: row.thread_id,
+    kind: row.kind,
+    status: row.status,
+    reason: row.reason,
+    ...(row.command !== null ? { command: row.command } : {}),
+    ...(row.prompt !== null ? { prompt: row.prompt } : {}),
+    ...(row.exec_id !== null ? { execId: row.exec_id } : {}),
+    ...(row.lease_id !== null ? { leaseId: row.lease_id } : {}),
+    ...(row.fire_at !== null ? { fireAt: row.fire_at } : {}),
+    ...(row.deadline_at !== null ? { deadlineAt: row.deadline_at } : {}),
+    ...(row.exit_code !== null ? { exitCode: row.exit_code } : {}),
+    ...(row.cause !== null ? { cause: row.cause } : {}),
+    logOffset: row.log_offset,
+    logTail: row.log_tail,
+    eventCount: row.event_count,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(row.ended_at !== null ? { endedAt: row.ended_at } : {}),
+    ...withOrigin(row.origin_json),
+    ...(row.window_start_at !== null ? { windowStartAt: row.window_start_at } : {}),
+    ...(row.window_count !== null ? { windowCount: row.window_count } : {}),
+    ...(row.watch_buffer !== null ? { watchBuffer: row.watch_buffer } : {}),
+    ...(row.last_emit_at !== null ? { lastEmitAt: row.last_emit_at } : {}),
+  };
+}
+
+function withOrigin(raw: string | null): { origin?: ChannelOrigin } {
+  const origin = parseOriginJson(raw);
+  return origin ? { origin } : {};
+}
+
+/** Raw column shape of a `SELECT * FROM engine_leases` row. */
+export interface LeaseRow {
+  id: string;
+  session_id: string;
+  sandbox_id: string | null;
+  owner_kind: string;
+  owner_id: string | null;
+  reason: string;
+  created_at: number;
+  deadline_at: number;
+  released_at: number | null;
+  release_cause: string | null;
+  thread_id: string | null;
+  origin_json: string | null;
+}
+
+export function rawToLeaseRow(raw: Record<string, unknown>): LeaseRow {
+  return {
+    id: asString(raw.id, "id"),
+    session_id: asString(raw.session_id, "session_id"),
+    sandbox_id: asStringOrNull(raw.sandbox_id, "sandbox_id"),
+    owner_kind: asString(raw.owner_kind, "owner_kind"),
+    owner_id: asStringOrNull(raw.owner_id, "owner_id"),
+    reason: asString(raw.reason, "reason"),
+    created_at: toNum(raw.created_at, "created_at"),
+    deadline_at: toNum(raw.deadline_at, "deadline_at"),
+    released_at: toNumOrNull(raw.released_at, "released_at"),
+    release_cause: asStringOrNull(raw.release_cause, "release_cause"),
+    thread_id: asStringOrNull(raw.thread_id, "thread_id"),
+    origin_json: asStringOrNull(raw.origin_json, "origin_json"),
+  };
+}
+
+function isLeaseOwnerKind(v: string): v is LeaseOwnerKind {
+  return v === "process" || v === "watch" || v === "hold";
+}
+
+function isLeaseReleaseCause(v: string): v is LeaseReleaseCause {
+  return v === "owner_ended" || v === "cancelled" || v === "deadline";
+}
+
+export function rowToLease(row: LeaseRow): Lease {
+  if (!isLeaseOwnerKind(row.owner_kind)) {
+    throw new Error(`engine_leases.owner_kind "${row.owner_kind}" is not a known owner kind`);
+  }
+  if (row.release_cause !== null && !isLeaseReleaseCause(row.release_cause)) {
+    throw new Error(`engine_leases.release_cause "${row.release_cause}" is not a known release cause`);
+  }
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    ...(row.sandbox_id !== null ? { sandboxId: row.sandbox_id } : {}),
+    ownerKind: row.owner_kind,
+    ...(row.owner_id !== null ? { ownerId: row.owner_id } : {}),
+    ...(row.thread_id !== null ? { threadId: row.thread_id } : {}),
+    ...withOrigin(row.origin_json),
+    reason: row.reason,
+    createdAt: row.created_at,
+    deadlineAt: row.deadline_at,
+    ...(row.released_at !== null ? { releasedAt: row.released_at } : {}),
+    ...(row.release_cause !== null ? { releaseCause: row.release_cause } : {}),
   };
 }

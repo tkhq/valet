@@ -1,0 +1,367 @@
+/**
+ * Wakeup tools (spec 2026-10-08: sandbox scratch, wakeups, and leases).
+ *
+ * Drives each tool's execute() directly with a hand-built ToolContext, same
+ * stub-ctx idiom as bash-job-mode.test.ts: a plain object with only the
+ * fields the tools under test touch, plus a `wakeups` seam built from
+ * `vi.fn()`s that each test overrides as needed.
+ */
+import { describe, it, expect, vi } from "vitest";
+import {
+  watchTool,
+  wakeAtTool,
+  holdSandboxTool,
+  processReadTool,
+  wakeupListTool,
+  wakeupCancelTool,
+} from "../src/builtin-tools/index.js";
+import { startBackgroundProcess } from "../src/builtin-tools/wakeups.js";
+import { wakeupsUnavailable } from "../src/wakeups/validate.js";
+import type {
+  Credential,
+  CredentialProvider,
+  DecisionGateRequest,
+  DecisionResolution,
+  MessageQuery,
+  Sandbox,
+  SessionEntry,
+  ToolContext,
+} from "../src/types.js";
+import type { Lease, Wakeup, WakeupsSeam } from "../src/wakeups/types.js";
+
+const stubCredentials: CredentialProvider = {
+  get: async (): Promise<Credential | null> => null,
+  request: async (): Promise<Credential> => {
+    throw new Error("not implemented in test stub");
+  },
+};
+
+const baseWakeup: Wakeup = {
+  id: "wk_base",
+  sessionId: "s1",
+  threadId: "t1",
+  kind: "process",
+  status: "running",
+  reason: "base",
+  logOffset: 0,
+  logTail: "",
+  eventCount: 0,
+  createdAt: 1_700_000_000_000,
+  updatedAt: 1_700_000_000_000,
+};
+
+const baseLease: Lease = {
+  id: "ls_base",
+  sessionId: "s1",
+  ownerKind: "hold",
+  reason: "base",
+  createdAt: 1_700_000_000_000,
+  deadlineAt: 1_700_000_000_000,
+};
+
+function makeCtx(seam: Partial<WakeupsSeam>): ToolContext {
+  return {
+    userId: "u1",
+    orgId: "o1",
+    sessionId: "s1",
+    threadId: "t1",
+    credentials: stubCredentials,
+    // None of these tools touch ctx.sandbox; an empty stub stands in for it,
+    // same idiom as bash-job-mode.test.ts's FakeSandbox.
+    sandbox: {} as Sandbox,
+    requestDecision: async (_gate: DecisionGateRequest): Promise<DecisionResolution> => {
+      throw new Error("not implemented in test stub");
+    },
+    threadRead: async (_key: string, _opts?: MessageQuery): Promise<SessionEntry[]> => [],
+    listThreads: async () => [],
+    setModel: async ({ model }: { model: string }) => ({ fromModel: model, toModel: model }),
+    wakeups: {
+      limits: { leaseMaxHours: 72, timerMaxHours: 24, perSession: 20, watchMaxEventsPerHour: 60 },
+      create: vi.fn(),
+      hold: vi.fn(),
+      get: vi.fn(),
+      list: vi.fn(async () => ({ wakeups: [], leases: [], otherThreads: 0 })),
+      cancel: vi.fn(),
+      readLog: vi.fn(),
+      ...seam,
+    },
+  };
+}
+
+describe("watch", () => {
+  it("starts a watch wakeup and reports the id", async () => {
+    const create = vi.fn(async () => ({
+      wakeup: { ...baseWakeup, id: "wk_w", kind: "watch" as const },
+      lease: { ...baseLease, id: "ls_w" },
+    }));
+    const r = await watchTool.execute({ command: "tail -f out.log", reason: "ci", max_hours: 2 }, makeCtx({ create }));
+    expect(create).toHaveBeenCalledWith("t1", { kind: "watch", command: "tail -f out.log", reason: "ci", maxHours: 2 });
+    expect(r.text).toContain("started watch wk_w");
+  });
+});
+
+describe("wake_at", () => {
+  it("schedules a timer and echoes the ISO time", async () => {
+    const create = vi.fn(async () => ({
+      wakeup: { ...baseWakeup, id: "wk_t", kind: "timer" as const, status: "pending" as const, fireAt: 1_700_000_000_000 },
+    }));
+    const r = await wakeAtTool.execute({ after_seconds: 7200, prompt: "Check the proof report" }, makeCtx({ create }));
+    expect(create.mock.calls[0]?.[1]).toMatchObject({ kind: "timer", prompt: "Check the proof report" });
+    expect(r.text.startsWith("scheduled wakeup wk_t at 2023-11-14T22:13:20.000Z.")).toBe(true);
+  });
+});
+
+describe("hold_sandbox", () => {
+  it("creates a lease", async () => {
+    const hold = vi.fn(async () => ({ ...baseLease, id: "ls_h", deadlineAt: 1_700_000_000_000 }));
+    const r = await holdSandboxTool.execute({ hours: 48, reason: "manual run" }, makeCtx({ hold }));
+    expect(r.text).toBe("holding sandbox until 2023-11-14T22:13:20.000Z (lease ls_h)");
+  });
+});
+
+describe("process_read", () => {
+  it("returns the slice and nextOffset", async () => {
+    const readLog = vi.fn(async () => ({ text: "hello", nextOffset: 5, eof: false }));
+    const r = await processReadTool.execute({ id: "wk_a", offset: 0, bytes: 4096 }, makeCtx({ readLog }));
+    expect(r.text).toBe("hello\n[nextOffset 5]");
+  });
+
+  it("marks eof", async () => {
+    const readLog = vi.fn(async () => ({ text: "", nextOffset: 5, eof: true }));
+    const r = await processReadTool.execute({ id: "wk_a", offset: 5 }, makeCtx({ readLog }));
+    expect(r.text).toBe("(no new output)\n[nextOffset 5] [eof]");
+  });
+
+  it("returns the seam's refusal text for an unknown id instead of throwing", async () => {
+    const readLog = vi.fn(async () => {
+      throw new Error("[process_read] wk_nope is not an active wakeup. Call wakeup_list to see active ids.");
+    });
+    const r = await processReadTool.execute({ id: "wk_nope" }, makeCtx({ readLog }));
+    expect(r.text).toBe("[process_read] wk_nope is not an active wakeup. Call wakeup_list to see active ids.");
+  });
+
+  it("returns the seam's refusal text for a timer id, which has no log", async () => {
+    const readLog = vi.fn(async () => {
+      throw new Error("[process_read] wk_timer is a timer and has no log. Only a background process or watch has a log.");
+    });
+    const r = await processReadTool.execute({ id: "wk_timer" }, makeCtx({ readLog }));
+    expect(r.text).toBe("[process_read] wk_timer is a timer and has no log. Only a background process or watch has a log.");
+  });
+
+  it("re-throws an error that is not a [process_read] refusal", async () => {
+    const readLog = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    await expect(processReadTool.execute({ id: "wk_a" }, makeCtx({ readLog }))).rejects.toThrow("boom");
+  });
+});
+
+describe("wakeup_list", () => {
+  it("renders one line per row and a hold lease", async () => {
+    const list = vi.fn(async () => ({
+      wakeups: [{ ...baseWakeup, id: "wk_a", reason: "proof build", deadlineAt: 1_700_000_000_000 }],
+      leases: [{ ...baseLease, id: "ls_h", ownerKind: "hold" as const, reason: "manual", deadlineAt: 1_700_000_000_000 }],
+      otherThreads: 0,
+    }));
+    const r = await wakeupListTool.execute({}, makeCtx({ list }));
+    expect(list).toHaveBeenCalledWith("t1");
+    expect(r.text).toContain('wk_a process running "proof build" deadline 2023-11-14T22:13:20.000Z');
+    expect(r.text).toContain('ls_h hold "manual" deadline 2023-11-14T22:13:20.000Z');
+    expect(r.text).not.toContain("other threads");
+  });
+
+  it("adds one line that counts the other threads' work (M14)", async () => {
+    const list = vi.fn(async () => ({ wakeups: [], leases: [], otherThreads: 3 }));
+    const r = await wakeupListTool.execute({}, makeCtx({ list }));
+    expect(r.text).toBe("(no active wakeups or holds in this thread)\n3 more in other threads of this session.");
+  });
+});
+
+describe("fix wave 2 tool changes", () => {
+  const origin = { channelType: "slack", threadKey: "slack:C1:1.2" };
+
+  it("passes the turn's origin to create and the thread and origin to hold (H3, M17)", async () => {
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_t", kind: "timer" as const, fireAt: 1_700_000_060_000 } }));
+    const hold = vi.fn(async () => ({ ...baseLease, id: "ls_h" }));
+    const ctx = { ...makeCtx({ create, hold }), origin };
+    await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, ctx);
+    expect(create.mock.calls[0]?.[1]).toMatchObject({ kind: "timer", origin });
+    await holdSandboxTool.execute({ hours: 1, reason: "r" }, ctx);
+    expect(hold).toHaveBeenCalledWith({ hours: 1, reason: "r", threadId: "t1", origin });
+  });
+
+  it("returns the seam's hold refusal as text (M10)", async () => {
+    const hold = vi.fn(async (): Promise<Lease> => {
+      throw new Error("[hold_sandbox] No sandbox is running. Start work that needs the sandbox first.");
+    });
+    const r = await holdSandboxTool.execute({ hours: 1, reason: "r" }, makeCtx({ hold }));
+    expect(r.text).toBe("[hold_sandbox] No sandbox is running. Start work that needs the sandbox first.");
+  });
+
+  it("process_read passes tail through (H5)", async () => {
+    const readLog = vi.fn(async () => ({ text: "last", nextOffset: 99, eof: false }));
+    await processReadTool.execute({ id: "wk_a", bytes: 100, tail: true }, makeCtx({ readLog }));
+    expect(readLog).toHaveBeenCalledWith("wk_a", 0, 100, { tail: true });
+  });
+
+  it("start texts say how to read the latest output (H5)", async () => {
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_w", kind: "watch" as const } }));
+    const r = await watchTool.execute({ command: "tail -f x", reason: "ci", max_hours: 2 }, makeCtx({ create }));
+    expect(r.text).toContain("process_read { id: \"wk_w\", tail: true }");
+  });
+});
+
+describe("wakeup_cancel", () => {
+  it("reports the kind and unknown ids", async () => {
+    expect(
+      (await wakeupCancelTool.execute({ id: "wk_a" }, makeCtx({ cancel: vi.fn(async () => ({ kind: "wakeup" as const })) }))).text,
+    ).toBe("cancelled wk_a");
+    expect(
+      (await wakeupCancelTool.execute({ id: "nope" }, makeCtx({ cancel: vi.fn(async () => null) }))).text,
+    ).toBe("[wakeup_cancel] nope is not an active wakeup or lease. Call wakeup_list to see active ids.");
+  });
+
+  it("returns the seam's refusal text for a process-owned lease id", async () => {
+    const text = "[wakeup_cancel] ls_p belongs to process wk_p. Cancel wk_p instead; that stops the process and releases this lease.";
+    const r = await wakeupCancelTool.execute({ id: "ls_p" }, makeCtx({ cancel: vi.fn(async () => ({ kind: "refused" as const, text })) }));
+    expect(r.text).toBe(text);
+  });
+});
+
+describe("wakeups seam absent", () => {
+  it("every tool refuses without the seam", async () => {
+    const ctx = makeCtx({});
+    delete ctx.wakeups;
+    expect((await watchTool.execute({ command: "x", reason: "r", max_hours: 1 }, ctx)).text).toBe(wakeupsUnavailable("watch"));
+    expect((await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, ctx)).text).toBe(wakeupsUnavailable("wake_at"));
+    expect((await holdSandboxTool.execute({ hours: 1, reason: "r" }, ctx)).text).toBe(wakeupsUnavailable("hold_sandbox"));
+    expect((await processReadTool.execute({ id: "x" }, ctx)).text).toBe(wakeupsUnavailable("process_read"));
+    expect((await wakeupListTool.execute({}, ctx)).text).toBe(wakeupsUnavailable("wakeup_list"));
+    expect((await wakeupCancelTool.execute({ id: "x" }, ctx)).text).toBe(wakeupsUnavailable("wakeup_cancel"));
+    expect(wakeupsUnavailable("wake_at")).not.toContain("foreground");
+  });
+});
+
+describe("fix wave 3 tool texts", () => {
+  const NOW = Date.UTC(2026, 9, 9, 12, 0, 0);
+
+  it("wakeup_list shows the elapsed time and JSON-quotes the reason (UX L4)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    try {
+      const list = vi.fn(async () => ({
+        wakeups: [{ ...baseWakeup, id: "wk_a", reason: 'build "core"', createdAt: NOW - (2 * 3600 + 5 * 60) * 1000, deadlineAt: NOW + 3_600_000 }],
+        leases: [],
+        otherThreads: 0,
+      }));
+      const r = await wakeupListTool.execute({}, makeCtx({ list }));
+      expect(r.text).toBe(`wk_a process running "build \\"core\\"" deadline ${new Date(NOW + 3_600_000).toISOString()}, started 2h 5m ago`);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("process_read says when the log hit its cap (k8s M-B)", async () => {
+    const readLog = vi.fn(async () => ({ text: "x\n[valet: log capped at 10 bytes; later output dropped]\n", nextOffset: 60, eof: false }));
+    const r = await processReadTool.execute({ id: "wk_a", tail: true }, makeCtx({ readLog }));
+    expect(r.text).toContain("[log capped: output after the cap was dropped. The process.exited signal reports the exit code.]");
+  });
+
+  it("returns a bash_background start refusal as text, not a tool error (UX L9)", async () => {
+    const create = vi.fn(async () => {
+      throw new Error("[bash_background] The start of wk_x took too long, so it was stopped. Run the command again.");
+    });
+    const r = await startBackgroundProcess(makeCtx({ create }), "make", { deadlineHours: 1, reason: "r" });
+    expect(r.text).toBe("[bash_background] The start of wk_x took too long, so it was stopped. Run the command again.");
+  });
+
+  it("returns a wake_at seam refusal as text", async () => {
+    const create = vi.fn(async () => {
+      throw new Error("[wake_at] This session was deleted, so the timer was not set.");
+    });
+    const r = await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, makeCtx({ create }));
+    expect(r.text).toBe("[wake_at] This session was deleted, so the timer was not set.");
+  });
+
+  it("tells the agent to end its turn after a start (UX prompt 1)", async () => {
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_p", deadlineAt: NOW } }));
+    const r = await startBackgroundProcess(makeCtx({ create }), "make", { deadlineHours: 1, reason: "r" });
+    expect(r.text).toContain("End your turn now with a one-line status");
+    const w = await watchTool.execute({ command: "tail -f x", reason: "ci", max_hours: 2 }, makeCtx({ create }));
+    expect(w.text).toContain("End your turn now with a one-line status");
+    expect(w.text).toContain("at most one watch.event every 120 seconds");
+  });
+
+  it("describes wake_at as scheduling a new turn, not a pause (UX prompt 2)", () => {
+    expect(wakeAtTool.description).not.toContain("Pause this thread");
+    expect(wakeAtTool.description).toContain("end your turn");
+  });
+});
+
+describe("per-session limit", () => {
+  it("refuses over the per-session limit", async () => {
+    const list = vi.fn(async () => ({
+      wakeups: Array.from({ length: 20 }, (_, i) => ({ ...baseWakeup, id: `wk_${i}` })),
+      leases: [],
+      otherThreads: 0,
+    }));
+    const r = await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, makeCtx({ list }));
+    expect(r.text).toBe(
+      "[wakeups_limit] This thread already has 20 active wakeups and holds (limit 20 per thread, set by sandbox.wakeupsPerSession). Cancel one of them with wakeup_cancel.",
+    );
+  });
+
+  it("counts a process wakeup once, not again for its lease", async () => {
+    const list = vi.fn(async () => ({
+      wakeups: Array.from({ length: 10 }, (_, i) => ({ ...baseWakeup, id: `wk_${i}` })),
+      leases: Array.from({ length: 10 }, (_, i) => ({ ...baseLease, id: `ls_${i}`, ownerKind: "process" as const, ownerId: `wk_${i}` })),
+      otherThreads: 50,
+    }));
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_t", kind: "timer" as const, fireAt: 1_700_000_060_000 } }));
+    const r = await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, makeCtx({ list, create }));
+    expect(r.text).toContain("scheduled wakeup wk_t");
+  });
+
+  it("counts hold leases toward the limit", async () => {
+    const list = vi.fn(async () => ({
+      wakeups: Array.from({ length: 19 }, (_, i) => ({ ...baseWakeup, id: `wk_${i}` })),
+      leases: [{ ...baseLease, id: "ls_h" }],
+      otherThreads: 0,
+    }));
+    const r = await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, makeCtx({ list }));
+    expect(r.text).toContain("[wakeups_limit]");
+  });
+});
+
+describe("watch result text", () => {
+  it("names the watch.exited signal the kernel emits", async () => {
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_w", kind: "watch" as const } }));
+    const r = await watchTool.execute({ command: "tail -f x", reason: "ci", max_hours: 2 }, makeCtx({ create }));
+    expect(r.text).toContain("watch.exited");
+    expect(r.text).not.toContain("watch.ended");
+  });
+});
+
+describe("fix wave 4 tool texts (UX N14, N5)", () => {
+  it("wake_at tells the agent to end its turn", async () => {
+    const create = vi.fn(async () => ({
+      wakeup: { ...baseWakeup, id: "wk_t", kind: "timer" as const, status: "pending" as const, fireAt: 1_700_000_000_000 },
+    }));
+    const r = await wakeAtTool.execute({ after_seconds: 7200, prompt: "Check" }, makeCtx({ create }));
+    expect(r.text).toBe(
+      "scheduled wakeup wk_t at 2023-11-14T22:13:20.000Z. End your turn now; the timer.fired signal starts your next turn.",
+    );
+  });
+
+  it("the watch start says a full 64 KiB buffer goes out sooner than the interval", async () => {
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_w", kind: "watch" as const } }));
+    const r = await watchTool.execute({ command: "tail -f x", reason: "ci", max_hours: 2 }, makeCtx({ create }));
+    expect(r.text).toContain("at most one watch.event every 120 seconds, or sooner when 64 KiB of new lines collect");
+  });
+
+  it("process_read gives the capped notice when the seam reports a cap drop with no marker (docker)", async () => {
+    const readLog = vi.fn(async () => ({ text: "head\n", nextOffset: 5, eof: true, capped: true }));
+    const r = await processReadTool.execute({ id: "wk_a", tail: true }, makeCtx({ readLog }));
+    expect(r.text).toContain("[log capped: output after the cap was dropped.");
+  });
+});

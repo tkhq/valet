@@ -203,6 +203,17 @@ describe("resource opinion hashing", () => {
     expect(specHash(spec, { cpu: 4, memory: "4Gi" })).not.toBe(base);
   });
 
+  it("changes when scratch changes, so a corrected value skips the failure backoff (M7)", () => {
+    const base = specHash(spec, { cpu: 4, scratch: "800Gi" });
+    expect(specHash(spec, { cpu: 4, scratch: "200Gi" })).not.toBe(base);
+    expect(specHash(spec, { cpu: 4 })).not.toBe(base);
+  });
+
+  it("keeps the scratch-less hash unchanged", () => {
+    expect(specHash(spec, { cpu: 4, memory: "8Gi" })).toBe(specHash(spec, { memory: "8Gi", cpu: 4 }));
+    expect(specHash(spec, { cpu: 4, memory: "8Gi", scratch: undefined })).toBe(specHash(spec, { cpu: 4, memory: "8Gi" }));
+  });
+
   it("changes when resource field authority changes", () => {
     const base = specHash(spec, { cpu: 2 });
     expect(specHash(spec, { cpu: 2 }, ["memory"])).not.toBe(base);
