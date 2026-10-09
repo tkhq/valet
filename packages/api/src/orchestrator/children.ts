@@ -1212,13 +1212,33 @@ export function buildChildReader(deps: ChildrenDeps): ChildReader {
  * unsettled). A yielded child is settled here on purpose — its turn ended;
  * the caller resumes it.
  */
+/** True while a watch's automatic channel reply has no admitted parent update. */
+async function owesAutomaticReply(
+  deps: ChildrenDeps,
+  childSessionId: string,
+  watch: { queueItemId: string; originJson: string | null; replyRoute: string | null },
+): Promise<boolean> {
+  const origin = settlementOrigin(watch.originJson, watch.replyRoute);
+  if (origin === undefined || origin.reply === "manual") return false;
+  const [intent] = await deps.db.select({
+    queueItemId: childReplyDeliveries.queueItemId,
+    completedAt: childReplyDeliveries.completedAt,
+    failedAt: childReplyDeliveries.failedAt,
+  }).from(childReplyDeliveries).where(eq(childReplyDeliveries.id,
+    namespaceInternalDispatchId(childSessionId, `settled:${childSessionId}:${watch.queueItemId}`))).limit(1);
+  return !intent || (intent.queueItemId === null && intent.completedAt === null && intent.failedAt === null);
+}
+
 export async function resolveChildSettlement(
   deps: ChildrenDeps,
   childSessionId: string,
   parentSessionId: string,
 ): Promise<{ settled: boolean; lastActivityAt: number | null } | null> {
   const rows = await deps.db
-    .select({ settled: childWatches.settled, originJson: childWatches.originJson, replyRoute: childWatches.replyRoute })
+    .select({
+      settled: childWatches.settled, queueItemId: childWatches.queueItemId,
+      originJson: childWatches.originJson, replyRoute: childWatches.replyRoute,
+    })
     .from(childWatches)
     .where(
       and(
@@ -1258,8 +1278,10 @@ export async function resolveChildSettlement(
   // permits this auto-repair because the violation is expected in the crash
   // window it names, not a silent invariant repair. Best-effort: a write
   // failure logs and never fails the read.
-  // Channel watches remain recoverable until the watcher stores the parent receipt.
-  if (settled && settlementOrigin(rows[0].originJson, rows[0].replyRoute) === undefined) {
+  // One exception: a watch that owes an automatic channel reply stays
+  // unsettled until the watcher admits the parent update, because a settled
+  // watch is never re-armed and the reply would be lost.
+  if (settled && !(await owesAutomaticReply(deps, childSessionId, rows[0]))) {
     try {
       await deps.db
         .update(childWatches)

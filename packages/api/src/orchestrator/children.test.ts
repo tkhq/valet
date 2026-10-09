@@ -1218,9 +1218,6 @@ describe("ChildWatcher", () => {
       id: "child-o", userId: "local-user", orgId: "local-org", workspace: "/tmp", status: "active",
       ownerType: "user", ownerId: "local-user", createdAt: Date.now(), updatedAt: Date.now(),
     });
-    expect((await resolveChildSettlement(deps, "child-o", "parent-o"))?.settled).toBe(true);
-    const [beforeDelivery] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-o"));
-    expect(beforeDelivery?.settled).toBe(false);
 
     // rearm() reads the row back — the restart path must not lose the origin.
     await watcher.rearm();
@@ -2604,6 +2601,30 @@ describe("buildChildSender", () => {
     const rebuilt = await engineHost.sessionFor("child-heal", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
     expect(rebuilt.options.sharedTranscript).toBe(true);
   });
+
+  it.each([
+    { route: "no channel origin", origin: null, replyRoute: null, repaired: true },
+    { route: "a manual origin", origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "manual" }, replyRoute: null, repaired: true },
+    { route: "a taken-over automatic origin", origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }, replyRoute: "none", repaired: true },
+    { route: "a pending automatic reply", origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }, replyRoute: null, repaired: false },
+  ] satisfies Array<{ route: string; origin: ChannelOrigin | null; replyRoute: string | null; repaired: boolean }>)(
+    "child_status repairs a stale unsettled watch with $route only when no automatic reply waits on it",
+    async ({ origin, replyRoute, repaired }) => {
+      api = await bootTestApi();
+      const deps = childrenDeps(api);
+      const { db } = api.providers;
+      await seedChild(api, { childId: "child-repair", parentId: "parent-repair", settled: true, queueItemId: "qi-repair" });
+      // The watcher gave up in-process, so the row stayed unsettled.
+      await db.update(childWatches).set({ settled: false, originJson: origin ? JSON.stringify(origin) : null, replyRoute })
+        .where(eq(childWatches.childSessionId, "child-repair"));
+
+      expect((await resolveChildSettlement(deps, "child-repair", "parent-repair"))?.settled).toBe(true);
+      const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-repair"));
+      // A pending automatic reply needs the watcher's rearm to admit it, so
+      // the row stays unsettled. Anything else frees the active-child slot.
+      expect(watch?.settled).toBe(repaired);
+    },
+  );
 
   it("re-opens a failed reply intent when it admits the parent update", async () => {
     api = await bootTestApi();

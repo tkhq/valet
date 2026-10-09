@@ -364,7 +364,11 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   keeps the route, including recovery after an interrupted `child_send`.
 - **Automatic child completion replies have durable delivery intents.** The
   watcher stores an intent before it submits `child.settled`. It stores the
-  parent submission ID before it marks the watch settled. Restart recovery
+  parent submission ID before it marks the watch settled. The `child_status`
+  repair, which marks a stale watch settled when the child's work is done,
+  skips only a watch whose automatic reply has no admitted parent update.
+  Every other watch, including a manual one, is repaired and frees its
+  active-child slot. Restart recovery
   resolves missing receipts by the immutable, namespaced dispatch ID, even if
   later work changed the child watch. `SessionStore.getQueueItemByDispatchId`
   scopes this lookup to the parent session in both store implementations.
