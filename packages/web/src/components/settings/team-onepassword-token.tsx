@@ -2,11 +2,14 @@ import { useState } from "react";
 import { useTeamOnePasswordStatus, useTeamOnePasswordToken } from "~/api/onepassword";
 import { Badge, Button, ConfirmDialog, Dialog, DialogContent, ErrorRow, Input } from "~/components/primitives";
 import { CardFooter, CardHeading, IntegrationCard } from "~/components/integrations/integration-card";
+import { OnePasswordInstructions } from "~/components/integrations/onepassword-setup";
 
 /**
  * The team's 1Password service account, as an integration card like every
  * other connection: Connect opens a dialog for the token. Mounted with the
- * team ID as key so a draft cannot move between teams.
+ * team ID as key so a draft cannot move between teams. The dialog shows the
+ * same setup steps as the personal and organization dialogs, because a team
+ * admin in Valet can still be refused by 1Password.
  */
 export function TeamOnePasswordToken({ teamId, teamName, canMutate }: {
   teamId: string; teamName: string; canMutate: boolean;
@@ -53,6 +56,7 @@ export function TeamOnePasswordToken({ teamId, teamName, canMutate }: {
         title={`Connect 1Password to ${teamName}`}
         description="Paste a 1Password service account token. Everyone on this team can use the vaults it can access."
       >
+        <OnePasswordInstructions />
         <label className="text-sm">Service account token
           <Input type="password" autoComplete="new-password" value={draft} className="mt-1"
             onChange={(event) => setDraft(event.target.value)} />

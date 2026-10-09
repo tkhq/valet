@@ -702,6 +702,23 @@ describe("1Password row", () => {
     expect(row.getByRole("button", { name: "Connect 1Password" })).toBeTruthy();
   });
 
+  // A member is the reader most likely to lack the 1Password permission
+  // that creating a service account needs, so the dialog this page opens
+  // names that permission and the alternative.
+  it("the setup dialog says what to ask an admin for when 1Password refuses", () => {
+    render(<ConnectedAccountsPage />);
+    const row = within(screen.getByRole("group", { name: "1Password" }));
+    fireEvent.click(row.getByRole("button", { name: "Connect 1Password" }));
+    const note = within(screen.getByRole("dialog")).getByText(/contact your administrator/i);
+    expect(note.textContent).toMatch(/permission to create and manage service accounts/i);
+    expect(note.textContent).toMatch(/a service account with read-only access to that vault alone/i);
+    expect(note.textContent).toMatch(/ask a 1Password owner or administrator/i);
+    expect(note.textContent).toMatch(/no Valet setting changes that/i);
+    expect(note.textContent).toMatch(/send the token to you with a 1Password share link, not in Slack or a chat/i);
+    expect(note.textContent).toMatch(/keep the token outside every vault the service account can read/i);
+    expect(note.textContent).toMatch(/an agent can read its own token/i);
+  });
+
   it("shows the connected state with Replace and Remove", () => {
     onePasswordSettings = { orgTokenConnected: true, personalTokenConnected: true };
     render(<ConnectedAccountsPage />);
