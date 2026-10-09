@@ -16,6 +16,7 @@ import type {
   ResourceRequirements,
   SandboxContainer,
   SandboxCR,
+  SandboxPodTemplate,
   SandboxResourceOpts,
   Volume,
 } from "./types.js";
@@ -45,17 +46,100 @@ const FULL_PROFILE_COMMAND = [
 /** The bare, non-terminating placeholder command — no profile, no docker. */
 const BARE_PLACEHOLDER_COMMAND = ["sh", "-c", "tail -f /dev/null"];
 
+/** Creates the scratch directories. Both are sticky and world-writable, so
+ * the `dockerd` workload user can write job logs and temp files there. */
+const SCRATCH_DIRS_SCRIPT = "mkdir -p /scratch/tmp /scratch/valet-jobs && chmod 1777 /scratch/tmp /scratch/valet-jobs";
+
 /** Bootstraps `/scratch` on a plain headless pod (no docker, no full
  * profile) when `resources.scratch` is set. `start-full.sh` and
  * `start-headless.sh` already create `/scratch/tmp` and
  * `/scratch/valet-jobs` and symlink `/tmp/valet-jobs`; a bare placeholder
- * pod runs no start script, so without this TMPDIR points at a directory
- * that never exists. */
+ * pod runs no start script, so it links `/tmp/valet-jobs` here. The
+ * scratch init container also creates the directories; this repeats it. */
 export const SCRATCH_PLACEHOLDER_COMMAND = [
   "sh",
   "-c",
-  "mkdir -p /scratch/tmp /scratch/valet-jobs && chmod 1777 /scratch/tmp && ln -sfn /scratch/valet-jobs /tmp/valet-jobs; exec tail -f /dev/null",
+  `${SCRATCH_DIRS_SCRIPT} && ln -sfn /scratch/valet-jobs /tmp/valet-jobs; exec tail -f /dev/null`,
 ];
+
+export const SCRATCH_INIT_NAME = "valet-scratch-init";
+
+/** Creates `/scratch/tmp` and `/scratch/valet-jobs` before the workload
+ * starts, whatever the image. Old bakes, images without the new start
+ * scripts, and pods that degrade to `tail -f` still get a valid TMPDIR. */
+export function scratchInitContainer(image: string): SandboxContainer {
+  return {
+    name: SCRATCH_INIT_NAME,
+    image,
+    command: ["sh", "-c", SCRATCH_DIRS_SCRIPT],
+    volumeMounts: [{ name: SCRATCH_VOLUME_NAME, mountPath: SCRATCH_MOUNT_PATH }],
+  };
+}
+
+const SCRATCH_TMPDIR = "/scratch/tmp";
+
+/**
+ * Sets a template's scratch state to `scratch` (undefined removes it): the
+ * emptyDir, the sandbox container's mount and TMPDIR, the init container,
+ * the plain-headless placeholder command, and the container's
+ * ephemeral-storage values (`ephemeral`, copied verbatim). Adoption uses it
+ * to keep the live pod's scratch when the preserve mask names scratch.
+ */
+export function withScratchState(
+  template: SandboxPodTemplate,
+  scratch: string | undefined,
+  ephemeral: { request?: string; limit?: string },
+): SandboxPodTemplate {
+  const bare = withHomeLinks([...BARE_PLACEHOLDER_COMMAND]);
+  const placeholder = withHomeLinks([...SCRATCH_PLACEHOLDER_COMMAND]);
+  const containers = template.spec.containers.map((container) => {
+    if (container.name !== SANDBOX_CONTAINER_NAME) return container;
+    const volumeMounts = (container.volumeMounts ?? []).filter((mount) => mount.name !== SCRATCH_VOLUME_NAME);
+    const env = (container.env ?? []).filter((entry) => !(entry.name === "TMPDIR" && entry.value === SCRATCH_TMPDIR));
+    if (scratch !== undefined) {
+      volumeMounts.push({ name: SCRATCH_VOLUME_NAME, mountPath: SCRATCH_MOUNT_PATH });
+      env.push({ name: "TMPDIR", value: SCRATCH_TMPDIR });
+    }
+    let command = container.command;
+    if (scratch !== undefined && commandEquals(command, bare)) command = placeholder;
+    if (scratch === undefined && commandEquals(command, placeholder)) command = bare;
+    const requests: ResourceList = { ...container.resources?.requests };
+    const limits: ResourceList = { ...container.resources?.limits };
+    delete requests["ephemeral-storage"];
+    delete limits["ephemeral-storage"];
+    if (ephemeral.request !== undefined) requests["ephemeral-storage"] = ephemeral.request;
+    if (ephemeral.limit !== undefined) limits["ephemeral-storage"] = ephemeral.limit;
+    const resources: ResourceRequirements = {
+      ...(Object.keys(requests).length > 0 ? { requests } : {}),
+      ...(Object.keys(limits).length > 0 ? { limits } : {}),
+    };
+    const { resources: _previousResources, ...rest } = container;
+    return {
+      ...rest,
+      ...(command !== undefined ? { command } : {}),
+      ...(Object.keys(resources).length > 0 ? { resources } : {}),
+      ...(volumeMounts.length > 0 ? { volumeMounts } : {}),
+      ...(env.length > 0 ? { env } : {}),
+    };
+  });
+  const initContainers = (template.spec.initContainers ?? []).filter((c) => c.name !== SCRATCH_INIT_NAME);
+  const volumes = (template.spec.volumes ?? []).filter((volume) => volume.name !== SCRATCH_VOLUME_NAME);
+  const sandboxImage = containers.find((c) => c.name === SANDBOX_CONTAINER_NAME)?.image;
+  if (scratch !== undefined) {
+    if (sandboxImage !== undefined) initContainers.push(scratchInitContainer(sandboxImage));
+    volumes.push({ name: SCRATCH_VOLUME_NAME, emptyDir: { sizeLimit: scratch } });
+  }
+  const { initContainers: _init, volumes: _volumes, ...spec } = template.spec;
+  return {
+    ...template,
+    spec: {
+      ...spec,
+      containers,
+      ...(initContainers.length > 0 ? { initContainers } : {}),
+      ...(volumes.length > 0 ? { volumes } : {}),
+    },
+  };
+}
 
 export const WORKSPACE_VOLUME_NAME = "workspace";
 export const WORKSPACE_MOUNT_PATH = "/workspace";
@@ -370,7 +454,7 @@ export function buildSandboxManifest(
       ...(container.volumeMounts ?? []),
       { name: SCRATCH_VOLUME_NAME, mountPath: SCRATCH_MOUNT_PATH },
     ];
-    container.env = [...(container.env ?? []), { name: "TMPDIR", value: "/scratch/tmp" }];
+    container.env = [...(container.env ?? []), { name: "TMPDIR", value: SCRATCH_TMPDIR }];
   }
 
   const isFullProfile = opts.profile === "full";
@@ -490,7 +574,7 @@ export function buildSandboxManifest(
   container.command = withHomeLinks(container.command ?? [...BARE_PLACEHOLDER_COMMAND]);
   container.volumeMounts = [...persistentHomeMounts(), ...(container.volumeMounts ?? [])];
   const podSpec: SandboxCR["spec"]["podTemplate"]["spec"] = {
-    initContainers: [homeInitContainer(image)],
+    initContainers: [homeInitContainer(image), ...(resourceOpts?.scratch ? [scratchInitContainer(image)] : [])],
     containers: [container, ...(browserContainer ? [browserContainer] : [])],
     ...(companion ? { automountServiceAccountToken: false } : {}),
     restartPolicy: "Always",

@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { SandboxCreateOpts } from "@valet/engine";
 import {
@@ -13,6 +16,7 @@ import {
   SANDBOX_CR_API_VERSION,
   SANDBOX_POD_LABEL_KEY,
   SCRATCH_MOUNT_PATH,
+  SCRATCH_INIT_NAME,
   SCRATCH_PLACEHOLDER_COMMAND,
   SCRATCH_VOLUME_NAME,
   buildSandboxManifest,
@@ -26,6 +30,8 @@ import {
 } from "../src/index.js";
 import type { K8sProviderConfig } from "../src/index.js";
 import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 const RFC1123_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
 
@@ -395,6 +401,34 @@ describe("buildSandboxManifest", () => {
         "-c",
         "[ -f /start-headless.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-headless.sh || exec /bin/bash /start-headless.sh; } || exec tail -f /dev/null",
       ]);
+    });
+
+    it.each([
+      { name: "plain headless", opts: {} },
+      { name: "full profile", opts: { profile: "full" as const } },
+      { name: "docker", opts: { docker: true } },
+    ])("bootstraps the scratch dirs in an init container on a $name pod (H12)", ({ opts }) => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { ...opts, resources: { scratch: "100Gi" } });
+      const inits = manifest.spec.podTemplate.spec.initContainers ?? [];
+      expect(inits.map((c) => c.name)).toEqual(["valet-home-init", SCRATCH_INIT_NAME]);
+      const init = inits.find((c) => c.name === SCRATCH_INIT_NAME);
+      expect(init?.image).toBe(baseConfig.defaultImage);
+      expect(init?.volumeMounts).toEqual([{ name: SCRATCH_VOLUME_NAME, mountPath: SCRATCH_MOUNT_PATH }]);
+      expect(init?.command?.[2]).toContain("mkdir -p /scratch/tmp /scratch/valet-jobs");
+      expect(init?.command?.[2]).toContain("chmod 1777 /scratch/tmp /scratch/valet-jobs");
+    });
+
+    it("adds no scratch init container without scratch", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
+      expect((manifest.spec.podTemplate.spec.initContainers ?? []).map((c) => c.name)).toEqual(["valet-home-init"]);
+    });
+
+    it("makes /scratch/valet-jobs writable by the workload user in every bootstrap (B6)", () => {
+      expect(SCRATCH_PLACEHOLDER_COMMAND[2]).toContain("chmod 1777 /scratch/tmp /scratch/valet-jobs");
+      for (const script of ["start-headless.sh", "start-full.sh"]) {
+        const text = readFileSync(join(REPO_ROOT, "docker", script), "utf8");
+        expect(text, script).toContain("chmod 1777 /scratch/tmp /scratch/valet-jobs");
+      }
     });
 
     it("keeps the bare placeholder command when scratch is absent", () => {

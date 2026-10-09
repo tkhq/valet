@@ -16,8 +16,10 @@ import {
   mapConditionsToStatus,
   parseSandboxCRRead,
   podStatusApiAdapter,
+  podTemplateResourceFingerprint,
   resolvePodName,
   resourceFingerprint,
+  sandboxCpuMemoryResources,
   sandboxStatus,
   setOperatingMode,
   resumeWithPersistentHomes,
@@ -763,6 +765,130 @@ describe("applySandbox", () => {
     await expect(applySandbox(api, cfg, manifest)).rejects.toThrow(/internal error/);
   });
 });
+
+describe("resourceFingerprint back-compat (fix wave 2, B4)", () => {
+  // Pinned from the pre-scratch logic at af3863503. A CR without scratch
+  // must keep its hash byte for byte, or every pod rolls on upgrade.
+  it("keeps the pre-scratch hash when scratch is absent", () => {
+    expect(resourceFingerprint({})).toBe("6cd8cec706fa11110d83fb46f97df1f9be43b4c570f3390e7c7f6a5173f595e6");
+    expect(resourceFingerprint({ requests: { cpu: "2", memory: "4Gi" }, limits: { cpu: "4", memory: "8Gi" } }))
+      .toBe("a1603f93418807f47e8b2740d242a5ed92ccf32b184384b6514de99117f23e3a");
+  });
+
+  it("changes the hash when scratch is set or resized", () => {
+    expect(resourceFingerprint({ scratch: "100Gi" })).not.toBe(resourceFingerprint({}));
+    expect(resourceFingerprint({ scratch: "100Gi" })).not.toBe(resourceFingerprint({ scratch: "200Gi" }));
+    expect(resourceFingerprint({ scratch: "1Ti" })).toBe(resourceFingerprint({ scratch: "1024Gi" }));
+  });
+});
+
+describe("applySandbox scratch preservation (fix wave 2, B3)", () => {
+  const ALL_FIELDS = ["cpu", "memory", "scratch"] as const;
+  const scratchCfg: K8sProviderConfig = {
+    ...cfg, defaultResources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "30Gi" },
+  };
+
+  it.each([{ fields: ALL_FIELDS }, { fields: ["scratch", "memory", "cpu"] as const }])("a no-opinion adopt $fields keeps the old fingerprint", async ({ fields }) => {
+    const api = new FakeCustomObjectsApi();
+    const live = buildSandboxManifest(cfg, "sess-adopt", { resources: { cpu: 2, memory: "4Gi" } });
+    const seeded = toCRRead(live);
+    const liveTemplate = structuredClone(live.spec.podTemplate);
+    liveTemplate.metadata = { ...liveTemplate.metadata, annotations: { "valet.dev/resource-fingerprint": "live-generation" } };
+    seeded.spec = { ...seeded.spec, podTemplate: liveTemplate };
+    api.seed(seeded);
+    const incoming = buildSandboxManifest(cfg, "sess-adopt", { resources: { cpu: 4, memory: "8Gi" } });
+
+    const result = await applySandbox(api, cfg, incoming, { preserveResourceFieldsOnAdopt: fields });
+
+    const template = api.get("sess-adopt")?.spec.podTemplate;
+    expect(podTemplateResourceFingerprint(template)).toBe("live-generation");
+    const container = sandboxCpuMemoryResources(template);
+    expect(container.requests).toEqual({ cpu: "2", memory: "4Gi" });
+    expect(result.adopted).toBe(true);
+  });
+
+  it("a legacy no-opinion adopt stays fingerprint-free (no migration roll)", async () => {
+    const api = new FakeCustomObjectsApi();
+    api.seed(toCRRead(buildSandboxManifest(cfg, "sess-legacy", {})));
+    const incoming = buildSandboxManifest(cfg, "sess-legacy", { resources: { cpu: 4 } });
+
+    await applySandbox(api, cfg, incoming, { preserveResourceFieldsOnAdopt: ALL_FIELDS });
+
+    expect(podTemplateResourceFingerprint(api.get("sess-legacy")?.spec.podTemplate)).toBeUndefined();
+  });
+
+  it("an adopt after a YAML read failure keeps the live scratch volume, mount, TMPDIR, and sums", async () => {
+    const api = new FakeCustomObjectsApi();
+    const live = buildSandboxManifest(scratchCfg, "sess-scratch", { resources: { scratch: "800Gi" } });
+    api.seed(toCRRead(live));
+    // The repository read failed: the incoming manifest has no scratch.
+    const incoming = buildSandboxManifest(scratchCfg, "sess-scratch", {});
+
+    await applySandbox(api, scratchCfg, incoming, { preserveResourceFieldsOnAdopt: ALL_FIELDS });
+
+    const stored = api.get("sess-scratch")?.spec.podTemplate;
+    expect(sandboxCpuMemoryResources(stored).scratch).toBe("800Gi");
+    const liveSpec = live.spec.podTemplate.spec;
+    expect(JSON.stringify(stored)).toContain('{"name":"scratch","emptyDir":{"sizeLimit":"800Gi"}}');
+    const storedContainer = parseContainer(stored);
+    const liveContainer = liveSpec.containers.find((c) => c.name === SANDBOX_CONTAINER_NAME);
+    expect(storedContainer.volumeMounts).toEqual(liveContainer?.volumeMounts);
+    expect(storedContainer.env).toContainEqual({ name: "TMPDIR", value: "/scratch/tmp" });
+    expect(storedContainer.resources).toEqual(liveContainer?.resources);
+    expect(storedContainer.command).toEqual(liveContainer?.command);
+    expect(parseInitNames(stored)).toEqual(liveSpec.initContainers?.map((c) => c.name));
+  });
+
+  it("a no-opinion adopt does not add scratch the live pod lacks", async () => {
+    const api = new FakeCustomObjectsApi();
+    const live = buildSandboxManifest(scratchCfg, "sess-none", {});
+    api.seed(toCRRead(live));
+    const incoming = buildSandboxManifest(scratchCfg, "sess-none", { resources: { scratch: "100Gi" } });
+
+    await applySandbox(api, scratchCfg, incoming, { preserveResourceFieldsOnAdopt: ALL_FIELDS });
+
+    const stored = api.get("sess-none")?.spec.podTemplate;
+    expect(JSON.stringify(stored)).not.toContain("scratch");
+    expect(parseContainer(stored).resources).toEqual(
+      live.spec.podTemplate.spec.containers.find((c) => c.name === SANDBOX_CONTAINER_NAME)?.resources,
+    );
+  });
+
+  it("an authoritative scratch with preserved cpu/memory applies the incoming scratch and a new fingerprint", async () => {
+    const api = new FakeCustomObjectsApi();
+    api.seed(toCRRead(buildSandboxManifest(scratchCfg, "sess-auth", { resources: { cpu: 2 } })));
+    const incoming = buildSandboxManifest(scratchCfg, "sess-auth", { resources: { cpu: 4, scratch: "200Gi" } });
+
+    await applySandbox(api, scratchCfg, incoming, { preserveResourceFieldsOnAdopt: ["cpu", "memory"] });
+
+    const stored = api.get("sess-auth")?.spec.podTemplate;
+    expect(sandboxCpuMemoryResources(stored)).toEqual({ requests: { cpu: "2" }, limits: { cpu: "2" }, scratch: "200Gi" });
+    expect(podTemplateResourceFingerprint(stored)).toBe(resourceFingerprint({ requests: { cpu: "2" }, limits: { cpu: "2" }, scratch: "200Gi" }));
+  });
+});
+
+/** The sandbox container of a stored template, narrowed for assertions. */
+function parseContainer(template: unknown): { volumeMounts?: unknown; env?: unknown[]; resources?: unknown; command?: unknown } {
+  if (typeof template !== "object" || template === null || !("spec" in template)) throw new Error("no spec");
+  const spec = template.spec;
+  if (typeof spec !== "object" || spec === null || !("containers" in spec) || !Array.isArray(spec.containers)) throw new Error("no containers");
+  const found: unknown = spec.containers.find((c: unknown) => typeof c === "object" && c !== null && "name" in c && c.name === SANDBOX_CONTAINER_NAME);
+  if (typeof found !== "object" || found === null) throw new Error("no sandbox container");
+  return {
+    volumeMounts: "volumeMounts" in found ? found.volumeMounts : undefined,
+    env: "env" in found && Array.isArray(found.env) ? found.env : undefined,
+    resources: "resources" in found ? found.resources : undefined,
+    command: "command" in found ? found.command : undefined,
+  };
+}
+
+/** Init container names of a stored template, in order. */
+function parseInitNames(template: unknown): string[] | undefined {
+  if (typeof template !== "object" || template === null || !("spec" in template)) return undefined;
+  const spec = template.spec;
+  if (typeof spec !== "object" || spec === null || !("initContainers" in spec) || !Array.isArray(spec.initContainers)) return undefined;
+  return spec.initContainers.map((c: unknown) => (typeof c === "object" && c !== null && "name" in c ? String(c.name) : ""));
+}
 
 describe("getSandbox", () => {
   it("returns null for an absent CR (never throws for the 404 case)", async () => {

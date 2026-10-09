@@ -110,6 +110,7 @@ import {
   SANDBOX_CONTAINER_NAME,
   SCRATCH_VOLUME_NAME,
   SESSION_ANNOTATION_KEY,
+  withScratchState,
 } from "./manifest.js";
 import type {
   K8sProviderConfig,
@@ -195,12 +196,14 @@ function withResourceFingerprint(
  * Also covers `scratch` (absent vs present counts as a change): the
  * scratch emptyDir is node-local disk the same way cpu/memory are node
  * compute, so a scratch-only change must roll the pod exactly like a
- * cpu/memory change does. */
+ * cpu/memory change does. The scratch slot is appended only when scratch
+ * is set, so a scratch-less spec keeps its pre-scratch hash byte for byte
+ * and an upgrade does not roll every pod. */
 export function resourceFingerprint(resources: SandboxCpuMemoryResources): string {
   const values: (string | null)[] = (["requests", "limits"] as const).flatMap((side) =>
     (["cpu", "memory"] as const).map((field) => normalizeQuantity(resources[side]?.[field]) ?? null),
   );
-  values.push(normalizeQuantity(resources.scratch) ?? null);
+  if (resources.scratch !== undefined) values.push(normalizeQuantity(resources.scratch) ?? null);
   return createHash("sha256").update(JSON.stringify(values)).digest("hex");
 }
 
@@ -578,6 +581,48 @@ export function sandboxCpuMemoryResources(template: unknown): SandboxCpuMemoryRe
   return result;
 }
 
+/** Every engine resource field. The `Record` key type makes the compiler
+ * reject a new `SandboxResourceField` until it is listed here. */
+const RESOURCE_FIELD_SET: Record<SandboxResourceField, true> = { cpu: true, memory: true, scratch: true };
+const ALL_RESOURCE_FIELDS: readonly SandboxResourceField[] = ["cpu", "memory", "scratch"];
+
+/** True when the preserve mask names every resource field, in any order. */
+export function preservesEveryResourceField(fields: readonly SandboxResourceField[]): boolean {
+  const named = new Set<string>(fields);
+  return Object.keys(RESOURCE_FIELD_SET).every((field) => named.has(field));
+}
+
+/** The live sandbox container's ephemeral-storage request and limit. */
+function ephemeralStorageOf(template: unknown): { request?: string; limit?: string } {
+  if (!isRecord(template) || !isRecord(template.spec) || !Array.isArray(template.spec.containers)) return {};
+  const container: unknown = template.spec.containers.find(
+    (value: unknown) => isRecord(value) && value.name === SANDBOX_CONTAINER_NAME,
+  );
+  if (!isRecord(container) || !isRecord(container.resources)) return {};
+  const read = (side: unknown): string | undefined =>
+    isRecord(side) && typeof side["ephemeral-storage"] === "string" ? side["ephemeral-storage"] : undefined;
+  const request = read(container.resources.requests);
+  const limit = read(container.resources.limits);
+  return { ...(request !== undefined ? { request } : {}), ...(limit !== undefined ? { limit } : {}) };
+}
+
+/** Copy the preserved fields from the live template into the incoming one.
+ * cpu/memory come from the container's requests/limits. scratch is the
+ * emptyDir, its mount, TMPDIR, the init container, and the ephemeral sums
+ * that include it. Incoming storage applies when scratch does not change. */
+function preserveResources(
+  template: SandboxCR["spec"]["podTemplate"],
+  previousTemplate: unknown,
+  previous: SandboxCpuMemoryResources,
+  fields: readonly SandboxResourceField[],
+): SandboxCR["spec"]["podTemplate"] {
+  const withCpuMemory = preserveCpuMemory(template, previous, fields);
+  if (!fields.includes("scratch")) return withCpuMemory;
+  const incomingScratch = sandboxCpuMemoryResources(template).scratch;
+  if (normalizeQuantity(incomingScratch) === normalizeQuantity(previous.scratch)) return withCpuMemory;
+  return withScratchState(withCpuMemory, previous.scratch, ephemeralStorageOf(previousTemplate));
+}
+
 /** Copy prior CPU/memory into a new template while keeping incoming storage. */
 function preserveCpuMemory(
   template: SandboxCR["spec"]["podTemplate"],
@@ -595,8 +640,8 @@ function preserveCpuMemory(
           limits?: { cpu?: string | number; memory?: string | number; "ephemeral-storage"?: string };
         } = { ...container.resources };
         // Only cpu/memory live on the container's resources.requests/limits.
-        // "scratch" is a node-local emptyDir volume, handled elsewhere in the
-        // pod template, so it never applies to this preservation step.
+        // "scratch" is a node-local emptyDir volume; `preserveResources`
+        // handles it with `withScratchState`.
         const cpuMemoryFields = fields.filter((field): field is "cpu" | "memory" => field !== "scratch");
         for (const side of ["requests", "limits"] as const) {
           const values: NonNullable<typeof resources.requests> = { ...resources[side] };
@@ -695,7 +740,7 @@ export async function applySandbox(
   // Migrate before the CR update can start replacement. Once stored, the
   // record survives pod deletion and a crash before create() returns.
   const preserveResourceFields = opts.preserveResourceFieldsOnAdopt ??
-    (opts.preserveResourcesOnAdopt ? (["cpu", "memory"] as const) : []);
+    (opts.preserveResourcesOnAdopt ? ALL_RESOURCE_FIELDS : []);
   const previousResourceOverrides = preserveResourceFields.length > 0
     ? readResourceOverridesAnnotation(existing) ?? await opts.readResourceOverrides?.() ?? null
     : undefined;
@@ -743,10 +788,13 @@ export async function applySandbox(
       : { ...manifest.spec, podTemplate: requestedTemplate };
   if (preserveResourceFields.length > 0) {
     const previousResources = sandboxCpuMemoryResources(existing.spec.podTemplate);
-    // Legacy no-opinion adoption keeps fingerprint absence. Only an
-    // authoritative opinion can start the one-time fingerprint migration roll.
-    const preservedTemplate = preserveCpuMemory(manifest.spec.podTemplate, previousResources, preserveResourceFields);
-    const resourceFingerprintValue = preserveResourceFields.length === 2
+    const preservedTemplate = preserveResources(
+      manifest.spec.podTemplate, existing.spec.podTemplate, previousResources, preserveResourceFields,
+    );
+    // A no-opinion adopt (every field preserved) keeps the live generation,
+    // including fingerprint absence on a legacy CR. Only an authoritative
+    // opinion can start the one-time fingerprint migration roll.
+    const resourceFingerprintValue = preservesEveryResourceField(preserveResourceFields)
       ? podTemplateResourceFingerprint(existing.spec.podTemplate)
       : resourceFingerprint(sandboxCpuMemoryResources(preservedTemplate));
     const template = withImageFingerprint(
