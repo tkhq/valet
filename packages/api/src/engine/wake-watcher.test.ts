@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { InMemorySessionStore, SandboxUnavailableError } from "@valet/engine";
+import { InMemorySessionStore, recordWakeupEnded, SandboxUnavailableError } from "@valet/engine";
 import type { ExecResult, JobPoll, Lease, PromptContent, PromptOptions, Sandbox, Wakeup } from "@valet/engine";
+vi.mock("@valet/engine", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@valet/engine")>();
+  return { ...actual, recordWakeupEnded: vi.fn() };
+});
+
 import { WakeWatcher, type WakeWatcherDeps, type WakeWatcherSession } from "./wake-watcher.js";
 
 const NOW = 1_700_000_000_000;
@@ -32,6 +37,7 @@ function fakeSandbox(id: string, pollJob: PollScript, cancelJob = vi.fn(async (_
 
 interface Harness {
   store: InMemorySessionStore;
+  threads: Set<string>;
   prompt: ReturnType<typeof vi.fn<(content: PromptContent, opts: PromptOptions) => Promise<unknown>>>;
   restore: ReturnType<typeof vi.fn<(id: string) => Promise<Sandbox>>>;
   setEvictionProtection: ReturnType<typeof vi.fn<(id: string, enabled: boolean) => Promise<{ changed: boolean }>>>;
@@ -48,7 +54,12 @@ function harness(poll: PollScript = async () => ({ status: "running", output: ""
   const restore = vi.fn(async (id: string) => fakeSandbox(id, poll, cancelJob));
   const setEvictionProtection = vi.fn(async (_id: string, _enabled: boolean) => ({ changed: false }));
   const listEvictionProtected = vi.fn(async (): Promise<string[]> => []);
-  const session: WakeWatcherSession = { prompt, attachment: { current: () => null } };
+  const threads = new Set(["thread-1"]);
+  const session: WakeWatcherSession = {
+    prompt,
+    threadById: (id) => (threads.has(id) ? { id } : null),
+    attachment: { current: () => null },
+  };
   const sessionFor = vi.fn(async (_sessionId: string) => session);
   const deps: WakeWatcherDeps = {
     engineStore: store,
@@ -60,6 +71,7 @@ function harness(poll: PollScript = async () => ({ status: "running", output: ""
   };
   return {
     store,
+    threads,
     prompt,
     restore,
     setEvictionProtection,
@@ -297,19 +309,17 @@ describe("WakeWatcher", () => {
     error.mockRestore();
   });
 
-  it("retries delivery on the main thread when the wakeup's thread is gone", async () => {
+  it("delivers on the main thread when the wakeup's thread is gone", async () => {
     const h = harness();
-    h.prompt.mockImplementationOnce(async () => {
-      throw new Error("prompt: thread thread-1 not found in session sess-1");
-    });
+    h.threads.clear();
     await h.store.createWakeup(
       wakeup({ kind: "timer", status: "pending", prompt: "ping", fireAt: NOW - 1, execId: undefined, leaseId: undefined }),
     );
 
     await h.watcher().sweep();
 
-    expect(h.prompt).toHaveBeenCalledTimes(2);
-    const { opts } = signalOf(h.prompt.mock.calls[1]);
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    const { opts } = signalOf(h.prompt.mock.calls[0]);
     expect(opts).toEqual({ dispatchId: "wakeup:wk_a:terminal", queueMode: "followup" });
   });
 
@@ -377,7 +387,7 @@ describe("WakeWatcher", () => {
     const h = harness();
     const live = fakeSandbox("sb-1", async () => ({ status: "done", exitCode: 2, output: "", nextOffset: 0 }));
     const prompt = vi.fn(async (_content: PromptContent, _opts: PromptOptions): Promise<unknown> => ({}));
-    const liveSession: WakeWatcherSession = { prompt, attachment: { current: () => live } };
+    const liveSession: WakeWatcherSession = { prompt, threadById: (id) => ({ id }), attachment: { current: () => live } };
     await seedProcess(h.store);
     const watcher = new WakeWatcher({
       engineStore: h.store,
@@ -394,6 +404,44 @@ describe("WakeWatcher", () => {
     expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "done", exitCode: 2 });
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(h.prompt).not.toHaveBeenCalled();
+  });
+
+  it("restores the lease's sandbox when the live session holds a different one", async () => {
+    const h = harness(async () => ({ status: "done", exitCode: 0, output: "", nextOffset: 0 }));
+    const other = fakeSandbox("sb-other", async () => ({ status: "running", output: "", nextOffset: 0 }));
+    const prompt = vi.fn(async (_content: PromptContent, _opts: PromptOptions): Promise<unknown> => ({}));
+    const liveSession: WakeWatcherSession = { prompt, threadById: (id) => ({ id }), attachment: { current: () => other } };
+    await seedProcess(h.store);
+    const watcher = new WakeWatcher({
+      engineStore: h.store,
+      engineHost: { sessionFor: h.sessionFor, liveSession: () => liveSession },
+      loadSession: async (id) => h.sessionFor(id),
+      provider: { restore: h.restore },
+      limits: LIMITS,
+      now: () => NOW,
+    });
+
+    await watcher.sweep();
+
+    expect(h.restore).toHaveBeenCalledWith("sb-1");
+    expect(other.pollJob).not.toHaveBeenCalled();
+    expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "done", exitCode: 0 });
+  });
+
+  it("delivers and records the end when the lease release throws after the CAS", async () => {
+    const h = harness(async () => ({ status: "done", exitCode: 0, output: "", nextOffset: 0 }));
+    await seedProcess(h.store);
+    vi.spyOn(h.store, "releaseLease").mockRejectedValueOnce(new Error("db blip"));
+    vi.mocked(recordWakeupEnded).mockClear();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(h.watcher().sweep()).resolves.toBeUndefined();
+
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    expect(recordWakeupEnded).toHaveBeenCalledWith("process", "exit");
+    expect(error.mock.calls.some((c) => String(c[0]).includes("lease ls_a release failed after wakeup wk_a moved to done"))).toBe(true);
+    expect(error.mock.calls.some((c) => String(c[0]).includes("stays due"))).toBe(false);
+    error.mockRestore();
   });
 
   it("protects a leased sandbox and unprotects it after the lease releases", async () => {

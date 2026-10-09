@@ -651,7 +651,23 @@ Implementation gaps become errata to this file in the same PR.
   after the CAS. If the submit throws, the watcher logs the error with the
   wakeup id and does not retry. The row already moved, so the signal is
   lost. The log line is the only record. `valet.wakeups.total` keeps its
-  closed cause set and has no `delivery_failed` cause.
+  closed cause set and has no `delivery_failed` cause. A failed
+  `lease.expired` delivery is also logged and not retried.
+- **B5, kill before CAS.** B5 lists the CAS first. The watcher runs the
+  best-effort kill (`cancelJob`) before the CAS, so a lost CAS can still
+  kill a process. The kill is a no-op on a process that already ended.
+- **B5, lease release failure.** If `releaseLease` throws after the CAS,
+  the watcher logs the error, then still delivers the signals and records
+  `valet.wakeups.total`. The lease stays active and
+  `valet_leases_over_deadline` pages after its deadline.
+- **B5, restart durability on docker.** Durable wakeups survive an api
+  restart only on kubernetes. The docker provider (the `make dev-local`
+  default) keeps job state in memory on each sandbox handle. After a
+  restart, or for a session that is not cached, `restore()` returns a new
+  handle with no job state. Every running `process` or `watch` wakeup then
+  ends `lost` with `cause=pid_missing`. A slow tick can also see
+  `pid_missing` after docker evicts a finished job. The kubernetes path is
+  not affected, because its job state lives in the pod.
 - **B5, probe failures.** An exec error that is not
   `SandboxUnavailableError`, `SandboxSupersededError`, or the kubernetes
   pod-gone error leaves the row unchanged for the next tick. A row whose

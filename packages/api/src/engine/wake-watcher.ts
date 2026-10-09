@@ -44,6 +44,8 @@ const POD_GONE = /No such container|backing pod was recreated or removed/;
 /** The slice of an engine `Session` the watcher uses. */
 export interface WakeWatcherSession {
   prompt(content: PromptContent, opts: PromptOptions): Promise<unknown>;
+  /** The loaded thread with this id, or null when the session has none. */
+  threadById(id: string): object | null;
   attachment: { current(): Sandbox | null };
 }
 
@@ -108,17 +110,22 @@ export class WakeWatcher {
       recordWakeupsActive(kind, rows.filter((r) => r.kind === kind).length);
     }
     for (const row of rows) {
+      const progress = { pastCas: false };
       try {
-        await this.processRow(now, row);
+        await this.processRow(now, row, progress);
       } catch (err) {
-        console.error(`WakeWatcher: wakeup ${row.id} failed this tick; it stays due for the next tick:`, err);
+        if (progress.pastCas) {
+          console.error(`WakeWatcher: wakeup ${row.id} failed after its transition was stored:`, err);
+        } else {
+          console.error(`WakeWatcher: wakeup ${row.id} failed this tick; it stays due for the next tick:`, err);
+        }
       }
     }
     await this.expireHolds(now);
     await this.reconcileLeases(now);
   }
 
-  private async processRow(now: number, row: Wakeup): Promise<void> {
+  private async processRow(now: number, row: Wakeup, progress: { pastCas: boolean }): Promise<void> {
     let sandbox: Sandbox | null = null;
     let probe: WakeupProbe;
     if (row.kind === "timer") {
@@ -169,9 +176,18 @@ export class WakeWatcher {
     const updated = await this.deps.engineStore.transitionWakeup(row.id, [row.status], decision.to, decision.patch, now);
     // Null means another sweep or wakeup_cancel won the CAS (INV-5).
     if (!updated) return;
+    progress.pastCas = true;
 
     if (decision.releaseLease && updated.leaseId) {
-      await this.deps.engineStore.releaseLease(updated.leaseId, decision.releaseLease, now);
+      try {
+        await this.deps.engineStore.releaseLease(updated.leaseId, decision.releaseLease, now);
+      } catch (err) {
+        // The row already moved, so delivery and the metric still run.
+        console.error(
+          `WakeWatcher: lease ${updated.leaseId} release failed after wakeup ${row.id} moved to ${decision.to}; valet_leases_over_deadline will page:`,
+          err,
+        );
+      }
     }
 
     for (const signal of decision.signals) {
@@ -190,22 +206,23 @@ export class WakeWatcher {
   }
 
   /**
-   * The live session's ready sandbox, else a restored handle for the lease's
-   * sandbox id. Neither path wakes or provisions a sandbox.
+   * The sandbox the wakeup's lease names: the live session's ready handle
+   * when it is that sandbox, else a restored handle. Neither path wakes or
+   * provisions a sandbox.
    */
   private async sandboxFor(row: Wakeup): Promise<Sandbox | null> {
-    const live = this.deps.engineHost.liveSession(row.sessionId)?.attachment.current();
-    if (live) return live;
     if (row.leaseId === undefined) return null;
     const leases = await this.deps.engineStore.listActiveLeases(row.sessionId);
     const sandboxId = leases.find((l) => l.id === row.leaseId)?.sandboxId;
     if (sandboxId === undefined) return null;
+    const live = this.deps.engineHost.liveSession(row.sessionId)?.attachment.current();
+    if (live && live.id === sandboxId) return live;
     return this.deps.provider.restore(sandboxId);
   }
 
   /**
-   * Submits one signal. Targets `threadId` when given; when that thread is
-   * gone, retries on the session's main thread (spec B5).
+   * Submits one signal. Targets `threadId` when the session has that thread;
+   * otherwise targets the session's main thread (spec B5).
    */
   private async deliver(sessionId: string, threadId: string | undefined, draft: SignalDraft): Promise<void> {
     const session = this.deps.engineHost.liveSession(sessionId) ?? (await this.loadSession(sessionId));
@@ -217,16 +234,11 @@ export class WakeWatcher {
       tagName: "wakeup",
     };
     const base: PromptOptions = { dispatchId: draft.dispatchId, queueMode: "followup" };
-    if (threadId === undefined) {
+    if (threadId === undefined || !session.threadById(threadId)) {
       await session.prompt(content, base);
       return;
     }
-    try {
-      await session.prompt(content, { threadId, ...base });
-    } catch (err) {
-      if (!isThreadNotFound(err, threadId)) throw err;
-      await session.prompt(content, base);
-    }
+    await session.prompt(content, { threadId, ...base });
   }
 
   /** Releases hold leases at their deadline and emits `lease.expired` (spec C2, C6). */
@@ -234,12 +246,19 @@ export class WakeWatcher {
     const leases = await this.deps.engineStore.listAllActiveLeases();
     for (const lease of leases) {
       if (lease.ownerKind !== "hold" || lease.deadlineAt > now) continue;
+      let released: Lease | null;
       try {
-        const released = await this.deps.engineStore.releaseLease(lease.id, "deadline", now);
-        if (!released) continue;
+        released = await this.deps.engineStore.releaseLease(lease.id, "deadline", now);
+      } catch (err) {
+        console.error(`WakeWatcher: release of hold lease ${lease.id} failed; it stays due for the next tick:`, err);
+        continue;
+      }
+      if (!released) continue;
+      try {
         await this.deliver(lease.sessionId, undefined, holdExpiredSignal(lease));
       } catch (err) {
-        console.error(`WakeWatcher: expiry of hold lease ${lease.id} failed:`, err);
+        // The lease is already released, so this signal is lost (spec Deviations).
+        console.error(`WakeWatcher: delivery of lease.expired for lease ${lease.id} failed; the signal is lost:`, err);
       }
     }
   }
@@ -311,11 +330,6 @@ function holdExpiredSignal(lease: Lease): SignalDraft {
 function isUnavailable(err: unknown): boolean {
   if (err instanceof SandboxUnavailableError || err instanceof SandboxSupersededError) return true;
   return err instanceof Error && POD_GONE.test(err.message);
-}
-
-/** Matches `Session.resolveTargetThread`'s missing-thread error. */
-function isThreadNotFound(err: unknown, threadId: string): boolean {
-  return err instanceof Error && err.message.includes(`thread ${threadId} not found`);
 }
 
 /** Builds or restores a session the way `ChildWatcher.attempt` and signal delivery do. */
