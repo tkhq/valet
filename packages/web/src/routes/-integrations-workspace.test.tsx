@@ -407,6 +407,15 @@ describe("Team account connection", () => {
     expect(within(screen.getByRole("list", { name: "Team connections" })).queryByText("1Password")).toBeNull();
   });
 
+  it("ignores a personal ?service= panel link in the team view", async () => {
+    teamId = "a";
+    searchState = { service: "typefully" };
+    mount();
+    expect(await screen.findByRole("list", { name: "Available" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Connect Typefully" })).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("keeps Slack organization-managed while blocking missing OAuth configuration", async () => {
     teamId = "a";
     vi.mocked(api.listPlugins).mockResolvedValue({ plugins: [{ name: "demo", version: "1", actionCount: 0,

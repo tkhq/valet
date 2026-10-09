@@ -204,3 +204,19 @@ describe("the workspace a link names", () => {
     expect(await screen.findByText("Platform workspace")).toBeTruthy();
   });
 });
+
+describe("other saved credentials", () => {
+  it("lists a credential no installed integration uses, with Revoke", async () => {
+    credentials = [{ service: "legacy-crm", type: "api_key", connectedAt: "2026-01-01T00:00:00Z" }];
+    mount();
+    const list = await screen.findByRole("list", { name: "Other saved credentials" });
+    expect(within(list).getByRole("button", { name: /^Revoke / })).toBeTruthy();
+  });
+
+  it("does not list a credential an integration row already covers", async () => {
+    credentials = [{ service: "notion", type: "api_key", connectedAt: "2026-01-01T00:00:00Z" }];
+    mount();
+    await screen.findByRole("link", { name: /Notion/ });
+    expect(screen.queryByRole("list", { name: "Other saved credentials" })).toBeNull();
+  });
+});
