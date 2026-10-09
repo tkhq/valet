@@ -53,6 +53,14 @@ data:
   # prep hits ENOSPC.
   VALET_SANDBOX_WORKSPACE_STORAGE: {{ .Values.sandbox.workspaceStorage | quote }}
   VALET_SANDBOX_WORKSPACE_MAX: {{ .Values.sandbox.workspaceStorageMax | quote }}
+  # Node-local /scratch per sandbox. See values.yaml (sandbox.scratchMax).
+  VALET_SANDBOX_SCRATCH_MAX: {{ .Values.sandbox.scratchMax | quote }}
+  VALET_SANDBOX_SCRATCH_AGENT_MAX: {{ .Values.sandbox.scratchAgentMax | quote }}
+  # Wakeups and leases. See values.yaml (sandbox.leaseMaxHours).
+  VALET_LEASE_MAX_HOURS: {{ .Values.sandbox.leaseMaxHours | quote }}
+  VALET_TIMER_MAX_HOURS: {{ .Values.sandbox.timerMaxHours | quote }}
+  VALET_WAKEUPS_PER_SESSION: {{ .Values.sandbox.wakeupsPerSession | quote }}
+  VALET_WATCH_MAX_EVENTS_PER_HOUR: {{ .Values.sandbox.watchMaxEventsPerHour | quote }}
   # Idle-retention windows before a suspended sandbox's workspace volume is
   # reclaimed (see values.yaml). Children churn fast and get the short
   # window; every other session class gets the long one. The api reads the
