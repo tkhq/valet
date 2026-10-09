@@ -91,8 +91,10 @@ export function OnePasswordInstructions() {
         If 1Password tells you to contact your administrator, your 1Password account cannot create
         service accounts, and no Valet setting changes that. Ask a 1Password owner or administrator
         for either of two things: permission to create and manage service accounts, or a service
-        account scoped to that vault alone. Have them share the token with you as a 1Password item,
-        not in Slack or a chat.
+        account scoped to that vault alone. Have them send the token to you with a 1Password share
+        link, not in Slack or a chat. Keep the token outside every vault the service account can
+        read, for example in your own vault. If the token is in a vault it reads, an agent can read
+        its own token.
       </p>
       <p>
         An item is addressed by a{" "}

@@ -45,12 +45,16 @@ setting changes that: the permission lives in 1Password. Ask a 1Password
 owner or administrator for either of two things.
 
 - Permission to create and manage service accounts, so you make your own.
-- A service account scoped to that vault alone. Have them share the token
-  with you as a 1Password item.
+- A service account scoped to that vault alone.
 
 The second keeps the token's reach narrow, which is the point of a service
-account. Do not paste a token into Slack, a Valet chat, memory, or a
-repository.
+account. Have them send the token to you with a
+[1Password share link](https://support.1password.com/share-items/). Keep the
+token outside every vault the service account can read, for example in your
+own vault. Never save the token in the vault that the service account reads.
+If you do, an agent can read the token and use it outside Valet, and a
+disconnect in Valet does not revoke that copy. Do not paste a token into
+Slack, a Valet chat, memory, or a repository.
 
 In Valet, a token lives on the page that owns it.
 
