@@ -54,6 +54,18 @@ import { isThreadUnread, pendingAgentQuestion, rowPullRequest } from "~/lib/thre
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
 import { projectThreadIds, removeArchivedProject, useThreadProjects } from "~/lib/thread-projects";
+import { backgroundWorkConflict } from "~/api/client";
+import { errorText } from "~/lib/error-text";
+import { useBackgroundWorkGuard, type GuardedAction } from "./background-work-confirm";
+
+const STOP_AND_ARCHIVE: GuardedAction = {
+  title: "Stop background work and archive?",
+  confirmLabel: "Stop background work and archive",
+};
+const STOP_AND_REPLACE: GuardedAction = {
+  title: "Stop background work and replace the sandbox?",
+  confirmLabel: "Stop background work and replace",
+};
 import { useMe } from "~/api/settings";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { ThreadStatusIcon } from "./thread-status-icon";
@@ -333,6 +345,11 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const setArchived = useSetThreadArchived(sessionId);
   const renameThread = useRenameThread(sessionId);
   const replaceSandbox = useReplaceSandbox(sessionId);
+  // Archive and Replace sandbox stop background work. The server refuses
+  // them with a 409 that lists the work; the guard asks, then resends with
+  // `force` (fix wave 3, H1 and H3). Other failures show in `actionError`.
+  const workGuard = useBackgroundWorkGuard();
+  const [actionError, setActionError] = useState<string>();
   const dismissChild = useDismissChild(sessionId);
   const [showArchived, setShowArchived] = useState(false);
   const archivedQ = useArchivedThreads(sessionId, { enabled: showArchived });
@@ -424,12 +441,17 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     setDeleteError(undefined);
     const ids = projectThreadIds(projects.readCurrent(), deleteProject.id);
     const archivedIds = new Set<string>();
+    let busyChats = 0;
     // Bound concurrency and attempt every chat, even when an earlier archive fails.
     for (const threadId of ids) {
       try {
         await setArchived.mutateAsync({ threadId, archived: true });
         archivedIds.add(threadId);
-      } catch { /* Keep the folder and offer a retry after all attempts. */ }
+      } catch (err) {
+        // Keep the folder and offer a retry after all attempts. A chat with
+        // background work is never archived without its own confirm.
+        if (backgroundWorkConflict(err)) busyChats += 1;
+      }
     }
     let removed = false;
     if (archivedIds.size === ids.length) {
@@ -448,15 +470,38 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
         navigate({ search: prev => ({ ...prev, thread: undefined, child: undefined }) });
       }
     } else {
-      setDeleteError("The project was kept because some chats could not be archived or its assignments changed. Already archived chats stay archived. Try again to finish deleting the project.");
+      setDeleteError(busyChats > 0
+        ? `The project was kept because ${busyChats === 1 ? "1 chat has" : `${busyChats} chats have`} background work running. Archive ${busyChats === 1 ? "that chat" : "those chats"} first, then delete the project.`
+        : "The project was kept because some chats could not be archived or its assignments changed. Already archived chats stay archived. Try again to finish deleting the project.");
     }
   }
 
+  const { attempt } = workGuard;
+  const archiveThread = useCallback((threadId: string) => {
+    setActionError(undefined);
+    // Archiving the thread you're looking at would strand the view on a
+    // thread absent from the list, so return to the default thread once the
+    // archive lands.
+    const leaveIfActive = () => {
+      if (threadId === activeThreadId) navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
+    };
+    attempt(
+      STOP_AND_ARCHIVE,
+      (force) => setArchived.mutateAsync({ threadId, archived: true, ...(force ? { force: true } : {}) }),
+      leaveIfActive,
+    ).catch((err: unknown) => setActionError(errorText(err, "Could not archive the thread. Try again.")));
+  }, [activeThreadId, attempt, navigate, setArchived]);
+
   const archiveActive = useCallback(() => {
     if (!activeThreadId || isAppAssistantThread(threadsQ.data?.threads.find((thread) => thread.id === activeThreadId) ?? {})) return;
-    void setArchived.mutateAsync({ threadId: activeThreadId, archived: true });
-    navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
-  }, [activeThreadId, navigate, setArchived, threadsQ.data]);
+    archiveThread(activeThreadId);
+  }, [activeThreadId, archiveThread, threadsQ.data]);
+
+  function replaceSessionSandbox() {
+    setActionError(undefined);
+    attempt(STOP_AND_REPLACE, (force) => replaceSandbox.mutateAsync(force ? { force: true } : undefined))
+      .catch((err: unknown) => setActionError(errorText(err, "Could not replace the sandbox. Try again.")));
+  }
 
   // Register this surface's hotkey targets for the global listener.
   useEffect(() => {
@@ -521,16 +566,8 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               onPin={() => projects.update((current) => ({ ...current, pinned: current.pinned.includes(t.id) ? current.pinned.filter((id) => id !== t.id) : [...current.pinned, t.id] }))}
               onMove={(projectId) => moveThread(t.id, projectId)}
               onDragEnd={() => setDropTarget(undefined)}
-              onArchive={(threadId) => {
-                void setArchived.mutateAsync({ threadId, archived: true });
-                // Archiving the thread you're looking at would strand the
-                // view on a thread absent from the list — return to the
-                // default thread.
-                if (threadId === activeThreadId) {
-                  navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
-                }
-              }}
-              onReplaceSandbox={() => void replaceSandbox.mutateAsync()}
+              onArchive={archiveThread}
+              onReplaceSandbox={replaceSessionSandbox}
               onDismissChild={(childSessionId) => void dismissChild.mutateAsync(childSessionId)}
               onRename={(threadId, title) =>
                 void renameThread.mutateAsync({ threadId, title })
@@ -558,6 +595,8 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
         <button type="button" aria-label="Search threads" title="Search threads" onClick={openSearch} className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><Search className="h-4 w-4" /></button>
       </div>
       {creationError && <p role="alert" className="px-4 py-2 text-xs text-danger-500">{creationError}</p>}
+      {actionError && <p role="alert" className="px-4 py-2 text-xs text-danger-500">{actionError}</p>}
+      {workGuard.dialog}
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
         <DialogContent hideClose className="max-w-2xl rounded-2xl p-2 gap-1" onOpenAutoFocus={(event) => { event.preventDefault(); searchInputRef.current?.focus(); }}>
           <DialogTitle className="sr-only">Search threads</DialogTitle>
