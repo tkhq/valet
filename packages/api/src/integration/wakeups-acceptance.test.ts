@@ -311,7 +311,7 @@ describe("api integration: wakeups acceptance scenario", () => {
     );
     expect(isScratchRequestError(refusal)).toBe(true);
     const a4 =
-      "scratch 200Gi exceeds the 100Gi agent cap (sandbox.scratchAgentMax). Declare it in .valet/prebuild.yaml, or ask an admin to raise the cap.";
+      "scratch 200Gi exceeds the 100Gi agent cap (sandbox.scratchAgentMax). Retry without resources.scratch, declare it in .valet/prebuild.yaml, or ask an admin to raise the cap.";
     expect(refusal).toMatchObject({ message: a4 });
 
     const taskTool = builtinTools.find((t) => t.name === "task");
