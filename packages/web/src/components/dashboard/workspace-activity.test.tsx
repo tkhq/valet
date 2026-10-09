@@ -3,11 +3,32 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { api, type OwnerFilter } from "~/api/client";
+import { api, ApiError, type OwnerFilter } from "~/api/client";
 import { WorkspaceActivity, safeResultUrl } from "./workspace-activity";
 let owner: OwnerFilter = { ownerType: "user", ownerId: "u" };
 vi.mock("@tanstack/react-router", () => ({ Link: ({ children, to, params, search }: { children: ReactNode; to: string; params?: Record<string, string>; search?: { thread?: string } }) => <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to) + (search?.thread ? `?thread=${search.thread}` : "")}>{children}</a> }));
-vi.mock("~/api/client", () => ({ api: { listArtifacts: vi.fn(), listWorkspaceOutcomes: vi.fn(), listWorkspaceActiveWork: vi.fn(), getWaitingThreads: vi.fn(async () => ({ threads: [] })), patchThread: vi.fn(async () => ({})), listWorkflows: vi.fn(), listWorkflowActionRequired: vi.fn(), dismissWorkflowRun: vi.fn(async () => ({ ok: true })) } }));
+vi.mock("~/api/client", async (importOriginal) => ({ ...(await importOriginal<typeof import("~/api/client")>()), api: { listArtifacts: vi.fn(), listWorkspaceOutcomes: vi.fn(), listWorkspaceActiveWork: vi.fn(), getWaitingThreads: vi.fn(async () => ({ threads: [] })), patchThread: vi.fn(async () => ({})), listWorkflows: vi.fn(), listWorkflowActionRequired: vi.fn(), dismissWorkflowRun: vi.fn(async () => ({ ok: true })) } }));
+it("asks before archiving a thread with background work, and archives with force on confirm", async () => {
+  vi.mocked(api.getWaitingThreads).mockResolvedValue({ threads: [
+    { sessionId: "s", threadId: "build", title: "Proof build", lastAgentActivityAt: 5, unread: false, preview: "Started the full proof build. I will report when it finishes." },
+  ] });
+  vi.mocked(api.patchThread).mockRejectedValueOnce(new ApiError(409, "PATCH → 409", {
+    error: 'This thread has background work running: "full proof build" (process).',
+    code: "background_work",
+    work: [{ id: "wk_1", kind: "process", reason: "full proof build", threadId: "build", createdAt: Date.now() }],
+    hiddenCount: 0,
+    forceAllowed: true,
+  }));
+  setup();
+  const updates = await screen.findByRole("region", { name: "Conversation updates" });
+  fireEvent.click(within(updates).getByRole("button", { name: "Archive Proof build" }));
+  const dialog = await screen.findByRole("dialog", { name: "Stop background work and archive?" });
+  expect(within(dialog).getByText("full proof build")).toBeTruthy();
+  // The refused archive left the thread in the list.
+  await waitFor(() => expect(within(screen.getByRole("region", { name: "Conversation updates", hidden: true })).getByText("Proof build")).toBeTruthy());
+  fireEvent.click(within(dialog).getByRole("button", { name: "Stop background work and archive" }));
+  await waitFor(() => expect(api.patchThread).toHaveBeenLastCalledWith("build", { archived: true, force: true }));
+});
 beforeEach(() => {
   vi.clearAllMocks(); owner = { ownerType: "user", ownerId: "u" };
   vi.mocked(api.listArtifacts).mockResolvedValue({ artifacts: [], nextCursor: null });
