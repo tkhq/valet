@@ -1586,30 +1586,40 @@ BEGIN
   -- workflow run and the step, not to the assistant. A run with no org (its
   -- workflow was deleted before runs kept their org) cannot be scoped to a
   -- tenant, so its turns stay on the assistant and keep counting there.
-  -- Only an assistant message carries usage or tool calls, so only it pays
-  -- for the queue lookup, once per entry.
-  CREATE OR REPLACE FUNCTION valet_usage_fact(e engine_entries) RETURNS usage_entry_facts
-  LANGUAGE sql STABLE AS $fact$
-    SELECT e.id, b.session_id,
-      CASE WHEN b.session_id LIKE 'wf:%' THEN split_part(b.session_id, ':', 2) END,
+  -- The step id of a Thread-step turn, or NULL. One indexed probe of the
+  -- queue item, then of the run.
+  CREATE OR REPLACE FUNCTION valet_usage_step_session(e engine_entries) RETURNS text
+  LANGUAGE sql STABLE AS $step$
+    SELECT 'wf:' || regexp_replace(substr(q.dispatch_id, 10), ':repair$', '')
+    FROM engine_queue_items q JOIN workflow_runs r ON r.id = split_part(q.dispatch_id, ':', 2)
+    WHERE q.id = e.queue_item_id AND q.session_id = e.session_id
+      AND q.dispatch_id LIKE 'workflow:%' AND r.org_id IS NOT NULL
+  $step$;
+
+  -- The fact of an entry billed to `billing_session`.
+  CREATE OR REPLACE FUNCTION valet_usage_fact_for(e engine_entries, billing_session text) RETURNS usage_entry_facts
+  LANGUAGE sql IMMUTABLE AS $fact$
+    SELECT e.id, billing_session,
+      CASE WHEN billing_session LIKE 'wf:%' THEN split_part(billing_session, ':', 2) END,
       e.created_at, e.model, e.usage::jsonb, e.cost::jsonb,
       COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'status' IN ('completed', 'error')),
       COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'toolName' = 'bash'
         AND p->>'status' = 'completed' AND p->'result'->'details'->'outcome'->>'kind' = 'pull_request_created'),
       COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'toolName' = 'bash'
         AND p->>'status' = 'completed' AND p->'result'->'details'->'outcome'->>'kind' = 'review_submitted'), false
-    FROM (SELECT CASE WHEN e.entry_type = 'message' AND e.role = 'assistant'
-        AND e.queue_item_id IS NOT NULL AND e.session_id NOT LIKE 'wf:%'
-      THEN COALESCE((SELECT 'wf:' || regexp_replace(substr(q.dispatch_id, 10), ':repair$', '')
-        FROM engine_queue_items q JOIN workflow_runs r ON r.id = split_part(q.dispatch_id, ':', 2)
-        WHERE q.id = e.queue_item_id AND q.session_id = e.session_id
-          AND q.dispatch_id LIKE 'workflow:%' AND r.org_id IS NOT NULL), e.session_id)
-      ELSE e.session_id END AS session_id) b
-    -- LEFT JOIN keeps one row for an entry with no parts; its counts are 0.
-    LEFT JOIN jsonb_array_elements(CASE WHEN e.entry_type = 'message' AND e.role = 'assistant'
+    FROM jsonb_array_elements(CASE WHEN e.entry_type = 'message' AND e.role = 'assistant'
       THEN COALESCE(replace(e.parts, chr(92) || 'u0000', chr(92) || 'uFFFD')::jsonb, '[]'::jsonb)
-      ELSE '[]'::jsonb END) p ON true
-    GROUP BY b.session_id
+      ELSE '[]'::jsonb END) p
+  $fact$;
+
+  -- Only an assistant message with a queue item can be a Thread-step turn
+  -- (it alone carries usage or tool calls), so every other entry skips the
+  -- probe, and a Thread-step turn probes once.
+  CREATE OR REPLACE FUNCTION valet_usage_fact(e engine_entries) RETURNS usage_entry_facts
+  LANGUAGE sql STABLE AS $fact$
+    SELECT valet_usage_fact_for(e, CASE WHEN e.queue_item_id IS NOT NULL AND e.entry_type = 'message'
+        AND e.role = 'assistant' AND e.session_id NOT LIKE 'wf:%'
+      THEN COALESCE(valet_usage_step_session(e), e.session_id) ELSE e.session_id END)
   $fact$;
   -- usage step attribution end
 
