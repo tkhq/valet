@@ -5622,6 +5622,8 @@ export interface DismissWorkspaceBriefingResponse {
   archived: number;
   /** Threads left open because an approval is pending on them. */
   keptWaiting: number;
+  /** Threads left open because background work runs on them. */
+  keptRunning: number;
 }
 export interface WorkspaceBriefingsResponse {
   checkedAt?: number | null;
