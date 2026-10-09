@@ -9,7 +9,8 @@
  */
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ListTeamsResponse, SessionDetail } from "@valet/api/wire";
+import type { BackgroundWorkConflict, ListTeamsResponse, SessionDetail } from "@valet/api/wire";
+import { ApiError } from "~/api/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "~/components/primitives";
 import { useStreamStore } from "~/stores/stream";
@@ -412,6 +413,66 @@ describe("SessionHeader — pause control", () => {
   });
 });
 
+describe("SessionHeader: background work refusal (fix wave 3, H3)", () => {
+  const HOUR = 3_600_000;
+  function conflict(forceAllowed = true, hiddenCount = 0): BackgroundWorkConflict {
+    return {
+      error: 'This session has background work running: "full proof build" (process). Cancel it first, or retry with force=true to stop it and pause the session.',
+      code: "background_work",
+      work: [{ id: "wk_1", kind: "process", reason: "full proof build", createdAt: Date.now() - 3 * HOUR - 60_000, deadlineAt: Date.now() + 49 * HOUR }],
+      hiddenCount,
+      forceAllowed,
+    };
+  }
+
+  it("pause: the 409 opens a confirm naming the work, and confirm resends with force", async () => {
+    pauseMutateAsync = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "POST /pause → 409", conflict()))
+      .mockResolvedValue({ status: "hibernated", cancelledWork: ["wk_1"] });
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+    await user.click(screen.getByRole("button", { name: "Thread menu" }));
+    await user.click(screen.getByRole("menuitem", { name: "Pause sandbox until the next message" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("full proof build")).toBeTruthy();
+    expect(within(dialog).getByText("Process · running 3h · deadline in 2d")).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: "Stop background work and pause" }));
+    expect(pauseMutateAsync).toHaveBeenLastCalledWith({ force: true });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("replace: the 409 opens a confirm, and confirm resends with force", async () => {
+    replaceMutateAsync = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "POST /sandbox/replace → 409", conflict()))
+      .mockResolvedValue({ ok: true });
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+    await user.click(screen.getByRole("button", { name: "Thread menu" }));
+    await user.click(screen.getByRole("menuitem", { name: /replace sandbox/i }));
+
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Stop background work and replace" }));
+    expect(replaceMutateAsync).toHaveBeenLastCalledWith({ force: true });
+  });
+
+  it("shows the server text and offers no force when hidden work blocks it", async () => {
+    pauseMutateAsync = vi.fn().mockRejectedValue(
+      new ApiError(409, "POST /pause → 409", { ...conflict(false, 2), error: "Ask the people in those threads to cancel it, then pause the session." }),
+    );
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+    await user.click(screen.getByRole("button", { name: "Thread menu" }));
+    await user.click(screen.getByRole("menuitem", { name: "Pause sandbox until the next message" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/Ask the people in those threads/)).toBeTruthy();
+    expect(within(dialog).getByText("2 more items run on threads you cannot see.")).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: /stop background work/i })).toBeNull();
+    expect(pauseMutateAsync).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("SessionHeader — overflow menu", () => {
   it("does not offer session ratings in the header or overflow menu", async () => {
     renderHeader({ state: "ready", epoch: 1 });
@@ -598,7 +659,7 @@ describe("SessionHeader — Terminal and VS Code switch", () => {
     expect(confirmSpy).not.toHaveBeenCalled();
 
     await user.click(within(dialog).getByRole("button", { name: "Turn on" }));
-    expect(setProfileMutateAsync).toHaveBeenCalledWith("full");
+    expect(setProfileMutateAsync).toHaveBeenCalledWith({ profile: "full" });
     confirmSpy.mockRestore();
   });
 
@@ -614,7 +675,7 @@ describe("SessionHeader — Terminal and VS Code switch", () => {
     expect(setProfileMutateAsync).not.toHaveBeenCalled();
 
     await user.click(within(dialog).getByRole("button", { name: "Turn off" }));
-    expect(setProfileMutateAsync).toHaveBeenCalledWith("headless");
+    expect(setProfileMutateAsync).toHaveBeenCalledWith({ profile: "headless" });
   });
 
   it("names the cost before restarting the sandbox", async () => {
@@ -649,6 +710,29 @@ describe("SessionHeader — Terminal and VS Code switch", () => {
     await waitFor(() =>
       expect(within(screen.getByRole("dialog")).getByText(/a turn is running/i)).toBeTruthy(),
     );
+  });
+
+  it("a profile change blocked by background work asks, then resends with force", async () => {
+    setProfileMutateAsync = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "PATCH → 409", {
+        error: "This session has background work running.",
+        code: "background_work",
+        work: [{ id: "wk_1", kind: "watch", reason: "tail the build", createdAt: Date.now() }],
+        hiddenCount: 0,
+        forceAllowed: true,
+      }))
+      .mockResolvedValue({ ok: true });
+    const user = userEvent.setup();
+    renderWithProfile("headless");
+
+    await user.click(screen.getByRole("button", { name: "Thread menu" }));
+    await user.click(screen.getByRole("menuitem", { name: /turn on terminal and vs code/i }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Turn on" }));
+
+    const guard = await screen.findByRole("dialog", { name: "Stop background work and restart the sandbox?" });
+    expect(within(guard).getByText("tail the build")).toBeTruthy();
+    await user.click(within(guard).getByRole("button", { name: "Stop background work and restart" }));
+    expect(setProfileMutateAsync).toHaveBeenLastCalledWith({ profile: "full", force: true });
   });
 
   it("hides the switch from a plain team member", async () => {

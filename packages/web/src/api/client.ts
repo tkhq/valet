@@ -171,6 +171,9 @@ import type {
   PatchSessionRequest,
   PatchSessionResponse,
   PauseSessionResponse,
+  ReplaceSandboxResponse,
+  BackgroundWorkConflict,
+  BackgroundWorkItem,
   ListSessionWakeupsResponse,
   CancelSessionWakeupResponse,
   GetSessionRatingsResponse,
@@ -323,6 +326,34 @@ export function memoryCopyConflict(error: unknown): { version: string | null; ch
   const version = payload.destinationVersion;
   if (changed && version === null) return { version, changed };
   return typeof version === "string" && version.length > 0 ? { version, changed } : null;
+}
+
+const WORK_KINDS: ReadonlySet<string> = new Set(["process", "watch", "timer", "hold"]);
+
+function isWorkItem(value: unknown): value is BackgroundWorkItem {
+  if (typeof value !== "object" || value === null) return false;
+  if (!("id" in value) || typeof value.id !== "string") return false;
+  if (!("kind" in value) || typeof value.kind !== "string" || !WORK_KINDS.has(value.kind)) return false;
+  if (!("reason" in value) || typeof value.reason !== "string") return false;
+  return "createdAt" in value && typeof value.createdAt === "number";
+}
+
+/**
+ * The structured 409 an action returns while background work would stop
+ * (pause, replace, a profile change, a move, a thread archive). Null for
+ * any other error. A caller shows the work and resends with `force`.
+ */
+export function backgroundWorkConflict(error: unknown): BackgroundWorkConflict | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const payload = error.payload;
+  if (typeof payload !== "object" || payload === null) return null;
+  if (!("code" in payload) || payload.code !== "background_work") return null;
+  if (!("error" in payload) || typeof payload.error !== "string") return null;
+  if (!("work" in payload) || !Array.isArray(payload.work)) return null;
+  const work: unknown[] = payload.work;
+  const hiddenCount = "hiddenCount" in payload && typeof payload.hiddenCount === "number" ? payload.hiddenCount : 0;
+  const forceAllowed = "forceAllowed" in payload && payload.forceAllowed === true;
+  return { error: payload.error, code: "background_work", work: work.filter(isWorkItem), hiddenCount, forceAllowed };
 }
 
 // `GET /api/auth-config` is unauthenticated and doesn't change without a
@@ -716,10 +747,20 @@ export const api = {
     ),
   mintSandboxJwt: (id: string) =>
     request<SandboxJwtResponse>("POST", `/sessions/${encodeURIComponent(id)}/sandbox-jwt`),
-  pauseSession: (id: string) =>
-    request<PauseSessionResponse>("POST", `/sessions/${encodeURIComponent(id)}/pause`),
-  replaceSandbox: (id: string) =>
-    request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(id)}/sandbox/replace`),
+  /** `force` stops background work that would block the pause. */
+  pauseSession: (id: string, opts?: { force?: boolean }) =>
+    request<PauseSessionResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/pause`,
+      opts?.force ? { force: true } : undefined,
+    ),
+  /** `force` stops background work that would block the replace. */
+  replaceSandbox: (id: string, opts?: { force?: boolean }) =>
+    request<ReplaceSandboxResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/sandbox/replace`,
+      opts?.force ? { force: true } : undefined,
+    ),
   listSessionWakeups: (id: string) =>
     request<ListSessionWakeupsResponse>("GET", `/sessions/${encodeURIComponent(id)}/wakeups`),
   cancelSessionWakeup: (id: string, wakeupId: string) =>

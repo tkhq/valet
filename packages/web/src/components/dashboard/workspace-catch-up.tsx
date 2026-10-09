@@ -29,10 +29,11 @@ function ScopedBriefings({ owner }: { owner: OwnerFilter }) {
   function dismissBriefing(briefing: WorkspaceBriefing) {
     setDismissNote(undefined);
     dismiss.mutate(briefing, {
-      onSuccess: ({ archived, keptWaiting }) => setDismissNote(
+      onSuccess: ({ archived, keptWaiting, keptRunning }) => setDismissNote(
         `Dismissed "${briefing.title}".` +
         (archived > 0 ? ` Archived ${archived} ${archived === 1 ? "thread" : "threads"}.` : "") +
-        (keptWaiting > 0 ? ` ${keptWaiting} waiting on an approval ${keptWaiting === 1 ? "stays" : "stay"} open.` : ""),
+        (keptWaiting > 0 ? ` ${keptWaiting} waiting on an approval ${keptWaiting === 1 ? "stays" : "stay"} open.` : "") +
+        (keptRunning > 0 ? ` ${keptRunning} with background work ${keptRunning === 1 ? "stays" : "stay"} open.` : ""),
       ),
       onError: () => setDismissNote("Could not dismiss the brief. Try again."),
     });

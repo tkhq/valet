@@ -7,8 +7,8 @@ import { isAbsolute } from "node:path";
 import { parseAssistantSessionId, type Principal } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { activeLeaseRefusal, cancelAllWorkAsHuman, listBackgroundWork } from "../engine/wakeups-admin.js";
-import { canCancelSessionWakeup } from "./wakeups.js";
+import { cancelAllWorkAsHuman, type CancelAllResult } from "../engine/wakeups-admin.js";
+import { gateBackgroundWork, type BackgroundWorkGate } from "./wakeups.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
 import {
@@ -64,6 +64,7 @@ import type {
   PatchSessionRequest,
   PatchSessionResponse,
   PauseSessionResponse,
+  ReplaceSandboxResponse,
   RepoBinding,
   SandboxJwtResponse,
   SandboxProfile,
@@ -1104,6 +1105,31 @@ sessionsRouter.patch("/:id", async (c) => {
     }
   }
 
+  // A live session froze its profile into `SandboxCreateOpts` when it was
+  // built, and the attachment reuses that object on every re-provision. So
+  // read whether a sandbox exists BEFORE the cache entry goes away: that
+  // answers whether a running container has to be replaced, or whether the
+  // next provision picks the new profile up on its own.
+  let hadSandbox = false;
+  if (nextProfile !== undefined && engineHost.isLive(id)) {
+    const live = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
+    hadSandbox = live.attachment.current() !== null;
+  }
+
+  // Background work blocks a change that would stop it, before any write
+  // (fix wave 3, H2 and M3). An owner move ends all of it: a timer or a
+  // process signal would otherwise start a turn billed to, and credentialed
+  // as, the new owner. A profile change of a running sandbox replaces it,
+  // which ends process, watch, and hold work; timers keep their schedule.
+  // `force: true` stops the work first, as a human cancel by the caller.
+  let gate: BackgroundWorkGate = { kind: "clear" };
+  if (nextOwner !== undefined) {
+    gate = await gateBackgroundWork(c, row, "move", {}, body.force === true);
+  } else if (nextProfile !== undefined && hadSandbox) {
+    gate = await gateBackgroundWork(c, row, "profile", { leasedOnly: true }, body.force === true);
+  }
+  if (gate.kind === "refused") return gate.response;
+
   // Materialize the engine session only when the model or reasoning
   // changes. A rename must not start a sandbox — the header renames
   // hibernated sessions too.
@@ -1137,33 +1163,33 @@ sessionsRouter.patch("/:id", async (c) => {
     reasoning = engineSession.options.sampling?.reasoning ?? null;
   }
 
-  // A live session froze its profile into `SandboxCreateOpts` when it was
-  // built, and the attachment reuses that object on every re-provision. So
-  // read whether a sandbox exists BEFORE the cache entry goes away: that
-  // answers whether a running container has to be replaced, or whether the
-  // next provision picks the new profile up on its own.
-  let hadSandbox = false;
-  if (nextProfile !== undefined && engineHost.isLive(id)) {
+  // The forced stop runs before the owner write, while the cached session
+  // still binds the old owner. The signals wait until the change landed:
+  // they then start their turns in the rebuilt session, so the agent learns
+  // that a person stopped the work, and why.
+  let stopped: CancelAllResult | undefined;
+  if (gate.kind === "force") {
     const live = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
-    hadSandbox = live.attachment.current() !== null;
-  }
-
-  // An owner move ends the background work the old owner's turns started
-  // (fix wave 2, H11): a timer or a process signal would otherwise start a
-  // turn billed to, and credentialed as, the new owner. It is a human cancel
-  // attributed to the mover, with no signal, because that signal turn would
-  // also run as the new owner. It runs before the owner write, while the
-  // cached session still binds the old owner.
-  let cancelledWorkCount: number | undefined;
-  if (nextOwner !== undefined) {
-    const work = await listBackgroundWork(engineStore, id);
-    if (work.wakeups.length > 0 || work.leases.length > 0) {
-      if (!(await canCancelSessionWakeup(db, row, c.var.principal))) {
-        return c.json({ error: "This session has background work you cannot stop. Ask a session admin to move it." }, 403);
-      }
-      const owned = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
-      const stopped = await cancelAllWorkAsHuman(engineStore, owned, id, {}, { actorUserId: userId, signal: "suppress" });
-      cancelledWorkCount = stopped.cancelled.length;
+    stopped = await cancelAllWorkAsHuman(
+      engineStore,
+      live,
+      id,
+      { ...(nextOwner === undefined ? { leasedOnly: true } : {}), ids: gate.ids },
+      {
+        actorUserId: userId,
+        signal: "defer",
+        note: nextOwner !== undefined
+          ? "They moved the session to another workspace. Do not start it again unless someone asks."
+          : "They changed the sandbox profile, which replaced the sandbox. Do not start it again unless someone asks.",
+      },
+    );
+    // A turn admitted while the work stopped would run under the change.
+    if ((await engineStore.listUnsettledSubmissions(id)).length > 0) {
+      await stopped.sendSignals();
+      return c.json(
+        { error: turnStartedError(nextOwner !== undefined ? "move the session" : "change the profile", true) },
+        409,
+      );
     }
   }
 
@@ -1210,6 +1236,11 @@ sessionsRouter.patch("/:id", async (c) => {
     engineHost.evictCache(id);
   }
 
+  // Sends the forced stop's signals into the session as it now is.
+  const sendStopped = async () => {
+    if (stopped) await stopped.sendSignals(await engineHost.sessionFor(id, await loadSessionMeta(db, effectiveRow)));
+  };
+
   if (nextProfile !== undefined) {
     if (hadSandbox) {
       // The old container still runs the old profile. Rebuild from the
@@ -1221,18 +1252,22 @@ sessionsRouter.patch("/:id", async (c) => {
       // applies. The row already carries the new profile, so say so.
       const recheck = await engineStore.listUnsettledSubmissions(id);
       if (recheck.length > 0) {
+        await sendStopped();
         return c.json({ error: profileSavedButSandboxFailed("a turn started") }, 409);
       }
       try {
         await rebuilt.attachment.replace();
       } catch (err) {
+        await sendStopped();
         return c.json({ error: profileSavedButSandboxFailed((err as Error).message) }, 502);
       }
       if (rebuilt.attachment.state !== "ready") {
+        await sendStopped();
         return c.json({ error: profileSavedButSandboxFailed("the new sandbox never became ready") }, 502);
       }
     }
   }
+  await sendStopped();
 
   const [{ n }] = await db
     .select({ n: count() })
@@ -1253,7 +1288,9 @@ sessionsRouter.patch("/:id", async (c) => {
     reasoning,
     profile: effectiveRow.profile,
     docker: effectiveRow.docker,
-    ...(cancelledWorkCount !== undefined ? { cancelledWorkCount } : {}),
+    ...(stopped
+      ? { cancelledWorkCount: stopped.cancelled.length, cancelledWork: stopped.cancelled.map((w) => w.id) }
+      : {}),
   };
   return c.json(detail);
 });
@@ -1335,29 +1372,36 @@ sessionsRouter.post("/:id/pause", async (c) => {
 
   // Active leases block a pause, as they block the idle sweeps (spec C3,
   // fix wave 2 B8): suspending deletes the running process and /scratch.
-  // `force=true` stops that work first, as a human cancel.
-  const leaseRefusal = await activeLeaseRefusal(engineStore, id);
-  const force = leaseRefusal !== null && (await wantsForce(c));
-  if (leaseRefusal !== null && !force) {
-    return c.json({ error: leaseRefusal }, 409);
-  }
-  if (force && !(await canCancelSessionWakeup(db, row, c.var.principal))) {
-    return c.json({ error: "You cannot stop this session's background work. Ask a session admin to pause it." }, 403);
-  }
+  // `force=true` stops that work first, as a human cancel. The 409 names
+  // only work the caller can see (`gateBackgroundWork`).
+  const gate = await gateBackgroundWork(c, row, "pause", { leasedOnly: true }, await wantsForce(c));
+  if (gate.kind === "refused") return gate.response;
 
   const session = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
-  const stopped = force
-    ? await cancelAllWorkAsHuman(engineStore, session, id, { leasedOnly: true }, {
+  // `suspend()` silently no-ops unless the attachment is `ready`. Check
+  // before any cancel: after an api restart the attachment stays `detached`
+  // until a turn uses the sandbox, and a forced pause would otherwise stop
+  // the work and then fail to pause (fix wave 3, M1).
+  if (session.attachment.current() === null) {
+    return c.json({ error: "sandbox is not ready to pause" }, 409);
+  }
+  const stopped = gate.kind === "force"
+    ? await cancelAllWorkAsHuman(engineStore, session, id, { leasedOnly: true, ids: gate.ids }, {
         actorUserId: userId,
         signal: "defer",
         note: "They paused the session. Do not start it again unless someone asks.",
       })
     : undefined;
+  // A turn admitted while the work stopped (a watcher signal, a due timer)
+  // would run under the suspend. Re-check right before it.
+  if ((await engineStore.listUnsettledSubmissions(id)).length > 0) {
+    await stopped?.sendSignals();
+    return c.json({ error: turnStartedError("pause the session", stopped !== undefined) }, 409);
+  }
   await session.attachment.suspend();
 
-  // `suspend()` silently no-ops unless the attachment was `ready` — only
-  // stamp the row `hibernated` when it actually transitioned, so a pause hit
-  // mid-provision doesn't lie about having suspended anything.
+  // Only stamp the row `hibernated` when the suspend actually transitioned,
+  // so a pause hit mid-provision doesn't lie about having suspended anything.
   if (session.attachment.state !== "suspended") {
     await stopped?.sendSignals();
     return c.json({ error: "sandbox is not ready to pause" }, 409);
@@ -1378,6 +1422,15 @@ sessionsRouter.post("/:id/pause", async (c) => {
   };
   return c.json(body, 200);
 });
+
+/**
+ * The 409 text when a turn started between the first busy check and the
+ * stop. `stoppedWork` says the forced cancel already ran.
+ */
+function turnStartedError(action: string, stoppedWork: boolean): string {
+  const already = stoppedWork ? " The background work already stopped." : "";
+  return `a turn started, so the request did not ${action}.${already} Wait for the turn to finish, then retry.`;
+}
 
 /**
  * True when the request asks to stop active background work: the query
@@ -1432,14 +1485,8 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
   // Active leases block a replace, as they block a pause (fix wave 2, B8):
   // the old sandbox goes away with every process in it. `force=true` stops
   // that work first, as a human cancel.
-  const leaseRefusal = await activeLeaseRefusal(engineStore, id);
-  const force = leaseRefusal !== null && (await wantsForce(c));
-  if (leaseRefusal !== null && !force) {
-    return c.json({ error: leaseRefusal }, 409);
-  }
-  if (force && !(await canCancelSessionWakeup(db, row, caller))) {
-    return c.json({ error: "You cannot stop this session's background work. Ask a session admin to replace the sandbox." }, 403);
-  }
+  const gate = await gateBackgroundWork(c, row, "replace", { leasedOnly: true }, await wantsForce(c));
+  if (gate.kind === "refused") return gate.response;
 
   const session = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
 
@@ -1451,13 +1498,18 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
     return c.json({ error: "a turn is running. Wait for it to finish, then retry." }, 409);
   }
 
-  const stopped = force
-    ? await cancelAllWorkAsHuman(engineStore, session, id, { leasedOnly: true }, {
+  const stopped = gate.kind === "force"
+    ? await cancelAllWorkAsHuman(engineStore, session, id, { leasedOnly: true, ids: gate.ids }, {
         actorUserId: c.var.user.id,
         signal: "defer",
         note: "They replaced the sandbox. Do not start it again unless someone asks.",
       })
     : undefined;
+  // A turn admitted while the work stopped would lose its sandbox mid-run.
+  if (stopped && (await engineStore.listUnsettledSubmissions(id)).length > 0) {
+    await stopped.sendSignals();
+    return c.json({ error: turnStartedError("replace the sandbox", true) }, 409);
+  }
 
   try {
     await session.attachment.replace();
@@ -1478,10 +1530,11 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
     );
   }
 
-  return c.json(
-    { ok: true, ...(stopped && stopped.cancelled.length > 0 ? { cancelledWork: stopped.cancelled.map((w) => w.id) } : {}) },
-    200,
-  );
+  const replaced: ReplaceSandboxResponse = {
+    ok: true,
+    ...(stopped && stopped.cancelled.length > 0 ? { cancelledWork: stopped.cancelled.map((w) => w.id) } : {}),
+  };
+  return c.json(replaced, 200);
 });
 
 // ── Delete ────────────────────────────────────────────────────────────────

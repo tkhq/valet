@@ -40,6 +40,7 @@ import type {
   PatchSessionResponse,
   PatchThreadResponse,
   PauseSessionResponse,
+  ReplaceSandboxResponse,
   ListSessionWakeupsResponse,
   CancelSessionWakeupResponse,
   PutRatingResponse,
@@ -243,13 +244,20 @@ export function useDeleteSession() {
  * session detail query still needs an explicit invalidation. */
 export function usePauseSession(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PauseSessionResponse, Error, void>({
-    mutationFn: () => api.pauseSession(sessionId),
+  return useMutation<PauseSessionResponse, Error, ForceOption | void>({
+    mutationFn: (opts) => api.pauseSession(sessionId, opts ?? undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
+      // A forced pause stopped background work; the badge drops it now.
+      qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) });
     },
   });
+}
+
+/** `force: true` stops the background work that blocks an action (409 `background_work`). */
+export interface ForceOption {
+  force?: boolean;
 }
 
 /** POST /:id/sandbox/replace — re-provision the session's sandbox in
@@ -258,10 +266,11 @@ export function usePauseSession(sessionId: string) {
  * needed beyond the session row. */
 export function useReplaceSandbox(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<{ ok: true }, Error, void>({
-    mutationFn: () => api.replaceSandbox(sessionId),
+  return useMutation<ReplaceSandboxResponse, Error, ForceOption | void>({
+    mutationFn: (opts) => api.replaceSandbox(sessionId, opts ?? undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+      qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) });
     },
   });
 }
@@ -385,11 +394,12 @@ export function useRenameSession(sessionId: string) {
  * it joined. */
 export function useMoveSession(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PatchSessionResponse, Error, string | null>({
-    mutationFn: (teamId) => api.patchSession(sessionId, { teamId }),
+  return useMutation<PatchSessionResponse, Error, { teamId: string | null } & ForceOption>({
+    mutationFn: ({ teamId, force }) => api.patchSession(sessionId, { teamId, ...(force ? { force: true } : {}) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
+      qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) });
     },
   });
 }
@@ -399,11 +409,12 @@ export function useMoveSession(sessionId: string) {
  * row and the live `sandbox.status` both change. */
 export function useSetSessionProfile(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PatchSessionResponse, Error, SandboxProfile>({
-    mutationFn: (profile) => api.patchSession(sessionId, { profile }),
+  return useMutation<PatchSessionResponse, Error, { profile: SandboxProfile } & ForceOption>({
+    mutationFn: ({ profile, force }) => api.patchSession(sessionId, { profile, ...(force ? { force: true } : {}) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
+      qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) });
     },
   });
 }
@@ -464,10 +475,12 @@ export function useMarkThreadsRead(sessionId: string) {
 
 export function useSetThreadArchived(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean }>({
-    mutationFn: ({ threadId, archived }) =>
-      api.patchThread(threadId, { archived }),
-    onSuccess: async (_saved, { threadId }) => {
+  return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean } & ForceOption>({
+    mutationFn: ({ threadId, archived, force }) =>
+      api.patchThread(threadId, { archived, ...(force ? { force: true } : {}) }),
+    onSuccess: async (saved, { threadId }) => {
+      // A forced archive stopped the thread's background work.
+      if (saved.cancelledWork) qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) });
       // An older supplemental activity read must not reinsert the archived row.
       await qc.cancelQueries({ predicate: query => query.queryKey[0] === "sessions"
         && query.queryKey[2] === "threads" && query.queryKey[3] === "activity" && query.queryKey[4] === threadId });

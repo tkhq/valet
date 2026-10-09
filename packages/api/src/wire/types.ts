@@ -858,6 +858,43 @@ export interface CancelSessionWakeupResponse {
   cancelled: { id: string; kind: WakeupKindWire | "hold" };
 }
 
+/** One piece of background work that blocks an action (`BackgroundWorkConflict`). */
+export interface BackgroundWorkItem {
+  /** The id a person cancels: `wk_` for a wakeup, `ls_` for a hold. */
+  id: string;
+  kind: WakeupKindWire | "hold";
+  reason: string;
+  threadId?: string;
+  /** `process`, `watch`, and `hold`: when the work stops on its own (ms). */
+  deadlineAt?: number;
+  /** `timer`: when it fires (ms). */
+  fireAt?: number;
+  createdAt: number;
+}
+
+/**
+ * The 409 body of an action that would stop background work: pause,
+ * replace, a profile change, an owner move, and a thread archive. Retry with
+ * `force: true` to stop the work as a person and then act. `work` lists only
+ * work on threads the caller can see.
+ */
+export interface BackgroundWorkConflict {
+  error: string;
+  code: "background_work";
+  work: BackgroundWorkItem[];
+  /** Items on threads the caller cannot see. Their reasons are not shown. */
+  hiddenCount: number;
+  /** False when `force` cannot help: the caller may not stop the work, or some of it is hidden. */
+  forceAllowed: boolean;
+}
+
+/** POST /api/sessions/:id/sandbox/replace. */
+export interface ReplaceSandboxResponse {
+  ok: true;
+  /** Ids of the background work a `force=true` replace cancelled. Absent when it cancelled none. */
+  cancelledWork?: string[];
+}
+
 // ── REST: workspace runtime ──────────────────────────────────────────────
 
 export type OrchestratorPresence = "idle" | "thinking" | "working";
@@ -1062,9 +1099,18 @@ export interface PatchThreadRequest {
   archived?: boolean;
   /** New title. The server trims it and rejects more than 200 characters. */
   title?: string | null;
+  /**
+   * With `archived: true`: stop the thread's background work first. Without
+   * it, an archive of a thread with background work returns 409
+   * `BackgroundWorkConflict`.
+   */
+  force?: boolean;
 }
 
-export type PatchThreadResponse = ThreadSummary;
+export type PatchThreadResponse = ThreadSummary & {
+  /** Ids of the background work a forced archive cancelled. Absent when it cancelled none. */
+  cancelledWork?: string[];
+};
 
 /**
  * Patch a session's settings. Send one field or both.
@@ -1101,14 +1147,22 @@ export interface PatchSessionRequest {
    * is refused while a turn is unsettled.
    */
   profile?: SandboxProfile;
+  /**
+   * Stop background work that blocks an owner move (all work) or a profile
+   * change of a running sandbox (process, watch, and hold work). Without it,
+   * such a change returns 409 `BackgroundWorkConflict`.
+   */
+  force?: boolean;
 }
 
 export type PatchSessionResponse = SessionDetail & {
   /**
-   * An owner move only: how many open wakeups and active holds the move
-   * cancelled, so nothing the old owner started runs as the new owner.
+   * A forced owner move or profile change: how many open wakeups and active
+   * holds it cancelled.
    */
   cancelledWorkCount?: number;
+  /** The ids behind `cancelledWorkCount`. */
+  cancelledWork?: string[];
 };
 
 // ── REST: messages ────────────────────────────────────────────────────────
@@ -1149,6 +1203,12 @@ export interface MessageSignal {
   signalType: string;
   attributes?: Record<string, string>;
   senderSessionId?: string;
+  /**
+   * The channel the signal came from, such as the Slack thread that asked
+   * for a wakeup. Only the channel type ships; the thread key stays on the
+   * server.
+   */
+  origin?: { channelType: string };
 }
 
 /**
@@ -5568,6 +5628,8 @@ export interface DismissWorkspaceBriefingResponse {
   archived: number;
   /** Threads left open because an approval is pending on them. */
   keptWaiting: number;
+  /** Threads left open because background work runs on them. */
+  keptRunning: number;
 }
 export interface WorkspaceBriefingsResponse {
   checkedAt?: number | null;

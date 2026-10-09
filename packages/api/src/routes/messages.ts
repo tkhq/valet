@@ -46,6 +46,7 @@ import type {
   MessageReplyReference,
   MessageSkillInvocation,
   PatchThreadRequest,
+  PatchThreadResponse,
   PromptFileAttachment,
   PromptImageAttachment,
   ResolveDecisionRequest,
@@ -57,8 +58,8 @@ import type {
 } from "../wire/types.js";
 import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { cancelAllWorkAsHuman, listBackgroundWork } from "../engine/wakeups-admin.js";
-import { canCancelSessionWakeup } from "./wakeups.js";
+import { cancelAllWorkAsHuman } from "../engine/wakeups-admin.js";
+import { gateBackgroundWork } from "./wakeups.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { answersGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
@@ -652,6 +653,14 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
     if (reasoningErr) return c.json({ error: reasoningErr }, 400);
   }
 
+  // Archiving a thread with background work stops that work, so it needs
+  // `force: true` (fix wave 3, H1). The check runs before any write; the
+  // forced stop runs below, next to the approval withdrawal.
+  const archiveGate = body.archived === true
+    ? await gateBackgroundWork(c, session, "archive", { threadId: thread.id }, body.force === true)
+    : undefined;
+  if (archiveGate?.kind === "refused") return archiveGate.response;
+
   if (body.model !== undefined) {
     try {
       await thread.setModel(
@@ -687,29 +696,28 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
       }
       for (const gate of pending) await engineSession.withdrawDecision(gate.id, "cancel");
     }
+  }
 
-    // The same reasoning covers background work (fix wave 2, H7): a process
-    // or a hold on a hidden thread keeps the sandbox awake for nobody, and
-    // its signals would start turns nobody reads. Archive cancels the
-    // thread's wakeups and holds as a human cancel with no signal: the
-    // thread is hidden, and the main thread can belong to other people.
-    const { engineStore } = c.var.providers;
-    const work = await listBackgroundWork(engineStore, sessionId);
-    const threadWork =
-      work.wakeups.some((w) => w.threadId === thread.id) ||
-      work.leases.some((l) => l.ownerKind === "hold" && l.threadId === thread.id);
-    if (threadWork) {
-      if (!(await canCancelSessionWakeup(db, session, c.var.principal))) {
-        return c.json(
-          { error: "This thread has background work running. Ask a session admin to cancel it, then archive the thread." },
-          409,
-        );
-      }
-      await cancelAllWorkAsHuman(engineStore, engineSession, sessionId, { threadId: thread.id }, {
+  // A forced archive stops the thread's wakeups and holds as a human cancel
+  // (fix wave 3, H1). The signal goes to the session's main thread, because
+  // the work's own thread is about to be hidden. It tells the agent that a
+  // person stopped the work, so it does not wait for a signal that never
+  // comes after an unarchive.
+  let cancelledWork: string[] | undefined;
+  if (archiveGate?.kind === "force") {
+    const stopped = await cancelAllWorkAsHuman(
+      c.var.providers.engineStore,
+      engineSession,
+      sessionId,
+      { threadId: thread.id, ids: archiveGate.ids },
+      {
         actorUserId: c.var.user.id,
-        signal: "suppress",
-      });
-    }
+        signal: "deliver",
+        deliverTo: "main",
+        note: "They archived the thread it ran in. Do not start it again unless someone asks.",
+      },
+    );
+    if (stopped.cancelled.length > 0) cancelledWork = stopped.cancelled.map((w) => w.id);
   }
 
   // The mirror row can be missing before auto-title runs.
@@ -761,7 +769,8 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
     archivedAt,
     thread.reasoning() ?? null,
   );
-  return c.json(summary);
+  const response: PatchThreadResponse = { ...summary, ...(cancelledWork ? { cancelledWork } : {}) };
+  return c.json(response);
 }
 
 messagesRouter.post("/:id/threads", (c) => createThread(c, c.req.param("id")));

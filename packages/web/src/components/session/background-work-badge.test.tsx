@@ -11,7 +11,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ListSessionWakeupsResponse } from "@valet/api/wire";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "~/api/client";
-import { BackgroundWorkBadge, backgroundItems, badgeLabel, timeUntil } from "./background-work-badge";
+import { BackgroundWorkBadge, backgroundItems, badgeLabel, itemDetail, timeSince, timeUntil } from "./background-work-badge";
 
 const HOUR = 3_600_000;
 const NOW = Date.UTC(2026, 9, 9, 12, 0, 0);
@@ -45,11 +45,22 @@ describe("background work helpers", () => {
 
   it("labels the badge with the count and the nearest deadline", () => {
     expect(badgeLabel(backgroundItems(listing(NOW)), NOW)).toBe("3 background · next deadline in 3h");
-    expect(badgeLabel([{ id: "wk_t", kind: "timer", reason: "x", fireAt: NOW + 10 * 60_000 }], NOW)).toBe(
+    expect(badgeLabel([{ id: "wk_t", kind: "timer", reason: "x", fireAt: NOW + 10 * 60_000, createdAt: NOW, status: "pending" }], NOW)).toBe(
       "1 background · next wakeup in 10m",
     );
     expect(timeUntil(NOW + 3 * 24 * HOUR, NOW)).toBe("in 3d");
     expect(timeUntil(NOW - 1, NOW)).toBe("now");
+  });
+});
+
+describe("row detail (fix wave 3, L2)", () => {
+  it("shows how long a process has run, and starting while it is pending", () => {
+    const [proc, timer, hold] = backgroundItems(listing(NOW));
+    expect(proc && itemDetail(proc, NOW)).toBe("Process · running 1h · deadline in 1d");
+    expect(timer && itemDetail(timer, NOW)).toBe("Timer · fires in 2h");
+    expect(hold && itemDetail(hold, NOW)).toBe("Hold · running under 1m · deadline in 3h");
+    expect(proc && itemDetail({ ...proc, status: "pending" }, NOW)).toBe("Process · starting · deadline in 1d");
+    expect(timeSince(NOW - 49 * HOUR, NOW)).toBe("2d");
   });
 });
 
