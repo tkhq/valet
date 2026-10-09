@@ -44,7 +44,7 @@ import {
   type WakeupsSeam,
 } from "@valet/engine";
 import type { CredentialUse, ValetPlugin } from "@valet/engine";
-import { buildWakeupsSeam, type WakeupsSeamSession } from "./wakeups-seam.js";
+import { buildWakeupsSeam, type WakeupsSeamDeps, type WakeupsSeamSession } from "./wakeups-seam.js";
 import type { ScratchCaps } from "@valet/shared";
 import { canBorrowCredential } from "../services/credential-borrow.js";
 import { membersSharing, withSharerName } from "../services/credential-shares.js";
@@ -292,6 +292,12 @@ export interface EngineHostOpts {
    * (spec 2026-10-08).
    */
   wakeupLimits: WakeupLimits;
+  /**
+   * Cap on one detached job's log, in bytes (`resolveJobLogMaxBytes` at
+   * boot). Passed to every session's `wakeups` seam. Optional so test
+   * harnesses can omit it; `node.ts` always sets it.
+   */
+  jobLogMaxBytes?: number;
   /** Anthropic API key required for prompts. Without it, prompts fail. */
   anthropicApiKey?: string;
   /** pi-ai model id or tier token; defaults to tier "s" when unset. */
@@ -487,6 +493,28 @@ export interface EngineHostOpts {
 
 /** `agent_sessions.credential_owner_mode`; see {@link SessionMeta.credentialOwnerMode}. */
 export type CredentialOwnerMode = "owner" | "actor";
+
+/** The `wakeups` seam deps every session builder passes. */
+export function wakeupsSeamDeps(
+  opts: Pick<EngineHostOpts, "engineStore" | "wakeupLimits" | "sandboxProvider" | "jobLogMaxBytes">,
+): WakeupsSeamDeps {
+  return {
+    engineStore: opts.engineStore,
+    limits: opts.wakeupLimits,
+    provider: opts.sandboxProvider,
+    ...(opts.jobLogMaxBytes !== undefined ? { jobLogMaxBytes: opts.jobLogMaxBytes } : {}),
+  };
+}
+
+/** The coding prompt's options. `scratchEnabled` is true when the session's
+ * resources include scratch, so the prompt names `/scratch` only then. */
+export function codingPromptOptions(
+  secretsCli: boolean,
+  flags: { resources?: { scratch?: string }; initialResources?: { scratch?: string } },
+): { secretsCli: boolean; scratchEnabled: boolean } {
+  const scratch = flags.resources?.scratch ?? flags.initialResources?.scratch;
+  return { secretsCli, scratchEnabled: scratch !== undefined };
+}
 
 /** A system-prompt paragraph that tells the model a dropped scratch
  * request left the session without `/scratch`. Empty when nothing dropped. */
@@ -1276,7 +1304,7 @@ export class EngineHost {
             resolveModel,
             resolveFallbackModel,
             sampling: { reasoning },
-            systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }) + scratchWarningPrompt(repoFlags.scratchWarning),
+            systemPrompt: codingSystemPrompt(codingPromptOptions(specProvider !== undefined, repoFlags)) + scratchWarningPrompt(repoFlags.scratchWarning),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1310,7 +1338,7 @@ export class EngineHost {
           resolveModel,
           resolveFallbackModel,
           sampling: { reasoning },
-          systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }) + scratchWarningPrompt(repoFlags.scratchWarning),
+          systemPrompt: codingSystemPrompt(codingPromptOptions(specProvider !== undefined, repoFlags)) + scratchWarningPrompt(repoFlags.scratchWarning),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: sessionRoles.length ? sessionRoles : undefined,
@@ -2526,7 +2554,7 @@ export class EngineHost {
   ): { wakeups: WakeupsSeam } {
     return {
       wakeups: buildWakeupsSeam(
-        { engineStore: this.opts.engineStore, limits: this.opts.wakeupLimits, provider: this.opts.sandboxProvider },
+        wakeupsSeamDeps(this.opts),
         sessionId,
         getSession,
       ),
@@ -4180,7 +4208,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }) + scratchWarningPrompt(repoFlags.scratchWarning),
+      systemPrompt: codingSystemPrompt(codingPromptOptions(specProvider !== undefined, repoFlags)) + scratchWarningPrompt(repoFlags.scratchWarning),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
@@ -4372,7 +4400,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       sampling: { reasoning },
-      systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
+      systemPrompt: codingSystemPrompt(codingPromptOptions(specProvider !== undefined, {})),
       // A step publishes a page from a file in its own sandbox, so a large page
       // never has to travel between steps as model output. A step gets this one
       // tool, not the memory tools. Its pages belong to the run owner and name

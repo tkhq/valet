@@ -87,8 +87,10 @@ import {
   resolveIdleMinutes,
   resolveOrgSandboxCeiling,
   resolveSandboxCapacityWaitMs,
+  resolveJobLogMaxBytes,
   resolveScratchCaps,
   resolveWakeupLimits,
+  scratchPoolWarning,
 } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
@@ -346,6 +348,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // kubernetes.
   const scratchCaps = resolveScratchCaps(process.env);
   const wakeupLimits = resolveWakeupLimits(process.env);
+  // Boot checks: a bad log cap, or one above the scratch cap, stops the api
+  // here instead of failing every session build.
+  const jobLogMaxBytes = resolveJobLogMaxBytes(process.env);
+  const poolWarning = scratchPoolWarning(process.env);
+  if (poolWarning !== undefined) console.warn(`WARNING: ${poolWarning}`);
   const rawSandboxProvider = buildSandboxProvider(process.env);
   const sandboxProvider = rawSandboxProvider.capabilities().hibernation
     ? withSandboxCapacityGate(rawSandboxProvider, {
@@ -490,6 +497,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     blobs,
     scratchCaps,
     wakeupLimits,
+    jobLogMaxBytes,
     anthropicApiKey: opts.anthropicApiKey,
     defaultImage: resolveDefaultImage(process.env),
     // Single image lineage: one stock image for every session shape.
