@@ -10,14 +10,43 @@ export type Validation<T> = { ok: true; value: T } | { ok: false; text: string }
 export const BACKGROUND_REFUSAL = (max: number) =>
   `[bash_background] Set deadline_hours (1 to ${max}) and reason when background is true.`;
 
-export const SLEEP_REFUSAL = "[bash_sleep] Use wake_at to pause for more than 5 minutes.";
+export const SLEEP_REFUSAL =
+  "[bash_sleep] Do not block a turn on sleep for more than 5 minutes. Call wake_at to start a new turn later, then end your turn.";
 
-export const WAKEUPS_UNAVAILABLE = "[wakeups_unavailable] this session cannot schedule wakeups. Run the work in the foreground.";
+/** The tools that refuse when the host wires no wakeups seam. */
+export type WakeupsTool = "bash" | "watch" | "wake_at" | "hold_sandbox" | "process_read" | "wakeup_list" | "wakeup_cancel";
+
+/**
+ * The refusal each tool returns when the session has no wakeups seam. The
+ * corrective action fits the tool: a reminder cannot run in the
+ * foreground (fix wave 3, UX prompt 13).
+ */
+export function wakeupsUnavailable(tool: WakeupsTool): string {
+  switch (tool) {
+    case "bash":
+    case "watch":
+      return "[wakeups_unavailable] This session cannot run background work. Run the command in the foreground.";
+    case "wake_at":
+      return "[wakeups_unavailable] This session cannot schedule wakeups. Tell the person to check back later instead.";
+    case "hold_sandbox":
+      return "[wakeups_unavailable] This session cannot hold its sandbox. Finish the work in this turn.";
+    case "process_read":
+    case "wakeup_list":
+    case "wakeup_cancel":
+      return "[wakeups_unavailable] This session has no background work.";
+  }
+}
+
+/** The `wake_at` text, kept under its old name for callers. */
+export const WAKEUPS_UNAVAILABLE = wakeupsUnavailable("wake_at");
 
 /** The cap counts per thread (fix wave 2, M14): one thread cannot use up another's. */
 export function wakeupsLimitRefusal(n: number, cap: number): string {
-  return `[wakeups_limit] This thread already has ${n} active wakeups and holds (limit ${cap}, sandbox.wakeupsPerSession). Cancel one of them with wakeup_cancel.`;
+  return `[wakeups_limit] This thread already has ${n} active wakeups and holds (limit ${cap} per thread, set by sandbox.wakeupsPerSession). Cancel one of them with wakeup_cancel.`;
 }
+
+/** An ISO time that ends in `Z` or a `+hh:mm` / `-hh:mm` offset. */
+const ISO_WITH_OFFSET = /(?:Z|[+-]\d{2}:?\d{2})$/i;
 
 function trimmedOrEmpty(value: string | undefined): string {
   return typeof value === "string" ? value.trim() : "";
@@ -78,7 +107,13 @@ export function validateWakeAt(
     }
     fireAt = now + seconds * 1000;
   } else {
-    const parsed = Date.parse(args.at as string);
+    const at = (args.at as string).trim();
+    // Without an offset, Date.parse reads the time in the api's zone, which
+    // the agent cannot see (fix wave 3, UX L1).
+    if (/^\d{4}-\d{2}-\d{2}T/.test(at) && !ISO_WITH_OFFSET.test(at)) {
+      return { ok: false, text: `[wake_at] Give at with a UTC offset, for example ${at}Z or ${at}+02:00.` };
+    }
+    const parsed = Date.parse(at);
     if (Number.isNaN(parsed) || parsed <= now) {
       return { ok: false, text: "[wake_at] Set at to a future ISO timestamp." };
     }
@@ -106,9 +141,18 @@ export function validateHold(
   return { ok: true, value: { hours: args.hours, reason } };
 }
 
+const SLEEP_UNIT_SECONDS: Record<string, number> = { "": 1, s: 1, m: 60, h: 3600, d: 86_400 };
+
+/**
+ * Refuses a `sleep` of more than 5 minutes at the start of the command or
+ * after a separator (`;`, `&&`, `||`, `|`, a newline), with an optional
+ * s/m/h/d unit (fix wave 3, UX prompt 4). `echo sleep 999` is not a sleep.
+ */
 export function sleepRefusal(command: string): string | null {
-  const match = /^\s*sleep\s+(\d+)/.exec(command);
-  if (!match) return null;
-  const seconds = Number(match[1]);
-  return seconds > 300 ? SLEEP_REFUSAL : null;
+  const re = /(?:^|[;&|\n])\s*sleep\s+(\d+(?:\.\d+)?)([smhd]?)\b/g;
+  for (const match of command.matchAll(re)) {
+    const seconds = Number(match[1]) * (SLEEP_UNIT_SECONDS[match[2] ?? ""] ?? 1);
+    if (seconds > 300) return SLEEP_REFUSAL;
+  }
+  return null;
 }

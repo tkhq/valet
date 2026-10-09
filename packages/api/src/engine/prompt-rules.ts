@@ -129,19 +129,33 @@ export const SECRETS_RULES = SECRETS_RULES_WITH_CLI;
 /**
  * Background work (spec 2026-10-08: sandbox scratch, wakeups, and leases).
  * Tells the model to use the background-work tools instead of blocking a
- * turn on a long command or polling a running process.
+ * turn on a long command or polling a running process. A model told only
+ * how to check progress loops on process_read, so the rules say to end the
+ * turn after a start (fix wave 3, UX prompts 1 and 9). The child timer
+ * promise holds only inside the ChildWatcher's 24-hour bound (UX M6).
  */
 export const BACKGROUND_WORK_RULES = `## Background work
 
-For a command longer than an hour, run \`bash\` with \`background: true\`, a \`deadline_hours\`, and a \`reason\`. You receive a \`process.exited\` signal when it ends; do not poll it. To check progress, call \`process_read\` with \`tail: true\`. To pause for more than 5 minutes, use \`wake_at\`, not \`sleep\`. In a child session, a pending \`wake_at\` keeps the child unsettled until the timer fires and that turn ends, so the parent waits for it. \`/scratch\` is wiped when the sandbox stops; keep anything you need in /workspace or push it.`;
+For a command longer than an hour, run \`bash\` with \`background: true\`, a \`deadline_hours\`, and a \`reason\`. After the start, end your turn with a one-line status. You receive a \`process.exited\` signal when it ends, and that signal starts your next turn; do not poll it. Call \`process_read\` with \`tail: true\` only when someone asks for progress. To follow a log or an external system, use \`watch\`, and print only the lines you will act on: each \`watch.event\` signal starts a turn. To pause for more than 5 minutes, call \`wake_at\` and end your turn; do not \`sleep\`. To keep the sandbox running while nothing runs in it, for example for a person in the terminal, use \`hold_sandbox\`. In a child session, a pending \`wake_at\` that fires within 24 hours keeps the child unsettled until that turn ends, so the parent waits for it. A later timer does not hold the parent. When a signal reports a cause other than \`exit\`, tell the person before you run the work again.`;
+
+/**
+ * The `/scratch` sentence. Only a session whose sandbox has `/scratch`
+ * gets it: a session without one was told a directory exists that does
+ * not (fix wave 3, UX prompt 8).
+ */
+export const SCRATCH_RULE =
+  "`/scratch` is wiped when the sandbox stops; keep anything you need in /workspace or push it.";
 
 /**
  * System prompt for sandbox coding sessions. `secretsCli` says whether this
  * build runs sandbox prep, which installs valet-secrets. An unbound build
  * on a non-isolated provider does not, and telling it about a command it
  * lacks produced a command-not-found with no scripted response.
+ * `scratchEnabled` says whether the session's sandbox has `/scratch`;
+ * absent means no, so the prompt never names a directory that may not
+ * exist.
  */
-export function codingSystemPrompt(opts: { secretsCli: boolean }): string {
+export function codingSystemPrompt(opts: { secretsCli: boolean; scratchEnabled?: boolean }): string {
   return `You are a coding assistant running inside a Docker sandbox. Your workspace is /workspace (the only mounted directory). All read/write/edit/bash tools operate against /workspace — use absolute paths under /workspace or relative paths (which resolve there).
 
 ${TOOL_USE_RULES}
@@ -158,7 +172,7 @@ ${CHILD_MODEL_RULES}
 
 ${opts.secretsCli ? SECRETS_RULES_WITH_CLI : SECRETS_RULES_NO_CLI}
 
-${BACKGROUND_WORK_RULES}
+${BACKGROUND_WORK_RULES}${opts.scratchEnabled ? ` ${SCRATCH_RULE}` : ""}
 
 ${CODING_PERSISTENCE_RULES}`;
 }
