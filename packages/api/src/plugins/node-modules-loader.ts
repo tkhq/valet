@@ -13,6 +13,7 @@ import { pathToFileURL } from "node:url";
 import { validateValetPlugin, type ValetPlugin } from "@valet/engine";
 import { httpInstallationResolvers } from "./http-installations.js";
 import { undeclaredHostRoutes } from "./http-routes.js";
+import { httpBindingMismatch } from "./http-bindings.js";
 
 export interface LoadNodeModulesPluginsOpts {
   /** Directories to scan, each treated as a `node_modules` root. */
@@ -173,6 +174,8 @@ async function loadOnePlugin(pkgDir: string, marker: string): Promise<LoadOneRes
       !Object.hasOwn(httpInstallationResolvers, validated.plugin.name)) {
     return { ok: false, reason: `No installation resolver for signed HTTP routes in ${validated.plugin.name}.` };
   }
+  const mismatch = validated.plugin.httpRoutes?.map((route) => httpBindingMismatch(validated.plugin.name, route)).find(Boolean);
+  if (mismatch) return { ok: false, reason: mismatch };
   const undeclared = undeclaredHostRoutes(validated.plugin);
   if (undeclared) return { ok: false, reason: undeclared };
 

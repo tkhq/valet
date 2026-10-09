@@ -121,6 +121,18 @@ The host removes Cookie, Authorization, X-API-Key, X-Valet-Sandbox, X-Valet-Inte
 Authenticated routes receive caller identity through the caller argument. Provider signatures must use separate headers, such as Linear-Signature.
 Signature headers and raw body bytes remain unchanged.
 
+## Host bindings
+
+Bundled routes that need host data use one mechanism: the binding table in `packages/api/src/plugins/http-bindings.ts`, keyed by plugin name and route ID.
+A binding pins the method, path, and authentication of the declaration it serves. The mount refuses a mismatch, and the node_modules loader quarantines the package.
+The mount runs a binding where it would call the manifest handler: after authentication, membership, administration, and the streaming body limit.
+The binding calls a handler that the bundled plugin package exports and gives it request-scoped capabilities. No capability method accepts an organization or user ID.
+The manifest handlers answer 501, so a host without the binding fails closed. A handler that a plugin declares never receives a capability.
+
+Compatibility URLs live in `LEGACY_ROUTES` in `packages/api/src/plugins/http-routes.ts`, keyed the same way.
+Each entry pins its method and authentication, so a plugin cannot widen access to an existing URL. It serves the same handler as the canonical URL.
+The mount refuses to boot when a loaded plugin with HTTP routes does not declare a route ID that a binding or compatibility URL names. Without this check, a renamed route would leave its existing URL answering 404. The node_modules loader quarantines such a package instead.
+
 ## Linear client preparation
 
 The Linear plugin owns the provider HTTP client for token creation, workspace lookup, and legacy webhook deletion.
@@ -138,9 +150,7 @@ Each compatibility URL fixes its method and authentication. Public plugin routes
 The plugin owns the URL verification handshake, v0 signature verification over raw bytes, payload parsing, retry headers, response codes, and the app manifest.
 The host passes the manifest URLs and the Slack user scope bundle as endpoint configuration.
 
-Bundled routes that need host data use a host-owned binding map, keyed by plugin name and route ID.
-A binding declares its authentication, and mounting fails on a mismatch. The host runs the binding after its authentication and body-limit checks.
-Each binding gives the handler one request-scoped capability. No capability method accepts an organization or user ID.
+Both routes use the host bindings described above. Each binding gives the handler one request-scoped capability.
 
 The ingress capability reads the single-org Slack connection, writes throttled diagnostics, and admits a verified request.
 Admission saves the encrypted request in `slack_webhook_inbox` before the 200 response. The host stores its own copy of the bytes and provider headers.
@@ -167,12 +177,7 @@ The host keeps `/api/org/github-app/*`, `/api/me/github/*`, and `/webhooks/githu
 
 ### Host binding
 
-GitHub uses the host binding table in `packages/api/src/plugins/http-bindings.ts`, keyed by plugin name and route ID. The Slack adoption uses the same table.
-The mount runs a binding where it would call the manifest handler: after authentication, membership, administration, and the streaming body limit.
-The mount refuses a binding whose authentication differs from the declaration. Each compatibility URL also pins its method and authentication.
-The mount also refuses to boot when a loaded plugin with HTTP routes does not declare a route ID that a host binding or compatibility URL names. Without this check, a renamed route would leave its existing URL answering 404. The node_modules loader quarantines such a package instead.
-The manifest handlers answer 501, so a host without the binding fails closed.
-
+GitHub uses the host bindings described above.
 `packages/api/src/plugins/http-github.ts` binds four capabilities. No capability method accepts a user or organization ID.
 
 - App administration binds to the caller's organization.

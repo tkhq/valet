@@ -81,24 +81,34 @@ describe('plugin route mounting', () => {
     }
   });
 
-  it('refuses Slack bindings and compatibility URLs with a different method or authentication', () => {
+  it('refuses a compatibility URL for an unbound route with a different method or authentication', () => {
+    const handle = () => new Response('ok');
+    expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'linear', version: '1', httpRoutes: [{
+      id: 'events', method: 'POST', path: '/events', auth: 'public', maxBodyBytes: 0, handle,
+    }] }], 'public')).toThrow('Compatibility route POST /webhooks/events/linear requires signature authentication.');
+  });
+
+  it('refuses Slack bindings with a different method, path, or authentication', () => {
     const handle = () => new Response('ok');
     expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'slack', version: '1', httpRoutes: [{
       id: 'events', method: 'POST', path: '/events', auth: 'org-admin', maxBodyBytes: 0, handle,
-    }] }], 'authenticated')).toThrow('Host binding for slack route events requires public authentication.');
+    }] }], 'authenticated')).toThrow('Declare slack route events as POST /events with public authentication.');
     expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'slack', version: '1', httpRoutes: [{
       id: 'app', method: 'POST', path: '/app', auth: 'org-admin', maxBodyBytes: 0, handle,
-    }] }], 'authenticated')).toThrow('Compatibility route GET /api/org/slack requires org-admin authentication.');
+    }] }], 'authenticated')).toThrow('Declare slack route app as GET /app with org-admin authentication.');
+    expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'slack', version: '1', httpRoutes: [{
+      id: 'events', method: 'POST', path: '/other', auth: 'public', maxBodyBytes: 0, handle,
+    }] }], 'public')).toThrow('Declare slack route events as POST /events with public authentication.');
   });
 
-  it('refuses GitHub bindings and compatibility URLs with a different method or authentication', () => {
+  it('refuses GitHub bindings with a different method or authentication', () => {
     const handle = () => new Response('ok');
     expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'github', version: '1', httpRoutes: [{
       id: 'webhook', method: 'POST', path: '/webhook', auth: 'user', maxBodyBytes: 0, handle,
-    }] }], 'authenticated')).toThrow('Host binding for github route webhook requires public authentication.');
+    }] }], 'authenticated')).toThrow('Declare github route webhook as POST /webhook with public authentication.');
     expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'github', version: '1', httpRoutes: [{
       id: 'app-status', method: 'POST', path: '/app', auth: 'org-admin', maxBodyBytes: 0, handle,
-    }] }], 'authenticated')).toThrow('Compatibility route GET /api/org/github-app requires org-admin authentication.');
+    }] }], 'authenticated')).toThrow('Declare github route app-status as GET /app with org-admin authentication.');
   });
 
   it('mounts public handlers without authentication and refuses anonymous protected handlers', async () => {

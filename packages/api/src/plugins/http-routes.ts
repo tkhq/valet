@@ -7,7 +7,7 @@ import { isOrgMember } from '../services/org.js';
 import { ingestEvent } from '../events/ingest.js';
 import { writeDropLog } from '../orchestrator/signals.js';
 import { httpInstallationResolvers } from './http-installations.js';
-import { httpRouteBinding, httpRouteBindings } from './http-bindings.js';
+import { httpBindingMismatch, httpRouteBinding, httpRouteBindings } from './http-bindings.js';
 
 interface LegacyRoute {
   path: string;
@@ -109,10 +109,9 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
       if (route.auth === 'signature' && !resolveInstallation) {
         throw new Error(`Configure an installation resolver for plugin ${plugin.name} before mounting signed ingress.`);
       }
+      const mismatch = httpBindingMismatch(plugin.name, route);
+      if (mismatch) throw new Error(mismatch);
       const binding = httpRouteBinding(plugin.name, route.id);
-      if (binding && binding.auth !== route.auth) {
-        throw new Error(`Host binding for ${plugin.name} route ${route.id} requires ${binding.auth} authentication.`);
-      }
       const handler: Handler<AppEnv> = async (c) => {
         let caller: PluginHttpCaller | undefined;
         if (!publicRoute) {

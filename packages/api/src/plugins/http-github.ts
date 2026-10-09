@@ -110,9 +110,9 @@ const connection = (context: PluginHttpBindingContext) =>
 
 /** Host bindings for every GitHub route, by route ID. */
 export const githubHttpBindings: Readonly<Record<string, PluginHttpBinding>> = {
-  "app-status": { auth: "org-admin", bind: (context) => appStatus(app(context)) },
+  "app-status": { method: "GET", path: "/app", auth: "org-admin", bind: (context) => appStatus(app(context)) },
   "app-manifest": {
-    auth: "org-admin",
+    method: "POST", path: "/app/manifest", auth: "org-admin",
     bind: (context) => appManifest(
       context.request, app(context), endpoints(), githubTriggers(context.providers).map((trigger) => trigger.id),
     ),
@@ -120,18 +120,39 @@ export const githubHttpBindings: Readonly<Record<string, PluginHttpBinding>> = {
   // The signed state names the organization. GitHub's redirect cannot carry
   // the org-admin check, so the capability repeats it for the admin the state names.
   "app-setup": {
-    auth: "user",
+    method: "GET", path: "/app/setup", auth: "user",
     bind: (context) => appSetup(context.request, setupCapability(context.providers, callerOf(context)), endpoints()),
   },
-  "app-credential": { auth: "org-admin", bind: (context) => appCredential(context.request, app(context)) },
-  "app-refresh": { auth: "org-admin", bind: (context) => appRefresh(app(context)) },
-  "app-disconnect": { auth: "org-admin", bind: (context) => appDisconnect(app(context)) },
-  connect: { auth: "user", bind: (context) => connectStart(context.request, connection(context), endpoints()) },
-  "org-status": { auth: "user", bind: (context) => connectOrgStatus(connection(context)) },
-  callback: { auth: "user", bind: (context) => connectCallback(context.request, connection(context), endpoints()) },
-  disconnect: { auth: "user", bind: (context) => connectDisconnect(connection(context)) },
+  "app-credential": {
+    method: "POST", path: "/app/credential", auth: "org-admin",
+    bind: (context) => appCredential(context.request, app(context)),
+  },
+  "app-refresh": {
+    method: "POST", path: "/app/refresh", auth: "org-admin",
+    bind: (context) => appRefresh(app(context)),
+  },
+  "app-disconnect": {
+    method: "DELETE", path: "/app", auth: "org-admin",
+    bind: (context) => appDisconnect(app(context)),
+  },
+  connect: {
+    method: "POST", path: "/connection/connect", auth: "user",
+    bind: (context) => connectStart(context.request, connection(context), endpoints()),
+  },
+  "org-status": {
+    method: "GET", path: "/connection/org-status", auth: "user",
+    bind: (context) => connectOrgStatus(connection(context)),
+  },
+  callback: {
+    method: "GET", path: "/connection/callback", auth: "user",
+    bind: (context) => connectCallback(context.request, connection(context), endpoints()),
+  },
+  disconnect: {
+    method: "DELETE", path: "/connection", auth: "user",
+    bind: (context) => connectDisconnect(connection(context)),
+  },
   webhook: {
-    auth: "public",
+    method: "POST", path: "/webhook", auth: "public",
     bind: (context) => receiveWebhook(context.request, webhookCapability(context.providers), githubTriggers(context.providers)),
   },
 };
