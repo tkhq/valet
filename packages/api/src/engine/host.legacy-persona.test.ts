@@ -241,4 +241,12 @@ describe("carried-over personality in the workspace prompt", () => {
     expect(neutral.startsWith("You are Night Helper.\n\n")).toBe(true);
     expect(neutral).not.toContain("TEAM-FILE-PERSONA");
   });
+
+  it("injects no carried-over personality for an assistant without a carried-over name", async () => {
+    const withFile = await promptFor("persona-unnamed-file", { name: null, personality: "STALE-COLUMN" }, { content: FILE, editedAfterUpgrade: false });
+    expect(withFile).not.toContain("STALE-COLUMN");
+    expect(withFile.startsWith(`${FILE}\n\n`)).toBe(true);
+    const columnOnly = await promptFor("persona-unnamed-column", { name: null, personality: "STALE-COLUMN" });
+    expect(columnOnly).not.toContain("STALE-COLUMN");
+  });
 });

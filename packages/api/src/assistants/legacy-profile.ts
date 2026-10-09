@@ -128,6 +128,10 @@ export async function loadLegacyAssistantProfile(
  * whitespace-only file clears the personality instead (legacy continuity
  * spec, "Limitation: no editor").
  *
+ * The old prompt had no persona at all without a name, so a column without
+ * a carried-over name is ignored. The file then applies as it does on a
+ * database created after the upgrade.
+ *
  * A migration-retained assistant shares the team's memory, so a file edit
  * after the upgrade is the live assistant's and never reaches it. It keeps
  * its own column. With a NULL column it used the shared file, as before the
@@ -138,7 +142,7 @@ export function effectivePersonality(
   file: { content: string; updatedAt: number } | null,
   legacy: LegacyAssistantProfile | undefined,
 ): string {
-  const column = legacy?.personality;
+  const column = legacy?.name ? legacy.personality : undefined;
   const editedAfterUpgrade = file !== null && file.updatedAt > (legacy?.upgradedAt ?? Number.POSITIVE_INFINITY);
   if (legacy?.retained) return column ?? (file && !editedAfterUpgrade ? file.content : "");
   if (column === undefined) return file?.content ?? "";
