@@ -419,6 +419,10 @@ Eligible items (`planBulkAnswers` in `packages/web/src/components/layout/bulk-an
 
 The bell opens a confirmation dialog before it sends anything. The dialog lists each covered item and each skipped item with its reason. On confirm, the web client sends each answer through the same endpoint as the per-item button, so the server applies the same authorization.
 
-At most four answers are in flight at one time. One failure does not stop the others. A `404` or `409` means the item was answered or expired elsewhere: the summary counts it as skipped, not failed. A status line shows progress ("Approving 3 of 12…") and then the summary ("Approved 11. 1 failed: title: error"). Focus moves to that line after the dialog closes. The bell then refetches both lists.
+At most four answers are in flight at one time. One failure does not stop the others. A `404` or `409` means the item is no longer waiting for this caller: another answer or a timeout settled it, or the caller lost access. The summary reports it as "no longer waiting", never as answered.
+
+After the last answer, the bell refetches the lists it covered. An item that the refetched lists still show is reported as "still waiting", whatever its response said. If the refetch fails, the bell keeps the response-based summary. A status line shows progress ("Approving 3 of 12…") and then the summary ("Approved 10. 1 was no longer waiting. 1 failed: title: error").
+
+The dialog says what an approval does. A tool action runs once, and Valet saves no rule. A workflow approval node lets its run continue to the next steps. After a confirmed run, focus moves to the status line. After Cancel, focus returns to the button that opened the dialog. When the bell closes after a run has settled, the summary clears.
 
 `NotificationsBell` owns the run state, not the popover content. If the user closes the bell during a run, the run continues. When the bell opens again, it shows the progress or the summary, and both buttons stay disabled until the run settles. A second run cannot start while one is in flight.

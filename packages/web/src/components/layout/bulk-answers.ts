@@ -122,14 +122,18 @@ export function workflowRequest(target: WorkflowTarget, decision: BulkDecision):
 
 export interface BulkOutcome {
   done: BulkTarget[];
-  /** Answered elsewhere, expired, or removed before this answer arrived. */
-  vanished: BulkTarget[];
+  /** 404 or 409: answered elsewhere, expired, or no longer visible to the
+   * caller. Not counted as answered by this run. */
+  gone: BulkTarget[];
+  /** Answered or gone, but the refetched lists still show it waiting. */
+  stillWaiting: BulkTarget[];
   failed: Array<{ target: BulkTarget; error: string }>;
 }
 
-/** 404 means the gate is not pending any more, and 409 means another answer
- * or a timeout settled it first. Neither is a failure of this answer. */
-function vanished(err: unknown): boolean {
+/** 404 means the gate is not pending for this caller any more (answered,
+ * removed, or access lost), and 409 means another answer or a timeout
+ * settled it first. Neither proves this run answered it. */
+function gone(err: unknown): boolean {
   return err instanceof ApiError && (err.status === 404 || err.status === 409);
 }
 
@@ -152,19 +156,38 @@ export async function answerAll(
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
-  const outcome: BulkOutcome = { done: [], vanished: [], failed: [] };
+  const outcome: BulkOutcome = { done: [], gone: [], stillWaiting: [], failed: [] };
   targets.forEach((target, index) => {
     const result = results[index]!;
     if (result.ok) outcome.done.push(target);
-    else if (vanished(result.err)) outcome.vanished.push(target);
+    else if (gone(result.err)) outcome.gone.push(target);
     else outcome.failed.push({ target, error: errorText(result.err) });
   });
   return outcome;
 }
 
-export function summarizeBulkAnswers(decision: BulkDecision, { done, vanished: gone, failed }: BulkOutcome): string {
+/** The keys `planBulkAnswers` gives the items in these lists. */
+export function listedKeys(workflows: readonly WorkflowActionRequiredItem[], decisions: readonly DecisionItem[]): Set<string> {
+  return new Set([...workflows.map(item => `workflow:${item.id}`), ...decisions.map(item => `decision:${item.gate.id}`)]);
+}
+
+/** A target that the refetched lists still show is not answered, whatever
+ * its response said. `listed` is undefined when the refetch failed. */
+export function reconcileBulkAnswers(outcome: BulkOutcome, listed: ReadonlySet<string> | undefined): BulkOutcome {
+  if (!listed) return outcome;
+  const waiting = (t: BulkTarget) => listed.has(t.key);
+  return {
+    done: outcome.done.filter(t => !waiting(t)),
+    gone: outcome.gone.filter(t => !waiting(t)),
+    stillWaiting: [...outcome.stillWaiting, ...outcome.done.filter(waiting), ...outcome.gone.filter(waiting)],
+    failed: outcome.failed,
+  };
+}
+
+export function summarizeBulkAnswers(decision: BulkDecision, { done, gone, stillWaiting, failed }: BulkOutcome): string {
   const parts = [`${decision === "approve" ? "Approved" : "Denied"} ${done.length}.`];
-  if (gone.length) parts.push(`Skipped ${gone.length} that ${gone.length === 1 ? "was" : "were"} already answered.`);
+  if (gone.length) parts.push(`${gone.length} ${gone.length === 1 ? "was" : "were"} no longer waiting.`);
+  if (stillWaiting.length) parts.push(`${stillWaiting.length} still waiting: ${stillWaiting.map(t => t.title).join(", ")}`);
   if (failed.length) parts.push(`${failed.length} failed: ${failed.map(f => `${f.target.title}: ${f.error}`).join(" ")}`);
   return parts.join(" ");
 }

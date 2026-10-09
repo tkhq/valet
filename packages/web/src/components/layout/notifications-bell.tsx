@@ -7,6 +7,7 @@ import { Badge, Button, Popover, PopoverContent, PopoverTrigger, StatusDot } fro
 import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { relativeTime } from "~/lib/relative-time";
+import { listedKeys } from "./bulk-answers";
 import { NeedsActionHeader, useBulkAnswerRun } from "./needs-action-header";
 
 /** Unread updates, newest first, one row per title: a workflow that fails
@@ -44,8 +45,14 @@ export function NotificationsBell() {
   const unread = updates.length;
   const loading = workflows.isLoading || decisions.isLoading;
   const failed = workflows.isError || decisions.isError;
-  // Each answered decision invalidates every inbox page; refetch after failures too.
-  const bulkRun = useBulkAnswerRun(() => { void workflows.refetch(); void summary.refetch(); });
+  // After a bulk run, refetch the lists it covered. An item still listed was
+  // not answered, whatever its response said.
+  const bulkRun = useBulkAnswerRun(async () => {
+    const [w, d] = await Promise.all([workflows.refetch(), decisionCursor ? page.refetch() : summary.refetch()]);
+    if (decisionCursor) void summary.refetch();
+    if (w.isError || d.isError) return undefined;
+    return listedKeys(w.data?.items ?? [], d.data?.items ?? []);
+  });
   function changeOpen(value: boolean) {
     setOpen(value);
     if (!value) { setDecisionCursor(undefined); bulkRun.dismiss(); }

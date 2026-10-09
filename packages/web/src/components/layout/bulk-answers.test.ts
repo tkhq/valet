@@ -1,7 +1,7 @@
 import type { DecisionGate, ListNotificationDecisionsResponse, WorkflowActionRequiredItem, WorkflowPendingGate } from "@valet/api/wire";
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "~/api/client";
-import { answerAll, decisionRequest, planBulkAnswers, SKIP_REASON_TEXT, summarizeBulkAnswers, workflowRequest, type BulkTarget, type WorkflowTarget } from "./bulk-answers";
+import { answerAll, decisionRequest, listedKeys, planBulkAnswers, reconcileBulkAnswers, SKIP_REASON_TEXT, summarizeBulkAnswers, workflowRequest, type BulkTarget, type WorkflowTarget } from "./bulk-answers";
 
 type DecisionItem = ListNotificationDecisionsResponse["items"][number];
 
@@ -130,14 +130,15 @@ describe("answerAll", () => {
     expect(progress).toHaveBeenLastCalledWith(6);
   });
 
-  it("keeps going after a failure and counts vanished gates as skipped", async () => {
+  it("keeps going after a failure and counts gates that are gone separately", async () => {
     const outcome = await answerAll(targets, async (t) => {
       if (t.key === "b") throw new ApiError(403, "POST → 403", { error: "Only the owner can answer." });
       if (t.key === "c") throw new ApiError(404, "POST → 404", { error: "gate not pending" });
       if (t.key === "d") throw new ApiError(409, "POST → 409", { error: "this approval gate has already been resolved" });
     }, () => {});
     expect(outcome.done.map(t => t.key)).toEqual(["a", "e", "f"]);
-    expect(outcome.vanished.map(t => t.key)).toEqual(["c", "d"]);
+    expect(outcome.gone.map(t => t.key)).toEqual(["c", "d"]);
+    expect(outcome.stillWaiting).toEqual([]);
     expect(outcome.failed).toEqual([{ target: targets[1], error: "Only the owner can answer." }]);
   });
 });
@@ -145,11 +146,34 @@ describe("answerAll", () => {
 describe("summarizeBulkAnswers", () => {
   const t = (title: string): BulkTarget => ({ kind: "decision", key: title, title, sessionId: "s", gateId: title });
   it("names each failure with its title and error", () => {
-    expect(summarizeBulkAnswers("approve", { done: [t("a"), t("b")], vanished: [], failed: [{ target: t("Deploy"), error: "Forbidden." }] }))
+    expect(summarizeBulkAnswers("approve", { done: [t("a"), t("b")], gone: [], stillWaiting: [], failed: [{ target: t("Deploy"), error: "Forbidden." }] }))
       .toBe("Approved 2. 1 failed: Deploy: Forbidden.");
   });
-  it("counts already answered requests as skipped", () => {
-    expect(summarizeBulkAnswers("deny", { done: [t("a")], vanished: [t("b")], failed: [] }))
-      .toBe("Denied 1. Skipped 1 that was already answered.");
+  it("reports gates that were no longer waiting without claiming they were answered", () => {
+    expect(summarizeBulkAnswers("deny", { done: [t("a")], gone: [t("b"), t("c")], stillWaiting: [], failed: [] }))
+      .toBe("Denied 1. 2 were no longer waiting.");
+  });
+  it("names requests that are still waiting", () => {
+    expect(summarizeBulkAnswers("approve", { done: [], gone: [], stillWaiting: [t("Ship it?")], failed: [] }))
+      .toBe("Approved 0. 1 still waiting: Ship it?");
+  });
+});
+
+describe("reconcileBulkAnswers", () => {
+  const t = (key: string): BulkTarget => ({ kind: "decision", key, title: key, sessionId: "s", gateId: key });
+  const outcome = { done: [t("a"), t("b")], gone: [t("c"), t("d")], stillWaiting: [], failed: [{ target: t("e"), error: "x" }] };
+
+  it("moves answered or gone targets that the refetched lists still show to still waiting", () => {
+    expect(reconcileBulkAnswers(outcome, new Set(["b", "d", "e"]))).toEqual({
+      done: [t("a")], gone: [t("c")], stillWaiting: [t("b"), t("d")], failed: [{ target: t("e"), error: "x" }],
+    });
+  });
+
+  it("keeps the outcome when the refetch failed", () => {
+    expect(reconcileBulkAnswers(outcome, undefined)).toBe(outcome);
+  });
+
+  it("keys listed items the same way the plan does", () => {
+    expect([...listedKeys([workflow("w")], [decision("g")])]).toEqual(["workflow:w", "decision:g"]);
   });
 });

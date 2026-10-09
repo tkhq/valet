@@ -5,7 +5,7 @@ import { useMe } from "~/api/settings";
 import { useResolveWorkflowApprovals } from "~/api/workflows";
 import { Badge, Button, ConfirmDialog } from "~/components/primitives";
 import {
-  answerAll, decisionRequest, planBulkAnswers, SKIP_REASON_TEXT, summarizeBulkAnswers, workflowRequest,
+  answerAll, decisionRequest, planBulkAnswers, reconcileBulkAnswers, SKIP_REASON_TEXT, summarizeBulkAnswers, workflowRequest,
   type BulkDecision, type BulkTarget, type SkippedItem,
 } from "./bulk-answers";
 
@@ -28,8 +28,10 @@ export interface BulkAnswerRun {
 
 /** Run state for bulk answers. `NotificationsBell` owns it, not the popover
  * content: closing the bell unmounts the content, and a run must keep its
- * progress and summary, and block a second run, until it settles. */
-export function useBulkAnswerRun(onSettled: () => void): BulkAnswerRun {
+ * progress and summary, and block a second run, until it settles.
+ * `refresh` refetches the lists and returns the keys still listed, or
+ * undefined when the refetch failed. A target still listed is not answered. */
+export function useBulkAnswerRun(refresh: () => Promise<ReadonlySet<string> | undefined>): BulkAnswerRun {
   const resolveDecision = useResolveDecisions();
   const resolveWorkflow = useResolveWorkflowApprovals();
   const [progress, setProgress] = useState<BulkAnswerRun["progress"]>(null);
@@ -51,13 +53,25 @@ export function useBulkAnswerRun(onSettled: () => void): BulkAnswerRun {
     setProgress({ decision, settled: 0, total: targets.length });
     const outcome = await answerAll(targets, target => answer(target, decision),
       settled => setProgress({ decision, settled, total: targets.length }));
+    const listed = await refresh().catch(() => undefined);
     inFlight.current = false;
     setProgress(null);
-    setSummary(summarizeBulkAnswers(decision, outcome));
-    onSettled();
+    setSummary(summarizeBulkAnswers(decision, reconcileBulkAnswers(outcome, listed)));
   }
 
   return { progress, summary, start, dismiss: () => { if (!inFlight.current) setSummary(""); } };
+}
+
+/** What the confirm does, in the dialog's description. A tool action runs
+ * once; a workflow approval node lets its run go on to its next steps. */
+function describe(decision: BulkDecision, targets: readonly BulkTarget[], partial: boolean): string {
+  const parts = [decision === "approve" ? "Valet approves each request below." : "Valet denies each request below."];
+  if (decision === "approve") {
+    if (targets.some(t => t.kind === "decision" || t.policy)) parts.push("Each tool action runs once. Valet saves no rule and allows no later calls.");
+    if (targets.some(t => t.kind === "workflow" && !t.policy)) parts.push("Each workflow approval lets its run continue to the next steps.");
+  }
+  if (partial) parts.push("This covers only the requests listed in the bell. Other pages are not included.");
+  return parts.join(" ");
 }
 
 /** The bell's "Needs action" heading with "Approve all" and "Deny all". A
@@ -79,6 +93,8 @@ export function NeedsActionHeader({ pendingCount, partialCount, workflows, decis
   const status = useRef<HTMLParagraphElement>(null);
   /** Set on confirm: the dialog then hands focus to the status line. */
   const started = useRef(false);
+  /** The button that opened the dialog. Cancel returns focus to it. */
+  const openedBy = useRef<HTMLButtonElement | null>(null);
   const live = planBulkAnswers(workflows, decisions, me.data?.id);
   const { progress, summary } = run;
 
@@ -95,14 +111,7 @@ export function NeedsActionHeader({ pendingCount, partialCount, workflows, decis
     ? `${VERB[progress.decision].ing} ${Math.min(progress.settled + 1, progress.total)} of ${progress.total}…`
     : summary;
   const verb = pending ? VERB[pending.decision] : VERB.approve;
-  const description = pending
-    ? [
-        pending.decision === "approve"
-          ? "Valet approves each request below once. It does not save a rule or allow later calls."
-          : "Valet denies each request below.",
-        partial ? "This covers only the requests listed in the bell. Other pages are not included." : "",
-      ].filter(Boolean).join(" ")
-    : "";
+  const description = pending ? describe(pending.decision, pending.targets, partial) : "";
 
   return (
     <div className="space-y-2">
@@ -115,7 +124,7 @@ export function NeedsActionHeader({ pendingCount, partialCount, workflows, decis
             return (
               <Button key={decision} size="sm" variant="secondary" disabled={running || n === 0}
                 aria-label={partial ? `${label} ${requests(n)}` : `${label} ${n} ${requests(n)}`}
-                onClick={() => { started.current = false; setPending({ decision, ...live }); }}>
+                onClick={event => { started.current = false; openedBy.current = event.currentTarget; setPending({ decision, ...live }); }}>
                 {label}
               </Button>
             );
@@ -133,10 +142,13 @@ export function NeedsActionHeader({ pendingCount, partialCount, workflows, decis
         confirmVariant={pending?.decision === "approve" ? "primary" : "danger"}
         onCloseAutoFocus={event => {
           // After a confirmed run, focus the progress line: the buttons are
-          // disabled, and they leave the page when no item is left.
-          if (!started.current) return;
+          // disabled, and they leave the page when no item is left. After
+          // Cancel, focus the button that opened the dialog. Radix's own
+          // restore lands on the body inside the bell's popover.
           event.preventDefault();
-          status.current?.focus();
+          const back = openedBy.current;
+          if (!started.current && back?.isConnected) back.focus();
+          else status.current?.focus();
         }}
       >
         {pending && <div className="space-y-3 text-sm">
