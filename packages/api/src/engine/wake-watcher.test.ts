@@ -910,7 +910,9 @@ describe("WakeWatcher", () => {
       const h = harness(async () => ({ status: "done", exitCode: 0, output: "head\n", nextOffset: 5, truncated: true }));
       await seedProcess(h.store);
       await h.watcher().sweep();
-      expect(String(signalOf(h.prompt.mock.calls[0]).content.body)).toContain("The log hit its size cap");
+      const { content } = signalOf(h.prompt.mock.calls[0]);
+      const body = typeof content === "object" && "body" in content ? String(content.body) : "";
+      expect(body).toContain("The log hit its size cap");
     });
 
     it("delivers the signal before the kill, so a cut shutdown loses the kill, not the signal (concurrency M6)", async () => {
