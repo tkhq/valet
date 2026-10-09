@@ -56,10 +56,26 @@ function isHoursInRange(value: number | undefined, max: number): boolean {
   return typeof value === "number" && Number.isFinite(value) && value >= 1 && value <= max;
 }
 
+/**
+ * The refusal for the first field that holds a NUL byte, or null. Postgres
+ * `text` rejects NUL, so the store write would fail with a raw driver error
+ * the agent cannot act on (fix wave 4, data probable 4).
+ */
+function nulRefusal(tool: string, fields: Record<string, string | undefined>): string | null {
+  for (const [name, value] of Object.entries(fields)) {
+    if (typeof value === "string" && value.includes("\u0000")) {
+      return `[${tool}] ${name} contains a NUL byte (\\0). Remove it and call the tool again.`;
+    }
+  }
+  return null;
+}
+
 export function validateBackground(
-  args: { background?: boolean; deadline_hours?: number; reason?: string },
+  args: { background?: boolean; deadline_hours?: number; reason?: string; command?: string },
   limits: WakeupLimits,
 ): Validation<{ deadlineHours: number; reason: string }> {
+  const nul = nulRefusal("bash_background", { command: args.command, reason: args.reason });
+  if (nul) return { ok: false, text: nul };
   const text = BACKGROUND_REFUSAL(limits.leaseMaxHours);
   const reason = trimmedOrEmpty(args.reason);
   if (!isHoursInRange(args.deadline_hours, limits.leaseMaxHours) || reason.length < 1 || reason.length > 200) {
@@ -69,9 +85,11 @@ export function validateBackground(
 }
 
 export function validateWatch(
-  args: { reason: string; max_hours: number },
+  args: { reason: string; max_hours: number; command?: string },
   limits: WakeupLimits,
 ): Validation<{ reason: string; maxHours: number }> {
+  const nul = nulRefusal("watch", { command: args.command, reason: args.reason });
+  if (nul) return { ok: false, text: nul };
   const reason = trimmedOrEmpty(args.reason);
   if (reason.length < 1 || reason.length > 200) {
     return { ok: false, text: `[watch] Set reason (1 to 200 characters).` };
@@ -87,6 +105,8 @@ export function validateWakeAt(
   now: number,
   limits: WakeupLimits,
 ): Validation<{ fireAt: number; prompt: string }> {
+  const nul = nulRefusal("wake_at", { prompt: args.prompt });
+  if (nul) return { ok: false, text: nul };
   const prompt = trimmedOrEmpty(args.prompt);
   const hasAt = typeof args.at === "string";
   const hasAfter = typeof args.after_seconds === "number";
@@ -131,6 +151,8 @@ export function validateHold(
   args: { hours: number; reason: string },
   limits: WakeupLimits,
 ): Validation<{ hours: number; reason: string }> {
+  const nul = nulRefusal("hold_sandbox", { reason: args.reason });
+  if (nul) return { ok: false, text: nul };
   const reason = trimmedOrEmpty(args.reason);
   if (reason.length < 1 || reason.length > 200) {
     return { ok: false, text: "[hold_sandbox] Set reason (1 to 200 characters)." };

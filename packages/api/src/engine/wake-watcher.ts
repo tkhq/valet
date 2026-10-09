@@ -168,6 +168,8 @@ export class WakeWatcher {
     this.clock = deps.now ?? Date.now;
     this.decideOptions = {
       watchMaxEventsPerHour: deps.limits.watchMaxEventsPerHour,
+      tickMs: this.intervalMs,
+      leaseMaxHours: deps.limits.leaseMaxHours,
       ...(deps.limits.watchMinIntervalMs !== undefined ? { watchMinIntervalMs: deps.limits.watchMinIntervalMs } : {}),
       ...(deps.jobLogDir !== undefined ? { logDir: deps.jobLogDir } : {}),
     };
@@ -221,9 +223,11 @@ export class WakeWatcher {
 
     // Page through every due row. A single fixed batch let old always-due
     // process rows starve newer timers once more than one batch was due.
+    // The store's cursor counts unreadable rows too, so one bad row never
+    // ends the scan early (fix wave 4, data N1).
     let after: WakeupCursor | undefined;
     for (;;) {
-      const rows = await this.deps.engineStore.listDueWakeups(now, this.batchSize, after);
+      const { rows, next } = await this.deps.engineStore.listDueWakeups(now, this.batchSize, after);
       for (const row of rows) {
         if (this.stopping) return;
         const progress = { pastCas: false };
@@ -237,9 +241,8 @@ export class WakeWatcher {
           }
         }
       }
-      const last = rows[rows.length - 1];
-      if (rows.length < this.batchSize || !last) break;
-      after = { createdAt: last.createdAt, id: last.id };
+      if (next === null) break;
+      after = next;
     }
     if (this.stopping) return;
     // Every pending or running row, not just the due ones: a pending timer
@@ -249,6 +252,9 @@ export class WakeWatcher {
       this.metrics.wakeupsActive(kind, counts.filter((c) => c.kind === kind).reduce((n, c) => n + c.count, 0));
     }
     await this.expireLeases(now);
+    // A shutdown that began during the lease pass skips the reconcile: its
+    // patches add work to the shutdown budget (fix wave 4, concurrency M6).
+    if (this.stopping) return;
     await this.reconcileLeases(now);
   }
 
@@ -283,6 +289,7 @@ export class WakeWatcher {
             output: poll.output,
             nextOffset: poll.nextOffset,
             ...(poll.exitCode !== undefined ? { exitCode: poll.exitCode } : {}),
+            ...(poll.truncated ? { truncated: true } : {}),
           };
         }
       } catch (err) {
@@ -343,16 +350,6 @@ export class WakeWatcher {
     if (!updated) return null;
     progress.pastCas = true;
 
-    // A lost CAS never reaches this kill, so a process that a cancel or
-    // another sweep already ended is never killed twice.
-    if (decision.kill && sandbox?.cancelJob && row.execId !== undefined) {
-      try {
-        await sandbox.cancelJob(row.execId);
-      } catch (err) {
-        console.error(`WakeWatcher: kill of wakeup ${row.id} (exec ${row.execId}) failed after the row moved to ${decision.to}:`, err);
-      }
-    }
-
     for (const signal of decision.signals) {
       try {
         await this.deliver(updated.sessionId, updated.threadId, signal, updated.origin);
@@ -361,6 +358,20 @@ export class WakeWatcher {
         // The counter and the log line are the only record (spec Deviations).
         this.metrics.signalLost(updated.kind);
         console.error(`WakeWatcher: delivery of ${signal.signalType} for wakeup ${row.id} failed; the signal is lost:`, err);
+      }
+    }
+
+    // A lost CAS never reaches this kill, so a process that a cancel or
+    // another sweep already ended is never killed twice. The kill runs
+    // after the delivery: a kill exec can take a minute, and a shutdown
+    // that cuts this row then loses the kill, not the signal (fix wave 4,
+    // concurrency M6). The next start's prune and the deadline still bound
+    // a process that outlives a lost kill.
+    if (decision.kill && sandbox?.cancelJob && row.execId !== undefined) {
+      try {
+        await sandbox.cancelJob(row.execId);
+      } catch (err) {
+        console.error(`WakeWatcher: kill of wakeup ${row.id} (exec ${row.execId}) failed after the row moved to ${decision.to}:`, err);
       }
     }
 
@@ -546,8 +557,17 @@ export class WakeWatcher {
     // slow pass skips ticks (fix wave 2, M11). The first pass after a start
     // counts one interval at most: the previous process counted the rest
     // (fix wave 3, data L1).
+    // One sandbox counts once, from its oldest lease, under that lease's
+    // owner kind: a process and a hold on one pod hold one node (fix wave
+    // 4, k8s L-4b). A lease with no sandbox id yet counts alone.
     const since = this.lastPassAt ?? now - this.intervalMs;
+    const oldestPerSandbox = new Map<string, Lease>();
     for (const lease of leases) {
+      const key = lease.sandboxId ?? `lease:${lease.id}`;
+      const prev = oldestPerSandbox.get(key);
+      if (!prev || lease.createdAt < prev.createdAt) oldestPerSandbox.set(key, lease);
+    }
+    for (const lease of oldestPerSandbox.values()) {
       const from = Math.max(lease.createdAt, since);
       const seconds = Math.max(0, now - from) / 1000;
       if (seconds > 0) this.metrics.nodeSeconds(lease.ownerKind, seconds);
@@ -566,6 +586,9 @@ export class WakeWatcher {
     // is not counted (fix wave 2, M10).
     let unannotated = 0;
     const oldestBySandbox = new Map<string, number>();
+    // A failed lookup hides which sandbox its lease holds, so this tick
+    // removes no protection: it could be that lease's (fix wave 4, k8s N-7).
+    let lookupFailed = false;
     for (const lease of leases) {
       let sandboxId = lease.sandboxId;
       if (sandboxId === undefined) {
@@ -573,6 +596,7 @@ export class WakeWatcher {
         try {
           resolved = await this.leaseSandbox(lease);
         } catch (err) {
+          lookupFailed = true;
           resolved = { kind: "error", why: err instanceof Error ? err.message : String(err) };
         }
         if (resolved.kind !== "id") {
@@ -599,6 +623,10 @@ export class WakeWatcher {
     }
     this.metrics.leasesUnannotated(unannotated);
 
+    if (lookupFailed) {
+      console.error("WakeWatcher: a lease lookup failed, so no eviction protection is removed this tick.");
+      return;
+    }
     let protectedIds: string[] = [];
     try {
       protectedIds = (await listEvictionProtected?.call(provider)) ?? [];

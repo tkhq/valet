@@ -87,6 +87,36 @@ describe("validateWakeAt `at` without an offset (fix wave 3, UX L1)", () => {
   });
 });
 
+describe("NUL bytes (fix wave 4, data probable 4)", () => {
+  const now = Date.UTC(2026, 9, 8, 12, 0, 0);
+  it("refuses a NUL in the command, reason, or prompt and names the field", () => {
+    expect(validateBackground({ background: true, deadline_hours: 2, reason: "r", command: "echo a\u0000b" }, limits)).toEqual({
+      ok: false,
+      text: "[bash_background] command contains a NUL byte (\\0). Remove it and call the tool again.",
+    });
+    expect(validateBackground({ background: true, deadline_hours: 2, reason: "r\u0000", command: "make" }, limits)).toEqual({
+      ok: false,
+      text: "[bash_background] reason contains a NUL byte (\\0). Remove it and call the tool again.",
+    });
+    expect(validateWatch({ command: "tail -f x\u0000", reason: "ci", max_hours: 2 }, limits)).toEqual({
+      ok: false,
+      text: "[watch] command contains a NUL byte (\\0). Remove it and call the tool again.",
+    });
+    expect(validateWatch({ command: "tail -f x", reason: "c\u0000i", max_hours: 2 }, limits)).toEqual({
+      ok: false,
+      text: "[watch] reason contains a NUL byte (\\0). Remove it and call the tool again.",
+    });
+    expect(validateWakeAt({ after_seconds: 60, prompt: "check\u0000" }, now, limits)).toEqual({
+      ok: false,
+      text: "[wake_at] prompt contains a NUL byte (\\0). Remove it and call the tool again.",
+    });
+    expect(validateHold({ hours: 1, reason: "soak\u0000" }, limits)).toEqual({
+      ok: false,
+      text: "[hold_sandbox] reason contains a NUL byte (\\0). Remove it and call the tool again.",
+    });
+  });
+});
+
 describe("wakeupsUnavailable (fix wave 3, UX prompt 13)", () => {
   it("names a corrective action that fits each tool", () => {
     expect(wakeupsUnavailable("bash")).toBe("[wakeups_unavailable] This session cannot run background work. Run the command in the foreground.");

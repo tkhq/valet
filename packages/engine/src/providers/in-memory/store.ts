@@ -350,8 +350,8 @@ export class InMemorySessionStore implements SessionStore {
       .map((w) => ({ ...w }));
   }
 
-  async listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<Wakeup[]> {
-    return [...this.wakeups.values()]
+  async listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<{ rows: Wakeup[]; next: WakeupCursor | null }> {
+    const rows = [...this.wakeups.values()]
       .filter(
         (w) =>
           ((w.status === "running" || w.status === "pending") && (w.kind === "process" || w.kind === "watch")) ||
@@ -361,6 +361,8 @@ export class InMemorySessionStore implements SessionStore {
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .slice(0, limit)
       .map((w) => ({ ...w }));
+    const last = rows[rows.length - 1];
+    return { rows, next: rows.length < limit || !last ? null : { createdAt: last.createdAt, id: last.id } };
   }
 
   async transitionWakeup(
@@ -388,6 +390,11 @@ export class InMemorySessionStore implements SessionStore {
     const next: Lease = { ...l, releasedAt, releaseCause: cause };
     this.leases.set(id, next);
     return { ...next };
+  }
+
+  async getLease(id: string): Promise<Lease | null> {
+    const l = this.leases.get(id);
+    return l ? { ...l } : null;
   }
 
   async listActiveLeases(sessionId: string): Promise<Lease[]> {

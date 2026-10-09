@@ -1,7 +1,8 @@
 // Helpers the wakeups seam and the WakeWatcher share (spec 2026-10-08,
-// fix wave 2): which errors mean the sandbox is gone, and the detached job
-// log cap. Also the human surface over background work (fix wave 2, group
-// C): the listing the routes show, and the human cancel of spec B6.
+// fix wave 2): which errors mean the sandbox is gone. The detached job log
+// cap lives in providers/sandbox-backend.ts. Also the human surface over
+// background work (fix wave 2, group C): the listing the routes show, and
+// the human cancel of spec B6.
 
 import {
   recordWakeupSignalLost,
@@ -10,6 +11,7 @@ import {
   SandboxSupersededError,
   SandboxUnavailableError,
 } from "@valet/engine";
+import { tail, WATCH_BUFFER_BYTES } from "./wake-watcher-decide.js";
 import type {
   Lease,
   PromptContent,
@@ -19,7 +21,6 @@ import type {
   WakeupKind,
   WakeupsSeam,
 } from "@valet/engine";
-import { parseResourceQuantity } from "@valet/shared";
 
 /**
  * Error texts that mean the sandbox is gone: the kubernetes provider's
@@ -43,26 +44,6 @@ export function isSandboxGone(err: unknown): boolean {
     return true;
   }
   return err instanceof Error && SANDBOX_GONE.test(err.message);
-}
-
-/** Default cap on one detached job's log: 2 GiB (fix wave 2, M6). */
-export const DEFAULT_JOB_LOG_MAX_BYTES = 2 * 1024 ** 3;
-
-/**
- * The detached job log cap from `VALET_JOB_LOG_MAX_BYTES`: a plain byte
- * count or a quantity such as `2Gi`. Unset means the default. A value that
- * does not parse to a positive whole number of bytes stops the boot.
- */
-export function resolveJobLogMaxBytes(env: Record<string, string | undefined>): number {
-  const raw = env.VALET_JOB_LOG_MAX_BYTES?.trim();
-  if (raw === undefined || raw === "") return DEFAULT_JOB_LOG_MAX_BYTES;
-  const bytes = /^\d+$/.test(raw) ? Number(raw) : parseResourceQuantity(raw);
-  if (bytes === null || !Number.isSafeInteger(bytes) || bytes < 1) {
-    throw new Error(
-      `VALET_JOB_LOG_MAX_BYTES="${raw}" is not a byte size. Set a whole number of bytes or a quantity such as 2Gi.`,
-    );
-  }
-  return bytes;
 }
 
 // ── Human surface (fix wave 2, group C) ─────────────────────────────────────
@@ -298,11 +279,18 @@ function wakeupCancelledSignal(row: Wakeup, opts: HumanCancelOptions, nowMs: num
     };
   }
   attributes.durationSeconds = String(Math.round((nowMs - row.createdAt) / 1000));
-  const lastOutput = ownThread && row.logTail ?`\n\nLast output:\n${row.logTail}` : "";
+  const lastOutput = ownThread && row.logTail ? `\n\nLast output:\n${row.logTail}` : "";
+  // A watch's buffered lines reached no watch.event. Up to 64 KiB of them
+  // follow the last output (fix wave 4, data N2). Off the work's own thread
+  // they stay out, like the log tail (security N3).
+  const unsent =
+    ownThread && row.kind === "watch" && row.watchBuffer
+      ? `\n\nLines the watch read but did not send yet:\n${tail(row.watchBuffer, WATCH_BUFFER_BYTES)}`
+      : "";
   return {
     kind: "signal",
     signalType: `${row.kind}.exited`,
-    body: `A person stopped this ${row.kind} at ${at}. ${opts.note ?? DEFAULT_CANCEL_NOTE}${lastOutput}`,
+    body: `A person stopped this ${row.kind} at ${at}. ${opts.note ?? DEFAULT_CANCEL_NOTE}${lastOutput}${unsent}`,
     attributes,
     tagName: "wakeup",
   };

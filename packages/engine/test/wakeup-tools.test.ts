@@ -107,7 +107,7 @@ describe("wake_at", () => {
     }));
     const r = await wakeAtTool.execute({ after_seconds: 7200, prompt: "Check the proof report" }, makeCtx({ create }));
     expect(create.mock.calls[0]?.[1]).toMatchObject({ kind: "timer", prompt: "Check the proof report" });
-    expect(r.text).toBe("scheduled wakeup wk_t at 2023-11-14T22:13:20.000Z");
+    expect(r.text.startsWith("scheduled wakeup wk_t at 2023-11-14T22:13:20.000Z.")).toBe(true);
   });
 });
 
@@ -339,5 +339,29 @@ describe("watch result text", () => {
     const r = await watchTool.execute({ command: "tail -f x", reason: "ci", max_hours: 2 }, makeCtx({ create }));
     expect(r.text).toContain("watch.exited");
     expect(r.text).not.toContain("watch.ended");
+  });
+});
+
+describe("fix wave 4 tool texts (UX N14, N5)", () => {
+  it("wake_at tells the agent to end its turn", async () => {
+    const create = vi.fn(async () => ({
+      wakeup: { ...baseWakeup, id: "wk_t", kind: "timer" as const, status: "pending" as const, fireAt: 1_700_000_000_000 },
+    }));
+    const r = await wakeAtTool.execute({ after_seconds: 7200, prompt: "Check" }, makeCtx({ create }));
+    expect(r.text).toBe(
+      "scheduled wakeup wk_t at 2023-11-14T22:13:20.000Z. End your turn now; the timer.fired signal starts your next turn.",
+    );
+  });
+
+  it("the watch start says a full 64 KiB buffer goes out sooner than the interval", async () => {
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_w", kind: "watch" as const } }));
+    const r = await watchTool.execute({ command: "tail -f x", reason: "ci", max_hours: 2 }, makeCtx({ create }));
+    expect(r.text).toContain("at most one watch.event every 120 seconds, or sooner when 64 KiB of new lines collect");
+  });
+
+  it("process_read gives the capped notice when the seam reports a cap drop with no marker (docker)", async () => {
+    const readLog = vi.fn(async () => ({ text: "head\n", nextOffset: 5, eof: true, capped: true }));
+    const r = await processReadTool.execute({ id: "wk_a", tail: true }, makeCtx({ readLog }));
+    expect(r.text).toContain("[log capped: output after the cap was dropped.");
   });
 });

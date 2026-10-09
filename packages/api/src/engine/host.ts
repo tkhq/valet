@@ -137,7 +137,7 @@ import {
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
 import securityPlugin from "@valet/plugin-security/plugin";
-import { codingSystemPrompt } from "./prompt-rules.js";
+import { CHILD_TIMER_HOURS, codingSystemPrompt } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool } from "../services/generated-files.js";
@@ -1306,7 +1306,7 @@ export class EngineHost {
             resolveModel,
             resolveFallbackModel,
             ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
-            systemPrompt: codingSystemPrompt(codingPromptOptions(specProvider !== undefined, repoFlags)) + scratchWarningPrompt(repoFlags.scratchWarning),
+            systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1339,7 +1339,7 @@ export class EngineHost {
           resolveModel,
           resolveFallbackModel,
           ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
-          systemPrompt: codingSystemPrompt(codingPromptOptions(specProvider !== undefined, repoFlags)) + scratchWarningPrompt(repoFlags.scratchWarning),
+          systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: sessionRoles.length ? sessionRoles : undefined,
@@ -4001,7 +4001,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
-      systemPrompt: codingSystemPrompt(codingPromptOptions(specProvider !== undefined, repoFlags)) + scratchWarningPrompt(repoFlags.scratchWarning),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, repoFlags), childTimerHours: CHILD_TIMER_HOURS }) + scratchWarningPrompt(repoFlags.scratchWarning),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
@@ -4186,7 +4186,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
-      systemPrompt: codingSystemPrompt(codingPromptOptions(specProvider !== undefined, {})),
+      systemPrompt: codingSystemPrompt({ ...codingPromptOptions(specProvider !== undefined, {}), childTimerHours: CHILD_TIMER_HOURS }),
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,

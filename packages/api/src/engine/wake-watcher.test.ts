@@ -886,4 +886,105 @@ describe("WakeWatcher", () => {
       await w.stop();
     });
   });
+
+  describe("fix wave 4", () => {
+    it("pages on the store's cursor, so a page that skipped an unreadable row does not end the pass (data N1)", async () => {
+      const h = harness();
+      for (const id of ["wk_1", "wk_2", "wk_3"]) {
+        await seedProcess(h.store, { id, leaseId: `ls_${id}`, execId: `exec-${id}`, createdAt: NOW - 90_000 }, { id: `ls_${id}`, ownerId: id });
+      }
+      await h.store.createWakeup(
+        wakeup({ id: "wk_t", kind: "timer", status: "pending", prompt: "ping", fireAt: NOW - 1, createdAt: NOW - 10, execId: undefined, leaseId: undefined, command: undefined }),
+      );
+      const real = h.store.listDueWakeups.bind(h.store);
+      // The first page reads two raw rows but one is unreadable, so it maps one.
+      vi.spyOn(h.store, "listDueWakeups").mockImplementation(async (now, limit, after) => {
+        const page = await real(now, limit, after);
+        return after === undefined ? { rows: page.rows.slice(1), next: page.next } : page;
+      });
+      await h.watcher({ batchSize: 2 }).sweep();
+      expect(await h.store.getWakeup("wk_t")).toMatchObject({ status: "done", cause: "fired" });
+    });
+
+    it("passes the provider's truncated flag to the exit body (UX N5)", async () => {
+      const h = harness(async () => ({ status: "done", exitCode: 0, output: "head\n", nextOffset: 5, truncated: true }));
+      await seedProcess(h.store);
+      await h.watcher().sweep();
+      const { content } = signalOf(h.prompt.mock.calls[0]);
+      const body = typeof content === "object" && "body" in content ? String(content.body) : "";
+      expect(body).toContain("The log hit its size cap");
+    });
+
+    it("delivers the signal before the kill, so a cut shutdown loses the kill, not the signal (concurrency M6)", async () => {
+      const order: string[] = [];
+      const h = harness(async () => ({ status: "running", output: "", nextOffset: 0 }));
+      h.cancelJob.mockImplementation(async () => {
+        order.push("kill");
+      });
+      h.prompt.mockImplementation(async () => {
+        order.push("deliver");
+        return {};
+      });
+      await seedProcess(h.store, { deadlineAt: NOW - 1 }, { deadlineAt: NOW - 1 });
+      await h.watcher().sweep();
+      expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "expired", cause: "deadline" });
+      expect(order).toEqual(["deliver", "kill"]);
+    });
+
+    it("skips the lease reconcile once stop() is called during the lease pass (concurrency M6)", async () => {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const h = harness();
+      h.prompt.mockImplementation(async () => {
+        await gate;
+        return {};
+      });
+      await h.store.createLease(lease({ id: "ls_h", ownerKind: "hold", ownerId: undefined, deadlineAt: NOW - 1 }));
+      const w = h.watcher({ sweepIntervalMs: 60_000 });
+      const pass = w.sweep();
+      await vi.waitFor(() => expect(h.prompt).toHaveBeenCalled());
+      const stopped = w.stop();
+      release();
+      await pass;
+      await stopped;
+      expect(h.listEvictionProtected).not.toHaveBeenCalled();
+    });
+
+    it("protects nothing less when one lease lookup fails: it skips the unprotect pass for that tick (k8s N-7)", async () => {
+      const h = harness();
+      await h.store.saveSession({
+        id: "sess-1", userId: "u1", orgId: "o1", owner: { type: "user", id: "u1" }, workspace: "/",
+        purpose: "interactive", status: "running", createdAt: 1, updatedAt: 1,
+      });
+      await h.store.createLease(lease({ id: "ls_h", ownerKind: "hold", ownerId: undefined, sandboxId: undefined, createdAt: NOW - 10 * 60_000 }));
+      h.listEvictionProtected.mockResolvedValue(["sb-1"]);
+      vi.spyOn(h.store, "getSession").mockRejectedValueOnce(new Error("db blip"));
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await h.watcher().sweep();
+      } finally {
+        warn.mockRestore();
+        error.mockRestore();
+      }
+      expect(h.setEvictionProtection).not.toHaveBeenCalledWith("sb-1", false);
+    });
+
+    it("counts node seconds once per sandbox when two leases share it (k8s L-4b)", async () => {
+      const h = harness();
+      const nodeSeconds = vi.fn();
+      await h.store.createLease(lease({ id: "ls_p", createdAt: NOW - 10_000 }));
+      await h.store.createLease(lease({ id: "ls_h", ownerKind: "hold", ownerId: undefined, createdAt: NOW - 5_000 }));
+      await h.store.createLease(lease({ id: "ls_o", sandboxId: "sb-2", ownerKind: "hold", ownerId: undefined, createdAt: NOW - 4_000 }));
+      await h.store.createWakeup(wakeup({ leaseId: "ls_p" }));
+      const w = h.watcher({ metrics: { nodeSeconds } });
+      await w.sweep(NOW);
+      expect(nodeSeconds.mock.calls).toEqual([
+        ["process", 10],
+        ["hold", 4],
+      ]);
+    });
+  });
 });

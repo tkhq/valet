@@ -2219,9 +2219,13 @@ export interface SessionStore {
    * wakeups (a start that has not finished, or one a crash cut short), and
    * pending timer wakeups whose fireAt <= now, in (createdAt, id) order.
    * `after` pages: it returns only rows strictly after that position, so a
-   * caller reads every due row.
+   * caller reads every due row. `rows` skips an unreadable row (counted in
+   * `valet.wakeups.bad_rows`). `next` is the position of the last row the
+   * page read, readable or not, or null when the page read fewer than
+   * `limit` rows. A caller pages on `next`, so one unreadable row never ends
+   * the scan early (fix wave 4, data N1).
    */
-  listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<Wakeup[]>;
+  listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<{ rows: Wakeup[]; next: WakeupCursor | null }>;
   /** Wakeup counts per (kind, status) over `statuses`. Groups with no rows are absent. */
   countWakeupsByKindAndStatus(statuses: readonly WakeupStatus[]): Promise<WakeupCount[]>;
   /** CAS: succeeds only when the row's current status is in `from`. Null when the CAS loses. */
@@ -2248,6 +2252,8 @@ export interface SessionStore {
   createLease(lease: Lease): Promise<void>;
   /** CAS release: succeeds only when the lease is not already released. Null when already released. */
   releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null>;
+  /** The lease with `id`, released or not, or null for an unknown or unreadable row. */
+  getLease(id: string): Promise<Lease | null>;
   listActiveLeases(sessionId: string): Promise<Lease[]>;
   listAllActiveLeases(): Promise<Lease[]>;
   countActiveLeases(sessionId: string): Promise<number>;

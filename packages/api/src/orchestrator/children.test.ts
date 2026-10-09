@@ -32,6 +32,7 @@ import {
   buildChildStatusReader,
   ChildWatcher,
   ChildLimitError,
+  childParkAction,
   classifyWatcherError,
   resolveChildSettlement,
   type ChildrenDeps,
@@ -1464,6 +1465,23 @@ describe("ChildWatcher", () => {
       error.mockRestore();
     });
 
+    it("keeps waiting while the child's sandbox is provisioning, as a forced replace does (fix wave 4, concurrency N1)", async () => {
+      const c = await armedChild("replacing");
+      await c.engineStore.createWakeup(terminalWakeup(c.watch.childSessionId, c.childThread.id, "wk_rx", { status: "cancelled", cause: "cancelled" }));
+      const live = api?.providers.engineHost.liveSession(c.watch.childSessionId);
+      if (!live) throw new Error("expected a live child session");
+      const state = vi.spyOn(live.attachment, "state", "get").mockReturnValue("provisioning");
+      try {
+        c.watcher.arm(c.watch);
+        // Past the 200 ms grace: without the provisioning wait it settles here.
+        await new Promise((r) => setTimeout(r, 500));
+        expect(await c.settled()).toBe(false);
+      } finally {
+        state.mockRestore();
+      }
+      await waitFor(c.settled);
+    });
+
     it("does not wait past the grace for an agent-cancelled wakeup, which sends no signal", async () => {
       const c = await armedChild("cancelled");
       await c.engineStore.createWakeup(terminalWakeup(c.watch.childSessionId, c.childThread.id, "wk_cx", { status: "cancelled", cause: "cancelled" }));
@@ -2057,6 +2075,19 @@ describe("ChildWatcher", () => {
 
     expect(engineHost.liveSession("child-busy")).not.toBeNull();
     expect(child.attachment.state).toBe("ready");
+  });
+});
+
+describe("childParkAction (fix wave 4, concurrency N1)", () => {
+  it("leaves a provisioning sandbox alone, so a replace in flight keeps its sandbox", () => {
+    expect(childParkAction("provisioning", true)).toBe("skip");
+    expect(childParkAction("provisioning", false)).toBe("skip");
+  });
+  it("parks a retainable ready or suspended sandbox and destroys the rest", () => {
+    expect(childParkAction("ready", true)).toBe("suspend");
+    expect(childParkAction("suspended", true)).toBe("record_suspended");
+    expect(childParkAction("ready", false)).toBe("destroy");
+    expect(childParkAction("detached", true)).toBe("destroy");
   });
 });
 
