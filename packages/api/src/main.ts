@@ -793,12 +793,18 @@ process.on("uncaughtException", (err) => {
  * the direct-entry boot below; the serve command wires its own handler so it
  * can also clean up its pidfile.
  */
+/** How long a SIGINT/SIGTERM shutdown may run before the process exits anyway. */
+export const SHUTDOWN_HARD_EXIT_MS = 20_000;
+
 function installSignalShutdown(handle: ServerHandle): void {
   const onSignal = (signal: NodeJS.Signals) => {
     console.log(`\nReceived ${signal}, shutting down (sessions evicted, durable state kept)...`);
     void handle.close().finally(() => process.exit(0));
     // Hard-exit if close() takes too long (containers can be slow to stop).
-    setTimeout(() => process.exit(1), 5_000).unref();
+    // close() waits for the WakeWatcher's row in flight, which can sit in a
+    // 60-second exec, so the bound is 20 seconds, not 5. A cut row loses at
+    // most its signal, never its lease (fix wave 3, concurrency M6).
+    setTimeout(() => process.exit(1), SHUTDOWN_HARD_EXIT_MS).unref();
   };
   process.on("SIGINT", () => onSignal("SIGINT"));
   process.on("SIGTERM", () => onSignal("SIGTERM"));

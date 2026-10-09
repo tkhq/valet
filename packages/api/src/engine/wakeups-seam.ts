@@ -15,7 +15,7 @@ import type {
   WakeupsSeam,
 } from "@valet/engine";
 import { newExecId, newLeaseId, newWakeupId } from "@valet/engine/wakeups-ids";
-import { isSandboxGone, resolveJobLogMaxBytes } from "./wakeups-admin.js";
+import { DEFAULT_JOB_LOG_MAX_BYTES, isSandboxGone } from "./wakeups-admin.js";
 
 /**
  * The slice of a live session the wakeups seam needs: the sandbox's job
@@ -42,14 +42,27 @@ export interface WakeupsSeamDeps {
   provider?: Pick<SandboxProvider, "restore">;
   /** Records a terminal transition in `valet.wakeups.total`. Tests inject a spy. */
   recordEnded?: (kind: WakeupKind, cause: WakeupCause) => void;
-  /** Cap on a detached job's log. Defaults to `VALET_JOB_LOG_MAX_BYTES` (2 GiB). */
+  /**
+   * Cap on a detached job's log, from `VALET_JOB_LOG_MAX_BYTES`. The host
+   * resolves it once at boot, so a bad value stops the boot instead of
+   * every session build (fix wave 3, data M3). Absent means 2 GiB.
+   */
   jobLogMaxBytes?: number;
+  /**
+   * The session's `/scratch` size in bytes, or undefined without scratch.
+   * Job logs live on `/scratch` when it exists, so each log is capped at a
+   * quarter of it: a log can then never fill `/scratch` and evict the pod
+   * alone (fix wave 3, k8s M-B).
+   */
+  scratchBytes?: () => number | undefined;
   now?: () => number;
 }
 
-const BASH_BACKGROUND_UNAVAILABLE = "[bash_background] this sandbox backend cannot run background processes.";
+const BASH_BACKGROUND_UNAVAILABLE =
+  "[bash_background] This sandbox backend cannot run background processes. Run the command in the foreground with a timeout of up to 3600 seconds.";
 const HOLD_NO_SANDBOX = "[hold_sandbox] No sandbox is running. Start work that needs the sandbox first.";
-const READ_NOT_RUNNING = "[process_read] the sandbox is not running; the log is gone with it.";
+const READ_NOT_RUNNING =
+  "[process_read] The sandbox is not running, so the log is gone with it. The process.exited signal kept the last 4 KB of output, and files in /workspace remain.";
 
 const HOUR_MS = 3_600_000;
 
@@ -69,7 +82,22 @@ export function buildWakeupsSeam(
   const { engineStore, limits } = deps;
   const now = deps.now ?? (() => Date.now());
   const recordEnded = deps.recordEnded ?? recordWakeupEnded;
-  const jobLogMaxBytes = deps.jobLogMaxBytes ?? resolveJobLogMaxBytes(process.env);
+  const jobLogMaxBytes = deps.jobLogMaxBytes ?? DEFAULT_JOB_LOG_MAX_BYTES;
+
+  /** The detached log cap: the deploy cap, or a quarter of `/scratch` when that is smaller. */
+  function logCap(): number {
+    const scratch = deps.scratchBytes?.();
+    return scratch === undefined ? jobLogMaxBytes : Math.min(jobLogMaxBytes, Math.max(1, Math.floor(scratch / 4)));
+  }
+
+  /**
+   * Ends a create's rows when the session was deleted while they were
+   * written: a delete that committed first leaves nothing to remove them
+   * (fix wave 3, data probable 2). True when the session is gone.
+   */
+  async function sessionGone(): Promise<boolean> {
+    return (await engineStore.getSession(sessionId)) === null;
+  }
 
   /**
    * INV-1: a lease deadline is at most `leaseMaxHours` after creation. The
@@ -168,10 +196,14 @@ export function buildWakeupsSeam(
     // A crash after this write leaves a pending row the WakeWatcher ends as
     // lost and kills; it never leaves a process that no row tracks.
     await engineStore.createWakeupWithLease(pending, lease);
+    if (await sessionGone()) {
+      await engineStore.transitionWakeupAndReleaseLease(wakeupId, ["pending"], "cancelled", { cause: "cancelled", endedAt: now() }, now(), "cancelled");
+      throw new Error("[bash_background] This session was deleted, so the command did not start.");
+    }
 
     let handle;
     try {
-      handle = await sb.execJob(command, { detached: true, execId, maxOutputBytes: jobLogMaxBytes });
+      handle = await sb.execJob(command, { detached: true, execId, maxOutputBytes: logCap() });
     } catch (err) {
       // The start may or may not have run the command. End the row and its
       // lease, and kill the requested id in case it did.
@@ -187,11 +219,24 @@ export function buildWakeupsSeam(
       throw err;
     }
 
-    const running = await engineStore.transitionWakeup(wakeupId, ["pending"], "running", { execId: handle.execId }, now());
+    let running: Wakeup | null;
+    try {
+      running = await engineStore.transitionWakeup(wakeupId, ["pending"], "running", { execId: handle.execId }, now());
+    } catch (err) {
+      // The job runs and the pending row names its exec id. The WakeWatcher
+      // probes the row past its start grace and adopts the job, so the
+      // agent must not run the command again (fix wave 3, concurrency L6).
+      console.error(`wakeups: marking ${wakeupId} running failed; the WakeWatcher adopts it after its start grace:`, err);
+      return { wakeup: { ...pending, execId: handle.execId }, lease };
+    }
     if (!running) {
-      // The WakeWatcher ended the pending row while the start ran (a start
-      // past its grace). Nothing tracks this job now, so stop it.
+      // Another writer ended the pending row while the start ran. Nothing
+      // tracks this job now, so stop it.
       await killJob(wakeupId, handle.execId, sandboxId);
+      const ended = await engineStore.getWakeup(wakeupId).catch(() => null);
+      if (ended?.status === "cancelled") {
+        throw new Error(`[bash_background] ${wakeupId} was cancelled before it started, so it was stopped. Do not start it again unless someone asks.`);
+      }
       throw new Error(`[bash_background] The start of ${wakeupId} took too long, so it was stopped. Run the command again.`);
     }
     // The start can provision the sandbox, so its id may be known only now.
@@ -230,6 +275,10 @@ export function buildWakeupsSeam(
       ...(origin !== undefined ? { origin } : {}),
     };
     await engineStore.createWakeup(wakeup);
+    if (await sessionGone()) {
+      await engineStore.transitionWakeup(wakeup.id, ["pending"], "cancelled", { cause: "cancelled", endedAt: now() }, now());
+      throw new Error("[wake_at] This session was deleted, so the timer was not set.");
+    }
     return { wakeup };
   }
 
@@ -263,6 +312,10 @@ export function buildWakeupsSeam(
         deadlineAt: nowMs + input.hours * HOUR_MS,
       };
       await engineStore.createLease(lease);
+      if (await sessionGone()) {
+        await engineStore.releaseLease(lease.id, "cancelled", now());
+        throw new Error("[hold_sandbox] This session was deleted, so no hold was set.");
+      }
       return lease;
     },
 
@@ -328,7 +381,7 @@ export function buildWakeupsSeam(
     async readLog(id: string, offset: number, bytes: number, opts?: { tail?: boolean }) {
       const wakeup = await ownWakeup(id);
       if (!wakeup) {
-        throw new Error(`[process_read] ${id} is not a wakeup of this thread. Call wakeup_list to see this thread's ids.`);
+        throw new Error(`[process_read] ${id} is not a background process or watch of this session. Call wakeup_list to see this thread's ids.`);
       }
       if (!wakeup.execId) {
         throw new Error(
