@@ -144,7 +144,7 @@ async function executeSubmission<TDispatched, TSettled>(
         iteration,
         status: 'failed',
         error,
-        effects: { ...hooks.initialEffects, ...(hooks.hasInputFiles ? { inputFilesAttempted: true, sessionId: inputSessionId() } : {}) },
+        effects: { ...hooks.initialEffects, ...(hooks.hasInputFiles ? { inputFilesAttempted: true, sessionId: inputSessionId() ?? hooks.initialEffects.sessionId } : {}) },
         attempt,
         createdAt: clock(),
       });

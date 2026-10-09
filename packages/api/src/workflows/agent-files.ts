@@ -1,7 +1,9 @@
 import { SANDBOX_READY_TIMEOUT_MS, type Sandbox, type Session } from "@valet/engine";
 import { AgentInputFileError, validateRenderedAgentFiles, type RenderedAgentFile } from "@valet/workflow";
 import { randomUUID } from "node:crypto";
-import type { WorkflowStore } from "@valet/workflow";
+import type { AppDb } from "../lib/drizzle.js";
+import { scopedInputRunStatus, type InputSandboxScope } from "./input-scope.js";
+import { recordWorkflowInputCleanupSkipped } from "../observability/workflow-input-metrics.js";
 import { posix } from "node:path";
 
 /** Crash windows can miss settlement cleanup. Bound that residual retention. */
@@ -57,9 +59,24 @@ function hasCode(err: unknown, code: string): boolean {
   return err !== null && typeof err === "object" && "code" in err && err.code === code;
 }
 
+/** Each retry removes crash leftovers before staging new bytes. */
+async function cleanupStaleTemps(sandbox: Sandbox, directory: string, match: string | RegExp = /\.tmp-/): Promise<void> {
+  const names = await sandbox.readdir(directory);
+  for (const name of names) {
+    if (typeof match === "string" ? name.startsWith(match) : match.test(name)) {
+      await sandbox.rm(posix.join(directory, name));
+    }
+  }
+}
+
+export function logInputCleanupSkipped(sessionId: string, scope: "node" | "run", reason: string): void {
+  recordWorkflowInputCleanupSkipped(scope, reason);
+  console.warn("workflow input cleanup skipped", { sessionId, scope, reason });
+}
+
 /** Only paths enter the rename command. Contents go through writeBinary/stdin. */
-async function atomicWrite(sandbox: Sandbox, path: string, bytes: Uint8Array): Promise<void> {
-  const temporary = `${path}.tmp-${randomUUID()}`;
+async function atomicWrite(sandbox: Sandbox, path: string, bytes: Uint8Array, temporaryPrefix = `${path}.tmp-`): Promise<void> {
+  const temporary = `${temporaryPrefix}${randomUUID()}`;
   try {
     await sandbox.writeBinary(temporary, bytes);
     const quote = (value: string) => `'${value.replace(/'/g, "'\"'\"'")}'`;
@@ -73,7 +90,7 @@ async function atomicWrite(sandbox: Sandbox, path: string, bytes: Uint8Array): P
 
 /** Readiness and unknown transport failures retain normal drive retry semantics. */
 export async function writeAgentInputFiles(
-  session: Session, workspace: string, prompt: string, opts: InputFileOptions, store: Pick<WorkflowStore, "getRun">,
+  session: Session, workspace: string, prompt: string, opts: InputFileOptions, db: AppDb,
 ): Promise<string> {
   const inputs = prepareInputs(workspace, opts);
   if (!inputs.length) return prompt;
@@ -81,8 +98,20 @@ export async function writeAgentInputFiles(
   try {
     const runRoot = posix.dirname(posix.dirname(inputDirectory(workspace, opts.dispatchId)));
     await sandbox.mkdir(runRoot);
-    await atomicWrite(sandbox, posix.join(runRoot, AGE_MARKER), new TextEncoder().encode(String(Date.now())));
-    await sweepAgentInputFiles(sandbox, workspace, opts.dispatchId.split(":")[1], store);
+    const [, , nodeId, iteration = "0"] = opts.dispatchId.split(":");
+    const markerPrefix = `${AGE_MARKER}.tmp-${nodeId}.${iteration}.`;
+    // Scope marker staging to this node: sibling foreach writers share the marker.
+    await cleanupStaleTemps(sandbox, runRoot, /^\.created-at\.tmp-[0-9a-f]{8}-[0-9a-f-]{27}$/);
+    await cleanupStaleTemps(sandbox, runRoot, markerPrefix);
+    await atomicWrite(sandbox, posix.join(runRoot, AGE_MARKER), new TextEncoder().encode(String(Date.now())),
+      posix.join(runRoot, markerPrefix));
+    const data = await session.toData();
+    await sweepAgentInputFiles(sandbox, workspace, opts.dispatchId.split(":")[1], db,
+      { orgId: data.orgId, ownerType: data.owner.type, ownerId: data.owner.id });
+    for (const directory of new Set([inputDirectory(workspace, opts.dispatchId), ...inputs.map(input => posix.dirname(input.path))])) {
+      await sandbox.mkdir(directory);
+      await cleanupStaleTemps(sandbox, directory);
+    }
     // Before admission no turn can read these files. Replace any incomplete
     // prior attempt instead of treating transport truncation as a conflict.
     for (const input of inputs) {
@@ -101,7 +130,7 @@ export async function writeAgentInputFiles(
 }
 
 /** Bounded, rotating scan. Crash leftovers are expected; failures remain visible. */
-export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, currentRun: string, store: Pick<WorkflowStore, "getRun">, now = Date.now()): Promise<void> {
+export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, currentRun: string, db: AppDb, scope: InputSandboxScope, now = Date.now()): Promise<void> {
   const root = posix.resolve(workspace, INPUT_ROOT);
   try {
     const names = (await sandbox.readdir(root)).filter(name => /^[A-Za-z0-9_-]+$/.test(name) && name !== currentRun).sort();
@@ -114,8 +143,8 @@ export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, 
       try {
         const createdAt = Number(await sandbox.readFile(posix.join(directory, AGE_MARKER)));
         if (Number.isFinite(createdAt) && createdAt > 0 && createdAt < now - AGENT_INPUT_RETENTION_MS) {
-          const run = await store.getRun(names[(offset + i) % names.length]);
-          if (!run || run.status === "settled") await sandbox.rm(directory, { recursive: true });
+          const status = await scopedInputRunStatus(db, scope, names[(offset + i) % names.length]);
+          if (!status || status === "settled") await sandbox.rm(directory, { recursive: true });
         }
       } catch (err) {
         console.warn(`workflow input sweep failed for ${directory}:`, err);
@@ -132,9 +161,15 @@ export async function cleanupAgentInputFiles(session: Session, workspace: string
     const directory = "dispatchId" in scope ? inputDirectory(workspace, scope.dispatchId)
       : /^[A-Za-z0-9_-]+$/.test(scope.runId) ? posix.resolve(workspace, INPUT_ROOT, scope.runId) : undefined;
     if (!directory) throw new Error("Invalid workflow run ID for input cleanup");
-    if (session.attachment.state !== "ready") return;
+    if (session.attachment.state !== "ready") {
+      logInputCleanupSkipped(session.id, "dispatchId" in scope ? "node" : "run", session.attachment.state);
+      return;
+    }
     const sandbox = session.attachment.current();
-    if (!sandbox) return;
+    if (!sandbox) {
+      logInputCleanupSkipped(session.id, "dispatchId" in scope ? "node" : "run", "unattached");
+      return;
+    }
     await sandbox.rm(directory, { recursive: true });
   } catch (err) {
     if (!hasCode(err, "ENOENT")) console.warn(`workflow input cleanup failed for ${session.id}:`, err);

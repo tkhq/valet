@@ -31,9 +31,10 @@
  * than assuming the session `createSession` warmed is still cached.
  */
 
-import { agentInputPrompt, cleanupAgentInputFiles, writeAgentInputFiles } from "./agent-files.js";
+import { personalInputAudienceIsShared, PERSONAL_INPUT_AUDIENCE_ERROR } from "./input-audience.js";
+import { agentInputPrompt, cleanupAgentInputFiles, logInputCleanupSkipped, writeAgentInputFiles } from "./agent-files.js";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
-import { isOutsideThreadKey, privateThreadOwner, runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
+import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import type { Usage } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
@@ -367,7 +368,7 @@ export async function cleanupWorkflowRunInputs(opts: WorkflowEngineDepsOpts, run
         const session = opts.host.liveSession(sessionId);
         if (session?.attachment.state === "ready") {
           await cleanupAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), { runId });
-        }
+        } else logInputCleanupSkipped(sessionId, "run", session?.attachment.state ?? "uncached");
       } catch (err) {
         console.warn(`workflow input run cleanup failed for ${runId} on ${sessionId}:`, err);
       }
@@ -386,7 +387,7 @@ async function deliverInputs(opts: WorkflowEngineDepsOpts, session: Session,
   const prior = await opts.engineStore.getSubmissionByDispatchId(session.id, promptOpts.dispatchId);
   if (prior) return agentInputPrompt(opts.host.sandboxWorkingDirectory(session), text, promptOpts);
   await promptOpts.onInputTarget?.(session.id);
-  return writeAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), text, promptOpts, opts.store);
+  return writeAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), text, promptOpts, opts.db);
 }
 
 export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowEngineDeps {
@@ -434,7 +435,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       const session = opts.host.liveSession(sessionId);
       if (session?.attachment.state === "ready") {
         await cleanupAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), { dispatchId });
-      }
+      } else logInputCleanupSkipped(sessionId, "node", session?.attachment.state ?? "uncached");
     },
 
     async awaitResult(
@@ -663,15 +664,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         ? await opts.engineStore.getSubmissionByDispatchId(session.id, promptOpts.dispatchId) : null;
       if (promptOpts.files?.length && !admitted) {
         const data = await session.toData();
-        // Personal roots have owner-only API access, but can also serve channel
-        // turns. Such a root is not a verified owner-only file audience.
-        const personalChannel = data.owner.type === "user" && (ctx.slackChannel ||
-          (await opts.engineStore.listThreads(session.id)).some(t => {
-            const participant = privateThreadOwner(t.key);
-            return isOutsideThreadKey(t.key) || (participant !== undefined && participant !== data.owner.id);
-          }));
-        if (personalChannel) {
-          throw new AgentInputFileError("Workflow files cannot be delivered to a personal sandbox with a channel audience. Use a session step or start a new private thread.");
+        if (data.owner.type === "user" && await personalInputAudienceIsShared(opts.db, opts.engineStore, session.id,
+          { orgId: data.orgId, ownerType: data.owner.type, ownerId: data.owner.id })) {
+          throw new AgentInputFileError(PERSONAL_INPUT_AUDIENCE_ERROR);
         }
         const legacyShared = data.owner.type === "team" && await isLegacyAssistantRuntime(opts.db, session.id, ctx.orgId);
         const audienceAccess = await canAccessSessionResources({ db: opts.db, engineStore: opts.engineStore,

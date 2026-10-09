@@ -98,8 +98,13 @@ A bounded sweep removes crash leftovers older than 7 days. Cleanup failures are 
 Shared legacy team sandboxes and unverifiable audiences cannot receive files. Use a session step or start a new private thread.
 Provisioning and transport failures retain normal retries. Before admission, retries replace incomplete inputs atomically.
 After admission, duplicate dispatch skips all file operations, even if the agent edited or deleted an input.
-Personal assistant roots with channel audiences or other participants cannot receive files.
-Cleanup never wakes a sandbox. Residual sweeps retain live runs and apply a seven-day floor to absent or settled runs.
+Personal roots allow the owner's own linked DMs. Archived conversations and settled workflow-run threads do not block files.
+Active shared channels, group DMs, and DMs with known other participants block files.
+The host uses durable authors and identity links. Without participant data, only non-DM conversations count as shared.
+The error is: "Workflow files cannot be delivered to a personal sandbox with another participant. Use a session step or archive the shared conversation."
+Cleanup never wakes a sandbox. Skips emit a warning and `valet.workflow.inputs.cleanup_skipped`.
+Residual sweeps protect only live runs with the same org and owner. Foreign runs count as absent.
+Sweeps apply a seven-day floor to absent or settled runs. Without another file write, residual inputs persist until sandbox destruction.
 `llm` and `tool` nodes do not accept `files`.
 
 ## Model selection

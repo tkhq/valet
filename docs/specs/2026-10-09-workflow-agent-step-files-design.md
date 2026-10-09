@@ -41,6 +41,8 @@ The host calls `attachment.ensureReady` before prompt admission. This provisions
 It creates parent directories and writes bytes through `Sandbox.writeBinary`, the same primitive used by file uploads.
 No shell command carries file contents as command text. Docker transports base64 bytes through stdin.
 The host stages each file and the age marker beside its destination, then uses atomic rename to replace it.
+Before each pre-admission write, the host removes stale temporary files from the node's input directories and age-marker staging paths.
+Age-marker staging names include node and iteration, so concurrent foreach writers do not delete each other's staging files.
 
 The input root is `<working-directory>/.valet/workflow-inputs/<runId>/<nodeId>/<iteration>/`.
 Iteration 0 is explicit, matching existing workflow working-directory conventions. Foreach checkpoint iterations and template indexes both start at 0.
@@ -76,8 +78,13 @@ After attention and origin reporting, the run-settled hook starts best-effort cl
 Cleanup uses only cached sessions with ready attachments. It never creates, restores, or wakes a sandbox.
 Run cleanup skips `wf:` sessions because the workflow sandbox reclaimer destroys them.
 Cleanup logs failures and never changes the node or run outcome.
+Skipped cleanup emits a warning and the `valet.workflow.inputs.cleanup_skipped` counter, labeled by node/run scope and attachment state.
+Cleanup does not wake residual sandboxes. Inputs persist until a later write-time sweep or sandbox destruction.
+If the sandbox never receives files again, no write-time sweep runs. Retention is not a seven-day deletion deadline.
 Crash windows can miss cleanup. Each new input write scans up to `AGENT_INPUT_SWEEP_LIMIT` (100) sibling run directories.
-The scan rotates across siblings. It excludes the current run and preserves every live sibling, regardless of marker age.
+The scan rotates across siblings. It excludes the current run and preserves live siblings in the sandbox's organization and owner scope.
+The status lookup joins the run's definition and filters organization, owner type, and owner ID in the database.
+A foreign run counts as absent, even when its ID matches a sandbox directory. Its existence or state never changes retention.
 Only absent or settled runs with markers older than `AGENT_INPUT_RETENTION_MS` (7 days) can be removed.
 Each pre-admission attempt refreshes the host-created `.created-at` marker atomically. Missing or unreadable markers are logged, never guessed.
 The sweep uses sandbox file primitives, not shell interpolation. Duplicate admission never triggers it.
@@ -87,8 +94,16 @@ This feature adds no reverse output-file interface.
 
 File delivery reuses `canAccessSessionResources` to verify the resolved execution's governing audience and ancestry.
 The existing `isLegacyAssistantRuntime` predicate identifies retained shared team sandboxes, which are rejected even when legacy resource access permits them.
-Personal roots can also execute channel turns. File delivery rejects Slack-event origins, outside-channel thread keys, and other users' assistant threads on that root.
-This check rejects shared personal roots rather than claiming that owner-only API access proves sandbox isolation.
+Personal roots can also execute channel turns. Only active conversations with another principal block file delivery.
+The host queries channel and personal-thread prefixes through the engine store, not every thread or transcript.
+Both engine-archived threads and app-archived threads are excluded. Workflow-run threads belonging to settled same-scope runs are also excluded.
+Durable message and submission authors record participants. Identity links identify the owner's external accounts.
+Owner-only Slack DMs (`D...`) and Telegram private chats are allowed. Known other participants, including external senders, are rejected.
+Slack group DMs (`G...`) and shared channels are rejected because other people can participate, even before they send a message.
+No generic channel-membership table exists. Without participant records, only non-DM conversations count as shared.
+GitHub conversations have no DM form and count as shared. Telegram's transport accepts private chats only; legacy numeric chat keys remain supported.
+A DM with no participant records uses the DM fallback. A known counterpart or recorded author belonging to another person is rejected.
+The exact error is: "Workflow files cannot be delivered to a personal sandbox with another participant. Use a session step or archive the shared conversation."
 An unverified resource audience, including Slack executions without verifiable membership, fails closed. A clear node error directs authors to a session step or a new private thread.
 Attended report routing still resolves an isolated execution before this check. Existing text-only legacy admissions remain compatible.
 
