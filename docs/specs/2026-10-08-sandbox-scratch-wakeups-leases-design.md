@@ -577,6 +577,25 @@ otherwise, like the existing workspace default/max check.
 | `valet_sandbox_scratch_refused_total` | counter | `source`, `reason` |
 | `valet_sandbox_scratch_live_bytes` | gauge | declared `/scratch` summed over running sandboxes, set by the reconcile sweep |
 | `valet_sandbox_volume_used_bytes`, `_size_bytes` | gauge | `volume`, `repo` |
+| `valet_wakeups_sweep_ok_at_seconds` | gauge | Unix time of the last finished WakeWatcher pass, or of the watcher start |
+| `valet_wakeups_sweep_failed_total` | counter | |
+| `valet_wakeups_signal_lost_total` | counter | `kind` |
+| `valet_wakeups_bad_rows_total` | counter | `table` |
+| `valet_leases_orphan_released_total` | counter | `owner_kind`, `reason` (`missing_owner`, `terminal_owner`, `deadline`) |
+| `valet_jobs_logs_pruned_total` | counter | |
+| `valet_jobs_docker_output_dropped_total` | counter | |
+
+Example alert rules. The OTel Prometheus export appends the unit, so the
+`valet.wakeups.sweep_ok_at` gauge (unit `s`) exports as
+`valet_wakeups_sweep_ok_at_seconds`.
+
+```
+time() - valet_wakeups_sweep_ok_at_seconds > 300 or absent(valet_wakeups_sweep_ok_at_seconds)
+valet_leases_over_deadline > 0                                     for 5m
+increase(valet_leases_orphan_released_total{reason="deadline"}[1h]) > 0
+increase(valet_wakeups_bad_rows_total[1h]) > 0
+increase(valet_wakeups_signal_lost_total[1h]) > 0
+```
 
 UI: a wakeups strip on the session page lists active wakeups and leases
 (kind, reason, elapsed, deadline, cancel). A signal turn that produced no
@@ -1107,5 +1126,81 @@ with an earlier entry, the entry below wins.
   `watch.event` cards of one watch, and the quiet turns between them,
   render as one expandable card; quiet turns elsewhere still render as
   before. The card shows `from <channel>` when `MessageSignal.origin` is
-  set; `engineSignalToWire` (`bridge.ts`, not group C's) must copy
-  `origin.channelType` for that to show.
+  set; `engineSignalToWire` (`bridge.ts`) copies `origin.channelType`
+  and nothing else from the origin.
+- **A3: watch rate counts polls with output.** Fix wave 3 (data M1)
+  found the signal-count limit unreachable. One signal per 30-second tick
+  gives at most 120 per hour, and the check needed 121. The window now
+  counts WakeWatcher polls that read new lines, and it starts over only
+  when it is more than one hour old. So a watch with output on every poll
+  stops on the 121st poll, at the 3600-second mark, at the defaults.
+- **A3: coalesced watch signals.** A watch sends at most one
+  `watch.event` per `watchMinIntervalMs` (default 120000,
+  `VALET_WATCH_MIN_INTERVAL_MS`). The first signal goes out at once. Lines
+  read in between collect in the new nullable `watch_buffer` column, and
+  `last_emit_at` records the last signal. A buffer of 64 KiB goes out at
+  once. At exit, the buffer and the last lines go out as one final
+  `watch.event` before `watch.exited`. B1 gains both columns, with
+  `SCHEMA_REPAIRS` entries.
+- **A3: INV-6 before the repair.** The WakeWatcher sets
+  `valet.leases.over_deadline` at the start of each pass, before it ends
+  or repairs anything. `valet.leases.orphan_released` gains a `reason`
+  label: `missing_owner` and `terminal_owner` are crash windows;
+  `deadline` is a bug and pages. Take a lease two ticks past its deadline
+  whose owner is still open. Its owner now ends as `expired/deadline`
+  with a kill and its signal. The release is in the same statement. An unreadable owner row reads as missing.
+- **A3: pending rows are probed.** The start grace is 45 minutes, longer
+  than the kubernetes scale-up wait plus an image pull. Past it, the
+  WakeWatcher probes a pending row. A running job is adopted (`running`),
+  an exited job ends with its exit code, and no job ends `lost` with a
+  kill. The seam's `pending -> running` write can throw after the job
+  started. The seam then returns the started process and leaves the row for
+  this adoption. So the agent does not run the command twice.
+- **A3: seam start texts.** A pending start that a human cancel ended
+  refuses with `<id> was cancelled before it started, so it was stopped.
+  Do not start it again unless someone asks.` The tools return every
+  `[bash_background]`, `[wake_at]`, and `[hold_sandbox]` seam refusal as
+  result text. A create re-reads the session after its
+  writes; when a delete won the race, it ends its rows and refuses.
+- **A3: transition time.** Each WakeWatcher transition stamps `endedAt`
+  and `updatedAt` with the clock at that transition. On a slow pass, the
+  pass start time was minutes old. The ChildWatcher awaits the terminal turn of a wakeup that ended
+  after the watched submission was admitted or was created after it, and
+  measures its admission grace from when it first saw the row ended. It
+  awaits a `cancelled` row's turn too, because a human cancel sends one;
+  an agent cancel sends none and costs one grace wait. The lease bound is
+  the latest deadline plus two WakeWatcher ticks plus one poll.
+- **A3: child retention and leases.** The retention sweep skips a child
+  while it holds an active lease or a pending timer, at both checks, and
+  logs once per child (INV-8).
+- **A3: job logs on scratch.** The seam caps a detached log at
+  `min(jobLogMaxBytes, scratch / 4)` when the host passes `scratchBytes`.
+  A capped kubernetes log ends with `[valet: log capped at <n> bytes;
+  later output dropped]` once output passes the cap; `process_read` and
+  the exit body name it. The marker needs a `head` that reads no more
+  than it writes from a pipe. GNU coreutils on the sandbox image does.
+  Job files are pruned at each kickoff when their `.exit` or `.dead` is
+  more than a day old, and `valet.jobs.logs_pruned` counts them. The
+  brief named a WakeWatcher step. The kickoff runs the prune instead,
+  because logs grow only through kickoffs and the kickoff needs no row
+  state to find them.
+- **A3: docker.** The `/scratch` host directory is mode 1777. One
+  sandbox's finished detached job buffers stay under 256 MiB in total;
+  past that, the oldest finished buffer is dropped and counted in
+  `valet.jobs.docker_output_dropped`. Running buffers are never dropped.
+- **A3: smaller fixes.** A timer with no prompt ends `lost` and counts as
+  a bad row. `getWakeup` and the count read skip and count unreadable
+  rows. The first pass after a start counts at most one interval of
+  `node_seconds`. `sweep_ok_at` is set when the watcher starts. A session
+  delete counts open wakeups as `cause=session_deleted`. The INV-6 test
+  matches `releaseLease(` in any case. `stop()` makes a pass stop before
+  its next row, and the signal shutdown waits 20 seconds. A `task`
+  scratch refusal counts in `valet.sandbox.scratch.refused`.
+- **A3: prompts and tools.** The `/scratch` sentence appears only when
+  the host passes `scratchEnabled`. The rules tell the agent to end its
+  turn after a start, cover `watch` and `hold_sandbox`, and bound the
+  child timer promise at 24 hours. The orchestrator persona says a
+  `<wakeup>` signal is the assistant's own work even when it reads
+  `addressed="false"`. `wake_at` refuses an `at` with no UTC offset.
+  Terminal signal bodies end with a line that names the next step for
+  `pid_missing`, `sandbox_unavailable`, `deadline`, and a capped log.
