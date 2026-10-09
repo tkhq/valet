@@ -102,7 +102,6 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 import { ApiKeysSection } from "./api-keys-section";
-import { SettingsLayout } from "~/routes/settings";
 
 function Wrapper({ children }: { children: ReactNode }) {
   return <div>{children}</div>;
@@ -219,28 +218,3 @@ describe("ApiKeysSection — personal workspace", () => {
 });
 
 
-describe("API keys in contextual settings", () => {
-  it("keeps real team controls reachable and resets the draft before changing team", () => {
-    scope = { key: "team_1", teamId: "team_1" };
-    teamKeys = [];
-    personalKeys = [];
-    createTeamKeyTarget.mockClear();
-    createPersonalKeyMutate.mockClear();
-    const view = render(<SettingsLayout />);
-    expect(screen.getByRole("link", { name: "API keys" }).getAttribute("href")).toBe("/settings/api-keys");
-    expect(screen.queryByTestId("redirect")).toBeNull();
-    fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "Platform draft" } });
-    scope = { key: "team_2", teamId: "team_2" };
-    view.rerender(<SettingsLayout />);
-    expect(screen.getByLabelText("Key name")).toHaveProperty("value", "");
-    expect(screen.queryByText("Platform")).toBeNull();
-    fireEvent.change(screen.getByLabelText("Key name"), { target: { value: "Support CI" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create" }));
-    expect(createTeamKeyTarget).toHaveBeenCalledExactlyOnceWith("team_2", "Support CI");
-    expect(createPersonalKeyMutate).not.toHaveBeenCalled();
-    scope = { key: "user", teamId: undefined };
-    view.rerender(<SettingsLayout />);
-    expect(screen.queryByTestId("redirect")).toBeNull();
-    expect(screen.getByLabelText("Key name")).toHaveProperty("value", "");
-  });
-});

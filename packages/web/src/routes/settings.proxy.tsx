@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Navigate, createFileRoute } from "@tanstack/react-router";
 import { useProxySettings } from "~/api/proxy-usage";
 import { useOrg } from "~/api/settings";
 import { Section } from "~/components/settings/section";
@@ -8,13 +8,15 @@ import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { OnboardingPanel } from "~/components/usage/OnboardingPanel";
 
 /**
- * `/settings/proxy` — personal proxy page visible to every user. Lets any
+ * Proxy settings for the scope the page pins: personal on
+ * `/settings/api-keys`, a team on `/settings/teams/$teamId/access`. Lets any
  * user generate a proxy key and see setup snippets. When the org has
  * `features.organizations` enabled, governance controls are read-only (managed
- * by admins); in single-user mode they are interactive.
+ * by admins); in single-user mode they are interactive. The old
+ * `/settings/proxy` path redirects to API keys and proxy.
  */
 export const Route = createFileRoute("/settings/proxy")({
-  component: SettingsProxyPage,
+  component: () => <Navigate to="/settings/api-keys" replace />,
 });
 
 export function SettingsProxyPage() {

@@ -1,9 +1,8 @@
 // @vitest-environment jsdom
 /**
- * Settings rail (action-policies plan, Task 5): the two new org entries
- * (Policies, Action log) only show once `useOrg()` gates on + caller-admin,
- * matching the rail's existing visibility rule; the one new You entry
- * (Policies) always shows.
+ * Settings rail (settings-redesign spec, decision 2): every scope is listed
+ * at once — Account, Personal workspace, Your teams, Organization — and the
+ * rail never reads the workspace switcher.
  */
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,109 +19,104 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 let pathname = "/settings/profile";
-let teamId: string | undefined;
-vi.mock("~/lib/workspace-scope", () => ({
-  useWorkspaceScope: () => ({ teamId }),
-}));
-beforeEach(() => {
-  pathname = "/settings/profile";
-  teamId = undefined;
-});
-
 let orgData: { callerRole: "admin" | "member"; features: { organizations: boolean } } | undefined;
+let teams: Array<{ id: string; name: string; callerRole: "admin" | "member" | null }> = [];
 
 vi.mock("~/api/settings", () => ({
   useOrg: () => ({ data: orgData, isLoading: false, error: null }),
+  useTeams: () => ({ data: { teams }, isLoading: false, error: null }),
 }));
 
-import { SettingsRail, isTeamSettingsPath } from "./settings-rail";
-beforeEach(() => { teamId = undefined; });
+import { SettingsRail, orgSectionFor } from "./settings-rail";
+
+beforeEach(() => {
+  pathname = "/settings/profile";
+  orgData = { callerRole: "admin", features: { organizations: true } };
+  teams = [
+    { id: "t2", name: "platform", callerRole: "admin" },
+    { id: "t1", name: "team-tvc", callerRole: "member" },
+    { id: "t3", name: "not-mine", callerRole: null },
+  ];
+});
+
+function rail() {
+  return screen.getByRole("navigation", { name: "Settings" });
+}
+
+function groupLabels(): string[] {
+  return within(rail()).getAllByRole("group").map((g) => g.getAttribute("aria-label") ?? "");
+}
 
 describe("SettingsRail", () => {
-  it("opens the current section menu with only permitted organization links", async () => {
-    orgData = { callerRole: "member", features: { organizations: true } };
+  it("lists every scope, with teams by name", () => {
     render(<SettingsRail />);
-    await userEvent.click(screen.getByRole("button", { name: "Settings section: You / Profile" }));
-    const menu = screen.getByRole("menu");
-    expect(within(menu).getByRole("menuitem", { name: "Teams" })).toBeTruthy();
-    expect(within(menu).queryByRole("menuitem", { name: "Members" })).toBeNull();
-    await userEvent.click(within(menu).getByRole("menuitem", { name: "Appearance" }));
-    expect(screen.queryByRole("menu")).toBeNull();
+    expect(groupLabels()).toEqual(["Account", "Personal workspace", "Your teams", "Organization"]);
+    const yourTeams = within(rail()).getByRole("group", { name: "Your teams" });
+    expect(within(yourTeams).getAllByRole("link").map((a) => a.textContent)).toEqual(["platform", "team-tvc"]);
+    expect(within(yourTeams).getByRole("link", { name: "team-tvc" }).getAttribute("href")).toBe("/settings/teams/t1");
   });
 
-  it("does not expose organization sections before the query resolves", async () => {
+  it("keeps API keys, Agent access, and Policies under Personal workspace", () => {
+    render(<SettingsRail />);
+    const personal = within(rail()).getByRole("group", { name: "Personal workspace" });
+    for (const label of ["API keys and proxy", "Agent access", "Policies"]) {
+      expect(within(personal).getByRole("link", { name: label })).toBeTruthy();
+    }
+  });
+
+  it("marks a team active on any of its tabs", () => {
+    pathname = "/settings/teams/t1/policies";
+    render(<SettingsRail />);
+    expect(within(rail()).getByRole("link", { name: "team-tvc" }).getAttribute("aria-current")).toBe("page");
+    expect(within(rail()).getByRole("link", { name: "platform" }).getAttribute("aria-current")).toBeNull();
+  });
+
+  it("groups an admin's organization pages into four sections", () => {
+    pathname = "/settings/organization/linear";
+    render(<SettingsRail />);
+    const org = within(rail()).getByRole("group", { name: "Organization" });
+    expect(within(org).getAllByRole("link").map((a) => a.textContent)).toEqual([
+      "General", "Models and usage", "Apps and plugins", "Security and audit",
+    ]);
+    expect(within(org).getByRole("link", { name: "Apps and plugins" }).getAttribute("aria-current")).toBe("page");
+    expect(within(org).getByRole("link", { name: "General" }).getAttribute("aria-current")).toBeNull();
+  });
+
+  it("shows a member only Teams and 1Password under Organization", () => {
+    orgData = { callerRole: "member", features: { organizations: true } };
+    render(<SettingsRail />);
+    const org = within(rail()).getByRole("group", { name: "Organization" });
+    expect(within(org).getAllByRole("link").map((a) => a.textContent)).toEqual(["Teams", "1Password"]);
+  });
+
+  it("hides Organization and Your teams before the org query resolves", () => {
     orgData = undefined;
     render(<SettingsRail />);
-    await userEvent.click(screen.getByRole("button", { name: "Settings section: You / Profile" }));
-    expect(within(screen.getByRole("menu")).queryByText("Organization")).toBeNull();
+    expect(groupLabels()).toEqual(["Account", "Personal workspace"]);
   });
 
-  it("distinguishes Team and Organization sections and follows the current route", async () => {
-    orgData = { callerRole: "admin", features: { organizations: true } };
-    teamId = "team-1";
-    pathname = "/settings/team";
-    const { rerender } = render(<SettingsRail />);
-    await userEvent.click(screen.getByRole("button", { name: "Settings section: Team / General" }));
+  it("offers Models under Personal workspace only while organizations are off", () => {
+    orgData = { callerRole: "admin", features: { organizations: false } };
+    render(<SettingsRail />);
+    const personal = within(rail()).getByRole("group", { name: "Personal workspace" });
+    expect(within(personal).getByRole("link", { name: "Models" })).toBeTruthy();
+    expect(groupLabels()).not.toContain("Organization");
+  });
+
+  it("names the current section in the narrow-screen menu", async () => {
+    pathname = "/settings/teams/t1";
+    render(<SettingsRail />);
+    await userEvent.click(screen.getByRole("button", { name: "Settings section: Your teams / team-tvc" }));
     const menu = screen.getByRole("menu");
-    const team = within(menu).getByRole("group", { name: "Team" });
-    const organization = within(menu).getByRole("group", { name: "Organization" });
-    const personal = within(menu).getByRole("group", { name: "You" });
-    expect(within(personal).getByRole("menuitem", { name: "Profile" })).toBeTruthy();
-    for (const label of ["API keys", "Proxy", "Policies"]) {
-      expect(within(personal).queryByRole("menuitem", { name: label })).toBeNull();
-      expect(within(team).getByRole("menuitem", { name: label })).toBeTruthy();
-    }
-    expect(within(team).getByRole("menuitem", { name: "General" }).getAttribute("aria-current")).toBe("page");
-    expect(within(organization).getByRole("menuitem", { name: "General" }).getAttribute("href")).toBe("/settings/organization");
-    await userEvent.keyboard("{Escape}");
-    pathname = "/settings/organization";
-    rerender(<SettingsRail />);
-    expect(screen.getByRole("button", { name: "Settings section: Organization / General" })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: "Security and audit" })).toBeTruthy();
   });
+});
 
-  it("keeps workspace settings in Team and personal settings in You", () => {
-    teamId = "team";
-    orgData = { callerRole: "member", features: { organizations: false } };
-    render(<SettingsRail />);
-    expect(screen.getByText("Team")).toBeTruthy();
-    for (const label of ["Proxy", "Policies"]) {
-      expect(screen.getByRole("link", { name: label }).getAttribute("href")).toBe(`/settings/${label.toLowerCase()}`);
-      expect(isTeamSettingsPath(`/settings/${label.toLowerCase()}`)).toBe(true);
-    }
-    expect(screen.getByRole("link", { name: "Profile" })).toBeTruthy();
-  });
-  it("always shows the You · Policies entry", () => {
-    orgData = { callerRole: "member", features: { organizations: false } };
-    render(<SettingsRail />);
-    expect(screen.getByRole("link", { name: "Policies" })).toBeTruthy();
-  });
-
-  it("hides Organization · Policies / Action log when the org gate is off", () => {
-    orgData = { callerRole: "member", features: { organizations: false } };
-    render(<SettingsRail />);
-    expect(screen.queryByRole("link", { name: "Action log" })).toBeNull();
-  });
-
-  it("shows Organization · Policies + Action log for a gated-on admin", () => {
-    orgData = { callerRole: "admin", features: { organizations: true } };
-    render(<SettingsRail />);
-    expect(screen.getByRole("link", { name: "Action log" })).toBeTruthy();
-    expect(screen.getAllByRole("link", { name: "Policies" })).toHaveLength(2);
-    // Beside GitHub and Slack: per-provider setup lives on the rail.
-    expect(screen.getByRole("link", { name: "1Password" })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Sandbox settings" })).toBeTruthy();
-    expect(screen.queryByRole("link", { name: "Sandbox images" })).toBeNull();
-  });
-
-  // The page holds the member's OWN personal token as well as the org one,
-  // so a member needs the link. Without it the allow-personal toggle an
-  // admin turns on has no member-facing surface.
-  it("shows a gated-on member 1Password beside Teams, and nothing else", () => {
-    orgData = { callerRole: "member", features: { organizations: true } };
-    render(<SettingsRail />);
-    expect(screen.getByRole("link", { name: "1Password" })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Teams" })).toBeTruthy();
-    expect(screen.queryByRole("link", { name: "Members" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "Action log" })).toBeNull();
+describe("orgSectionFor", () => {
+  it("matches the General root exactly and Teams by prefix", () => {
+    expect(orgSectionFor("/settings/organization")?.label).toBe("General");
+    expect(orgSectionFor("/settings/organization/teams/abc")?.label).toBe("General");
+    expect(orgSectionFor("/settings/organization/action-log/")?.label).toBe("Security and audit");
+    expect(orgSectionFor("/settings/profile")).toBeUndefined();
   });
 });

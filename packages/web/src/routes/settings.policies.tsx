@@ -2,11 +2,12 @@ import { createFileRoute } from "@tanstack/react-router";
 import { PolicyOverridesSection } from "~/components/settings/policy-overrides-section";
 import { GrantsSection } from "~/components/settings/grants-section";
 import { TeamPolicyOverrides } from "~/components/settings/team-policy-overrides";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { PinnedWorkspaceScope, useWorkspaceScope } from "~/lib/workspace-scope";
 import { useMe, useTeams } from "~/api/settings";
 
 /**
- * `/settings/policies` follows the workspace: team policies or personal overrides.
+ * `PoliciesPage` follows the pinned scope: personal overrides on
+ * `/settings/policies`, team policies on `/settings/teams/$teamId/policies`.
  * Team membership gates reads; only team admins edit. Switching scope drops drafts.
  * Per-user surface: MY policy overrides (own overrides on top of org
  * policy, bounds-checked at write time) and MY active runtime grants. Lives
@@ -16,7 +17,11 @@ import { useMe, useTeams } from "~/api/settings";
  * they belong with the rest of the caller's own settings.
  */
 export const Route = createFileRoute("/settings/policies")({
-  component: PoliciesPage,
+  component: () => (
+    <PinnedWorkspaceScope teamId={undefined}>
+      <PoliciesPage />
+    </PinnedWorkspaceScope>
+  ),
 });
 
 export function PoliciesPage() {

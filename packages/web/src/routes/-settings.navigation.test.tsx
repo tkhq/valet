@@ -23,6 +23,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
       isLoading: false,
       error: null,
     }),
+    useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
   };
 });
 
@@ -41,13 +42,13 @@ function settingsRouter() {
     path: "profile",
     component: () => <p>Profile page</p>,
   });
-  const appearance = createRoute({
+  const preferences = createRoute({
     getParentRoute: () => settings,
-    path: "appearance",
-    component: () => <p>Appearance page</p>,
+    path: "preferences",
+    component: () => <p>Preferences page</p>,
   });
   return createRouter({
-    routeTree: root.addChildren([settings.addChildren([teams, profile, appearance])]),
+    routeTree: root.addChildren([settings.addChildren([teams, profile, preferences])]),
     history: createMemoryHistory({ initialEntries: ["/settings/organization/teams"] }),
   });
 }
@@ -59,7 +60,7 @@ beforeEach(() => {
 describe("settings navigation from Organization Teams", () => {
   it.each([
     ["Profile", "/settings/profile", "Profile page"],
-    ["Appearance", "/settings/appearance", "Appearance page"],
+    ["Preferences", "/settings/preferences", "Preferences page"],
   ])("exits to %s and stays there", async (label, expectedPath, expectedPage) => {
     const router = settingsRouter();
     render(<RouterProvider router={router} />);

@@ -1,11 +1,10 @@
 import type { ReactNode } from "react";
 
 /**
- * A settings section: display-face heading, optional one-line description,
- * and a hairline-separated stack of children (typically `FieldRow`s). No
- * card box — the spec is explicit that the settings surface reads as open
- * stacks, not boxes-in-a-void (the enable-organizations card is the one
- * deliberate exception, built in Task 6).
+ * A settings section: a heading, an optional one-line description, and its
+ * rows (typically `FieldRow`s) in one soft rounded group divided by
+ * hairlines — the same grouped-row look as the thread UI's context panel
+ * (settings-redesign spec, "Visual language"). No boxed cards inside it.
  */
 export function Section({
   title,
@@ -17,12 +16,12 @@ export function Section({
   children: ReactNode;
 }) {
   return (
-    <section className="space-y-4">
+    <section className="space-y-3">
       <div className="space-y-1">
-        <h2 className="font-display text-xl text-ink">{title}</h2>
+        <h2 className="text-lg font-medium text-ink">{title}</h2>
         {description && <p className="text-sm text-muted">{description}</p>}
       </div>
-      <div className="divide-y divide-line border-t border-line">{children}</div>
+      <div className="divide-y divide-line rounded-2xl bg-ink-wash px-4">{children}</div>
     </section>
   );
 }

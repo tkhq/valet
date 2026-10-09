@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import { Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
 import { useOrg } from "~/api/settings";
-import { Button } from "~/components/primitives";
-import { ORG_ONEPASSWORD_PATH, ORG_TEAMS_PATH } from "~/components/settings/settings-rail";
+import { Button, LinkTabs } from "~/components/primitives";
+import { ORG_ONEPASSWORD_PATH, ORG_TEAMS_PATH, orgSectionFor } from "~/components/settings/settings-rail";
 
 /**
  * `/settings/organization` layout — guards the org sections behind the
@@ -44,8 +44,31 @@ export function isMemberVisiblePath(pathname: string): boolean {
 export function OrganizationLayout() {
   return (
     <OrgRouteGuard>
+      <OrgSectionTabs />
       <Outlet />
     </OrgRouteGuard>
+  );
+}
+
+/**
+ * The admin's tab bar over the routes one Organization rail item groups
+ * (settings-redesign spec, decision 2). A plain member reaches only Teams
+ * and 1Password, which are rail items of their own, so they get no tabs.
+ */
+function OrgSectionTabs() {
+  const orgQ = useOrg();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const section = orgSectionFor(pathname);
+  if (orgQ.data?.callerRole !== "admin" || !section || section.routes.length < 2) return null;
+  const path = pathname.replace(/\/+$/, "").toLowerCase();
+  const active = section.routes.find((route) =>
+    route.to === "/settings/organization" ? path === route.to : path === route.to || path.startsWith(`${route.to}/`),
+  );
+  return (
+    <div className="mb-8">
+      <h2 className="mb-3 text-lg font-medium text-ink">{section.label}</h2>
+      <LinkTabs tabs={section.routes} activeTo={active?.to ?? section.routes[0]!.to} label={section.label} />
+    </div>
   );
 }
 
