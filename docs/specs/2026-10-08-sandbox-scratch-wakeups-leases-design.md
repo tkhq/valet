@@ -680,3 +680,53 @@ Implementation gaps become errata to this file in the same PR.
   annotation. A change on a sandbox whose oldest lease is older than two
   ticks counts toward `valet_leases_unannotated`. Providers without the
   seam (docker, local) skip the reconcile.
+- **Acceptance, test coverage.** The integration test
+  `wakeups-acceptance.test.ts` runs steps 2, 4, 6, 8, 9, and 10. It uses a
+  scripted virtual sandbox and drives the WakeWatcher clock by hand. Steps 1, 3, 5, and 7 need a kubernetes pod or the idle
+  clock. Their unit suites cover them, so no single run covers all ten.
+- **A1 and Part D, create route.** The REST session create route does not
+  accept `resources` today, cpu and memory included. `scratch` on create
+  waits for the plan that adds `resources` to that route. Spec A1 bullet 5
+  and the Part D create route row describe that future state.
+- **A5, backends without scratch.** The `local` and `virtual` backends mount
+  nothing for scratch and emit the A5 warning through `console.warn`. A
+  host filesystem `/scratch` is not a sandbox path. The docker backend also
+  warns through `console.warn`, because its create path has no warnings
+  channel.
+- **A5, docker scratch dir.** Docker stores `scratchHostDir` in its
+  inventory record, so a destroy after an api restart still deletes the
+  host dir. Docker creates the dir with mode `0o777`, so the sandbox user
+  can write to it.
+- **B5, docker job output.** Docker keeps detached output in api memory
+  with the existing job state. It writes no log file to disk. This is
+  acceptable for the dev backend. See the restart durability entry above.
+- **C5, pod summary shape.** `PodSummary` exposes `annotations` and
+  `labels` as flat fields, to match its existing flat shape. It has no
+  `metadata` object.
+- **B1, engine ids subpath.** `newWakeupId` and `newLeaseId` live behind the
+  `@valet/engine/wakeups-ids` subpath. They use `node:crypto`, and a
+  browser loads the engine barrel, so the barrel cannot import it.
+- **B3, `wakeup_list` leases.** `wakeup_list` prints hold leases only. A
+  process or watch lease appears through its wakeup line, so the list does
+  not show it twice.
+- **B3, `process_read` refusals.** `process_read` refuses an unknown id, a
+  timer id, and a backend without `pollJob`. Each refusal text starts with
+  `[process_read]` and names the next step.
+- **Part D, agent cap off.** `VALET_SANDBOX_SCRATCH_AGENT_MAX="0"` sets no
+  agent cap. Only the deploy cap then bounds `task.resources.scratch`.
+- **C4, child settle grace.** The WakeWatcher releases a lease before it
+  submits the terminal signal. After the last lease releases, `ChildWatcher`
+  waits a bounded grace window (`leaseSettleGraceMs`, default 90 seconds).
+  The engine then admits the signal turn before the child settles.
+- **B5 and B6, watch log tail.** `watch` carries `logTail` across ticks,
+  the same as `process`. The rate-expiry signal body names the limit that
+  the watch exceeded.
+- **B5, probe before deadline.** `decideWakeup` reads the probe status
+  before it checks the deadline. A process that already exited ends
+  `done` with `cause=exit`, even when the tick runs after its deadline.
+- **A2, kubernetes adoption.** The kubernetes provider's legacy "preserve
+  cpu and memory" adopt branch does not roll the pod when only `scratch`
+  changes. A follow-up fixes this (Task 10 ruling).
+- **A2, scratch on adoption.** The sandbox-kubernetes `preserveCpuMemory`
+  adoption helper ignores `scratch`. Adoption does not keep a live scratch
+  value.
