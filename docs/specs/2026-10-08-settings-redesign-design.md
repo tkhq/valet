@@ -96,7 +96,11 @@ Integrations becomes a list, like Claude's Connectors page:
   a removed plugin, gets a row with Revoke under **Other saved credentials**.
   The removed Connected accounts list was the only Revoke control for such a
   credential, so Integrations keeps one.
-- The details (pairing, account, tools and skills) open below the row.
+- A row is a link to `?service=<plugin>`, which opens the plugin's details
+  (owner, reach, account, pairing, repair notes, controls, and tools) in a
+  modal panel. The panel is a URL, so a link can open it. Closing it replaces
+  the history entry and keeps `?q=`, so Back does not reopen it. An unknown
+  `?service=` opens nothing.
 - A team or organization-provided connection shows its scope on the row.
 - The team view uses the same row and group components.
 

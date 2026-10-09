@@ -245,7 +245,9 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
           <Dialog
             open={detail !== undefined}
             onOpenChange={(open) => {
-              if (!open) void navigate({ to: "/integrations", search: rowSearch });
+              // Replace, not push: a pushed close leaves the open panel one
+              // entry back, so Back would reopen what the reader just closed.
+              if (!open) void navigate({ to: "/integrations", search: rowSearch, replace: true });
             }}
           >
             {detail && (
