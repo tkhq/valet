@@ -208,6 +208,36 @@ describe("EngineHost idle sweep", () => {
     host.evictAll();
   });
 
+  it("never suspends a session with an active lease; suspends once it is released", async () => {
+    vi.useFakeTimers();
+    const provider = new HibernatingTestProvider();
+    const store = new InMemorySessionStore();
+    const host = buildHost(store, provider, { idleMinutes: 1 });
+
+    const sessionId = "s-leased";
+    const session = await buildReadySession(host, sessionId);
+    await stampActivity(store, sessionId, "th-leased");
+    await store.createLease({
+      id: "lease-1",
+      sessionId,
+      ownerKind: "process",
+      reason: "long build",
+      createdAt: Date.now(),
+      deadlineAt: Date.now() + 3_600_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(session.attachment.state).toBe("ready");
+    expect(provider.suspendCalls).toEqual([]);
+
+    await store.releaseLease("lease-1", "owner_ended", Date.now());
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(session.attachment.state).toBe("suspended");
+
+    host.evictAll();
+  });
+
   it("resets the idle clock on new activity", async () => {
     vi.useFakeTimers();
     const provider = new HibernatingTestProvider();

@@ -42,6 +42,8 @@ describe("IdleHibernationSweep", () => {
     cachedSessions?: string[];
     /** Consumed per `listUnsettledSubmissions` call; empty → always settled. */
     unsettledQueue?: number[];
+    /** Consumed per `countActiveLeases` call; empty → always 0. */
+    activeLeaseQueue?: number[];
     activityAt?: number | null;
     /** Provider state for every sandbox; default "ready". */
     sandboxState?: SandboxStatus["state"];
@@ -54,6 +56,7 @@ describe("IdleHibernationSweep", () => {
     const suspended: string[] = [];
     const cached = new Set(overrides.cachedSessions ?? []);
     const unsettledQueue = [...(overrides.unsettledQueue ?? [])];
+    const activeLeaseQueue = [...(overrides.activeLeaseQueue ?? [])];
     const deps: IdleHibernationSweepDeps = {
       db,
       engineHost: {
@@ -73,6 +76,7 @@ describe("IdleHibernationSweep", () => {
       engineStore: {
         listUnsettledSubmissions: async () => new Array(unsettledQueue.shift() ?? 0).fill({}),
         latestActivityAt: async () => overrides.activityAt ?? null,
+        countActiveLeases: async () => activeLeaseQueue.shift() ?? 0,
       },
       idleMs: overrides.idleMs ?? IDLE_MS,
     };
@@ -162,6 +166,23 @@ describe("IdleHibernationSweep", () => {
     await new IdleHibernationSweep(deps).sweep(NOW);
 
     expect(suspended).toEqual([]);
+  });
+
+  it("an active lease holds off hibernation; it suspends once the lease is released", async () => {
+    const id = await seed();
+    const { deps: busyDeps, suspended: busySuspended } = fakeDeps({ activeLeaseQueue: [1] });
+
+    await new IdleHibernationSweep(busyDeps).sweep(NOW);
+
+    expect(busySuspended).toEqual([]);
+    expect((await row(id))?.status).toBe("active");
+
+    const { deps: freeDeps, suspended: freeSuspended } = fakeDeps({ activeLeaseQueue: [0] });
+
+    await new IdleHibernationSweep(freeDeps).sweep(NOW);
+
+    expect(freeSuspended).toEqual([`sbx:/ws/${id}`]);
+    expect((await row(id))?.status).toBe("hibernated");
   });
 
   it("a submission admitted between check and suspend wins (re-check race rule)", async () => {
