@@ -242,8 +242,9 @@ by hand as each user signs in. No wipe and no re-import is needed.
 | `VALET_SANDBOX_API_URL` | URL sandboxes use to call back into the API (defaults to the auth base URL) |
 | `VALET_LEASE_MAX_HOURS` | Max hours a lease (a background process, a watch, or `hold_sandbox`) keeps a sandbox alive (default `72`). Use plain digits from 1 to 8760, or API startup fails. |
 | `VALET_TIMER_MAX_HOURS` | Max hours ahead a `wake_at` timer may fire (default `720`). Use plain digits from 1 to 8760, or API startup fails. |
-| `VALET_WAKEUPS_PER_SESSION` | Max active wakeups and leases one session may hold at once (default `20`). Use plain digits from 1 to 1000, or API startup fails. |
-| `VALET_WATCH_MAX_EVENTS_PER_HOUR` | Max `watch.event` signals one `watch` wakeup may emit in one hour (default `120`). A watch emits at most one signal per WakeWatcher tick. The hour window starts at the first signal after the previous window ends. A watch over the limit stops with `cause=rate`. Use plain digits from 1 to 100000, or API startup fails. |
+| `VALET_WAKEUPS_PER_SESSION` | Max active wakeups and holds one thread may hold at once (default `20`). The count is per thread, so a session with many threads can hold more in total. Use plain digits from 1 to 1000, or API startup fails. |
+| `VALET_WATCH_MAX_EVENTS_PER_HOUR` | Max WakeWatcher polls with new output that one `watch` wakeup may have in one hour (default `120`). The WakeWatcher polls every 30 seconds, so the default stops a watch that prints new lines on every poll for an hour, on the 121st poll. The hour window starts at the first such poll after the previous window ends. A watch over the limit stops with `cause=rate`. Use plain digits from 1 to 100000, or API startup fails. |
+| `VALET_WATCH_MIN_INTERVAL_MS` | Shortest gap between two `watch.event` signals of one watch, in milliseconds (default `120000`). The WakeWatcher collects the lines read in between and sends them in one signal; 64 KiB of collected lines go out at once. The first signal goes out without waiting. Each signal starts an agent turn, so this bounds the turns one watch costs. |
 | `VALET_JOB_LOG_MAX_BYTES` | Cap on one detached background process log (default `2Gi`, a Kubernetes quantity). Output past the cap is dropped; the process keeps running. |
 
 The Helm chart maps `sandbox.resources.cpu` and `sandbox.resources.memory` to
