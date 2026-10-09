@@ -10,22 +10,34 @@ if [ "${VALET_BROWSER_ENABLED:-0}" = 1 ]; then /browser-preflight.sh; fi
 WORK_DIR=/workspace
 mkdir -p "$WORK_DIR"
 if [ -d /scratch ]; then
-  mkdir -p /scratch/tmp /scratch/valet-jobs
+  # Sticky root: the workload user cannot replace a root-owned entry.
+  chmod 1777 /scratch
+  mkdir -p /scratch/tmp /scratch/valet-jobs /scratch/tmp-root
   # Sticky and world-writable: non-privileged execs run as dockerd.
   chmod 1777 /scratch/tmp /scratch/valet-jobs
+  chmod 700 /scratch/tmp-root
   # Background process logs live on scratch when it exists (spec B4).
   ln -sfn /scratch/valet-jobs /tmp/valet-jobs
   # A container restart killed every job, but /scratch kept its files. Mark
   # each job with no exit code dead, so a poll does not trust a reused pid.
   for pidfile in /scratch/valet-jobs/*.pid; do
     [ -e "$pidfile" ] || continue
-    [ -e "${pidfile%.pid}.exit" ] || : > "${pidfile%.pid}.dead"
+    [ -e "${pidfile%.pid}.exit" ] || [ -L "${pidfile%.pid}.dead" ] || : > "${pidfile%.pid}.dead"
   done
+fi
+# Root services use a root-only temp dir. The workload user keeps
+# /scratch/tmp from the container env.
+if [ -d /scratch/tmp-root ] && [ ! -L /scratch/tmp-root ] && [ -O /scratch/tmp-root ]; then
+  export TMPDIR=/scratch/tmp-root
+elif [ "${TMPDIR:-}" = /scratch/tmp ]; then
+  unset TMPDIR
 fi
 if [ "${VALET_SANDBOX_PROFILE:-headless}" = "full" ]; then
   WORKLOAD_COMMAND=()
   if [ "${VALET_BROWSER_ENABLED:-0}" = 1 ]; then
     WORKLOAD_COMMAND=(/usr/bin/env -u VALET_SANDBOX_JWT_SECRET /usr/bin/setpriv --reuid dockerd --regid dockerd --init-groups --no-new-privs /usr/bin/env HOME=/home/dockerd USER=dockerd LOGNAME=dockerd)
+    # The workload user cannot write the root temp dir.
+    if [ -d /scratch/tmp ]; then WORKLOAD_COMMAND+=(TMPDIR=/scratch/tmp); fi
   fi
   "${WORKLOAD_COMMAND[@]}" code-server --bind-addr "127.0.0.1:8765" --auth none \
     --disable-telemetry --disable-update-check --welcome-text "Valet Workspace" "$WORK_DIR" &

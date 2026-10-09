@@ -414,8 +414,9 @@ describe("buildSandboxManifest", () => {
       const init = inits.find((c) => c.name === SCRATCH_INIT_NAME);
       expect(init?.image).toBe(baseConfig.defaultImage);
       expect(init?.volumeMounts).toEqual([{ name: SCRATCH_VOLUME_NAME, mountPath: SCRATCH_MOUNT_PATH }]);
-      expect(init?.command?.[2]).toContain("mkdir -p /scratch/tmp /scratch/valet-jobs");
-      expect(init?.command?.[2]).toContain("chmod 1777 /scratch/tmp /scratch/valet-jobs");
+      expect(init?.command?.[2]).toContain('chmod 1777 "$scratch"');
+      expect(init?.command?.[2]).toContain('chmod 1777 "$scratch/tmp" "$scratch/valet-jobs"');
+      expect(init?.command?.[2]).toContain('chmod 700 "$scratch/tmp-root"');
     });
 
     it("adds no scratch init container without scratch", () => {
@@ -424,11 +425,33 @@ describe("buildSandboxManifest", () => {
     });
 
     it("makes /scratch/valet-jobs writable by the workload user in every bootstrap (B6)", () => {
-      expect(SCRATCH_PLACEHOLDER_COMMAND[2]).toContain("chmod 1777 /scratch/tmp /scratch/valet-jobs");
+      expect(SCRATCH_PLACEHOLDER_COMMAND[2]).toContain('chmod 1777 "$scratch/tmp" "$scratch/valet-jobs"');
       for (const script of ["start-headless.sh", "start-full.sh"]) {
         const text = readFileSync(join(REPO_ROOT, "docker", script), "utf8");
         expect(text, script).toContain("chmod 1777 /scratch/tmp /scratch/valet-jobs");
       }
+    });
+
+    it("makes the /scratch root sticky in the start scripts too (fix wave 3, H-1)", () => {
+      for (const script of ["start-headless.sh", "start-full.sh"]) {
+        const text = readFileSync(join(REPO_ROOT, "docker", script), "utf8");
+        expect(text, script).toContain("chmod 1777 /scratch\n");
+        expect(text, script).not.toMatch(/chmod 0?777 \/scratch/);
+      }
+    });
+
+    it("gives root services a root-only TMPDIR and keeps the container env on /scratch/tmp (fix wave 3, H-2)", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { profile: "full", resources: { scratch: "100Gi" } });
+      const env = manifest.spec.podTemplate.spec.containers[0]?.env ?? [];
+      expect(env.filter((entry) => entry.name === "TMPDIR")).toEqual([{ name: "TMPDIR", value: "/scratch/tmp" }]);
+      for (const script of ["start-headless.sh", "start-full.sh"]) {
+        const text = readFileSync(join(REPO_ROOT, "docker", script), "utf8");
+        expect(text, script).toContain("export TMPDIR=/scratch/tmp-root");
+        expect(text, script).toContain("[ -O /scratch/tmp-root ]");
+      }
+      const full = readFileSync(join(REPO_ROOT, "docker", "start-full.sh"), "utf8");
+      expect(full).toContain("TMPDIR=/scratch/tmp");
+      expect(full.indexOf("export TMPDIR=/scratch/tmp-root")).toBeLessThan(full.indexOf("code-server --bind-addr"));
     });
 
     it("keeps the bare placeholder command when scratch is absent", () => {

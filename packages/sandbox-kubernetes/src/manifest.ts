@@ -7,7 +7,10 @@
  */
 import { createHash } from "node:crypto";
 import { RUNTIME_STATE_ANNOTATION, runtimeStateClaimName } from "./runtime-state.js";
-import { homeInitContainer, persistentHomeMounts, withHomeLinks, WORKSPACE_SUBPATH, HOME_LAYOUT_ENV, HOME_LAYOUT_VERSION } from "./home-persistence.js";
+import {
+  homeInitContainer, persistentHomeMounts, scratchDirsScript, scratchStartScript, withHomeLinks,
+  WORKSPACE_SUBPATH, HOME_LAYOUT_ENV, HOME_LAYOUT_VERSION,
+} from "./home-persistence.js";
 import { NESTED_KUBERNETES_IDENTITY, type SandboxCreateOpts } from "@valet/engine";
 import { DEFAULT_WORKSPACE_STORAGE_MAX, clampStorageRequest, formatStorageQuantity, parseStorageQuantity } from "./quantity.js";
 import type {
@@ -46,32 +49,28 @@ const FULL_PROFILE_COMMAND = [
 /** The bare, non-terminating placeholder command — no profile, no docker. */
 const BARE_PLACEHOLDER_COMMAND = ["sh", "-c", "tail -f /dev/null"];
 
-/** Creates the scratch directories. Both are sticky and world-writable, so
- * the `dockerd` workload user can write job logs and temp files there. */
-const SCRATCH_DIRS_SCRIPT = "mkdir -p /scratch/tmp /scratch/valet-jobs && chmod 1777 /scratch/tmp /scratch/valet-jobs";
-
 /** Bootstraps `/scratch` on a plain headless pod (no docker, no full
- * profile) when `resources.scratch` is set. `start-full.sh` and
- * `start-headless.sh` already create `/scratch/tmp` and
- * `/scratch/valet-jobs` and symlink `/tmp/valet-jobs`; a bare placeholder
- * pod runs no start script, so it links `/tmp/valet-jobs` here. The
- * scratch init container also creates the directories; this repeats it. */
+ * profile) when `resources.scratch` is set. The `withHomeLinks` prefix
+ * already runs the same setup on every container start; this command keeps
+ * the plain-headless pod distinct from the bare placeholder, so
+ * `withScratchState` can switch between the two. */
 export const SCRATCH_PLACEHOLDER_COMMAND = [
   "sh",
   "-c",
-  `${SCRATCH_DIRS_SCRIPT} && ln -sfn /scratch/valet-jobs /tmp/valet-jobs; exec tail -f /dev/null`,
+  `set -eu\n${scratchStartScript()}exec tail -f /dev/null`,
 ];
 
 export const SCRATCH_INIT_NAME = "valet-scratch-init";
 
-/** Creates `/scratch/tmp` and `/scratch/valet-jobs` before the workload
- * starts, whatever the image. Old bakes, images without the new start
+/** Creates `/scratch/tmp`, `/scratch/valet-jobs`, and `/scratch/tmp-root`
+ * and makes the `/scratch` root sticky before the workload starts,
+ * whatever the image. Old bakes, images without the new start
  * scripts, and pods that degrade to `tail -f` still get a valid TMPDIR. */
 export function scratchInitContainer(image: string): SandboxContainer {
   return {
     name: SCRATCH_INIT_NAME,
     image,
-    command: ["sh", "-c", SCRATCH_DIRS_SCRIPT],
+    command: ["sh", "-c", `set -eu\n${scratchDirsScript()}`],
     volumeMounts: [{ name: SCRATCH_VOLUME_NAME, mountPath: SCRATCH_MOUNT_PATH }],
   };
 }
@@ -90,8 +89,6 @@ export function withScratchState(
   scratch: string | undefined,
   ephemeral: { request?: string; limit?: string },
 ): SandboxPodTemplate {
-  const bare = withHomeLinks([...BARE_PLACEHOLDER_COMMAND]);
-  const placeholder = withHomeLinks([...SCRATCH_PLACEHOLDER_COMMAND]);
   const containers = template.spec.containers.map((container) => {
     if (container.name !== SANDBOX_CONTAINER_NAME) return container;
     const volumeMounts = (container.volumeMounts ?? []).filter((mount) => mount.name !== SCRATCH_VOLUME_NAME);
@@ -101,8 +98,15 @@ export function withScratchState(
       env.push({ name: "TMPDIR", value: SCRATCH_TMPDIR });
     }
     let command = container.command;
-    if (scratch !== undefined && commandEquals(command, bare)) command = placeholder;
-    if (scratch === undefined && commandEquals(command, placeholder)) command = bare;
+    // Rebuild the Valet start prefix, so it runs the scratch setup exactly
+    // when the pod has scratch. A plain-headless pod also switches between
+    // the bare and the scratch placeholder commands.
+    if (command !== undefined && command[3] === "valet-home-start") {
+      let inner = command.slice(4);
+      if (scratch !== undefined && commandEquals(inner, BARE_PLACEHOLDER_COMMAND)) inner = [...SCRATCH_PLACEHOLDER_COMMAND];
+      if (scratch === undefined && commandEquals(inner, SCRATCH_PLACEHOLDER_COMMAND)) inner = [...BARE_PLACEHOLDER_COMMAND];
+      command = withHomeLinks(inner, { scratch: scratch !== undefined });
+    }
     const requests: ResourceList = { ...container.resources?.requests };
     const limits: ResourceList = { ...container.resources?.limits };
     delete requests["ephemeral-storage"];
@@ -571,7 +575,7 @@ export function buildSandboxManifest(
     container.command = SCRATCH_PLACEHOLDER_COMMAND;
   }
 
-  container.command = withHomeLinks(container.command ?? [...BARE_PLACEHOLDER_COMMAND]);
+  container.command = withHomeLinks(container.command ?? [...BARE_PLACEHOLDER_COMMAND], { scratch: Boolean(resourceOpts?.scratch) });
   container.volumeMounts = [...persistentHomeMounts(), ...(container.volumeMounts ?? [])];
   const podSpec: SandboxCR["spec"]["podTemplate"]["spec"] = {
     initContainers: [homeInitContainer(image), ...(resourceOpts?.scratch ? [scratchInitContainer(image)] : [])],
