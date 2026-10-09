@@ -13,6 +13,7 @@ import {
   SANDBOX_CR_API_VERSION,
   SANDBOX_POD_LABEL_KEY,
   SCRATCH_MOUNT_PATH,
+  SCRATCH_PLACEHOLDER_COMMAND,
   SCRATCH_VOLUME_NAME,
   buildSandboxManifest,
   credsSecretName,
@@ -364,6 +365,42 @@ describe("buildSandboxManifest", () => {
       expect(ephemeralStorageSums(undefined, "2Gi", "30Gi")).toEqual({ request: "2Gi", limit: "30Gi" });
       expect(ephemeralStorageSums("1Ti", undefined, undefined)).toEqual({ request: "1Ti", limit: "1Ti" });
       expect(ephemeralStorageSums(undefined, undefined, undefined)).toEqual({});
+    });
+
+    it("bootstraps /scratch on a plain headless pod (no docker, no full profile)", () => {
+      // The bare `tail -f /dev/null` placeholder runs no start script, so
+      // nothing else creates /scratch/tmp before TMPDIR points at it.
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { resources: { scratch: "100Gi" } });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.command?.slice(4)).toEqual(SCRATCH_PLACEHOLDER_COMMAND);
+    });
+
+    it("keeps the full-profile command unchanged when scratch is set", () => {
+      // start-full.sh already creates /scratch/tmp — no placeholder swap needed.
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { profile: "full", resources: { scratch: "100Gi" } });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.command?.slice(4)).toEqual([
+        "sh",
+        "-c",
+        "[ -f /start-full.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-full.sh || exec /bin/bash /start-full.sh; } || exec tail -f /dev/null",
+      ]);
+    });
+
+    it("keeps the docker start-headless probe command unchanged when scratch is set", () => {
+      // start-headless.sh already creates /scratch/tmp — no placeholder swap needed.
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", { docker: true, resources: { scratch: "100Gi" } });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.command?.slice(4)).toEqual([
+        "sh",
+        "-c",
+        "[ -f /start-headless.sh ] && { [ -x /usr/bin/tini ] && exec /usr/bin/tini -g -- /bin/bash /start-headless.sh || exec /bin/bash /start-headless.sh; } || exec tail -f /dev/null",
+      ]);
+    });
+
+    it("keeps the bare placeholder command when scratch is absent", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.command?.slice(4)).toEqual(["sh", "-c", "tail -f /dev/null"]);
     });
   });
 
