@@ -289,15 +289,33 @@ function delegatingThreadId(item: { metadata?: Record<string, unknown> } | null 
 /**
  * Reply-route state of a child watch (`child_watches.reply_route`). The
  * stored origin never changes, because it also decides transcript sharing.
- * Null follows the origin's own reply policy.
+ * `origin` follows the origin's own reply policy, `manual` allows only
+ * explicit replies, and `none` sends the settlement with no origin. Only the
+ * spawner writes `origin`. Null marks a row written before this column: its
+ * takeover or cross-thread history is unknown, so it reads as `manual`.
  */
-export type ChildReplyRoute = "manual" | "none";
+export type ChildReplyRoute = "origin" | "manual" | "none";
 
 /** The origin a settlement carries: the stored origin with its reply-route state applied. */
 function settlementOrigin(originJson: string | null, replyRoute: string | null): ChannelOrigin | undefined {
   const origin = parseOriginJson(originJson);
   if (origin === undefined || replyRoute === "none") return undefined;
-  return replyRoute === "manual" ? { ...origin, reply: "manual" } : origin;
+  return replyRoute === "origin" ? origin : { ...origin, reply: "manual" };
+}
+
+/**
+ * The reply route after the watch moves to new child work. Work a person
+ * started (no parent delegation provenance) has no route. Parent work from
+ * another parent thread downgrades an automatic route to manual.
+ */
+export function nextReplyRoute(
+  current: string | null,
+  work: { delegated: boolean; parentThreadId?: string },
+  delegatingThreadId: string,
+): string | null {
+  if (!work.delegated) return "none";
+  if (current === "origin" && work.parentThreadId !== delegatingThreadId) return "manual";
+  return current;
 }
 
 /** The prompt options of a parent `child_send`. Tests use them to model the real sender. */
@@ -491,6 +509,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         // Durable: the settlement can arrive after a restart (rearm), and
         // the child.settled signal must still inherit this origin.
         originJson: ctx.origin !== undefined ? JSON.stringify(ctx.origin) : null,
+        replyRoute: ctx.origin !== undefined ? ("origin" satisfies ChildReplyRoute) : null,
       })
       .catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
@@ -783,20 +802,17 @@ export class ChildWatcher {
       }
       const successorItem = await this.deps.engineStore.getQueueItem(watch.childSessionId, successor);
       if (!successorItem) throw new Error(`Missing child successor submission ${successor}`);
-      // A successor the parent did not delegate is a person taking over the
-      // child: a different task, so it has no reply route. Delegated work
-      // from another parent thread (a `child_send` whose sender stopped
-      // before it stored the route) gets a manual route. This watcher owns
-      // the takeover decision. It reads the submission's provenance, because
-      // parent work also names an author. The stored origin never changes.
-      const replyRoute: ChildReplyRoute | null = !isParentDelegation(successorItem)
-        ? "none"
-        : row.replyRoute === null && delegatingThreadId(successorItem) !== watch.parentThreadId
-          ? "manual"
-          : null;
+      // This watcher owns the takeover decision. It reads the successor's
+      // provenance, because parent work also names an author. Recovery of a
+      // `child_send` whose sender stopped before it stored the route takes
+      // the same route the sender would have stored. The stored origin never
+      // changes.
+      const replyRoute = nextReplyRoute(row.replyRoute, {
+        delegated: isParentDelegation(successorItem), parentThreadId: delegatingThreadId(successorItem),
+      }, watch.parentThreadId);
       await this.deps.db
         .update(childWatches)
-        .set({ queueItemId: successor, settled: false, ...(replyRoute !== null ? { replyRoute } : {}) })
+        .set({ queueItemId: successor, settled: false, ...(replyRoute !== row.replyRoute ? { replyRoute } : {}) })
         .where(
           and(
             eq(childWatches.childSessionId, watch.childSessionId),
@@ -1428,7 +1444,8 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // to its channel thread. Work continued from another parent thread can
     // carry that thread's context, so from then on the parent replies to the
     // channel thread only when it chooses to (`reply: "manual"`).
-    const downgrade = watchRow.replyRoute === null && ctx.parentThreadId !== watchRow.parentThreadId;
+    const replyRoute = nextReplyRoute(watchRow.replyRoute, { delegated: true, parentThreadId: ctx.parentThreadId },
+      watchRow.parentThreadId);
 
     // Re-point BEFORE arming: the fresh watcher must find the row already
     // tracking its submission, and the stale watcher (if any) must find it
@@ -1441,7 +1458,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
         queueItemId: receipt.queueItemId,
         settled: false,
         dismissedAt: null,
-        ...(downgrade ? { replyRoute: "manual" satisfies ChildReplyRoute } : {}),
+        ...(replyRoute !== watchRow.replyRoute ? { replyRoute } : {}),
       })
       .where(eq(childWatches.childSessionId, req.childSessionId));
 

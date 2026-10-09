@@ -339,9 +339,11 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   manual turns. The child result itself does not post directly.
   The watch stores the spawning origin in `origin_json`, which never
   changes, because it also decides whether the child shares its transcript.
-  Reply-route state is a separate `reply_route` column. Null follows the
-  origin's own policy, `manual` downgrades the settlement to a manual reply,
-  and `none` sends the settlement with no origin.
+  Reply-route state is a separate `reply_route` column. `origin` follows
+  the origin's own policy, `manual` downgrades the settlement to a manual
+  reply, and `none` sends the settlement with no origin. Only the spawner
+  writes `origin`. A null route marks a watch from before this column. Its
+  takeover or cross-thread history is unknown, so it reads as `manual`.
   A `child_send` from the parent thread that delegated the work, and restart
   recovery, keep the route. A `child_send` from another parent thread sets
   `reply_route` to `manual`, so that thread's context never posts to the

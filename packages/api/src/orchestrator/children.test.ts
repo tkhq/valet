@@ -1211,7 +1211,7 @@ describe("ChildWatcher", () => {
       orgId: "local-org",
       settled: false,
       createdAt: Date.now(),
-      originJson: JSON.stringify(origin),
+      originJson: JSON.stringify(origin), replyRoute: "origin",
     });
 
     await db.insert(agentSessions).values({
@@ -1483,7 +1483,7 @@ describe("ChildWatcher", () => {
       actorUserId: "local-user",
       orgId: "local-org",
     };
-    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now(), originJson: JSON.stringify(origin) });
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now(), originJson: JSON.stringify(origin), replyRoute: "origin" });
 
     watcher.arm({ ...watch, origin });
     await waitFor(async () => {
@@ -2500,7 +2500,7 @@ describe("buildChildSender", () => {
     // The user dismissed the settled child; a re-open must resurface it.
     await db
       .update(childWatches)
-      .set({ dismissedAt: Date.now(), originJson: JSON.stringify(origin) })
+      .set({ dismissedAt: Date.now(), originJson: JSON.stringify(origin), replyRoute: "origin" })
       .where(eq(childWatches.childSessionId, "child-again"));
 
     const sender = buildChildSender(deps, watcher);
@@ -2548,7 +2548,7 @@ describe("buildChildSender", () => {
       settled: false,
       queueItemId: "qi-heal-orig",
     });
-    await db.update(childWatches).set({ originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }) })
+    await db.update(childWatches).set({ originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }), replyRoute: "origin" })
       .where(eq(childWatches.childSessionId, "child-heal"));
     watcher.arm({
       childSessionId: "child-heal",
@@ -2594,7 +2594,7 @@ describe("buildChildSender", () => {
     const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-heal"));
     // The channel provenance never changes. Only the reply route records the takeover.
     expect(watch?.originJson).toBe(JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }));
-    expect(watch?.replyRoute).toBe(humanTakeover ? "none" : null);
+    expect(watch?.replyRoute).toBe(humanTakeover ? "none" : "origin");
     expect(await db.select().from(childReplyDeliveries)).toHaveLength(humanTakeover ? 0 : 1);
     // A rebuilt child is still a channel-started child with a shared transcript.
     engineHost.evictCache("child-heal");
@@ -2606,7 +2606,8 @@ describe("buildChildSender", () => {
     { route: "no channel origin", origin: null, replyRoute: null, repaired: true },
     { route: "a manual origin", origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "manual" }, replyRoute: null, repaired: true },
     { route: "a taken-over automatic origin", origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }, replyRoute: "none", repaired: true },
-    { route: "a pending automatic reply", origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }, replyRoute: null, repaired: false },
+    { route: "a pending automatic reply", origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }, replyRoute: "origin", repaired: false },
+    { route: "a legacy automatic origin", origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }, replyRoute: null, repaired: true },
   ] satisfies Array<{ route: string; origin: ChannelOrigin | null; replyRoute: string | null; repaired: boolean }>)(
     "child_status repairs a stale unsettled watch with $route only when no automatic reply waits on it",
     async ({ origin, replyRoute, repaired }) => {
@@ -2635,7 +2636,7 @@ describe("buildChildSender", () => {
     const { parentThread, childThread } = await seedChild(api, {
       childId: "child-revive", parentId: "parent-revive", settled: false, queueItemId: "qi-revive",
     });
-    await db.update(childWatches).set({ originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }) })
+    await db.update(childWatches).set({ originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }), replyRoute: "origin" })
       .where(eq(childWatches.childSessionId, "child-revive"));
     // An earlier attempt wrote the intent, and the dispatcher failed it
     // before any parent update was admitted.

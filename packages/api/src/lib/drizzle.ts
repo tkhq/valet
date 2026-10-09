@@ -807,8 +807,9 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "origin_json" text',
   },
   {
-    // Reply-route state of a child watch. Null on older rows: those follow
-    // their stored origin's own reply policy.
+    // Reply-route state of a child watch. Null on older rows, which read
+    // as "manual": their takeover or cross-thread history is unknown, so
+    // they never post automatically. New watches store an explicit route.
     describe: "child_watches.reply_route column",
     probe: { kind: "column", table: "child_watches", column: "reply_route" },
     sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "reply_route" text',

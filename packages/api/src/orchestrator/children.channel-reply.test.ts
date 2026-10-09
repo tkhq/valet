@@ -130,6 +130,7 @@ async function bootDelegation(childId: string) {
   await db.insert(childWatches).values({
     childSessionId: childId, queueItemId, parentSessionId: parentId, parentThreadId: parentThread.id,
     actorUserId: USER_ID, orgId: ORG_ID, settled: false, createdAt: now, originJson: JSON.stringify(ORIGIN),
+    replyRoute: "origin",
   });
   const deps: ChildrenDeps = {
     db, engineHost, engineStore, prebuildService: api.providers.prebuildService,
@@ -327,6 +328,26 @@ describe("delegated child completion over a channel", () => {
     await api!.providers.channelHost.retryChildReplies();
     expect(run.transport.sent).toHaveLength(1);
     expect((await childSettledSignals(run.parentId)).map((signal) => signal.content.origin)).toEqual([ORIGIN]);
+  });
+
+  it("treats a watch written before reply routes as manual", async () => {
+    const run = await bootDelegation("child-legacy");
+    const { db, engineStore } = api!.providers;
+    // A row from before the reply_route column. Its history (a takeover, or
+    // work from another parent thread) is unknown, so it never posts on its own.
+    await db.update(childWatches).set({ replyRoute: null }).where(eq(childWatches.childSessionId, "child-legacy"));
+
+    await engineStore.settleUnclaimed("child-legacy", run.childThreadId, run.queueItemId, { outcome: "completed" });
+    const signals = await vi.waitFor(async () => {
+      const found = await childSettledSignals(run.parentId);
+      if (found.length < 1) throw new Error("the settlement is not admitted yet");
+      return found;
+    }, { timeout: 30_000, interval: 20 });
+    await run.parentThread.awaitResult(signals[0]!.id);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(0);
+    expect(signals.map((signal) => signal.content.origin)).toEqual([{ ...ORIGIN, reply: "manual" }]);
+    expect(await db.select().from(childReplyDeliveries)).toHaveLength(0);
   });
 
   it("drops the origin thread when a person takes over the child", async () => {
