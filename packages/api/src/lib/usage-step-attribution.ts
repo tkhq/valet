@@ -5,7 +5,7 @@ import { usageHourlyPublishSql } from "./usage-hourly-migration.js";
 
 /**
  * Deployed databases receive the Thread-step billing rule
- * (`valet_usage_billing_session` in 0000_app.sql) through this repair. A
+ * (`valet_usage_fact` in 0000_app.sql) through this repair. A
  * fresh database installs it with the usage projection and creates the
  * ready view at the end of the migration, so this repair never runs on one.
  * On a deployed database only this repair's publish step creates the view,
@@ -29,7 +29,7 @@ const functionsSql = between("-- usage step attribution begin\n", "-- usage step
  * when a run starts. The backfill gives each existing run its workflow's
  * org. A run whose workflow is already gone keeps no org: its spend was
  * already out of the org's totals, and its Thread-step turns stay on the
- * assistant (see `valet_usage_billing_session`).
+ * assistant (see `valet_usage_fact`).
  */
 export const WORKFLOW_RUN_ORG_SQL =
   `DO $run_org$ BEGIN ${between("-- workflow run org begin\n", "-- workflow run org end")} END $run_org$`;

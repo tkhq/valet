@@ -3,7 +3,7 @@
  *
  * The usage projection bills every model call a workflow makes to its step's
  * id (`wf:{runId}:{nodeId}[:{iteration}]`; see `step-usage.ts` and
- * `valet_usage_billing_session`), so the step and iteration are read back
+ * `valet_usage_fact`), so the step and iteration are read back
  * from `usage_entry_facts.session_id`. A `workflow` step's own cost is the
  * cost of the runs it started, which bill to their own run ids. The walk
  * follows `childRunId` from the checkpoints and adds each child run's total

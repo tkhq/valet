@@ -1577,37 +1577,39 @@ BEGIN
   CREATE INDEX IF NOT EXISTS usage_entry_facts_outcomes_window ON usage_entry_facts(created_at, session_id) WHERE pull_requests > 0 OR reviews > 0;
 
   -- usage step attribution begin
-  -- The session id an entry bills to. A Thread workflow step prompts the
-  -- workspace assistant, so its turns are written to the assistant session.
-  -- The queue item carries the step's dispatch id
-  -- (`workflow:{runId}:{nodeId}[:{iteration}][:repair]`), and the entry bills
+  -- `session_id` of a fact is the session id the entry bills to. A Thread
+  -- workflow step prompts the workspace assistant, so its turns are written
+  -- to the assistant session. The queue item carries the step's dispatch id
+  -- (`workflow:{runId}:{nodeId}[:{iteration}][:repair]`), and the turn bills
   -- to that step's id (`wf:{runId}:{nodeId}[:{iteration}]`), the key a
   -- session step already uses. Every rollup then attributes the turn to the
   -- workflow run and the step, not to the assistant. A run with no org (its
   -- workflow was deleted before runs kept their org) cannot be scoped to a
   -- tenant, so its turns stay on the assistant and keep counting there.
-  CREATE OR REPLACE FUNCTION valet_usage_billing_session(e engine_entries) RETURNS text
-  LANGUAGE sql STABLE AS $billing$
-    SELECT COALESCE((SELECT 'wf:' || regexp_replace(substr(q.dispatch_id, 10), ':repair$', '')
-      FROM engine_queue_items q JOIN workflow_runs r ON r.id = split_part(q.dispatch_id, ':', 2)
-      WHERE q.id = e.queue_item_id AND q.session_id = e.session_id
-        AND q.dispatch_id LIKE 'workflow:%' AND e.session_id NOT LIKE 'wf:%'
-        AND r.org_id IS NOT NULL), e.session_id)
-  $billing$;
-
+  -- Only an assistant message carries usage or tool calls, so only it pays
+  -- for the queue lookup, once per entry.
   CREATE OR REPLACE FUNCTION valet_usage_fact(e engine_entries) RETURNS usage_entry_facts
   LANGUAGE sql STABLE AS $fact$
-    SELECT e.id, valet_usage_billing_session(e),
-      CASE WHEN valet_usage_billing_session(e) LIKE 'wf:%' THEN split_part(valet_usage_billing_session(e), ':', 2) END,
+    SELECT e.id, b.session_id,
+      CASE WHEN b.session_id LIKE 'wf:%' THEN split_part(b.session_id, ':', 2) END,
       e.created_at, e.model, e.usage::jsonb, e.cost::jsonb,
       COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'status' IN ('completed', 'error')),
       COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'toolName' = 'bash'
         AND p->>'status' = 'completed' AND p->'result'->'details'->'outcome'->>'kind' = 'pull_request_created'),
       COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'toolName' = 'bash'
         AND p->>'status' = 'completed' AND p->'result'->'details'->'outcome'->>'kind' = 'review_submitted'), false
-    FROM jsonb_array_elements(CASE WHEN e.entry_type = 'message' AND e.role = 'assistant'
+    FROM (SELECT CASE WHEN e.entry_type = 'message' AND e.role = 'assistant'
+        AND e.queue_item_id IS NOT NULL AND e.session_id NOT LIKE 'wf:%'
+      THEN COALESCE((SELECT 'wf:' || regexp_replace(substr(q.dispatch_id, 10), ':repair$', '')
+        FROM engine_queue_items q JOIN workflow_runs r ON r.id = split_part(q.dispatch_id, ':', 2)
+        WHERE q.id = e.queue_item_id AND q.session_id = e.session_id
+          AND q.dispatch_id LIKE 'workflow:%' AND r.org_id IS NOT NULL), e.session_id)
+      ELSE e.session_id END AS session_id) b
+    -- LEFT JOIN keeps one row for an entry with no parts; its counts are 0.
+    LEFT JOIN jsonb_array_elements(CASE WHEN e.entry_type = 'message' AND e.role = 'assistant'
       THEN COALESCE(replace(e.parts, chr(92) || 'u0000', chr(92) || 'uFFFD')::jsonb, '[]'::jsonb)
-      ELSE '[]'::jsonb END) p
+      ELSE '[]'::jsonb END) p ON true
+    GROUP BY b.session_id
   $fact$;
   -- usage step attribution end
 
