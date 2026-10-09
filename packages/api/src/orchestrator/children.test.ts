@@ -2593,6 +2593,46 @@ describe("buildChildSender", () => {
     expect(await db.select().from(childReplyDeliveries)).toHaveLength(humanTakeover ? 0 : 1);
   });
 
+  it("re-opens a failed reply intent when it admits the parent update", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineStore, db } = api.providers;
+
+    const { parentThread, childThread } = await seedChild(api, {
+      childId: "child-revive", parentId: "parent-revive", settled: false, queueItemId: "qi-revive",
+    });
+    await db.update(childWatches).set({ originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }) })
+      .where(eq(childWatches.childSessionId, "child-revive"));
+    // An earlier attempt wrote the intent, and the dispatcher failed it
+    // before any parent update was admitted.
+    const replyId = "child-revive:settled:child-revive:qi-revive";
+    await db.insert(childReplyDeliveries).values({
+      id: replyId, orgId: "local-org", sessionId: "parent-revive", threadId: parentThread.id,
+      childSessionId: "child-revive", childQueueItemId: "qi-revive",
+      nextAttemptAt: 0, createdAt: 0, attempts: 10, failedAt: 1, lastError: "earlier failure",
+    });
+    await db.insert(eventDropLog).values({
+      id: `child-reply:${replyId}`, orgId: "local-org", reason: "child_reply_failed", detail: "earlier failure", createdAt: 1,
+    });
+
+    await engineStore.settleUnclaimed("child-revive", childThread.id, "qi-revive", { outcome: "completed" });
+    watcher.arm({
+      childSessionId: "child-revive", queueItemId: "qi-revive", parentSessionId: "parent-revive",
+      parentThreadId: parentThread.id, actorUserId: "local-user", orgId: "local-org",
+    });
+    await waitFor(async () => {
+      const [row] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-revive"));
+      return row?.settled === true;
+    });
+
+    // The parent update now exists, so the reply must be delivered.
+    const [signal] = settledSignalsOf(await engineStore.listUnsettledSubmissions("parent-revive"));
+    const [intent] = await db.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, replyId));
+    expect(intent).toMatchObject({ queueItemId: signal?.id, failedAt: null, attempts: 0, lastError: null, completedAt: null });
+    expect(await db.select().from(eventDropLog).where(eq(eventDropLog.id, `child-reply:${replyId}`))).toHaveLength(0);
+  });
+
   it("re-opening a settled child pays the child cap: the 11th active child is rejected", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);

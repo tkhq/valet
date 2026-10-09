@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { and, count, eq, isNull, lte, notExists, sql } from "drizzle-orm";
+import { and, count, eq, isNotNull, isNull, lte, notExists, sql } from "drizzle-orm";
 import { governingThreadKeySql, isOutsideThreadKey, outsideReaderMayReach, sharedWithWholeTeamSql } from "../services/thread-access.js";
 import {
   namespaceInternalDispatchId,
@@ -39,7 +39,7 @@ import {
   walkTranscriptDag,
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, childReplyDeliveries, childWatches, sessionRepos, type ChildWatchRow } from "../schema/index.js";
+import { agentSessions, childReplyDeliveries, childWatches, eventDropLog, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
@@ -759,12 +759,7 @@ export class ChildWatcher {
     const replyId = namespaceInternalDispatchId(watch.childSessionId, `settled:${watch.childSessionId}:${watch.queueItemId}`);
     const automaticReply = origin !== undefined && origin.reply !== "manual";
     // Write the intent before the parent can finish. Dispatch-ID lookup recovers a lost receipt.
-    if (automaticReply) {
-      await this.deps.db.insert(childReplyDeliveries).values({
-        id: replyId, orgId: watch.orgId, sessionId: watch.parentSessionId,
-        threadId: watch.parentThreadId, nextAttemptAt: Date.now(), createdAt: Date.now(),
-      }).onConflictDoNothing();
-    }
+    if (automaticReply) await this.openReplyIntent(watch, replyId);
     const receipt = await admitSignal(this.deps, {
       from: { sessionId: watch.childSessionId, owner: childData.owner },
       to: watch.parentSessionId,
@@ -793,6 +788,31 @@ export class ChildWatcher {
     }
     await this.markSettled(watch.childSessionId, watch.queueItemId);
     await this.parkChildSandbox(watch.childSessionId);
+  }
+
+  /**
+   * Writes the reply intent before an admission attempt. An intent that
+   * failed before any parent update was admitted is opened again: this
+   * watcher is about to admit that update, so the earlier failure no longer
+   * holds, and its problem record goes with it. An intent with an admitted
+   * update keeps its state, so a delivered reply never posts twice.
+   */
+  private async openReplyIntent(watch: ArmArgs, replyId: string): Promise<void> {
+    const now = Date.now();
+    await this.deps.db.transaction(async (tx) => {
+      const reopened = await tx.insert(childReplyDeliveries).values({
+        id: replyId, orgId: watch.orgId, sessionId: watch.parentSessionId, threadId: watch.parentThreadId,
+        childSessionId: watch.childSessionId, childQueueItemId: watch.queueItemId, nextAttemptAt: now, createdAt: now,
+      }).onConflictDoUpdate({
+        target: childReplyDeliveries.id,
+        set: { failedAt: null, attempts: 0, lastError: null, nextAttemptAt: now },
+        setWhere: and(eq(childReplyDeliveries.orgId, watch.orgId), isNull(childReplyDeliveries.queueItemId),
+          isNotNull(childReplyDeliveries.failedAt)),
+      }).returning({ failedAt: childReplyDeliveries.failedAt });
+      if (reopened.length > 0) {
+        await tx.delete(eventDropLog).where(and(eq(eventDropLog.id, `child-reply:${replyId}`), eq(eventDropLog.orgId, watch.orgId)));
+      }
+    });
   }
 
   private async latestContinuationCheckpoint(

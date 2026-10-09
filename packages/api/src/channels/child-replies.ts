@@ -2,7 +2,7 @@ import { and, asc, eq, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
 import type { SessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { recordChildReplyFailure } from "../observability/child-reply-metrics.js";
-import { childReplyDeliveries, eventDropLog } from "../schema/index.js";
+import { childReplyDeliveries, childWatches, eventDropLog } from "../schema/index.js";
 
 type ChildReplyRow = typeof childReplyDeliveries.$inferSelect;
 
@@ -23,10 +23,6 @@ const RETRY_BASE_MS = 1_000;
 const RETRY_CAP_MS = 5 * 60_000;
 /** Poll interval while the parent turn runs. The engine settles every submission, so this wait is bounded. */
 const WAITING_POLL_MS = 2_000;
-/** The parent's update is admitted right after its intent is written. An
- * intent with no admitted submission after this long lost its admission (a
- * crash between the two writes), and nothing else would ever finish it. */
-export const CHILD_REPLY_ADMISSION_WINDOW_MS = 10 * 60_000;
 const LEASE_MS = 60_000;
 const PRUNE_EVERY_MS = 60 * 60_000;
 const COMPLETED_RETENTION_MS = 7 * 24 * 60 * 60_000;
@@ -102,11 +98,7 @@ export class ChildReplyDispatcher {
           queueItemId = item?.id ?? null;
           if (queueItemId) await db.update(childReplyDeliveries).set({ queueItemId }).where(leased);
         }
-        const admissionLost = !queueItemId && row.createdAt !== null
-          && this.deps.now() - row.createdAt > CHILD_REPLY_ADMISSION_WINDOW_MS;
-        outcome = queueItemId ? await this.deps.deliver({ ...row, queueItemId })
-          : admissionLost ? { kind: "undeliverable", reason: "The parent update was never admitted." }
-          : { kind: "waiting" };
+        outcome = queueItemId ? await this.deps.deliver({ ...row, queueItemId }) : await this.unadmitted(row);
       } catch (error) {
         outcome = { kind: "undeliverable", reason: error instanceof Error ? error.message : String(error) };
       }
@@ -118,6 +110,31 @@ export class ChildReplyDispatcher {
         await this.recordFailure(row, leased, outcome.reason);
       }
     }
+  }
+
+  /**
+   * An intent with no admitted parent update. The child watcher owns the
+   * admission: it writes the intent, admits the update, and only then marks
+   * its watch settled. It retries a failed admission, including on the next
+   * boot. So the intent waits, with no time limit, while its watch still
+   * reports this child submission and is open. A watch that moved to a later
+   * child submission ends the intent: the parent hears about the later one.
+   */
+  private async unadmitted(row: ChildReplyRow): Promise<ChildReplyOutcome> {
+    // Intents written before these columns existed cannot name their watch.
+    if (!row.childSessionId || !row.childQueueItemId) return { kind: "waiting" };
+    const [watch] = await this.deps.db.select({ queueItemId: childWatches.queueItemId, settled: childWatches.settled })
+      .from(childWatches).where(and(eq(childWatches.childSessionId, row.childSessionId), eq(childWatches.orgId, row.orgId)))
+      .limit(1);
+    if (watch && !watch.settled && watch.queueItemId === row.childQueueItemId) return { kind: "waiting" };
+    // The watcher admits before it settles or moves on, so check the
+    // admission again after reading the watch.
+    const item = await this.deps.engineStore.getQueueItemByDispatchId(row.sessionId, row.id);
+    if (item) return { kind: "waiting" };
+    if (watch?.settled && watch.queueItemId === row.childQueueItemId) {
+      return { kind: "undeliverable", reason: "The child watch settled without admitting the parent update." };
+    }
+    return { kind: "done" };
   }
 
   /** Every failed attempt is recorded. The last one fails the intent and leaves an operator-visible problem. */

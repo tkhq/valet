@@ -9,6 +9,7 @@ import {
   type FauxProviderRegistration,
 } from "@earendil-works/pi-ai/compat";
 import {
+  namespaceInternalDispatchId,
   VirtualSandboxProvider,
   type BusEvent,
   type ChannelGatePrompt,
@@ -39,7 +40,6 @@ import { wireAttentionRouter } from "../orchestrator/attention-wiring.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
 import { ChannelHost, type ChannelHostDeps } from "./host.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
-import { CHILD_REPLY_ADMISSION_WINDOW_MS } from "./child-replies.js";
 
 const ORG_ID = "local-org";
 const USER_ID = "local-user";
@@ -1034,30 +1034,86 @@ describe("ChannelHost outbound delivery", () => {
     }
   });
 
-  it("stops waiting for a parent update that was never admitted", async () => {
-    const { timed, clock } = await failingChildReply("reply-anchor", "absent:99");
-    try {
-      // The intent was written, but its admission never happened: no queue
-      // item carries its dispatch id, so nothing else would ever finish it.
-      await testDb.appDb.insert(childReplyDeliveries).values({
-        id: "reply-unadmitted", orgId: ORG_ID, sessionId: "parent-without-admission", threadId: "thread",
-        nextAttemptAt: clock.now, createdAt: clock.now,
-      });
-      const unadmitted = async () => {
-        const [found] = await testDb.appDb.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, "reply-unadmitted"));
-        if (!found) throw new Error("child reply reply-unadmitted is missing");
-        return found;
-      };
-      await timed.retryChildReplies();
-      expect(await unadmitted()).toMatchObject({ attempts: 0, lastError: null });
+  /** A parent thread, a child watch that reports `childItemId`, and the intent the watcher writes before admission. */
+  async function unadmittedChildReply(clock: { now: number }, childId: string, watch: { queueItemId: string; settled: boolean }) {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const childItemId = `qi-${childId}`;
+    const replyId = namespaceInternalDispatchId(childId, `settled:${childId}:${childItemId}`);
+    await testDb.appDb.insert(childWatches).values({
+      childSessionId: childId, queueItemId: watch.queueItemId, parentSessionId: session.id, parentThreadId: threadId,
+      actorUserId: USER_ID, orgId: ORG_ID, settled: watch.settled, createdAt: clock.now,
+      originJson: JSON.stringify({ channelType: "fake", threadKey: "fake:99", reply: "auto" }),
+    });
+    await testDb.appDb.insert(childReplyDeliveries).values({
+      id: replyId, orgId: ORG_ID, sessionId: session.id, threadId, childSessionId: childId, childQueueItemId: childItemId,
+      nextAttemptAt: clock.now, createdAt: clock.now,
+    });
+    const intent = async () => {
+      const [found] = await testDb.appDb.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, replyId));
+      if (!found) throw new Error(`child reply ${replyId} is missing`);
+      return found;
+    };
+    return { session, threadId, childItemId, replyId, intent };
+  }
 
-      clock.now += CHILD_REPLY_ADMISSION_WINDOW_MS + 1;
-      await testDb.appDb.update(childReplyDeliveries).set({ nextAttemptAt: clock.now }).where(eq(childReplyDeliveries.id, "reply-unadmitted"));
+  it("waits as long as the watcher can still admit the parent update, then posts it", async () => {
+    const { timed, clock } = await failingChildReply("reply-anchor-late", "absent:99");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const late = await unadmittedChildReply(clock, "child-late", { queueItemId: "qi-child-late", settled: false });
+      // The watcher cannot admit the settlement for an hour, for example
+      // because the parent thread is at its pending cap. Its watch stays
+      // open, so the parent update can still arrive.
+      for (let minute = 0; minute < 60; minute++) {
+        await timed.retryChildReplies();
+        clock.now += 60_000;
+      }
+      expect(await late.intent()).toMatchObject({ attempts: 0, failedAt: null, completedAt: null, queueItemId: null });
+      expect(await testDb.appDb.select().from(eventDropLog).where(eq(eventDropLog.id, `child-reply:${late.replyId}`))).toHaveLength(0);
+
+      // The watcher admits the settlement and the parent answers.
+      const now = Date.now();
+      await engineStore.admitSubmission(late.session.id, late.threadId, {
+        id: "qi-parent-late", threadId: late.threadId, dispatchId: late.replyId, content: "child settled", status: "queued",
+        attemptCount: 0, maxAttempts: 10, timeoutAt: now + 3_600_000, createdAt: now, updatedAt: now,
+      });
+      await engineStore.appendEntries(late.session.id, late.threadId, [
+        userEntry({ sessionId: late.session.id, threadId: late.threadId, queueItemId: "qi-parent-late", signal: {
+          signalType: "child.settled", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" },
+        } }),
+        { type: "message", id: "reply-parent-late", sessionId: late.session.id, threadId: late.threadId, parentId: null,
+          createdAt: now, role: "assistant", content: "Late delegated result", queueItemId: "qi-parent-late", stopReason: "end_turn" },
+      ]);
+      await engineStore.settleUnclaimed(late.session.id, late.threadId, "qi-parent-late", { outcome: "completed" });
+      clock.now += 10 * 60_000;
       await timed.retryChildReplies();
-      const late = await unadmitted();
-      expect(late.attempts).toBe(1);
-      expect(late.lastError).toContain("never admitted");
+      expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["Late delegated result"]);
+      expect((await late.intent()).completedAt).not.toBeNull();
     } finally {
+      error.mockRestore();
+      await timed.stop();
+    }
+  });
+
+  it("ends an unadmitted reply whose watch moved on, and fails one whose watch settled without it", async () => {
+    const { timed, clock } = await failingChildReply("reply-anchor-ended", "absent:99");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      // A later child submission replaced this one before its settlement
+      // was admitted. The parent hears about the later one instead.
+      const moved = await unadmittedChildReply(clock, "child-moved", { queueItemId: "qi-child-moved-later", settled: false });
+      // A settled watch with no admitted update breaks the watcher's rule
+      // (admit, then settle), so it counts as a failed attempt.
+      const stuck = await unadmittedChildReply(clock, "child-stuck", { queueItemId: "qi-child-stuck", settled: true });
+      await timed.retryChildReplies();
+      expect(await moved.intent()).toMatchObject({ attempts: 0, failedAt: null, completedAt: clock.now });
+      const failed = await stuck.intent();
+      expect(failed).toMatchObject({ attempts: 1, completedAt: null });
+      expect(failed.lastError).toContain("settled without admitting");
+      expect(fakeTransport.sent).toHaveLength(0);
+    } finally {
+      error.mockRestore();
       await timed.stop();
     }
   });

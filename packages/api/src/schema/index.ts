@@ -2926,6 +2926,9 @@ export const childReplyDeliveries = pgTable("child_reply_deliveries", {
   lastError: text("last_error"),
   /** Set when retries stop. `last_error` and an `event_drop_log` row say why. */
   failedAt: bigint("failed_at", { mode: "number" }),
-  /** When the intent was written. Bounds the wait for the parent's admission. */
+  /** When the intent was written. Reports how long a reply has waited. */
   createdAt: bigint("created_at", { mode: "number" }),
+  /** The child submission this reply reports. Its child watch decides whether admission can still happen. */
+  childSessionId: text("child_session_id"),
+  childQueueItemId: text("child_queue_item_id"),
 }, (t) => [index("child_reply_deliveries_due").on(t.orgId, t.completedAt, t.nextAttemptAt)]);

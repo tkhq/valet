@@ -590,11 +590,15 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   "attempts" integer DEFAULT 0 NOT NULL,
   "last_error" text,
   "failed_at" bigint,
-  "created_at" bigint
+  "created_at" bigint,
+  "child_session_id" text,
+  "child_queue_item_id" text
 );` },
   { describe: "child completion reply due index", probe: { kind: "index", index: "child_reply_deliveries_due" }, sql: `CREATE INDEX IF NOT EXISTS "child_reply_deliveries_due" ON "child_reply_deliveries" ("org_id", "completed_at", "next_attempt_at");` },
   { describe: "child completion reply terminal failures", probe: { kind: "column", table: "child_reply_deliveries", column: "failed_at" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "failed_at" bigint' },
   { describe: "child completion reply creation time", probe: { kind: "column", table: "child_reply_deliveries", column: "created_at" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "created_at" bigint' },
+  { describe: "child completion reply child session", probe: { kind: "column", table: "child_reply_deliveries", column: "child_session_id" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "child_session_id" text' },
+  { describe: "child completion reply child submission", probe: { kind: "column", table: "child_reply_deliveries", column: "child_queue_item_id" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "child_queue_item_id" text' },
   {
     describe: "session_repos.resolved_ref column",
     probe: { kind: "column", table: "session_repos", column: "resolved_ref" },

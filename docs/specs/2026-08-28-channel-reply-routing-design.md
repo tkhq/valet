@@ -359,9 +359,16 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   The dispatcher bypasses the live dropped-reply feedback path. While the
   parent turn runs, the dispatcher checks the intent every two seconds and
   records no failure. The engine settles every submission, so this wait ends.
-  An intent whose submission was never admitted (a crash between the two
-  writes) has nothing to wait for. Ten minutes after it was written, the
-  dispatcher counts it as a failed attempt, and the retry limit below ends it.
+  The watcher owns admission. It retries a failed admission, including on
+  the next boot, and marks its watch settled only after it admits. So an
+  intent with no admitted parent update waits, with no time limit, while
+  its watch is open and still reports the same child submission. The
+  intent stores that child submission to make this check. If the watch
+  moved to a later child submission, the dispatcher completes the intent
+  without a send, because the parent hears about the later one. A settled
+  watch with no admitted update is a failed attempt. Before each admission
+  attempt, the watcher re-opens an intent that failed before any update
+  was admitted, and deletes its problem row.
   A provider send error or a missing route (for example, a stopped channel)
   is a failed attempt. Each failed attempt records `attempts` and
   `last_error`, logs the intent ID, and increments the
