@@ -11,6 +11,7 @@ import {
 import { Dialog, DialogContent, DialogTitle } from "~/components/primitives/dialog";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
+import { useResizablePane } from "~/lib/use-resizable-pane";
 
 const COLLAPSED_KEY = "valet:sidebar-collapsed";
 
@@ -60,10 +61,8 @@ function loadStoredCollapsed(): boolean {
  * Three-zone app shell: a top nav, a left sidebar, and the main content
  * outlet.
  *
- * Desktop (`md`+): the sidebar sizes to its content (widest thread title)
- * between a 200px floor and a 320px cap, so a list of short titles doesn't
- * waste horizontal space and a long title truncates instead of pushing
- * `<main>` off-screen. The collapsed state persists to localStorage.
+ * Desktop (`md`+): drag the divider or use its arrow keys to resize the
+ * sidebar. Width and collapsed state persist to localStorage.
  *
  * Mobile: collapses out of the flow and opens as a full-height overlay
  * drawer (paper bg, hairline right border). The drawer closes on backdrop
@@ -95,6 +94,11 @@ export function AppShell({
   className?: string;
 }) {
   const { open: mobileOpen, setOpen: setMobileOpen } = useResponsiveOverlay("md");
+  const sidebarPane = useResizablePane({
+    storageKey: "valet:sidebar-width", cssVar: "--sidebar-width",
+    defaultWidth: 288, min: 200, max: 480, side: "left",
+    ariaLabel: "Resize thread sidebar",
+  });
   const drawerOpener = useRef<HTMLElement | null>(null);
   const drawer = useRef<HTMLDivElement>(null);
   const [collapsed, setCollapsed] = useState<boolean>(() => loadStoredCollapsed());
@@ -132,7 +136,7 @@ export function AppShell({
     <SidebarControlsContext.Provider value={controls}>
       <div className={cn("h-dvh w-full min-w-0 overflow-hidden flex flex-col bg-[--bg] text-[--fg]", className)}>
         {topNav}
-        <div className="flex-1 flex min-h-0 relative">
+        <div className="flex-1 flex min-h-0 relative" style={sidebarPane.containerStyle}>
           {sidebar != null && (
             <>
               {/* Collapsed HIDES the aside rather than unmounting it. The
@@ -141,13 +145,18 @@ export function AppShell({
                   silently dead for anyone whose collapsed state persisted. */}
               <aside
                 className={cn(
-                  "shrink-0 flex-col w-72 min-w-0 border-r border-line",
+                  "shrink-0 flex-col w-[var(--sidebar-width)] max-w-[45%] min-w-0",
                   collapsed ? "hidden" : "hidden md:flex",
                 )}
                 aria-hidden={collapsed}
               >
                 <div className="flex-1 min-h-0 flex flex-col">{sidebar}</div>
               </aside>
+              {!collapsed && <div
+                {...sidebarPane.handleProps}
+                title="Drag to resize; use arrow keys when focused"
+                className="hidden md:block relative z-10 w-1 shrink-0 touch-none cursor-col-resize bg-line hover:bg-moss/50 focus:bg-moss focus:outline-none after:absolute after:inset-y-0 after:-inset-x-1"
+              />}
               <Dialog open={mobileOpen} onOpenChange={setMobileOpen}>
                 <DialogContent
                   ref={drawer}

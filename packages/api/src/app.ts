@@ -7,7 +7,9 @@ import { threadsRouter } from "./routes/threads.js";
  * I/O (open sqlite, build providers) out of the hot test path.
  */
 import { TeamAdminRequiredError, teamAdminRefusal } from "./services/team-deletion-access.js";
+import { productAnnouncementsRouter } from "./routes/product-announcements.js";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -17,7 +19,7 @@ import type { RunningServer, ServerAdapter } from "./server-adapter.js";
 import { nodeServerAdapter } from "./server-adapter.node.js";
 import type { Providers } from "./providers/types.js";
 import { providersMiddleware } from "./middleware/providers.js";
-import { buildAuthMiddleware, refuseTeamKeyOutsideScope } from "./middleware/auth.js";
+import { buildAuthMiddleware, refuseAgentAuthority, refuseTeamKeyOutsideScope } from "./middleware/auth.js";
 import { filterTeamKeysFromPersonalApiKeyList } from "./lib/personal-api-key-list.js";
 import { teamIdFromApiKeyMetadata } from "./lib/request-principal.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
@@ -48,6 +50,11 @@ import { workflowTriggersRouter } from "./routes/workflow-triggers.js";
 import { workflowConversationRouter } from "./routes/workflow-conversation.js";
 import { workflowsRouter } from "./routes/workflows.js";
 import { pluginsRouter } from "./routes/plugins.js";
+import { actionsRouter } from "./routes/actions.js";
+import { mcpAuthorizeGate, mcpTokenGate, oauthConsentRouter } from "./routes/oauth-consent.js";
+import { cliDevicePublicRouter, cliDeviceRouter } from "./routes/cli-device.js";
+import { agentAccessRouter } from "./routes/agent-access.js";
+import { mountOnboardingRoutes } from "./onboarding/routes.js";
 import { templatesRouter } from "./routes/templates.js";
 import { skillsRouter } from "./routes/skills.js";
 import { credentialsRouter } from "./routes/credentials.js";
@@ -85,7 +92,7 @@ import { channelsRouter } from "./routes/channels.js";
 import { slackWebhookRouter } from "./routes/slack-webhook.js";
 import { slackAppRouter } from "./routes/slack-app.js";
 import { SLACK_WEBHOOK_MOUNT } from "./services/slack-app.js";
-import { eventWebhooksRouter } from "./routes/event-webhooks.js";
+import { mountPluginHttpRoutes } from "./plugins/http-routes.js";
 import { workflowHooksRouter } from "./routes/workflow-hooks.js";
 import { artifactsRouter, buildArtifactsPublicRouter } from "./routes/artifacts.js";
 import { eventReceiptsRouter } from "./routes/event-receipts.js";
@@ -212,11 +219,10 @@ export function createApp(
   // for the same reason `channelsRouter` is.
   app.route("/webhooks/github-app", githubAppWebhookRouter);
 
-  // PUBLIC generic event-webhook ingress — same reasoning as the mounts
-  // above: the caller is the provider (Linear etc.), not a logged-in Valet
-  // user; verification is signature-level (plugin `TriggerDef.verify` over
-  // the raw bytes) inside the router itself, not the auth gate below.
-  app.route("/webhooks/events", eventWebhooksRouter);
+  // Public plugin routes include signed event ingress and host-owned legacy aliases.
+  // Authenticated plugin routes mount below the normal authentication middleware.
+  mountPluginHttpRoutes(app, providers.plugins, "public");
+  app.post("/webhooks/events/:service", (c) => c.json({ error: "unknown service" }, 404));
 
   // PUBLIC arbitrary-URL workflow trigger ingress (overhaul design decision
   // 5) — same reasoning as the mounts above: the hookId in the URL IS the
@@ -243,6 +249,9 @@ export function createApp(
   // Public health check (no auth). Carries the running binary's version and
   // the resolved sandbox backend so `valet status` can report client/server
   // versions + skew (single-binary CLI plan, T6; spec decisions 6 & 9).
+  // Public agent onboarding pages (`/agent-setup.md`, `/agent-skill.md`).
+  mountOnboardingRoutes(app);
+
   app.get("/api/health", (c) => {
     const body: HealthResponse = {
       ok: true,
@@ -271,6 +280,16 @@ export function createApp(
   // authMiddleware so it's public even when VALET_LOCAL_AUTH isn't set —
   // otherwise login/signup could never succeed in production.
   if (auth) {
+    // Every MCP authorization goes through Valet's consent page: a client
+    // cannot skip it by leaving out prompt=consent (routes/oauth-consent.ts).
+    app.get("/api/auth/mcp/authorize", mcpAuthorizeGate(auth));
+    app.post("/api/auth/mcp/token", mcpTokenGate(providers.db));
+    // `valet login` starts, polls, refreshes, and signs out here before it
+    // has a credential (routes/cli-device.ts).
+    app.use("/api/cli/device/code", bodyLimit({ maxSize: 16 * 1024 }));
+    app.use("/api/cli/device/token", bodyLimit({ maxSize: 16 * 1024 }));
+    app.use("/api/cli/token/*", bodyLimit({ maxSize: 16 * 1024 }));
+    app.route("/api/cli", cliDevicePublicRouter(providers.db));
     app.on(["POST", "GET"], "/api/auth/*", async (c) => {
       const res = await auth.handler(c.req.raw);
       return filterTeamKeysFromPersonalApiKeyList(c.req.path, res);
@@ -288,6 +307,10 @@ export function createApp(
         const rows = await listStandaloneSessions(providers.db, userId);
         return rows.map((r) => ({ id: r.id, title: r.title, status: r.status }));
       },
+      // Agent tools call `/api` routes in-process. `app` is complete by the
+      // time a tool runs, so this sees every route mounted below.
+      dispatch: (inner) => Promise.resolve(app.fetch(inner)),
+      engineStore: providers.engineStore,
     });
     app.all("/mcp", (c) => mcp(c.req.raw));
   }
@@ -310,8 +333,13 @@ export function createApp(
   // Everything under /api/* requires auth (stub in dev; 401 otherwise).
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
   app.use("/api/*", refuseTeamKeyOutsideScope());
+  app.use("/api/*", refuseAgentAuthority());
+  mountPluginHttpRoutes(app, providers.plugins, "authenticated");
 
   app.route("/api/threads", threadsRouter);
+  app.route("/api/actions", actionsRouter);
+  app.route("/api/oauth/consent", oauthConsentRouter);
+  app.route("/api/cli/device", cliDeviceRouter);
   app.route("/api/sessions", childWorkRouter);
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.
@@ -360,11 +388,13 @@ export function createApp(
   // registers just GET / and PATCH / (no wildcard/param routes), so there is
   // no actual collision to lose. Revisit this ordering if /api/me ever grows
   // a catch-all route that could shadow /api/me/identity-links.
+  app.route("/api/me/agent-access", agentAccessRouter);
   app.route("/api/me/identity-links", identityLinksRouter);
   // Mounted BEFORE /api/me for the same defensive-ordering reason as
   // identityLinksRouter above.
   app.route("/api/me/github", githubConnectRouter);
   app.route("/api/me", meRouter);
+  app.route("/api/product-announcements", productAnnouncementsRouter);
   app.route("/api/models", modelsRouter);
   app.route("/api/usage", usageRouter);
   app.route("/api/proxy", proxyUsageRouter);
@@ -412,6 +442,15 @@ export function createApp(
   // Web app static serving + SPA fallback — registered LAST (decision 3):
   // every real route above must get first crack at a request. No-op unless
   // `opts.webDistDir` points at a real build (has index.html).
+  // The approval pages must not load in a frame, so another site cannot
+  // overlay them and trick a click on Allow.
+  for (const path of ["/oauth/consent", "/cli/device"]) {
+    app.use(path, async (c, next) => {
+      await next();
+      c.header("X-Frame-Options", "DENY");
+      c.header("Content-Security-Policy", "frame-ancestors 'none'");
+    });
+  }
   const webServed = mountWebStatic(app, opts.webDistDir);
 
   // Default 404 for anything no route (or the SPA fallback above) claimed —

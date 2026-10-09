@@ -118,7 +118,7 @@ describe("ownerFromContext", () => {
   });
 
   it("derives the owner from ctx.userId/orgId", () => {
-    expect(ownerFromContext(ctx())).toEqual({ userId: "user1", orgId: "org1" });
+    expect(ownerFromContext(ctx())).toEqual({ userId: "user1", orgId: "org1", agentEditor: true });
   });
 
   it("keeps the session owner as the workflow principal", () => {
@@ -127,6 +127,7 @@ describe("ownerFromContext", () => {
       orgId: "org1",
       principal: { type: "team", id: "team1" },
       requireTeamMembership: true,
+      agentEditor: true,
     });
   });
 
@@ -135,7 +136,7 @@ describe("ownerFromContext", () => {
       owner: { type: "team", id: "team1" }, actor: { id: "current-member" },
     }))).toEqual({
       userId: "current-member", orgId: "org1",
-      principal: { type: "team", id: "team1" }, requireTeamMembership: true,
+      principal: { type: "team", id: "team1" }, requireTeamMembership: true, agentEditor: true,
     });
   });
 
@@ -148,6 +149,7 @@ describe("ownerFromContext", () => {
       orgId: "org1",
       principal: { type: "team", id: "team1" },
       requireTeamMembership: false,
+      agentEditor: true,
     });
   });
 
@@ -310,13 +312,14 @@ describe("DB-backed actions", () => {
     deps.plugins = [githubPlugin];
     const workflowId = await seedWorkflow();
     const tool = workflowsActionPlugin(() => deps).actions.find(a => a.id === "workflows.propose_trigger")!;
-    const input = { proposal_key: "pulls", workflow_id: workflowId, name: "Pulls", event_keys: ["github.pull_request.opened"] };
+    const input = { proposal_key: "pulls", workflow_id: workflowId, name: "Pulls", event_keys: ["github.pull_request.opened"], presence: { displayName: "PR helper" } };
     expect(await tool.execute(input, ctx({ userId: "other" }))).toMatchObject({ success: false });
     const results = await Promise.all([tool.execute(input, ctx()), tool.execute(input, ctx())]);
-    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { enabled: false, config: { target: { kind: "workflow", workflowId } } } } });
+    for (const result of results) expect(result).toMatchObject({ success: true, data: { proposal: { enabled: false, config: { target: { kind: "workflow", workflowId, presence: input.presence } } } } });
     expect(await db.select().from(eventSubscriptions)).toHaveLength(1);
     await db.update(eventSubscriptions).set({ enabled: true });
     expect(await tool.execute(input, ctx())).toMatchObject({ success: true, data: { proposal: { enabled: true } } });
+    expect(await tool.execute({ ...input, presence: { displayName: "Different" } }, ctx())).toMatchObject({ success: true, data: { proposal: { config: { target: { presence: input.presence } } } } });
   });
 
   it("keeps one proposal key separate per workflow", async () => {
@@ -1354,5 +1357,22 @@ describe("update actions", () => {
     );
     expect(result.success).toBe(false);
     expect(result.error).toContain("not found");
+  });
+});
+
+describe("standing automations need a person by default", () => {
+  it("rates schedule and event-trigger creation and updates high, so the risk default requires approval", async () => {
+    // A schedule or trigger keeps prompting the assistant after the thread
+    // ends, and an agent can steer the assistant through a thread.
+    const { workflowsActionPlugin } = await import("./actions.js");
+    const plugin = workflowsActionPlugin(() => {
+      throw new Error("not called when listing actions");
+    });
+    const risk = (id: string) => plugin.actions.find((a) => a.id === id)?.riskLevel;
+    for (const id of ["workflows.create_schedule", "workflows.update_schedule", "workflows.create_trigger", "workflows.update_trigger", "workflows.create_webhook"]) {
+      expect(risk(id), id).toBe("high");
+    }
+    // A proposal does nothing until a person accepts it.
+    expect(risk("workflows.propose_schedule")).toBe("low");
   });
 });

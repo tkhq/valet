@@ -11,6 +11,8 @@
  *     client-side ordering. Durable frames also carry a persistent `offset`;
  *     clients resume after a gap by reconnecting with `?fromOffset=<offset>`.
  */
+import type { Presence } from "@valet/shared";
+export type { Presence } from "@valet/shared";
 import type { RepoListItem } from "@valet/sdk/repos";
 import type { CommandInfo, RegistryDiagnostic } from "@valet/engine";
 export type { CommandInfo, RegistryDiagnostic };
@@ -986,6 +988,9 @@ export interface MarkThreadsReadRequest {
 
 export interface ListThreadsResponse {
   threads: ThreadSummary[];
+  nextCursor?: string;
+  defaultThreadId?: string;
+  originCounts?: Record<"all" | "chat" | "auto" | "channel" | "other", number>;
 }
 
 export interface CreateThreadRequest {
@@ -2088,7 +2093,16 @@ export interface WorkflowRunSignal {
   createdAt: number;
 }
 
+export interface WorkflowRunConversation {
+  sessionId: string;
+  threadId: string;
+  title?: string;
+  nodeId?: string;
+}
+
 export interface WorkflowRunDetail {
+  /** Run-owned histories, excluding the human conversation that started the run. */
+  conversations?: WorkflowRunConversation[];
   run: WorkflowRunSummary & {
     waitingOn: unknown[];
     definition: unknown;
@@ -2623,6 +2637,7 @@ export interface WorkflowScheduleResponse {
 }
 
 export interface CreateWorkflowEventTriggerRequest {
+  presence?: Presence;
   workflowId: string;
   name: string;
   eventKeys: string[];
@@ -2646,6 +2661,7 @@ export interface UpdateWorkflowEventTriggerRequest {
 
 export interface WorkflowEventTriggerResponse {
   trigger: {
+    presence?: Presence;
     triggerId: string;
     workflowId: string;
     name: string;
@@ -2829,6 +2845,8 @@ export interface PluginActionServiceSummary {
 }
 
 export interface PluginSummary {
+  /** Installed playbooks shipped by this plugin; does not imply a connected account. */
+  skills?: Array<{ name: string; description?: string }>;
   name: string;
   version: string;
   /** Human-readable name from the plugin manifest, e.g. "Grafana Cloud".
@@ -3947,6 +3965,10 @@ export interface IdentityLinkStatus {
   /** True when `GET .../members` works: the transport has a member
    * directory for the "find me by name" fallback. */
   memberSearch: boolean;
+  /** The credential service whose OAuth connect also links this account
+   * (Slack: `slack-user`). Present only when that OAuth client is
+   * configured, so the card can offer "Sign in with Slack". */
+  oauthService?: string;
 }
 
 export interface ListIdentityLinksResponse {
@@ -3986,21 +4008,27 @@ export interface DeliverIdentityLinkRequest {
 }
 
 /** 200 body of `POST /api/me/identity-links/:provider/deliver`: the bot DMed
- * the target account an anchor message. The DM carries NO code — `code`
- * exists only in this authenticated response, and the user carries it into
- * the chat themselves. That trip is the ownership proof. */
+ * the target account a link code. The code is NOT in this response: the
+ * person reads it in the DM and enters it through `POST .../verify`. That
+ * trip proves they control the account it went to. */
 export interface DeliverIdentityLinkResponse {
   delivered: true;
   /** Provider-side account the DM went to (Slack: the `U…` user id). */
   externalId: string;
   displayName?: string;
-  /** The code to send back to the bot. Shown only here, never DMed. */
-  code: string;
-  /** The exact reply to send back (Slack: `link <code>` with the real
-   * code). The card renders it verbatim as one copyable line; the
-   * transport's parser accepts it unchanged. */
-  replyText: string;
   expiresInSeconds: number;
+}
+
+/** Body of `POST /api/me/identity-links/:provider/verify`. */
+export interface VerifyIdentityLinkRequest {
+  /** The code the bot DMed in the deliver flow. */
+  code: string;
+}
+
+/** 200 body of `POST .../verify`: the DMed account is now linked. */
+export interface VerifyIdentityLinkResponse {
+  linked: true;
+  externalId: string;
 }
 
 /** 202 body of `POST .../deliver`: the caller's email names nobody in the
@@ -4479,12 +4507,13 @@ export interface FilterOptionsResponse {
 export type EventDeliveryPolicy = "always" | "ignoreIfMyTeamSubscribed" | "ignoreIfAnyTeamSubscribed";
 
 export type EventSubscriptionTargetWire =
-  | { kind: "workflow"; workflowId: string }
+  | { kind: "workflow"; workflowId: string; presence?: Presence }
   /** `teamId` is required when `orchestrator` is `"team"`, and refused
    * otherwise — the two fields are one choice, and a `teamId` alongside
    * `"user"` would name a team the delivery never reaches. */
   | {
       kind: "orchestrator";
+      presence?: Presence;
       orchestrator?: "user" | "team" | "org";
       teamId?: string;
       /** Follow the thread: after this rule delivers a channel mention, later
@@ -4639,6 +4668,8 @@ export interface ListEventSubscriptionsResponse {
 }
 
 export interface PatchEventSubscriptionRequest {
+  /** Replace channel identity. Null clears the override; omission preserves it. */
+  presence?: Presence | null;
   deliveryPolicy?: EventDeliveryPolicy;
   pauseOnOverlap?: boolean;
   name?: string;
@@ -5492,4 +5523,121 @@ export interface WorkspaceBriefingsResponse {
   generatedAt: number | null;
   coverage: "recent";
   unavailable?: boolean;
+}
+
+/** A release notice with a stable identity and an internal destination. */
+export interface ProductAnnouncement {
+  id: string;
+  title: string;
+  body: string;
+  action: { label: string; href: string };
+}
+export interface ProductAnnouncementsResponse { announcements: ProductAnnouncement[] }
+
+// ── Tool broker (`/api/actions`, docs/specs/2026-10-07-mcp-agent-tools-design.md) ──
+
+/** One brokered action, as search and describe return it. */
+export interface ActionToolSummary {
+  /** `service.action`, e.g. `github.create_issue`. */
+  tool_id: string;
+  service: string;
+  name: string;
+  description: string;
+  risk_level: "low" | "medium" | "high" | "critical";
+}
+
+/** `GET /api/actions` */
+export interface ActionSearchResponse {
+  tools: ActionToolSummary[];
+  /** Matches before `limit` applied. */
+  total: number;
+  /** Services that could not list tools, with the reason. */
+  unavailable?: Array<{ service: string; reason: string }>;
+}
+
+/** `GET /api/actions/:toolId` */
+export interface ActionDescribeResponse extends ActionToolSummary {
+  /** JSON Schema for `params`. */
+  parameters: unknown;
+  /** What a call resolves to now under the policy hierarchy. */
+  policy: "allow" | "require_approval" | "deny";
+  /** Whether `policy` was resolved for specific params or without them. */
+  policy_for: string;
+}
+
+/** `POST /api/actions/:toolId/invoke` request. */
+export interface ActionInvokeRequest {
+  params?: Record<string, unknown>;
+  /** `user` or a team id. Default: `user`. */
+  workspace?: string;
+  /** A repeated key returns the first result instead of running again. */
+  idempotencyKey?: string;
+}
+
+/** `POST /api/actions/:toolId/invoke` response. */
+export type ActionInvokeResponse =
+  | { tool_id: string; status: "completed"; result: unknown }
+  | { tool_id: string; status: "failed"; error: string }
+  | { tool_id: string; status: "approval_required"; risk_level?: string; approver?: { userId: string; name?: string }; next_step: string }
+  /** A call with the same idempotency key, tool, and params is still running. */
+  | { tool_id: string; status: "in_progress"; next_step: string };
+
+// ── MCP OAuth consent (`/api/oauth/consent`) ──
+
+/** `GET /api/oauth/consent?consent_code=` */
+export interface OAuthConsentInfo {
+  /** The name the app registered with. The app chooses it, so it is not proof of identity. */
+  client_name: string;
+  /** Where the browser sends the authorization code after approval. */
+  redirect_origin: string;
+  /** True when the code goes to this computer (localhost), as with Claude Code. */
+  redirect_is_local: boolean;
+  /** The signed-in Valet account the app would act as. */
+  account: string;
+  /** What an approved app can do. */
+  access: string[];
+  /** What the app cannot do. */
+  limits: string[];
+}
+
+/** `POST /api/oauth/consent` response: where to send the browser next. */
+export interface OAuthConsentDecision {
+  redirect: string;
+}
+
+/** `POST /api/cli/device/code` response: what `valet login` shows and polls with. */
+export interface CliDeviceCodeResponse {
+  device_code: string;
+  /** Shown in the terminal; the person types it on the Valet page. */
+  user_code: string;
+  /** Path of the page where the person enters the code, on the instance URL. */
+  verification_path: string;
+  expires_in: number;
+  /** Seconds between polls. */
+  interval: number;
+}
+
+/** CLI token pair (`POST /api/cli/device/token` and `POST /api/cli/token/refresh`). Times are epoch ms. */
+export interface CliTokenResponse {
+  access_token: string;
+  refresh_token: string;
+  access_expires_at: number;
+  refresh_expires_at: number;
+}
+
+/** `GET /api/cli/device` response: what the browser sign-in page shows for `valet login`. */
+export interface CliDeviceInfo {
+  account: string;
+  /** The computer name the CLI reported. The CLI chooses it, so it proves nothing. */
+  device: string;
+  user_code: string;
+  access: string[];
+  /** What the CLI cannot do. */
+  limits: string[];
+}
+
+/** `GET /api/me/agent-access` response: the apps and CLIs that can act as the caller. */
+export interface AgentAccessResponse {
+  mcp_apps: Array<{ client_id: string; name: string; connected_at: number | null; expires_at: number | null }>;
+  cli_devices: Array<{ id: string; device: string; signed_in_at: number; last_used_at: number | null }>;
 }

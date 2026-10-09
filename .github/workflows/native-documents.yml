@@ -1,0 +1,29 @@
+name: Native document runtime
+
+on:
+  pull_request:
+    paths:
+      - docker/Dockerfile.sandbox-k8s
+      - docker/native-documents/**
+      - .github/workflows/native-documents.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-documents-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  office-runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test native document runtime
+        run: docker build --target office-runtime -f docker/Dockerfile.sandbox-k8s -t valet-office:test .

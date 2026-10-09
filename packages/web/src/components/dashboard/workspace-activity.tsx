@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { FileText, GitPullRequest, MessageSquare, ArrowUpRight, CircleAlert, LoaderCircle, CheckCheck, ChevronRight } from "lucide-react";
 import type { ArtifactListItem, GlobalWorkflowRunSummary, WaitingThread, WorkspaceOutcome, WorkspaceActiveWorkItem } from "@valet/api/wire";
@@ -8,6 +8,8 @@ import { useArtifacts } from "~/api/artifacts";
 import { useDismissRun, useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
 import { Badge, Button, ErrorRow, LoadingRow, textLinkClass, WorkRow, WorkSection, WorkList } from "~/components/primitives";
 import { RunStateBadge } from "~/components/run-state-badge";
+
+const CONVERSATION_PAGE_SIZE = 10;
 
 export function WorkspaceActivity({ owner }: { owner: OwnerFilter }) {
   return <ScopedCatchUp key={`${owner.ownerType}:${owner.ownerId}`} owner={owner} />;
@@ -98,6 +100,13 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
   // Separate detected questions from updates that do not necessarily need a reply.
   const questions = waiting.filter(row => row.question);
   const replies = waiting.filter(row => !row.question);
+  const [conversationPage, setConversationPage] = useState(0);
+  const lastConversationPage = Math.max(0, Math.ceil(replies.length / CONVERSATION_PAGE_SIZE) - 1);
+  const currentConversationPage = Math.min(conversationPage, lastConversationPage);
+  useEffect(() => {
+    setConversationPage(page => Math.min(page, lastConversationPage));
+  }, [lastConversationPage]);
+  const visibleReplies = replies.slice(currentConversationPage * CONVERSATION_PAGE_SIZE, (currentConversationPage + 1) * CONVERSATION_PAGE_SIZE);
   const finish = useFinishWaitingThread(owner);
   const inProgress = activeThreads.filter(row => row.state === "working");
   const attentionRuns = runs.filter(row => runCategory(row) === "attention");
@@ -123,7 +132,12 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
       {attentionRuns.map(row => <RunRow key={row.runId} row={row} prompt={gates.error ? undefined : gates.data?.items.find(item => item.runId === row.runId && item.owner.type === owner.ownerType && item.owner.id === owner.ownerId)?.gate.prompt} />)}
     </WorkSection>}
     {replies.length > 0 && <WorkSection title="Conversation updates" icon={<MessageSquare className="h-4 w-4 text-muted" />} count={replies.length}>
-      {replies.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} onDone={() => finish.mutate(row)} />)}
+      {visibleReplies.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} onDone={() => finish.mutate(row)} />)}
+      {lastConversationPage > 0 && <nav aria-label="Conversation updates pagination" className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+        <Button variant="secondary" size="sm" aria-label="Previous page" disabled={currentConversationPage === 0} onClick={() => setConversationPage(currentConversationPage - 1)}>Previous</Button>
+        <span className="text-xs text-muted" aria-live="polite">Page {currentConversationPage + 1} of {lastConversationPage + 1}</span>
+        <Button variant="secondary" size="sm" aria-label="Next page" disabled={currentConversationPage === lastConversationPage} onClick={() => setConversationPage(currentConversationPage + 1)}>Next</Button>
+      </nav>}
     </WorkSection>}
     {(inProgress.length + progressRuns.length > 0) && <WorkSection title="In progress" icon={<LoaderCircle className="h-4 w-4 text-moss" />} count={inProgress.length + progressRuns.length}>
       {inProgress.map(row => <ActiveRow key={row.id} row={row} />)}

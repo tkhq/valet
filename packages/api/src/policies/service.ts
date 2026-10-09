@@ -37,7 +37,7 @@ import type {
 } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, runtimeGrants, users, workflowActionGrants, workflowDefinitions, workflowRuns } from "../schema/index.js";
-import { shareGeneration, canBorrowCredential, isUnattendedTeamRuntime, writeBorrowGrant } from "../services/credential-borrow.js";
+import { shareGeneration, canBorrowCredential, isUnattendedTeamSession, writeBorrowGrant } from "../services/credential-borrow.js";
 import { orgFallbackPolicy, readTeamCredential } from "../services/credential-resolution.js";
 import { membersSharing } from "../services/credential-shares.js";
 import type { OnePasswordService } from "../services/onepassword.js";
@@ -466,6 +466,8 @@ export interface AuditInvocationRow {
   durationMs?: number | null;
   startedAt?: number | null;
   createdAt?: number;
+  /** External caller label (`ActionInvocationContext.external.client`). */
+  caller?: string | null;
 }
 
 /**
@@ -510,6 +512,7 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
         error,
         durationMs: row.durationMs ?? null,
         startedAt: row.startedAt ?? null,
+        caller: row.caller ?? null,
       })
       .onConflictDoNothing();
   } catch (err) {
@@ -682,7 +685,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       // Another member's account: they answer, and nobody else can.
       const approver = await sharedAccountApprover(input);
       if (approver) {
-        if (!input.externalSender && (!input.userId || !input.teamId || (!await isTeamMember(deps.db, input.teamId, input.userId) && !await isUnattendedTeamRuntime(deps.db, {
+        if (!input.externalSender && (!input.userId || !input.teamId || (!await isTeamMember(deps.db, input.teamId, input.userId) && !await isUnattendedTeamSession(deps.db, {
           orgId: input.orgId, teamId: input.teamId, sessionId: input.sessionId, threadId: input.threadId, actorId: input.userId,
         })))) {
           return { mode: "deny", provenance: { ...decision.provenance, source: "shared_account" } };

@@ -97,6 +97,7 @@ import type {
   DeliverIdentityLinkFallback,
   DeliverIdentityLinkRequest,
   DeliverIdentityLinkResponse,
+  VerifyIdentityLinkResponse,
   ListLinkMembersResponse,
   ListCredentialsResponse,
   DelegateCredentialRequest,
@@ -425,9 +426,17 @@ function uploadProfilePicture(path: string, file: File): Promise<ProfilePictureU
   return requestForm<ProfilePictureUploadResponse>(path, form);
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, callerSignal?: AbortSignal): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let timedOut = false;
+  const forwardAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) forwardAbort();
+  else callerSignal?.addEventListener("abort", forwardAbort, { once: true });
+  const timer = setTimeout(() => {
+    if (controller.signal.aborted) return;
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(`${BASE}${path}`, {
       method,
@@ -451,7 +460,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
   } catch (err) {
-    if (controller.signal.aborted) {
+    if (timedOut) {
       throw new ApiError(
         NO_RESPONSE_STATUS,
         `${method} ${path} got no response in ${REQUEST_TIMEOUT_MS / 1000}s. Check that the server is running, then try again.`,
@@ -460,6 +469,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     throw err;
   } finally {
     clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", forwardAbort);
   }
 }
 
@@ -517,6 +527,19 @@ export function usagePeriodSearchParams(period: UsagePeriodSelection): URLSearch
 }
 
 export const api = {
+  oauthConsent: (consentCode: string) =>
+    request<import("@valet/api/wire").OAuthConsentInfo>("GET", `/oauth/consent?consent_code=${encodeURIComponent(consentCode)}`),
+  decideOAuthConsent: (consentCode: string, accept: boolean) =>
+    request<import("@valet/api/wire").OAuthConsentDecision>("POST", "/oauth/consent", { consent_code: consentCode, accept }),
+  cliDevice: (userCode: string) =>
+    request<import("@valet/api/wire").CliDeviceInfo>("GET", `/cli/device?user_code=${encodeURIComponent(userCode)}`),
+  decideCliDevice: (userCode: string, accept: boolean) =>
+    request<{ ok: true }>("POST", "/cli/device", { user_code: userCode, accept }),
+  agentAccess: () => request<import("@valet/api/wire").AgentAccessResponse>("GET", "/me/agent-access"),
+  disconnectMcpApp: (clientId: string) => request<{ ok: true }>("DELETE", `/me/agent-access/mcp/${encodeURIComponent(clientId)}`),
+  disconnectCliDevice: (id: string) => request<{ ok: true }>("DELETE", `/me/agent-access/cli/${encodeURIComponent(id)}`),
+  productAnnouncements: () => request<import("@valet/api/wire").ProductAnnouncementsResponse>("GET", "/product-announcements"),
+  acknowledgeProductAnnouncement: (id: string) => request<{ acknowledged: true }>("POST", `/product-announcements/${encodeURIComponent(id)}/acknowledge`),
   listTeamDeletionRequests: (teamId: string, options: ListTeamDeletionRequestsParams = {}) => {
     const query = new URLSearchParams();
     if (options.status) query.set("status", options.status);
@@ -795,11 +818,23 @@ export const api = {
     request<ImportMemoryResponse>("POST", `/memory/import${ownerQuery(owner)}`, body),
 
   // threads + messages (session-scoped)
-  listThreads: (sessionId: string, opts?: { archived?: boolean; q?: string }) =>
-    request<ListThreadsResponse>(
+  listThreads: (sessionId: string, opts?: { archived?: boolean; q?: string; threadId?: string; limit?: number; cursor?: string; sort?: string; origin?: string; fixedIds?: string[]; fixedOnly?: boolean }) => {
+    const params = new URLSearchParams();
+    if (opts?.archived) params.set("archived", "1");
+    if (opts?.q) params.set("q", opts.q);
+    if (opts?.threadId) params.set("threadId", opts.threadId);
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    if (opts?.cursor) params.set("cursor", opts.cursor);
+    if (opts?.sort) params.set("sort", opts.sort);
+    if (opts?.origin) params.set("origin", opts.origin);
+    if (opts?.fixedOnly) params.set("fixedOnly", "1");
+    for (const id of opts?.fixedIds ?? []) params.append("fixedId", id);
+    const query = params.toString();
+    return request<ListThreadsResponse>(
       "GET",
-      `/sessions/${encodeURIComponent(sessionId)}/threads${opts?.q ? `?q=${encodeURIComponent(opts.q)}${opts.archived ? "&archived=1" : ""}` : opts?.archived ? "?archived=1" : ""}`,
-    ),
+      `/sessions/${encodeURIComponent(sessionId)}/threads${query ? `?${query}` : ""}`,
+    );
+  },
   markThreadsRead: (sessionId: string, threadIds?: string[]) =>
     request<void>("POST", `/sessions/${encodeURIComponent(sessionId)}/threads/read`, threadIds ? { threadIds } : {}),
   createThread: (sessionId: string, body: CreateThreadRequest = {}) =>
@@ -999,9 +1034,10 @@ export const api = {
     for (const [field, value] of Object.entries(params.deps ?? {})) qs.set(field, value);
     return request<FilterOptionsResponse>("GET", `/events/filter-options?${qs.toString()}`);
   },
-  getEventLog: (params: { owner: OwnerFilter; problems?: boolean; q?: string; cursor?: string }) => {
+  getEventLog: (params: { owner: OwnerFilter; problems?: boolean; diagnostics?: boolean; q?: string; cursor?: string }) => {
     const qs = new URLSearchParams({ ownerType: params.owner.ownerType, ownerId: params.owner.ownerId });
     if (params.problems) qs.set("problems", "1");
+    if (params.diagnostics) qs.set("diagnostics", "1");
     if (params.q) qs.set("q", params.q);
     if (params.cursor) qs.set("cursor", params.cursor);
     return request<EventLogResponse>("GET", `/events/log${qs.size ? `?${qs}` : ""}`);
@@ -1070,30 +1106,30 @@ export const api = {
   uploadMyAvatar: (file: File) => uploadProfilePicture("/me/avatar", file),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
-  usageBreakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
+  usageBreakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`);
+    return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`, undefined, signal);
   },
-  usageToolEfficiency: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
+  usageToolEfficiency: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageToolEfficiencyResponse>("GET", `/usage/tool-efficiency?${qs}`);
+    return request<UsageToolEfficiencyResponse>("GET", `/usage/tool-efficiency?${qs}`, undefined, signal);
   },
-  usageOutcomes: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) => {
+  usageOutcomes: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageOutcomesResponse>("GET", `/usage/outcomes?${qs}`);
+    return request<UsageOutcomesResponse>("GET", `/usage/outcomes?${qs}`, undefined, signal);
   },
-  usageItems: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) => {
+  usageItems: (period: UsagePeriodSelection, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string, signal?: AbortSignal) => {
     const qs = usagePeriodSearchParams(period);
     qs.set("scope", scope);
     qs.set("useCase", useCase);
     if (teamId !== undefined) qs.set("teamId", teamId);
-    return request<UsageDrillResponse>("GET", `/usage/items?${qs}`);
+    return request<UsageDrillResponse>("GET", `/usage/items?${qs}`, undefined, signal);
   },
   usageExportCsvUrl: (
     period: UsagePeriodSelection,
@@ -1377,6 +1413,12 @@ export const api = {
       `/me/identity-links/${encodeURIComponent(provider)}/deliver`,
       body,
     ),
+  verifyIdentityLink: (provider: string, code: string) =>
+    request<VerifyIdentityLinkResponse>(
+      "POST",
+      `/me/identity-links/${encodeURIComponent(provider)}/verify`,
+      { code },
+    ),
   searchLinkMembers: (provider: string, query: string) =>
     request<ListLinkMembersResponse>(
       "GET",
@@ -1450,7 +1492,7 @@ export const api = {
     to?: number;
     cursor?: string;
     limit?: number;
-  } = {}) => {
+  } = {}, signal?: AbortSignal) => {
     const qs = new URLSearchParams();
     if (opts.model) qs.set("model", opts.model);
     if (opts.harness) qs.set("harness", opts.harness);
@@ -1459,10 +1501,10 @@ export const api = {
     if (opts.cursor) qs.set("cursor", opts.cursor);
     if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
     const tail = qs.toString() ? `?${qs}` : "";
-    return request<ProxyRequestListResponse>("GET", `/proxy/requests${tail}`);
+    return request<ProxyRequestListResponse>("GET", `/proxy/requests${tail}`, undefined, signal);
   },
-  proxySettings: () =>
-    request<ProxySettingsResponse>("GET", "/proxy/settings"),
+  proxySettings: (signal?: AbortSignal) =>
+    request<ProxySettingsResponse>("GET", "/proxy/settings", undefined, signal),
   setProxyMode: (mode: "centralized" | "passthrough") =>
     request<ProxySettingsResponse>("PUT", "/proxy/settings", { mode }),
   updateProxySettings: (patch: { enabled?: boolean; mode?: "centralized" | "passthrough" }) =>

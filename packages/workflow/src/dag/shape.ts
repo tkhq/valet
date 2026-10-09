@@ -9,10 +9,13 @@
  * structurally without interpreting its contents.
  */
 
+import type { Presence } from '@valet/shared';
+
 import type { WorkflowNode } from './nodes.js';
 
 export interface WorkflowDefinition {
   version: 'dag/v1';
+  presence?: Presence;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   policy?: WorkflowPolicy;

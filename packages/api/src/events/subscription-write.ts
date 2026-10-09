@@ -8,6 +8,7 @@
  * workflow trigger service (`workflows/trigger-service.ts`), and the template
  * installer (`workflows/templates.ts`).
  */
+import { validatePresence } from "@valet/shared";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { allCatalogEntries } from "./ingest.js";
@@ -108,6 +109,10 @@ export function validateSubscription(
   const target = body.target as Record<string, unknown>;
   if (typeof target.kind !== "string" || !(TARGET_KINDS as readonly string[]).includes(target.kind)) {
     return `unknown target kind: ${String(target.kind)}`;
+  }
+  if (target.presence !== undefined) {
+    const error = validatePresence(target.presence);
+    if (error) return error;
   }
   if (target.kind === "workflow" && (typeof target.workflowId !== "string" || target.workflowId.length === 0)) {
     return "workflow target requires workflowId";

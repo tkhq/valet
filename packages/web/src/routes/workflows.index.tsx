@@ -30,7 +30,8 @@ type HubTab = "workflows" | "scheduled";
 
 export const Route = createFileRoute("/workflows/")({
   component: WorkflowsIndexPage,
-  validateSearch: (search: Record<string, unknown>): { tab?: HubTab; run?: string; gate?: string; review?: string } => ({
+  validateSearch: (search: Record<string, unknown>): { workspace?: string; tab?: HubTab; run?: string; gate?: string; review?: string } => ({
+    workspace: typeof search.workspace === "string" ? search.workspace : undefined,
     tab:
       search.tab === "scheduled" || search.tab === "triggers"
         ? "scheduled"

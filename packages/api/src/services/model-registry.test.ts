@@ -194,11 +194,34 @@ describe("ModelRegistry", () => {
     expect(registry.getModel("anthropic", "claude-brand-new")?.name).toBe("Claude Brand New");
   });
 
+  it("hides retired models from catalogs but resolves them for persisted references", async () => {
+    const retired = validModel({
+      id: "gpt-5.6-sol",
+      name: "GPT-5.6 Sol",
+      api: "openai-responses",
+      provider: "openai",
+      baseUrl: "https://api.openai.com/v1",
+    });
+    const current = { ...retired, id: "gpt-current" };
+    fetchMock.mockImplementation(async (url: string) => jsonResponse(
+      url.endsWith("/openai.json")
+        ? { "openai-responses": { [retired.id]: retired, [current.id]: current } }
+        : {},
+    ));
+
+    const registry = new ModelRegistry(db);
+    await registry.refresh();
+
+    expect(registry.listModels("openai").map((model) => model.id)).toContain(current.id);
+    expect(registry.listModels("openai").map((model) => model.id)).not.toContain(retired.id);
+    expect(registry.getModel("openai", retired.id)).toMatchObject({ id: retired.id, name: retired.name });
+  });
+
   it("lets the runtime catalog override supplemental Sol metadata", async () => {
     const registry = new ModelRegistry(db);
     const bundled = registry.getModel("openai", "gpt-6.1-sol");
     if (!bundled) throw new Error("The bundled catalog must include Sol.");
-    expect(bundled.contextWindow).toBe(1_050_000);
+    expect(bundled.contextWindow).toBe(272_000);
     const fetched = { ...bundled, name: "Refreshed Sol", contextWindow: 400_000 };
     fetchMock.mockImplementation(async (url: string) => jsonResponse(
       url.endsWith("/openai.json") ? { "openai-responses": { [fetched.id]: fetched } } : {},
@@ -378,20 +401,20 @@ describe("ModelRegistry", () => {
       expect(model?.maxTokens).toBe(128_000);
     });
 
-    it("never serves Astra from fetched or persisted catalogs", async () => {
-      const disabled = validModel({ id: "gpt-6-astra", provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1" });
-      await new PgModelsStore(db).write("openai", { models: [disabled], checkedAt: Date.now() });
+    it("serves Astra from fetched and persisted catalogs", async () => {
+      const astra = validModel({ id: "gpt-6-astra", provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1" });
+      await new PgModelsStore(db).write("openai", { models: [astra], checkedAt: Date.now() });
       const registry = new ModelRegistry(db);
       vi.stubEnv("VALET_MODEL_REGISTRY_URL", "");
       await registry.start();
       vi.stubEnv("VALET_MODEL_REGISTRY_URL", REGISTRY_URL);
       try {
-        expect(registry.getModel("openai", disabled.id)).toBeUndefined();
-        expect(registry.listModels("openai").some((model) => model.id === disabled.id)).toBe(false);
-        fetchMock.mockImplementation(async () => jsonResponse({ "openai-responses": { [disabled.id]: disabled } }));
+        expect(registry.getModel("openai", astra.id)?.id).toBe(astra.id);
+        expect(registry.listModels("openai").some((model) => model.id === astra.id)).toBe(true);
+        fetchMock.mockImplementation(async () => jsonResponse({ "openai-responses": { [astra.id]: astra } }));
         await registry.refresh();
-        expect(registry.getModel("openai", disabled.id)).toBeUndefined();
-        expect(registry.listModels("openai").some((model) => model.id === disabled.id)).toBe(false);
+        expect(registry.getModel("openai", astra.id)?.id).toBe(astra.id);
+        expect(registry.listModels("openai").some((model) => model.id === astra.id)).toBe(true);
       } finally { registry.stop(); }
     });
 

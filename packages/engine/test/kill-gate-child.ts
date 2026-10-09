@@ -92,7 +92,7 @@ async function main(): Promise<void> {
     tools: [approvalTool],
   });
 
-  const receipt = await session.prompt("please do the thing");
+  const receipt = await session.prompt("please do the thing", { metadata: { presence: { displayName: "Release helper" } } });
   const itemId = receipt.queueItemId;
 
   // Wait until the gate row is durably pending AND the submission is durably

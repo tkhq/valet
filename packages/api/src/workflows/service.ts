@@ -105,6 +105,13 @@ export interface WorkflowServiceDeps {
 export interface WorkflowOwner {
   userId: string;
   orgId: string;
+  /**
+   * An agent makes this change: an MCP app, a `valet login` CLI, or Valet's
+   * own assistant, which other agents and the content it reads can steer.
+   * A step change by an agent revokes the workflow's grants, so a person
+   * approves the new steps (`updateWorkflowDefinition`).
+   */
+  agentEditor?: boolean;
   /** The authenticated request, assistant-session, or workflow-run owner. */
   principal?: RequestPrincipal;
   /** Live team-assistant actions recheck the acting member. Team API keys
@@ -764,12 +771,12 @@ export async function updateWorkflowDefinition(
     rejectAssistantRouting(input.definition);
   }
   const stepsChange = input.definition !== undefined && !sameWorkflowSteps(input.definition, row.definition);
-  // A grant approves the steps as they were. When someone who could not have
-  // granted it changes them, an approver must look again. Revoke before the
+  // A grant approves the steps as they were. When an agent, or someone who
+  // could not have granted it, changes them, an approver must look again. Revoke before the
   // write, so no run can start on the new steps under the old grant, and
   // again after it: an approval that read the old steps can land between the
   // two, and its grant must not outlive them.
-  const revokeGrants = stepsChange && !(await canGrantWorkflowPermissions(deps, owner, row));
+  const revokeGrants = stepsChange && (owner.agentEditor === true || !(await canGrantWorkflowPermissions(deps, owner, row)));
   if (revokeGrants) await revokeWorkflowGrants(deps.db, row.orgId, id);
   // In-flight runs are unaffected: `workflow_runs.definition` snapshots the
   // definition at run-start time (plan decision 17), so updating the

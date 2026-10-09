@@ -49,7 +49,12 @@ import type {
   PostSessionFileUploadResponse,
   PostSessionFileUploadPdfInfo,
 } from "../wire/types.js";
-import { threadsVisibleTo } from "./_thread-access.js";
+import { readGeneratedFile } from "../services/generated-files.js";
+import { threadsVisibleTo, viewerOf } from "./_thread-access.js";
+import { workflowSessionOwner } from "../workflows/session-owner.js";
+import { parseWorkflowSessionId } from "../workflows/engine-deps.js";
+import { isAuthorizedForOwner } from "../workflows/service.js";
+import { runEventVisible, runOriginVisible } from "../services/thread-access.js";
 
 export const fileUploadRouter = new Hono<AppEnv>();
 
@@ -524,4 +529,47 @@ fileUploadRouter.get("/:id/threads/:threadId/files", async (c) => {
     "x-content-type-options": "nosniff",
     "content-security-policy": "sandbox; default-src 'none'",
   });
+});
+
+/** Generated downloads use durable bytes and the current thread access policy. */
+fileUploadRouter.get("/:id/threads/:threadId/files/:fileId", async (c) => {
+  const { engineStore, blobs, db, workflowStore } = c.var.providers;
+  const sessionId = c.req.param("id");
+  const ordinary = await loadOwnedSession(c);
+  let row: { id: string; orgId: string; ownerType: string };
+  if (ordinary) {
+    row = ordinary;
+    if (!await canAccessSessionResources(c.var.providers, ordinary, c.var.principal)) return c.json({ error: "file not found" }, 404);
+  } else {
+    // Workflow engine sessions intentionally have no agent_sessions row.
+    // The helper checks the tenant; HTTP access uses the raw run owner, as ownedRun does.
+    const owner = await workflowSessionOwner(db, sessionId, c.var.user.orgId);
+    if (!owner) return c.json({ error: "file not found" }, 404);
+    const run = await workflowStore.getRun(parseWorkflowSessionId(sessionId).runId);
+    const viewer = viewerOf(c);
+    if (!run?.owner || !await isAuthorizedForOwner(db, {
+      orgId: c.var.user.orgId,
+      userId: c.var.principal?.type === "team" ? `team:${c.var.principal.id}` : c.var.user.id,
+      principal: c.var.principal,
+    }, run.owner)
+      || !await runOriginVisible(c.var.providers, viewer, { ownerType: run.owner.ownerType, origin: run.params.origin, actorUserId: run.actorUserId })
+      || !await runEventVisible(c.var.providers, viewer, run.params)) return c.json({ error: "file not found" }, 404);
+    row = { id: sessionId, orgId: c.var.user.orgId, ownerType: run.owner.ownerType };
+  }
+  const thread = await engineStore.getThread(row.id, c.req.param("threadId"));
+  const fileId = c.req.param("fileId");
+  if (!thread || !await threadsVisibleTo(c, row)(thread.key) || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(fileId)) {
+    return c.json({ error: "file not found" }, 404);
+  }
+  const file = await readGeneratedFile(db, blobs, { orgId: row.orgId, sessionId: row.id, threadId: thread.id }, fileId);
+  if (!file) return c.json({ error: "file not found", corrective: "Ask the assistant to attach the file again." }, 404);
+  const encoded = encodeURIComponent(file.name).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return new Response(file.data, { headers: {
+    "content-type": file.mimeType,
+    "content-length": String(file.bytes),
+    "content-disposition": `attachment; filename="${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}"; filename*=UTF-8''${encoded}`,
+    "cache-control": "private, no-store",
+    "x-content-type-options": "nosniff",
+    "content-security-policy": "sandbox; default-src 'none'",
+  } });
 });

@@ -1,4 +1,4 @@
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import type { TeamSummary } from "@valet/api/wire";
 import { Check, ChevronsUpDown, User, Users } from "lucide-react";
 import {
@@ -26,12 +26,9 @@ import { cn } from "~/lib/cn";
  * A badge here would be a second, weaker answer to a question the bell
  * already answers completely.
  *
- * Selecting a workspace SETS THE SCOPE, and navigates only from `/chat`.
- * It used to always navigate to that workspace's default assistant, which
- * made the control unusable from `/skills` or `/workflows`: choosing a team
- * threw you into a conversation instead of re-scoping the page you were
- * reading. Staying put is what Slack, Linear and Notion do — the page you
- * are on reloads under the new workspace.
+ * Selecting a workspace keeps list pages in place. Workspace-owned channel,
+ * workflow, and run details return to Automation so an old resource is not
+ * requested under the new owner. Chat opens the selected workspace's thread list.
  *
  * A workspace with no assistant is therefore selectable now. It could not be
  * before, because the only thing selecting it did was open an assistant that
@@ -74,6 +71,7 @@ export function WorkspaceSwitcher({
   navigateOnSelect: boolean;
 }) {
   const navigate = useNavigate();
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
 
   // One workspace is not a choice. A solo user sees the logo alone, exactly
   // as before teams existed.
@@ -106,12 +104,13 @@ export function WorkspaceSwitcher({
           <DropdownMenuItem
             key={o.key}
             onSelect={() => {
+              if (o.key === activeKey) return;
+              if (pathname === "/channel" || pathname === "/workflows" || pathname.startsWith("/workflows/")) {
+                // Drop old detail parameters and make the new workspace authoritative.
+                void navigate({ to: "/workflows", search: { workspace: o.key } });
+                return;
+              }
               onSelect(o.key);
-              // From `/chat` the open assistant defines the workspace, so the
-              // conversation has to move with it or the two disagree. From
-              // anywhere else the page simply re-reads the new scope, and
-              // navigating would take the reader somewhere they did not ask
-              // to go.
               if (!navigateOnSelect) return;
               void navigate({
                 to: "/chat",

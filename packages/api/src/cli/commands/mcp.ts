@@ -1,39 +1,41 @@
 /**
- * `valet mcp setup [claude-code] [--print]` — wire a local agent (Claude Code
- * today) to the instance's `/mcp` endpoint in one command.
+ * `valet mcp setup [claude-code|codex|cursor] [--print]` — wire a local agent
+ * to the instance's `/mcp` endpoint in one command.
  *
- * ─────────────────────────────────────────────────────────────────────────
- * DEVIATION / KNOWN LIMITATION — `/mcp` auth is Bearer OAuth, not `x-api-key`
- * ─────────────────────────────────────────────────────────────────────────
- * VERIFIED against `packages/api/src/app.ts`:
- *   - `/mcp` is mounted with `mcpHandler` guarded by better-auth's MCP OAuth
- *     (`withMcpAuth`): it expects `Authorization: Bearer <token>`, NOT the
- *     `x-api-key` header the other REST commands (sessions/send/gates/status)
- *     use.
- *   - `/mcp` is ONLY mounted when real auth is configured (the `auth` object
- *     is present). Under the local stub (`VALET_LOCAL_AUTH=1`) it is not
- *     mounted at all.
+ * - `claude-code`: `claude mcp add --scope user`, so Valet is available in
+ *   every project and no config file lands in a repository. `--project`
+ *   writes `./.mcp.json` instead.
+ * - `codex`: writes `[mcp_servers.<name>]` into `$CODEX_HOME/config.toml`
+ *   (default `~/.codex`). `codex mcp add` is not used: for an OAuth server it
+ *   starts a sign-in at once and waits for a browser, which hangs a script.
+ *   The person signs in with `codex mcp login <name>`.
+ * - `cursor`: merges the server into `~/.cursor/mcp.json`.
  *
- * The CLI / auth-v2 cannot mint an MCP bearer token yet — that requires the
- * instance's MCP OAuth handshake, which is a later task. So this command
- * PROVISIONS the correct config *shape* (streamable-HTTP transport, bearer
- * header) and documents the token requirement; it does NOT perform the OAuth
- * handshake. When the caller has a token out-of-band they can pass `--token`;
- * otherwise the header carries a clear `<MCP_OAUTH_TOKEN>` placeholder and the
- * command prints the caveat.
+ * `/mcp` auth is OAuth, not `x-api-key`. The endpoint is mounted only when
+ * the instance runs real auth, and it 401s with a `WWW-Authenticate` header
+ * that names the instance's OAuth protected-resource metadata. The instance
+ * also supports dynamic client registration. An MCP client that implements
+ * the MCP authorization spec (Claude Code does) therefore signs in by
+ * itself: it opens the browser login on first connect and stores the token.
+ *
+ * So without `--token` this command writes the endpoint with no headers.
+ * With `--token <bearer>` it embeds `Authorization: Bearer <token>` for a
+ * client that cannot run the OAuth flow, and writes the file `0600`.
  */
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
 import { ConfigError, ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printJson, printLine } from "../output.js";
 import { resolveInstance } from "../resolve.js";
 import type { CliContext } from "../types.js";
 
-/** A single Claude Code MCP server entry (streamable-HTTP transport). */
+/** A single MCP server entry (streamable-HTTP transport). Cursor reads `url` without `type`. */
 export interface McpServerEntry {
-  type: "http";
+  type?: "http";
   url: string;
-  headers: { Authorization: string };
+  headers?: { Authorization: string };
 }
 
 /** The Claude Code MCP config document shape (partial — we only own `mcpServers`). */
@@ -41,40 +43,36 @@ export interface ClaudeCodeMcpConfig {
   mcpServers: Record<string, McpServerEntry>;
 }
 
-/** Placeholder used when no explicit bearer token is supplied. */
-const TOKEN_PLACEHOLDER = "<MCP_OAUTH_TOKEN>";
-
-/** The caveat explaining the Bearer-OAuth-vs-x-api-key deviation. */
-const BEARER_CAVEAT =
-  "note: the instance's /mcp endpoint requires an OAuth bearer token obtained via the " +
-  "instance's MCP OAuth flow (auth-v2) — NOT the x-api-key used by other valet commands. " +
-  "Replace the Authorization header's placeholder with a real token (or re-run with --token <bearer>). " +
-  "The /mcp endpoint is also only available when the instance runs with real auth configured.";
+/** How the client authenticates when no token is embedded. */
+const OAUTH_NOTE =
+  "note: the client signs in through the instance's OAuth flow the first time it connects. " +
+  "In Claude Code, restart it, run /mcp, and choose Authenticate. In Codex, run `codex mcp login valet`. " +
+  "Your valet API key does not work here. The /mcp endpoint needs an instance with real auth configured.";
 
 export interface BuildConfigInput {
   /** The instance base URL (any trailing slashes are stripped). */
   url: string;
   /** The MCP server name (map key under `mcpServers`). */
   name: string;
-  /** An explicit bearer token; a placeholder is used when omitted. */
+  /** An explicit bearer token. Omit it to let the client run the OAuth flow. */
   token?: string;
 }
 
 /**
  * Pure builder for the Claude Code MCP server config. Computes the endpoint as
  * `<instanceUrl>/mcp` (stripping any trailing slashes on the base) and emits a
- * streamable-HTTP server entry carrying an `Authorization: Bearer …` header.
+ * streamable-HTTP server entry. The entry carries an `Authorization` header
+ * only for an explicit token.
  */
 export function buildMcpServerConfig(input: BuildConfigInput): ClaudeCodeMcpConfig {
   const base = input.url.replace(/\/+$/, "");
   const endpoint = `${base}/mcp`;
-  const bearer = input.token ?? TOKEN_PLACEHOLDER;
   return {
     mcpServers: {
       [input.name]: {
         type: "http",
         url: endpoint,
-        headers: { Authorization: `Bearer ${bearer}` },
+        ...(input.token !== undefined ? { headers: { Authorization: `Bearer ${input.token}` } } : {}),
       },
     },
   };
@@ -98,6 +96,7 @@ export const defaultFsSeam: FsSeam = {
     }
   },
   writeFile: (path, content, opts) => {
+    mkdirSync(dirname(path), { recursive: true });
     if (opts?.secret) {
       // `mode` only applies at creation — chmod too, so a pre-existing looser
       // file gets tightened (same treatment as config.ts saveConfig).
@@ -107,6 +106,15 @@ export const defaultFsSeam: FsSeam = {
       writeFileSync(path, content);
     }
   },
+};
+
+/** Runs an agent's own CLI. Injectable so tests never start a real process. */
+export type ExecSeam = (cmd: string, args: string[]) => { status: number | null; output: string };
+
+const defaultExec: ExecSeam = (cmd, args) => {
+  const res = spawnSync(cmd, args, { encoding: "utf8" });
+  // A missing binary sets `error` (ENOENT) and a null status.
+  return { status: res.error ? null : res.status, output: `${res.stdout ?? ""}${res.stderr ?? ""}`.trim() };
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -121,7 +129,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *
  * `opts.secret` → the write is 0600. Only set when the entry embeds a REAL
  * bearer token (`--token`): `.mcp.json` is a project-local file that users
- * legitimately commit/share when it only carries the placeholder.
+ * legitimately commit/share when it carries only the endpoint URL.
  */
 export function writeClaudeCodeConfig(
   path: string,
@@ -156,24 +164,64 @@ export function writeClaudeCodeConfig(
   fs.writeFile(path, `${JSON.stringify(doc, null, 2)}\n`, { secret: opts?.secret === true });
 }
 
-const USAGE = `usage: valet mcp setup [claude-code] [options]
+const USAGE = `usage: valet mcp setup [claude-code|codex|cursor] [options]
 
 Wire a local agent to this instance's /mcp endpoint.
 
 Arguments:
   setup                Provision MCP config for a local agent
-  [claude-code]        Target agent (default: claude-code)
+  [agent]              claude-code (default), codex, or cursor
 
 Options:
+  --project            claude-code: write ./.mcp.json instead of user scope
   --print              Emit the config JSON to stdout (any agent); write nothing
-  --token <bearer>     Explicit MCP OAuth bearer token to embed
+  --token <bearer>     Explicit MCP OAuth bearer token to embed (writes ./.mcp.json)
   --name <serverName>  MCP server name (default: valet)
   --instance <profile> Instance profile to target`;
 
-/** The one supported target agent today. */
-const KNOWN_AGENTS = new Set<string>(["claude-code"]);
+const KNOWN_AGENTS = new Set<string>(["claude-code", "codex", "cursor"]);
+
+export interface McpDeps {
+  exec: ExecSeam;
+  fs: FsSeam;
+  cwd: string;
+  home: string;
+  /** Codex's config directory: `$CODEX_HOME`, else `~/.codex`. */
+  codexHome: string;
+}
+
+/**
+ * Put `[mcp_servers.<name>]` with `url` into a Codex `config.toml`, replacing
+ * that table if it exists and leaving every other line alone. Line-based, so
+ * comments and formatting elsewhere survive.
+ */
+export function withCodexServer(toml: string, name: string, url: string): string {
+  const header = `[mcp_servers.${name}]`;
+  const lines = toml === "" ? [] : toml.replace(/\n$/, "").split("\n");
+  const out: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // A sub-table such as [mcp_servers.<name>.env] belongs to the entry too.
+    if (trimmed === header || trimmed.startsWith(`[mcp_servers.${name}.`)) {
+      skipping = true;
+      continue;
+    }
+    if (skipping && trimmed.startsWith("[")) skipping = false;
+    if (!skipping) out.push(line);
+  }
+  while (out.length > 0 && out[out.length - 1]?.trim() === "") out.pop();
+  if (out.length > 0) out.push("");
+  out.push(header, `url = ${JSON.stringify(url)}`);
+  return `${out.join("\n")}\n`;
+}
 
 export async function run(args: string[], ctx: CliContext): Promise<number> {
+  const home = homedir();
+  return runMcp({ exec: defaultExec, fs: defaultFsSeam, cwd: process.cwd(), home, codexHome: process.env.CODEX_HOME || resolve(home, ".codex") }, args, ctx);
+}
+
+export async function runMcp(deps: McpDeps, args: string[], ctx: CliContext): Promise<number> {
   const flags = parseGlobalFlags(args);
   const sub = flags.rest[0];
 
@@ -184,7 +232,7 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
 
   const agent = flags.rest[1] ?? "claude-code";
   if (!KNOWN_AGENTS.has(agent)) {
-    printErr(`mcp: unknown agent "${agent}" (supported: claude-code)`);
+    printErr(`mcp: unknown agent "${agent}" (supported: claude-code, codex, cursor)`);
     printErr(USAGE);
     return ExitCode.Usage;
   }
@@ -198,28 +246,57 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
   const name = typeof flags.flags.name === "string" ? flags.flags.name : "valet";
   const token = typeof flags.flags.token === "string" ? flags.flags.token : undefined;
   const config = buildMcpServerConfig({ url: instance.url, name, token });
+  const entry = config.mcpServers[name];
 
   // `--print`: universal path — emit config to stdout for any agent, write
-  // nothing. Keep stdout pure JSON; the token caveat goes to stderr.
+  // nothing. Keep stdout pure JSON; the sign-in note goes to stderr.
   if (flags.flags.print === true) {
     printJson(config);
-    if (token === undefined) printErr(BEARER_CAVEAT);
+    if (token === undefined) printErr(OAUTH_NOTE);
     return ExitCode.OK;
   }
 
-  // `setup claude-code`: merge into a project-local `.mcp.json` in cwd. Claude
-  // Code reads a project-scoped `.mcp.json`, so this is safer than mutating the
-  // global `~/.claude.json` — it's scoped to the repo and easy to inspect/undo.
-  const target = resolve(process.cwd(), ".mcp.json");
-  const entry = config.mcpServers[name];
-  // A real --token in the file → owner-only perms; placeholder-only stays default.
-  writeClaudeCodeConfig(target, name, entry, defaultFsSeam, { secret: token !== undefined });
-
-  printLine(`wrote MCP server "${name}" → ${target}`);
-  printLine(`endpoint: ${entry.url}`);
-  if (token === undefined) {
-    printLine("");
-    printLine(BEARER_CAVEAT);
+  if (agent === "codex") {
+    const target = resolve(deps.codexHome, "config.toml");
+    deps.fs.writeFile(target, withCodexServer(deps.fs.readFile(target) ?? "", name, entry.url));
+    printLine(`wrote MCP server "${name}" → ${target}`);
+    printLine(`Sign in: run \`codex mcp login ${name}\` in a terminal, open the URL it prints, and choose Allow.`);
+    return ExitCode.OK;
   }
+
+  if (agent === "cursor") {
+    const target = resolve(deps.home, ".cursor", "mcp.json");
+    writeClaudeCodeConfig(target, name, { url: entry.url, ...(entry.headers ? { headers: entry.headers } : {}) }, deps.fs, { secret: token !== undefined });
+    printLine(`wrote MCP server "${name}" → ${target}`);
+    printLine("Cursor signs in to Valet the first time it connects. If it does not, open Cursor Settings > MCP and sign in to valet.");
+    return ExitCode.OK;
+  }
+
+  // claude-code. A token, or --project, writes ./.mcp.json in the project.
+  if (token !== undefined || flags.flags.project === true) {
+    const target = resolve(deps.cwd, ".mcp.json");
+    // A real --token in the file → owner-only perms; a URL-only entry stays default.
+    writeClaudeCodeConfig(target, name, entry, deps.fs, { secret: token !== undefined });
+    printLine(`wrote MCP server "${name}" → ${target}`);
+    printLine(`endpoint: ${entry.url}`);
+    if (token === undefined) {
+      printLine("");
+      printLine(OAUTH_NOTE);
+    }
+    return ExitCode.OK;
+  }
+  // User scope: every project sees it, and no file lands in a repository.
+  deps.exec("claude", ["mcp", "remove", "--scope", "user", name]);
+  const added = deps.exec("claude", ["mcp", "add", "--transport", "http", "--scope", "user", name, entry.url]);
+  if (added.status !== 0) {
+    printErr(added.status === null
+      ? "mcp: the claude command was not found. Run this in a terminal where Claude Code is installed:"
+      : `mcp: claude mcp add failed: ${added.output}`);
+    printErr(`  claude mcp add --transport http --scope user ${name} ${entry.url}`);
+    printErr("Or run `valet mcp setup claude-code --project` to write ./.mcp.json.");
+    return ExitCode.Failure;
+  }
+  printLine(`added MCP server "${name}" to Claude Code (user scope) → ${entry.url}`);
+  printLine("Sign in: restart Claude Code, run /mcp, choose valet, and choose Authenticate.");
   return ExitCode.OK;
 }

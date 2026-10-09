@@ -6,6 +6,7 @@ import "./chat";
 import { PageTitleProvider } from "~/lib/page-title";
 const capture = vi.hoisted(() => ({ page: undefined as (() => ReactElement) | undefined }));
 const createThread = vi.fn();
+const readThreads = vi.fn();
 const navigate = vi.fn<(options: { search: (previous: { thread?: string; workspace?: string }) => { thread?: string; workspace?: string } }) => void>();
 let data: { sessionId: string } | undefined;
 let error: Error | null = null;
@@ -21,7 +22,7 @@ vi.mock("~/api/settings", () => ({ useTeams: () => ({ data: teamMetadata ? { tea
 let threadKey: string | undefined = "web:default";
 let empty = false;
 vi.mock("~/api/queries", () => ({
-  useThreads: () => ({ data: { threads: empty ? [] : [{ id: "thread-a", sessionId: "shared-execution", key: threadKey, title: "Fix login", createdAt: 1 }] } }),
+  useThreads: (...args: unknown[]) => { readThreads(...args); return ({ data: { threads: empty ? [] : [{ id: "thread-a", sessionId: "shared-execution", key: threadKey, title: "Fix login", createdAt: 1 }] } }); },
   useCreateThread: () => ({ mutateAsync: createThread, isPending: false }),
 }));
 vi.mock("~/hooks/use-invalidate-messages-on-queue-state", () => ({ useInvalidateMessagesOnQueueState: vi.fn() }));
@@ -54,4 +55,10 @@ it("does not read a conversation before its session is ensured", () => {
 it("shows errors without silently substituting a personal conversation", () => {
   data = undefined; error = new Error("not found"); show();
   expect(screen.queryByTestId("conversation")).toBeNull(); expect(screen.getByRole("alert")).toBeTruthy();
+});
+
+it("requests the selected thread even when it is outside the recent page", () => {
+  show();
+  expect(readThreads).toHaveBeenCalledWith("team-session", undefined, "thread-a");
+  expect(screen.getByTestId("conversation").textContent).toBe("shared-execution:thread-a");
 });

@@ -23,6 +23,8 @@ export interface AppVariables {
   user: AuthUser;
   principal: RequestPrincipal;
   authVia: AuthVia;
+  /** The OAuth client id behind an `mcp` caller, for the audit trail. */
+  mcpClientId?: string;
   auth?: ValetAuth;
   sandbox?: SandboxPrincipal;
 }

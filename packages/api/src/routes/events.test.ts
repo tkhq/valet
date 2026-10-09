@@ -167,6 +167,25 @@ describe("GET /api/events/catalog", () => {
 });
 
 describe("POST /api/event-subscriptions", () => {
+  it("persists, replaces, and clears channel presence without changing the match", async () => {
+    const a = await boot();
+    const presence = { displayName: "Issue helper", avatarUrl: "https://example.com/a.webp" };
+    const created = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { ...VALID_BODY.target, presence } });
+    expect(created.status).toBe(201);
+    const body = await created.json() as CreateEventSubscriptionResponse;
+    expect(body.target).toMatchObject({ presence });
+    const invalid = await patchSubscription(a.baseUrl, body.id, { presence: { avatarUrl: "http://example.com/a" } });
+    expect(invalid.status).toBe(400);
+    const replaced = await patchSubscription(a.baseUrl, body.id, { presence: { displayName: "New helper" } });
+    expect(replaced.status).toBe(200);
+    expect((await replaced.json() as CreateEventSubscriptionResponse).target).toMatchObject({ presence: { displayName: "New helper" } });
+    const cleared = await patchSubscription(a.baseUrl, body.id, { presence: null });
+    expect(cleared.status).toBe(200);
+    const result = await cleared.json() as CreateEventSubscriptionResponse;
+    expect(result.target).not.toHaveProperty("presence");
+    expect(result.filters).toEqual(VALID_BODY.filters);
+  });
+
   it("201s a valid orchestrator subscription and writes a user-owned row", async () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, VALID_BODY);

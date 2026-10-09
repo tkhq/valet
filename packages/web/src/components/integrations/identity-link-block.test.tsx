@@ -18,10 +18,15 @@ const unlinkReset = vi.fn(() => {
   unlinkError = null;
 });
 
+const deliverMutateAsync = vi.fn();
+const verifyMutate = vi.fn();
+let verifyError: Error | null = null;
+
 vi.mock("~/api/queries", () => ({
   useIdentityLinks: () => ({ data: { links: [] }, isLoading: false, error: null }),
   useStartIdentityLink: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
-  useDeliverIdentityLink: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
+  useDeliverIdentityLink: () => ({ mutateAsync: deliverMutateAsync, isPending: false, error: null }),
+  useVerifyIdentityLink: () => ({ mutate: verifyMutate, isPending: false, error: verifyError }),
   useLinkMembers: () => ({ data: undefined, isLoading: false, isError: false, error: null }),
   useUnlinkIdentity: () => ({
     mutate: unlinkMutate,
@@ -113,5 +118,67 @@ describe("IdentityLinkBlock unlink", () => {
     unlinkPending = true;
     rerender(<IdentityLinkBlock link={LINKED} title="Slack" />);
     expect(screen.getByRole("button", { name: "Unlinking…" })).toBeTruthy();
+  });
+});
+
+describe("IdentityLinkBlock sign-in with OAuth", () => {
+  const UNLINKED: IdentityLinkStatus = {
+    provider: "slack", linked: false, channelReady: true, codeDelivery: true, memberSearch: true, oauthService: "slack-user",
+  };
+
+  it("offers Sign in with Slack only when the page opts in", () => {
+    const { rerender } = render(<IdentityLinkBlock link={UNLINKED} title="Slack" />);
+    expect(screen.queryByRole("button", { name: "Sign in with Slack" })).toBeNull();
+    rerender(<IdentityLinkBlock link={UNLINKED} title="Slack" offerOAuth />);
+    expect(screen.getByRole("button", { name: "Sign in with Slack" })).toBeTruthy();
+    // The button grants more than a link; the card says so.
+    expect(screen.getByText(/search, read, and post in Slack as you/)).toBeTruthy();
+  });
+
+  it("starts the OAuth connect for the declared service", () => {
+    Object.defineProperty(window, "location", { value: { ...window.location, href: "" }, writable: true });
+    render(<IdentityLinkBlock link={UNLINKED} title="Slack" offerOAuth />);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with Slack" }));
+    expect(window.location.href).toBe("/api/credentials/slack-user/connect?landing=connected-accounts");
+  });
+
+  it("hides the button when the deployment has no OAuth client", () => {
+    render(<IdentityLinkBlock link={{ ...UNLINKED, oauthService: undefined }} title="Slack" offerOAuth />);
+    expect(screen.queryByRole("button", { name: "Sign in with Slack" })).toBeNull();
+  });
+});
+
+// v1's flow: the bot DMs a code, and the person types it into Valet.
+describe("IdentityLinkBlock DM me", () => {
+  const UNLINKED: IdentityLinkStatus = {
+    provider: "slack", linked: false, channelReady: true, codeDelivery: true, memberSearch: true,
+  };
+
+  beforeEach(() => {
+    verifyMutate.mockReset();
+    verifyError = null;
+    deliverMutateAsync.mockResolvedValue({
+      delivered: true, externalId: "U777", displayName: "ada", expiresInSeconds: 600,
+    });
+  });
+
+  it("asks for the DMed code and submits it to verify", async () => {
+    render(<IdentityLinkBlock link={UNLINKED} title="Slack" />);
+    fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
+
+    const input = await screen.findByRole("textbox", { name: "Slack link code" });
+    expect(screen.getByText(/We DMed/).textContent).toContain("@ada");
+    fireEvent.change(input, { target: { value: "  Ab3_dE-9fGh1jK2lMn4pQr " } });
+    fireEvent.click(screen.getByRole("button", { name: "Link" }));
+    expect(verifyMutate).toHaveBeenCalledWith({ provider: "slack", code: "Ab3_dE-9fGh1jK2lMn4pQr" });
+  });
+
+  it("shows the server's refusal for a wrong code", async () => {
+    verifyError = new ApiError(400, "POST /me/identity-links/slack/verify → 400", {
+      error: "That code is invalid or expired. Send yourself a new DM from this card.",
+    });
+    render(<IdentityLinkBlock link={UNLINKED} title="Slack" />);
+    fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
+    expect(await screen.findByText(/invalid or expired/)).toBeTruthy();
   });
 });

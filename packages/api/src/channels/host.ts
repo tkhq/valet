@@ -1,3 +1,4 @@
+import { mergePresence, readPresence } from "@valet/shared";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 /**
  * `ChannelHost` — inbound routing for channel transports (telegram etc,
@@ -774,7 +775,7 @@ export class ChannelHost {
     if (!target) return;
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
-    const sender = await this.workspaceSenderForSession(sessionId);
+    const sender = await this.workspaceSenderForSession(sessionId, queueItemId);
     await transport.send(target.conversationKey, {
       markdown: "This turn failed. Open the session in Valet for details.",
       ...(sender !== undefined ? { sender } : {}),
@@ -839,6 +840,7 @@ export class ChannelHost {
             "Only call the current signal origin service's reply_to_origin action if you intended to reply. " +
             "This reminder is sent once per assistant thread.",
           acceptDispatchConflict: true,
+          queueItemId,
         });
       }
       return;
@@ -852,7 +854,7 @@ export class ChannelHost {
     if (this.delivered.has(dedupeKey)) return;
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
-    const sender = await this.workspaceSenderForSession(sessionId);
+    const sender = await this.workspaceSenderForSession(sessionId, queueItemId);
     let sent: SendRef;
     try {
       sent = await transport.send(target.conversationKey, {
@@ -930,6 +932,7 @@ export class ChannelHost {
       dispatchId: `feedback:reply-failed:${queueItemId}`,
       body: `Your response was not posted to ${origin.threadKey}. Delivery failed: ${reason}. Call ${origin.channelType}.reply_to_origin with the response text to retry.`,
       acceptDispatchConflict: true,
+      queueItemId,
     };
     for (const delay of FEEDBACK_RETRY_DELAYS_MS) {
       if (delay > 0) await this.sleepOrAbort(delay, signal);
@@ -946,7 +949,7 @@ export class ChannelHost {
     sessionId: string,
     threadKey: string,
     origin: ChannelOrigin,
-    feedback: { dispatchId: string; body: string; acceptDispatchConflict?: boolean },
+    feedback: { dispatchId: string; body: string; acceptDispatchConflict?: boolean; queueItemId?: string },
   ): Promise<"admitted" | "retryable" | "not_live"> {
     try {
       const session = this.deps.engineHost.liveSession(sessionId);
@@ -954,6 +957,8 @@ export class ChannelHost {
         console.warn("[channels] reply-dropped feedback skipped: session is not live", { sessionId });
         return "not_live";
       }
+      const item = feedback.queueItemId ? await this.deps.engineStore.getQueueItem(sessionId, feedback.queueItemId) : undefined;
+      const presence = readPresence(item?.metadata?.presence);
       await session.thread(threadKey).submitPrompt(
         {
           kind: "signal",
@@ -967,7 +972,7 @@ export class ChannelHost {
             reply: "manual",
           },
         },
-        { dispatchId: feedback.dispatchId, queueMode: "followup" },
+        { dispatchId: feedback.dispatchId, queueMode: "followup", ...(presence ? { metadata: { presence } } : {}) },
       );
       return "admitted";
     } catch (error) {
@@ -1048,10 +1053,13 @@ export class ChannelHost {
 
   private async workspaceSenderForSession(
     sessionId: string,
+    queueItemId?: string,
   ): Promise<{ displayName?: string; avatarUrl?: string } | undefined> {
     try {
       const row = await loadAssistantBySessionId(this.deps.db, sessionId);
-      return row ? workspaceSenderIdentity(this.deps.db, row.orgId, { type: row.ownerType, id: row.ownerId }) : undefined;
+      const base = row ? await workspaceSenderIdentity(this.deps.db, row.orgId, { type: row.ownerType, id: row.ownerId }) : undefined;
+      const item = queueItemId ? await this.deps.engineStore.getQueueItem(sessionId, queueItemId) : undefined;
+      return mergePresence(base, readPresence(item?.metadata?.presence));
     } catch (err) {
       // Identity is decoration on the post; the text must still land.
       console.error("[channels] assistant identity lookup failed", err);
@@ -1133,7 +1141,7 @@ export class ChannelHost {
     // that the request went to them, with no buttons to press.
     const approver = gateApprover(gate);
     if (approver) {
-      const sender = await this.workspaceSenderForSession(sessionId);
+      const sender = await this.workspaceSenderForSession(sessionId, gate.queueItemId);
       await transport.send(mapped.conversationKey, {
         markdown: `This needs ${approver.name ?? "a teammate"}'s shared account. Valet asked them for permission and continues once they allow it.`,
         ...(sender !== undefined ? { sender } : {}),
@@ -1182,7 +1190,8 @@ export class ChannelHost {
     // The card carries the asking assistant's identity. In a channel with
     // shared workspaces, the reader must see who asks for approval.
     // Resolution edits keep the posted identity.
-    const sender = await this.workspaceSenderForSession(sessionId);
+    const sourceGate = await this.deps.engineStore.getDecisionGate(sessionId, prompt.gateId);
+    const sender = await this.workspaceSenderForSession(sessionId, sourceGate?.queueItemId);
     // A channel reply cannot answer an open question (one with no options),
     // so the card says where the answer goes instead of showing no control.
     const body = prompt.actions.length > 0 ? prompt.body

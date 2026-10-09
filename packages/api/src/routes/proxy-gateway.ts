@@ -8,7 +8,6 @@
  * llm_proxy_requests; all other subpaths forward without recording.
  */
 import type { Hono, Context } from "hono";
-import { isDisabledModel } from "@valet/engine/model-catalog";
 import type { AppEnv } from "../env.js";
 import type { ProviderKind } from "../proxy/types.js";
 import { resolveProxyPrincipal, extractPassthroughKey, wireError } from "../proxy/principal.js";
@@ -209,19 +208,13 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
     }
     const rawBody = hasBody ? await c.req.text() : "";
     let requestedModel: unknown;
-    let fallbackModels: unknown;
     try {
       const parsed: unknown = JSON.parse(rawBody);
       if (parsed && typeof parsed === "object") {
         if ("model" in parsed) requestedModel = parsed.model;
-        if ("models" in parsed) fallbackModels = parsed.models;
       }
     } catch {
       // Keep existing upstream validation for malformed request bodies.
-    }
-    if ((typeof requestedModel === "string" && isDisabledModel(requestedModel))
-      || (Array.isArray(fallbackModels) && fallbackModels.some((model: unknown) => typeof model === "string" && isDisabledModel(model)))) {
-      return wireError(kind, 403, "Astra is disabled in Valet. Choose GPT-6.1 Sol or Claude Opus 5.5.");
     }
     if (c.req.method === "POST" && RECORDABLE.has(policyPath)
       && (typeof requestedModel !== "string" || requestedModel.trim() === "")) {

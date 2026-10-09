@@ -77,5 +77,6 @@ export function resolveInstance(sources: InstanceSources): ResolvedInstance {
   const profile: ProfileConfig | undefined = sources.config.profiles?.[name];
   if (profile === undefined) throw new ProfileNotFoundError(name);
 
-  return { name, url: profile.url, apiKey: profile.apiKey };
+  // A device sign-in's access token travels in the same header as an API key.
+  return { name, url: profile.url, apiKey: profile.cli?.accessToken ?? profile.apiKey };
 }

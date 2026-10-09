@@ -102,7 +102,7 @@ export function PullFromPersonal({ teamId, teamName }: { teamId: string; teamNam
             const title = displayName(cred.service);
             return (
               <div key={cred.service} className="px-2 py-1">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="min-w-0 truncate text-sm text-ink">{title}</span>
                   <Button
                     size="sm"

@@ -69,7 +69,7 @@ function describeSkills(skills: SkillSource[]): string {
  * lets the model correct itself and call again.
  */
 function renderSkillResult(
-  skills: Map<string, SkillSource>,
+  skills: ReadonlyMap<string, SkillSource>,
   name: string,
   args: Record<string, unknown>,
 ): { text: string; skill?: SkillSource } {
@@ -93,9 +93,27 @@ function renderSkillResult(
 }
 
 /**
+ * The part of an engine `Session` the `skill` tool reads once the host binds
+ * it. The session re-reads `skills` at the start of each turn
+ * (`Session.refreshSkills`), so a bound tool always describes and serves the
+ * set the session holds now.
+ */
+export interface SkillToolSession {
+  readonly skills: ReadonlyMap<string, SkillSource>;
+  refreshSkills(): Promise<void>;
+}
+
+/**
  * Builds the `skill` ToolDef over an assembled plugin set's skills.
- * Returns `null` when the set ships no skills — a tool that can list
- * nothing is worse than no tool.
+ * Returns `null` only for an empty static set. A session-bound tool stays
+ * available so its first saved skill can appear without a runtime restart.
+ *
+ * `session` returns the session that carries this tool, once the host has
+ * built it and bound it (`PluginSessionExtras.bindSession`). Until then, and
+ * for a caller that never binds, the tool serves the `skills` it was built
+ * with. The description is a getter: the engine rebuilds its tool list each
+ * turn and reads the description then, so a bound tool lists the skills of
+ * that turn, not of the session build.
  *
  * Callers must resolve duplicate names BEFORE this point: `collectSkills`
  * rejects two plugins that claim one name, and `pluginSessionExtras` drops
@@ -104,34 +122,43 @@ function renderSkillResult(
  * quietly keep the last one — serving one skill's body under another's
  * name. It throws instead.
  */
-export function buildSkillTool(skills: SkillSource[], reload?: () => Promise<SkillSource[]>): ToolDef | null {
-  if (skills.length === 0) return null;
-  let byName = new Map<string, SkillSource>();
+export function buildSkillTool(
+  skills: SkillSource[],
+  session?: () => SkillToolSession | undefined,
+): ToolDef | null {
+  if (skills.length === 0 && !session) return null;
+  const builtWith = new Map<string, SkillSource>();
   for (const skill of skills) {
-    if (byName.has(skill.name)) {
+    if (builtWith.has(skill.name)) {
       throw new Error(
         `Two skills are named "${skill.name}". Deduplicate the skills before you build the skill tool.`,
       );
     }
-    byName.set(skill.name, skill);
+    builtWith.set(skill.name, skill);
   }
+  const current = (): ReadonlyMap<string, SkillSource> => session?.()?.skills ?? builtWith;
 
   return defineTool({
     name: SKILL_TOOL_NAME,
-    description: describeSkills(skills),
+    get description() {
+      return describeSkills([...current().values()]);
+    },
     parameters: skillParameters,
     riskLevel: "low",
     protectedFromPruning: true,
     execute: async (args, ctx): Promise<ToolResult> => {
-      // A long-lived session (a workspace runtime) was built before a skill
-      // synced or saved later. Re-read the owner's skills once before
-      // answering that a name does not exist.
-      if (!byName.has(args.name) && reload) {
-        const fresh = new Map<string, SkillSource>();
-        for (const skill of await reload()) if (!fresh.has(skill.name)) fresh.set(skill.name, skill);
-        byName = fresh;
+      // A skill saved earlier in this same turn is not in the turn-start
+      // read. Re-read the session's skills once before answering that a
+      // name does not exist. A failed read answers from the previous set.
+      const bound = session?.();
+      if (bound && !bound.skills.has(args.name)) {
+        try {
+          await bound.refreshSkills();
+        } catch (err) {
+          console.error(`skill tool: skill refresh failed while looking up "${args.name}":`, err);
+        }
       }
-      const rendered = renderSkillResult(byName, args.name, args.args ?? {});
+      const rendered = renderSkillResult(current(), args.name, args.args ?? {});
       if (rendered.skill && ctx.recordSkillInvocation) {
         await ctx.recordSkillInvocation(rendered.skill, "model_tool", rendered.text);
       }

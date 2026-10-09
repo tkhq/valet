@@ -1,6 +1,5 @@
 import { assistantMemoryNamespace } from "../services/memory-scope.js";
 import { assistantExecutions } from "../schema/index.js";
-import { isDisabledModel } from "@valet/engine/model-catalog";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
 import { workflowEditorThreadContext } from "../workflows/editor-thread-context.js";
@@ -140,6 +139,8 @@ import {
 import securityPlugin from "@valet/plugin-security/plugin";
 import { codingSystemPrompt } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
+import { publicUrlFromEnv } from "../channels/host.js";
+import { buildFileAttachTool } from "../services/generated-files.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
 import { securityCompactionHook } from "./security-compaction.js";
@@ -1316,6 +1317,7 @@ export class EngineHost {
       await this.noteSessionWarning(session, repoFlags.scratchWarning);
     }
 
+    extras.bindSession(session);
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     // Retention: after a successful restore of an existing session, prune
@@ -1497,21 +1499,21 @@ export class EngineHost {
     };
     const serviceAvailability = await resolveServiceAvailability();
     const catalogOptions = {
-      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", ...appendedNativeToolNames],
+      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", ...(this.opts.blobs && this.opts.db ? ["file_attach"] : []), ...appendedNativeToolNames],
       serviceAvailability,
       resolveServiceAvailability,
     };
     const browserPins = this.opts.sandboxProvider.capabilities().browserAutomation && plugins.some((plugin) => plugin.name === 'browser')
       ? ['browser.describe', 'browser.execute', 'browser.reset'].map((actionId) => ({ actionId })) : [];
     const effectivePins = [...pins, ...browserPins];
-    if (!this.opts.db) return pluginSessionExtras(plugins, [], effectivePins, catalogOptions);
-    return pluginSessionExtras(
+    const extras = pluginSessionExtras(
       plugins,
-      await listSkillSourcesFor(this.opts.db, owner, orgId),
+      this.opts.db ? await listSkillSourcesFor(this.opts.db, owner, orgId) : [],
       effectivePins,
       catalogOptions,
-      this.skillsProviderFor(owner, orgId, extraPlugins),
     );
+    if (this.opts.blobs && this.opts.db) extras.tools.push(buildFileAttachTool(this.opts.db, this.opts.blobs, publicUrlFromEnv(process.env)));
+    return extras;
   }
 
   /**
@@ -2748,11 +2750,14 @@ export class EngineHost {
     await ensureTodayJournal(db, scope);
     const snapshotContent = await assembleMemorySnapshot(db, scope);
     const personaPrefix = await this.resolvePersonaPrefix(db, scope);
-    // The owner's human name, so the persona names the team/org instead of its
-    // raw id (the "team_<uuid>" leak). A missing row falls back to a neutral
-    // phrase inside the persona.
+    // The owner's human name, so the persona names the workspace instead of
+    // its raw id (the "team_<uuid>" leak). A missing row falls back to a
+    // neutral phrase inside the persona.
     let ownerDisplayName: string | undefined;
-    if (principal.type === "team") {
+    if (principal.type === "user") {
+      const rows = await db.select({ name: users.name }).from(users).where(eq(users.id, principal.id)).limit(1);
+      ownerDisplayName = rows[0]?.name;
+    } else if (principal.type === "team") {
       const rows = await db.select({ name: teams.name }).from(teams).where(eq(teams.id, principal.id)).limit(1);
       ownerDisplayName = rows[0]?.name;
     } else if (principal.type === "org") {
@@ -2944,6 +2949,7 @@ export class EngineHost {
     }
     builtSession = session;
 
+    extras.bindSession(session);
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);
@@ -3414,7 +3420,6 @@ export class EngineHost {
     if (!this.opts.db || prefs.length === 0) return undefined;
     const rows = await listLlmProviders(this.opts.db, orgId);
     for (const pref of prefs) {
-      if (isDisabledModel(pref)) continue;
       const { namespace } = parseModelId(pref);
       const row = rows.find((r) => providerNamespace(r) === namespace);
       let active: boolean;
@@ -3446,7 +3451,7 @@ export class EngineHost {
       .where(eq(users.id, userId))
       .limit(1);
     const pref = rows[0]?.defaultModel;
-    return pref && !isDisabledModel(pref) ? pref : undefined;
+    return pref ?? undefined;
   }
 
   /**
@@ -3512,9 +3517,8 @@ export class EngineHost {
       childDefault?: string;
     },
   ): Promise<BuildModel> {
-    // Retired pins must not brick history or the model selector on restore.
-    // Explicit selections remain rejected by the resolver and request boundary.
-    if (existing?.model && !isDisabledModel(existing.model)) return this.resolveModelObject(orgId, existing.model);
+    // Preserve the saved model when restoring an existing session.
+    if (existing?.model) return this.resolveModelObject(orgId, existing.model);
     const id =
       prefs.overrideId ??
       prefs.childDefault ??
@@ -3981,6 +3985,7 @@ export class EngineHost {
       : await engine.createSession({ id: childSessionId, ...sessionOptions });
 
     builtSession = session;
+    provisionedExtras.bindSession(session);
     this.cache.set(childSessionId, { engine, session });
     this.trackHibernationWake(childSessionId, session);
     if (existing) this.pruneExpiredEvents(childSessionId);
@@ -4149,6 +4154,7 @@ export class EngineHost {
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     builtSession = session;
+    extras.bindSession(session);
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);

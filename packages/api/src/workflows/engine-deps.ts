@@ -1,3 +1,4 @@
+import { mergePresence, readPresence, type Presence } from "@valet/shared";
 /**
  * `WorkflowEngineDeps` (Phase 5 plan decision 15) implemented over
  * `EngineHost`. Node executors and the interpreter only see this narrow
@@ -180,6 +181,7 @@ export function workflowRunThreadKey(runId: string, slackChannel?: string): stri
 }
 
 interface RunContext {
+  presence?: Presence;
   legacyRuntimeId?: string;
   orgId: string;
   actorUserId: string;
@@ -229,7 +231,10 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
     && typeof data.key === "string" && data.key.startsWith("slack.")) {
     throw new Error("The Slack workflow event has no channel audience.");
   }
-  return { legacyRuntimeId, orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
+  const definitionPresence = run.definition && typeof run.definition === "object" && "presence" in run.definition
+    ? readPresence(run.definition.presence) : undefined;
+  const presence = mergePresence(definitionPresence, readPresence(run.params.presence));
+  return { presence, legacyRuntimeId, orgId: defRow.orgId, actorUserId: run.actorUserId ?? actorUserIdFor(owner), owner,
     origin: run.params.origin, ...(slackChannel ? { slackChannel } : {}) };
 }
 
@@ -372,6 +377,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       const receipt = await thread.submitPrompt(text, {
         dispatchId: promptOpts.dispatchId,
         model: promptOpts.model,
+        ...(context.presence ? { metadata: { presence: context.presence } } : {}),
         queueMode: promptOpts.queueMode,
       });
       return { threadId: thread.id, queueItemId: receipt.queueItemId };
@@ -606,6 +612,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         attributes: { runId },
       };
       const receipt = await thread.submitPrompt(content, {
+        ...(ctx.presence ? { metadata: { presence: ctx.presence } } : {}),
         dispatchId: promptOpts.dispatchId,
         queueMode: promptOpts.queueMode,
       });
@@ -634,6 +641,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         orgId: ctx.orgId,
         owner: ctx.owner,
         workflowExecutionId: runId,
+        presence: ctx.presence,
       });
     },
 

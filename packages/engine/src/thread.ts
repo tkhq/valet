@@ -1,3 +1,4 @@
+import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
@@ -8,7 +9,7 @@ import { isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
-import { assertModelEnabled, bundledModel } from "./model-catalog.js";
+import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
@@ -677,7 +678,10 @@ export class Thread {
         "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
       );
     }
-    const effectiveMode: QueueMode = opts.queueMode ?? this.mode;
+    const requestedMode = opts.queueMode ?? this.mode;
+    // A sender override belongs to one submission, never a collect digest.
+    const effectiveMode: QueueMode = requestedMode === "collect" && readPresence(opts.metadata?.presence)
+      ? "followup" : requestedMode;
 
     // Validate a per-item model pin at admission, the same way setModel
     // validates a thread pin: an unknown spec is rejected here with the
@@ -747,7 +751,7 @@ export class Thread {
       const coalesceKey = overheardCoalesceKey(prepared.content);
       if (coalesceKey !== undefined) {
         const run = this.overheardCoalesceChain.then(() =>
-          this.coalesceQueuedOverheard(coalesceKey, item.author),
+          this.coalesceQueuedOverheard(coalesceKey, item.author, readPresence(admitted.metadata?.presence)),
         );
         this.overheardCoalesceChain = run.catch(() => null);
         receiptItem = (await run) ?? admitted;
@@ -778,7 +782,7 @@ export class Thread {
    * doubled submission. Returns the digest item, or null when there was
    * nothing to merge with.
    */
-  private async coalesceQueuedOverheard(coalesceKey: string, author?: PromptAuthor): Promise<QueueItem | null> {
+  private async coalesceQueuedOverheard(coalesceKey: string, author?: PromptAuthor, presence?: Presence): Promise<QueueItem | null> {
     const store = this.session.providers.store;
     const items = await store.listUnsettledSubmissions(this.session.id);
     const coalescible = items
@@ -786,6 +790,9 @@ export class Thread {
         (i) =>
           i.threadId === this.id &&
           i.status === "queued" &&
+          // Only combine messages that use the same sender identity.
+          readPresence(i.metadata?.presence)?.displayName === presence?.displayName &&
+          readPresence(i.metadata?.presence)?.avatarUrl === presence?.avatarUrl &&
           i.supersededByItemId === undefined &&
           i.abortRequestedAt === undefined &&
           i.author?.id === author?.id &&
@@ -803,7 +810,7 @@ export class Thread {
       model: newest.model,
       role: newest.role,
       author: newest.author,
-      metadata: { overheardDigest: digest },
+      metadata: { overheardDigest: digest, ...(presence ? { presence } : {}) },
     });
     const { item: admittedMerged } = await store.admitSubmission(this.session.id, this.id, merged);
     for (const constituent of coalescible) {
@@ -1429,6 +1436,7 @@ export class Thread {
     const priorActive = this.runningItem;
     this.runningItem = {
       id: suspended.queueItemId,
+      metadata: priorActive?.metadata,
       threadId: this.id,
       content: "",
       status: "running",
@@ -2315,7 +2323,6 @@ export class Thread {
    * runs. Throws `ValidationError` on an unknown spec.
    */
   private async validateModelSpec(spec: string): Promise<ResolvedModel | null> {
-    assertModelEnabled(spec);
     const sessionSpec = this.session.options.modelSpec ?? this.session.options.model.id;
     // Valid by construction, and deliberately NOT resolved: null tells the
     // caller "accepted without a lookup", which `applyModelToRunningTurn`
@@ -2471,7 +2478,6 @@ export class Thread {
    * model and credentials the user never chose.
    */
   private async resolveTurnModelForTurn(item?: QueueItem): Promise<PiModel> {
-    assertModelEnabled(this.turnModelSpec(item));
     this.assignedModelSpec = this.turnModelSpec(item);
     const resolver = this.session.options.resolveModel;
     if (!resolver) return this.resolveTurnModel(item);
@@ -3896,6 +3902,15 @@ export class Thread {
       this.activeSkillInvocations.set(queuedSkillFact.id, queuedSkillFact);
     }
 
+    // Re-read the session's skills before the tools are built. The host's
+    // `skill` tool describes and serves this map, and a cached session can
+    // outlive many skill edits. A failed read keeps the previous set.
+    try {
+      await this.session.refreshSkills();
+    } catch (err) {
+      console.error(`skill refresh failed for session ${this.session.id}; the previous skills stay:`, err);
+    }
+
     // Build the AgentTool list with closures over this turn's ToolContext.
     this.agent.state.tools = this.buildTools();
 
@@ -4235,7 +4250,6 @@ export class Thread {
         if (!fallback) fallbackExhausted = true;
       }
       if (fallback) {
-        assertModelEnabled(fallback.canonicalId ?? fallback.model.id);
         const previousProvider = this.agent.state.model.provider;
         attemptedProviderIds.add(fallback.model.provider);
         this.turnApiKey = fallback.apiKey;
@@ -4948,7 +4962,6 @@ export class Thread {
       // from its own config wins — pinning here would silently disable the
       // upstream knob forever.
       streamFn: async (model, context, options) => {
-        assertModelEnabled(model.id);
         this.lastRequestModel = model;
         await this.persistSkillContextAttributions();
         const runtimeModelContext = this.modelSystemPrompt(undefined, model);
@@ -5082,6 +5095,8 @@ export class Thread {
     const { signal, toolCallId, toolName, toolArgs } = args;
     const session = this.session;
     const runningContent = this.runningItem?.content;
+    const presence = mergePresence(readPresence(this.runningItem?.metadata?.presence));
+    const resolveDefaultSender = session.options.resolveOutboundSender;
     const actorId = this.runningItem?.author?.id
       ?? (session.owner.type === "team" && session.options.purpose !== "workflow" && session.options.purpose !== "child"
         ? `team:${session.owner.id}` : session.options.userId);
@@ -5127,7 +5142,9 @@ export class Thread {
       // so reply_to_origin / react_to_origin answer the right conversation.
       origin,
       sharedTranscript: session.options.sharedTranscript,
-      resolveOutboundSender: session.options.resolveOutboundSender,
+      resolveOutboundSender: presence
+        ? async () => mergePresence(await resolveDefaultSender?.(), presence)
+        : resolveDefaultSender,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,

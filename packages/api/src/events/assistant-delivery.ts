@@ -1,3 +1,4 @@
+import type { Presence } from "@valet/shared";
 /**
  * The one way an event or a followed message is delivered to an assistant:
  * resolve the session, assert its org against the delivery's org (the
@@ -51,6 +52,7 @@ export interface AssistantDeliveryArgs {
   threadKey: string;
   target?: { sessionId: string; threadId: string };
   signal: SignalContent;
+  presence?: Presence;
   dispatchId: string;
   /** Drop-log reason if the resolved assistant belongs to another org. */
   mismatchReason: string;
@@ -200,6 +202,7 @@ async function deliverToAssistantThreadInner(
   }
   await thread.submitPrompt(signal, {
     dispatchId: args.dispatchId,
+    ...(args.presence ? { metadata: { presence: args.presence } } : {}),
     author: args.author ?? { id: args.actorUserId },
   });
   if (args.inbound) {

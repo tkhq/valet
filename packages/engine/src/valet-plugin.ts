@@ -12,6 +12,7 @@
  * See the "Channel transports" section below for the v2 ChannelTransport
  * contract (Telegram, Phase 7).
  */
+import { validatePluginHttpRoutes, type PluginHttpRoute } from "./plugin-http.js";
 import type { ActionPlugin } from "./plugin-catalog.js";
 import type { RiskLevel, SkillSource, RoleSpec, StoredCredential } from "./types.js";
 import { BUILTIN_COMMAND_NAMES, type CommandDef } from "./commands/types.js";
@@ -531,28 +532,25 @@ export interface IdentityLinkDeclaration {
    *  null when the transport is not ready. */
   deepLink?: (ctx: { botUsername: string | null; code: string }) => string | null;
   /**
-   * The anchor DM the bot sends in the "DM me" flow. It MUST NOT contain
-   * the link code or any code-shaped token. The code is returned only in
-   * the authenticated web response, and the user carries it into the chat
-   * themselves — that trip IS the ownership proof (web session + provider
-   * account). A code in the DM would collapse it to bot→user→bot, and a DM
-   * sent to a picked member would become a one-reply account takeover.
-   * Point the reader at the command shown in the web UI, name the expiry
-   * window, and tell an unexpecting recipient to ignore the message. Keep
-   * it plain prose: no backticks or angle brackets — the mrkdwn path
-   * restores code spans unescaped, so a `<` inside one reaches Slack raw.
-   * Meaningful only for providers whose transport implements
-   * `lookupUserByEmail`; the deliver flow also needs `deliveryReply`.
+   * The DM the bot sends in the "DM me" and "Find me by name" flows. It
+   * carries the link code, and the person types that code into the web app.
+   * Reading the DM proves control of the provider account; typing the code
+   * into the signed-in web app proves the Valet user. The host binds the
+   * code to the account it DMed and to the requesting user, and never
+   * redeems it from chat, so a picked recipient who replies with it links
+   * nothing. Tell the reader to enter the code in Valet, name the expiry
+   * window, and tell an unexpecting recipient to ignore the message. Never
+   * phrase the code as a chat command. Meaningful only for providers whose
+   * transport implements `lookupUserByEmail`.
    */
-  deliveryDm?: string;
+  deliveryDm?: (ctx: { code: string }) => string;
   /**
-   * Build the exact reply the user sends back after the anchor DM (Slack:
-   * `link ${code}`). Shown ONLY in the authenticated web response — never
-   * sent to the provider — so embedding the code here is safe and is the
-   * point: the card renders one copyable line the transport's parser
-   * accepts verbatim.
+   * The credential service whose OAuth connect also writes this identity
+   * link (Slack: `slack-user`, "Sign in with Slack"). The web card offers it
+   * as a one-click alternative to the code flow when the deployment has
+   * that service's OAuth client configured.
    */
-  deliveryReply?: (ctx: { code: string }) => string;
+  oauthService?: string;
 }
 
 /**
@@ -584,6 +582,8 @@ export interface ValetPlugin {
   description?: string;
   actions?: ActionPlugin[];
   triggers?: TriggerDef[];
+  /** Portable HTTP handlers mounted and authorized by the host. */
+  httpRoutes?: PluginHttpRoute[];
   skills?: SkillSource[];
   roles?: RoleSpec[];
   credentials?: CredentialDeclaration[];
@@ -674,6 +674,8 @@ export function validateValetPlugin(
   if (v.description !== undefined && typeof v.description !== "string") {
     issues.push({ path: "description", message: "must be a string when present" });
   }
+
+  issues.push(...validatePluginHttpRoutes(v.httpRoutes));
 
   checkArray(v.actions, "actions", issues, (p, path) => {
     const plugin = asRecord(p, path, issues);
@@ -942,11 +944,11 @@ export function validateValetPlugin(
       if (link.deepLink !== undefined && typeof link.deepLink !== "function") {
         issues.push({ path: "identityLink.deepLink", message: "must be a function when present" });
       }
-      if (link.deliveryDm !== undefined && (typeof link.deliveryDm !== "string" || link.deliveryDm === "")) {
-        issues.push({ path: "identityLink.deliveryDm", message: "must be a non-empty string when present" });
+      if (link.deliveryDm !== undefined && typeof link.deliveryDm !== "function") {
+        issues.push({ path: "identityLink.deliveryDm", message: "must be a function when present" });
       }
-      if (link.deliveryReply !== undefined && typeof link.deliveryReply !== "function") {
-        issues.push({ path: "identityLink.deliveryReply", message: "must be a function when present" });
+      if (link.oauthService !== undefined && (typeof link.oauthService !== "string" || !NAME_RE.test(link.oauthService))) {
+        issues.push({ path: "identityLink.oauthService", message: "must match /^[a-z][a-z0-9-]*$/ when present" });
       }
     }
   }

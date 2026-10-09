@@ -77,14 +77,16 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
     });
   });
 
-  it.each(["gpt-6-astra", "openai/gpt-6-astra", "openrouter/openai/gpt-6-astra", "custom/gpt-6-astra-20261001", "openrouter/openai/gpt-6-astra:nitro"])("blocks disabled model %s before credentials", async (spec) => {
-    await expect(resolveModelSpec(db, credentials, orgId, spec)).rejects.toThrow("Astra is disabled");
+  it("resolves Astra with OpenAI credentials", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "env-openai");
+    expect(await resolveModelSpec(db, credentials, orgId, "openai/gpt-6-astra")).toMatchObject({ model: { id: "gpt-6-astra" } });
   });
 
   describe("new model resolution", () => {
     it.each([
       ["anthropic/claude-fable-5-1", "claude-fable-5-1", "anthropic", "ANTHROPIC_API_KEY"],
       ["openai/gpt-6.1-sol", "gpt-6.1-sol", "openai", "OPENAI_API_KEY"],
+      ["openai/gpt-5.6-sol", "gpt-5.6-sol", "openai", "OPENAI_API_KEY"],
     ] as const)("resolves %s", async (spec, wireId, provider, envName) => {
       vi.stubEnv(envName, "test-key");
       const resolved = await resolveModelSpec(db, credentials, orgId, spec);
@@ -708,7 +710,8 @@ describe("EngineHost model resolution wiring", () => {
     ).rejects.toThrow(/provider Custom is disabled/);
   });
 
-  it.each([null, "openrouter/openai/gpt-6-astra"])("reopens an Astra-pinned session with saved user default %s and permits an allowed model change", async (defaultModel) => {
+  it.each([null, "openai/gpt-6-astra"])("reopens an Astra-pinned session with saved user default %s and permits an allowed model change", async (defaultModel) => {
+    vi.stubEnv("OPENAI_API_KEY", "env-openai");
     api = await bootTestApi();
     const { engineHost, engineStore } = api.providers;
     const meta = { userId: "local-user", orgId: "local-org", workspace: "/tmp" };
@@ -716,15 +719,14 @@ describe("EngineHost model resolution wiring", () => {
     const thread = await session.createThread("web:retained");
     const saved = await engineStore.getSession(session.id);
     if (!saved) throw new Error("Session was not persisted");
-    await engineStore.saveSession({ ...saved, model: "openrouter/openai/gpt-6-astra" });
+    await engineStore.saveSession({ ...saved, model: "openai/gpt-6-astra" });
     await api.providers.db.update(users).set({ defaultModel }).where(eq(users.id, "local-user"));
     engineHost.evictAll();
 
     const restored = await engineHost.sessionFor(session.id, meta);
-    expect(restored.options.modelSpec).toBe("s");
+    expect(restored.options.modelSpec).toBe("openai/gpt-6-astra");
     expect(restored.threadById(thread.id)?.key).toBe("web:retained");
     await restored.setModel("anthropic/claude-sonnet-4-5");
-    await expect(restored.setModel("gpt-6-astra")).rejects.toThrow("Astra is disabled");
     engineHost.evictAll();
     expect((await engineHost.sessionFor(session.id, meta)).options.modelSpec).toBe("anthropic/claude-sonnet-4-5");
   });

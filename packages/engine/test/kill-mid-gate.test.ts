@@ -36,6 +36,8 @@ async function poll(
   }
 }
 
+let replayedSender: { displayName?: string; avatarUrl?: string } | undefined;
+
 const approvalParams = Type.Object({ arg: Type.String() });
 const approvalTool: ToolDef<typeof approvalParams> = {
   name: "do_thing",
@@ -47,6 +49,7 @@ const approvalTool: ToolDef<typeof approvalParams> = {
       title: "ok?",
       resumeKey: "kg",
     });
+    replayedSender = await ctx.resolveOutboundSender?.();
     return { text: `did with ${r.actionId}` };
   },
 };
@@ -117,6 +120,7 @@ describe("kill-mid-gate recovery (cross-process SIGKILL, roadmap exit criterion)
             sandbox: {},
             model: faux.getModel(),
             tools: [approvalTool],
+            resolveOutboundSender: async () => ({ displayName: "Workspace", avatarUrl: "https://example.com/default.png" }),
           },
         });
 
@@ -139,6 +143,7 @@ describe("kill-mid-gate recovery (cross-process SIGKILL, roadmap exit criterion)
         });
 
         const result = await session.thread().awaitResult(itemId);
+        expect(replayedSender).toEqual({ displayName: "Release helper", avatarUrl: "https://example.com/default.png" });
         expect(result).toEqual({
           queueItemId: itemId,
           outcome: "completed",

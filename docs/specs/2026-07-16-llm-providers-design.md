@@ -155,6 +155,15 @@ bundled catalog as the floor.
   the bundled catalog, which is the behavior before this change. The
   zero-config path is unaffected: an org with no `llm_providers` rows and only
   `ANTHROPIC_API_KEY` still sees the Anthropic list.
+- **Retired models.** Catalog visibility and model resolution have different
+  rules. `openai/gpt-5.6-sol` is retired from selectable catalogs after
+  `openai/gpt-6.1-sol` replaces it. `registryModels`, org catalogs, and
+  pickers exclude the retired id. `registryModelById` still resolves it from
+  the unfiltered pi-ai bundled registry for a persisted session or default.
+  This is the same live-versus-picker rule that de-selected OpenRouter models
+  use. Remove this resolution compatibility only after evidence confirms that
+  the upstream provider no longer serves the retired id and migration handles
+  all persisted references.
 - **Visibility.** `GET /api/models/registry-status` reports per provider the
   model count, `checkedAt`, whether the bundled fallback is in use, and the
   last error. The catalog degrades silently by design, so this route is how an
@@ -163,8 +172,8 @@ bundled catalog as the floor.
 
 ## Extension: manual bundled overlay (2026-09-05)
 
-Valet uses pi-ai and pi-agent-core 0.85.0. This release bundles
-`claude-fable-5-1`. The `MANUAL_BUNDLED_MODELS` table in
+Valet uses pi-ai and pi-agent-core 1.0.3. This release bundles
+`gpt-6.1-sol`. The `MANUAL_BUNDLED_MODELS` table in
 `packages/engine/src/model-catalog.ts` adds models that pi has committed
 but has not released. Pi bundled entries win by id. Each manual
 entry must match pi's generated catalog. A canary test fails when a later pi

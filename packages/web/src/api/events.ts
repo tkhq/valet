@@ -51,8 +51,8 @@ export const qkEvents = {
   catalog: () => ["events", "catalog"] as const,
   filterOptions: (source: string, q: string, deps: Record<string, string>) =>
     filterOptionsKey(source, q, deps),
-  log: (owner: OwnerFilter | undefined, problems: boolean, q?: string) =>
-    ["events", "log", owner?.ownerType ?? "", owner?.ownerId ?? "", problems ? "problems" : "all", q ?? ""] as const,
+  log: (owner: OwnerFilter | undefined, problems: boolean, q?: string, diagnostics = false) =>
+    ["events", "log", owner?.ownerType ?? "", owner?.ownerId ?? "", problems ? "problems" : "all", q ?? "", diagnostics] as const,
   detail: (id: string) => ["events", "detail", id] as const,
   subscriptions: (owner?: OwnerFilter, held = false) =>
     ["events", "subscriptions", ...ownerKey(owner, held)] as const,
@@ -102,13 +102,13 @@ export function useEvent(id: string, opts?: Partial<UseQueryOptions<GetEventResp
 
 /** The Log: stored events and recorded problems, newest first, one page at a
  * time. Polls the first page while nothing is searched. */
-export function useEventLog(params: { owner: OwnerFilter | undefined; problems: boolean; q?: string }) {
+export function useEventLog(params: { owner: OwnerFilter | undefined; problems: boolean; diagnostics?: boolean; q?: string }) {
   const { owner } = params;
   return useInfiniteQuery({
-    queryKey: qkEvents.log(owner, params.problems, params.q),
+    queryKey: qkEvents.log(owner, params.problems, params.q, params.diagnostics),
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) => owner
-      ? api.getEventLog({ owner, problems: params.problems, ...(params.q ? { q: params.q } : {}), ...(pageParam ? { cursor: pageParam } : {}) })
+      ? api.getEventLog({ owner, problems: params.problems, diagnostics: params.diagnostics, ...(params.q ? { q: params.q } : {}), ...(pageParam ? { cursor: pageParam } : {}) })
       : Promise.reject(new Error("No workspace selected.")),
     // An owner-less request names no workspace, so the Log waits for the owner.
     enabled: owner !== undefined,

@@ -31,6 +31,8 @@ interface CacheOptions {
   now?: () => number;
   checkIntervalMs?: number;
   failureBackoffMs?: number;
+  /** Return a preparing response while slow collection/generation continues. */
+  requestWaitMs?: number;
   leaseMs?: number;
   /** Minimum age of a shown snapshot before changed evidence regenerates it. */
   minRegenerateMs?: number;
@@ -42,8 +44,9 @@ interface CacheOptions {
  * When a snapshot of the current version exists, changed evidence regenerates it in
  * the background and the GET returns the old snapshot marked `refreshing`. Showing it
  * is safe because every read re-checks that the caller can still read each source.
- * A snapshot younger than `minRegenerateMs` is kept, so an active conversation does
- * not start one model call per check. Only the first snapshot blocks the request. */
+ * A snapshot younger than `minRegenerateMs` is kept without repeating collection.
+ * Cold requests wait briefly, then return
+ * refreshing while the lease holder continues collection and generation. */
 export function createDurableBriefingCache(options: CacheOptions) {
   const validate = options.validate ?? canReadCachedBriefingSources;
   const now = options.now ?? Date.now;
@@ -70,7 +73,12 @@ export function createDurableBriefingCache(options: CacheOptions) {
     const read = async () => (await db.select().from(cache).where(scope).limit(1))[0];
     const existing = await read();
     const at = now();
-    if (existing?.version === options.version && existing.nextCheckAt > at) return visible(existing);
+    if (existing?.version === options.version && (existing.nextCheckAt > at
+      || (existing.response?.generatedAt != null && at - existing.response.generatedAt < minRegenerate))) {
+      // No evidence can trigger generation during this window. Still recheck access
+      // on every read, and leave checkedAt at the last actual collection time.
+      return visible(existing);
+    }
     const token = randomUUID();
     const [claimed] = await db.insert(cache).values({ orgId, ownerType: owner.type, ownerId: owner.id,
       version: options.version, leaseToken: token, leaseUntil: at+leaseMs,
@@ -88,42 +96,62 @@ export function createDurableBriefingCache(options: CacheOptions) {
         .catch(err => console.error("workspace briefing lease renewal failed:", err));
     }, Math.max(10, Math.floor(leaseMs/3)));
     renewal.unref();
-    try {
-      const evidence = await options.collect(db,orgId,owner);
-      const evidenceHash = briefingEvidenceHash(evidence);
-      const checkedAt = now();
-      if (claimed.version === options.version && claimed.evidenceHash === evidenceHash && claimed.response) {
-        const [row] = await db.update(cache).set({ checkedAt, nextCheckAt: checkedAt+interval,
-          leaseToken: null, leaseUntil: 0 }).where(fence()).returning();
-        return visible(row ?? await read());
-      }
-      const shown = claimed.version === options.version ? claimed.response : null;
-      if (shown) {
-        const generatedAt = shown.generatedAt ?? 0;
-        if (checkedAt - generatedAt < minRegenerate) {
-          // Keep the old evidence hash, so the next check after the window regenerates.
-          const [row] = await db.update(cache).set({ checkedAt, nextCheckAt: generatedAt+minRegenerate,
+    const work = (async () => {
+      try {
+        const evidence = await measured("collection", () => options.collect(db,orgId,owner));
+        const evidenceHash = briefingEvidenceHash(evidence);
+        const checkedAt = now();
+        if (claimed.version === options.version && claimed.evidenceHash === evidenceHash && claimed.response) {
+          const [row] = await db.update(cache).set({ checkedAt, nextCheckAt: checkedAt+interval,
             leaseToken: null, leaseUntil: 0 }).where(fence()).returning();
           return visible(row ?? await read());
         }
-        background = true;
-        void regenerate(evidence, evidenceHash, checkedAt, true);
-        return visible(claimed);
+        const shown = claimed.version === options.version ? claimed.response : null;
+        if (shown) {
+          background = true;
+          void regenerate(evidence, evidenceHash, checkedAt, true);
+          return visible(claimed);
+        }
+        // No snapshot yet: publish it when ready; slow requests return refreshing.
+        const [invalidated] = await db.update(cache).set({ version: options.version, response: null,
+          evidenceHash: null, checkedAt }).where(fence()).returning();
+        if (!invalidated) return visible(await read());
+        return await regenerate(evidence, evidenceHash, checkedAt, false);
+      } catch (err) {
+        return await fail(err, claimed.version === options.version && !!claimed.response);
+      } finally {
+        if (!background) clearInterval(renewal);
       }
-      // No snapshot to show yet: this request waits for the first one.
-      const [invalidated] = await db.update(cache).set({ version: options.version, response: null,
-        evidenceHash: null, checkedAt }).where(fence()).returning();
-      if (!invalidated) return visible(await read());
-      return await regenerate(evidence, evidenceHash, checkedAt, false);
-    } catch (err) {
-      return await fail(err, false);
+    })();
+    let responseTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<WorkspaceBriefingsResponse>(resolve => {
+          responseTimer = setTimeout(() => resolve(visible(claimed)), options.requestWaitMs ?? 2000);
+          responseTimer.unref();
+        }),
+      ]);
     } finally {
-      if (!background) clearInterval(renewal);
+      clearTimeout(responseTimer);
+    }
+
+    async function measured<T>(stage: "collection" | "generation", action: () => Promise<T>): Promise<T> {
+      const started = performance.now();
+      let outcome = "threw";
+      try {
+        const result = await action();
+        outcome = "returned";
+        return result;
+      } finally {
+        console.info("workspace briefing stage", { orgId, ownerType: owner.type, ownerId: owner.id,
+          stage, durationMs: Math.round(performance.now()-started), outcome });
+      }
     }
 
     async function regenerate(evidence: BriefingEvidence[], evidenceHash: string, checkedAt: number, keepShown: boolean) {
       try {
-        let response = evidence.length ? await options.generate(orgId,owner,evidence,{ db, ...(credentials ? { credentials } : {}) })
+        let response = evidence.length ? await measured("generation", () => options.generate(orgId,owner,evidence,{ db, ...(credentials ? { credentials } : {}) }))
           : { briefings: [], generatedAt: null, coverage: "recent" as const };
         if (!response.unavailable && !await validate(db,orgId,owner,response)) response = unavailable(checkedAt);
         if (response.unavailable && keepShown) return await fail(new Error("Briefing generation was unavailable."), true);

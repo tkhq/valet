@@ -978,7 +978,13 @@ function makeListTool(
     .map((item) => `${item.service} (${item.state})`)
     .sort();
   const serviceLine = [
-    availableServices.length > 0 ? ` Available services: ${availableServices.join(", ")}.` : "",
+    // "Installed", not "connected": this line is built once per session from
+    // deployment and org state. A person's own connection is probed only when
+    // list_tools runs, so the line must not read as a connection report.
+    availableServices.length > 0
+      ? ` Installed services: ${availableServices.join(", ")}. This list does not show whether the person connected each one;` +
+        " call list_tools before you say a service is connected or reachable."
+      : "",
     configurableServices.length > 0
       ? ` Configurable but not connected: ${configurableServices.join(", ")}.`
       : "",
@@ -1270,7 +1276,9 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
     case "pending-approval":
       return { text: `denied: user did not approve ${toolId}` };
     case "invalid-args":
-      return { text: `invalid params for ${toolId}: ${outcome.error}` };
+      return {
+        text: `invalid params for ${toolId}: ${outcome.error}. Call list_tools (service: "${toolId.split(".")[0]}") to read its parameter schema, then call ${toolId} again with params that match.`,
+      };
     case "missing-credential":
       return {
         text: `${toolId} failed: credential ${outcome.service} not connected — Connect ${outcome.service} on the Integrations page (/integrations). After connecting, call list_tools (service: "${outcome.service}") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.`,

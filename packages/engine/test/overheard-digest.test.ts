@@ -1,3 +1,4 @@
+import { readPresence } from "@valet/shared";
 import { describe, it, expect } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
@@ -251,6 +252,50 @@ describe("overheard digest: queue coalescing", () => {
     expect(userMessages[0].signal?.attributes?.digest).toBe("3");
 
     faux.unregister();
+  });
+
+  it("keeps custom-presence submissions outside default overheard digests", async () => {
+    const faux = registerFauxProvider({ provider: "digest-presence" });
+    try {
+      const { engine, store } = makeEngine();
+      const session = await engine.createSession({ userId: "owner", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+      const thread = session.thread(THREAD_KEY);
+      await thread.pause();
+      const plain = await thread.submitPrompt(overheardSignal({ body: "plain" }), {});
+      const custom = await thread.submitPrompt(overheardSignal({ body: "custom" }), { metadata: { presence: { displayName: "Automation" } } });
+      const customAgain = await thread.submitPrompt(overheardSignal({ body: "custom again" }), { metadata: { presence: { displayName: "Automation" } } });
+      const digest = await thread.submitPrompt(overheardSignal({ body: "plain again" }), {});
+      expect((await store.getQueueItem(session.id, plain.queueItemId))?.outcome).toEqual({ outcome: "merged" });
+      expect((await store.getQueueItem(session.id, custom.queueItemId))?.outcome).toEqual({ outcome: "merged" });
+      expect(await store.getQueueItem(session.id, customAgain.queueItemId)).toMatchObject({ status: "queued", metadata: { presence: { displayName: "Automation" } } });
+      for (let i = 0; i < 25; i++) {
+        await thread.submitPrompt(overheardSignal({ body: `custom ${i}` }), { metadata: { presence: { displayName: "Automation" } } });
+      }
+      await thread.submitPrompt(overheardSignal({ body: "other identity" }), { metadata: { presence: { displayName: "Other" } } });
+      await thread.submitPrompt(overheardSignal({ body: "different avatar" }), { metadata: { presence: { displayName: "Automation", avatarUrl: "https://example.com/avatar.png" } } });
+      const pending = await store.listUnsettledSubmissions(session.id);
+      expect(pending).toHaveLength(4);
+      expect(pending.filter(item => readPresence(item.metadata?.presence)?.displayName === "Automation")).toHaveLength(2);
+      const content = (await store.getQueueItem(session.id, digest.queueItemId))?.content;
+      if (!content || typeof content !== "object" || !("kind" in content)) throw new Error("Expected a digest signal");
+      expect(content.body.split("\n").sort()).toEqual([OVERHEARD_DIGEST_HEADER, "plain", "plain again"].sort());
+    } finally {
+      faux.unregister();
+    }
+  });
+
+  it("queues custom presence separately when collect mode is requested", async () => {
+    const faux = registerFauxProvider({ provider: "collect-presence" });
+    try {
+      const { engine, store } = makeEngine();
+      const session = await engine.createSession({ userId: "owner", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+      const thread = session.thread(THREAD_KEY);
+      await thread.pause();
+      const receipt = await thread.submitPrompt("custom", { queueMode: "collect", metadata: { presence: { displayName: "Automation" } } });
+      expect(await store.getQueueItem(session.id, receipt.queueItemId)).toMatchObject({ status: "queued", metadata: { presence: { displayName: "Automation" } } });
+    } finally {
+      faux.unregister();
+    }
   });
 
   it("preserves the digest actor and never merges different actors", async () => {

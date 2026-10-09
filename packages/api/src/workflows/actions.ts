@@ -146,7 +146,17 @@ export function formatEditLintErrors(blocking: string[], preExisting: string[], 
   );
 }
 
+/**
+ * The workflow owner for an assistant tool call. The assistant is an agent
+ * (`WorkflowOwner.agentEditor`): a step change it makes revokes the
+ * workflow's grants.
+ */
 export function ownerFromContext(ctx: PluginActionContext): WorkflowOwner | null {
+  const owner = ownerFromContextUnmarked(ctx);
+  return owner ? { ...owner, agentEditor: true } : null;
+}
+
+function ownerFromContextUnmarked(ctx: PluginActionContext): WorkflowOwner | null {
   // A channel sender with no Valet account runs as the rule's creator, but is
   // not that person: they may not manage the workspace's workflows.
   if (ctx.externalSender) return null;
@@ -629,6 +639,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     Type.Object({
       workflow_id: Type.String(),
       name: Type.Optional(Type.String()),
+      presence: Type.Optional(Type.Union([Type.Object({
+        displayName: Type.Optional(Type.String()),
+        avatarUrl: Type.Optional(Type.String()),
+      }), Type.Null()])),
       upsert_nodes: Type.Optional(Type.Array(Type.Unknown())),
       remove_node_ids: Type.Optional(Type.Array(Type.String())),
       add_edges: Type.Optional(
@@ -656,13 +670,14 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Patch workflow",
     description:
       "Edit a workflow WITHOUT re-sending the whole definition: rename, upsert single nodes " +
-      "(replace-by-id or append), remove nodes (their edges go too), add/remove edges. " +
+      "(replace-by-id or append), remove nodes (their edges go too), add/remove edges, or set presence. " +
+      "Presence replaces the channel identity; null clears it. " +
       "Prefer this over save_workflow for small edits — the patched result runs the full " +
       "linter, so a bad patch returns lint errors instead of saving. The linter reads the " +
       "WHOLE merged definition, so an error in a node you did not touch also blocks the " +
       "patch; the reply names those errors as pre-existing.",
     riskLevel: "medium",
-    execute: async ({ workflow_id, name, upsert_nodes, remove_node_ids, add_edges, remove_edges }, ctx) => {
+    execute: async ({ workflow_id, name, presence, upsert_nodes, remove_node_ids, add_edges, remove_edges }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
@@ -680,6 +695,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       }
 
       const patched = applyWorkflowPatch(stored as WorkflowDefinition, {
+        presence,
         upsertNodes: upsert_nodes,
         removeNodeIds: remove_node_ids,
         addEdges: add_edges as WorkflowEdge[] | undefined,
@@ -920,6 +936,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     Type.Object({
       workflow_id: Type.String(),
       name: Type.String(),
+      presence: Type.Optional(Type.Object({ displayName: Type.Optional(Type.String()), avatarUrl: Type.Optional(Type.String()) })),
       event_keys: Type.Array(Type.String(), {
         description: 'Event key patterns; trailing ".*" wildcard supported (e.g. "github.pull_request.*").',
       }),
@@ -953,15 +970,18 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "schedules are not supported yet). The event arrives in templates as " +
       "{{trigger.data.payload...}} plus {{trigger.data.key}}/{{trigger.data.refs...}}. " +
       "Returns { triggerId }.",
-    riskLevel: "medium",
-    execute: async ({ workflow_id, name, event_keys, filters, any_channel }, ctx) => {
+    // A schedule or event trigger keeps prompting the assistant after the
+    // conversation ends, so a person approves it by default (risk default
+    // for "high"). Agents can steer the assistant through threads.
+    riskLevel: "high",
+    execute: async ({ workflow_id, name, event_keys, filters, any_channel, presence }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
       const result = await createWorkflowTrigger(
         armDepsFrom(deps),
         owner,
-        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel },
+        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, presence },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.trigger };
@@ -1016,7 +1036,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "or the ASSISTANT (prompt → you receive the prompt each fire, e.g. 'check my PRs " +
       "every morning'). Fires are accurate to ~30s; missed fires during downtime collapse " +
       "into one catch-up. Returns { scheduleId, nextFireAt }.",
-    riskLevel: "medium",
+    // A schedule or event trigger keeps prompting the assistant after the
+    // conversation ends, so a person approves it by default (risk default
+    // for "high"). Agents can steer the assistant through threads.
+    riskLevel: "high",
     execute: async ({ workflow_id, prompt, name, cron, timezone, input }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
@@ -1046,15 +1069,17 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Propose workflow event trigger",
     description: "Save a disabled event trigger for human review. Returns a review link and the stored configuration. Repeated keys return the existing record without changing it. Ask the user to review and enable it in Events.",
     riskLevel: "low",
-    execute: async ({ workflow_id, name, event_keys, filters, any_channel, proposal_key }, ctx) => {
+    execute: async ({ workflow_id, name, event_keys, filters, any_channel, proposal_key, presence }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const result = await createWorkflowTrigger(armDepsFrom(getDeps()), owner, {
-        workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, proposalKey: proposal_key,
+        workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel, proposalKey: proposal_key, presence,
       });
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: proposalResult("subscription", result.trigger.triggerId, result.trigger.enabled, {
-        ...result.trigger, target: { kind: "workflow", workflowId: result.trigger.workflowId },
+        ...result.trigger, target: { kind: "workflow", workflowId: result.trigger.workflowId,
+          ...(result.trigger.presence ? { presence: result.trigger.presence } : {}),
+        },
       }) };
     },
   });
@@ -1147,7 +1172,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Update a cron schedule by id. Changing cron or timezone recomputes next fire time. " +
       "Setting enabled=false pauses the schedule; re-enabling recomputes next fire time so a stale slot does not fire at once. " +
       "Target kind (workflow vs orchestrator) cannot change — delete and recreate to switch.",
-    riskLevel: "medium",
+    // A schedule or event trigger keeps prompting the assistant after the
+    // conversation ends, so a person approves it by default (risk default
+    // for "high"). Agents can steer the assistant through threads.
+    riskLevel: "high",
     execute: async ({ schedule_id, name, cron, timezone, enabled, prompt, input }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
@@ -1200,7 +1228,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     description:
       "Update a workflow event trigger by id. All fields are optional; only supplied fields change. " +
       "Changing event_keys or filters re-validates against the event catalog.",
-    riskLevel: "medium",
+    // A schedule or event trigger keeps prompting the assistant after the
+    // conversation ends, so a person approves it by default (risk default
+    // for "high"). Agents can steer the assistant through threads.
+    riskLevel: "high",
     execute: async ({ trigger_id, name, event_keys, filters, enabled, any_channel }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;

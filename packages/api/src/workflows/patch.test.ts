@@ -19,6 +19,15 @@ function base(): WorkflowDefinition {
 }
 
 describe("applyWorkflowPatch", () => {
+  it("replaces and clears identity while preserving the graph", () => {
+    const original = { ...base(), presence: { displayName: "Original" } };
+    const changed = applyWorkflowPatch(original, { presence: { avatarUrl: "https://example.com/a.webp" } });
+    expect(changed).toEqual({ ok: true, definition: { ...base(), presence: { avatarUrl: "https://example.com/a.webp" } } });
+    expect(original.presence).toEqual({ displayName: "Original" });
+    expect(applyWorkflowPatch(original, { presence: null })).toEqual({ ok: true, definition: base() });
+    expect(applyWorkflowPatch(original, { presence: { avatarUrl: "http://example.com/a" } })).toMatchObject({ ok: false, errors: [expect.stringContaining("HTTPS")] });
+  });
+
   it("upserts by id (replace) and appends new nodes", () => {
     const result = applyWorkflowPatch(base(), {
       upsertNodes: [

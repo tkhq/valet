@@ -129,6 +129,40 @@ function action<TParams extends TSchema>(parameters: TParams) {
   }): PluginAction<TParams> => ({ ...rest, parameters });
 }
 
+/** Link fields a caller can use without a token. Every other `*_url` field is
+ * an API link template (`hooks_url`, `issues_url{/number}`) and is dropped. */
+const KEPT_REPO_URLS = new Set(["html_url", "clone_url", "ssh_url", "git_url", "svn_url", "mirror_url"]);
+
+/** Nested objects that shrink to their identity. A fork's `parent` and
+ * `source` are full repositories, each with its own owner and link templates. */
+const NESTED_ACCOUNT = new Set(["owner", "organization"]);
+const NESTED_REPO = new Set(["parent", "source", "template_repository"]);
+
+function pickFields(value: unknown, fields: readonly string[]): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => fields.includes(key)));
+}
+
+/**
+ * A repository without GitHub's API link templates. The raw response is about
+ * 15,000 characters for a fork, most of it `*_url` templates and full copies of
+ * the parent and source repositories. Every scalar setting (`allow_*`,
+ * `has_*`, `delete_branch_on_merge`, `size`) and every other field keeps its
+ * GitHub name and shape, so a reader of the raw response still finds it. Only
+ * the link templates go, and the nested owner and repositories shrink.
+ */
+function repoView(repo: object): Record<string, unknown> {
+  const view: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(repo)) {
+    if (key.endsWith("_url") && !KEPT_REPO_URLS.has(key)) continue;
+    if (NESTED_ACCOUNT.has(key)) view[key] = pickFields(value, ["login", "id", "type"]);
+    else if (NESTED_REPO.has(key)) view[key] = pickFields(value, ["id", "full_name", "html_url", "default_branch"]);
+    else if (key === "license") view[key] = pickFields(value, ["key", "name", "spdx_id"]);
+    else view[key] = value;
+  }
+  return view;
+}
+
 // ─── Actions ────────────────────────────────────────────────────────────────
 
 const getRepository = action(Type.Object({
@@ -143,7 +177,7 @@ const getRepository = action(Type.Object({
     const octokit = await getOctokit(ctx);
     try {
       const { data } = await octokit.request("GET /repos/{owner}/{repo}", { owner, repo });
-      return { success: true, data };
+      return { success: true, data: repoView(data) };
     } catch (err) {
       return handleOctokitError(err, "github.get_repository", "Get repository");
     }
@@ -202,7 +236,7 @@ const listRepos = action(Type.Object({
         per_page: args.perPage,
         page: args.page,
       });
-      return { success: true as const, data: data.repositories };
+      return { success: true as const, data: data.repositories.map(repoView) };
     }
 
     if (scope === "installation") {
@@ -228,7 +262,7 @@ const listRepos = action(Type.Object({
         per_page: args.perPage,
         page: args.page,
       });
-      return { success: true, data };
+      return { success: true, data: data.map(repoView) };
     } catch (err) {
       if (scope === "auto" && isForbidden(err)) {
         try {

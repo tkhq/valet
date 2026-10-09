@@ -159,6 +159,13 @@ describe("orchestratorPersona", () => {
     expect(orchestratorPersona({ type: "team", id: "t1" })).toContain("shared assistant for a team");
     expect(orchestratorPersona({ type: "org", id: "o1" })).toContain("chief of staff");
   });
+
+  // Asked which workspace it ran in, a personal assistant said the name was
+  // not exposed to it. Team and org personas already named theirs.
+  it("names the personal workspace owner when known", () => {
+    expect(flat(orchestratorPersona({ type: "user", id: "u1" }, "Ada Lovelace"))).toContain("You run in Ada Lovelace's personal workspace.");
+    expect(flat(orchestratorPersona({ type: "user", id: "u1" }))).toContain("You run in this person's personal workspace.");
+  });
   // Asked for a 1Password value, the orchestrator ran `op read`, got zero
   // bytes, and told the user their vault and item names were wrong. The rule
   // it needed named a tool it does not have and never named 1Password, so

@@ -53,7 +53,7 @@ export function TabBar<Id extends string>({
   }
 
   return (
-    <div role="tablist" aria-label={label} className="flex gap-1 border-b border-line">
+    <div role="tablist" aria-label={label} className="flex min-w-0 max-w-full gap-1 overflow-x-auto border-b border-line">
       {tabs.map((t, i) => (
         <button
           key={t.id}
@@ -70,7 +70,7 @@ export function TabBar<Id extends string>({
           onClick={() => onSelect(t.id)}
           onKeyDown={(e) => handleKeyDown(e, i)}
           className={cn(
-            "-mb-px border-b-2 px-3 py-2 text-sm transition-colors touch-manipulation",
+            "-mb-px min-h-11 shrink-0 whitespace-nowrap border-b-2 px-3 py-2 text-sm transition-colors touch-manipulation",
             active === t.id
               ? "border-ink font-medium text-ink"
               : "border-transparent text-muted hover:text-ink",

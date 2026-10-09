@@ -1,7 +1,7 @@
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useCatalogOwner, useListOwner } from "~/lib/use-list-owner";
 import { useSkills } from "~/api/skills";
-import { Button, Spinner, pageClass } from "~/components/primitives";
+import { Button, Spinner, TabBar, tabPanelId, pageClass } from "~/components/primitives";
 import { Pager } from "~/components/pager";
 import {
   readScopeFilter,
@@ -22,35 +22,9 @@ import {
 } from "~/lib/cursor-stack";
 import { textParam } from "~/lib/search-params";
 
-/**
- * `/skills` — markdown documents the assistant can pull into a turn. One
- * grid holds both kinds: skills the installed plugins ship, and skills
- * stored for the caller. Each card carries an origin badge and opens the
- * skill's page.
- *
- * A skill is written here, or by the assistant through the `skills` actions,
- * or synced from a repository. All three land in the same table and reach a
- * session the same way. See docs/specs/2026-08-05-agent-skills-design.md.
- *
- * The repositories panel above the grid is the other half of that rule: it
- * points Valet at a repository to mirror, and never edits a skill. It sits
- * here, over the skills it produces, and lists personal and team sources.
- * Organization repositories are tracked on Organization · Library. Org
- * skills still appear in this grid; only the source rows move.
- *
- * One grid, in delivery order. Grouping into a section per plugin was tried
- * and reverted: 8 of the 9 plugins ship exactly one skill, so it produced 8
- * headed sections holding a single card each and stretched 11 items over
- * roughly nine screens. The origin belongs on the card, not in a header.
- *
- * Both lists are paged, and every piece of that state — the filters and each
- * list's cursor stack — lives in the search params. A page is then a real
- * history entry, so Back pages back instead of leaving Skills.
- *
- * The grid, its filter chips, the scope select, and the search box live in
- * `SkillGrid`, so the org Library settings page reuses the same grid.
- */
+/** The catalog and source management keep independent URL state. */
 interface SkillsSearch {
+  view?: "sources";
   filter?: string;
   scope?: string;
   q?: string;
@@ -65,6 +39,7 @@ interface SkillsSearch {
  * page that gives no reason. */
 function readSkillsSearch(raw: unknown): SkillsSearch {
   return {
+    view: textParam(raw, "view") === "sources" ? "sources" : undefined,
     filter: textParam(raw, "filter"),
     scope: textParam(raw, "scope"),
     q: textParam(raw, "q"),
@@ -83,6 +58,7 @@ export function SkillsIndexPage() {
   // module and never build a real router context.
   const search = readSkillsSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
+  const view = search.view ?? "catalog";
 
   const filters: SkillGridFilters = {
     filter: readSkillFilter(search.filter),
@@ -123,7 +99,19 @@ export function SkillsIndexPage() {
           </Button>
         </div>
 
+        <p className="mt-3 text-sm text-muted">
+          Skills give the assistant instructions for a task. Installed skills do not connect accounts or grant access.
+        </p>
         <div className="mt-6">
+          <TabBar
+            label="Skills views"
+            tabs={[{ id: "catalog", label: "Catalog" }, { id: "sources", label: "Sources" }]}
+            active={view}
+            onSelect={(next) => go({ view: next === "sources" ? "sources" : undefined })}
+          />
+        </div>
+        {view === "sources" && <div className="mt-6" role="tabpanel" id={tabPanelId("Skills views", "sources")} aria-labelledby={`${tabPanelId("Skills views", "sources")}-tab`}>
+          <p className="mb-4 text-sm text-muted">Manage the repositories that supply skills to this workspace.</p>
           {/* The repositories of the workspace in view, matching the skills below:
               a personal repository's skills are personal, so a team page must not list it. */}
           <RepoSourcesPanel
@@ -131,9 +119,9 @@ export function SkillsIndexPage() {
             cursors={sourceCursors}
             onCursorsChange={(next) => go({ sourcePage: formatCursorStack(next) })}
           />
-        </div>
+        </div>}
 
-        <div className="mt-8">
+        {view === "catalog" && <div className="mt-8" role="tabpanel" id={tabPanelId("Skills views", "catalog")} aria-labelledby={`${tabPanelId("Skills views", "catalog")}-tab`}>
           {isLoading && (
             <div className="flex items-center gap-2 text-sm text-muted">
               <Spinner size={14} /> Loading skills…
@@ -180,7 +168,7 @@ export function SkillsIndexPage() {
               )}
             </>
           )}
-        </div>
+        </div>}
       </div>
     </div>
   );

@@ -98,3 +98,54 @@ ChatContainer (orchestrator)
 - Web, Slack, and Telegram user prompts update the server-derived timestamp. Agent-driven submissions do not update it.
 - Timestamp writes are monotonic. A durable WebSocket event updates every connected viewer after persistence.
 - Origin filters and the archived-thread section keep their existing order and behavior.
+
+### Progressive loading (2026-10-08, current web UI)
+
+- The current sidebar requests ten recent threads from the server. Scrolling to the end requests the next page.
+- A **Load more threads** button supports keyboard use. If a request fails, **Retry** keeps the rows already loaded.
+- The server applies authorization, archive state, origin filters, and sort order before it selects a page.
+- A cursor uses the sort timestamp, creation timestamp, and thread ID. Equal timestamps do not drop rows.
+- Pins, grouped project threads, pending approvals, the selected thread, and the implicit default remain available beyond the recent page.
+- Recent pages are independent of pins and projects. A pinned recent row can reduce the number of unpinned rows among the first ten.
+- Search checks titles and persisted messages across authorized history. Project-name matches include assigned threads outside loaded pages.
+- Page cache keys include the workspace runtime, sort, and origin. Selection, pins, project assignments, and approvals do not reset loaded pages.
+- Supplemental rows use separate requests with at most 50 IDs and 3,000 encoded fixed-ID query bytes per batch. These rows ignore origin filters.
+- The archived approval marker waits for supplemental reads. An active row outside the origin filter does not imply archived history.
+- Workspace switches do not reuse another workspace's rows. The selected thread is requested explicitly when opening its conversation.
+- The server and client break equal creation timestamps by ascending thread ID.
+- Live activity updates loaded rows without refetching pages. An unloaded row gets one authorized fixed-row read per active activity-sorted list.
+- Promoted rows enter the first cached page without changing its cursor. Pending page reads are cancelled before insertion to prevent stale overwrites.
+- Supplemental placeholders contain only current pins, project assignments, approvals, and selection. Clearing selection removes its old supplemental row immediately.
+- Successful archiving cancels pending activity reads for that thread before refreshing lists. A late response cannot restore the archived row.
+- Completed turns and normal list invalidations still refresh the list. A failed activity read uses the existing list retry path.
+- Existing mutation updates support both single-page and infinite-query cache shapes.
+
+The first version scans authorized candidate metadata before paging. Activity and pull-request enrichment runs only for returned rows.
+This limits response size and enrichment work, but does not bound candidate metadata reads. Unpaged API callers and archived history keep their existing response behavior.
+
+
+## Start a thread in a project
+
+Each project folder has a visible plus button, including when collapsed.
+The button creates a thread with workspace defaults and assigns it to that project using existing sidebar preferences.
+Creation expands the project, opens the thread, and focuses the composer.
+If creation fails, the project stays unchanged and the sidebar shows retry guidance.
+Switching workspaces while creation is pending must not navigate to the previous workspace's thread.
+
+Project folder hover and focus highlights use square corners, matching the adjacent thread selection rows.
+
+
+### Delete a project
+
+Right-click a project folder header or use its visible menu button to select
+**Delete project**. The confirmation explains that every assigned chat will be
+archived, including pinned chats and chats outside the loaded pages. An empty
+folder can also be deleted. Archived chats remain available in **Show archived**.
+
+The folder and its assignments are removed only after every archive succeeds.
+If an archive fails, the folder stays and the dialog offers **Retry delete
+project**; chats already archived remain archived. A new assignment from another
+tab during the operation also keeps the folder for retry. Deletion uses the
+original workspace even if the user switches workspaces while it runs, and does
+not navigate or change preferences in the new workspace. Project folders remain
+personal browser preferences; archiving uses the existing chat access checks.

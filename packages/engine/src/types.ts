@@ -2708,10 +2708,11 @@ export interface CreateSessionOptions {
   /**
    * Host-injected re-reader for the session's skill set (plugin skills plus
    * the stored skills the owner can reach, merged by the host's shadow rule).
-   * `Session.refreshCommandRegistry()` invokes it and replaces the session's
-   * skill map with the result, so managed skills created or edited after the
-   * session was built reach the slash-command registry and `skill`-tool
-   * lookups of a long-lived (cached) session. Absent === the skill set stays
+   * `Session.refreshCommandRegistry()` and `Session.refreshSkills()` (at the
+   * start of each turn) invoke it and replace the session's skill map with
+   * the result, so managed skills created or edited after the session was
+   * built reach the slash-command registry and the `skill` tool of a
+   * long-lived (cached) session. Absent === the skill set stays
    * the construction-time `options.skills`, exactly as before.
    */
   skillsProvider?: () => Promise<SkillSource[]>;

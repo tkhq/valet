@@ -191,11 +191,20 @@ and `signal` records engine-routed admissions.
   the same line renders. If a gap remains on the events path, close it here.
 - **Outbound identity (TKAI-387).** Host deliveries and Slack actions resolve
   the current workspace name. Team and organization runs use their owner's
-  name. Personal runs use the bot identity.
+  name. Personal runs use the bot identity. Workflows may set
+  `definition.presence: { displayName?, avatarUrl? }`; event subscriptions may
+  set `target.presence` for either an assistant or workflow target. Fields
+  inherit in order: workspace, workflow, subscription, explicit action arguments.
+  The editor exposes these as Presence settings. Clearing a field restores its
+  inherited default. Settings change appearance, never the runtime owner.
+  Runs retain the definition and subscription presence captured at admission;
+  assistant turns carry presence in durable submission metadata. Followed Slack
+  replies read the bound subscription's current settings. No schema migration
+  or rewrite of existing definitions, chats, files, or memories is required.
   `reply_to_origin`, `send_message`, `dm_owner`, and `dm_user` accept optional
   `sender_name` and `sender_avatar_url` parameters. Each parameter overrides
   its default for that message. Workflow tool steps persist these parameters.
-  An upstream `set` node can hold a shared identity for downstream Slack steps.
+  Existing per-step overrides continue to work.
   Agent steps pass the same parameters through their tool calls.
   These settings do not change credentials, permissions, or the bot's DM identity.
   `profile_pictures.publish_avatar` converts a current-chat image attachment
@@ -204,9 +213,9 @@ and `signal` records engine-routed admissions.
   The existing profile-picture normalizer bounds the size, removes metadata,
   and writes a WebP copy. Only this copy is public under `/avatars/workflows/`.
   The publication tool uses the normal high-risk action approval path.
-  Workflow authors store its URL in `sender_avatar_url`; later runs do not
+  Workflow authors store its URL in `presence.avatarUrl`; later runs do not
   depend on the source chat. Retries reuse the same source-scoped content key.
-  Automatic replies and approval cards keep their existing workspace identity.
+  Automatic replies and approval cards use the asking submission's presence.
   Slack maps the display name and avatar URL to `username` and `icon_url` on
   `chat.postMessage`, using `chat:write.customize`. Names have an 80-character
   limit. Avatar URLs must use HTTPS and be accessible to Slack.
@@ -446,3 +455,20 @@ support native spans.
 The web question card accepts image uploads, clipboard images, and dropped images. An answer can contain images without text. Failed submissions retain the draft and its images. Changing questions clears that draft.
 
 Question resolutions retain inline images for restart replay. The question tool returns them as model-visible image attachments. The avatar publishing tool can select a question-answer photo from the same thread. Approval and credential gates do not accept images. Existing image count and size limits apply; remote URLs are rejected.
+
+### Agent configuration tools
+
+`events.list_subscriptions` lists the current personal or team workspace's subscriptions.
+It supports an exact name filter and bounded pagination (default 25, maximum 100).
+`events.set_subscription_presence` replaces the selected subscription's presence; null clears it.
+Both tools require organization membership. Team access also requires current team membership.
+Unlinked channel senders cannot use either tool. Organization-owned subscriptions remain outside these tools.
+The write changes only the target's presence field and update timestamp with an atomic JSONB operation.
+It preserves concurrent target edits, matching rules, ownership, and enabled state.
+`workflows.create_trigger` and `workflows.propose_trigger` accept presence for new workflow event subscriptions.
+
+## Presence during follow and replay
+
+Every subscription-created follow binding retains its subscription ID, including personal subscriptions. Followed replies read current presence from that rule.
+Empty presence objects behave as unset, including previously stored values. Overheard messages coalesce only when their display name and avatar overrides match.
+The digest retains those overrides. Different identities and sender authorities remain separate. Approval replay retains the blocked submission metadata across restart.

@@ -28,7 +28,7 @@ export interface InstanceListJson {
 export function buildListJson(config: ValetConfig): InstanceListJson {
   const profiles: Record<string, { url: string; hasKey: boolean }> = {};
   for (const [name, p] of Object.entries(config.profiles ?? {})) {
-    profiles[name] = { url: p.url, hasKey: p.apiKey !== undefined && p.apiKey !== "" };
+    profiles[name] = { url: p.url, hasKey: (p.apiKey !== undefined && p.apiKey !== "") || p.cli !== undefined };
   }
   const out: InstanceListJson = { profiles };
   if (config.defaultProfile !== undefined) out.defaultProfile = config.defaultProfile;

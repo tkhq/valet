@@ -33,9 +33,9 @@ function ChatPage() {
   const runtimeId = conversation.data?.sessionId;
   const createThread = useCreateThread(runtimeId ?? "");
   // The notice follows the open thread: a helper thread is private, a Slack thread follows its channel.
-  const threads = useThreads(runtimeId ?? "");
+  const threads = useThreads(runtimeId ?? "", undefined, thread);
   const list = threads.data?.threads ?? [];
-  const active = list.find(t => t.id === (thread ?? defaultThreadId(list)));
+  const active = list.find(t => t.id === (thread ?? threads.data?.defaultThreadId ?? defaultThreadId(list)));
   const sessionId = active?.sessionId ?? runtimeId;
   const activeKey = active?.key;
   usePageTitle(active?.title || "Chat");

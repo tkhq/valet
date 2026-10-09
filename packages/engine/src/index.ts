@@ -314,3 +314,5 @@ export {
 } from "./document-text.js";
 export { formatTranscriptText } from "./transcript-formatter.js";
 export { nestedKubernetesDecision, NESTED_KUBERNETES_IDENTITY, NESTED_KUBERNETES_UNSUPPORTED } from "./sandbox/nested-kubernetes.js";
+
+export { validatePluginHttpRoutes, MAX_PLUGIN_HTTP_BODY_BYTES, type PluginHttpRoute, type PluginHttpRequest, type PluginHttpCaller, type PluginIngressVerification } from "./plugin-http.js";

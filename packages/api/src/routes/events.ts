@@ -329,9 +329,10 @@ eventsRouter.get("/events/log", async (c) => {
   if (filter.error || !filter.owner) return c.json({ error: filter.error ?? "Send ownerType and ownerId for the workspace whose Log to read." }, 400);
   const owner = filter.owner;
   const problemsOnly = c.req.query("problems") === "1";
+  const diagnostics = c.req.query("diagnostics") === "1";
   const q = c.req.query("q")?.trim() || undefined;
   if (q && q.length > 200) return c.json({ error: "q must be 200 characters or fewer" }, 400);
-  const scopeKey = JSON.stringify([owner, problemsOnly, q ?? null]);
+  const scopeKey = JSON.stringify([owner, problemsOnly, diagnostics, q ?? null]);
   const rawCursor = c.req.query("cursor");
   const decoded = rawCursor === undefined ? undefined : decodePageCursor(rawCursor);
   const before = decoded && decoded.orgId === user.orgId && decoded.scope === scopeKey &&
@@ -341,14 +342,14 @@ eventsRouter.get("/events/log", async (c) => {
 
   const admin = await isOrgAdminUser(c);
   const { items, hasMore } = await listEventLog(db, {
-    orgId: user.orgId, owner, admin, limit, problemsOnly, ...(q ? { q } : {}), ...(before ? { before } : {}),
+    orgId: user.orgId, owner, admin, limit, problemsOnly, diagnostics, ...(q ? { q } : {}), ...(before ? { before } : {}),
     channelVisible: channelsVisibleTo(c),
   });
   const last = items.at(-1);
   const resp: EventLogResponse = {
     items,
     nextCursor: hasMore && last ? encodePageCursor({ orgId: user.orgId, scope: scopeKey, at: last.at, id: last.id }) : null,
-    lastEventAt: await lastEventLogActivity(db, user.orgId, admin),
+    lastEventAt: await lastEventLogActivity(db, user.orgId, admin, diagnostics),
     windowDays: EVENT_LOG_WINDOW_MS / (24 * 60 * 60 * 1000),
   };
   return c.json(resp);
@@ -734,6 +735,12 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // Validated jsonb narrows to the wire union, as before; old rows may also carry `assistantId`.
   const { assistantId: _retired, ...storedTarget } = row.target as EventSubscriptionTargetWire & { assistantId?: unknown };
   let patchedTarget: EventSubscriptionTargetWire = storedTarget;
+  if (body.presence === null) {
+    const { presence: _cleared, ...rest } = patchedTarget;
+    patchedTarget = rest;
+  } else if (body.presence !== undefined) {
+    patchedTarget = { ...patchedTarget, presence: body.presence };
+  }
   if (body.deliveryPolicy !== undefined || body.pauseOnOverlap !== undefined) {
     if (row.ownerType !== "user" || patchedTarget.kind !== "orchestrator") return c.json({ error: "Delivery preferences apply only to personal assistant subscriptions." }, 400);
     patchedTarget = { ...patchedTarget,

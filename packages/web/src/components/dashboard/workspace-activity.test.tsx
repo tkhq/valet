@@ -151,3 +151,39 @@ it("keeps navigation through empty filtered artifact pages", async () => {
   await waitFor(() => expect(within(results).queryByRole("button", { name: "Latest artifacts" })).toBeNull());
   expect(within(results).getByRole("button", { name: "Next artifacts" })).toBeTruthy();
 });
+
+it("pages conversation updates in tens, recovers after archiving, and resets for another workspace", async () => {
+  const threads = Array.from({ length: 21 }, (_, i) => ({ sessionId: "s", threadId: `update-${i}`, title: `Update ${i + 1}`, lastAgentActivityAt: 100 - i, unread: false }));
+  vi.mocked(api.getWaitingThreads).mockResolvedValue({ threads });
+  const { client, rerender } = setup();
+  const updates = await screen.findByRole("region", { name: "Conversation updates" });
+  expect(within(updates).getAllByRole("link", { name: "Open thread" })).toHaveLength(10);
+  expect(within(updates).getByRole("button", { name: "Previous page" }).hasAttribute("disabled")).toBe(true);
+  expect(within(updates).queryByText("Update 11")).toBeNull();
+  fireEvent.click(within(updates).getByRole("button", { name: "Next page" }));
+  expect(within(updates).getByText("Update 11")).toBeTruthy();
+  expect(within(updates).getAllByRole("link", { name: "Open thread" })).toHaveLength(10);
+  fireEvent.click(within(updates).getByRole("button", { name: "Next page" }));
+  expect(within(updates).getAllByRole("link", { name: "Open thread" })).toHaveLength(1);
+  expect(within(updates).getByRole("button", { name: "Next page" }).hasAttribute("disabled")).toBe(true);
+  vi.mocked(api.getWaitingThreads).mockResolvedValue({ threads: threads.slice(0, 20) });
+  fireEvent.click(within(updates).getByRole("button", { name: "Archive Update 21" }));
+  await waitFor(() => expect(within(updates).getByText("Page 2 of 2")).toBeTruthy());
+  expect(within(updates).getAllByRole("link", { name: "Open thread" })).toHaveLength(10);
+  fireEvent.click(within(updates).getByRole("button", { name: "Previous page" }));
+  expect(within(updates).getByText("Update 1")).toBeTruthy();
+  fireEvent.click(within(updates).getByRole("button", { name: "Next page" }));
+  owner = { ownerType: "team", ownerId: "other-team" };
+  rerender(<QueryClientProvider client={client}><WorkspaceActivity owner={owner} /></QueryClientProvider>);
+  const teamUpdates = await screen.findByRole("region", { name: "Conversation updates" });
+  expect(within(teamUpdates).getByText("Page 1 of 2")).toBeTruthy();
+  expect(within(teamUpdates).getByText("Update 1")).toBeTruthy();
+});
+
+it("does not show pagination for ten or fewer conversation updates", async () => {
+  vi.mocked(api.getWaitingThreads).mockResolvedValue({ threads: Array.from({ length: 10 }, (_, i) => ({ sessionId: "s", threadId: `update-${i}`, title: `Update ${i}`, lastAgentActivityAt: i, unread: false })) });
+  setup();
+  const updates = await screen.findByRole("region", { name: "Conversation updates" });
+  expect(within(updates).getAllByRole("link", { name: "Open thread" })).toHaveLength(10);
+  expect(within(updates).queryByRole("navigation")).toBeNull();
+});

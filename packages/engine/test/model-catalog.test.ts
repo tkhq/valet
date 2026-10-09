@@ -3,7 +3,7 @@ import * as builtinCatalog from "@earendil-works/pi-ai/providers/all";
 import { getSupportedThinkingLevels, type TranscriptContext } from "@earendil-works/pi-ai";
 import { streamSimple as streamOpenAI } from "@earendil-works/pi-ai/api/openai-responses";
 import { streamSimple as streamAnthropic } from "@earendil-works/pi-ai/api/anthropic-messages";
-import { bundledModel, bundledModels, isDisabledModel } from "../src/model-catalog.js";
+import { bundledModel, bundledModels } from "../src/model-catalog.js";
 
 vi.mock("@earendil-works/pi-ai/providers/all", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@earendil-works/pi-ai/providers/all")>();
@@ -13,6 +13,12 @@ vi.mock("@earendil-works/pi-ai/providers/all", async (importOriginal) => {
 afterEach(() => vi.resetAllMocks());
 
 describe("bundled model catalog", () => {
+  it("hides retired Sol from selection while resolving existing sessions", () => {
+    expect(bundledModels("openai").some((model) => model.id === "gpt-5.6-sol")).toBe(false);
+    expect(bundledModel("openai", "gpt-5.6-sol")?.id).toBe("gpt-5.6-sol");
+    expect(bundledModels("openai").some((model) => model.id === "gpt-6.1-sol")).toBe(true);
+  });
+
   it("preserves upstream model metadata", () => {
     const upstream = builtinCatalog.getBuiltinModels("anthropic");
     expect(bundledModels("anthropic").slice(0, upstream.length)).toEqual(upstream);
@@ -31,10 +37,10 @@ describe("bundled model catalog", () => {
     });
   });
 
-  it.each(["gpt-6-astra", "gpt-6-astra-20261001", "openai/gpt-6-astra", "openrouter/openai/gpt-6-astra", "openrouter/openai/gpt-6-astra:nitro", "openrouter/openai/gpt-6-astra:floor"])("excludes disabled Astra variant %s", (id) => {
-    expect(isDisabledModel(id)).toBe(true);
-    expect(bundledModel("openai", id)).toBeUndefined();
-    expect(bundledModels("openai").some((model) => isDisabledModel(model.id))).toBe(false);
+  it("includes Astra with the SDK metadata", () => {
+    const upstream = builtinCatalog.getBuiltinModel("openai", "gpt-6-astra");
+    expect(bundledModel("openai", "gpt-6-astra")).toEqual(upstream);
+    expect(bundledModels("openai").filter((model) => model.id === "gpt-6-astra")).toEqual([upstream]);
   });
 
   it.each([["openai", "gpt-6.1-sol"], ["anthropic", "claude-sonnet-5-5"]] as const)("uses upstream metadata and deduplicates %s/%s", (provider, id) => {
@@ -50,7 +56,7 @@ describe("bundled model catalog", () => {
     expect(bundledModel(provider, id)).toBe(upstream);
   });
 
-  it.each([["openai", "gpt-6.1-sol", 1_050_000], ["anthropic", "claude-sonnet-5-5", 1_000_000]] as const)(
+  it.each([["openai", "gpt-6.1-sol", 272_000], ["anthropic", "claude-sonnet-5-5", 1_000_000]] as const)(
     "adds %s/%s with its supported effort levels", (provider, id, contextWindow) => {
       const model = bundledModel(provider, id);
       expect(model).toMatchObject({ id, provider, contextWindow, maxTokens: 128_000, cost: { input: 2, output: 10 } });
@@ -95,7 +101,11 @@ describe("bundled model catalog", () => {
     } else {
       expect(request.url).toBe("https://api.anthropic.com/v1/messages?beta=true");
       expect(body.thinking.type).toBe("adaptive");
-      expect(body.output_config.effort).toBe("low");
+      if (model.compat?.supportsMidConvoEffort) {
+        expect(body.messages.at(-1)).toMatchObject({ role: "system", output_config: { effort: "low" } });
+      } else {
+        expect(body.output_config.effort).toBe("low");
+      }
       expect(body.temperature).toBeUndefined();
     }
   });

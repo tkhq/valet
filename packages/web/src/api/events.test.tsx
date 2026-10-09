@@ -80,8 +80,9 @@ describe("qkEvents", () => {
       "team",
       "t_eng",
     ]);
+    expect(qkEvents.log({ ownerType: "user", ownerId: "u1" }, true, "slack", true)).not.toEqual(qkEvents.log({ ownerType: "user", ownerId: "u1" }, true, "slack", false));
     expect(qkEvents.log({ ownerType: "user", ownerId: "u1" }, true, "slack")).toEqual([
-      "events", "log", "user", "u1", "problems", "slack",
+      "events", "log", "user", "u1", "problems", "slack", false,
     ]);
   });
 

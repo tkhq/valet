@@ -31,12 +31,11 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Trash2,
   X,
 } from "lucide-react";
 import type {
   DecisionGate,
-  GetModelTiersResponse,
-  ModelInfo,
   ChildWorkSummary,
   ThreadPullRequest,
   ThreadSummary,
@@ -46,17 +45,16 @@ import {
   useCreateThread,
   useRenameThread,
   useReplaceSandbox,
-  useSession,
   useMarkThreadsRead,
   useSetThreadArchived,
-  useThreads,
+  useSidebarThreads,
   useThreadSearch,
 } from "~/api/queries";
 import { isThreadUnread, pendingAgentQuestion, rowPullRequest } from "~/lib/thread-read";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
-import { useThreadProjects } from "~/lib/thread-projects";
-import { useMe, useModels, useModelTiers } from "~/api/settings";
+import { projectThreadIds, removeArchivedProject, useThreadProjects } from "~/lib/thread-projects";
+import { useMe } from "~/api/settings";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { ThreadStatusIcon } from "./thread-status-icon";
 import { useStreamStore, useThreadLiveStatus, useQueueStateForThread, queueBusy } from "~/stores/stream";
@@ -64,6 +62,7 @@ import { createDebouncer } from "~/lib/debounce";
 import { formatChord } from "~/lib/chat-keybindings";
 import {
   Button,
+  ConfirmDialog,
   Dialog,
   DialogContent,
   DialogTitle,
@@ -82,8 +81,6 @@ import {
 } from "~/components/primitives";
 import { formatWhen } from "~/lib/format-when";
 import { cn } from "~/lib/cn";
-import { sameModelSpec } from "~/lib/models";
-import { isSizeTier, selectionLabel, tierSubtitle, TIER_LABELS } from "~/lib/model-tiers";
 import { getSubconversationsCollapsed, setSubconversationsCollapsed } from "~/lib/preferences";
 import { defaultThreadId, isAppAssistantThread } from "~/lib/thread-default";
 
@@ -242,7 +239,7 @@ export function ThreadTree({ sessionId: override, showChildren = true }: ThreadT
 
   if (!sessionId) return <ThreadTreeWaiting />;
 
-  return <ThreadTreeInner sessionId={sessionId} showChildren={showChildren} />;
+  return <ThreadTreeInner key={sessionId} sessionId={sessionId} showChildren={showChildren} />;
 }
 
 /**
@@ -277,6 +274,12 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const projects = useThreadProjects(viewer.data?.id ?? "loading", sessionId);
   const [projectDialog, setProjectDialog] = useState(false);
   const [projectName, setProjectName] = useState("");
+  const [projectMenu, setProjectMenu] = useState<string>();
+  const [deleteProject, setDeleteProject] = useState<{ id: string; name: string }>();
+  const [deletingProject, setDeletingProject] = useState(false);
+  const deletingRef = useRef(false);
+  const [deleteError, setDeleteError] = useState<string>();
+
   const [projectError, setProjectError] = useState<string>();
   function createProject() {
     const name = projectName.trim();
@@ -289,15 +292,36 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     setProjectDialog(false);
     setProjectName("");
   }
-  const threadsQ = useThreads(sessionId);
+  const search = (useSearch({ strict: false }) ?? {}) as { thread?: string; child?: string };
+  const [sortMode, setSortMode] = useState<ThreadSortMode>(() => loadStoredThreadSort());
+  const [originFilter, setOriginFilter] = useState<ThreadOriginBucket>(() => loadStoredOriginFilter());
+  // Seed pending gates from REST for ourselves — the tree must not depend
+  // on a SessionView being mounted for the same session. Live updates
+  // arrive via the wire (`gate.*` frames); the record's identity only
+  // changes when a gate opens or resolves, so the derived set is cheap.
+  usePendingGatesSeed(sessionId);
+  const pendingGates = useStreamStore((s) => s.bySession[sessionId]?.pendingGates);
+  const gatedThreadIds = useMemo(() => threadIdsWithPendingGates(pendingGates), [pendingGates]);
+
+  const fixedIds = [...new Set([...gatedThreadIds, ...projects.value.pinned, ...Object.keys(projects.value.assignments).filter(id =>
+    projects.value.grouped && projects.value.projects.some(project => project.id === projects.value.assignments[id]))])].sort();
+  const threadsQ = useSidebarThreads(sessionId, { sort: sortMode, origin: originFilter, fixedIds, threadId: search.thread });
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const moreRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const target = moreRef.current;
+    if (!target || !threadsQ.hasNextPage || threadsQ.isFetching || threadsQ.isError || typeof IntersectionObserver === "undefined") return;
+    let requested = false;
+    const observer = new IntersectionObserver(entries => {
+      if (!requested && entries.some(entry => entry.isIntersecting)) {
+        requested = true;
+        void threadsQ.fetchNextPage();
+      }
+    }, { root: scrollRef.current });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [threadsQ.hasNextPage, threadsQ.isFetching, threadsQ.isError, threadsQ.fetchNextPage]);
   const markRead = useMarkThreadsRead(sessionId);
-  // Session default model, for the pin chip: a chip renders only on threads
-  // whose pin DIVERGES from it (every new thread pins at creation, so an
-  // always-on chip would just be noise).
-  const sessionQ = useSession(sessionId);
-  const sessionModel = sessionQ.data?.model;
-  const modelsQ = useModels();
-  const tierMapQ = useModelTiers();
   const childrenQ = useChildWork(sessionId, {
     refetchInterval: CHILDREN_POLL_MS,
     enabled: showChildren,
@@ -314,36 +338,29 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const archivedQ = useArchivedThreads(sessionId, { enabled: showArchived });
   const navigate = useNavigate({ from: "/chat" });
 
-  const search = (useSearch({ strict: false }) ?? {}) as { thread?: string; child?: string };
-  const [sortMode, setSortMode] = useState<ThreadSortMode>(() => loadStoredThreadSort());
   const threads = useMemo(
     () => sortThreads((threadsQ.data?.threads ?? []).filter((thread) => !isAppAssistantThread(thread)), sortMode),
     [threadsQ.data, sortMode],
   );
   // Both the sidebar and SessionView use this creation-order default. Sort only changes row order.
-  const defaultId = defaultThreadId(threads);
+  const defaultId = threadsQ.data?.defaultThreadId ?? defaultThreadId(threads);
   const activeThreadId = search.thread ?? defaultId;
   const grouped = groupChildrenByThread(showChildren ? (childrenQ.error ? [] : flattenChildWork(childrenQ.data)) : []);
-
-  // Seed pending gates from REST for ourselves — the tree must not depend
-  // on a SessionView being mounted for the same session. Live updates
-  // arrive via the wire (`gate.*` frames); the record's identity only
-  // changes when a gate opens or resolves, so the derived set is cheap.
-  usePendingGatesSeed(sessionId);
-  const pendingGates = useStreamStore((s) => s.bySession[sessionId]?.pendingGates);
-  const gatedThreadIds = useMemo(() => threadIdsWithPendingGates(pendingGates), [pendingGates]);
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchSelectedId, setSearchSelectedId] = useState<string>();
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const debouncedSearch = useDebouncedValue(normalizedSearch, 250);
-  const contentSearch = useThreadSearch(sessionId, debouncedSearch, searchOpen);
+  const matchingProjects = projects.value.projects.filter(project => project.name.toLowerCase().includes(debouncedSearch));
+  const projectSearchIds = Object.keys(projects.value.assignments).filter(id => matchingProjects.some(project => project.id === projects.value.assignments[id]));
+  const contentSearch = useThreadSearch(sessionId, debouncedSearch, searchOpen, projectSearchIds);
   const contentMatchIds = new Set(
     debouncedSearch === normalizedSearch ? contentSearch.data?.threads.map((thread) => thread.id) : [],
   );
   const searching = !!normalizedSearch && (debouncedSearch !== normalizedSearch || contentSearch.isFetching);
-  const searchResults = threads.filter((thread) => {
+  const searchCandidates = [...new Map([...threads, ...(debouncedSearch === normalizedSearch ? contentSearch.data?.threads ?? [] : [])].map(thread => [thread.id, thread])).values()];
+  const searchResults = sortThreads(searchCandidates.filter(thread => !isAppAssistantThread(thread)), sortMode).filter((thread) => {
     const project = projects.value.projects.find((p) => p.id === projects.value.assignments[thread.id]);
     return contentMatchIds.has(thread.id) || `${thread.title ?? ""} ${project?.name ?? ""}`.toLowerCase().includes(normalizedSearch);
   });
@@ -353,8 +370,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     setSearchOpen(false);
     navigate({ search: (prev) => ({ ...prev, thread: threadId, child: undefined }) });
   }
-  const [originFilter, setOriginFilter] = useState<ThreadOriginBucket>(() => loadStoredOriginFilter());
-  const originCounts = useMemo(() => bucketCounts(threads), [threads]);
+  const originCounts = threadsQ.data?.originCounts ?? bucketCounts(threads);
   const visible = originFilter === "all" ? threads : threads.filter((thread) => threadOriginBucket(thread) === originFilter);
   function selectOriginFilter(next: ThreadOriginBucket) {
     setOriginFilter(next);
@@ -366,7 +382,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   }
   // A gate on an archived thread has no row in `visible`; without this the
   // gate would be invisible while the archived section is closed.
-  const archivedGated = threadsQ.data !== undefined && hasGateOutsideList(threadsQ.data?.threads ?? [], gatedThreadIds);
+  const archivedGated = threadsQ.data !== undefined && threadsQ.fixedReady && hasGateOutsideList(threadsQ.data?.threads ?? [], gatedThreadIds);
 
   function selectThreadSort(next: ThreadSortMode) {
     setSortMode(next);
@@ -379,13 +395,61 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  async function createAndNavigate() {
-    // A new top-level thread uses current defaults, not the active thread's settings.
-    const thread = await createThread.mutateAsync();
-    navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
-    // Land the cursor in the composer — a fresh thread exists to be
-    // typed into.
-    useComposerPrefillStore.getState().requestFocus();
+  const [creationError, setCreationError] = useState<string>();
+  const currentSession = useRef<string | undefined>(sessionId);
+  useEffect(() => {
+    currentSession.current = sessionId;
+    return () => { currentSession.current = undefined; };
+  }, [sessionId]);
+
+  async function createAndNavigate(projectId?: string) {
+    setCreationError(undefined);
+    try {
+      // A new thread uses the workspace defaults, not the active thread's settings.
+      const thread = await createThread.mutateAsync();
+      if (projectId) moveThread(thread.id, projectId);
+      // A workspace switch during creation must not open the old workspace's thread.
+      if (currentSession.current !== sessionId) return;
+      navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
+      useComposerPrefillStore.getState().requestFocus();
+    } catch {
+      if (currentSession.current === sessionId) setCreationError("Could not create the thread. Try again.");
+    }
+  }
+
+  async function confirmDeleteProject() {
+    if (!deleteProject || deletingRef.current) return;
+    deletingRef.current = true;
+    setDeletingProject(true);
+    setDeleteError(undefined);
+    const ids = projectThreadIds(projects.readCurrent(), deleteProject.id);
+    const archivedIds = new Set<string>();
+    // Bound concurrency and attempt every chat, even when an earlier archive fails.
+    for (const threadId of ids) {
+      try {
+        await setArchived.mutateAsync({ threadId, archived: true });
+        archivedIds.add(threadId);
+      } catch { /* Keep the folder and offer a retry after all attempts. */ }
+    }
+    let removed = false;
+    if (archivedIds.size === ids.length) {
+      projects.update(current => {
+        const next = removeArchivedProject(current, deleteProject.id, archivedIds);
+        removed = !next.projects.some(project => project.id === deleteProject.id);
+        return next;
+      });
+    }
+    deletingRef.current = false;
+    if (currentSession.current !== sessionId) return;
+    setDeletingProject(false);
+    if (removed) {
+      setDeleteProject(undefined);
+      if (activeThreadId && archivedIds.has(activeThreadId)) {
+        navigate({ search: prev => ({ ...prev, thread: undefined, child: undefined }) });
+      }
+    } else {
+      setDeleteError("The project was kept because some chats could not be archived or its assignments changed. Already archived chats stay archived. Try again to finish deleting the project.");
+    }
   }
 
   const archiveActive = useCallback(() => {
@@ -447,9 +511,6 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               key={t.id}
               thread={t}
               isDefault={t.id === defaultId}
-              sessionModel={sessionModel}
-              models={modelsQ.data?.models ?? []}
-              tierMap={tierMapQ.data}
               active={t.id === activeThreadId}
               hasPendingGate={gatedThreadIds.has(t.id)}
               childSessions={grouped.get(t.id) ?? []}
@@ -496,6 +557,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
         </button>
         <button type="button" aria-label="Search threads" title="Search threads" onClick={openSearch} className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink"><Search className="h-4 w-4" /></button>
       </div>
+      {creationError && <p role="alert" className="px-4 py-2 text-xs text-danger-500">{creationError}</p>}
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}>
         <DialogContent hideClose className="max-w-2xl rounded-2xl p-2 gap-1" onOpenAutoFocus={(event) => { event.preventDefault(); searchInputRef.current?.focus(); }}>
           <DialogTitle className="sr-only">Search threads</DialogTitle>
@@ -535,7 +597,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
       {/* Plain overflow div, NOT the Radix ScrollArea — its viewport wraps
           content in a `display: table` div that sizes to intrinsic content
           width, which defeats row truncation within the fixed-width sidebar. */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
         <nav className="pb-3">
           <div className="flex items-center gap-1 px-3 py-2">
             <button onClick={() => projects.update((current) => ({ ...current, collapsed: !current.collapsed }))} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-sm text-muted hover:text-ink">Projects {threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
@@ -577,28 +639,49 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
             </DialogContent>
           </Dialog>
 
+          <ConfirmDialog open={!!deleteProject} onOpenChange={open => { if (!open && !deletingRef.current) { setDeleteProject(undefined); setDeleteError(undefined); } }}
+            title={`Delete project “${deleteProject?.name ?? ""}”?`}
+            description="All chats assigned to this project will be archived, including chats outside the loaded list. You can restore them from archived chats. The project folder will be removed."
+            confirmLabel={deleteError ? "Retry delete project" : "Delete project"} pendingLabel="Archiving chats…" pending={deletingProject}
+            error={deleteError ? <span role="alert">{deleteError}</span> : undefined} onConfirm={() => void confirmDeleteProject()} />
+
           {threadsQ.isLoading && (
             <div className="px-4 py-3 flex items-center gap-2 text-sm text-muted">
               <Spinner size={14} /> Loading…
             </div>
           )}
+          {threadsQ.fixedError && (
+            <div role="alert" className="px-4 py-3 text-sm text-danger-500">Could not load pinned, project, or selected threads. {threadsQ.fixedError.message} <button type="button" onClick={() => void threadsQ.refetchFixed()} className="underline">Retry</button></div>
+          )}
           {threadsQ.error && (
-            <div className="px-4 py-3 text-sm text-danger-500">Failed to load threads</div>
+            <div role="alert" className="px-4 py-3 text-sm text-danger-500">Could not load threads. <button type="button" onClick={() => void (threadsQ.isFetchNextPageError ? threadsQ.fetchNextPage() : threadsQ.refetch())} className="underline">Retry</button></div>
           )}
           {visible.some((thread) => projects.value.pinned.includes(thread.id)) && <section aria-label="Pinned"><h2 className="px-4 pb-1 pt-3 text-xs font-medium text-muted">Pinned</h2>{visible.filter((thread) => projects.value.pinned.includes(thread.id)).map(renderThread)}</section>}
           {projects.value.grouped && !projects.value.collapsed && projects.value.projects.map((project) => {
             const members = visible.filter((thread) => !projects.value.pinned.includes(thread.id) && projects.value.assignments[thread.id] === project.id);
-            return <section key={project.id} aria-label={`Project: ${project.name}`} {...dropHandlers(project.id)} className={cn("mb-1 rounded-lg transition-colors", dropTarget === project.id && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}>
-              <button type="button" aria-expanded={!project.collapsed} onClick={() => projects.update((current) => ({ ...current, projects: current.projects.map((item) => item.id === project.id ? { ...item, collapsed: !item.collapsed } : item) }))} className="flex w-full items-center gap-2 rounded-lg px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
+            return <section key={project.id} aria-label={`Project: ${project.name}`} {...dropHandlers(project.id)} className={cn("mb-1 transition-colors", dropTarget === project.id && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}>
+              <div className="flex items-center pr-2" onContextMenu={event => { event.preventDefault(); setProjectMenu(project.id); }}>
+              <button type="button" aria-expanded={!project.collapsed} onClick={() => projects.update((current) => ({ ...current, projects: current.projects.map((item) => item.id === project.id ? { ...item, collapsed: !item.collapsed } : item) }))} className="flex min-w-0 flex-1 items-center gap-2 rounded-none px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
                 {project.collapsed ? <Folder className="h-4 w-4 shrink-0" /> : <FolderOpen className="h-4 w-4 shrink-0" />}
                 <span className="truncate">{project.name}</span>{members.some((thread) => gatedThreadIds.has(thread.id)) && <Bell aria-label="Needs approval" className="ml-auto h-3.5 w-3.5 shrink-0 text-amber-500" />}
               </button>
-              {!project.collapsed && <div className="ml-4 border-l border-line/50">{members.map(renderThread)}{members.length === 0 && <p className="px-4 py-2 text-xs text-muted">Move a thread here</p>}</div>}
+                <button type="button" aria-label={`New thread in ${project.name}`} title={`New thread in ${project.name}`} disabled={createThread.isPending}
+                  onClick={() => void createAndNavigate(project.id)}
+                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss disabled:opacity-50 sm:h-8 sm:w-8">
+                  <Plus className="h-4 w-4" aria-hidden />
+                </button>
+                <DropdownMenu open={projectMenu === project.id} onOpenChange={open => setProjectMenu(open ? project.id : undefined)}>
+                  <DropdownMenuTrigger asChild><button type="button" aria-label={`Project menu: ${project.name}`} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss sm:h-8 sm:w-8"><MoreHorizontal className="h-4 w-4" aria-hidden /></button></DropdownMenuTrigger>
+                  <DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => { setDeleteError(undefined); setDeleteProject({ id: project.id, name: project.name }); }}><Trash2 aria-hidden />Delete project</DropdownMenuItem></DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+              {!project.collapsed && <div className="ml-4 border-l border-line/50">{members.map(renderThread)}{members.length === 0 && <p className="px-4 py-2 text-xs text-muted">Start a thread with + or move one here</p>}</div>}
             </section>;
           })}
           <section aria-label="Recents" {...dropHandlers()} className={cn("min-h-16 rounded-lg transition-colors", dropTarget === "recents" && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}><h2 className="px-4 pb-1 pt-4 text-xs font-medium text-muted">Recents</h2>
           {visible.filter((thread) => !projects.value.pinned.includes(thread.id) && (!projects.value.grouped || !projects.value.projects.some((project) => project.id === projects.value.assignments[thread.id]))).map(renderThread)}
           </section>
+          {threadsQ.hasNextPage && <button ref={moreRef} type="button" disabled={threadsQ.isFetching} onClick={() => void threadsQ.fetchNextPage()} className="px-4 py-2 text-xs text-moss">{threadsQ.isFetchingNextPage ? "Loading threads…" : "Load more threads"}</button>}
         </nav>
         {showChildren && childrenQ.isLoading && <p className="px-4 py-2 text-xs text-muted">Loading work…</p>}
         {showChildren && childrenQ.error && <p className="px-4 py-2 text-xs text-danger-500">Could not load work. <button onClick={() => void childrenQ.refetch()} className="underline">Retry</button></p>}
@@ -652,9 +735,6 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
 function ThreadNode({
   thread,
   isDefault,
-  sessionModel,
-  models,
-  tierMap,
   active,
   hasPendingGate,
   childSessions,
@@ -678,10 +758,6 @@ function ThreadNode({
   onDragEnd: () => void;
   thread: ThreadSummary;
   isDefault: boolean;
-  /** Session default model — the pin chip shows only when the thread's pin diverges from it. */
-  sessionModel?: string;
-  models: ModelInfo[];
-  tierMap?: GetModelTiersResponse;
   active: boolean;
   /** The thread holds a pending decision gate — show the response-required bell. */
   hasPendingGate: boolean;
@@ -718,22 +794,6 @@ function ThreadNode({
     setCollapsed(next);
     setSubconversationsCollapsed(thread.id, next);
   }
-
-  // Pin chip: the thread runs on a model other than the session default.
-  // Requires a KNOWN session default — while the session query loads, and
-  // for non-live sessions (GET /sessions/:id omits `model` unless the
-  // engine session is materialized), divergence is unknowable and a chip on
-  // every stamped thread would be pure noise.
-  const pinnedModel =
-    sessionModel && thread.model && !sameModelSpec(thread.model, sessionModel)
-      ? thread.model
-      : undefined;
-  const pinnedTier = isSizeTier(pinnedModel) ? pinnedModel : undefined;
-  const pinnedModelLabel = pinnedModel
-    ? pinnedTier
-      ? tierSubtitle(pinnedTier, tierMap, models)
-      : selectionLabel(pinnedModel, tierMap, models)
-    : undefined;
 
   // Port the v1 inline editor. Enter and blur save. Escape cancels.
   // `savedRef` prevents Enter and its following blur from saving twice.
@@ -857,18 +917,6 @@ function ThreadNode({
                 ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>
                 : unread && <StatusDot tone="info" label="Unread" className="mx-1.5" />}
               <ThreadStatusIcon status={liveStatus.status} busy={queueBusy(queueState)} needsApproval={hasPendingGate} />
-              {pinnedModelLabel && (
-                <span className="ml-2 flex min-w-0 items-center gap-1" title={pinnedModelLabel}>
-                  <span className="max-w-28 truncate text-[10px] font-normal text-muted">
-                    {pinnedModelLabel}
-                  </span>
-                  {pinnedTier && (
-                    <span className="shrink-0 rounded-sm bg-ink-wash px-1 py-0.5 text-[9px] font-normal text-muted">
-                      {TIER_LABELS[pinnedTier]}
-                    </span>
-                  )}
-                </span>
-              )}
 
             </Link>
           </Tooltip>

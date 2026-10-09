@@ -68,6 +68,7 @@ describe("pluginSessionExtras with pins", () => {
       "workflows__copy_to_team",
       "workflows__get_workflow",
       "workflows__patch_workflow",
+      "skill",
     ]);
     const copy = tools.find((t) => t.name === "workflows__copy_to_team");
     expect(copy?.description).toContain("original and its triggers unchanged");
@@ -84,7 +85,7 @@ describe("pluginSessionExtras with pins", () => {
 
   it("ships no direct tools when the caller pins nothing", () => {
     const { tools } = pluginSessionExtras([workflowsPlugin()]);
-    expect(tools.map((t) => t.name)).toEqual(["list_tools", "call_tool"]);
+    expect(tools.map((t) => t.name)).toEqual(["list_tools", "call_tool", "skill"]);
   });
 
   it("keeps the skill tool alongside the pinned tools, with no repeated name", () => {
@@ -113,6 +114,7 @@ describe("pluginSessionExtras with pins", () => {
       "workflows__copy_to_team",
       "workflows__get_workflow",
       "workflows__patch_workflow",
+      "skill",
     ]);
   });
 });

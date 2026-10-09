@@ -11,6 +11,9 @@
  *   GET  /api/sessions/:id/messages  → list messages (?threadId=…)
  *   POST /api/sessions/:id/messages  → send prompt (body.threadId optional)
  */
+import { threadPage } from "../services/thread-page.js";
+import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
+import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
 import { Hono, type Context } from "hono";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -21,10 +24,10 @@ import {
   ValidationError,
 } from "@valet/engine";
 import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@valet/engine";
-import type { RequestPrincipal } from "../lib/request-principal.js";
+import { isAgentCaller, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
-import { agentSessions, assistants, assistantExecutions, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
 import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
@@ -356,6 +359,23 @@ async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSe
         eq(agentSessions.ownerType, session.ownerType), eq(agentSessions.ownerId, session.ownerId),
         sql`${agentSessions.status} <> 'deleted'`))
     : [];
+  // The singleton cutover retained older assistant runtimes under their original
+  // workspace ownership. Include their history without moving threads or files.
+  const legacy = (session.ownerType === "user" || session.ownerType === "team" || session.ownerType === "org") && session.ownerId
+    ? await db.select({ session: agentSessions }).from(legacyAssistantRuntimes)
+      .innerJoin(agentSessions, eq(agentSessions.id, legacyAssistantRuntimes.sessionId))
+      .where(and(eq(legacyAssistantRuntimes.orgId, session.orgId),
+        eq(legacyAssistantRuntimes.ownerType, session.ownerType), eq(legacyAssistantRuntimes.ownerId, session.ownerId),
+        eq(agentSessions.orgId, session.orgId), eq(agentSessions.ownerType, session.ownerType), eq(agentSessions.ownerId, session.ownerId),
+        sql`${agentSessions.status} <> 'deleted'`,
+        sql`EXISTS (SELECT 1 FROM assistants a WHERE a.session_id = ${session.id}
+          AND a.org_id = ${session.orgId} AND a.owner_type = ${session.ownerType}
+          AND a.owner_id = ${session.ownerId} AND a.archived_at IS NULL)`))
+    : [];
+  const retained = [];
+  for (const row of legacy) {
+    if (row.session.id !== session.id && await isLegacyAssistantRuntime(db, row.session.id, session.orgId)) retained.push(row.session);
+  }
   const anchors = new Set(executions.map(e => e.governingThreadId));
   const keys = new Map(executions.map(e => [e.session.id, e.governingKey]));
   if (session.id.startsWith("execution:")) {
@@ -364,7 +384,7 @@ async function workspaceThreadGroups(c: Context<AppEnv>, session: typeof agentSe
     if (self) keys.set(session.id, self.key);
   }
   const groups = [];
-  for (const row of [session, ...executions.filter(e => e.matchesArchive).map(e => e.session)]) {
+  for (const row of [session, ...retained, ...executions.filter(e => e.matchesArchive).map(e => e.session)]) {
     if (!await spawnedFromVisibleThread(c, row)) continue;
     const visible = threadsVisibleTo(c, row);
     const stored = await engineStore.listThreads(row.id);
@@ -392,8 +412,9 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
 
   if (!session.id.startsWith("execution:") && !engineSession.options.readOnlyReason) await engineSession.ensureDefaultThread();
   const wantArchived = c.req.query("archived") === "1";
-  const groups = await workspaceThreadGroups(c, session, wantArchived);
-  const threads = groups.flatMap(group => group.threads.map(t => ({ ...t,
+  const selectedThreadId = c.req.query("threadId");
+  const groups = await workspaceThreadGroups(c, session, selectedThreadId ? undefined : wantArchived);
+  const threads = groups.flatMap(group => group.threads.filter(t => t.id === selectedThreadId || !isWorkflowRunConversation(group.session.id, t.key)).map(t => ({ ...t,
     model: t.model ?? group.defaults?.model, reasoning: t.reasoning ?? group.defaults?.reasoning })));
 
   // Titles + archive state live in the app-side `session_threads` mirror
@@ -440,15 +461,19 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
           and role in ('user', 'assistant')
           and strpos(lower(content), ${query}) > 0`)
     : [];
-  const matchingIds = new Set(contentMatches.map((row) => row.threadId));
+  const matchingIds = new Set([...contentMatches.map((row) => row.threadId), ...(c.req.queries("fixedId") ?? [])]);
   const summaries = threads
     .filter(t => !query || matchingIds.has(t.id) || metaById.get(t.id)?.title?.toLowerCase().includes(query))
-    .filter(t => (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
+    .filter(t => t.id === selectedThreadId || (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
     .map(t => threadToSummary(t.id, t.createdAt, t.sessionId,
       metaById.get(t.id)?.lastUserActivityAt ?? t.createdAt, metaById.get(t.id)?.title,
       t.model, t.key, metaById.get(t.id)?.archivedAt, t.reasoning ?? null));
+  let body: ListThreadsResponse;
+  try { body = threadPage(summaries, new URL(c.req.url).searchParams); }
+  catch (error) { return c.json({ error: error instanceof Error ? error.message : "Refresh the thread list." }, 400); }
   for (const group of groups) {
-    const groupSummaries = summaries.filter(t => t.sessionId === group.session.id);
+    const groupSummaries = body.threads.filter(t => t.sessionId === group.session.id);
+    if (!groupSummaries.length) continue;
     const activity = await listThreadActivity(db, c.var.user.id, group.session.id, groupSummaries.map(t => t.id));
     for (const summary of groupSummaries) {
       Object.assign(summary, activity.get(summary.id));
@@ -456,7 +481,6 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
       if (channel) summary.channel = channel;
     }
   }
-  const body: ListThreadsResponse = { threads: summaries };
   return c.json(body);
 }
 
@@ -1433,6 +1457,12 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
   const pending = await visibleGates(c, session, engineSession);
   const gate = pending.find((g) => g.id === gateId && (!threadId || g.threadId === threadId));
   if (!gate) return c.json({ error: "gate not pending" }, 404);
+  // An MCP client or a `valet login` key is an agent. It may answer a
+  // question, but an approval or a credential request needs a person, or
+  // require_approval policy would let one agent approve another's actions.
+  if (isAgentCaller(c.var.authVia) && gate.type !== "question") {
+    return c.json({ error: "A person must approve this request. Open the thread in Valet to approve or deny it." }, 403);
+  }
   if (body.attachments?.length && gate.type !== "question") {
     return c.json({ error: "Images can only answer questions. Use the approval buttons for this request." }, 400);
   }

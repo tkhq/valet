@@ -434,7 +434,10 @@ CREATE TABLE "identity_link_codes" (
 	"provider" text NOT NULL,
 	"code_hash" text NOT NULL,
 	"expires_at" bigint NOT NULL,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	-- Set for a code the bot DMed to one provider account. Only the minting
+	-- user can redeem it, in the web app, and it links that account.
+	"external_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "identity_link_codes_provider" ON "identity_link_codes" ("provider","code_hash");
@@ -915,7 +918,8 @@ CREATE TABLE "action_invocations" (
 	"duration_ms" bigint,
 	"error" text,
 	"started_at" bigint,
-	"resolved_by" text
+	"resolved_by" text,
+	"caller" text
 );
 --> statement-breakpoint
 CREATE INDEX "action_invocations_session" ON "action_invocations" ("session_id");
@@ -2562,3 +2566,50 @@ CREATE TABLE "legacy_workflow_run_runtimes" (run_id text PRIMARY KEY, session_id
 
 --> statement-breakpoint
 CREATE TABLE "legacy_artifact_publications" (artifact_id text PRIMARY KEY, org_id text NOT NULL, owner_type text NOT NULL, owner_id text NOT NULL, source_session_id text NOT NULL);
+
+--> statement-breakpoint
+CREATE TABLE "product_announcements" (
+  "id" text PRIMARY KEY, "activated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+INSERT INTO "product_announcements" ("id", "activated_at")
+VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_timestamp()) * 1000)::bigint);
+--> statement-breakpoint
+CREATE TABLE "product_announcement_acknowledgements" (
+  "announcement_id" text NOT NULL, "user_id" text NOT NULL, "acknowledged_at" bigint NOT NULL,
+  PRIMARY KEY ("announcement_id", "user_id")
+);
+
+--> statement-breakpoint
+CREATE TABLE "generated_files" (
+  "id" text PRIMARY KEY, "org_id" text NOT NULL, "session_id" text NOT NULL,
+  "thread_id" text NOT NULL, "digest" text NOT NULL, "name" text NOT NULL,
+  "mime_type" text NOT NULL, "bytes" bigint NOT NULL, "ready" boolean NOT NULL DEFAULT false,
+  "created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX generated_files_scope_digest ON generated_files (org_id, session_id, thread_id, digest);
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "cli_device_requests" (
+  "device_code_hash" text PRIMARY KEY NOT NULL, "user_code" text NOT NULL, "device" text NOT NULL,
+  "status" text NOT NULL DEFAULT 'pending', "user_id" text REFERENCES "user"("id") ON DELETE cascade,
+  "created_at" bigint NOT NULL, "expires_at" bigint NOT NULL, "last_poll_at" bigint
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "cli_device_requests_user_code" ON "cli_device_requests" ("user_code");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "cli_tokens" (
+  "id" text PRIMARY KEY NOT NULL, "user_id" text NOT NULL REFERENCES "user"("id") ON DELETE cascade,
+  "device" text NOT NULL, "access_hash" text NOT NULL, "refresh_hash" text NOT NULL,
+  "access_expires_at" bigint NOT NULL, "refresh_expires_at" bigint NOT NULL,
+  "created_at" bigint NOT NULL, "last_used_at" bigint,
+  "prev_access_hash" text, "prev_refresh_hash" text, "rotated_at" bigint
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_access" ON "cli_tokens" ("access_hash");
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_refresh" ON "cli_tokens" ("refresh_hash");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "cli_tokens_user" ON "cli_tokens" ("user_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "cli_device_requests_expires" ON "cli_device_requests" ("expires_at");

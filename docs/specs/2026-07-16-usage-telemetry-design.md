@@ -347,3 +347,20 @@ Full source backfill has a separate, data-dependent cost. Interrupted backfill r
 
 Usage repair helpers share migration SQL with fresh installs. The server build embeds this SQL, including formatter-added trailing commas in asset reads.
 Asset parity and bundle guards reject migration paths that would require source files at runtime.
+
+## Usage page views
+
+The Usage page opens in Overview. Overview shows spend totals, token and cache statistics, active agents, and the daily chart.
+Breakdown shows tool efficiency, outcomes, use cases, skills, models, and member tables when authorized.
+Activity shows the personal proxy request log and gateway settings links. Team workspaces show a direction to switch to Personal.
+The Activity log does not use the spend period filter. Spend loading and error states appear only in Overview and Breakdown.
+
+The period, scope, and export controls remain available across views. Switching views preserves the selected period, expanded breakdown rows, and request page.
+Switching workspaces resets the request page. Hidden breakdown details and inactive Activity queries do not fetch.
+The views do not change authorization, usage calculations, or CSV export behavior.
+
+Usage query functions forward their abort signals to the API client, which retains its separate 30-second timeout.
+The client forwards caller cancellation through its request controller without requiring `AbortSignal.any`. It removes the caller listener when the request settles.
+Disabling a mounted Usage query cancels its pending request when no other enabled observer needs it.
+Period changes cancel unused requests for the previous period. Leaving the page cancels requests without remaining observers.
+Cancellation preserves cached data and does not report a timeout. Rapid-switch tests exercise all six query families through mocked pending fetches.

@@ -1,3 +1,4 @@
+import type { Presence } from "@valet/shared";
 /**
  * Event-delivery dispatcher: drains `event_deliveries` rows into their
  * subscription targets (workflow run start / orchestrator signal prompt /
@@ -69,6 +70,7 @@ export interface OrchestratorDeliverFn {
      */
     actorUserId: string;
     signal: SignalContent;
+  presence?: Presence;
     dispatchId: string;
     /** The thread to deliver to, when the event names one other than its origin's. */
     threadKey?: string;
@@ -125,6 +127,7 @@ function channelText(payload: unknown): string | undefined {
 interface SubscriptionTarget {
   kind: "workflow" | "orchestrator" | "signal";
   workflowId?: string;
+  presence?: Presence;
   /** When true, an orchestrator channel delivery follows the thread: later
    * messages route to the assistant without a re-mention. */
   follow?: boolean;
@@ -261,7 +264,7 @@ export class EventDispatcher {
       }
 
       if (target.kind === "workflow" && target.workflowId) {
-        await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs, sub.createdBy);
+        await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs, sub.createdBy, target.presence);
       } else if (target.kind === "orchestrator") {
         const teamMention = isTeamAssistantMention(sub, event.eventKey);
         const audience = mentionAudience(sub);
@@ -380,6 +383,7 @@ export class EventDispatcher {
             attributes,
             origin: origin ?? undefined,
           },
+          ...(target.presence ? { presence: target.presence } : {}),
           dispatchId: `event:${delivery.id}`,
           ...(prComment && commentThread ? { target: { sessionId: commentThread.sessionId, threadId: commentThread.threadId } } : {}),
           ...(prThreadKey ? { threadKey: prThreadKey } : !origin && slackChannel ? { threadKey: slackEventsThreadKey(slackChannel) } : {}),
@@ -417,10 +421,9 @@ export class EventDispatcher {
               ownerType: sub.ownerType,
               ownerId: sub.ownerId,
               createdBy: actorUserId,
-              // The follow router re-checks the actor's membership on every
-              // later message, against this rule's CURRENT audience. So the
-              // rule id is what it needs.
-              ...(teamMention ? { subscriptionId: sub.id } : {}),
+              // Followed replies need the source rule for current presence
+              // settings and, for teams, audience authorization.
+              subscriptionId: sub.id,
               preserveBinding,
               // The mention itself is the last message the assistant has seen,
               // so the follow-router's gap re-hydration starts right after it.
@@ -460,6 +463,7 @@ export class EventDispatcher {
     refs: Record<string, string>,
     /** Creator attribution applies only to personal workflows. */
     createdBy: string,
+    presence?: Presence,
   ): Promise<void> {
     // Mirrors routes/workflows.ts POST /:id/runs: same run-id scheme, same
     // definitionVersionId, owner resolved from the definition row. The org
@@ -485,6 +489,7 @@ export class EventDispatcher {
       definitionVersionId: definitionVersionId(def.definition),
       triggerId: subscriptionId,
       input: trigger,
+      ...(presence ? { presence } : {}),
     };
     // Idempotency across delivery retries: the runId is DERIVED from the
     // delivery row (not freshly minted), so a re-claim after a partially

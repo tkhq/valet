@@ -522,3 +522,22 @@ describe("Editor", () => {
     expect(promptField.value).toBe("hello from json");
   });
 });
+
+
+it("saves Presence through the editor draft and restores inherited identity on cancel", async () => {
+  const onSave = vi.fn().mockResolvedValue(undefined);
+  render(<Editor initialDefinition={baseDefinition()} onSave={onSave} />);
+  fireEvent.click(screen.getByRole("button", { name: "Presence" }));
+  fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Release bot" } });
+  expect(screen.getByTestId("unsaved-indicator")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Avatar URL"), { target: { value: "http://example.com/avatar.png" } });
+  expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+  fireEvent.change(screen.getByLabelText("Avatar URL"), { target: { value: "https://example.com/avatar.png" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+    presence: { displayName: "Release bot", avatarUrl: "https://example.com/avatar.png" },
+  })));
+  fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Another bot" } });
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(screen.getByLabelText<HTMLInputElement>("Display name").value).toBe("");
+});

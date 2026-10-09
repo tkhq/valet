@@ -7,6 +7,7 @@ import { useComposerDraftStore } from "~/stores/composer-drafts";
 import { Link, Outlet, createRootRouteWithContext, useRouterState } from "@tanstack/react-router";
 import type { QueryClient } from "@tanstack/react-query";
 import { TooltipProvider } from "~/components/primitives/tooltip";
+import { ProductAnnouncement } from "~/components/product-announcement";
 import { AppShell } from "~/components/layout/app-shell";
 import { TopNav } from "~/components/layout/top-nav";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
@@ -74,8 +75,13 @@ function sidebarForPath(pathname: string) {
  * never sees app nav before they can sign in. */
 const PUBLIC_ROUTES = new Set(["/login", "/signup"]);
 
+/** Approval pages for an app or the CLI. They need a session (their API
+ * calls send a signed-out visitor to `/login?next=`), but render without app
+ * chrome so the decision is the only thing on the page. */
+const APPROVAL_ROUTES = new Set(["/oauth/consent", "/cli/device"]);
+
 function isPublicPath(pathname: string): boolean {
-  return PUBLIC_ROUTES.has(pathname) || pathname.startsWith("/a/");
+  return PUBLIC_ROUTES.has(pathname) || APPROVAL_ROUTES.has(pathname) || pathname.startsWith("/a/");
 }
 
 function RootLayout() {
@@ -105,6 +111,7 @@ function RootLayout() {
       <WorkspaceScopeProvider>
         <WorkspaceAssistantProvider>
         <SignedInEffects />
+        <ProductAnnouncement />
         <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)} rightPanel={<WorkspaceAssistantDock />}>
           {/* Keybindings must sit under AppShell so sidebar controls resolve. */}
           <ChatKeybindingsHost />

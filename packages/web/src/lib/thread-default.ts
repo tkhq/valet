@@ -7,7 +7,7 @@ export function isAppAssistantThread(thread: Pick<ThreadSummary, "key">): boolea
 /** The implicit thread is always the newest created thread, regardless of sidebar sort. */
 export function defaultThreadId(threads: ThreadSummary[]): string | undefined {
   return threads.filter((thread) => !isAppAssistantThread(thread)).reduce<ThreadSummary | undefined>(
-    (newest, thread) => !newest || thread.createdAt > newest.createdAt ? thread : newest,
+    (newest, thread) => !newest || thread.createdAt > newest.createdAt || (thread.createdAt === newest.createdAt && thread.id.localeCompare(newest.id) < 0) ? thread : newest,
     undefined,
   )?.id;
 }

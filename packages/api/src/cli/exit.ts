@@ -20,6 +20,8 @@
  */
 export enum ExitCode {
   OK = 0,
+  /** A step outside Valet failed, e.g. another agent's CLI. */
+  Failure = 1,
   Usage = 2,
   GatePending = 3,
   TurnError = 4,
@@ -73,11 +75,24 @@ export class UnreachableError extends CliError {
 }
 
 /** Generic API failure carrying the HTTP status and response body. */
+/** The server's own `error` text when the body carries one: route errors name the fix. */
+function apiErrorMessage(status: number, body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === "object" && "error" in parsed && typeof parsed.error === "string" && parsed.error !== "") {
+      return `${parsed.error} (HTTP ${status})`;
+    }
+  } catch {
+    // Not JSON: fall through to the status line.
+  }
+  return `API request failed with status ${status}`;
+}
+
 export class ApiError extends CliError {
   readonly status: number;
   readonly body: string;
   constructor(status: number, body: string, message?: string) {
-    super(message ?? `API request failed with status ${status}`, 1);
+    super(message ?? apiErrorMessage(status, body), 1);
     this.status = status;
     this.body = body;
   }

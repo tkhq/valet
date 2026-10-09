@@ -11,6 +11,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { validateValetPlugin, type ValetPlugin } from "@valet/engine";
+import { httpInstallationResolvers } from "./http-installations.js";
 
 export interface LoadNodeModulesPluginsOpts {
   /** Directories to scan, each treated as a `node_modules` root. */
@@ -165,6 +166,11 @@ async function loadOnePlugin(pkgDir: string, marker: string): Promise<LoadOneRes
   if (!validated.ok) {
     const detail = validated.issues.map((i) => `${i.path || "/"}: ${i.message}`).join("; ");
     return { ok: false, reason: `invalid manifest: ${detail}` };
+  }
+
+  if (validated.plugin.httpRoutes?.some((route) => route.auth === "signature") &&
+      !Object.hasOwn(httpInstallationResolvers, validated.plugin.name)) {
+    return { ok: false, reason: `No installation resolver for signed HTTP routes in ${validated.plugin.name}.` };
   }
 
   return { ok: true, plugin: validated.plugin };

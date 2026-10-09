@@ -534,6 +534,10 @@ No permissions, provider validation, or running-submission model behavior change
 The bundled catalog fills missing GPT-6.1 Sol and Claude Sonnet 5.5 metadata; SDK entries and runtime overlays take precedence.
 Provider availability and organization approval still apply. Serialization tests use fake HTTP transports, without paid requests.
 Source metadata: https://developers.openai.com/api/docs/models/gpt-6.1-sol and https://platform.claude.com/docs/en/models/sonnet-5-5/overview.
-Astra IDs, aliases, routing suffixes and custom-provider selections are disabled in catalogs, tier resolution, inference and recording proxies.
-Historical usage pricing remains available. Session restoration skips retired defaults; explicit thread pins require an allowed replacement.
+Astra is available from the SDK catalog and follows normal provider credentials and organization approval rules.
+This change does not add Astra to default tiers or rewrite saved approval lists.
+Restricted organizations must approve Astra before members can select it or use it as a tier fallback.
+Unrestricted organizations can select any active model, including Astra.
+Historical usage pricing remains available. Session restoration preserves resolvable saved model IDs, including Astra.
+The recording proxy retains its existing gateway rules; it does not enforce the organization model approval list.
 Proxy inference requires a model; batches remain unavailable because uploaded request files cannot be checked before submission.

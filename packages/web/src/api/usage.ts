@@ -3,7 +3,7 @@
  * Consumes `GET /api/usage/breakdown`, `GET /api/usage/items`.
  * Routed through the central `api` client for 401→login handling.
  */
-import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
+import type { UseQueryOptions } from "@tanstack/react-query";
 import type {
   UsageDrillResponse,
   UsagePeriodSelection,
@@ -14,6 +14,7 @@ import type {
   UsageUseCase,
 } from "@valet/api/wire";
 import { api } from "~/api/client";
+import { useCancellableQuery } from "./use-cancellable-query";
 
 export const qkUsage = {
   breakdown: (period: UsagePeriodSelection, scope: UsageScopeName = "me", teamId?: string) =>
@@ -32,9 +33,9 @@ export function useUsageOutcomes(
   teamId?: string,
   opts?: Partial<UseQueryOptions<UsageOutcomesResponse>>,
 ) {
-  return useQuery<UsageOutcomesResponse>({
+  return useCancellableQuery<UsageOutcomesResponse>({
     queryKey: qkUsage.outcomes(period, scope, teamId),
-    queryFn: () => api.usageOutcomes(period, scope, teamId),
+    queryFn: ({ signal }) => api.usageOutcomes(period, scope, teamId, signal),
     staleTime: 60_000,
     ...opts,
   });
@@ -46,9 +47,9 @@ export function useUsageToolEfficiency(
   teamId?: string,
   opts?: Partial<UseQueryOptions<UsageToolEfficiencyResponse>>,
 ) {
-  return useQuery<UsageToolEfficiencyResponse>({
+  return useCancellableQuery<UsageToolEfficiencyResponse>({
     queryKey: qkUsage.toolEfficiency(period, scope, teamId),
-    queryFn: () => api.usageToolEfficiency(period, scope, teamId),
+    queryFn: ({ signal }) => api.usageToolEfficiency(period, scope, teamId, signal),
     staleTime: 60_000,
     ...opts,
   });
@@ -60,9 +61,9 @@ export function useUsageBreakdown(
   teamId?: string,
   opts?: Partial<UseQueryOptions<UsageBreakdownResponse>>,
 ) {
-  return useQuery<UsageBreakdownResponse>({
+  return useCancellableQuery<UsageBreakdownResponse>({
     queryKey: qkUsage.breakdown(period, scope, teamId),
-    queryFn: () => api.usageBreakdown(period, scope, teamId),
+    queryFn: ({ signal }) => api.usageBreakdown(period, scope, teamId, signal),
     staleTime: 60_000,
     ...opts,
   });
@@ -75,9 +76,9 @@ export function useUsageItems(
   teamId?: string,
   opts?: Partial<UseQueryOptions<UsageDrillResponse>>,
 ) {
-  return useQuery<UsageDrillResponse>({
+  return useCancellableQuery<UsageDrillResponse>({
     queryKey: qkUsage.items(period, scope, useCase, teamId),
-    queryFn: () => api.usageItems(period, scope, useCase, teamId),
+    queryFn: ({ signal }) => api.usageItems(period, scope, useCase, teamId, signal),
     staleTime: 60_000,
     ...opts,
   });

@@ -13,9 +13,9 @@ import { driveActions } from '../drive-actions.js';
 
 type FakeSandbox = Partial<Sandbox> & { id: string };
 
-function makeCredentials(token: string | null): CredentialProvider {
+function makeCredentials(token: string | null, refreshToken = "stable-refresh"): CredentialProvider {
   return {
-    get: async (): Promise<Credential | null> => (token === null ? null : { accessToken: token }),
+    get: async (): Promise<Credential | null> => (token === null ? null : { accessToken: token, refreshToken }),
     request: async (): Promise<Credential> => {
       throw new Error('not implemented in test stub');
     },
@@ -166,6 +166,148 @@ describe('drive actions', () => {
       success: true,
       data: { files: [], total: 0, nextPageToken: 'np2', hasMore: true },
     });
+  });
+
+  async function searchPage(pageToken?: string, overrides: Record<string, unknown> = {}) {
+    const result = await action('drive.search_files').execute({ query: 'budget', folderId: 'root', pageToken, ...overrides }, pluginCtx());
+    return result as { success: boolean; error?: string; data?: { files: Array<{ id: string }>; nextPageToken?: string; hasMore: boolean } };
+  }
+
+  it('uses single-parent queries and continues without rediscovering folders', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'child' }] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'root-match' }], nextPageToken: 'native-next' }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'root-match-2' }] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'root' }] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'child-match' }] }));
+    const first = await searchPage();
+    const second = await searchPage(first.data?.nextPageToken);
+    const third = await searchPage(second.data?.nextPageToken);
+    expect(first.data?.files[0].id).toBe('root-match');
+    expect(second.data?.files[0].id).toBe('root-match-2');
+    expect(third.data).toMatchObject({ files: [{ id: 'child-match' }], hasMore: false });
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    const queries = fetchMock.mock.calls.map(([url]) => new URL(String(url)).searchParams);
+    expect(queries[2].get('pageToken')).toBe('native-next');
+    for (const query of queries) expect(query.get('q')?.match(/in parents/g)).toHaveLength(1);
+    expect(queries[4].get('q')).toContain("'child' in parents");
+  });
+
+  it('preserves search filters, label scope, escaping, and per-folder ordering', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [] }));
+    await searchPage(undefined, { folderId: "a'b", searchIn: 'name', mimeType: 'document',
+      modifiedAfter: '2026-01-01', orderBy: 'name', sortDirection: 'asc', maxResults: 3,
+      __labelFilter: "'labels/required' in labels" });
+    const query = new URL(String(fetchMock.mock.calls[1][0])).searchParams;
+    expect(query.get('q')).toContain("name contains 'budget'");
+    expect(query.get('q')).toContain("mimeType='application/vnd.google-apps.document'");
+    expect(query.get('q')).toContain("'labels/required' in labels");
+    expect(query.get('q')).toContain("2026-01-01T00:00:00.000Z");
+    expect(query.get('q')).toContain("'a" + String.fromCharCode(92) + "'b' in parents");
+    expect(query.get('orderBy')).toBe('name');
+    expect(query.get('pageSize')).toBe('3');
+  });
+
+  it('bounds requests on empty discovery pages and resumes at the native cursor', async () => {
+    let calls = 0;
+    fetchMock.mockImplementation(async () => jsonResponse(200, { files: [], nextPageToken: `page-${++calls}` }));
+    const first = await searchPage();
+    expect(first.data).toMatchObject({ files: [], hasMore: true });
+    expect(fetchMock).toHaveBeenCalledTimes(10);
+    await searchPage(first.data?.nextPageToken);
+    expect(fetchMock).toHaveBeenCalledTimes(20);
+    expect(new URL(String(fetchMock.mock.calls[10][0])).searchParams.get('pageToken')).toBe('page-10');
+  });
+
+  it('does not rescan a 99-child subtree across five result pages', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: Array.from({length: 99}, (_, i) => ({id: `child-${i}`})) }))
+      .mockImplementation(async () => jsonResponse(200, { files: [], nextPageToken: 'more-results' }));
+    let cursor: string | undefined;
+    for (let i = 0; i < 5; i++) cursor = (await searchPage(cursor)).data?.nextPageToken;
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it('skips empty folders within the request budget to reach late matches', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:Array.from({length:9}, (_,i) => ({id:`child-${i}`}))}));
+    fetchMock.mockImplementation(async (url: string) => {
+      const q = new URL(url).searchParams.get('q') ?? '';
+      return jsonResponse(200, {files: !q.includes('mimeType=') && q.includes("'child-8'") ? [{id:'late-match'}] : []});
+    });
+    const first = await searchPage();
+    expect(first.data).toMatchObject({files:[],hasMore:true});
+    expect(fetchMock).toHaveBeenCalledTimes(10);
+    const last = await searchPage(first.data?.nextPageToken);
+    expect(last.data).toMatchObject({files:[{id:'late-match'}],hasMore:false});
+    expect(fetchMock).toHaveBeenCalledTimes(20);
+  });
+
+  it('rejects changed criteria, tampering, and another account before HTTP', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { files: [{ id: 'child' }] }))
+      .mockResolvedValueOnce(jsonResponse(200, { files: [{id: 'first'}] }));
+    const first = await searchPage();
+    const cursor = first.data!.nextPageToken!;
+    expect(await searchPage(cursor, { query: 'different' })).toMatchObject({success: false, error: expect.stringContaining('Restart')});
+    expect(await searchPage(cursor + 'tampered')).toMatchObject({success: false});
+    const foreign = await action('drive.search_files').execute({query:'budget', folderId:'root', pageToken:cursor}, pluginCtx({userId:'other'}));
+    expect(foreign).toMatchObject({success: false});
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([403, 404, 429, 500])('propagates discovery HTTP %s without a partial success', async (status) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(status, {error:{message:'Discovery failed'}}));
+    expect(await searchPage()).toMatchObject({success:false, error:expect.stringContaining(`Drive API ${status}`)});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('survives OAuth refresh but rejects a different credential and expiry', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:[{id:'child'}]}))
+      .mockResolvedValueOnce(jsonResponse(200, {files:[{id:'first'}]}));
+    const cursor = (await searchPage()).data!.nextPageToken!;
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:[]})).mockResolvedValueOnce(jsonResponse(200, {files:[{id:'match'}]}));
+    const refreshed = await action('drive.search_files').execute({query:'budget',folderId:'root',pageToken:cursor}, pluginCtx({credentials:makeCredentials('new-access-token')}));
+    expect(refreshed).toMatchObject({success:true,data:{files:[{id:'match'}],hasMore:false}});
+    const rotated = await action('drive.search_files').execute({query:'budget',folderId:'root',pageToken:cursor}, pluginCtx({credentials:makeCredentials('rotated', 'different-account-refresh')}));
+    expect(rotated).toMatchObject({success:false,error:expect.stringContaining('Restart')});
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 3_600_001);
+    try { expect(await searchPage(cursor)).toMatchObject({success:false,error:expect.stringContaining('expired')}); }
+    finally { clock.mockRestore(); }
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([429, 500])('keeps a result cursor retryable after HTTP %s', async (status) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:[]}))
+      .mockResolvedValueOnce(jsonResponse(200, {files:[],nextPageToken:'results-next'}));
+    const cursor = (await searchPage()).data!.nextPageToken!;
+    fetchMock.mockResolvedValueOnce(jsonResponse(status, {error:{message:'Retry later'}}))
+      .mockResolvedValueOnce(jsonResponse(200, {files:[{id:'match'}]}));
+    expect(await searchPage(cursor)).toMatchObject({success:false});
+    expect(await searchPage(cursor)).toMatchObject({success:true,data:{files:[{id:'match'}],hasMore:false}});
+    for (const [url] of fetchMock.mock.calls.slice(2)) expect(new URL(String(url)).searchParams.get('pageToken')).toBe('results-next');
+  });
+
+  it('rejects incomplete result pages after successful discovery', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:[]}))
+      .mockResolvedValueOnce(jsonResponse(200, {files:[{id:'partial'}],incompleteSearch:true}));
+    expect(await searchPage()).toMatchObject({success:false,error:expect.stringContaining('incomplete')});
+  });
+
+  it('rejects excessive folder counts', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:Array.from({length:100}, (_,i) => ({id:`child-${i}`}))}));
+    expect(await searchPage()).toMatchObject({success:false, error:expect.stringContaining('100 folders')});
+  });
+
+  it('enforces the total discovery bound across continuation calls', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse(200, {files:[], nextPageToken:'more'}));
+    let cursor: string | undefined;
+    for (let i=0;i<10;i++) cursor = (await searchPage(cursor)).data?.nextPageToken;
+    expect(await searchPage(cursor)).toMatchObject({success:false,error:expect.stringContaining('100 discovery pages')});
+    expect(fetchMock).toHaveBeenCalledTimes(100);
+  });
+
+  it.each([true, false])('reports incomplete results with corrective guidance for folder=%s', async (folder) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, {files:[], incompleteSearch:true}));
+    const result = await searchPage(undefined, {folderId:folder ? 'root' : undefined});
+    expect(result).toMatchObject({success:false,error:expect.stringContaining(folder ? 'smaller folder subtree' : 'Add a folderId')});
   });
 
   it('list_documents filters to Google Docs mimeType', async () => {

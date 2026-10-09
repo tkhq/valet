@@ -1,16 +1,10 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import type { CredentialSummary, IdentityLinkStatus, StartIdentityLinkResponse } from "@valet/api/wire";
-import {
-  useIdentityLinks,
-  useSetLinkNotify,
-  useStartIdentityLink,
-  useUnlinkIdentity,
-} from "~/api/queries";
+import type { CredentialSummary, IdentityLinkStatus } from "@valet/api/wire";
+import { useIdentityLinks, useSetLinkNotify, useUnlinkIdentity } from "~/api/queries";
 import { useConnectGithub, useDisconnectGithub } from "~/api/repos";
 import { useCredentials, useDisconnectCredential } from "~/api/integrations";
 import { useGithubApp } from "~/api/settings";
-import { ApiError } from "~/api/client";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { Badge, Button, ConfirmDialog, Spinner, Switch } from "~/components/primitives";
@@ -19,6 +13,7 @@ import { formatDateOr } from "~/lib/format-when";
 import { displayName } from "~/components/integrations/display-name";
 import { useOnePasswordSettings } from "~/api/onepassword";
 import { OnePasswordTokenRow } from "~/components/integrations/onepassword-setup";
+import { IdentityLinkBlock } from "~/components/integrations/identity-link-block";
 
 /**
  * `/settings/connected-accounts` — You · Connected accounts. Renders one
@@ -28,25 +23,11 @@ export const Route = createFileRoute("/settings/connected-accounts")({
   component: ConnectedAccountsPage,
 });
 
-/** Server sends `{ error: "..." }` for documented failures; fall back to a
- * generic message for anything else (network failure, unexpected shape). */
-function extractStartLinkError(err: unknown, provider: string): string {
-  if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
-    const message = (err.payload as Record<string, unknown>).error;
-    if (typeof message === "string" && message) return message;
-  }
-  return `Couldn't start the ${displayName(provider)} link. Try again.`;
-}
-
 interface LinkAccountCardProps {
   link: IdentityLinkStatus;
-  onStart: (provider: string) => Promise<StartIdentityLinkResponse>;
-  startPending: boolean;
 }
 
-function LinkAccountCard({ link, onStart, startPending }: LinkAccountCardProps) {
-  const [pendingLink, setPendingLink] = useState<StartIdentityLinkResponse | null>(null);
-  const [connectError, setConnectError] = useState<string | null>(null);
+function LinkAccountCard({ link }: LinkAccountCardProps) {
   const setNotify = useSetLinkNotify(link.provider);
   const unlink = useUnlinkIdentity(link.provider);
   const label = displayName(link.provider);
@@ -62,50 +43,14 @@ function LinkAccountCard({ link, onStart, startPending }: LinkAccountCardProps) 
     );
   }
 
+  // The same pairing flow the Integrations tile uses: "DM me" and "Find me
+  // by name" where the provider can DM, and the exact reply line to send.
+  // A second copy here showed only the bare code, which the Slack bot does
+  // not read as a link command.
   if (!link.linked) {
     return (
-      <FieldRow label={label} hint={`Message your assistant from ${label}.`}>
-        <div className="space-y-2">
-          <Button
-            type="button"
-            variant="secondary"
-            disabled={startPending}
-            onClick={async () => {
-              try {
-                const res = await onStart(link.provider);
-                setPendingLink(res);
-                setConnectError(null);
-              } catch (err) {
-                setConnectError(extractStartLinkError(err, link.provider));
-              }
-            }}
-          >
-            {startPending ? "Connecting…" : `Connect ${label}`}
-          </Button>
-          {connectError && <p className="text-sm text-danger-500">{connectError}</p>}
-          {pendingLink && (
-            <div className="space-y-1 rounded-md border border-line bg-ink-wash p-3 text-sm">
-              {pendingLink.deepLink && (
-                <>
-                  <a
-                    href={pendingLink.deepLink}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="font-medium text-moss underline"
-                  >
-                    Open Telegram and press Start
-                  </a>
-                  <p className="break-all font-mono text-xs text-muted">{pendingLink.deepLink}</p>
-                </>
-              )}
-              <p className="break-all font-mono text-xs text-muted">{pendingLink.code}</p>
-              <p className="text-xs text-muted">{pendingLink.instructions}</p>
-              <p className="text-xs text-muted">
-                Link expires in {Math.round(pendingLink.expiresInSeconds / 60)} minutes.
-              </p>
-            </div>
-          )}
-        </div>
+      <FieldRow label={label}>
+        <IdentityLinkBlock link={link} title={label} offerOAuth />
       </FieldRow>
     );
   }
@@ -145,7 +90,6 @@ function LinkAccountCard({ link, onStart, startPending }: LinkAccountCardProps) 
 
 export function ConnectedAccountsPage() {
   const linksQ = useIdentityLinks();
-  const startLink = useStartIdentityLink();
 
   return (
     <>
@@ -163,14 +107,7 @@ export function ConnectedAccountsPage() {
       )}
 
       {linksQ.data?.links.map((link) => (
-        <LinkAccountCard
-          key={link.provider}
-          link={link}
-          onStart={startLink.mutateAsync}
-          // Pending is scoped to the provider in flight, so starting one
-          // provider's link does not disable every other card's button.
-          startPending={startLink.isPending && startLink.variables === link.provider}
-        />
+        <LinkAccountCard key={link.provider} link={link} />
       ))}
 
       <GithubRow />

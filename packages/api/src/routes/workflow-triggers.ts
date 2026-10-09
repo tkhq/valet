@@ -7,6 +7,7 @@
  * BEFORE `workflowsRouter`, whose `GET /:id` would otherwise swallow
  * `/triggers` as a workflow id.
  */
+import { validatePresence } from "@valet/shared";
 import { getLinearIngressStatus } from "../services/linear-ingress.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
@@ -250,7 +251,12 @@ workflowTriggersRouter.post("/event-triggers", async (c) => {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
+  if (body.presence !== undefined) {
+    const error = validatePresence(body.presence);
+    if (error) return c.json({ error }, 400);
+  }
   const result = await createWorkflowTrigger(armDeps(c), owner, {
+    presence: body.presence,
     workflowId: body.workflowId,
     name: body.name,
     eventKeys: body.eventKeys,
