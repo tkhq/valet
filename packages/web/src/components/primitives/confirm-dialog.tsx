@@ -19,6 +19,7 @@ export function ConfirmDialog({
   error,
   onConfirm,
   onCloseAutoFocus,
+  confirmVariant = "danger",
   children,
 }: {
   open: boolean;
@@ -34,6 +35,8 @@ export function ConfirmDialog({
   /** Radix focuses the element that opened the dialog when it closes. Call
    * `preventDefault()` here to move focus somewhere else. */
   onCloseAutoFocus?: (event: Event) => void;
+  /** The confirm button's style. A confirm that grants or approves something uses `primary`. */
+  confirmVariant?: "danger" | "primary";
   children?: ReactNode;
 }) {
   return (
@@ -44,7 +47,7 @@ export function ConfirmDialog({
           <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button type="button" variant="danger" disabled={pending} onClick={onConfirm}>
+          <Button type="button" variant={confirmVariant} disabled={pending} onClick={onConfirm}>
             {pending ? (pendingLabel ?? confirmLabel) : confirmLabel}
           </Button>
         </DialogFooter>

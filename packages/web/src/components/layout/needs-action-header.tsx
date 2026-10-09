@@ -109,6 +109,7 @@ export function NeedsActionHeader({ pendingCount, partialCount, workflows, decis
         description={description}
         confirmLabel={`${verb.label} ${pending?.targets.length ?? 0}`}
         onConfirm={() => void run()}
+        confirmVariant={pending?.decision === "approve" ? "primary" : "danger"}
         onCloseAutoFocus={event => {
           // After a confirmed run, focus the progress line: the buttons are
           // disabled, and they leave the page when no item is left.

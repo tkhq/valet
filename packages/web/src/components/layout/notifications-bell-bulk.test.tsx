@@ -98,6 +98,8 @@ it("approves each listed item once through its own endpoint and reports the resu
   state.decisions = [decision("a")];
   await openBell();
   await userEvent.click(screen.getByRole("button", { name: "Approve all 3 requests" }));
+  // Approving is not destructive, so the confirm button uses the primary style.
+  expect(screen.getByRole("button", { name: "Approve 3" }).className).toContain("bg-moss");
   await userEvent.click(screen.getByRole("button", { name: "Approve 3" }));
   await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Approved 3."));
   expect(state.resolveWorkflow.mock.calls.map(c => c[0])).toEqual([
