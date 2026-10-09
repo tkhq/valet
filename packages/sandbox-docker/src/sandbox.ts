@@ -1246,10 +1246,23 @@ export function jobWithProcessGroup(execId: string, command: string): string {
   return `if setsid --help 2>&1 | grep -q -e --wait; then exec setsid -w sh -c ${inner}; else exec sh -c ${inner}; fi`;
 }
 
-/** Kills a job's process group from the pid file, then the leader, then removes the file. Exported for tests. */
+/**
+ * Kills every process in the job's process group (from the pid file), then
+ * the leader, then removes the file. The group members come from a sweep
+ * of `/proc/<pid>/stat` (field 3 after the command name is the pgrp):
+ * dash and BusyBox `kill` builtins disagree on how a negative pid is
+ * spelled, and BusyBox reads `-<pgid>` as a signal, so no `kill -- -pgid`
+ * form works on both. Exported for tests.
+ */
 export function jobGroupKillCommand(execId: string): string {
   const pid = shQuote(jobPidPath(execId));
-  return `p=$(cat ${pid} 2>/dev/null); if [ -n "$p" ]; then kill -9 -- -"$p" 2>/dev/null; kill -9 "$p" 2>/dev/null; fi; rm -f ${pid}; :`;
+  return (
+    `p=$(cat ${pid} 2>/dev/null); if [ -n "$p" ]; then ` +
+    `for s in /proc/[0-9]*/stat; do d=\${s%/stat}; pid=\${d#/proc/}; ` +
+    `rest=$(sed 's/.*) //' "$s" 2>/dev/null) || continue; set -- $rest; ` +
+    `if [ "$3" = "$p" ] && [ "$pid" != "$$" ]; then kill -9 "$pid" 2>/dev/null; fi; done; ` +
+    `kill -9 "$p" 2>/dev/null; fi; rm -f ${pid}; :`
+  );
 }
 
 function shQuote(s: string): string {

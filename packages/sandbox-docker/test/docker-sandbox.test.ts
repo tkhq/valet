@@ -246,12 +246,18 @@ describeDocker("DockerSandbox", () => {
   it("job-mode: cancelJob kills the command inside the container, not only the exec client (PR review, finding 3)", async () => {
     const sb = await makeSandbox();
     try {
-      const { execId } = await sb.execJob("sleep 300", { detached: true });
+      // Children of the job, not only its leader, must die with the cancel.
+      const { execId } = await sb.execJob("sleep 300 & sleep 300 & wait", { detached: true });
       // Give the wrapper time to record its process group.
       await new Promise((r) => setTimeout(r, 300));
+      // Live `sleep` processes only: the alpine keepalive (`tail`) is PID 1
+      // and never reaps, so a killed sleep stays in /proc as a zombie.
+      const count = `ps -o stat=,comm= | awk '$2 == "sleep" && $1 !~ /^Z/' | wc -l`;
+      const before = await sb.exec(count);
+      expect(Number(before.stdout.trim())).toBe(2);
       await sb.cancelJob(execId);
-      const check = await sb.exec("if pgrep -x sleep >/dev/null 2>&1; then echo alive; else echo gone; fi");
-      expect(check.stdout.trim()).toBe("gone");
+      const after = await sb.exec(count);
+      expect(Number(after.stdout.trim())).toBe(0);
     } finally {
       await provider.destroy(sb.id);
     }
@@ -673,7 +679,9 @@ describe("job process group wrapper (PR review, finding 3)", () => {
     expect(wrapped).toContain("echo $$ > ");
     expect(wrapped).toContain(".valet-job-job-x-12345678.pid");
     const kill = jobGroupKillCommand("job-x-12345678");
-    expect(kill).toContain(`kill -9 -- -"$p"`);
+    expect(kill).toContain('[ "$3" = "$p" ]');
+    expect(kill).toContain('kill -9 "$pid"');
+    expect(kill).toContain('kill -9 "$p"');
     expect(kill).toContain("rm -f '/tmp/.valet-job-job-x-12345678.pid'");
   });
 
