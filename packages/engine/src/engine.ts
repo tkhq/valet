@@ -31,6 +31,7 @@ export class Engine {
       opts.sandboxReadyTimeoutMs,
       opts.specProvider,
       opts.sandboxLifecycle,
+      opts.isLeased,
     );
     const session = new Session(id, opts, this.opts.providers, sandbox, attachment, policySandbox);
     this.sessions.set(id, session);
@@ -50,6 +51,7 @@ export class Engine {
       args.options.sandboxReadyTimeoutMs,
       args.options.specProvider,
       args.options.sandboxLifecycle,
+      args.options.isLeased,
     );
     const session = await Session.rehydrate(
       data,
@@ -88,6 +90,7 @@ export class Engine {
     readyTimeoutMs: number | undefined,
     specProvider?: SpecProvider,
     lifecycle?: CreateSessionOptions['sandboxLifecycle'],
+    isLeased?: CreateSessionOptions['isLeased'],
   ): Promise<{ attachment: SandboxAttachment; sandbox: Sandbox; policySandbox: PolicySandbox }> {
     let attachment: SandboxAttachment;
     if (arg && typeof (arg as Sandbox).readFile === "function") {
@@ -105,7 +108,7 @@ export class Engine {
       // from another session (or carrying an explicit `sessionId: undefined`
       // key) must never annotate the sandbox with the wrong owner.
       const createOpts: SandboxCreateOpts = { ...((arg ?? {}) as SandboxCreateOpts), sessionId };
-      attachment = new SandboxAttachment(provider, createOpts, specProvider, lifecycle);
+      attachment = new SandboxAttachment(provider, createOpts, specProvider, lifecycle, isLeased);
     }
     const policySandbox = new PolicySandbox(attachment, { readyTimeoutMs });
     return { attachment, sandbox: policySandbox, policySandbox };

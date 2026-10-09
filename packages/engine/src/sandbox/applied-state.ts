@@ -31,8 +31,8 @@ export interface AppliedState {
   image: string;
   specHash: string;
   steps: Record<string, string>;
-  /** Repository CPU and memory overrides. Old files omit this field. */
-  resources?: Pick<SandboxResources, "cpu" | "memory">;
+  /** Repository CPU, memory, and scratch overrides. Old files omit this field. */
+  resources?: Pick<SandboxResources, "cpu" | "memory" | "scratch">;
 }
 
 function validResources(resources: unknown): boolean {
@@ -42,6 +42,9 @@ function validResources(resources: unknown): boolean {
   }
   if ("memory" in resources && resources.memory !== undefined) {
     if (typeof resources.memory !== "string" || resources.memory.trim().length === 0) return false;
+  }
+  if ("scratch" in resources && resources.scratch !== undefined) {
+    if (typeof resources.scratch !== "string" || resources.scratch.trim().length === 0) return false;
   }
   return true;
 }

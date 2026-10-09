@@ -34,14 +34,21 @@ export const OBSERVE_TTL_MS = 5 * 60_000;
 /** Max backoff between failed replacement retries (spec decision 6). */
 const REPLACE_BACKOFF_CAP_MS = 30 * 60_000;
 
-/** Missing applied resources and an empty opinion both mean no overrides. */
-function resourceDrift(
+/** Authoritative resource fields compared for drift (cpu, memory, scratch). */
+const DRIFT_FIELDS = ["cpu", "memory", "scratch"] as const satisfies readonly SandboxResourceField[];
+
+/**
+ * Missing applied resources and an empty opinion both mean no overrides.
+ * Exported for a direct unit test of the scratch-only drift case. No other
+ * consumer should import this from outside the sandbox package.
+ */
+export function resourceDrift(
   desired: DesiredSandboxSpec["resources"],
   applied: AppliedState["resources"],
   preserved: readonly SandboxResourceField[] = [],
 ): boolean {
   if (desired === undefined && preserved.length === 0) return false;
-  return (["cpu", "memory"] as const).some((field) =>
+  return DRIFT_FIELDS.some((field) =>
     !preserved.includes(field) && desired?.[field] !== applied?.[field]);
 }
 
@@ -50,12 +57,14 @@ function effectiveResources(
   fallback: AppliedState["resources"],
 ): AppliedState["resources"] {
   const preserved = desired.preserveResourceFields ??
-    (desired.resources === undefined ? (["cpu", "memory"] as const) : []);
+    (desired.resources === undefined ? DRIFT_FIELDS : []);
   const result: NonNullable<AppliedState["resources"]> = {};
   const cpu = preserved.includes("cpu") ? fallback?.cpu : desired.resources?.cpu;
   const memory = preserved.includes("memory") ? fallback?.memory : desired.resources?.memory;
+  const scratch = preserved.includes("scratch") ? fallback?.scratch : desired.resources?.scratch;
   if (cpu !== undefined) result.cpu = cpu;
   if (memory !== undefined) result.memory = memory;
+  if (scratch !== undefined) result.scratch = scratch;
   if (Object.keys(result).length === 0 && desired.resources === undefined && fallback === undefined) {
     return undefined;
   }
@@ -67,6 +76,7 @@ function createResourceOpinion(resources: SandboxCreateOpts["resources"]): Appli
   const result: NonNullable<AppliedState["resources"]> = {};
   if (resources.cpu !== undefined) result.cpu = resources.cpu;
   if (resources.memory !== undefined) result.memory = resources.memory;
+  if (resources.scratch !== undefined) result.scratch = resources.scratch;
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
@@ -161,7 +171,14 @@ export class SandboxAttachment {
   private releaseInFlight: Promise<void> | null = null;
   private pendingReadyEpoch: number | null = null;
 
-  constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, specProvider?: SpecProvider, private readonly lifecycle?: SandboxLifecycle) {
+  constructor(
+    provider: SandboxProvider,
+    createOpts: SandboxCreateOpts,
+    specProvider?: SpecProvider,
+    private readonly lifecycle?: SandboxLifecycle,
+    /** True while a lease holds the sandbox (spec INV-8). Defers pod-replacing changes. */
+    private readonly isLeased?: () => Promise<boolean>,
+  ) {
     this.provider = provider;
     this.createOpts = createOpts;
     this.specProvider = specProvider;
@@ -521,7 +538,12 @@ export class SandboxAttachment {
       } else {
         this.ignoredResourceDriftKey = null;
       }
-      if (this.replacementNeeded(desired, observed)) {
+      const wantsReplace = this.replacementNeeded(desired, observed);
+      if (wantsReplace && await this.isLeased?.()) {
+        // A multi-hour leased process must keep its pod (spec INV-8). Prep
+        // steps that do not replace the pod still run below.
+        console.log(`sandbox ${sandbox.id}: deferring image/resource change while a lease is active`);
+      } else if (wantsReplace) {
         // Backoff: skip the replace when the SAME desired spec already failed
         // to replace within its exponential window (spec decision 6). A
         // repeatedly-failing spec must not re-provision on every idle sweep.
@@ -1043,7 +1065,7 @@ export class SandboxAttachment {
       }
       this.persistResources(desired?.resources, desired?.preserveResourceFields);
       const preserveResourceFieldsOnAdopt = desired?.preserveResourceFields ??
-        (desired !== undefined && desired.resources === undefined ? (["cpu", "memory", "scratch"] as const) : undefined);
+        (desired !== undefined && desired.resources === undefined ? DRIFT_FIELDS : undefined);
       const sandbox = await provider.create({
         ...this.createOpts,
         image: bootImage,

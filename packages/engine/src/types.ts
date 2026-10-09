@@ -2481,6 +2481,14 @@ export interface CreateSessionOptions {
    */
   specProvider?: SpecProvider;
   /**
+   * Optional host-provided lease check. Absent === no lease gate; existing
+   * replace behavior unchanged. When present, `reconcile` calls it before a
+   * pod-replacing image or resource change; a `true` result defers the
+   * change until a later run-start window finds the lease released (spec
+   * INV-8). It never blocks an in-place step apply.
+   */
+  isLeased?: () => Promise<boolean>;
+  /**
    * Optional host-provided credential resolver. Absent === raw store read —
    * existing paths unchanged (the session-scoped `CredentialProvider`
    * `Session.credentialProvider()` returns reads `providers.credentials`

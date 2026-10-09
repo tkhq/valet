@@ -21,6 +21,7 @@ import {
   type SpecProvider,
 } from "../src/index.js";
 import { readAppliedState } from "../src/sandbox/applied-state.js";
+import { resourceDrift } from "../src/sandbox/attachment.js";
 
 // ── Provider ──────────────────────────────────────────────────────────
 
@@ -167,6 +168,20 @@ async function reachReady(
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
+
+describe("resourceDrift", () => {
+  it("a scratch-only difference counts as drift", () => {
+    const desired = { cpu: 1, memory: "2Gi", scratch: "100Gi" };
+    const applied = { cpu: 1, memory: "2Gi" };
+    expect(resourceDrift(desired, applied)).toBe(true);
+  });
+
+  it("equal scratch is not drift", () => {
+    const desired = { cpu: 1, memory: "2Gi", scratch: "100Gi" };
+    const applied = { cpu: 1, memory: "2Gi", scratch: "100Gi" };
+    expect(resourceDrift(desired, applied)).toBe(false);
+  });
+});
 
 describe("SandboxAttachment.reconcile", () => {
   it("cold provision applies desired resources and preserves ephemeral storage", async () => {
@@ -706,6 +721,59 @@ describe("SandboxAttachment.reconcile", () => {
     expect(provider.releaseCalls).toEqual(["sb-1"]); // compute released; workspace retained
     expect(provider.destroyCalls).toEqual([]);
     expect(applied).toEqual(["s1"]); // steps re-applied on the fresh container
+    expect(att.observedImage()).toBe("img:v2");
+    expect(att.state).toBe("ready");
+  });
+
+  it("a leased sandbox defers an image change and keeps its pod (INV-8)", async () => {
+    const provider = new RecordingProvider({ release: true });
+    const applied: string[] = [];
+    const mkSteps = () => [
+      step("s1", "sh1", async () => {
+        applied.push("s1");
+      }),
+    ];
+    const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: mkSteps() });
+    const att = new SandboxAttachment(provider, { image: "img:v1" }, fake.provider(), undefined, async () => true);
+    await att.ensureReady({ timeoutMs: 5000 });
+    expect(provider.createImages).toEqual(["img:v1"]);
+    applied.length = 0;
+
+    // Drift the image while a lease is active.
+    fake.spec = { image: "img:v2", specHash: "h2", steps: mkSteps() };
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await att.reconcile();
+    logSpy.mockRestore();
+
+    expect(provider.createImages).toEqual(["img:v1"]); // no replace while leased
+    expect(provider.releaseCalls).toEqual([]);
+    expect(att.currentEpoch()).toBe(1); // same epoch
+    expect(att.state).toBe("ready");
+    expect(att.observedImage()).toBe("img:v1");
+  });
+
+  it("an unleased sandbox still replaces on image drift when isLeased is wired", async () => {
+    const provider = new RecordingProvider({ release: true });
+    const applied: string[] = [];
+    const mkSteps = () => [
+      step("s1", "sh1", async () => {
+        applied.push("s1");
+      }),
+    ];
+    const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: mkSteps() });
+    const att = new SandboxAttachment(provider, { image: "img:v1" }, fake.provider(), undefined, async () => false);
+    await att.ensureReady({ timeoutMs: 5000 });
+    expect(provider.createImages).toEqual(["img:v1"]);
+    applied.length = 0;
+
+    fake.spec = { image: "img:v2", specHash: "h2", steps: mkSteps() };
+
+    await att.reconcile();
+    await att.ensureReady({ timeoutMs: 5000 });
+
+    expect(att.currentEpoch()).toBe(2); // replace still happens
+    expect(provider.createImages).toEqual(["img:v1", "img:v2"]);
     expect(att.observedImage()).toBe("img:v2");
     expect(att.state).toBe("ready");
   });
