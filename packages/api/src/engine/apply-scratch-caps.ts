@@ -37,7 +37,7 @@ export function applyScratchCaps(
         resources: dropScratch(flags.resources),
         initialResources: dropScratch(flags.initialResources),
       },
-      warning: `Valet did not apply the repository's scratch setting. ${err.message}`,
+      warning: `Valet did not apply resources.scratch from .valet/prebuild.yaml. ${err.message}`,
     };
   }
 }

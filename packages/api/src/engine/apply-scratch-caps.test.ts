@@ -19,7 +19,7 @@ describe("applyScratchCaps", () => {
     expect(r.flags.resources).toEqual({ cpu: 2 });
     expect(r.flags.initialResources).toEqual({ cpu: 2 });
     expect(r.warning).toBe(
-      "Valet did not apply the repository's scratch setting. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or ask an admin to raise the cap.",
+      "Valet did not apply resources.scratch from .valet/prebuild.yaml. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or set a higher sandbox.scratchMax in the Valet chart (an admin task).",
     );
   });
 
@@ -31,7 +31,7 @@ describe("applyScratchCaps", () => {
     expect(r.flags.resources).toEqual({});
     expect(r.flags.initialResources).toEqual({});
     expect(r.warning).toBe(
-      "Valet did not apply the repository's scratch setting. scratch is not enabled on this deployment. Ask an admin to set sandbox.scratchMax.",
+      "Valet did not apply resources.scratch from .valet/prebuild.yaml. scratch is not enabled on this deployment. Set sandbox.scratchMax in the Valet chart (an admin task), or VALET_SANDBOX_SCRATCH_MAX in a dev stack.",
     );
   });
 

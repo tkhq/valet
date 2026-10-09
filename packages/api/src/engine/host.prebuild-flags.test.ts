@@ -361,7 +361,7 @@ describe("childSessionFor repo prebuild flags", () => {
       await child.attachment.ensureReady({ timeoutMs: 5_000 });
 
       expect(startupWarnings).toEqual([
-        "Valet did not apply the repository's scratch setting. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or ask an admin to raise the cap.",
+        "Valet did not apply resources.scratch from .valet/prebuild.yaml. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or set a higher sandbox.scratchMax in the Valet chart (an admin task).",
       ]);
       const call = recorder.createCalls.find((c) => c.sessionId === childId);
       expect(call?.resources).toEqual({});
@@ -426,7 +426,7 @@ describe("childSessionFor repo prebuild flags", () => {
       const parentThread = parent.thread("web:default");
 
       const warningText =
-        "Valet did not apply the repository's scratch setting. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or ask an admin to raise the cap.";
+        "Valet did not apply resources.scratch from .valet/prebuild.yaml. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or set a higher sandbox.scratchMax in the Valet chart (an admin task).";
       for (const childId of ["child-scratch-cap-dedup-1", "child-scratch-cap-dedup-2"]) {
         await db.insert(agentSessions).values({
           id: childId, userId: "local-user", orgId: "local-org", workspace: `/tmp/${childId}`,
@@ -460,7 +460,7 @@ describe("childSessionFor repo prebuild flags", () => {
       }
 
       const scratchCapLogs = warnSpy.mock.calls.filter(
-        ([message]) => typeof message === "string" && message.includes("did not apply the repository's scratch setting"),
+        ([message]) => typeof message === "string" && message.includes("did not apply resources.scratch from .valet/prebuild.yaml"),
       );
       expect(scratchCapLogs).toHaveLength(1);
     } finally {
@@ -715,7 +715,7 @@ describe("childSessionFor repo prebuild flags", () => {
         repos: [binding({ fullName: "acme/open-widgets" })],
       };
       const warning =
-        "Valet did not apply the repository's scratch setting. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or ask an admin to raise the cap.";
+        "Valet did not apply resources.scratch from .valet/prebuild.yaml. scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or set a higher sandbox.scratchMax in the Valet chart (an admin task).";
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
       const session = await engineHost.sessionFor(sessionId, meta);
@@ -728,6 +728,60 @@ describe("childSessionFor repo prebuild flags", () => {
       const entries = await engineStore.getEntries(sessionId, thread.id);
       const notices = entries.filter((e) => e.type === "message" && e.role === "system" && e.content === warning);
       expect(notices).toHaveLength(1);
+      // The model does not read `system` entries, so the system prompt
+      // carries the same warning (M13).
+      expect(session.options.systemPrompt).toContain(`This session has no /scratch. ${warning}`);
+    } finally {
+      if (prevScratchMax === undefined) delete process.env.VALET_SANDBOX_SCRATCH_MAX;
+      else process.env.VALET_SANDBOX_SCRATCH_MAX = prevScratchMax;
+    }
+  });
+
+  it("puts the scratch warning on the thread that triggered the build (M13)", async () => {
+    const prevScratchMax = process.env.VALET_SANDBOX_SCRATCH_MAX;
+    delete process.env.VALET_SANDBOX_SCRATCH_MAX;
+    try {
+      fixture = startGithubFixture({
+        getContents: (_owner, _repo, path) =>
+          path === ".valet/prebuild.yaml"
+            ? contentsBody("resources:\n  scratch: 200Gi\n", "blob-rest-scratch-thread")
+            : { status: 404, body: { message: "Not Found" } },
+      });
+      api = await bootTestApi({
+        sandboxProvider: new RecordingSandboxProvider(),
+        githubTokenDeps: { key: deriveSecretKey("test-key"), apiUrl: fixture.url, githubUrl: fixture.url },
+      });
+      const { engineHost, engineStore, db } = api.providers;
+      const sessionId = "rest-scratch-thread";
+      const now = Date.now();
+      await db.insert(agentSessions).values({
+        id: sessionId, userId: "local-user", orgId: "local-org", workspace: `/tmp/${sessionId}`,
+        status: "active", ownerType: "user", ownerId: "local-user", profile: "headless", createdAt: now, updatedAt: now,
+      });
+      await db.insert(sessionRepos).values({
+        sessionId, host: "github", fullName: "acme/open-widgets", cloneUrl: "https://github.com/acme/open-widgets.git",
+        ref: null, auth: "auto", position: 0, targetDir: "open-widgets",
+      });
+      const warning =
+        "Valet did not apply resources.scratch from .valet/prebuild.yaml. scratch is not enabled on this deployment. " +
+        "Set sandbox.scratchMax in the Valet chart (an admin task), or VALET_SANDBOX_SCRATCH_MAX in a dev stack.";
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const session = await engineHost.sessionFor(sessionId, {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: `/tmp/${sessionId}`,
+        repos: [binding({ fullName: "acme/open-widgets" })],
+        warningThreadKey: "web:trigger",
+      });
+      warnSpy.mockRestore();
+
+      const trigger = await session.threadByKey("web:trigger");
+      const onTrigger = trigger === null ? [] : await engineStore.getEntries(sessionId, trigger.id);
+      expect(onTrigger.filter((e) => e.type === "message" && e.role === "system" && e.content === warning)).toHaveLength(1);
+      const defaultThread = await session.threadByKey("web:default");
+      const onDefault = defaultThread === null ? [] : await engineStore.getEntries(sessionId, defaultThread.id);
+      expect(onDefault.filter((e) => e.type === "message" && e.role === "system" && e.content === warning)).toHaveLength(0);
     } finally {
       if (prevScratchMax === undefined) delete process.env.VALET_SANDBOX_SCRATCH_MAX;
       else process.env.VALET_SANDBOX_SCRATCH_MAX = prevScratchMax;
