@@ -54,6 +54,9 @@ it("lists the thread's pull requests in Outputs and groups the ones a child open
     { url: "https://github.com/acme/valet/pull/9", repo: "acme/valet", number: 9, state: "merged" },
     { url: "https://github.com/acme/valet/pull/852", repo: "acme/valet", number: 852, state: "open",
       delegatedFrom: { sessionId: "child-1", threadId: "ct", title: "Investigate OpenAI images" } },
+    // The API leaves the title out when the viewer cannot open the child.
+    { url: "https://github.com/acme/valet/pull/853", repo: "acme/valet", number: 853, state: "open",
+      delegatedFrom: { sessionId: "child-2", threadId: "ct2" } },
   ]);
   const outputs = within(screen.getByRole("region", { name: "Outputs" }));
   const own = outputs.getByRole("link", { name: /valet #9/ });
@@ -64,6 +67,7 @@ it("lists the thread's pull requests in Outputs and groups the ones a child open
   const child = delegated.getByRole("link", { name: /valet #852/ });
   expect(child.textContent).toContain("via Investigate OpenAI images");
   expect(child.getAttribute("target")).toBe("_blank");
+  expect(delegated.getByRole("link", { name: /valet #853/ }).textContent).toContain("via a delegated thread");
   // The thread's own pull request is not in the delegated group.
   expect(delegated.queryByRole("link", { name: /valet #9\b/ })).toBeNull();
   // A thread with outputs does not offer to create its first one.
