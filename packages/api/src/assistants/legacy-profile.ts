@@ -128,17 +128,19 @@ export async function loadLegacyAssistantProfile(
  * whitespace-only file clears the personality instead (legacy continuity
  * spec, "Limitation: no editor").
  *
- * A migration-retained assistant never takes the file. It shares the team's
- * memory, so the file there is the live assistant's personality, and an
- * edit or a whitespace reset of it is meant for that assistant. A retained
- * assistant keeps its own column, or no personality.
+ * A migration-retained assistant shares the team's memory, so a file edit
+ * after the upgrade is the live assistant's and never reaches it. It keeps
+ * its own column. With a NULL column it used the shared file, as before the
+ * upgrade, but only while the file is unchanged since the upgrade: the
+ * store keeps no earlier copy, so after a later edit it has no personality.
  */
 export function effectivePersonality(
   file: { content: string; updatedAt: number } | null,
   legacy: LegacyAssistantProfile | undefined,
 ): string {
-  if (legacy?.retained) return legacy.personality ?? "";
-  if (legacy?.personality === undefined) return file?.content ?? "";
-  if (file && file.updatedAt > (legacy.upgradedAt ?? Number.POSITIVE_INFINITY)) return file.content;
-  return legacy.personality;
+  const column = legacy?.personality;
+  const editedAfterUpgrade = file !== null && file.updatedAt > (legacy?.upgradedAt ?? Number.POSITIVE_INFINITY);
+  if (legacy?.retained) return column ?? (file && !editedAfterUpgrade ? file.content : "");
+  if (column === undefined) return file?.content ?? "";
+  return file && editedAfterUpgrade ? file.content : column;
 }
