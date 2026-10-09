@@ -70,10 +70,12 @@ export function validateScratchRequest(value: unknown, source: ScratchSource, ca
   }
   const maxBytes = caps.max ? parseResourceQuantity(caps.max) : null;
   if (maxBytes === null || maxBytes <= 0) {
+    // The agent can act on a task refusal at once; the admin steps are for a person.
+    const retry = source === "task" ? " Retry without resources.scratch." : "";
     throw new ScratchRequestError(
       "disabled",
       "scratch is not enabled on this deployment. Set sandbox.scratchMax in the Valet chart (an admin task), " +
-        "or VALET_SANDBOX_SCRATCH_MAX in a dev stack.",
+        `or VALET_SANDBOX_SCRATCH_MAX in a dev stack.${retry}`,
     );
   }
   if (bytes > maxBytes) {
@@ -88,7 +90,7 @@ export function validateScratchRequest(value: unknown, source: ScratchSource, ca
     if (agentBytes !== null && bytes > agentBytes) {
       throw new ScratchRequestError(
         "agent_cap",
-        `scratch ${text} exceeds the ${caps.agentMax} agent cap (sandbox.scratchAgentMax). Declare it in .valet/prebuild.yaml, or ask an admin to raise the cap.`,
+        `scratch ${text} exceeds the ${caps.agentMax} agent cap (sandbox.scratchAgentMax). Retry without resources.scratch, declare it in .valet/prebuild.yaml, or ask an admin to raise the cap.`,
       );
     }
   }

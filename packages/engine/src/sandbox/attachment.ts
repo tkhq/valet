@@ -499,6 +499,17 @@ export class SandboxAttachment {
   }
 
   /**
+   * The resource overrides the live sandbox has applied, per the most recent
+   * cached observation. `null` when nothing has been observed yet, or when
+   * the applied file carried no resources. The wakeups seam reads `scratch`
+   * from it to cap a detached job log at a quarter of `/scratch`. Does not
+   * trigger an observation.
+   */
+  observedResources(): NonNullable<AppliedState["resources"]> | null {
+    return this.observation?.applied.resources ?? null;
+  }
+
+  /**
    * Converge the live sandbox toward the desired spec (spec decisions 3-7).
    * The caller gates idleness — this only runs the observe/diff/apply cycle.
    *

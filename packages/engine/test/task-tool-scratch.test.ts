@@ -64,7 +64,7 @@ describe("task tool: resources.scratch", () => {
     const spawner = vi.fn(async () => {
       throw new ScratchRequestError(
         "agent_cap",
-        "scratch 200Gi exceeds the 100Gi agent cap (sandbox.scratchAgentMax). Declare it in .valet/prebuild.yaml, or ask an admin to raise the cap.",
+        "scratch 200Gi exceeds the 100Gi agent cap (sandbox.scratchAgentMax). Retry without resources.scratch, declare it in .valet/prebuild.yaml, or ask an admin to raise the cap.",
       );
     });
     const r = await taskTool.execute(
@@ -72,7 +72,7 @@ describe("task tool: resources.scratch", () => {
       makeCtx({ config: { childSpawner: spawner } }),
     );
     expect(r.text).toBe(
-      "[task_resources] scratch 200Gi exceeds the 100Gi agent cap (sandbox.scratchAgentMax). Declare it in .valet/prebuild.yaml, or ask an admin to raise the cap.",
+      "[task_resources] scratch 200Gi exceeds the 100Gi agent cap (sandbox.scratchAgentMax). Retry without resources.scratch, declare it in .valet/prebuild.yaml, or ask an admin to raise the cap.",
     );
   });
 

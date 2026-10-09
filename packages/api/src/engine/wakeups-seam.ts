@@ -32,6 +32,8 @@ export interface WakeupsSeamSession {
     sandboxId?: string;
     /** The ready sandbox, or null. Reading it never provisions or wakes compute. */
     current(): Sandbox | null;
+    /** The applied resource overrides from the last observation, or null. */
+    observedResources?(): { scratch?: string } | null;
   };
 }
 

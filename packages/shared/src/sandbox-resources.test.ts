@@ -51,6 +51,15 @@ describe("validateScratchRequest", () => {
     );
   });
 
+  it("tells the agent to retry without scratch when a task request hits a disabled deployment", () => {
+    let err: unknown;
+    try { validateScratchRequest("10Gi", "task", {}); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(ScratchRequestError);
+    expect((err as ScratchRequestError).message).toBe(
+      "scratch is not enabled on this deployment. Set sandbox.scratchMax in the Valet chart (an admin task), or VALET_SANDBOX_SCRATCH_MAX in a dev stack. Retry without resources.scratch.",
+    );
+  });
+
   it("refuses over the deploy cap, never clamps", () => {
     expect(() => validateScratchRequest("2Ti", "prebuild", caps)).toThrow(
       "scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or set a higher sandbox.scratchMax in the Valet chart (an admin task).",
@@ -63,7 +72,7 @@ describe("validateScratchRequest", () => {
     expect(err).toBeInstanceOf(ScratchRequestError);
     expect((err as ScratchRequestError).reason).toBe("agent_cap");
     expect((err as ScratchRequestError).message).toBe(
-      "scratch 200Gi exceeds the 100Gi agent cap (sandbox.scratchAgentMax). Declare it in .valet/prebuild.yaml, or ask an admin to raise the cap.",
+      "scratch 200Gi exceeds the 100Gi agent cap (sandbox.scratchAgentMax). Retry without resources.scratch, declare it in .valet/prebuild.yaml, or ask an admin to raise the cap.",
     );
   });
 

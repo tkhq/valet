@@ -41,7 +41,7 @@ import {
 } from "@valet/engine";
 import type { CredentialUse, ValetPlugin } from "@valet/engine";
 import { buildWakeupsSeam, type WakeupsSeamDeps, type WakeupsSeamSession } from "./wakeups-seam.js";
-import type { ScratchCaps } from "@valet/shared";
+import { parseResourceQuantity, type ScratchCaps } from "@valet/shared";
 import { canBorrowCredential } from "../services/credential-borrow.js";
 import { membersSharing } from "../services/credential-shares.js";
 import { pluginStore } from "../services/plugin-store.js";
@@ -492,6 +492,22 @@ export function wakeupsSeamDeps(
     provider: opts.sandboxProvider,
     ...(opts.jobLogMaxBytes !== undefined ? { jobLogMaxBytes: opts.jobLogMaxBytes } : {}),
   };
+}
+
+/**
+ * The session's live `/scratch` size in bytes, from the attachment's last
+ * observation, or undefined when the session has no scratch or nothing has
+ * been observed yet. The wakeups seam caps a detached job log at a quarter
+ * of it (fix wave 3, k8s M-B). Lazy: a job starts after the run-start
+ * reconcile, so the observation exists by then.
+ */
+export function sessionScratchBytes(
+  getSession: () => Pick<WakeupsSeamSession, "attachment"> | undefined,
+): number | undefined {
+  const scratch = getSession()?.attachment.observedResources?.()?.scratch;
+  if (scratch === undefined) return undefined;
+  const bytes = parseResourceQuantity(scratch);
+  return bytes === null || bytes <= 0 ? undefined : bytes;
 }
 
 /** The coding prompt's options. `scratchEnabled` is true when the session's
@@ -2442,7 +2458,7 @@ export class EngineHost {
   ): { wakeups: WakeupsSeam } {
     return {
       wakeups: buildWakeupsSeam(
-        wakeupsSeamDeps(this.opts),
+        { ...wakeupsSeamDeps(this.opts), scratchBytes: () => sessionScratchBytes(getSession) },
         sessionId,
         getSession,
       ),

@@ -1204,3 +1204,22 @@ with an earlier entry, the entry below wins.
   `addressed="false"`. `wake_at` refuses an `at` with no UTC offset.
   Terminal signal bodies end with a line that names the next step for
   `pid_missing`, `sandbox_unavailable`, `deadline`, and a capped log.
+- **Wave 3 wiring.** The host passes `scratchBytes` to every wakeups seam.
+  The value comes from the attachment's last observation
+  (`observedResources`), so the log cap follows the live `/scratch` size on
+  every session builder. The
+  `valet serve` hard exit uses `SHUTDOWN_HARD_EXIT_MS` (20 seconds), the
+  same deadline as the api entry. A refused saved scratch counts in
+  `valet.sandbox.scratch.refused` with source `saved`. The agent-cap and
+  disabled `task` refusals end with `Retry without resources.scratch`.
+- **Wave 3, restored job handle.** A kubernetes handle can lack a kickoff
+  identity: it was restored after an api restart, or polled after a
+  terminal poll. Such a handle checks the backing pod before a poll or
+  cancel. A missing CR, a
+  missing pod, or a pod that is not Running means the job is gone, so the
+  row ends `sandbox_unavailable` at once. The brief named a Pending pod as
+  transient. A Pending pod has no container, so no process of the original
+  job can run in it; it is a recreated pod.
+- **Wave 3, wakeup signals and `addressed`.** The envelope still renders
+  `addressed="false"` for a `<wakeup>` signal. The orchestrator persona
+  rule names the signal as the assistant's own work, which is enough.
