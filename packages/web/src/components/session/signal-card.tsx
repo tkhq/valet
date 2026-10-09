@@ -4,6 +4,7 @@ import { ChevronRight, Workflow } from "lucide-react";
 import type { Message, MessageSignal } from "@valet/api/wire";
 import { Badge } from "~/components/primitives";
 import { Markdown } from "~/components/markdown";
+import { cn } from "~/lib/cn";
 
 const BODY_PREVIEW_LEN = 200;
 /** A signal body past either limit starts collapsed. */
@@ -136,11 +137,93 @@ function WorkflowRequestCard({ message, signal }: { message: Message; signal: Me
   );
 }
 
+const WAKEUP_PREFIXES = ["process.", "watch.", "timer.", "lease."];
+
+/**
+ * Pure: whether a signal reports background work (spec 2026-10-08, B6):
+ * `process.*`, `watch.*`, `timer.*`, or `lease.*` with a wakeup or lease
+ * id. The wire does not ship the envelope tag, so the id attribute marks
+ * the signal as the WakeWatcher's or a human cancel's.
+ */
+export function isWakeupSignal(signal: MessageSignal): boolean {
+  const attrs = signal.attributes ?? {};
+  return (
+    WAKEUP_PREFIXES.some((p) => signal.signalType.startsWith(p)) &&
+    (attrs.wakeupId !== undefined || attrs.leaseId !== undefined)
+  );
+}
+
+/** Pure: the outcome badge of a wakeup signal, or null when it reports no end. */
+export function wakeupOutcome(attrs: Record<string, string>): { label: string; failed: boolean } | null {
+  const { cause, exitCode } = attrs;
+  if (cause === undefined && exitCode === undefined) return null;
+  const failed = (cause !== undefined && cause !== "exit") || (exitCode !== undefined && exitCode !== "0");
+  if (cause === undefined || cause === "exit") return { label: `exit ${exitCode ?? "?"}`, failed };
+  return { label: exitCode !== undefined ? `${cause} · exit ${exitCode}` : cause, failed };
+}
+
+/** Pure: a duration in seconds as "45s", "12m", "3h 4m", or "2d 1h". */
+export function formatDurationSeconds(raw: string | undefined): string | undefined {
+  const s = raw === undefined ? NaN : Number(raw);
+  if (!Number.isFinite(s) || s < 0) return undefined;
+  if (s < 60) return `${Math.round(s)}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  return h % 24 ? `${d}d ${h % 24}h` : `${d}d`;
+}
+
+/** Background work: the reason as the title, the outcome, and the log as plain text. */
+function WakeupCard({ message, signal }: { message: Message; signal: MessageSignal }) {
+  const attrs = signal.attributes ?? {};
+  const outcome = wakeupOutcome(attrs);
+  const duration = formatDurationSeconds(attrs.durationSeconds);
+  return (
+    <CardShell>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="min-w-0 truncate text-sm font-medium text-ink">{attrs.reason || signal.signalType}</span>
+        <Badge variant="neutral">{signal.signalType}</Badge>
+        {outcome && <Badge variant={outcome.failed ? "danger" : "success"}>{outcome.label}</Badge>}
+        {duration && <span className="text-xs text-muted">ran {duration}</span>}
+      </div>
+      {message.content && <LogBody content={message.content} />}
+    </CardShell>
+  );
+}
+
+/** A log tail: preformatted, never Markdown, so `#` and `***` lines stay text. */
+function LogBody({ content }: { content: string }) {
+  const long = isLongBody(content);
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-1.5">
+      <pre
+        className={cn(
+          "overflow-x-auto whitespace-pre-wrap break-words rounded-sm bg-ink-wash px-2 py-1.5 font-mono text-xs text-ink",
+          long && !open && "max-h-32 overflow-hidden [mask-image:linear-gradient(to_bottom,black_60%,transparent)]",
+        )}
+      >
+        {content}
+      </pre>
+      {long && (
+        <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="mt-1 text-xs text-muted hover:text-ink">
+          {open ? "Show less" : "Show full log"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function EnvelopeCard({ message, signal }: { message: Message; signal: MessageSignal }) {
   // A run's report (`workflow.request`) and its settle report back to the
   // thread that started it (`workflow.settled`, `run-attention.ts`).
   if (signal.signalType === "workflow.request" || signal.signalType === "workflow.settled") {
     return <WorkflowRequestCard key={message.id} message={message} signal={signal} />;
+  }
+  if (isWakeupSignal(signal)) {
+    return <WakeupCard message={message} signal={signal} />;
   }
   return (
     <CardShell>
