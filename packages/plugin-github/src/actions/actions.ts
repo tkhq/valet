@@ -129,6 +129,79 @@ function action<TParams extends TSchema>(parameters: TParams) {
   }): PluginAction<TParams> => ({ ...rest, parameters });
 }
 
+/** The repository fields `repoView` reads. The full and minimal GitHub
+ * repository shapes both satisfy it, so one view serves get and list. */
+interface RepoFields {
+  id: number;
+  name: string;
+  full_name: string;
+  owner: { login: string; type?: string } | null;
+  private: boolean;
+  visibility?: string;
+  description: string | null;
+  fork: boolean;
+  html_url: string;
+  clone_url?: string;
+  ssh_url?: string;
+  homepage?: string | null;
+  default_branch?: string;
+  language?: string | null;
+  topics?: string[];
+  archived?: boolean;
+  disabled?: boolean;
+  is_template?: boolean;
+  stargazers_count?: number;
+  forks_count?: number;
+  open_issues_count?: number;
+  license?: { spdx_id: string | null } | null;
+  permissions?: Record<string, boolean>;
+  created_at?: string | null;
+  updated_at?: string | null;
+  pushed_at?: string | null;
+  parent?: { full_name: string; html_url: string };
+  source?: { full_name: string; html_url: string };
+}
+
+/**
+ * A repository without GitHub's API link templates (`*_url`) or nested full
+ * owner, parent, and source objects. The raw response is about 15,000
+ * characters for a fork, most of it links a caller cannot follow without a
+ * token. Field names match GitHub's, so a reader of the raw shape still
+ * finds the fields it used.
+ */
+function repoView(repo: RepoFields) {
+  return {
+    id: repo.id,
+    name: repo.name,
+    full_name: repo.full_name,
+    owner: repo.owner ? { login: repo.owner.login, type: repo.owner.type } : null,
+    private: repo.private,
+    visibility: repo.visibility,
+    description: repo.description,
+    fork: repo.fork,
+    ...(repo.parent ? { parent: { full_name: repo.parent.full_name, html_url: repo.parent.html_url } } : {}),
+    ...(repo.source ? { source: { full_name: repo.source.full_name, html_url: repo.source.html_url } } : {}),
+    html_url: repo.html_url,
+    clone_url: repo.clone_url,
+    ssh_url: repo.ssh_url,
+    homepage: repo.homepage || undefined,
+    default_branch: repo.default_branch,
+    language: repo.language,
+    topics: repo.topics,
+    archived: repo.archived,
+    disabled: repo.disabled,
+    is_template: repo.is_template,
+    stargazers_count: repo.stargazers_count,
+    forks_count: repo.forks_count,
+    open_issues_count: repo.open_issues_count,
+    license: repo.license?.spdx_id ?? null,
+    permissions: repo.permissions,
+    created_at: repo.created_at,
+    updated_at: repo.updated_at,
+    pushed_at: repo.pushed_at,
+  };
+}
+
 // ─── Actions ────────────────────────────────────────────────────────────────
 
 const getRepository = action(Type.Object({
@@ -143,7 +216,7 @@ const getRepository = action(Type.Object({
     const octokit = await getOctokit(ctx);
     try {
       const { data } = await octokit.request("GET /repos/{owner}/{repo}", { owner, repo });
-      return { success: true, data };
+      return { success: true, data: repoView(data) };
     } catch (err) {
       return handleOctokitError(err, "github.get_repository", "Get repository");
     }
@@ -202,7 +275,7 @@ const listRepos = action(Type.Object({
         per_page: args.perPage,
         page: args.page,
       });
-      return { success: true as const, data: data.repositories };
+      return { success: true as const, data: data.repositories.map(repoView) };
     }
 
     if (scope === "installation") {
@@ -228,7 +301,7 @@ const listRepos = action(Type.Object({
         per_page: args.perPage,
         page: args.page,
       });
-      return { success: true, data };
+      return { success: true, data: data.map(repoView) };
     } catch (err) {
       if (scope === "auto" && isForbidden(err)) {
         try {

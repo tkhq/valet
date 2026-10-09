@@ -56,6 +56,46 @@ describe("github action base URL", () => {
   });
 });
 
+// ─── repository view ────────────────────────────────────────────────────────
+
+describe("github.get_repository result", () => {
+  // A raw fork response was about 15,000 characters, mostly API link
+  // templates and the full parent and source repositories.
+  it("drops API link templates and nested repositories but keeps GitHub field names", async () => {
+    const owner = { login: "acme", type: "Organization", id: 1, url: "https://api.github.com/users/acme", repos_url: "https://api.github.com/users/acme/repos" };
+    const parent = { full_name: "upstream/widgets", html_url: "https://github.com/upstream/widgets", owner, hooks_url: "https://api.github.com/repos/upstream/widgets/hooks" };
+    useFixture({
+      getRepo: () => ({
+        body: {
+          id: 7, name: "widgets", full_name: "acme/widgets", owner, private: false, visibility: "public",
+          description: "Widgets", fork: true, parent, source: parent,
+          html_url: "https://github.com/acme/widgets", clone_url: "https://github.com/acme/widgets.git",
+          default_branch: "main", license: { key: "mit", spdx_id: "MIT", url: "https://api.github.com/licenses/mit" },
+          permissions: { admin: false, push: true, pull: true },
+          hooks_url: "https://api.github.com/repos/acme/widgets/hooks",
+          issues_url: "https://api.github.com/repos/acme/widgets/issues{/number}",
+        },
+      }),
+    });
+
+    const result = await findAction("github.get_repository").execute({ owner: "acme", repo: "widgets" }, fakeActionContext("t"));
+
+    expect(result.success).toBe(true);
+    if (!result.success) throw new Error("expected success");
+    expect(result.data).toMatchObject({
+      full_name: "acme/widgets",
+      owner: { login: "acme", type: "Organization" },
+      parent: { full_name: "upstream/widgets", html_url: "https://github.com/upstream/widgets" },
+      html_url: "https://github.com/acme/widgets",
+      default_branch: "main",
+      license: "MIT",
+      permissions: { push: true },
+    });
+    const text = JSON.stringify(result.data);
+    expect(text).not.toContain("api.github.com");
+  });
+});
+
 // ─── list_repos credential scope ────────────────────────────────────────────
 
 describe("github.list_repos credential scope", () => {
