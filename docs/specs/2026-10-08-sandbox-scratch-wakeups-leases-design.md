@@ -245,8 +245,9 @@ the `SCHEMA_REPAIRS` entry, do not bump `ENGINE_SCHEMA_VERSION`.
 | `created_at`, `updated_at`, `ended_at` | bigint | ms |
 
 Store methods: `createWakeup`, `getWakeup`, `listWakeups(sessionId, status?)`,
-`listDueWakeups(now, limit)` (running `process`/`watch`, and pending
-`timer` with `fire_at <= now`), `transitionWakeup(id, from[], to, patch)`
+`listDueWakeups(now, limit, after?)` (running `process`/`watch`, and pending
+`timer` with `fire_at <= now`, in `(created_at, id)` order; `after` is a
+keyset cursor, so a caller reads every due row page by page), `transitionWakeup(id, from[], to, patch)`
 (a single-statement CAS that returns the row only when `from` matched).
 
 ### B2. Kinds
@@ -301,9 +302,22 @@ New tools:
 `cancelled`. On a `timer` it sets the row `cancelled`. On a `hold` it
 releases the lease with `cancelled`. Nothing is deleted.
 
+The kill is best-effort. It uses the session's ready sandbox, or a
+restored handle for the lease's sandbox. It never provisions compute, and
+a failed kill does not block the cancel. An agent cancel records
+`valet_wakeups_total{cause="cancelled"}`.
+
+`wakeup_cancel` on the lease id of a `process` or `watch` is refused,
+because the wakeup would keep running with no lease:
+`[wakeup_cancel] <lease id> belongs to <kind> <wakeup id>. Cancel <wakeup id> instead; that stops the <kind> and releases this lease.`
+
+Ownership: the seam accepts only ids of its own session. `process_read`,
+`wakeup_cancel`, and `get` treat an id from another session as unknown and
+return the unknown-id text.
+
 Per-session cap: when a session has `wakeupsPerSession` or more
-non-terminal wakeups and active leases combined, every create tool
-refuses:
+non-terminal wakeups and active hold leases combined, every create tool
+refuses (a process or watch lease counts through its wakeup):
 `[wakeups_limit] This session already has <n> active wakeups and leases (limit <cap>, sandbox.wakeupsPerSession). Cancel one with wakeup_cancel.`
 
 The system prompt gains one paragraph: background work is reported by
@@ -323,23 +337,42 @@ Changes:
 - The `.out` file is not capped for `process` and `watch`. The existing
   `maxOutputBytes` cap stays for foreground job-mode bash.
 - `execJob` gains `{ uncapped: true }`.
+- `pollJob(execId, offset, { maxBytes?, tail? })` bounds each read.
+  Without `tail` it reads forward at most `maxBytes` and reports
+  `running` while bytes remain past the cap. With `tail` it returns only
+  the last `maxBytes` before the end of the log and sets `nextOffset` to
+  the end. `process_read` passes its `bytes`. The WakeWatcher reads a
+  `process` with `{ maxBytes: 4096, tail: true }` and a `watch` with
+  `{ maxBytes: 65536 }`. A watch line that fills a whole read becomes one
+  event, so a long line cannot stall the watch.
+- The kubernetes poll reads the status before the output. With no
+  `.exit`, it checks `kill -0 -<pid>`. A dead group, rechecked after one
+  second for a late `.exit`, reports `dead`, which maps to `failed` with
+  no exit code (`cause=pid_missing`).
+- At container start, the image start scripts write `<execId>.dead` for
+  each `/scratch/valet-jobs/<execId>.pid` with no `.exit`. A container
+  restart killed those jobs, and a new process can reuse the pid. The
+  poll reports `dead` for a job with this marker.
 
 A provider that lacks `execJob` returns `[bash_background] this sandbox backend cannot run background processes.`
 
 ### B5. WakeWatcher
 
 An api sweep (`packages/api/src/engine/wake-watcher.ts`), DB-driven like
-`ChildWatcher`, interval 30s, batch 200, started in `main.ts`, with the
+`ChildWatcher`, interval 30s, started in `main.ts`, with the
 sandbox provider and the pod patch api injected.
 
-Each tick, for each due row:
+Each tick reads every due row in pages of 200. It stops at a short page.
+For each due row:
 
 | Kind | Probe | Transition |
 |---|---|---|
 | `process`, `watch` | exec `test -f .exit && cat .exit; kill -0 -<pid>` | `.exit` present → `done`, `cause=exit`, `exit_code` |
 | | | no `.exit`, pid dead → `lost`, `cause=pid_missing` |
 | | | exec fails `SandboxUnavailableError` → `lost`, `cause=sandbox_unavailable` |
+| | | sandbox gone (CR not found, lease released, session deleted) → `lost`, `cause=sandbox_unavailable` |
 | | | `now >= deadline_at` → kill group, `expired`, `cause=deadline` |
+| | | probe fails for another reason → no change before `deadline_at`; at or past it → `expired`, `cause=deadline` |
 | `watch` | plus `tail -c +<log_offset>` | new lines → one `watch.event` signal per tick, max 200 lines; advance `log_offset`, add to `event_count` |
 | `timer` | none | `fire_at <= now` → `done`, `cause=fired` |
 
@@ -411,6 +444,11 @@ Store methods: `createLease`, `releaseLease(id, cause)` (CAS on
 - `hold_sandbox` creates a lease with no owner row. The WakeWatcher
   releases it at `deadline_at` with `deadline` and emits `lease.expired`.
 - `deadline_at` MUST be at most `created_at + leaseMaxHours`.
+- Session delete ends the session's background work.
+  `SessionStore.deleteSession` moves its `pending` and `running` wakeups
+  to `lost` with `cause=sandbox_unavailable` and releases its active leases
+  with `owner_ended`, in the same transaction as the delete. No signal is
+  sent: the session is gone.
 
 ### C3. Idle predicate
 
@@ -540,8 +578,9 @@ Each invariant names its enforcing mechanism. Review is never the
 mechanism.
 
 - **INV-1 Every lease has an owner kind, a reason, and a deadline.**
-  Mechanism: NOT NULL columns; `createLease` rejects `deadline_at` past the
-  max. Vector: insert with a 100h deadline under a 72h max is refused.
+  Mechanism: NOT NULL columns; the wakeups seam refuses a lease longer than
+  `leaseMaxHours` before it calls `createLease` (the stores take no limits
+  configuration). Vector: insert with a 100h deadline under a 72h max is refused.
 - **INV-2 A session with an active lease is never idle-suspended.**
   Mechanism: both sweep predicates call `countActiveLeases`. Vector: each
   sweep against a fake store with one lease skips the suspend.
@@ -555,14 +594,22 @@ mechanism.
   terminal signal.** Mechanism: `transitionWakeup` is a single-statement
   CAS. The watcher submits the signal only after the CAS returns the row.
 - **INV-6 Only the WakeWatcher and `wakeup_cancel` release a lease.**
-  Mechanism: the acceptance test greps for `releaseLease(` call sites and
-  fails on any other file. `valet_leases_over_deadline` pages.
+  Mechanism: `packages/api/src/engine/lease-releasers.test.ts` greps every
+  package's `src` for `releaseLease(` and fails on a file outside the
+  WakeWatcher, the wakeups seam, and the stores. `valet_leases_over_deadline`
+  pages. Session delete also releases leases, inside the store (C2).
 - **INV-7 A timer never creates a lease.** Mechanism: the lease insert is
   reachable only from `process`, `watch`, and `hold_sandbox` code paths;
   vector: `wake_at` leaves `leases` empty.
 - **INV-8 A leased sandbox's pod is never recreated by a spec change.**
   Mechanism: the attachment's run-start reconcile checks
-  `countActiveLeases` before a pod-replacing change.
+  `countActiveLeases` before a pod-replacing change. A cold attachment
+  (api restart, cache eviction) adopts compute in `provider.create`, so it
+  checks the lease first and passes `preserveLivePod: true`. The
+  kubernetes provider then keeps the live pod and its CR template and
+  skips every roll. Docker keeps the container on its image. The attachment
+  records the live image and resources, so the change still reads as
+  drift and lands after the last lease releases.
 - **INV-9 The workspace claim never shrinks and is never silently clamped.**
   Mechanism: existing never-shrink rule in `resolveWorkspaceStorageRequest`;
   Part E item 3 replaces the clamp with a refusal. Vector: a 200Gi
@@ -650,9 +697,10 @@ Implementation gaps become errata to this file in the same PR.
 - **B5, signal delivery failure.** The WakeWatcher submits a signal once,
   after the CAS. If the submit throws, the watcher logs the error with the
   wakeup id and does not retry. The row already moved, so the signal is
-  lost. The log line is the only record. `valet.wakeups.total` keeps its
-  closed cause set and has no `delivery_failed` cause. A failed
-  `lease.expired` delivery is also logged and not retried.
+  lost. The watcher records `valet.wakeups.signal_lost{kind}` and logs the
+  error. `valet.wakeups.total` keeps its closed cause set and has no
+  `delivery_failed` cause. A failed `lease.expired` delivery is also
+  logged, counted with `kind=hold`, and not retried.
 - **B5, kill before CAS.** B5 lists the CAS first. The watcher runs the
   best-effort kill (`cancelJob`) before the CAS, so a lost CAS can still
   kill a process. The kill is a no-op on a process that already ended.
@@ -668,17 +716,25 @@ Implementation gaps become errata to this file in the same PR.
   ends `lost` with `cause=pid_missing`. A slow tick can also see
   `pid_missing` after docker evicts a finished job. The kubernetes path is
   not affected, because its job state lives in the pod.
-- **B5, probe failures.** An exec error that is not
-  `SandboxUnavailableError`, `SandboxSupersededError`, or the kubernetes
-  pod-gone error leaves the row unchanged for the next tick. A row whose
-  lease has no `sandbox_id` and no ready live session is also skipped and
-  logged each tick. The lease then stays active past its deadline and
-  raises `valet_leases_over_deadline` (INV-6).
+- **B5, probe failures.** Four errors mean the sandbox is gone:
+  `SandboxUnavailableError`, `SandboxSupersededError`, the kubernetes
+  pod-gone error, and the kubernetes `restore()` miss (`Sandbox CR "<id>"
+  not found`). Any other exec error is a probe `error`. Before `deadline_at` the row stays
+  unchanged for the next tick. At or past it the row expires with
+  `cause=deadline`, so a probe that always fails cannot keep a row and
+  its lease alive. The watcher treats a row as unavailable when its lease
+  is released or its session row is gone.
+- **B5 and C5, lease sandbox id.** A lease created before its attachment
+  knew the sandbox id has no `sandbox_id`. The WakeWatcher resolves it
+  from the live attachment or the session row and writes it back with
+  `SessionStore.setLeaseSandboxId`. This gap occurs in normal operation,
+  so the backfill is not a silent repair.
 - **C5, reconcile shape.** The watcher calls
   `SandboxProvider.setEvictionProtection(id, true)` for each leased sandbox
   each tick. The provider reports `changed` when the pod lacked the
   annotation. A change on a sandbox whose oldest lease is older than two
-  ticks counts toward `valet_leases_unannotated`. Providers without the
+  ticks counts toward `valet_leases_unannotated`. So do a failed patch and
+  a lease older than two ticks whose sandbox id stays unknown. Providers without the
   seam (docker, local) skip the reconcile.
 - **Acceptance, test coverage.** The integration test
   `wakeups-acceptance.test.ts` runs steps 2, 4, 6, 8, 9, and 10. It uses a
@@ -695,7 +751,8 @@ Implementation gaps become errata to this file in the same PR.
   channel.
 - **A5, docker scratch dir.** Docker stores `scratchHostDir` in its
   inventory record, so a destroy after an api restart still deletes the
-  host dir. Docker creates the dir with mode `0o777`, so the sandbox user
+  host dir. Docker creates the dir and then sets mode `0o777` with
+  `chmod`, because the process umask masks the `mkdir` mode. So the sandbox user
   can write to it.
 - **B5, docker job output.** Docker keeps detached output in api memory
   with the existing job state. It writes no log file to disk. This is
@@ -730,3 +787,25 @@ Implementation gaps become errata to this file in the same PR.
 - **A2, scratch on adoption.** The sandbox-kubernetes `preserveCpuMemory`
   adoption helper ignores `scratch`. Adoption does not keep a live scratch
   value.
+- **B4, docker read bounds.** Docker keeps job output as an in-memory
+  string. Its offsets and `maxBytes` count UTF-16 code units. The
+  kubernetes provider counts bytes. The `local` and `virtual`
+  backends ignore the bounds; `process_read` cuts their output to `bytes`.
+- **B4, dead detection on docker.** Docker holds the job's child process,
+  so it sees an exit directly and needs no `kill -0` check.
+- **C2 and INV-6, session delete.** `deleteSession` releases leases with
+  its own SQL inside the store. It does not call `releaseLease`. The INV-6
+  grep test allows the stores for this reason.
+- **C4, settle result.** After a lease wait, `child.settled` carries the
+  result of the last turn the ChildWatcher awaited. That is the turn that
+  handled the terminal signal. A superseded turn does not replace the
+  result.
+- **A4 and Part G, REST scratch refusal.** A REST session has no parent
+  to receive a startup warning. When its `.valet/prebuild.yaml` scratch
+  request is dropped, the host writes the warning once as a `system`
+  entry on the session's default thread. The session page shows it; the
+  model does not see `system` entries. When a later reconcile finds a
+  refusal, the host only logs it.
+- **Part G, scratch requested gauge.** `valet_sandbox_scratch_requested_bytes`
+  uses `session_class` `repo` for an accepted `.valet/prebuild.yaml`
+  request and `task` for an accepted `task` request.
