@@ -14,7 +14,7 @@
  * Every subcommand takes --workspace user|TEAM_ID and --json.
  */
 import type { InstanceClient } from "../client.js";
-import { flagProblem, intFlag, readSource, runWithClient, strFlag, usage } from "../command-kit.js";
+import { flagProblem, help, helpRequested, intFlag, readSource, runWithClient, strFlag, usage } from "../command-kit.js";
 import { ExitCode } from "../exit.js";
 import { printJson, printLine, renderTable, type ParsedFlags } from "../output.js";
 import type { CliContext } from "../types.js";
@@ -37,6 +37,7 @@ export interface MemoryDeps {
 }
 
 export async function runMemory(deps: MemoryDeps, flags: ParsedFlags): Promise<number> {
+  if (helpRequested(flags)) return help(USAGE);
   const problem = flagProblem(flags, ["new"]);
   if (problem) return usage(problem);
   const [sub, ...args] = flags.rest;

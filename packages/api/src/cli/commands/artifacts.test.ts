@@ -93,3 +93,18 @@ describe("valet memory", () => {
     expect(await runMemory({ client, readSource: async () => "  " }, parseGlobalFlags(["write", "a.md", "--file", "x.md"]))).toBe(ExitCode.Usage);
   });
 });
+
+// Agents run --help to learn a command. It must print usage, not a flag error.
+describe("--help", () => {
+  it("prints usage and exits 0 on every command, including an argument-taking subcommand", async () => {
+    const out = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const client: MemoryClient = {
+      searchMemory: async () => ({ results: [] }), readMemory: async () => ({}), writeMemory: async () => ({}),
+      patchMemory: async () => ({}), moveMemory: async () => undefined, deleteMemory: async () => undefined,
+    };
+    expect(await runMemory({ client, readSource: async () => "" }, parseGlobalFlags(["--help"]))).toBe(ExitCode.OK);
+    expect(await runMemory({ client, readSource: async () => "" }, parseGlobalFlags(["rm", "--help"]))).toBe(ExitCode.OK);
+    expect(out.mock.calls.map((c) => String(c[0])).join("")).toContain("usage: valet memory");
+  });
+});
+

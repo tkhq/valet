@@ -18,7 +18,7 @@ import { InstanceClient } from "../client.js";
 import { ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printJson, printLine, renderTable, type ParsedFlags } from "../output.js";
 import { resolveInstance } from "../resolve.js";
-import { flagProblem } from "../command-kit.js";
+import { flagProblem, help, helpRequested } from "../command-kit.js";
 import type { CliContext } from "../types.js";
 import type { ActionDescribeResponse, ActionInvokeRequest, ActionInvokeResponse, ActionSearchResponse } from "../../wire/types.js";
 
@@ -63,6 +63,7 @@ async function readParams(deps: ToolsDeps, flags: ParsedFlags): Promise<Record<s
 }
 
 export async function runTools(deps: ToolsDeps, flags: ParsedFlags): Promise<number> {
+  if (helpRequested(flags)) return help(USAGE);
   // A bare or empty --workspace would run the tool with personal credentials and policies.
   const problem = flagProblem(flags);
   if (problem) {

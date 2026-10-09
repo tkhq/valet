@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { InstanceClient } from "./client.js";
 import { ExitCode } from "./exit.js";
-import { parseGlobalFlags, printErr, type ParsedFlags } from "./output.js";
+import { parseGlobalFlags, printErr, printLine, type ParsedFlags } from "./output.js";
 import { resolveInstance } from "./resolve.js";
 import type { CliContext } from "./types.js";
 
@@ -17,7 +17,12 @@ export function strFlag(flags: ParsedFlags, name: string): string | undefined {
 }
 
 /** Flags that take no value. */
-const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["json"]);
+const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["json", "help", "h"]);
+
+/** Whether `--help` or `--h` was passed. A command prints its usage and exits 0. */
+export function helpRequested(flags: ParsedFlags): boolean {
+  return flags.flags.help === true || flags.flags.h === true;
+}
 
 /**
  * The first flag that was given without a usable value, as a message naming
@@ -65,6 +70,12 @@ export function parseJsonObject(raw: string, flag: string): { ok: true; value: R
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { ok: false, error: `--${flag} must be a JSON object.` };
   return { ok: true, value: Object.fromEntries(Object.entries(parsed)) };
+}
+
+/** Prints usage on stdout for `--help` and returns OK. */
+export function help(text: string): number {
+  printLine(text);
+  return ExitCode.OK;
 }
 
 /** Prints a usage error and returns the usage exit code. */

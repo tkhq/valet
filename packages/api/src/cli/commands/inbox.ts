@@ -5,14 +5,17 @@
  * An approval needs a person in Valet.
  */
 import type { InstanceClient } from "../client.js";
-import { flagProblem, runWithClient, usage } from "../command-kit.js";
+import { flagProblem, help, helpRequested, runWithClient, usage } from "../command-kit.js";
 import { ExitCode } from "../exit.js";
 import { printJson, printLine, renderTable, type ParsedFlags } from "../output.js";
 import type { CliContext } from "../types.js";
 
 export type InboxClient = Pick<InstanceClient, "listInboxDecisions" | "listWorkflowActionRequired">;
 
+const USAGE = "usage: valet inbox [--json]";
+
 export async function runInbox(client: InboxClient, flags: ParsedFlags): Promise<number> {
+  if (helpRequested(flags)) return help(USAGE);
   const problem = flagProblem(flags);
   if (problem) return usage(problem);
   const [decisions, workflows] = await Promise.all([client.listInboxDecisions(), client.listWorkflowActionRequired()]);

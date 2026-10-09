@@ -6,7 +6,7 @@
  *   valet skills show <name>
  */
 import type { InstanceClient } from "../client.js";
-import { flagProblem, intFlag, runWithClient, strFlag, usage } from "../command-kit.js";
+import { flagProblem, help, helpRequested, intFlag, runWithClient, strFlag, usage } from "../command-kit.js";
 import { ExitCode } from "../exit.js";
 import { printJson, printLine, renderTable, type ParsedFlags } from "../output.js";
 import type { CliContext } from "../types.js";
@@ -19,6 +19,7 @@ const USAGE = [
 export type SkillsClient = Pick<InstanceClient, "listSkills" | "getSkill">;
 
 export async function runSkills(client: SkillsClient, flags: ParsedFlags): Promise<number> {
+  if (helpRequested(flags)) return help(USAGE);
   const problem = flagProblem(flags);
   if (problem) return usage(problem);
   const [sub, ...args] = flags.rest;

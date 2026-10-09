@@ -2,11 +2,14 @@ import { InstanceClient } from "../client.js";
 import { ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printJson, printLine, renderTable, type ParsedFlags } from "../output.js";
 import { resolveInstance } from "../resolve.js";
-import { flagProblem } from "../command-kit.js";
+import { flagProblem, help, helpRequested } from "../command-kit.js";
 import type { CliContext } from "../types.js";
 
 type ThreadsClient = Pick<InstanceClient, "getThread" | "listWorkspaceThreads" | "createWorkspaceThread" | "abortThread">;
+const USAGE = "usage: valet threads <list|new|show ID|stop ID> [--workspace user|TEAM_ID] [--title TITLE]";
+
 export async function runThreads(client: ThreadsClient, flags: ParsedFlags): Promise<number> {
+  if (helpRequested(flags)) return help(USAGE);
   // A bare or empty --workspace would create the thread in the personal workspace.
   const problem = flagProblem(flags);
   if (problem) {
@@ -51,7 +54,7 @@ export async function runThreads(client: ThreadsClient, flags: ParsedFlags): Pro
       return ExitCode.OK;
     }
   }
-  printErr("usage: valet threads <list|new|show ID|stop ID> [--workspace user|TEAM_ID] [--title TITLE]");
+  printErr(USAGE);
   return ExitCode.Usage;
 }
 

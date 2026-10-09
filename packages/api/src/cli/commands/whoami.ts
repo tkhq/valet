@@ -4,7 +4,7 @@
  * `whoami` and `list_workspaces` tools.
  */
 import type { InstanceClient } from "../client.js";
-import { flagProblem, runWithClient, usage } from "../command-kit.js";
+import { flagProblem, help, helpRequested, runWithClient, usage } from "../command-kit.js";
 import { ExitCode } from "../exit.js";
 import { printJson, printLine, renderTable, type ParsedFlags } from "../output.js";
 import type { CliContext } from "../types.js";
@@ -12,6 +12,7 @@ import type { CliContext } from "../types.js";
 export type WhoamiClient = Pick<InstanceClient, "me" | "listTeams">;
 
 export async function runWhoami(client: WhoamiClient, flags: ParsedFlags): Promise<number> {
+  if (helpRequested(flags)) return help("usage: valet whoami [--json]");
   const problem = flagProblem(flags);
   if (problem) return usage(problem);
   const me = await client.me();
@@ -22,6 +23,7 @@ export async function runWhoami(client: WhoamiClient, flags: ParsedFlags): Promi
 }
 
 export async function runWorkspaces(client: WhoamiClient, flags: ParsedFlags): Promise<number> {
+  if (helpRequested(flags)) return help("usage: valet workspaces [--json]");
   const problem = flagProblem(flags);
   if (problem) return usage(problem);
   const [me, teams] = await Promise.all([client.me(), client.listTeams()]);
