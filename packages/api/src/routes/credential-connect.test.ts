@@ -5,7 +5,7 @@
  * fake authorization server.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import type { ValetPlugin } from "@valet/engine";
 import { OAuthInterpretError, type TokenInterpretation } from "@valet/engine";
@@ -707,15 +707,30 @@ describe("identity auto-link (slackish plugin)", () => {
 describe("verifyOAuthConnectState", () => {
   const key = Buffer.from("test-key-material-32-bytes-long");
 
+  /** Built per test: an `exp` fixed at collection time expires on a slow run. */
+  function payload(expInMs = 60_000) {
+    return { userId: "u1", orgId: "o1", teamId: "t1", service: "linear", nonce: "n1", exp: Date.now() + expInMs };
+  }
+
   it("accepts a validly signed, unexpired payload", () => {
-    const state = signState({ userId: "u1", service: "linear", nonce: "n1", exp: Date.now() + 10_000 }, key);
+    const state = signState("integration-connect", payload(), key);
     const verified = verifyOAuthConnectState(state, key, Date.now());
     expect(verified).toMatchObject({ userId: "u1", service: "linear" });
   });
 
   it("rejects an expired payload", () => {
-    const state = signState({ userId: "u1", service: "linear", nonce: "n1", exp: Date.now() - 1000 }, key);
+    const state = signState("integration-connect", payload(-1000), key);
     expect(verifyOAuthConnectState(state, key, Date.now())).toBeNull();
+  });
+
+  it.each(["github-app-setup", "github-connect"] as const)("rejects a %s state with a matching payload", (purpose) => {
+    expect(verifyOAuthConnectState(signState(purpose, payload(), key), key, Date.now())).toBeNull();
+  });
+
+  it("rejects a state signed without a purpose, as states were before purpose keys", () => {
+    const payloadB64 = Buffer.from(JSON.stringify(payload()), "utf8").toString("base64url");
+    const unpurposed = `${payloadB64}.${createHmac("sha256", key).update(payloadB64).digest("base64url")}`;
+    expect(verifyOAuthConnectState(unpurposed, key, Date.now())).toBeNull();
   });
 });
 

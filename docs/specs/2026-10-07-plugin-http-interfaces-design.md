@@ -13,7 +13,7 @@ Existing webhook URLs, OAuth callbacks, saved credentials, installation records 
 ## Current evidence
 
 - `packages/engine/src/valet-plugin.ts` has no HTTP route declaration.
-- `packages/api/src/app.ts` explicitly mounts Slack, GitHub, Linear and Security route families.
+- `packages/api/src/app.ts` explicitly mounted Slack, GitHub, Linear and Security route families. GitHub now mounts through the registry.
 - `packages/api/src/routes/event-webhooks.ts` resolves Linear installations and signing secrets in a service-name branch.
 - `packages/api/src/services/plugin-store.ts` already supports scoped documents and indexes.
 - Linear setup now uses client credentials. The ticket's older OAuth flow description must not replace the current connection behavior.
@@ -107,7 +107,7 @@ Triggers from other services cannot participate in Linear verification.
 A temporary host adapter reads existing Linear installations and signing metadata without refreshing credentials.
 The installation's stored organization determines event ownership after verification. Request bodies cannot override it.
 
-This iteration does not move connection handlers, GitHub, or Security routes. The Slack section below describes the Slack adoption.
+This iteration does not move connection handlers or Security routes. The Slack and GitHub adoption sections below describe those moves.
 It does not implement arbitrary callback state capabilities, plugin-owned storage, lifecycle hooks, or the complete event-emission interface.
 New signed plugins currently need an installation adapter. This restriction remains until plugin-owned installation storage is available.
 No database migration or existing-data rewrite is required.
@@ -155,3 +155,49 @@ If the Slack plugin is not loaded, the compatibility URLs are not mounted. The i
 Org credential connect, user OAuth, and identity linking remain generic host routes. They serve several plugins and need TKAI-379 lifecycle hooks before they move.
 The inbox table remains an API table pending TKAI-378. New manifests still name the compatibility URL.
 The implementation record is [the Slack adoption plan](../plans/2026-10-09-slack-plugin-adoption.md).
+
+## GitHub adoption
+
+The GitHub plugin declares eleven routes in `packages/plugin-github/src/http/`. It owns request parsing, manifest construction, the manifest code conversion, the OAuth code exchange, the profile lookup, HMAC verification, payload parsing, and every response.
+The API removed `routes/github-app.ts`, `routes/github-connect.ts`, and their mounts in `app.ts`.
+The plan is [the GitHub adoption plan](../plans/2026-10-09-github-plugin-adoption.md). It lists each route, its legacy URL, and its body cap.
+
+Canonical routes are `/api/plugins/github/http/app`, `/app/*`, `/connection`, `/connection/*`, and the public `/plugins/github/http/webhook`.
+The host keeps `/api/org/github-app/*`, `/api/me/github/*`, and `/webhooks/github-app` as fixed aliases. Existing GitHub Apps store these URLs, so the manifest still names them.
+
+### Host binding
+
+GitHub uses the host binding table in `packages/api/src/plugins/http-bindings.ts`, keyed by plugin name and route ID. The Slack adoption uses the same table.
+The mount runs a binding where it would call the manifest handler: after authentication, membership, administration, and the streaming body limit.
+The mount refuses a binding whose authentication differs from the declaration. Each compatibility URL also pins its method and authentication.
+The mount also refuses to boot when a loaded plugin with HTTP routes does not declare a route ID that a host binding or compatibility URL names. Without this check, a renamed route would leave its existing URL answering 404. The node_modules loader quarantines such a package instead.
+The manifest handlers answer 501, so a host without the binding fails closed.
+
+`packages/api/src/plugins/http-github.ts` binds four capabilities. No capability method accepts a user or organization ID.
+
+- App administration binds to the caller's organization.
+- App setup opens a grant only for a setup state the host signed. The state names the org admin who started setup, and the grant opens only for that caller while they are still an admin of the organization in the state. The grant binds to that organization.
+- User connection binds to the caller. A callback grant opens only when the signed state names the caller.
+- Webhook delivery exposes the App webhook secret first. It binds organization effects only after the plugin verifies the signature.
+
+### Why the webhook is not signed ingress
+
+The GitHub webhook uses a bound public route, not the `signature` pipeline.
+GitHub signs per App, so the host resolves one App secret before it knows an organization. With only the `GITHUB_APP_*` fallback, the verified installation ID selects the organization.
+The `signature` pipeline writes a drop-log row for each bad signature, and it acknowledges a verified malformed body with its acknowledgement status.
+The GitHub route keeps its throttled warning, writes nothing for a bad signature, and returns 400 for a verified body that is not JSON.
+Verified deliveries also update installation rows, content sources, and pull request state. The `signature` pipeline only emits events.
+
+### Behavior changes
+
+- Authenticated GitHub routes now require current organization membership, the same as other plugin routes.
+- Authenticated GitHub routes now have body caps: 0 bytes for GET and DELETE, and 64 KiB for POST. Before, they had no cap.
+- The webhook enforces its 1 MiB cap while it reads the stream.
+- A manifest request with a JSON `null` body now uses the defaults. Before, it failed with HTTP 500.
+- The routes exist only when the GitHub plugin is loaded. Bundled plugins always load, so deployments keep every URL.
+
+### Not moved
+
+The shared App client stays in `packages/api/src/services/github-app.ts`. Token resolution, the installation sweep, and boot webhook sync use its JWT minting, installation discovery, and webhook URL sync.
+Installation rows stay in `github_installations`, and App credentials stay in `credentials`. TKAI-378 decides plugin-owned storage.
+The single-App caveat remains. If two organizations store an App in one deployment, webhook deliveries go to the first credential row.

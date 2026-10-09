@@ -7,28 +7,11 @@
  * true, and it does not matter. A source with no installation still polls,
  * and marking it due only moves its next poll forward.
  */
-export interface ContentPushRef {
-  repoFullName: string;
-  gitRef: string;
-  defaultBranch: string;
-}
+import type { GithubPushRef } from "@valet/plugin-github/http";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** The repository and ref a `push` names, or null when the payload is not a push. */
-export function parseContentPushPayload(payload: unknown): ContentPushRef | null {
-  if (!isRecord(payload)) return null;
-  if (typeof payload.ref !== "string" || payload.ref.length === 0) return null;
-  const repository = payload.repository;
-  if (!isRecord(repository) || typeof repository.full_name !== "string") return null;
-  const defaultBranch =
-    typeof repository.default_branch === "string" && repository.default_branch.length > 0
-      ? repository.default_branch
-      : "main";
-  return { repoFullName: repository.full_name, gitRef: payload.ref, defaultBranch };
-}
+/** The GitHub plugin owns push payload parsing for its webhook. */
+export { parseContentPushPayload } from "@valet/plugin-github/http";
+export type ContentPushRef = GithubPushRef;
 
 /** True when this source tracks the branch or tag the push moved. An empty
  * source ref means the repository default branch. */
