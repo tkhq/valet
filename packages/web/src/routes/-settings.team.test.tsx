@@ -42,7 +42,13 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("~/api/settings", () => ({
   useOrg: () => ({ data: { callerRole: "member", features: { organizations: true } }, isLoading: false, error: null }),
   useTeams: () => ({
-    data: { teams: [{ id: "t1", name: "team-tvc", callerRole: "member" }, { id: "t9", name: "other", callerRole: null }] },
+    data: {
+      teams: [
+        { id: "t1", name: "team-tvc", callerRole: "member" },
+        { id: "t2", name: "platform", callerRole: "admin" },
+        { id: "t9", name: "other", callerRole: null },
+      ],
+    },
     isLoading: false,
     error: null,
   }),
@@ -67,13 +73,14 @@ describe("team settings pages", () => {
     expect(screen.getByText("tab: t1")).toBeTruthy();
   });
 
-  it("drops a draft when another team opens", () => {
+  it("drops a draft when another of the caller's teams opens", () => {
+    // Both teams are the caller's, so the same tab stays mounted across the
+    // change. Only the Outlet's key stops t1's draft from showing under t2.
     const view = render(<TeamSettingsShell teamId="t1" />);
     fireEvent.change(screen.getByLabelText("Draft"), { target: { value: "half-typed key" } });
     view.rerender(<TeamSettingsShell teamId="t2" />);
-    // t2 is not one of the caller's teams in this fixture, so the tab is gone.
-    expect(screen.queryByLabelText("Draft")).toBeNull();
-    view.rerender(<TeamSettingsShell teamId="t1" />);
+    expect(screen.getByRole("heading", { name: "platform" })).toBeTruthy();
+    expect(screen.getByText("tab: t2")).toBeTruthy();
     expect(screen.getByLabelText("Draft")).toHaveProperty("value", "");
   });
 
