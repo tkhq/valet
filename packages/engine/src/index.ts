@@ -112,6 +112,7 @@ export {
   recordTurn,
   recordWakeupEnded,
   recordWakeupSignalLost,
+  recordWakeupKillFailed,
   recordWakeupsActive,
   recordChildSettleOverDeadline,
   recordLeaseOrphanReleased,

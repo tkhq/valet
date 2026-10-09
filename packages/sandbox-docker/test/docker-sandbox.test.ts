@@ -663,7 +663,12 @@ describe("dropFinishedDetachedOutputs (fix wave 3, security L4)", () => {
       ["e", { detached: true, status: "done", output: "x".repeat(40), terminalPolled: true }],
     ]);
     expect(dropFinishedDetachedOutputs(jobs, 100)).toEqual(["a", "c"]);
-    expect([...jobs.keys()]).toEqual(["b", "d", "e"]);
+    // A drop empties the output and keeps the job, so its exit stays readable.
+    expect([...jobs.keys()]).toEqual(["a", "b", "c", "d", "e"]);
+    expect(jobs.get("a")).toMatchObject({ status: "done", output: "" });
+    expect(jobs.get("c")).toMatchObject({ status: "failed", output: "" });
+    expect(jobs.get("e")?.output).toHaveLength(40);
+    expect(dropFinishedDetachedOutputs(jobs, 100)).toEqual([]);
   });
 
   it("keeps a finished job whose exit no terminal poll has read yet (fix wave 4, data N3)", () => {
@@ -673,7 +678,9 @@ describe("dropFinishedDetachedOutputs (fix wave 3, security L4)", () => {
       ["c", { detached: true, status: "done", output: "x".repeat(40) }],
     ]);
     expect(dropFinishedDetachedOutputs(jobs, 50)).toEqual(["b"]);
-    expect([...jobs.keys()]).toEqual(["a", "c"]);
+    expect(jobs.get("a")?.output).toHaveLength(40);
+    expect(jobs.get("b")?.output).toBe("");
+    expect(jobs.get("c")?.output).toHaveLength(40);
   });
 
   it("drops nothing under the cap, and nothing it may not drop over it", () => {
