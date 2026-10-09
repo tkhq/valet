@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { Wakeup } from "@valet/engine";
-import { decideWakeup, tail, LOG_TAIL_BYTES, WATCH_READ_BYTES, type DecideOptions, type WakeupDecision, type WakeupProbe } from "./wake-watcher-decide.js";
+import { decideWakeup, tail, LOG_TAIL_BYTES, WATCH_BUFFER_BYTES, WATCH_READ_BYTES, type DecideOptions, type WakeupDecision, type WakeupProbe } from "./wake-watcher-decide.js";
 
 interface Vector {
   name: string;
@@ -135,7 +135,9 @@ describe("watch rate limit and coalescing (fix wave 3)", () => {
     const row: Wakeup = { ...WATCH_ROW, lastEmitAt: 1_000, eventCount: 1, watchBuffer: big };
     const d = decideWakeup(31_000, row, { kind: "poll", status: "running", output: big, nextOffset: Buffer.byteLength(big) }, DEFAULTS);
     expect(d?.signals).toHaveLength(1);
-    expect(d?.signals[0]?.body).toBe(`${big}${big}`.slice(0, -1));
+    // One event holds at most 64 KiB; the second line stays buffered (fix wave 4, data N8).
+    expect(d?.signals[0]?.body).toBe(big.slice(0, -1));
+    expect(d?.patch.watchBuffer).toBe(big);
   });
 
   it("flushes the buffer into the final watch.event at exit", () => {
@@ -180,5 +182,130 @@ describe("terminal bodies name the next step (fix wave 3, UX)", () => {
   it("a capped log says so in the exit body", () => {
     const d = decideWakeup(1_000, proc, { kind: "poll", status: "done", exitCode: 1, output: "x\n[valet: log capped at 10 bytes; later output dropped]\n", nextOffset: 60 }, DEFAULTS);
     expect(d?.signals[0]?.body).toContain("The log hit its size cap");
+  });
+});
+
+// ── Fix wave 4, group A ──
+
+describe("watch rate limit under timer drift (fix wave 4, data M1)", () => {
+  it("expires a watch on its 121st output poll when each tick lands 30 001 ms after the last", () => {
+    let row = WATCH_ROW;
+    let offset = 0;
+    for (let poll = 0; poll < 121; poll++) {
+      const now = 1_000 + poll * 30_001;
+      const output = `line ${poll}\n`;
+      offset += Buffer.byteLength(output);
+      const d = decideWakeup(now, row, { kind: "poll", status: "running", output, nextOffset: offset }, DEFAULTS);
+      expect(d).not.toBeNull();
+      if (!d) return;
+      if (poll < 120) {
+        expect(d.to).toBe("running");
+        row = applied(row, d);
+        continue;
+      }
+      expect(d.to).toBe("expired");
+      expect(d.cause).toBe("rate");
+    }
+  });
+
+  it("starts a new window only one tick past the hour", () => {
+    const row: Wakeup = { ...WATCH_ROW, lastEmitAt: 1_000, eventCount: 1, windowStartAt: 0, windowCount: 5 };
+    const inside = decideWakeup(3_600_000 + 30_000, row, { kind: "poll", status: "running", output: "x\n", nextOffset: 2 }, DEFAULTS);
+    expect(inside?.patch.windowCount).toBe(6);
+    const past = decideWakeup(3_600_000 + 30_001, row, { kind: "poll", status: "running", output: "x\n", nextOffset: 2 }, DEFAULTS);
+    expect(past?.patch.windowCount).toBe(1);
+    const slowTick = decideWakeup(3_600_000 + 30_001, row, { kind: "poll", status: "running", output: "x\n", nextOffset: 2 }, { ...DEFAULTS, tickMs: 60_000 });
+    expect(slowTick?.patch.windowCount).toBe(6);
+  });
+});
+
+describe("pending row past the start grace (fix wave 4, concurrency N4)", () => {
+  const pending: Wakeup = { ...WATCH_ROW, id: "wk_pend", kind: "process", status: "pending", deadlineAt: 10 * 3_600_000 };
+  it("makes no decision on a probe error before the deadline", () => {
+    expect(decideWakeup(46 * 60_000, pending, { kind: "error" }, DEFAULTS)).toBeNull();
+  });
+  it("expires the row at its deadline when the probe still fails", () => {
+    const d = decideWakeup(11 * 3_600_000, pending, { kind: "error" }, DEFAULTS);
+    expect(d).toMatchObject({ to: "expired", cause: "deadline", kill: true, releaseLease: "deadline" });
+  });
+});
+
+describe("buffered watch lines reach every terminal body (fix wave 4, data N2)", () => {
+  const held: Wakeup = { ...WATCH_ROW, lastEmitAt: 1_000, eventCount: 1, logTail: "sent\nheld 1\nheld 2\n", watchBuffer: "held 1\nheld 2\n" };
+  it("the deadline body carries the buffered lines and the new output", () => {
+    const d = decideWakeup(200 * 3_600_000, held, { kind: "poll", status: "running", output: "new\n", nextOffset: 4 }, DEFAULTS);
+    expect(d?.to).toBe("expired");
+    expect(d?.signals[0]?.body.startsWith("held 1\nheld 2\nnew\n")).toBe(true);
+  });
+  it("the sandbox_unavailable body carries the buffered lines", () => {
+    const d = decideWakeup(31_000, held, { kind: "unavailable" }, DEFAULTS);
+    expect(d?.signals[0]?.body.startsWith("held 1\nheld 2\n")).toBe(true);
+    expect(d?.signals[0]?.body).not.toContain("sent");
+  });
+  it("the rate body keeps up to 64 KiB of buffered lines, not a 4 KiB tail", () => {
+    const line = "z".repeat(1023) + "\n";
+    const buffer = line.repeat(40);
+    const row: Wakeup = { ...held, watchBuffer: buffer, windowStartAt: 0, windowCount: 120 };
+    const d = decideWakeup(31_000, row, { kind: "poll", status: "running", output: "last\n", nextOffset: 5 }, DEFAULTS);
+    expect(d?.cause).toBe("rate");
+    expect(d?.signals[0]?.body.startsWith(`${buffer}last\n`)).toBe(true);
+  });
+  it("caps a terminal body's buffered lines at 64 KiB", () => {
+    const line = "q".repeat(1023) + "\n";
+    const row: Wakeup = { ...held, watchBuffer: line.repeat(100) };
+    const d = decideWakeup(31_000, row, { kind: "unavailable" }, DEFAULTS);
+    const body = d?.signals[0]?.body ?? "";
+    expect(Buffer.byteLength(body)).toBeLessThan(WATCH_BUFFER_BYTES + 1024);
+    expect(body).toContain("The sandbox stopped");
+  });
+});
+
+describe("watch.event body cap (fix wave 4, data N8)", () => {
+  it("emits at most 64 KiB of lines and keeps the rest buffered", () => {
+    const line = "w".repeat(1023) + "\n";
+    const row: Wakeup = { ...WATCH_ROW, lastEmitAt: 1_000, eventCount: 1, watchBuffer: line.repeat(63) };
+    const output = line.repeat(60);
+    const d = decideWakeup(31_000, row, { kind: "poll", status: "running", output, nextOffset: Buffer.byteLength(output) }, DEFAULTS);
+    expect(d?.signals).toHaveLength(1);
+    const body = d?.signals[0]?.body ?? "";
+    expect(Buffer.byteLength(body)).toBeLessThanOrEqual(WATCH_BUFFER_BYTES);
+    expect(d?.signals[0]?.attributes.lineCount).toBe("64");
+    expect(d?.patch.watchBuffer).toBe(line.repeat(59));
+  });
+  it("splits a large exit flush into several events of at most 64 KiB", () => {
+    const line = "e".repeat(1023) + "\n";
+    const row: Wakeup = { ...WATCH_ROW, lastEmitAt: 1_000, eventCount: 1, watchBuffer: line.repeat(63) };
+    const output = line.repeat(60);
+    const d = decideWakeup(31_000, row, { kind: "poll", status: "done", exitCode: 0, output, nextOffset: Buffer.byteLength(output) }, DEFAULTS);
+    const events = d?.signals.filter((s) => s.signalType === "watch.event") ?? [];
+    expect(events.map((s) => s.attributes.lineCount)).toEqual(["64", "59"]);
+    expect(events.map((s) => s.dispatchId)).toEqual(["wakeup:wk_w3:event:2", "wakeup:wk_w3:event:3"]);
+    expect(d?.patch.eventCount).toBe(3);
+    for (const s of events) expect(Buffer.byteLength(s.body)).toBeLessThanOrEqual(WATCH_BUFFER_BYTES);
+  });
+});
+
+describe("a provider-reported truncation gives the capped notice (fix wave 4, UX N5)", () => {
+  const proc: Wakeup = { ...WATCH_ROW, id: "wk_p", kind: "process", logTail: "" };
+  it("adds the capped notice to the exit body when the poll reports truncated", () => {
+    const d = decideWakeup(1_000, proc, { kind: "poll", status: "done", exitCode: 0, output: "head\n", nextOffset: 5, truncated: true }, DEFAULTS);
+    expect(d?.signals[0]?.body).toContain("The log hit its size cap");
+  });
+});
+
+describe("deadline guidance (fix wave 4, UX N14)", () => {
+  const proc: Wakeup = { ...WATCH_ROW, id: "wk_p", kind: "process", logTail: "", createdAt: 0, deadlineAt: 72 * 3_600_000 };
+  it("does not say to rerun with a larger deadline when the deadline was already the max", () => {
+    const d = decideWakeup(73 * 3_600_000, proc, { kind: "error" }, { ...DEFAULTS, leaseMaxHours: 72 });
+    const body = d?.signals[0]?.body ?? "";
+    expect(body).not.toContain("larger deadline");
+    expect(body).toContain("72 hours");
+  });
+  it("names the watch and max_hours for a watch", () => {
+    const d = decideWakeup(200 * 3_600_000, { ...WATCH_ROW, logTail: "" }, { kind: "error" }, { ...DEFAULTS, leaseMaxHours: 200 });
+    const body = d?.signals[0]?.body ?? "";
+    expect(body).toContain("the watch reached its max_hours");
+    expect(body).toContain("larger max_hours");
+    expect(body).not.toContain("process");
   });
 });

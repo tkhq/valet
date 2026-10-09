@@ -746,7 +746,7 @@
       "signals": [
         {
           "signalType": "watch.exited",
-          "body": "last line\n[valet: the process reached its deadline and was stopped. Run it again with a larger deadline only if it was making progress.]",
+          "body": "last line\n[valet: the watch reached its max_hours and was stopped. Start it again with a larger max_hours only if you still need it.]",
           "attributes": {
             "wakeupId": "wk_015",
             "kind": "watch",
@@ -763,7 +763,7 @@
   },
   {
     "name": "watch_rate_window_resets_after_an_hour",
-    "now": 3600001,
+    "now": 3630001,
     "row": {
       "id": "wk_020",
       "sessionId": "s1",
@@ -798,11 +798,11 @@
       "patch": {
         "logOffset": 2,
         "logTail": "x\n",
-        "windowStartAt": 3600001,
+        "windowStartAt": 3630001,
         "windowCount": 1,
         "eventCount": 501,
         "watchBuffer": "",
-        "lastEmitAt": 3600001
+        "lastEmitAt": 3630001
       },
       "signals": [
         {
@@ -1273,6 +1273,147 @@
             "logPath": "/tmp/valet-jobs/job-a-12345678.out"
           },
           "dispatchId": "wakeup:wk_025:terminal"
+        }
+      ],
+      "releaseLease": "owner_ended"
+    }
+  },
+  {
+    "name": "pending_process_past_start_grace_probe_error_waits_for_the_deadline",
+    "now": 2700000,
+    "row": {
+      "id": "wk_026",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "process",
+      "status": "pending",
+      "reason": "build",
+      "command": "make build",
+      "execId": "job-a-87654321",
+      "leaseId": "ls_26",
+      "deadlineAt": 7200000,
+      "logOffset": 0,
+      "logTail": "",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": {
+      "kind": "error"
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
+    },
+    "expected": null
+  },
+  {
+    "name": "watch_deadline_body_carries_the_buffered_lines",
+    "now": 6000,
+    "row": {
+      "id": "wk_027",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "watch",
+      "status": "running",
+      "reason": "follow",
+      "command": "tail -f x",
+      "execId": "exec27",
+      "leaseId": "ls_27",
+      "deadlineAt": 5000,
+      "logOffset": 10,
+      "logTail": "old\nheld 1\nheld 2\n",
+      "eventCount": 3,
+      "createdAt": 0,
+      "updatedAt": 0,
+      "lastEmitAt": 1000,
+      "watchBuffer": "held 1\nheld 2\n"
+    },
+    "probe": {
+      "kind": "poll",
+      "status": "running",
+      "output": "new\n",
+      "nextOffset": 14
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
+    },
+    "expected": {
+      "to": "expired",
+      "cause": "deadline",
+      "kill": true,
+      "patch": {
+        "cause": "deadline",
+        "endedAt": 6000
+      },
+      "signals": [
+        {
+          "signalType": "watch.exited",
+          "body": "held 1\nheld 2\nnew\n[valet: the watch reached its max_hours and was stopped. Start it again with a larger max_hours only if you still need it.]",
+          "attributes": {
+            "wakeupId": "wk_027",
+            "kind": "watch",
+            "reason": "follow",
+            "cause": "deadline",
+            "durationSeconds": "6",
+            "logPath": "/tmp/valet-jobs/exec27.out"
+          },
+          "dispatchId": "wakeup:wk_027:terminal"
+        }
+      ],
+      "releaseLease": "deadline"
+    }
+  },
+  {
+    "name": "watch_sandbox_unavailable_body_carries_the_buffered_lines",
+    "now": 3000,
+    "row": {
+      "id": "wk_028",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "watch",
+      "status": "running",
+      "reason": "follow",
+      "command": "tail -f x",
+      "execId": "exec28",
+      "leaseId": "ls_28",
+      "deadlineAt": 99999999,
+      "logOffset": 10,
+      "logTail": "old\nheld\n",
+      "eventCount": 1,
+      "createdAt": 0,
+      "updatedAt": 0,
+      "lastEmitAt": 1000,
+      "watchBuffer": "held\n"
+    },
+    "probe": {
+      "kind": "unavailable"
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
+    },
+    "expected": {
+      "to": "lost",
+      "cause": "sandbox_unavailable",
+      "patch": {
+        "cause": "sandbox_unavailable",
+        "endedAt": 3000
+      },
+      "signals": [
+        {
+          "signalType": "watch.exited",
+          "body": "held\n[valet: The sandbox stopped, so the process ended with it. Files outside /workspace are gone. Tell the person before you run it again.]",
+          "attributes": {
+            "wakeupId": "wk_028",
+            "kind": "watch",
+            "reason": "follow",
+            "cause": "sandbox_unavailable",
+            "durationSeconds": "3",
+            "logPath": "/tmp/valet-jobs/exec28.out"
+          },
+          "dispatchId": "wakeup:wk_028:terminal"
         }
       ],
       "releaseLease": "owner_ended"
