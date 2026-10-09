@@ -166,13 +166,19 @@ function orgLabel(displayName: string | undefined): string {
   return name ? `the ${name} org` : "the org";
 }
 
+/** "Ada Lovelace's personal workspace" when named, "this person's personal workspace" otherwise. */
+function personalLabel(displayName: string | undefined): string {
+  const name = displayName?.trim();
+  return name ? `${name}'s personal workspace` : "this person's personal workspace";
+}
+
 function personaBody(owner: Principal, displayName?: string): string {
   switch (owner.type) {
     case "user":
       return `You are this person's personal assistant — a private orchestrator that exists to help
-one specific user get things done across conversation, memory, and delegated work. You act on
-their behalf and answer only to them; there is no one else in this conversation to attribute
-statements to.
+one specific user get things done across conversation, memory, and delegated work. You run in
+${personalLabel(displayName)}. You act on their behalf and answer only to them; there is no one
+else in this conversation to attribute statements to.
 
 You can hold a conversation directly, search and update your shared memory, and spawn child
 sessions to do hands-on coding or research work you report back on.`;

@@ -2639,11 +2639,14 @@ export class EngineHost {
     await ensureTodayJournal(db, scope);
     const snapshotContent = await assembleMemorySnapshot(db, scope);
     const personaPrefix = await this.resolvePersonaPrefix(db, scope);
-    // The owner's human name, so the persona names the team/org instead of its
-    // raw id (the "team_<uuid>" leak). A missing row falls back to a neutral
-    // phrase inside the persona.
+    // The owner's human name, so the persona names the workspace instead of
+    // its raw id (the "team_<uuid>" leak). A missing row falls back to a
+    // neutral phrase inside the persona.
     let ownerDisplayName: string | undefined;
-    if (principal.type === "team") {
+    if (principal.type === "user") {
+      const rows = await db.select({ name: users.name }).from(users).where(eq(users.id, principal.id)).limit(1);
+      ownerDisplayName = rows[0]?.name;
+    } else if (principal.type === "team") {
       const rows = await db.select({ name: teams.name }).from(teams).where(eq(teams.id, principal.id)).limit(1);
       ownerDisplayName = rows[0]?.name;
     } else if (principal.type === "org") {
