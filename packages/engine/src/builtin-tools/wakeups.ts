@@ -127,7 +127,8 @@ export const watchTool = defineTool({
     return {
       text:
         `started watch ${wakeup.id} (max ${validation.value.maxHours}h). ` +
-        `You will receive at most one watch.event every ${intervalSeconds} seconds, and a watch.exited signal when it stops. ` +
+        `You will receive at most one watch.event every ${intervalSeconds} seconds, or sooner when 64 KiB of new lines collect, ` +
+        "and a watch.exited signal when it stops. " +
         afterStart(wakeup.id, "next watch"),
     };
   },
@@ -167,7 +168,11 @@ export const wakeAtTool = defineTool({
       throw err;
     }
     const fireAt = wakeup.fireAt ?? validation.value.fireAt;
-    return { text: `scheduled wakeup ${wakeup.id} at ${new Date(fireAt).toISOString()}` };
+    // The model must end the turn, or it waits in the turn for a signal
+    // that starts a new one (fix wave 4, UX N14).
+    return {
+      text: `scheduled wakeup ${wakeup.id} at ${new Date(fireAt).toISOString()}. End your turn now; the timer.fired signal starts your next turn.`,
+    };
   },
 });
 
@@ -240,8 +245,10 @@ export const processReadTool = defineTool({
     const body = result.text.length > 0 ? result.text : "(no new output)";
     const eofSuffix = result.eof ? " [eof]" : "";
     // The log keeps its first bytes up to the cap, so a tail read stops
-    // moving once the cap hits. Say so (fix wave 3, k8s M-B).
-    const capped = result.text.includes(JOB_LOG_CAPPED_MARKER)
+    // moving once the cap hits. Say so (fix wave 3, k8s M-B). Docker writes
+    // no marker line; the seam reports its cap drop as `capped` (fix wave 4,
+    // UX N5).
+    const capped = result.capped || result.text.includes(JOB_LOG_CAPPED_MARKER)
       ? "\n[log capped: output after the cap was dropped. The process.exited signal reports the exit code.]"
       : "";
     return { text: `${body}\n[nextOffset ${result.nextOffset}]${eofSuffix}${capped}` };
