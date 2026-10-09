@@ -24,7 +24,7 @@ import { clearRepoPrebuildFlagsCache } from "../bakes/source-service.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { loadSessionMeta } from "./session-meta.js";
-import { codingPromptOptions, primaryGitHubRepoTarget, wakeupsSeamDeps } from "./host.js";
+import { codingPromptOptions, primaryGitHubRepoTarget, sessionScratchBytes, wakeupsSeamDeps } from "./host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import type { RepoBinding } from "../wire/types.js";
 import { InMemorySessionStore, type Sandbox, type SandboxCapabilities, type SandboxCreateOpts } from "@valet/engine";
@@ -73,6 +73,21 @@ describe("session wiring for scratch and job logs (fix wave 3)", () => {
     expect(wakeupsSeamDeps({ ...base, jobLogMaxBytes: 1234 }).jobLogMaxBytes).toBe(1234);
     expect(wakeupsSeamDeps(base)).not.toHaveProperty("jobLogMaxBytes");
     expect(wakeupsSeamDeps(base).limits).toBe(base.wakeupLimits);
+  });
+
+  it("reads the session's scratch bytes from the attachment's observation (k8s M-B)", () => {
+    const session = (resources: { scratch?: string } | null | undefined) => ({
+      attachment: {
+        sandboxId: "sb-1",
+        current: () => null,
+        ...(resources === undefined ? {} : { observedResources: () => resources }),
+      },
+    });
+    expect(sessionScratchBytes(() => session({ scratch: "1Gi" }))).toBe(1024 ** 3);
+    expect(sessionScratchBytes(() => session({}))).toBeUndefined();
+    expect(sessionScratchBytes(() => session(null))).toBeUndefined();
+    expect(sessionScratchBytes(() => session(undefined))).toBeUndefined();
+    expect(sessionScratchBytes(() => undefined)).toBeUndefined();
   });
 
   it("tells the prompt builder whether the session has scratch (ux L-5)", () => {

@@ -20,6 +20,7 @@ import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import { isScratchRequestError, isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange, validateScratchRequest } from "@valet/shared";
+import { recordScratchRefused } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { imageSources, bakes, type ImageSourceRow } from "../schema/index.js";
@@ -309,7 +310,10 @@ sourcesRouter.patch("/:id", async (c) => {
         try {
           parsed.scratch = validateScratchRequest(resources.scratch, "saved", scratchCaps);
         } catch (err) {
-          if (isScratchRequestError(err)) return c.json({ error: err.message }, 400);
+          if (isScratchRequestError(err)) {
+            recordScratchRefused("saved", err.reason);
+            return c.json({ error: err.message }, 400);
+          }
           throw err;
         }
       }
