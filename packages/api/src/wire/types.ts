@@ -978,6 +978,10 @@ export interface ThreadPullRequest {
   repo: string;
   number: number;
   state: "open" | "merged" | "closed";
+  /** Present when delegated work opened the pull request: the child session
+   * and thread that opened it. Absent when this thread opened it, and on rows
+   * recorded before the opening thread was kept. */
+  delegatedFrom?: { sessionId: string; threadId: string; title?: string };
 }
 
 /** `POST /api/sessions/:id/threads/read` — mark threads read for the caller. */

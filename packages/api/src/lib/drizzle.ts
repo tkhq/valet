@@ -471,6 +471,10 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   PRIMARY KEY ("session_id", "thread_id", "url")
 )` },
   { describe: "thread_pull_requests_url", probe: { kind: "index", index: "thread_pull_requests_url" }, sql: 'CREATE INDEX IF NOT EXISTS "thread_pull_requests_url" ON "thread_pull_requests" ("url")' },
+  // The thread that opened the pull request. A delegating thread's copy names
+  // its child here; rows recorded before this column stay null.
+  { describe: "thread_pull_requests.opened_session_id column", probe: { kind: "column", table: "thread_pull_requests", column: "opened_session_id" }, sql: 'ALTER TABLE "thread_pull_requests" ADD COLUMN IF NOT EXISTS "opened_session_id" text' },
+  { describe: "thread_pull_requests.opened_thread_id column", probe: { kind: "column", table: "thread_pull_requests", column: "opened_thread_id" }, sql: 'ALTER TABLE "thread_pull_requests" ADD COLUMN IF NOT EXISTS "opened_thread_id" text' },
   { describe: "channel messages", probe: { kind: "table", table: "channel_messages" }, sql: `CREATE TABLE IF NOT EXISTS "channel_messages" (
   "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
   "channel_key" text NOT NULL, "conversation_key" text NOT NULL, "provider_message_id" text NOT NULL,

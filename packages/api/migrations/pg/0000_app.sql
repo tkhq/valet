@@ -2517,7 +2517,7 @@ CREATE TABLE IF NOT EXISTS "thread_reads" (
 CREATE TABLE IF NOT EXISTS "thread_pull_requests" (
   "session_id" text NOT NULL, "thread_id" text NOT NULL, "url" text NOT NULL, "repo" text NOT NULL,
   "number" bigint NOT NULL, "state" text NOT NULL, "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL,
-  "checked_at" bigint NOT NULL,
+  "checked_at" bigint NOT NULL, "opened_session_id" text, "opened_thread_id" text,
   PRIMARY KEY ("session_id", "thread_id", "url")
 );
 --> statement-breakpoint

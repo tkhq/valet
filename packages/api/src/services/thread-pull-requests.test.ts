@@ -1,10 +1,13 @@
 import { eq } from "drizzle-orm";
-import { agentSessions, orgs, threadPullRequests } from "../schema/index.js";
+import { agentSessions, childWatches, orgs, threadPullRequests } from "../schema/index.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { recordThreadPullRequest, recheckOpenPullRequests, PULL_REQUEST_RECHECK_MS, setPullRequestState, startPullRequestSweep } from "./thread-pull-requests.js";
+import { recordDelegatedPullRequest, recordThreadPullRequest, recheckOpenPullRequests, PULL_REQUEST_RECHECK_MS, setPullRequestState, startPullRequestSweep } from "./thread-pull-requests.js";
+import { userPrincipal } from "../lib/request-principal.js";
+import { listThreadActivity } from "./thread-read-state.js";
 
 let api: TestApi | undefined;
+const viewer = userPrincipal("local-user");
 afterEach(async () => { vi.useRealTimers(); await api?.cleanup(); api = undefined; });
 
 it("claims one provider check across parallel workers and duplicate thread associations", async () => {
@@ -110,4 +113,56 @@ it("lists stale pull requests without resolving credentials or claiming work", a
   } finally {
     credentials.mockRestore();
   }
+});
+
+it("names the child that opened a pull request on the delegating thread's copy only", async () => {
+  api = await bootTestApi();
+  const parent = await (await fetch(`${api.baseUrl}/api/threads`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json() as { id: string; sessionId: string };
+  const now = Date.now();
+  await api.providers.db.insert(agentSessions).values({
+    id: "child-1", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active",
+    ownerType: "user", ownerId: "local-user", title: "Investigate OpenAI images", createdAt: now, updatedAt: now,
+  });
+  await api.providers.db.insert(childWatches).values({
+    childSessionId: "child-1", queueItemId: "q-1", parentSessionId: parent.sessionId, parentThreadId: parent.id,
+    actorUserId: "local-user", orgId: "local-org", createdAt: now,
+  });
+  const url = "https://github.com/acme/app/pull/852";
+  await recordDelegatedPullRequest(api.providers.db, { sessionId: "child-1", threadId: "child-thread", url });
+
+  const onParent = (await listThreadActivity(api.providers.db, "local-user", parent.sessionId, [parent.id], viewer)).get(parent.id)?.pullRequests;
+  expect(onParent).toEqual([{ url, repo: "acme/app", number: 852, state: "open",
+    delegatedFrom: { sessionId: "child-1", threadId: "child-thread", title: "Investigate OpenAI images" } }]);
+  const onChild = (await listThreadActivity(api.providers.db, "local-user", "child-1", ["child-thread"], viewer)).get("child-thread")?.pullRequests;
+  expect(onChild).toEqual([{ url, repo: "acme/app", number: 852, state: "open" }]);
+});
+
+it("treats a pull request recorded before the opening thread was kept as the thread's own", async () => {
+  api = await bootTestApi();
+  const thread = await (await fetch(`${api.baseUrl}/api/threads`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json() as { id: string; sessionId: string };
+  const url = "https://github.com/acme/app/pull/3";
+  await recordThreadPullRequest(api.providers.db, { sessionId: thread.sessionId, threadId: thread.id, url });
+  await api.providers.db.update(threadPullRequests).set({ openedSessionId: null, openedThreadId: null }).where(eq(threadPullRequests.url, url));
+  const prs = (await listThreadActivity(api.providers.db, "local-user", thread.sessionId, [thread.id], viewer)).get(thread.id)?.pullRequests;
+  expect(prs).toEqual([{ url, repo: "acme/app", number: 3, state: "open" }]);
+});
+
+it("leaves out the title of a child session the viewer cannot open", async () => {
+  api = await bootTestApi();
+  const parent = await (await fetch(`${api.baseUrl}/api/threads`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json() as { id: string; sessionId: string };
+  const now = Date.now();
+  await api.providers.db.insert(agentSessions).values({
+    id: "child-private", userId: "other-user", orgId: "local-org", workspace: "/w", status: "active",
+    ownerType: "user", ownerId: "other-user", title: "Private child title", createdAt: now, updatedAt: now,
+  });
+  await api.providers.db.insert(childWatches).values({
+    childSessionId: "child-private", queueItemId: "q-2", parentSessionId: parent.sessionId, parentThreadId: parent.id,
+    actorUserId: "other-user", orgId: "local-org", createdAt: now,
+  });
+  const url = "https://github.com/acme/app/pull/853";
+  await recordDelegatedPullRequest(api.providers.db, { sessionId: "child-private", threadId: "child-thread", url });
+
+  const prs = (await listThreadActivity(api.providers.db, "local-user", parent.sessionId, [parent.id], viewer)).get(parent.id)?.pullRequests;
+  expect(prs).toEqual([{ url, repo: "acme/app", number: 853, state: "open",
+    delegatedFrom: { sessionId: "child-private", threadId: "child-thread" } }]);
 });
