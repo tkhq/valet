@@ -24,10 +24,11 @@ import { clearRepoPrebuildFlagsCache } from "../bakes/source-service.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { loadSessionMeta } from "./session-meta.js";
-import { primaryGitHubRepoTarget } from "./host.js";
+import { codingPromptOptions, primaryGitHubRepoTarget, wakeupsSeamDeps } from "./host.js";
 import { buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
 import type { RepoBinding } from "../wire/types.js";
-import type { Sandbox, SandboxCapabilities, SandboxCreateOpts } from "@valet/engine";
+import { InMemorySessionStore, type Sandbox, type SandboxCapabilities, type SandboxCreateOpts } from "@valet/engine";
+import { resolveWakeupLimits } from "../providers/sandbox-backend.js";
 
 class NestedRecordingSandboxProvider extends RecordingSandboxProvider {
   override capabilities(): SandboxCapabilities {
@@ -61,6 +62,26 @@ function binding(overrides: Partial<RepoBinding> = {}): RepoBinding & { targetDi
     ...overrides,
   };
 }
+
+describe("session wiring for scratch and job logs (fix wave 3)", () => {
+  it("passes the boot-resolved job log cap to the wakeups seam (data M3)", () => {
+    const base = {
+      engineStore: new InMemorySessionStore(),
+      wakeupLimits: resolveWakeupLimits({}),
+      sandboxProvider: new RecordingSandboxProvider(),
+    };
+    expect(wakeupsSeamDeps({ ...base, jobLogMaxBytes: 1234 }).jobLogMaxBytes).toBe(1234);
+    expect(wakeupsSeamDeps(base)).not.toHaveProperty("jobLogMaxBytes");
+    expect(wakeupsSeamDeps(base).limits).toBe(base.wakeupLimits);
+  });
+
+  it("tells the prompt builder whether the session has scratch (ux L-5)", () => {
+    expect(codingPromptOptions(true, { resources: { scratch: "100Gi" } })).toEqual({ secretsCli: true, scratchEnabled: true });
+    expect(codingPromptOptions(false, { initialResources: { scratch: "100Gi" } })).toEqual({ secretsCli: false, scratchEnabled: true });
+    expect(codingPromptOptions(true, { resources: {} })).toEqual({ secretsCli: true, scratchEnabled: false });
+    expect(codingPromptOptions(true, {})).toEqual({ secretsCli: true, scratchEnabled: false });
+  });
+});
 
 describe("primaryGitHubRepoTarget", () => {
   it('host "github" (the session_repos schema default) resolves — the TKAI-385 regression', () => {

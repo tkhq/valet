@@ -39,6 +39,8 @@ import {
   resolveSandboxWorkspaceStorage,
   resolveSandboxWorkspaceStorageMax,
   resolveWakeupLimits,
+  resolveJobLogMaxBytes,
+  scratchPoolWarning,
 } from "./sandbox-backend.js";
 
 function fakeKubeConfig(): k8s.KubeConfig {
@@ -541,6 +543,7 @@ describe("resolveWakeupLimits", () => {
       timerMaxHours: 720,
       perSession: 20,
       watchMaxEventsPerHour: 120,
+      watchMinIntervalMs: 120_000,
     });
   });
 
@@ -551,8 +554,9 @@ describe("resolveWakeupLimits", () => {
         VALET_TIMER_MAX_HOURS: "48",
         VALET_WAKEUPS_PER_SESSION: "5",
         VALET_WATCH_MAX_EVENTS_PER_HOUR: "10",
+        VALET_WATCH_MIN_INTERVAL_MS: "30000",
       }),
-    ).toEqual({ leaseMaxHours: 24, timerMaxHours: 48, perSession: 5, watchMaxEventsPerHour: 10 });
+    ).toEqual({ leaseMaxHours: 24, timerMaxHours: 48, perSession: 5, watchMaxEventsPerHour: 10, watchMinIntervalMs: 30_000 });
   });
 
   it("throws naming the knob when a value is zero, negative, or not an integer", () => {
@@ -578,7 +582,10 @@ describe("resolveWakeupLimits", () => {
       VALET_TIMER_MAX_HOURS: "8760",
       VALET_WAKEUPS_PER_SESSION: "1000",
       VALET_WATCH_MAX_EVENTS_PER_HOUR: "100000",
-    })).toEqual({ leaseMaxHours: 8760, timerMaxHours: 8760, perSession: 1000, watchMaxEventsPerHour: 100000 });
+      VALET_WATCH_MIN_INTERVAL_MS: "86400000",
+    })).toEqual({
+      leaseMaxHours: 8760, timerMaxHours: 8760, perSession: 1000, watchMaxEventsPerHour: 100000, watchMinIntervalMs: 86_400_000,
+    });
   });
 
   it.each([
@@ -586,10 +593,53 @@ describe("resolveWakeupLimits", () => {
     ["VALET_TIMER_MAX_HOURS", "10000000000000", 8760],
     ["VALET_WAKEUPS_PER_SESSION", "1001", 1000],
     ["VALET_WATCH_MAX_EVENTS_PER_HOUR", "100001", 100000],
+    ["VALET_WATCH_MIN_INTERVAL_MS", "86400001", 86400000],
   ])("refuses %s above its bound", (name, raw, max) => {
     expect(() => resolveWakeupLimits({ [name]: raw })).toThrow(
       `${name}="${raw}" is not a whole number from 1 to ${max}. Set it to a value in that range.`,
     );
+  });
+});
+
+describe("resolveJobLogMaxBytes (fix wave 3, data M3 and k8s M-B)", () => {
+  it("defaults to 2Gi", () => {
+    expect(resolveJobLogMaxBytes({})).toBe(2 * 1024 ** 3);
+  });
+
+  it("accepts plain bytes and quantities", () => {
+    expect(resolveJobLogMaxBytes({ VALET_JOB_LOG_MAX_BYTES: "1048576" })).toBe(1_048_576);
+    expect(resolveJobLogMaxBytes({ VALET_JOB_LOG_MAX_BYTES: " 512Mi " })).toBe(512 * 1024 ** 2);
+  });
+
+  it.each(["2GB", "0", "-1Gi", "abc"])("fails the boot on %j and names the variable", (raw) => {
+    expect(() => resolveJobLogMaxBytes({ VALET_JOB_LOG_MAX_BYTES: raw })).toThrow(
+      `VALET_JOB_LOG_MAX_BYTES="${raw}" is not a byte size. Set a whole number of bytes or a quantity such as 2Gi.`,
+    );
+  });
+
+  it("fails the boot when the cap exceeds the deploy scratch cap", () => {
+    expect(() => resolveJobLogMaxBytes({ VALET_SANDBOX_SCRATCH_MAX: "1Gi" })).toThrow(
+      'VALET_JOB_LOG_MAX_BYTES (effective "2147483648" bytes) exceeds VALET_SANDBOX_SCRATCH_MAX ("1Gi"). ' +
+        "Set sandbox.jobLogMaxBytes to at most sandbox.scratchMax in the Valet chart.",
+    );
+    expect(resolveJobLogMaxBytes({ VALET_SANDBOX_SCRATCH_MAX: "1Gi", VALET_JOB_LOG_MAX_BYTES: "256Mi" })).toBe(256 * 1024 ** 2);
+    expect(resolveJobLogMaxBytes({ VALET_SANDBOX_SCRATCH_MAX: "0" })).toBe(2 * 1024 ** 3);
+  });
+});
+
+describe("scratchPoolWarning (fix wave 3, k8s probable 3)", () => {
+  it("warns when scratch is enabled and no scratch pool is marked ready", () => {
+    expect(scratchPoolWarning({ VALET_SANDBOX_SCRATCH_MAX: "1Ti" })).toBe(
+      "VALET_SANDBOX_SCRATCH_MAX is 1Ti, but VALET_SANDBOX_SCRATCH_POOL_READY is not 1. " +
+        "A scratch request can land on a shared root disk and make the node unhealthy. " +
+        "Set sandbox.scratchMax to \"0\" until a local-NVMe scratch node pool exists, then set sandbox.scratchPoolReady.",
+    );
+  });
+
+  it("is silent when scratch is off or the pool is marked ready", () => {
+    expect(scratchPoolWarning({})).toBeUndefined();
+    expect(scratchPoolWarning({ VALET_SANDBOX_SCRATCH_MAX: "0" })).toBeUndefined();
+    expect(scratchPoolWarning({ VALET_SANDBOX_SCRATCH_MAX: "1Ti", VALET_SANDBOX_SCRATCH_POOL_READY: "1" })).toBeUndefined();
   });
 });
 
