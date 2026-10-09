@@ -81,6 +81,7 @@ import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
 import {
   buildSandboxProvider,
+  parseSandboxBackend,
   resolveChildRetentionMs,
   resolveDefaultImage,
   resolveHibernatedRetentionMs,
@@ -602,6 +603,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineHost,
     provider: sandboxProvider,
     limits: wakeupLimits,
+    // Kubernetes keeps detached logs on disk in the pod, so exit signals
+    // can name the file. Docker keeps them in api memory (no path).
+    ...(parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND) === "kubernetes"
+      ? { jobLogDir: "/tmp/valet-jobs" }
+      : {}),
   });
 
   // Autonomy nudge sweep (valet-security spec §Autonomy). Re-drives an idle
