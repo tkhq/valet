@@ -13,7 +13,7 @@ import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
 import { SANDBOX_CR_API_VERSION } from "../src/index.js";
 import { buildSandboxManifest, credsSecretName, BROWSER_LABEL_KEY, DOCKER_LABEL_KEY, NESTED_KUBERNETES_LABEL_KEY, sandboxCrName, SESSION_LABEL_KEY } from "../src/manifest.js";
 import { RUNTIME_STATE_ANNOTATION } from "../src/runtime-state.js";
-import { wrapAsWorkloadUser, type ExecStatus } from "../src/exec.js";
+import { ROOT_TMPDIR_PREFIX, wrapAsWorkloadUser, type ExecStatus } from "../src/exec.js";
 import type { K8sProviderConfig, ResourceRequirements, SandboxCR, SandboxCRRead } from "../src/types.js";
 import type {
   CreateSandboxParams,
@@ -597,14 +597,14 @@ describe("exec identity threading (docker flag → exec layer)", () => {
     const { provider, execApi } = makeExecProvider({ [DOCKER_LABEL_KEY]: "true" });
     const sandbox = await provider.restore("sb-docker");
     await sandbox.exec("echo hi", { privileged: true });
-    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", "echo hi"]);
+    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", `${ROOT_TMPDIR_PREFIX}echo hi`]);
   });
 
   it("restore() of an unlabeled CR keeps exec unwrapped", async () => {
     const { provider, execApi } = makeExecProvider(undefined);
     const sandbox = await provider.restore("sb-plain");
     await sandbox.exec("echo hi");
-    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", "echo hi"]);
+    expect(execApi.commands[0]).toEqual(["/bin/sh", "-c", `${ROOT_TMPDIR_PREFIX}echo hi`]);
   });
 
   it("create({ nestedKubernetes: true }) threads the workload user into exec", async () => {
@@ -2290,6 +2290,41 @@ describe("job pod identity", () => {
     const requested = newExecId();
     await expect(setup(false).sandbox.execJob("three", { execId: requested })).resolves.toEqual({ execId: requested });
     await expect(setup(false).sandbox.execJob("four", { execId: "../etc" })).rejects.toThrow("invalid execId");
+  });
+
+  describe("a handle with no kickoff identity checks the backing pod (fix wave 3, concurrency P1)", () => {
+    function restored(phase: string | null) {
+      const exec = vi.fn<PodExecApi["exec"]>(async (_ns, _pod, _container, _command, _stdout, stderr, _stdin, _tty, cb) => {
+        stderr?.write("running");
+        cb?.({ status: "Success" });
+        return { close() {} };
+      });
+      const sandbox = new KubernetesSandbox({
+        objectsApi: new FakeObjectsApi(),
+        podsApi: { listNamespacedPod: async () => ({ items: [{ name: "pod", ownerReferences: [{ kind: "Sandbox", name: "sandbox", controller: true }] }] }), patchNamespacedPod: async () => ({}) },
+        execApi: { exec }, livenessApi: { getPodUid: async () => "uid", getPodPhase: async () => phase }, cfg: providerCfg,
+      }, "sandbox");
+      return { sandbox, exec };
+    }
+
+    it("polls the job when the pod is Running", async () => {
+      const { sandbox, exec } = restored("Running");
+      await expect(sandbox.pollJob(newExecId(), 0)).resolves.toMatchObject({ status: "running" });
+      expect(exec).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["Pending", "Failed", "Succeeded"])("reports the job gone without an exec when the pod is %s", async (phase) => {
+      const { sandbox, exec } = restored(phase);
+      await expect(sandbox.pollJob(newExecId(), 0)).rejects.toThrow("the job's backing pod was recreated or removed");
+      await expect(sandbox.cancelJob(newExecId())).rejects.toThrow("the job's backing pod was recreated or removed");
+      expect(exec).not.toHaveBeenCalled();
+    });
+
+    it("reports the job gone when the pod no longer exists", async () => {
+      const { sandbox, exec } = restored(null);
+      await expect(sandbox.pollJob(newExecId(), 0)).rejects.toThrow("the job's backing pod was recreated or removed");
+      expect(exec).not.toHaveBeenCalled();
+    });
   });
 
   it("releases the kickoff identity after a terminal poll", async () => {
