@@ -506,7 +506,9 @@ async function computeResult(
         error: `invalid params: ${prepared.error}`,
       });
     }
-    return { ok: false, error: prepared.error };
+    // A bare schema path ("/: must have required properties repo") names no
+    // fix. The caller can always read the tool's schema and send matching params.
+    return { ok: false, error: `Invalid params for ${policyActionId}: ${prepared.error}. Read the tool's parameter schema, then call it again with params that match.` };
   }
 
   const actionCtx = buildActionContext(req, ctx, credentials, action.id, opts.db);
