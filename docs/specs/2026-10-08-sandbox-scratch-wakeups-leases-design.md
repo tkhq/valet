@@ -190,7 +190,7 @@ text is normative:
 - Over the deploy cap:
   `scratch <value> exceeds the <cap> deploy cap (sandbox.scratchMax). Request at most <cap>, or ask an admin to raise the cap.`
 - From `task` and over the agent cap:
-  `scratch <value> exceeds the <cap> agent cap (sandbox.scratchAgentMax). Declare it in .valet/prebuild.yaml, or ask an admin to raise the cap.`
+  `scratch <value> exceeds the <cap> agent cap (sandbox.scratchAgentMax). Retry without resources.scratch, declare it in .valet/prebuild.yaml, or ask an admin to raise the cap.`
 
 Where the refusal lands:
 
