@@ -22,7 +22,14 @@ import {
   formatSandboxErrorCause,
   formatSandboxErrorLog,
 } from "../errors.js";
-import { type AppliedState, applyPlan, diffSteps, readAppliedState, writeAppliedState } from "./applied-state.js";
+import {
+  type AppliedState,
+  applyPlan,
+  diffSteps,
+  DRIFT_FIELDS,
+  readAppliedState,
+  writeAppliedState,
+} from "./applied-state.js";
 import { nestedKubernetesDecision, NESTED_KUBERNETES_UNSUPPORTED } from "./nested-kubernetes.js";
 
 /**
@@ -34,9 +41,6 @@ export const OBSERVE_TTL_MS = 5 * 60_000;
 
 /** Max backoff between failed replacement retries (spec decision 6). */
 const REPLACE_BACKOFF_CAP_MS = 30 * 60_000;
-
-/** Authoritative resource fields compared for drift (cpu, memory, scratch). */
-const DRIFT_FIELDS = ["cpu", "memory", "scratch"] as const satisfies readonly SandboxResourceField[];
 
 /**
  * Missing applied resources and an empty opinion both mean no overrides.
@@ -545,7 +549,7 @@ export class SandboxAttachment {
       if (wantsReplace && await this.isLeased?.()) {
         // A multi-hour leased process must keep its pod (spec INV-8). Prep
         // steps that do not replace the pod still run below.
-        console.log(`sandbox ${sandbox.id}: deferring image/resource change while a lease is active`);
+        console.warn(`sandbox ${sandbox.id}: deferring image/resource change while a lease is active`);
       } else if (wantsReplace) {
         // Backoff: skip the replace when the SAME desired spec already failed
         // to replace within its exponential window (spec decision 6). A
@@ -652,7 +656,7 @@ export class SandboxAttachment {
     );
   }
 
-  /** Replace only the repository CPU/memory opinion; keep other resources. */
+  /** Replace only the repository resource opinion (DRIFT_FIELDS); keep other resources. */
   private persistResources(
     resources: DesiredSandboxSpec["resources"],
     preserved: readonly SandboxResourceField[] = [],
@@ -666,6 +670,10 @@ export class SandboxAttachment {
     if (!preserved.includes("memory")) {
       delete next.memory;
       if (resources.memory !== undefined) next.memory = resources.memory;
+    }
+    if (!preserved.includes("scratch")) {
+      delete next.scratch;
+      if (resources.scratch !== undefined) next.scratch = resources.scratch;
     }
     this.createOpts = { ...this.createOpts, resources: next };
   }

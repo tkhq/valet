@@ -251,6 +251,21 @@ describe("applyPlan resources", () => {
     expect(await readAppliedState(sb)).toEqual(result);
   });
 
+  it("a scratch-only desired change writes applied state when no steps are pending", async () => {
+    const sb = makeSandbox();
+    const prior: AppliedState = { image: "img:v1", specHash: "old", steps: { s1: "h1" }, resources: { cpu: 1, memory: "2Gi" } };
+    await seedAppliedState(sb, prior);
+    const desired = { ...makeSpec([makeStep("s1", "h1", false)]), resources: { cpu: 1, memory: "2Gi", scratch: "100Gi" } };
+    const execSpy = vi.spyOn(sb, "exec");
+
+    const result = await applyPlan(sb, desired, "img:v1", prior);
+
+    expect(result).toEqual({ ...prior, specHash: desired.specHash, resources: desired.resources });
+    const writes = execSpy.mock.calls.filter(([cmd]) => cmd.includes("mkdir -p /etc/valet"));
+    expect(writes).toHaveLength(1); // scratch-only drift still writes: the gap this test guards
+    expect(await readAppliedState(sb)).toEqual(result);
+  });
+
   it("persists non-empty resources for a cold sandbox with no prep steps", async () => {
     const sb = makeSandbox();
     const desired = { ...makeSpec([]), resources: { cpu: 4, memory: "8Gi" } };

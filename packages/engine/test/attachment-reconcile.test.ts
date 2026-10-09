@@ -444,6 +444,7 @@ describe("SandboxAttachment.reconcile", () => {
     { cpu: 4, memory: "4Gi" },
     { cpu: 2, memory: "8Gi" },
     { cpu: 4 },
+    { cpu: 2, memory: "4Gi", scratch: "100Gi" },
     {},
   ])("resource drift to %j replaces and applies the full plan", async (resources) => {
     const provider = new RecordingProvider({ release: true });
@@ -742,15 +743,16 @@ describe("SandboxAttachment.reconcile", () => {
     // Drift the image while a lease is active.
     fake.spec = { image: "img:v2", specHash: "h2", steps: mkSteps() };
 
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     await att.reconcile();
-    logSpy.mockRestore();
 
     expect(provider.createImages).toEqual(["img:v1"]); // no replace while leased
     expect(provider.releaseCalls).toEqual([]);
     expect(att.currentEpoch()).toBe(1); // same epoch
     expect(att.state).toBe("ready");
     expect(att.observedImage()).toBe("img:v1");
+    expect(warnSpy).toHaveBeenCalledWith("sandbox sb-1: deferring image/resource change while a lease is active");
+    warnSpy.mockRestore();
   });
 
   it("an unleased sandbox still replaces on image drift when isLeased is wired", async () => {
