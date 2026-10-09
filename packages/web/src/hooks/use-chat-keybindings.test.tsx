@@ -10,6 +10,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, cleanup } from "@testing-library/react";
+import { PageActiveContext } from "~/lib/page-active";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
 
 let pathname = "/chat";
@@ -97,6 +98,16 @@ afterEach(() => {
 });
 
 describe("useChatKeybindings", () => {
+  it("detaches hidden-page shortcuts and restores them when visible", () => {
+    const view = render(<PageActiveContext.Provider value={true}><Host /></PageActiveContext.Provider>);
+    view.rerender(<PageActiveContext.Provider value={false}><Host /></PageActiveContext.Provider>);
+    expect(press("Backspace", { shift: true }).defaultPrevented).toBe(false);
+    expect(press("Slash").defaultPrevented).toBe(false);
+    expect(archiveActiveThread).not.toHaveBeenCalled();
+    view.rerender(<PageActiveContext.Provider value={true}><Host /></PageActiveContext.Provider>);
+    press("Backspace", { shift: true });
+    expect(archiveActiveThread).toHaveBeenCalledOnce();
+  });
   it("runs the registered handler for each chord", () => {
     render(<Host />);
 

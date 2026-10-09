@@ -1,3 +1,4 @@
+import { usePageActive } from "~/lib/page-active";
 import {
   useCallback,
   useEffect,
@@ -132,6 +133,7 @@ export function Composer({
   // still land in the thread it started on. See stores/composer-drafts.ts.
   // Store actions are reached through `getState()` inside handlers so
   // callback identities do not churn per keystroke.
+  const pageActive = usePageActive();
   const key = draftKey(sessionId, threadId);
   const { text, images, files, imageErrors, fileErrors } = useComposerDraft(key);
   const setText = (value: string) => useComposerDraftStore.getState().setText(key, value);
@@ -679,6 +681,7 @@ export function Composer({
   const abortMutate = abort.mutate;
   const abortPending = abort.isPending;
   useEffect(() => {
+    if (!pageActive) return;
     function onEscape(e: globalThis.KeyboardEvent) {
       if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
       const targetItemId = queueState?.activeItemId;
@@ -692,7 +695,7 @@ export function Composer({
     }
     window.addEventListener("keydown", onEscape);
     return () => window.removeEventListener("keydown", onEscape);
-  }, [working, threadId, queueState?.activeItemId, abortPending, abortMutate, setSubmitError]);
+  }, [pageActive, working, threadId, queueState?.activeItemId, abortPending, abortMutate, setSubmitError]);
 
   function insertSelection(id: string) {
     if (commandQuery !== null) {

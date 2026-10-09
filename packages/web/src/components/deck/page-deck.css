@@ -1,0 +1,63 @@
+.page-deck { height:100dvh; display:flex; flex-direction:column; overflow:hidden; background:radial-gradient(ellipse at 50% 40%,color-mix(in srgb,var(--moss) 7%,var(--paper)),var(--paper) 75%); color:var(--ink); }
+.page-deck button,.page-deck a { -webkit-tap-highlight-color:transparent; }
+.page-deck button:focus-visible,.page-deck a:focus-visible { outline:2px solid var(--moss); outline-offset:3px; }
+.page-deck button:disabled { opacity:.35; cursor:default; }
+.deck-toolbar { height:76px; padding:0 28px; display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.deck-brand { display:flex; gap:12px; align-items:center; font-weight:600; }
+.deck-brand svg { color:var(--moss); }
+.deck-brand small { font-weight:400; color:var(--muted); margin-left:9px; }
+.deck-modes { display:flex; padding:4px; gap:2px; border:1px solid var(--line); border-radius:14px; background:var(--paper); }
+.deck-modes button { display:flex; align-items:center; gap:7px; padding:8px 12px; border-radius:10px; font-size:12px; color:var(--muted); }
+.deck-modes button[aria-pressed=true] { background:var(--ink); color:var(--paper); }
+.deck-add { display:flex; align-items:center; gap:7px; font-size:13px; padding:10px 15px; border:1px solid var(--line); border-radius:12px; background:var(--paper); }
+.deck-caption { display:flex; justify-content:space-between; padding:2px 32px 16px; font-size:12px; color:var(--muted); }
+.deck-stage { flex:1; min-height:0; position:relative; isolation:isolate; }
+.deck-card { position:absolute; top:0; left:70px; width:calc(100% - 140px); height:100%; border:1px solid var(--line); border-radius:22px; overflow:hidden; background:var(--paper); box-shadow:0 22px 50px -24px #0005; transition:transform 440ms cubic-bezier(.22,.8,.25,1),width 440ms cubic-bezier(.22,.8,.25,1),height 440ms cubic-bezier(.22,.8,.25,1),left 440ms cubic-bezier(.22,.8,.25,1),top 440ms cubic-bezier(.22,.8,.25,1),opacity 300ms; display:flex; flex-direction:column; }
+.deck-card[data-active=true] { border-color:color-mix(in srgb,var(--moss) 35%,var(--line)); z-index:3; }
+.deck-card-bar { height:43px; min-height:43px; display:flex; align-items:center; gap:5px; padding:0 14px; border-bottom:1px solid var(--line); background:color-mix(in srgb,var(--paper) 96%,var(--ink)); }
+.deck-card-bar > button:not(.deck-card-name),.deck-card-bar > a { display:grid; place-items:center; width:28px; height:28px; border-radius:7px; color:var(--muted); }
+.deck-card-bar > button:hover,.deck-card-bar > a:hover { background:color-mix(in srgb,var(--ink) 7%,transparent); }
+.deck-card-name { flex:1; display:flex; align-items:center; gap:9px; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:12px; text-align:left; height:30px; }
+.deck-dot { width:6px; height:6px; border-radius:50%; background:var(--muted); flex-shrink:0; }
+.deck-card[data-active=true] .deck-dot { background:var(--moss); }
+.deck-page { position:relative; flex:1; min-height:0; }
+.deck-frame { width:100%; height:100%; border:0; background:var(--paper); }
+.deck-card-cover { position:absolute; inset:0; cursor:pointer; }
+.deck-card[data-slot=before] { transform:translateX(calc(-100% - 20px)) scale(.95); opacity:.6; }
+.deck-card[data-slot=after] { transform:translateX(calc(100% + 20px)) scale(.95); opacity:.6; }
+.deck-card[data-slot=left],.deck-card[data-slot=right] { width:calc(50% - 30px); left:20px; }
+.deck-card[data-slot=right] { left:calc(50% + 10px); }
+.deck-card[data-slot=parked] { transform:translateY(120%); opacity:0; pointer-events:none; }
+.deck-card[data-slot^=overview] { width:calc((100% - 80px)/3); height:calc(50% - 10px); left:20px; }
+.deck-card[data-slot=overview-1],.deck-card[data-slot=overview-4] { left:calc((100% - 80px)/3 + 40px); }
+.deck-card[data-slot=overview-2],.deck-card[data-slot=overview-5] { left:calc(2*(100% - 80px)/3 + 60px); }
+.deck-card[data-slot=overview-3],.deck-card[data-slot=overview-4],.deck-card[data-slot=overview-5] { top:calc(50% + 10px); }
+.deck-dock { display:flex; justify-content:center; align-items:center; gap:8px; padding:18px 24px; min-height:76px; }
+.deck-dock > button { padding:8px; color:var(--muted); }
+.deck-tabs { display:flex; gap:6px; padding:5px; background:var(--paper); border:1px solid var(--line); border-radius:15px; overflow-x:auto; }
+.deck-tabs button { display:flex; align-items:center; gap:8px; border-radius:10px; padding:9px 12px; max-width:190px; overflow:hidden; white-space:nowrap; font-size:12px; color:var(--muted); }
+.deck-tabs button span { font-size:10px; opacity:.6; }
+.deck-tabs button[aria-pressed=true] { background:color-mix(in srgb,var(--moss) 12%,var(--paper)); color:var(--ink); }
+@media(min-width:801px) { .page-deck[data-count="1"] .deck-card[data-slot^=overview],.page-deck[data-count="2"] .deck-card[data-slot^=overview],.page-deck[data-count="3"] .deck-card[data-slot^=overview] { height:100%; } }
+@media(max-width:800px) {
+ .deck-toolbar { padding:0 12px; height:64px; gap:8px; }.deck-brand small,.deck-modes button span,.deck-caption span:last-child { display:none; }
+ .deck-modes button { padding:8px; }.deck-add { padding:9px; }.deck-caption { padding:0 16px 12px; }
+ .deck-card { left:12px; width:calc(100% - 24px); border-radius:15px; }
+ .deck-card[data-slot=left],.deck-card[data-slot=right] { left:12px; width:calc(100% - 24px); height:calc(50% - 6px); }
+ .deck-card[data-slot=right] { top:calc(50% + 6px); }
+ .deck-card[data-slot^=overview] { width:calc(50% - 18px); height:calc((100% - 24px)/3); left:12px; top:0; }
+ .deck-card[data-slot=overview-1],.deck-card[data-slot=overview-3],.deck-card[data-slot=overview-5] { left:calc(50% + 6px); }
+ .deck-card[data-slot=overview-2],.deck-card[data-slot=overview-3] { top:calc((100% - 24px)/3 + 12px); }
+ .deck-card[data-slot=overview-4],.deck-card[data-slot=overview-5] { top:calc(2*(100% - 24px)/3 + 24px); }
+ .deck-dock { padding:12px 8px; }.deck-tabs button { max-width:140px; }
+}
+@media(prefers-reduced-motion:reduce) { .deck-card { transition:none; } }
+
+@media(max-width:480px) {
+ .deck-brand > span { display:none; }
+ .deck-toolbar { gap:6px; }
+ .deck-modes button { min-width:36px; min-height:40px; }
+ .deck-brand { gap:6px; }
+ .deck-tabs { min-width:0; }
+ .deck-tabs button { flex-shrink:0; }
+}

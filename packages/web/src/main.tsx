@@ -1,3 +1,5 @@
+import { DeckAccess } from "./components/deck/deck-access";
+import { installFrameBridge } from "./components/deck/frame-bridge";
 import "./styles/globals.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -41,13 +43,15 @@ declare module "@tanstack/react-router" {
   }
 }
 
+installFrameBridge((notify) => router.subscribe("onResolved", notify));
+
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("#root not found");
 
 createRoot(rootEl).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      <DeckAccess><RouterProvider router={router} /></DeckAccess>
     </QueryClientProvider>
   </StrictMode>,
 );

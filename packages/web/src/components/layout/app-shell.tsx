@@ -1,3 +1,4 @@
+import { cardStorageKey } from "~/lib/card-context";
 import {
   createContext,
   useCallback,
@@ -13,7 +14,7 @@ import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 
-const COLLAPSED_KEY = "valet:sidebar-collapsed";
+const COLLAPSED_KEY = cardStorageKey("valet:sidebar-collapsed");
 
 /**
  * The sidebar's open/closed state, published so the TOP NAV can own the

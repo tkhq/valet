@@ -1,3 +1,4 @@
+import { cardStorageKey } from "~/lib/card-context";
 /**
  * Per-thread composer drafts: text, attachments, and intake errors, keyed
  * by the signed-in account and `draftKey(sessionId, threadId)`.
@@ -93,7 +94,7 @@ interface ComposerDraftStore {
  * the draft it changed and leaves the others alone. localStorage can be
  * absent or throw (private windows, blocked site data, a full quota). A draft
  * that cannot be saved still works for this tab. */
-const STORAGE_PREFIX = "valet:composer-draft:v2:";
+const STORAGE_PREFIX = cardStorageKey("valet:composer-draft:v2:");
 
 function storedDrafts(owner: string): Record<string, ComposerDraft> {
   const byKey: Record<string, ComposerDraft> = {};
