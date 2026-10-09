@@ -3111,6 +3111,11 @@ export class EngineHost {
     return this.cache.get(sessionId)?.session ?? null;
   }
 
+  /** Absolute path visible to the agent, not the provider's host mount key. */
+  sandboxWorkingDirectory(session: Session): string {
+    return this.opts.sandboxProvider.backend === "local" ? session.options.workspace : "/workspace";
+  }
+
   /**
    * Whether the sandbox backend can suspend/resume (hibernation). The
    * child retention path consults this at settle time: capable backends

@@ -77,6 +77,13 @@ export class VirtualSandbox implements Sandbox {
     this.fs.set(norm, { type: "file", content: data });
   }
 
+  async rename(source: string, destination: string): Promise<void> {
+    const entry = this.fs.get(normalize(source));
+    if (!entry) throw Object.assign(new Error(`ENOENT: ${source}`), { code: "ENOENT" });
+    this.fs.set(normalize(destination), entry);
+    this.fs.delete(normalize(source));
+  }
+
   async readdir(path: string): Promise<string[]> {
     const norm = normalize(path);
     if (!this.fs.has(norm)) throw new Error(`ENOENT: ${path}`);
@@ -224,6 +231,13 @@ async function runVirtualCommand(
     return ok("");
   }
 
+  // Workflow input staging renames quote both paths and carry no file contents.
+  const move = trimmed.match(/^mv -f -- '([^']*)' '([^']*)'$/);
+  if (move) {
+    await sb.rename(resolveRel(cwd, move[1]), resolveRel(cwd, move[2]));
+    return ok("");
+  }
+
   // printf '%s' '<content>' > <path>
   // Supports POSIX single-quote escape: \'\' inside the quoted string embeds a literal single quote.
   const printfMatch = trimmed.match(/^printf\s+'%s'\s+'([\s\S]*)'\s+>\s+(\S+)$/);
@@ -248,9 +262,39 @@ async function runVirtualCommand(
     };
   }
 
-  const lsMatch = trimmed.match(/^ls(?:\s+(\S+))?$/);
+  const findRemove = trimmed.match(/^find '([^']*)' -mindepth 1 -maxdepth 1 ! -name '([^']*)' -exec rm -rf -- \{\} \+$/);
+  if (findRemove) {
+    for (const name of await sb.readdir(findRemove[1])) {
+      if (name !== findRemove[2]) await sb.rm(`${findRemove[1]}/${name}`, { recursive: true });
+    }
+    return ok("");
+  }
+
+  const remove = trimmed.match(/^rm -(rf|f) -- '([^']*)'$/);
+  if (remove) {
+    await sb.rm(remove[2], { recursive: remove[1] === "rf" });
+    return ok("");
+  }
+  const removeDirectory = trimmed.match(/^rmdir -- '([^']*)'$/);
+  if (removeDirectory) {
+    if ((await sb.readdir(removeDirectory[1])).length) return { stdout: "", stderr: "Directory not empty", exitCode: 1 };
+    await sb.rm(removeDirectory[1]);
+    return ok("");
+  }
+
+  const headMatch = trimmed.match(/^head -c (\d+) -- '([^']*)'$/);
+  if (headMatch) {
+    try {
+      const bytes = await sb.readBinary(headMatch[2]);
+      return ok(new TextDecoder().decode(bytes.subarray(0, Number(headMatch[1]))));
+    } catch (e) {
+      return { stdout: "", stderr: `head: ${e instanceof Error ? e.message : String(e)}\n`, exitCode: 1 };
+    }
+  }
+
+  const lsMatch = trimmed.match(/^ls(?: -1A)?(?:\s+(\S+))?$/);
   if (lsMatch) {
-    const target = lsMatch[1] ? resolveRel(cwd, lsMatch[1]) : cwd;
+    const target = lsMatch[1] ? resolveRel(cwd, lsMatch[1].replace(/^'|'$/g, "")) : cwd;
     try {
       const names = await sb.readdir(target);
       return ok(names.sort().join("\n") + (names.length ? "\n" : ""));

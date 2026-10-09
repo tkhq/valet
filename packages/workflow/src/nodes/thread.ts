@@ -30,7 +30,9 @@
  * without ever calling `promptOrchestrator`.
  */
 
+import type { WorkflowDefinition } from '../dag/shape.js';
 import type { ThreadNode } from '../dag/nodes.js';
+import { AgentInputFileError, agentFileWaitError, renderAgentFiles } from '../dag/agent-files.js';
 import { renderTemplate, type TemplateContext } from '../dag/expression.js';
 import { executeSubmissionNode, withOutputSchemaPrompt, type SubmissionDispatch } from './submission-node.js';
 import { iterationSuffix, resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
@@ -84,14 +86,19 @@ export async function executeThread(args: NodeExecutorArgs<ThreadNode>): Promise
     { run, nodeId: node.id, attempt, iteration, store, clock, engine, existingCheckpoint },
     {
       nodeKind: 'orchestrator',
+      hasInputFiles: !!node.files && Object.keys(node.files).length > 0,
       dispatchId,
       initialEffects: {},
       waitMode: node.wait?.mode,
       outputSchema: node.outputSchema,
-      dispatch: async (id): Promise<SubmissionDispatch> => {
+      dispatch: async (id, onInputTarget): Promise<SubmissionDispatch> => {
+        const files = renderAgentFiles(node.files, templateContext, run.definition as WorkflowDefinition); // Validated snapshot, as in the interpreter.
+        const waitError = agentFileWaitError(node.files, node.wait);
+        if (waitError) throw new AgentInputFileError(waitError);
         const promptText = withOutputSchemaPrompt(renderText(node.prompt, templateContext), node.outputSchema);
         const dispatched = await engine.promptOrchestrator(promptText, {
           dispatchId: id,
+          ...(files.length ? { files, onInputTarget, inputAttempt: attempt } : {}),
           queueMode: 'followup',
           ownerHint: owner,
         });

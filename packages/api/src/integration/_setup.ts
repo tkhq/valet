@@ -58,7 +58,7 @@ import type { OnePasswordService } from "../services/onepassword.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
-import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
+import { buildWorkflowEngineDeps, cleanupWorkflowRunInputs } from "../workflows/engine-deps.js";
 import { buildRunSettledAttention, buildRunThreadArchive } from "../workflows/run-attention.js";
 import { writeExecutionGrant } from "../policies/service.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
@@ -495,6 +495,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     // stays manual here, for the reason given above it.
     onRunSettled: async (info) => {
       await buildRunSettledAttention({ db, store: workflowStore })(info);
+      void cleanupWorkflowRunInputs({ host: engineHost, store: workflowStore, db, engineStore,
+        actionPluginByService, credentials: engineCredentials }, info.runId);
       await buildRunThreadArchive({ db, store: workflowStore, engineStore })(info);
     },
   });

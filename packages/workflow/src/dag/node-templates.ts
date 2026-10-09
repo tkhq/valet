@@ -67,6 +67,7 @@ export function collectNodeTemplateSources(node: WorkflowNode): NodeTemplateSour
       addJson(out, 'details', node.details);
       break;
     case 'session':
+      addJson(out, 'files', node.files);
       addSource(out, 'prompt', node.prompt);
       addSource(out, 'title', node.title);
       break;
@@ -79,6 +80,7 @@ export function collectNodeTemplateSources(node: WorkflowNode): NodeTemplateSour
       addSource(out, 'system', node.system);
       break;
     case 'orchestrator':
+      addJson(out, 'files', node.files);
       addSource(out, 'prompt', node.prompt);
       break;
     case 'tool':

@@ -58,14 +58,65 @@ Node types:
 - `if` — conditional; outgoing edges use `"fromOutput": "true"` / `"false"`
 - `wait` — pause for a duration (`{ "mode": "duration", "duration": "5m" }`)
 - `approval` — park until a human approves/denies (`prompt`, optional `summary`, `details`, `timeout`, `onDeny`)
-- `session` — start an agent session with a `prompt` (optional `title`, `model`, `outputSchema`, `wait`)
-- `orchestrator` — prompt the workspace assistant in a durable workflow thread (optional `outputSchema`, `wait`). The app labels this step "Thread".
+- `session` — start an agent session with a `prompt` (optional `title`, `model`, `outputSchema`, `wait`, `files`)
+- `orchestrator` — prompt the workspace assistant in a durable workflow thread (optional `outputSchema`, `wait`, `files`). The app labels this step "Thread".
 - `tool` — invoke a plugin action (`service`, `action`, `params`)
 - `llm` — one-shot LLM call (`model`, `prompt`, optional `system`, `outputSchema`)
 - `foreach` — iterate `items` over `body` nodes (optional `maxItems`, `concurrency`)
 - `stop` — terminal node (`outcome`, optional `output`, `message`)
 
 Edges may carry `"when"` (an expression) to gate a branch.
+
+## Pass data to an agent step as files
+
+Use a `session` step with `files` for agent work that needs input data. Its dedicated sandbox is reclaimed after the run.
+`orchestrator` steps support files only in verified, non-legacy team execution sandboxes.
+The host writes the files before the first turn. The prompt receives absolute paths and byte sizes.
+Tell the agent to read those files. Do not ask it to retype the data.
+
+```json
+{
+  "id": "build", "type": "session", "mode": "start",
+  "prompt": "Build the dashboard from the input files listed below.",
+  "files": {
+    "jobs.json": "{{nodes.jobs.result.data}}",
+    "scorecards.json": "{{nodes.scorecards.result.items}}",
+    "notes.md": "Run for {{trigger.data.team}}"
+  }
+}
+```
+
+Keys are literal, normalized relative paths. Use `/` between segments of letters, digits, dots, underscores, and hyphens.
+Do not use templates, dot segments, empty segments, absolute paths, or backslashes in keys.
+Each segment can contain at most 255 bytes. The whole relative path can contain at most 1,024 bytes.
+Do not define case-insensitive duplicates (`Data.json` and `data.json`) or case-folded file/child collisions (`Data` and `data/a`).
+Values are template strings. A single expression preserves its type: strings are UTF-8 text; other values become pretty-printed JSON.
+Missing paths follow `policy.onUnresolvedPath`: `empty` uses the existing empty/null rendering; `fail` stops the node before dispatch.
+A foreach body can use `item` and `index` in values. Each iteration has its own directory.
+The host scopes directories by run, node, and iteration. Limits are 100 files, 10 MiB per file, and 25 MiB total.
+Inputs are ephemeral. The host removes them when the consuming step settles and removes the run directory on every settlement outcome.
+Use the default `until_idle` wait mode. `files` cannot use `wait.mode: "none"` because settlement would remove data before consumption.
+A bounded sweep removes crash leftovers older than 7 days. Cleanup failures are logged without failing the run.
+Shared legacy team sandboxes and unverifiable audiences cannot receive files. Use a session step.
+Provisioning, transport, and interrupted rename failures retain normal retries. Before admission, retries replace incomplete inputs atomically. Files stage in a reserved sibling tree on the same filesystem, outside user input paths.
+Staging cleanup recursively removes only lower-attempt directories. Node and run cleanup remove both trees.
+After admission, duplicate dispatch returns the receipt before target or audience checks. It skips all file operations, even after access changes.
+Personal assistant roots never receive orchestrator files. Channel delivery can reach their shared sandbox even after sidebar archival.
+Use a session step instead. Team ownership is not sufficient if routing selects a legacy or shared runtime.
+The error is: "Workflow input files cannot be delivered into a shared assistant sandbox. Use a session step for agent work that needs input files."
+A proper team execution can fail audience verification. Check the actor's team membership or channel privacy, or use a session step.
+Slack visibility errors remain fail-closed because the access check does not expose their cause.
+Known user-owned definitions receive the shared-sandbox error at save/patch time. Other routes must pass the runtime execution-scope check.
+Cleanup never wakes a sandbox. Skips emit a warning and `valet.workflow.inputs.cleanup_skipped`.
+Residual sweeps protect only live runs with the same org and owner. Foreign runs count as absent.
+Team executions can outlive a run, so residual sweeping remains. Only `wf:` sandboxes are reclaimed with their run.
+Sweeps cap listings at 64 KiB and marker reads at 32 bytes. They check a five-second budget before each candidate. If the budget expires during a status lookup, removal does not start. Started removals have a fixed one-second timeout.
+Removal deletes contents and staging before the age marker. Interrupted cleanup remains sweepable.
+Each sweep starts at a random candidate and wraps around. Repeated sweeps eventually cover all candidates, with no fixed coverage deadline.
+The sweep stores no cursor, so handle recreation and API restarts cannot reset progress.
+The `valet.workflow.inputs.sweep_skipped` counter records listing, marker, budget, and removal skips, including removal timeouts. Invalid metadata remains untouched.
+Sweeps apply a seven-day floor to absent or settled runs. Without another file write, residual inputs persist until sandbox destruction.
+`llm` and `tool` nodes do not accept `files`.
 
 ## Model selection
 

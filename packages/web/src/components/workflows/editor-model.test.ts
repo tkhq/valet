@@ -704,3 +704,27 @@ it('includes Presence in the signature used for server refresh and conflict dete
   expect(graphSignature({ ...definition, presence: { displayName: 'Bot', avatarUrl: 'https://example.com/a.png' } }))
     .toBe(graphSignature({ ...definition, presence: { avatarUrl: 'https://example.com/a.png', displayName: 'Bot' } }));
 });
+
+
+it('preserves agent files through canvas and inspector edits, including foreach bodies', () => {
+  const files = { 'nested/data.json': '{{trigger.data}}' };
+  let definition: WorkflowDefinition = {
+    version: 'dag/v1',
+    nodes: [
+      { id: 't', type: 'trigger' },
+      { id: 's', type: 'session', mode: 'start', prompt: 'Read', files },
+      { id: 'o', type: 'orchestrator', prompt: 'Read', files },
+      { id: 'f', type: 'foreach', items: '{{trigger.data.rows}}', body: { id: 'b', type: 'session', mode: 'start', prompt: 'Read', files } },
+    ],
+    edges: [{ from: 't', to: 's' }, { from: 's', to: 'o' }, { from: 'o', to: 'f' }],
+  };
+  definition = updateNode(definition, 's', { prompt: 'Read the data' });
+  definition = updateNode(definition, 'o', { wait: { mode: 'until_idle' } });
+  definition = setNodePosition(definition, 's', { x: 100, y: 200 });
+  const saved = JSON.parse(JSON.stringify(definition));
+  expect(saved.nodes[1].files).toEqual(files);
+  expect(saved.nodes[2].files).toEqual(files);
+  expect(saved.nodes[3].body.files).toEqual(files);
+  expect(toFlow(definition).nodes.map((n) => n.data.node)).toEqual(definition.nodes);
+  expect(validateWorkflowDefinition(definition)).toEqual({ ok: true });
+});

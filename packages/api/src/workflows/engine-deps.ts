@@ -1,4 +1,3 @@
-import { mergePresence, readPresence, type Presence } from "@valet/shared";
 /**
  * `WorkflowEngineDeps` (Phase 5 plan decision 15) implemented over
  * `EngineHost`. Node executors and the interpreter only see this narrow
@@ -32,11 +31,14 @@ import { mergePresence, readPresence, type Presence } from "@valet/shared";
  * than assuming the session `createSession` warmed is still cached.
  */
 
+import { agentInputPrompt, cleanupAgentInputFiles, logInputCleanupSkipped, UNVERIFIED_INPUT_AUDIENCE_ERROR, SHARED_ASSISTANT_INPUT_ERROR, writeAgentInputFiles } from "./agent-files.js";
+import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import type { Usage } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
   parsePrincipal,
+  type Session,
   type ActionPlugin,
   type CredentialStore,
   type Principal,
@@ -45,7 +47,10 @@ import {
   type ValetPlugin,
 } from "@valet/engine";
 import { bundledModel } from "@valet/engine/model-catalog";
+import { AgentInputFileError } from "@valet/workflow";
+import { canAccessSessionResources } from "../services/session-access.js";
 import type {
+  WorkflowDefinition,
   WorkflowAwaitResultOptions,
   WorkflowCreateSessionOptions,
   WorkflowEngineDeps,
@@ -343,6 +348,47 @@ async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, ti
   });
 }
 
+/** Best-effort settlement cleanup, independent of archival and sandbox reclaim. */
+export async function cleanupWorkflowRunInputs(opts: WorkflowEngineDepsOpts, runId: string): Promise<void> {
+  try {
+    const run = await opts.store.getRun(runId);
+    if (!run) return;
+    // The interpreter persists a validated dag/v1 snapshot for every run.
+    const definition = run.definition as WorkflowDefinition;
+    const fileNodes = new Set(definition.nodes.flatMap(node => node.type === "foreach" ? [node.body] : [node])
+      .filter(node => "files" in node && node.files && Object.keys(node.files).length > 0).map(node => node.id));
+    if (!fileNodes.size) return;
+    const sessions = new Set((await opts.store.getCheckpoints(runId))
+      .filter(cp => fileNodes.has(cp.nodeId) && (cp.effects?.inputFilesAttempted || cp.effects?.receipt)).map(cp => cp.effects?.sessionId)
+      .filter((id): id is string => typeof id === "string"));
+    for (const sessionId of sessions) {
+      try {
+        if (sessionId.startsWith("wf:")) continue; // The workflow sandbox reclaimer owns these.
+        const session = opts.host.liveSession(sessionId);
+        if (session?.attachment.state === "ready") {
+          await cleanupAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), { runId });
+        } else logInputCleanupSkipped(sessionId, "run", session?.attachment.state ?? "uncached");
+      } catch (err) {
+        console.warn(`workflow input run cleanup failed for ${runId} on ${sessionId}:`, err);
+      }
+    }
+  } catch (err) {
+    console.warn(`workflow input run cleanup failed for ${runId}:`, err);
+  }
+}
+
+/** Skip filesystem work after admission when re-driving a lost checkpoint. */
+async function deliverInputs(opts: WorkflowEngineDepsOpts, session: Session,
+  text: string, promptOpts: WorkflowPromptOptions | WorkflowPromptOrchestratorOptions): Promise<string> {
+  if (!promptOpts.files?.length) return text;
+  // Validate before reporting the target or touching the sandbox.
+  agentInputPrompt(opts.host.sandboxWorkingDirectory(session), text, promptOpts);
+  const prior = await opts.engineStore.getSubmissionByDispatchId(session.id, promptOpts.dispatchId);
+  if (prior) return agentInputPrompt(opts.host.sandboxWorkingDirectory(session), text, promptOpts);
+  await promptOpts.onInputTarget?.(session.id);
+  return writeAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), text, promptOpts, opts.db);
+}
+
 export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowEngineDeps {
   const invokeActionImpl = buildActionInvoker({
     db: opts.db,
@@ -374,13 +420,21 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         }
         return { threadId: previous.threadId, queueItemId: previous.queueItemId };
       }
-      const receipt = await thread.submitPrompt(text, {
+      const deliveredText = await deliverInputs(opts, session, text, promptOpts);
+      const receipt = await thread.submitPrompt(deliveredText, {
         dispatchId: promptOpts.dispatchId,
         model: promptOpts.model,
         ...(context.presence ? { metadata: { presence: context.presence } } : {}),
         queueMode: promptOpts.queueMode,
       });
       return { threadId: thread.id, queueItemId: receipt.queueItemId };
+    },
+
+    async cleanupAgentInputs(sessionId: string, dispatchId: string): Promise<void> {
+      const session = opts.host.liveSession(sessionId);
+      if (session?.attachment.state === "ready") {
+        await cleanupAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), { dispatchId });
+      } else logInputCleanupSkipped(sessionId, "node", session?.attachment.state ?? "uncached");
     },
 
     async awaitResult(
@@ -555,6 +609,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         throw new Error("Workflow origin owner is no longer a team member. Start a new run from an authorized assistant.");
       }
       if (previous) {
+        if (promptOpts.files?.length) throw new AgentInputFileError(SHARED_ASSISTANT_INPUT_ERROR);
         return { sessionId: previous.sessionId, threadId: previous.threadId, queueItemId: previous.queueItemId };
       }
       // Through the shared helper, so a runtime first woken by a workflow
@@ -590,25 +645,45 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         const target = await resolveWorkflowReportTarget(deps,
           { type: assistant.ownerType, id: assistant.ownerId }, meta, session, thread, promptOpts.dispatchId);
         if (target.priorQueueItemId) {
+          if (promptOpts.files?.length) throw new AgentInputFileError(SHARED_ASSISTANT_INPUT_ERROR);
           const item = await opts.engineStore.getQueueItem(session.id, target.priorQueueItemId);
           const content = item?.content;
           if (!content || typeof content === "string" || !("kind" in content) || content.kind !== "signal" ||
-              content.signalType !== "workflow.request" || content.body !== promptText || content.attributes?.runId !== runId) {
+              content.signalType !== "workflow.request" || content.body !== agentInputPrompt(opts.host.sandboxWorkingDirectory(session), promptText, promptOpts) || content.attributes?.runId !== runId) {
             throw new Error("The legacy workflow dispatch has different content. Start a new workflow run.");
           }
           return { sessionId: session.id, threadId: thread.id, queueItemId: target.priorQueueItemId };
         }
         ({ session, thread } = target);
       }
+      // Admission owns this dispatch. Replaying it must not reauthorize or
+      // fail a node whose existing turn can still be consuming its inputs.
+      const admitted = promptOpts.files?.length
+        ? await opts.engineStore.getSubmissionByDispatchId(session.id, promptOpts.dispatchId) : null;
+      if (admitted) return { sessionId: session.id, threadId: admitted.threadId, queueItemId: admitted.id };
       // `runId` as an attribute, so the client can render a link back to the
       // run instead of the bare signal type. `attributes` is flat and
       // string-valued by contract (`SignalContent`), and nothing set it
       // before — which is why a workflow report showed up in a person's
       // assistant as an envelope labelled "workflow.request" and nothing else.
+      if (promptOpts.files?.length) {
+        const data = await session.toData();
+        if (data.owner.type !== "team" || !data.parentSessionId || !data.parentThreadId ||
+            await isLegacyAssistantRuntime(opts.db, session.id, ctx.orgId)) {
+          throw new AgentInputFileError(SHARED_ASSISTANT_INPUT_ERROR);
+        }
+        const audienceAccess = await canAccessSessionResources({ db: opts.db, engineStore: opts.engineStore,
+          engineCredentials: opts.credentials, onePassword: opts.onePassword },
+          { ...data, ownerType: data.owner.type, ownerId: data.owner.id },
+          principal.type === "team" && ctx.actorUserId === `team:${principal.id}`
+            ? { type: "team", id: principal.id } : { type: "user", id: ctx.actorUserId });
+        if (!audienceAccess) throw new AgentInputFileError(UNVERIFIED_INPUT_AUDIENCE_ERROR);
+      }
+      const deliveredText = await deliverInputs(opts, session, promptText, promptOpts);
       const content: SignalContent = {
         kind: "signal",
         signalType: "workflow.request",
-        body: promptText,
+        body: deliveredText,
         attributes: { runId },
       };
       const receipt = await thread.submitPrompt(content, {
