@@ -51,7 +51,7 @@ import { channelThreadContextFetcher } from "../events/channel-thread-context.js
 import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
-import { resolveScratchCaps } from "../providers/sandbox-backend.js";
+import { resolveScratchCaps, resolveWakeupLimits } from "../providers/sandbox-backend.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { createOnePasswordService } from "../services/onepassword.js";
@@ -312,6 +312,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // `process.env.VALET_SANDBOX_SCRATCH_MAX`/`VALET_SANDBOX_SCRATCH_AGENT_MAX`
   // before calling `bootTestApi()` and restores it afterward.
   const scratchCaps = resolveScratchCaps(process.env);
+  const wakeupLimits = resolveWakeupLimits(process.env);
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
@@ -319,6 +320,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineCredentials,
     blobs,
     scratchCaps,
+    wakeupLimits,
     anthropicApiKey: ANTHROPIC_API_KEY,
     defaultImage: opts.defaultImage,
     prebuildPreflight: opts.prebuildPreflight,

@@ -88,6 +88,7 @@ import {
   resolveOrgSandboxCeiling,
   resolveSandboxCapacityWaitMs,
   resolveScratchCaps,
+  resolveWakeupLimits,
 } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
@@ -343,6 +344,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // contradictory-config boot check must fire on every backend, not only
   // kubernetes.
   const scratchCaps = resolveScratchCaps(process.env);
+  const wakeupLimits = resolveWakeupLimits(process.env);
   const rawSandboxProvider = buildSandboxProvider(process.env);
   const sandboxProvider = rawSandboxProvider.capabilities().hibernation
     ? withSandboxCapacityGate(rawSandboxProvider, {
@@ -482,6 +484,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineCredentials,
     blobs,
     scratchCaps,
+    wakeupLimits,
     anthropicApiKey: opts.anthropicApiKey,
     defaultImage: resolveDefaultImage(process.env),
     // Single image lineage: one stock image for every session shape.

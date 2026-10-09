@@ -127,6 +127,15 @@ This sandbox has no secrets command. Do not run one to find out. Never print a c
 export const SECRETS_RULES = SECRETS_RULES_WITH_CLI;
 
 /**
+ * Background work (spec 2026-10-08: sandbox scratch, wakeups, and leases).
+ * Tells the model to use the background-work tools instead of blocking a
+ * turn on a long command or polling a running process.
+ */
+export const BACKGROUND_WORK_RULES = `## Background work
+
+For a command longer than an hour, run \`bash\` with \`background: true\`, a \`deadline_hours\`, and a \`reason\`. You receive a \`process.exited\` signal when it ends; do not poll it. Use \`wake_at\` to pause instead of \`sleep\`. \`/scratch\` is wiped when the sandbox stops; keep anything you need in /workspace or push it.`;
+
+/**
  * System prompt for sandbox coding sessions. `secretsCli` says whether this
  * build runs sandbox prep, which installs valet-secrets. An unbound build
  * on a non-isolated provider does not, and telling it about a command it
@@ -148,6 +157,8 @@ ${MODEL_SWITCH_CORE}
 ${CHILD_MODEL_RULES}
 
 ${opts.secretsCli ? SECRETS_RULES_WITH_CLI : SECRETS_RULES_NO_CLI}
+
+${BACKGROUND_WORK_RULES}
 
 ${CODING_PERSISTENCE_RULES}`;
 }

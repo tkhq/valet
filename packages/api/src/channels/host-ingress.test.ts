@@ -147,6 +147,7 @@ describe("long-poll mode", () => {
     };
     engineHost = new EngineHost({
       scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore,
       sandboxProvider,
       eventStream,
@@ -215,6 +216,7 @@ describe("long-poll mode", () => {
     };
     engineHost = new EngineHost({
       scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore,
       sandboxProvider,
       eventStream,

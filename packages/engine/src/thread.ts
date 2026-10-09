@@ -5116,6 +5116,7 @@ export class Thread {
         record: (path, contentHash) => this.fileReadHashes.set(path, contentHash),
       },
       config: session.options.toolConfig,
+      wakeups: session.options.wakeups,
       owner: session.owner,
       policyResolver: session.options.policyResolver,
       pluginStoreFactory: session.options.pluginStoreFactory,

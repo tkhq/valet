@@ -144,6 +144,7 @@ describe("EngineHost.readSandboxFileMeta (guardrail 4 host seam)", () => {
   it("returns null (fail open) for a session that is not live in the cache", async () => {
     const host = new EngineHost({
       scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore: new InMemorySessionStore(),
       sandboxProvider: new NonIsolatedProvider(),
       eventStream: new InMemoryEventStream(),

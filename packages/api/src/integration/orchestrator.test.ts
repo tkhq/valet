@@ -123,6 +123,7 @@ describe("api integration: default assistant lifecycle", () => {
     // generic `buildSession` path (no persona/snapshot/mem tools/steer).
     const restoreHost = new EngineHost({
       scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore: api.providers.engineStore,
       sandboxProvider: api.providers.sandboxProvider,
       eventStream: api.providers.eventStream,

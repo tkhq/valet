@@ -83,6 +83,7 @@ function buildHost(
 ): EngineHost {
   return new EngineHost({
     scratchCaps: {},
+    wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
     engineStore: store,
     sandboxProvider: provider,
     eventStream: new InMemoryEventStream(),
