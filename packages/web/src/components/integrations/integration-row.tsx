@@ -37,7 +37,7 @@ import { IntegrationDetails } from "./integration-details";
 import { useState } from "react";
 import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
 import { Badge, Button, ConfirmDialog } from "~/components/primitives";
-import { useDisconnectCredential } from "~/api/integrations";
+import { useCredentials, useDisconnectCredential } from "~/api/integrations";
 import { errorText } from "~/lib/error-text";
 import { Link } from "@tanstack/react-router";
 import { ChevronRight } from "lucide-react";
@@ -262,6 +262,10 @@ function ServiceBlock({
   // one of their dialogs at once.
   const [disconnecting, setDisconnecting] = useState(false);
   const disconnect = useDisconnectCredential();
+  // A reference-backed credential stores only an `op://` reference, so
+  // disconnecting it leaves the 1Password item in place. The plugin summary
+  // does not carry the reference; the caller's credential list does.
+  const reference = useCredentials().data?.credentials.find((cred) => cred.service === service.service)?.onepasswordRef;
   const health = serviceHealth(service);
   const badge = healthBadge(health);
   const note = healthNote(health);
@@ -421,7 +425,9 @@ function ServiceBlock({
         open={disconnecting}
         onOpenChange={setDisconnecting}
         title={`Disconnect ${title}?`}
-        description={`This deletes the saved ${title} credential and any team share that rides on it. The assistant cannot reach ${title} until you connect it again.`}
+        description={reference
+          ? `This deletes the stored ${title} reference and any team share that rides on it. The item in 1Password is not deleted. The assistant cannot reach ${title} until you connect it again.`
+          : `This deletes the saved ${title} credential and any team share that rides on it. The assistant cannot reach ${title} until you connect it again.`}
         confirmLabel="Disconnect"
         pendingLabel="Disconnecting…"
         pending={disconnect.isPending}

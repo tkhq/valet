@@ -6,7 +6,7 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
+import type { CredentialSummary, PluginServiceSummary, PluginSummary } from "@valet/api/wire";
 
 const disconnectMutate = vi.fn();
 let disconnectPending = false;
@@ -17,6 +17,8 @@ const disconnectReset = vi.fn(() => {
   disconnectError = null;
 });
 
+let credentials: CredentialSummary[] = [];
+
 vi.mock("~/api/integrations", () => ({
   useDisconnectCredential: () => ({
     mutate: disconnectMutate,
@@ -25,7 +27,7 @@ vi.mock("~/api/integrations", () => ({
     reset: disconnectReset,
   }),
   useConnectCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
-  useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
+  useCredentials: () => ({ data: { credentials }, isLoading: false, error: null }),
   useDelegateCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
   useRevokeDelegation: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
 }));
@@ -79,6 +81,7 @@ function nativeConfirm() {
 
 describe("IntegrationRow disconnect", () => {
   beforeEach(() => {
+    credentials = [];
     disconnectMutate.mockReset();
     disconnectReset.mockClear();
     disconnectPending = false;
@@ -115,6 +118,15 @@ describe("IntegrationRow disconnect", () => {
     expect(dialog.textContent).toContain("deletes the saved Linear credential");
     expect(disconnectMutate).not.toHaveBeenCalled();
     expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  it("says a 1Password reference leaves the 1Password item in place", () => {
+    credentials = [{ service: "linear", type: "oauth2", connectedAt: "2026-01-01T00:00:00Z", onepasswordRef: "op://Work/Linear/token" }];
+    render(<IntegrationDetail plugin={PLUGIN} />);
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect Linear" }));
+    const text = screen.getByRole("dialog").textContent ?? "";
+    expect(text).toContain("deletes the stored Linear reference");
+    expect(text).toContain("The item in 1Password is not deleted.");
   });
 
   it("deletes the credential when the dialog is confirmed", async () => {
