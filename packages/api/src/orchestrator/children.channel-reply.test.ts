@@ -135,7 +135,7 @@ async function bootDelegation(childId: string) {
   };
   const watcher = new ChildWatcher(deps);
   watcher.arm({ childSessionId: childId, queueItemId, parentSessionId: parentId, parentThreadId: parentThread.id, actorUserId: USER_ID, orgId: ORG_ID, origin: ORIGIN });
-  return { deps, watcher, transport, parentId, parentThread, childThreadId: childThread.id, queueItemId };
+  return { deps, watcher, transport, parentId, parentThread, child, childThreadId: childThread.id, queueItemId };
 }
 
 /**
@@ -199,6 +199,32 @@ describe("delegated child completion over a channel", () => {
     expect(run.transport.sent.every((sent) => sent.conversationKey === "fake:dm:C1")).toBe(true);
     const signals = await childSettledSignals(run.parentId);
     expect(signals.map((signal) => signal.content.origin)).toEqual([ORIGIN, ORIGIN]);
+  });
+
+  it.each([
+    { input: "a queued followup", childId: "child-keep-followup", sideThread: false },
+    { input: "a message on another child thread", childId: "child-keep-side", sideThread: true },
+  ])("keeps the origin thread when a person sends $input", async ({ childId, sideThread }) => {
+    const run = await bootDelegation(childId);
+    const { db, engineStore } = api!.providers;
+    const [childRow] = await db.select().from(agentSessions).where(eq(agentSessions.id, childId));
+    if (!childRow) throw new Error("child session row missing");
+
+    // Neither input replaces the delegated work, so its result still
+    // belongs to the channel turn that delegated it.
+    const sent = await submitSessionPrompt(api!.providers, childRow, "Also note this for later", sideThread
+      ? { threadId: run.child.thread("web:side").id, queueMode: "steer", author: { id: USER_ID } }
+      : { threadId: run.childThreadId, queueMode: "followup", author: { id: USER_ID } });
+    if (!sent?.messageId) throw new Error("human input was not admitted");
+    expect((await engineStore.getQueueItem(childId, run.queueItemId))?.supersededByItemId).toBeUndefined();
+
+    await engineStore.settleUnclaimed(childId, run.childThreadId, run.queueItemId, { outcome: "completed" });
+    await parentUpdateSettled(run, childId, run.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+    expect(run.transport.sent[0]?.conversationKey).toBe("fake:dm:C1");
+    const signals = await childSettledSignals(run.parentId);
+    expect(signals.map((signal) => signal.content.origin)).toEqual([ORIGIN]);
   });
 
   it("drops the origin thread when a person takes over the child", async () => {

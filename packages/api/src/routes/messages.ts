@@ -947,21 +947,30 @@ export async function submitSessionPrompt(
       })
     : Promise.resolve();
 
-  // Human input takes the child's work away from the channel turn that
-  // delegated it. Clear the reply route only after the engine accepts the
-  // input: a rejected prompt changes nothing. The engine store and the app
-  // database cannot share a transaction, so the watcher also clears the
-  // route when it follows a human-authored successor (`ChildWatcher.attempt`).
-  const releaseChildReplyRoute = async () => {
-    if (!author) return;
+  // Human input that supersedes the delegated item takes that work away
+  // from the channel turn that delegated it. A followup, or input on another
+  // thread, leaves the item to finish for that turn. Check only after the
+  // engine accepts the input: a rejected prompt changes nothing. The engine
+  // store and the app database cannot share a transaction, so the watcher
+  // also clears the route when it follows a human-authored successor
+  // (`ChildWatcher.attempt`).
+  const releaseChildReplyRoute = async (submittedItemId: string) => {
+    if (!author || !submittedItemId) return;
+    const [watch] = await db.select({ queueItemId: childWatches.queueItemId }).from(childWatches).where(and(
+      eq(childWatches.childSessionId, row.id), eq(childWatches.orgId, row.orgId), eq(childWatches.settled, false),
+    )).limit(1);
+    if (!watch) return;
+    const watched = await engineSession.providers.store.getQueueItem(row.id, watch.queueItemId);
+    if (watched?.supersededByItemId !== submittedItemId) return;
     await db.update(childWatches).set({ originJson: null }).where(and(
       eq(childWatches.childSessionId, row.id), eq(childWatches.orgId, row.orgId),
+      eq(childWatches.queueItemId, watch.queueItemId),
     ));
   };
 
   if (admission.promoteItemId) {
     const receipt = await thread.promoteQueuedItem(admission.promoteItemId);
-    await releaseChildReplyRoute();
+    await releaseChildReplyRoute(receipt.queueItemId);
     const activityAt = Date.now();
     await recordSessionActivity(db, row.id, activityAt);
     await recordThreadActivityBestEffort(() => recordActivity(activityAt));
@@ -1087,7 +1096,7 @@ export async function submitSessionPrompt(
     attachmentRefStore.restore(resolvedFileAttachments);
     throw err;
   }
-  await releaseChildReplyRoute();
+  await releaseChildReplyRoute(receipt.queueItemId);
 
   // Session recency is completion time. `activityAt` marks request start and
   // can be older than a later submission that already finished.

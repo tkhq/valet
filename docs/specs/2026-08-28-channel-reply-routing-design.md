@@ -339,8 +339,10 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   manual turns. The child result itself does not post directly.
   `child_send` and restart recovery retain the stored origin, even when a
   follow-up comes from another parent thread.
-  The web admission path clears the stored channel origin after the engine
-  accepts human input for a child. A rejected prompt leaves the origin intact.
+  The web admission path clears the stored channel origin only when the
+  engine accepts human input that supersedes the watched child submission.
+  A followup, a promotion that runs ahead of queued delegated work, input on
+  another child thread, and a rejected prompt leave the origin intact.
   The watcher also clears it when it follows human steering. Parent-directed steering
   retains the origin, including recovery after an interrupted `child_send`.
 - **Automatic child completion replies have durable delivery intents.** The
