@@ -1041,11 +1041,12 @@ with an earlier entry, the entry below wins.
   thread, which is already the fallback.
 - **B3: A2, adopt records scratch.** The provider's override record and its
   `valet.dev/resource-overrides` annotation now carry `scratch`. A
-  preserve-all adopt records the live emptyDir size. An annotation written
-  before this change lacks scratch, so the attachment takes scratch from
-  the applied file when the record has none. A pod replace always deletes
-  that file, so a scratch in it is current. A preserved scratch also goes
-  into the attachment's create options for a later re-create.
+  preserve-all adopt records the live emptyDir size. The provider fills a
+  record from the live template when an older annotation lacks scratch
+  (`resourceOverridesWithLiveScratch`). A preserved scratch also goes
+  into the attachment's create options for a later re-create. Wave 4
+  removed the applied-file fallback; see "B4: applied file is not a
+  scratch source".
 - **B3: A3, applied-state loss on a container restart.** A container
   restart deletes `/etc/valet/applied.json` and keeps the pod and
   `/scratch`. When the read finds no file inside an epoch the attachment
@@ -1220,6 +1221,27 @@ with an earlier entry, the entry below wins.
   row ends `sandbox_unavailable` at once. The brief named a Pending pod as
   transient. A Pending pod has no container, so no process of the original
   job can run in it; it is a recreated pod.
+- **B4: applied file is not a scratch source.** The applied file lives in
+  the sandbox, where the agent can write it. The attachment no longer takes
+  `scratch` from it; the provider record and the live pod are the only
+  sources. The kubernetes manifest builder refuses a scratch value that is
+  not whole bytes or a Ki, Mi, Gi, or Ti quantity, as a last line for a
+  value that arrived another way.
+- **B4: root temp dir guard.** `ROOT_TMPDIR_PREFIX` exports
+  `TMPDIR=/scratch/tmp-root` only when the path is a real directory that
+  root owns, the same guard the start scripts use. A pod from before the
+  scratch bootstrap has no such directory, so root execs there keep the
+  container's `TMPDIR`.
+- **B4: `.dead` stamp never stops a start.** The start prefix and both
+  start scripts write a `.dead` marker only when nothing exists at that
+  path, ignore a write failure, and stamp only `.pid` files older than the
+  start (a temp stamp file and `find ! -newer`). A planted directory,
+  FIFO, or file in `valet-jobs` cannot crash-loop the container, and a
+  kickoff that races the start keeps its pid.
+- **B4: `Unknown` pod phase.** A restored handle treats `Pending`,
+  `Succeeded`, and `Failed` as a gone pod. `Unknown` (the kubelet lost
+  contact) is a transient probe error: the row stays, the lease stays, and
+  the deadline still bounds it.
 - **Wave 3, wakeup signals and `addressed`.** The envelope still renders
   `addressed="false"` for a `<wakeup>` signal. The orchestrator persona
   rule names the signal as the assistant's own work, which is enough.

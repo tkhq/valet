@@ -30,6 +30,7 @@ import {
 } from "../src/index.js";
 import type { K8sProviderConfig } from "../src/index.js";
 import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
+import { scratchSizeLimit } from "../src/manifest.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -858,5 +859,19 @@ describe("nested Kubernetes security profile", () => {
     expect(container.securityContext).toBeUndefined();
     expect(container.env?.some(({ name }) => name === "KUBECONFIG" || name === "VALET_SANDBOX_KUBERNETES")).toBe(false);
     expect(cr.spec.podTemplate.spec.hostUsers).toBeUndefined();
+  });
+});
+
+describe("scratchSizeLimit (fix wave 4, security N2)", () => {
+  it("passes the api's accepted forms through unchanged", () => {
+    for (const ok of ["200Gi", "1Ti", "512Mi", "1024Ki", "107374182400"]) {
+      expect(scratchSizeLimit(ok)).toBe(ok);
+    }
+  });
+
+  it("refuses a form the CRD rejects or the api never accepts", () => {
+    for (const bad of ["200G", "1.5Ti", "2000000K", "1e12", "", " 200Gi", "200Gi; rm -rf /"]) {
+      expect(() => scratchSizeLimit(bad), bad).toThrow("is not a supported quantity");
+    }
   });
 });

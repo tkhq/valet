@@ -1289,23 +1289,26 @@ describe("SandboxAttachment wake folding", () => {
 });
 
 describe("SandboxAttachment keeps /scratch across a record gap (fix wave 3)", () => {
-  it("H-A: a preserve-all adopt whose provider record lacks scratch keeps the applied scratch, and a matching YAML does not replace", async () => {
+  it("a scratch value in the applied file never stands in for the provider record (fix wave 4, security N2)", async () => {
     const adopted = new VirtualSandbox("sb-existing");
+    // The file lives in the sandbox, where the agent can write it. A
+    // forged scratch here must not reach the next pod spec.
     await adopted.writeFile("/etc/valet/applied.json", JSON.stringify({
       image: "img:v1", specHash: "h1", steps: {}, resources: { cpu: 2, scratch: "800Gi" },
     }));
-    // An annotation written before scratch was recorded carries cpu/memory only.
+    // The provider's record is the authority on the live scratch: none here.
     const provider = new RecordingProvider({ adopt: adopted, resourceOverrides: { cpu: 2 } });
     const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: [] });
 
     const att = await reachReady(provider, fake);
-    expect((await readAppliedState(adopted))?.resources).toEqual({ cpu: 2, scratch: "800Gi" });
+    expect((await readAppliedState(adopted))?.resources).toEqual({ cpu: 2 });
 
+    // A YAML that asks for scratch now reads as drift: the pod has none.
     fake.spec = { image: "img:v1", specHash: "h2", resources: { cpu: 2, scratch: "800Gi" }, steps: [] };
     await att.reconcile();
 
-    expect(att.current()).toBe(adopted);
-    expect(provider.createImages).toHaveLength(1);
+    expect(provider.createImages).toHaveLength(2);
+    expect(provider.createResources[1]?.scratch).toBe("800Gi");
     await att.destroy();
   });
 

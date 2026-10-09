@@ -62,6 +62,26 @@ export const SCRATCH_PLACEHOLDER_COMMAND = [
 
 export const SCRATCH_INIT_NAME = "valet-scratch-init";
 
+/** The scratch forms the api accepts (`validateScratchRequest`): whole
+ * bytes or a Ki, Mi, Gi, or Ti suffix. */
+const SCRATCH_SIZE_FORM = /^\d+(?:Ki|Mi|Gi|Ti)?$/;
+
+/**
+ * The emptyDir `sizeLimit` for a scratch request. The api validates every
+ * request against the caps before it reaches a provider; this is the last
+ * line for a value that arrived another way (a preserved record, a file).
+ * It refuses a form the CRD would reject, so a bad value fails here with
+ * a named cause instead of in the controller.
+ */
+export function scratchSizeLimit(scratch: string): string {
+  if (!SCRATCH_SIZE_FORM.test(scratch)) {
+    throw new Error(
+      `scratch "${scratch}" is not a supported quantity. Use whole bytes or a Ki, Mi, Gi, or Ti suffix, like "200Gi".`,
+    );
+  }
+  return scratch;
+}
+
 /** Creates `/scratch/tmp`, `/scratch/valet-jobs`, and `/scratch/tmp-root`
  * and makes the `/scratch` root sticky before the workload starts,
  * whatever the image. Old bakes, images without the new start
@@ -131,7 +151,7 @@ export function withScratchState(
   const sandboxImage = containers.find((c) => c.name === SANDBOX_CONTAINER_NAME)?.image;
   if (scratch !== undefined) {
     if (sandboxImage !== undefined) initContainers.push(scratchInitContainer(sandboxImage));
-    volumes.push({ name: SCRATCH_VOLUME_NAME, emptyDir: { sizeLimit: scratch } });
+    volumes.push({ name: SCRATCH_VOLUME_NAME, emptyDir: { sizeLimit: scratchSizeLimit(scratch) } });
   }
   const { initContainers: _init, volumes: _volumes, ...spec } = template.spec;
   return {
@@ -641,7 +661,7 @@ export function buildSandboxManifest(
   if (resourceOpts?.scratch) {
     podSpec.volumes = [
       ...(podSpec.volumes ?? []),
-      { name: SCRATCH_VOLUME_NAME, emptyDir: { sizeLimit: resourceOpts.scratch } },
+      { name: SCRATCH_VOLUME_NAME, emptyDir: { sizeLimit: scratchSizeLimit(resourceOpts.scratch) } },
     ];
   }
 

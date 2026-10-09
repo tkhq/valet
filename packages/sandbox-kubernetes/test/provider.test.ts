@@ -2320,6 +2320,14 @@ describe("job pod identity", () => {
       expect(exec).not.toHaveBeenCalled();
     });
 
+    it("treats an Unknown phase as a transient error, not a gone sandbox", async () => {
+      const { sandbox, exec } = restored("Unknown");
+      const poll = sandbox.pollJob(newExecId(), 0);
+      await expect(poll).rejects.toThrow("phase is Unknown");
+      await expect(poll).rejects.not.toThrow("recreated or removed");
+      expect(exec).not.toHaveBeenCalled();
+    });
+
     it("reports the job gone when the pod no longer exists", async () => {
       const { sandbox, exec } = restored(null);
       await expect(sandbox.pollJob(newExecId(), 0)).rejects.toThrow("the job's backing pod was recreated or removed");
