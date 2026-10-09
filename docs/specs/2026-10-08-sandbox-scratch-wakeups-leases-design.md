@@ -1281,6 +1281,29 @@ with an earlier entry, the entry below wins.
   `Succeeded`, and `Failed` as a gone pod. `Unknown` (the kubelet lost
   contact) is a transient probe error: the row stays, the lease stays, and
   the deadline still bounds it.
+- **PR review, eviction protection through the capacity gate.** The
+  sandbox capacity gate passes `setEvictionProtection` and
+  `listEvictionProtected` through to the inner provider. Before this, a
+  deployment with a positive capacity ceiling left every leased pod
+  without `safe-to-evict: "false"` (INV-3).
+- **PR review, scratch cap after an authority read failure.** The cap
+  check reads `initialResources.scratch` when `resources` is absent, so a
+  repository request that survived a failed saved-defaults read is still
+  capped before the fresh-create path applies it.
+- **PR review, docker cancel kills the command.** A docker job records
+  its process group in a pid file (`setsid -w` when util-linux has it);
+  `cancelJob` kills that group inside the container before it ends the
+  host-side `docker exec` client.
+- **PR review, every line at exit.** The terminal watch branch has no
+  200-line cap; `chunkLines` bounds each event instead. The 200-line cap
+  stays for a running tick.
+- **PR review, a leased pod survives a failed prep step.** A critical
+  preparation-step failure on a leased adopted pod keeps the pod and
+  logs; it no longer calls `release`, which would suspend the CR and
+  delete the pod with its `/scratch`. The next attach retries the steps.
+- **PR review, EXIT after the log drain.** The kubernetes kickoff saves
+  the job's status, waits for the capping filter, then writes `.exit`.
+  A poll that sees `.exit` reads a complete log.
 - **Wave 3, wakeup signals and `addressed`.** The envelope still renders
   `addressed="false"` for a `<wakeup>` signal. The orchestrator persona
   rule names the signal as the assistant's own work, which is enough.

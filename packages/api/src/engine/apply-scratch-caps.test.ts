@@ -35,6 +35,22 @@ describe("applyScratchCaps", () => {
     );
   });
 
+  it("caps a scratch that only initialResources carries after an authority read failed (PR review, finding 2)", () => {
+    const r = applyScratchCaps(
+      { docker: false, outcome: "declared", initialResources: { cpu: 2, scratch: "800Gi" }, resourcesWithheld: true },
+      { max: "100Gi" },
+    );
+    expect(r.flags.resources).toBeUndefined();
+    expect(r.flags.initialResources).toEqual({ cpu: 2 });
+    expect(r.warning).toContain("exceeds the 100Gi deploy cap");
+    const disabled = applyScratchCaps(
+      { docker: false, outcome: "declared", initialResources: { scratch: "800Gi" }, resourcesWithheld: true },
+      {},
+    );
+    expect(disabled.flags.initialResources).toEqual({});
+    expect(disabled.warning).toContain("scratch is not enabled on this deployment");
+  });
+
   it("passes through flags with no declared scratch", () => {
     const r = applyScratchCaps(
       { docker: false, outcome: "declared", resources: { cpu: 2 }, initialResources: { cpu: 2 } },

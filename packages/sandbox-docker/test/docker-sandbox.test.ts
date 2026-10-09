@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { omittedMarker, SandboxGoneError } from "@valet/engine";
 import { DockerSandboxProvider, type DockerSandboxCreateOpts, createSandboxWorkspace } from "../src/index.js";
-import { dropFinishedDetachedOutputs, jobOutputLimit, sliceUtf8 } from "../src/sandbox.js";
+import { dropFinishedDetachedOutputs, jobGroupKillCommand, jobOutputLimit, jobWithProcessGroup, sliceUtf8 } from "../src/sandbox.js";
 import { buildFullProfileTestImage } from "./full-profile-test-image.js";
 
 /** Skip the whole suite when Docker isn't available locally. */
@@ -242,6 +242,20 @@ describeDocker("DockerSandbox", () => {
     }
     return poll;
   }
+
+  it("job-mode: cancelJob kills the command inside the container, not only the exec client (PR review, finding 3)", async () => {
+    const sb = await makeSandbox();
+    try {
+      const { execId } = await sb.execJob("sleep 300", { detached: true });
+      // Give the wrapper time to record its process group.
+      await new Promise((r) => setTimeout(r, 300));
+      await sb.cancelJob(execId);
+      const check = await sb.exec("if pgrep -x sleep >/dev/null 2>&1; then echo alive; else echo gone; fi");
+      expect(check.stdout.trim()).toBe("gone");
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
 
   it("job-mode: a terminal poll of a detached job keeps its state for later reads (fix wave 2, H1)", async () => {
     const sb = await makeSandbox();
@@ -649,6 +663,27 @@ describe("docker job output helpers (fix wave 2)", () => {
     expect(jobOutputLimit({ detached: true, maxOutputBytes: 1000 })).toBe(1000);
     expect(jobOutputLimit({ maxOutputBytes: 5 })).toBe(5);
     expect(jobOutputLimit()).toBeUndefined();
+  });
+});
+
+describe("job process group wrapper (PR review, finding 3)", () => {
+  it("records the group id before the command and kills the group from the file", () => {
+    const wrapped = jobWithProcessGroup("job-x-12345678", "echo 'hi'");
+    expect(wrapped).toContain("setsid -w sh -c");
+    expect(wrapped).toContain("echo $$ > ");
+    expect(wrapped).toContain(".valet-job-job-x-12345678.pid");
+    const kill = jobGroupKillCommand("job-x-12345678");
+    expect(kill).toContain(`kill -9 -- -"$p"`);
+    expect(kill).toContain("rm -f '/tmp/.valet-job-job-x-12345678.pid'");
+  });
+
+  it("round-trips the command through a real shell", () => {
+    const wrapped = jobWithProcessGroup("job-y-12345678", "printf '%s' \"it's quoted\"");
+    // Replace the pid file with a temp path and run the wrapper locally.
+    const script = wrapped.replaceAll("/tmp/.valet-job-job-y-12345678.pid", `${process.env.TMPDIR ?? "/tmp"}/valet-test-${process.pid}.pid`);
+    const result = spawnSync("/bin/sh", ["-c", script], { encoding: "utf8" });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("it's quoted");
   });
 });
 

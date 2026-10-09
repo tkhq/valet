@@ -265,12 +265,16 @@ export function jobKickoffCommand(execId: string, innerCommand: string, maxOutpu
     // each get their own independent view of a regular file instead of a
     // shared pipe). Sequencing `mkfifo` synchronously before anything
     // touches the path closes that race.
+    // EXIT is written only after the filter drained the fifo into OUT: a
+    // poll that sees EXIT then reads a complete log (PR review, finding 6).
+    // The job's exit (or its group kill) closes the fifo's write end, so
+    // the filter reaches EOF at once and the wait adds no cancel latency.
     wrapped =
       `rm -f ${shQuote(fifo)}; mkfifo ${shQuote(fifo)}; ` +
       `( ${cappingFilter} ) < ${shQuote(fifo)} & filterpid=$!; ` +
-      `${innerSetsid} > ${shQuote(fifo)} 2>&1; ` +
-      `echo $? > ${shQuote(exitFile)}; ` +
+      `${innerSetsid} > ${shQuote(fifo)} 2>&1; rc=$?; ` +
       `wait "$filterpid"; ` +
+      `echo "$rc" > ${shQuote(exitFile)}; ` +
       `rm -f ${shQuote(fifo)}`;
   }
 

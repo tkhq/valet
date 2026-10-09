@@ -172,7 +172,7 @@ export function useBackgroundWorkGuard(): {
     [],
   );
 
-  async function confirm() {
+  async function confirmStop() {
     if (!prompt) return;
     setPending(true);
     setError(null);
@@ -196,7 +196,7 @@ export function useBackgroundWorkGuard(): {
       prompt={prompt}
       pending={pending}
       error={error}
-      onConfirm={() => void confirm()}
+      onConfirm={() => void confirmStop()}
       onClose={() => {
         if (pending) return;
         setPrompt(null);
