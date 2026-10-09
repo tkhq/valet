@@ -306,7 +306,7 @@ describe("POST /api/sessions/:id/pause", () => {
     expect(rows[0]?.status).toBe("deleted");
   });
 
-  it("409s 'sandbox is not ready to pause' when the attachment never reached ready, and writes nothing", async () => {
+  it("409s 'The sandbox did not suspend. Send a message in the session, then pause again.' when the attachment never reached ready, and writes nothing", async () => {
     const provider = new HibernatingTestProvider();
     api = await bootTestApi({ sandboxProvider: provider });
     const sessionId = "pause-not-ready";

@@ -1258,6 +1258,12 @@ sessionsRouter.patch("/:id", async (c) => {
         await sendStopped();
         return c.json({ error: profileSavedButSandboxFailed("a turn started") }, 409);
       }
+      // Leased work that started after the gate would die with the old
+      // sandbox (fix wave 4, N5); the same rule as pause and replace.
+      if (await leasedWorkStarted(engineStore, id)) {
+        await sendStopped();
+        return c.json({ error: profileSavedButSandboxFailed("background work started") }, 409);
+      }
       try {
         await rebuilt.attachment.replace();
       } catch (err) {
@@ -1416,7 +1422,7 @@ sessionsRouter.post("/:id/pause", async (c) => {
   // so a pause hit mid-provision doesn't lie about having suspended anything.
   if (session.attachment.state !== "suspended") {
     await stopped?.sendSignals();
-    return c.json({ error: "sandbox is not ready to pause" }, 409);
+    return c.json({ error: "The sandbox did not suspend. Send a message in the session, then pause again." }, 409);
   }
 
   // Status guard #2: conditioned `WHERE status='active'` (shared with the
