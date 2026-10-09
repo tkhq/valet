@@ -107,8 +107,16 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     expect(CODING_SYSTEM_PROMPT).toContain("background: true");
     expect(CODING_SYSTEM_PROMPT).toContain("deadline_hours");
     expect(CODING_SYSTEM_PROMPT).toContain("do not poll it");
-    expect(CODING_SYSTEM_PROMPT).toContain("Use `wake_at` to pause instead of `sleep`");
     expect(CODING_SYSTEM_PROMPT).toContain("/scratch` is wiped when the sandbox stops");
+  });
+
+  // Fix wave 2 (H6): a child that sets a timer stays unsettled until it
+  // fires, so the prompt must say so instead of recommending wake_at bare.
+  it("says a child's wake_at keeps the child unsettled until the timer's turn ends", () => {
+    expect(CODING_SYSTEM_PROMPT).not.toContain("Use `wake_at` to pause instead of `sleep`");
+    expect(CODING_SYSTEM_PROMPT).toContain(
+      "In a child session, a pending `wake_at` keeps the child unsettled until the timer fires and that turn ends",
+    );
   });
 
   it("composes the secrets paragraph from whether prep installs the CLI", () => {
