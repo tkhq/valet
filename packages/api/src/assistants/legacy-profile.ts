@@ -14,6 +14,7 @@
  */
 import { sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
+import { PRESENCE_DISPLAY_NAME_MAX_LENGTH, validatePresence } from "@valet/shared";
 import { LEGACY_RUNTIME_MARKER, type AppDb } from "../lib/drizzle.js";
 
 export interface LegacyAssistantProfile {
@@ -26,8 +27,33 @@ export interface LegacyAssistantProfile {
   upgradedAt?: number;
 }
 
-function text(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+/**
+ * The stored name as one trimmed line of at most 80 UTF-16 units: Slack's
+ * `username` limit, and the cap `validatePresence` applies to every other
+ * display name. The old API stored any string, so a stored name can hold
+ * line breaks or run long. Control and line-separator characters become
+ * spaces, so the name cannot break out of the "You are <name>." line into
+ * a new prompt section or a new Slack line. Its words still reach the
+ * prompt: the same owners and the assistant itself wrote both the name and
+ * the personality, which is instruction text by design.
+ */
+function displayName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const line = value.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
+  let capped = "";
+  for (const char of line) {
+    if (capped.length + char.length > PRESENCE_DISPLAY_NAME_MAX_LENGTH) break;
+    capped += char;
+  }
+  return capped.trim() || undefined;
+}
+
+/** A trimmed https URL that `validatePresence` accepts, without the inner
+ * whitespace the old API also refused. */
+function avatarUrl(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const url = value.trim();
+  return url && !/\s/.test(url) && validatePresence({ avatarUrl: url }) === null ? url : undefined;
 }
 
 /** The workspace assistant's carried-over profile, or undefined when it has none. */
@@ -46,8 +72,8 @@ export async function loadLegacyAssistantProfile(
   const row = result.rows[0];
   if (!row) return undefined;
   const profile: LegacyAssistantProfile = {
-    ...(text(row.name) ? { name: text(row.name) } : {}),
-    ...(text(row.avatar_url) ? { avatarUrl: text(row.avatar_url) } : {}),
+    ...(displayName(row.name) ? { name: displayName(row.name) } : {}),
+    ...(avatarUrl(row.avatar_url) ? { avatarUrl: avatarUrl(row.avatar_url) } : {}),
     ...(typeof row.personality === "string" ? { personality: row.personality.trim() } : {}),
   };
   if (Object.keys(profile).length === 0) return undefined;
