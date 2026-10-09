@@ -220,6 +220,19 @@ describeDocker("DockerSandbox", () => {
     }
   });
 
+  it("job-mode: exec ids are unique per job and a requested id is used as given (fix wave 2, B1)", async () => {
+    const sb = await makeSandbox();
+    try {
+      const a = await sb.execJob("true");
+      const b = await sb.execJob("true");
+      expect(a.execId).toMatch(/^job-[0-9a-z]+-[0-9a-z]{8}$/);
+      expect(a.execId).not.toBe(b.execId);
+      await expect(sb.execJob("true", { execId: "job-abc-12345678" })).resolves.toEqual({ execId: "job-abc-12345678" });
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
   it("job-mode: pollJob bounds a forward read and a tail read (spec B4)", async () => {
     const sb = await makeSandbox();
     try {

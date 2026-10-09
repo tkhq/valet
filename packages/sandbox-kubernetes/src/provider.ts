@@ -66,6 +66,7 @@ import { browserRuntimeFingerprint, browserTargetContainer, hasBrowserCompanion 
  * applies.
  */
 import { findPodEviction, type SandboxEvictionApi } from "./eviction.js";
+import { EXEC_ID_PATTERN, newExecId } from "@valet/engine/wakeups-ids";
 import { HOME_LAYOUT_VERSION } from "./home-persistence.js";
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
@@ -298,13 +299,11 @@ function extractExitCodeFromMessage(message: string): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
-/** execId format guard (carried forward from Task 4 review): generated
- * execIds are provider-owned counters, never user input, but this is
- * asserted defensively anyway so a malformed id can never be interpolated
- * into a `/tmp/valet-jobs/{execId}.*` path and traverse out of that
- * directory (no `/`, no `.`, no whitespace). Exported for unit testing. */
-const EXEC_ID_PATTERN = /^job-[0-9]+$/;
-
+/** execId format guard (carried forward from Task 4 review): an execId is
+ * `newExecId()` output, never user input, but this is asserted defensively
+ * anyway so a malformed id can never be interpolated into a
+ * `/tmp/valet-jobs/{execId}.*` path and traverse out of that directory (no
+ * `/`, no `.`, no whitespace). Exported for unit testing. */
 export function assertSafeExecId(execId: string): void {
   if (!EXEC_ID_PATTERN.test(execId)) {
     throw new Error(`invalid execId ${JSON.stringify(execId)}: expected to match ${EXEC_ID_PATTERN}`);
@@ -497,7 +496,6 @@ export class KubernetesSandbox implements Sandbox {
   adopted?: boolean;
   resourceOverrides?: Sandbox["resourceOverrides"];
   private readonly deps: KubernetesSandboxDeps;
-  private nextJobId = 1;
   private lastPodContext?: { podName: string; uid: string | null };
   private readonly jobPods = new Map<string, { podName: string; uid: string | null }>();
 
@@ -530,8 +528,15 @@ export class KubernetesSandbox implements Sandbox {
     return { ...this.execDeps(), containerName, docker: false, browser: false };
   }
 
-  private nextExecId(): string {
-    return `job-${this.nextJobId++}`;
+  /**
+   * A job id unique across handles: job files outlive this handle, so a
+   * per-handle counter reused a live job's files after an api restart
+   * (fix wave 2, B1). A caller may request an id it already stored.
+   */
+  private nextExecId(requested?: string): string {
+    if (requested === undefined) return newExecId();
+    assertSafeExecId(requested);
+    return requested;
   }
 
   /** Resolves the current backing pod name PLUS its `uid` baseline (the
@@ -706,7 +711,7 @@ export class KubernetesSandbox implements Sandbox {
 
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
     if (opts?.target === "browser") throw new Error("Browser jobs are not supported. Use browser exec or a browser command channel.");
-    const execId = this.nextExecId();
+    const execId = this.nextExecId(opts?.execId);
     return this.withPodContext(async (ctx) => {
       const handle = await execJobInPod(this.execDeps(), ctx.podName, execId, command, opts);
       this.jobPods.set(execId, ctx);

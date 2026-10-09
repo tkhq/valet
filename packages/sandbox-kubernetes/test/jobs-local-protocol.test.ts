@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   cancelCommand,
   decodeUtf8HoldingTail,
+  execJobInPod,
   jobKickoffCommand,
   parseJobStatus,
   pollCommand,
@@ -462,5 +463,54 @@ describe.skipIf(!hasBase64W0Trimmed)("pollJobInPod: dead-process detection and r
     const poll = await pollJobInPod(localDeps, "pod-1", execId, 0, { maxBytes: 4, tail: true });
     expect(poll.output).toBe("cde");
     expect(poll.nextOffset).toBe(Buffer.byteLength("ab€cde"));
+  });
+});
+
+// Fix wave 2, B1 and L9. The refusal and the guarded kill run before any
+// setsid call, so these run on every machine.
+describe("job file reuse guards (fix wave 2)", () => {
+  afterEach(async () => {
+    for (const id of execIds) await rm(`${JOBS_DIR}/${id}.dead`, { force: true });
+  });
+
+  it.each(["out", "pid", "exit", "dead"])("kickoff refuses when %s already exists and keeps the old log", async (ext) => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    await writeFile(`${JOBS_DIR}/${execId}.out`, "old log\n");
+    if (ext !== "out") await writeFile(`${JOBS_DIR}/${execId}.${ext}`, "1\n");
+    const result = sh(jobKickoffCommand(execId, "echo new"));
+    expect(result.status).toBe(17);
+    expect(result.stderr).toContain(execId);
+    expect(await readFile(`${JOBS_DIR}/${execId}.out`, "utf8")).toBe("old log\n");
+  });
+
+  it("execJobInPod surfaces the refusal as an error that names the id", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    await writeFile(`${JOBS_DIR}/${execId}.exit`, "0\n");
+    await writeFile(`${JOBS_DIR}/${execId}.out`, "");
+    await expect(execJobInPod(localDeps, "pod-1", execId, "echo new")).rejects.toThrow(
+      new RegExp(`job id ${execId} already has files`),
+    );
+  });
+
+  it("cancelCommand does not kill the recorded group when .exit already exists (L9)", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    // A live group stands in for an unrelated group that reused the pid.
+    const child = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+    try {
+      await writeFile(`${JOBS_DIR}/${execId}.out`, "");
+      await writeFile(`${JOBS_DIR}/${execId}.pid`, `${child.pid}\n`);
+      await writeFile(`${JOBS_DIR}/${execId}.exit`, "0\n");
+      sh(cancelCommand(execId));
+      // A killed child stays in `ps` as a zombie until node reaps it, so
+      // read the exit event instead.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(child.signalCode).toBeNull();
+      expect(child.exitCode).toBeNull();
+    } finally {
+      child.kill("SIGKILL");
+    }
   });
 });

@@ -21,6 +21,20 @@ describe("jobKickoffCommand", () => {
     expect(cmd).toContain(`: > ${shQuote(`${JOBS_DIR}/job-1.out`)}`);
   });
 
+  it("refuses to start when any job file for the id already exists (fix wave 2, B1)", () => {
+    const cmd = jobKickoffCommand("job-1", "echo hi");
+    for (const ext of ["pid", "exit", "dead", "out"]) {
+      expect(cmd).toContain(`[ -e ${shQuote(`${JOBS_DIR}/job-1.${ext}`)} ]`);
+    }
+    // The refusal runs before `: > OUT`, so it never truncates a live log.
+    expect(cmd.indexOf("exit 17")).toBeLessThan(cmd.indexOf(`: > ${shQuote(`${JOBS_DIR}/job-1.out`)}`));
+  });
+
+  it("caps the detached .out with head -c when given a limit (fix wave 2, M6)", () => {
+    const cmd = jobKickoffCommand("job-1", "yes", 2 * 1024 ** 3);
+    expect(cmd).toContain(`head -c ${2 * 1024 ** 3}`);
+  });
+
   it("groups the backgrounded work in parens so the WHOLE sequence backgrounds, not just the trailing echo", () => {
     const cmd = jobKickoffCommand("job-1", "echo hi");
     // The literal brief text `cmd1; cmd2 & echo started` would only
