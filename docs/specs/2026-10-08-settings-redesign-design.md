@@ -53,9 +53,11 @@ on these pages, not the switcher's.
 - **A team** opens `/settings/teams/$teamId`, a page with tabs: General (the
   team panel: members, defaults, Slack home channel, connections), API keys and
   proxy, and Policies. `/settings/team` redirects to the team selected in the
-  switcher, or to Profile when the switcher is on the personal workspace. A
-  draft on one team's tab does not carry to another team's page. Deleting the
-  team, or removing yourself from it, on this page opens Profile.
+  switcher, or to Profile when the switcher is on the personal workspace or
+  holds a team the caller is no longer on. It waits for the teams and org
+  queries before it decides, because the switcher keeps a stored team while
+  they load. A draft on one team's tab does not carry to another team's page.
+  Deleting the team, or removing yourself from it, on this page opens Profile.
 - **Organization** keeps every existing route. The rail shows four items, and
   each item's page shows a tab bar over the routes it groups:
   - General: General, Members, Teams

@@ -8,7 +8,8 @@
  * route's own component. Only data hooks and a few leaf sections are mocked.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { useSyncExternalStore } from "react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import {
   Outlet,
   RouterProvider,
@@ -28,9 +29,28 @@ const teams = [
   { id: "t2", name: "support", callerRole: "admin" as const },
 ];
 
+/** Whether the teams and org queries have answered. A test flips it to
+ * show a page while membership is still unknown, then the answer. */
+let membershipLoaded = true;
+const membershipListeners = new Set<() => void>();
+function resolveMembership() {
+  membershipLoaded = true;
+  for (const listener of membershipListeners) listener();
+}
+function useMembershipLoaded(): boolean {
+  return useSyncExternalStore((listener) => {
+    membershipListeners.add(listener);
+    return () => membershipListeners.delete(listener);
+  }, () => membershipLoaded);
+}
+
 vi.mock("~/api/settings", () => ({
-  useOrg: () => ({ data: { callerRole: orgRole, features: { organizations: true } }, isLoading: false, error: null }),
-  useTeams: () => ({ data: { teams }, isLoading: false, error: null }),
+  useOrg: () => useMembershipLoaded()
+    ? { data: { callerRole: orgRole, features: { organizations: true } }, isLoading: false, error: null }
+    : { data: undefined, isLoading: true, error: null },
+  useTeams: () => useMembershipLoaded()
+    ? { data: { teams }, isLoading: false, error: null }
+    : { data: undefined, isLoading: true, error: null },
   useMe: () => ({ data: { id: "u1", orgRole, defaultModel: null, defaultReasoning: null }, isLoading: false, error: null }),
   usePatchMe: () => ({ mutate: vi.fn() }),
   useOrgDirectory: () => ({ data: { users: [] }, isLoading: false, error: null }),
@@ -78,6 +98,7 @@ import { TeamSettingsShell } from "./settings.teams.$teamId";
 import { Route as TeamAccessRoute } from "./settings.teams.$teamId.access";
 import { Route as TeamPoliciesRoute } from "./settings.teams.$teamId.policies";
 import { Route as OrganizationRoute } from "./settings.organization";
+import { Route as TeamRedirectRoute } from "./settings.team";
 
 /** The component a file route renders. Every route here declares one. */
 function componentOf(route: { options: { component?: RouteComponent } }): RouteComponent {
@@ -110,6 +131,7 @@ async function mount(initial: string) {
   const tree = root.addChildren([
     settings.addChildren([
       child("profile", stub("Profile page")),
+      child("team", componentOf(TeamRedirectRoute)),
       child("appearance", componentOf(AppearanceRoute)),
       child("threads", componentOf(ThreadsRoute)),
       child("proxy", componentOf(ProxyRoute)),
@@ -139,6 +161,7 @@ function content(): HTMLElement {
 }
 
 beforeEach(() => {
+  membershipLoaded = true;
   orgRole = "admin";
   window.sessionStorage.clear();
   // The switcher holds a team for every test: settings pages must not follow it.
@@ -155,6 +178,27 @@ describe("old settings paths", () => {
     await waitFor(() => expect(router.state.location.pathname).toBe(to));
     // Replace, not push: Back must not land on the redirect again.
     expect(router.history.length).toBe(1);
+  });
+});
+
+describe("/settings/team", () => {
+  it("opens the switcher's team once membership is known", async () => {
+    const router = await mount("/settings/team");
+    await waitFor(() => expect(router.state.location.pathname).toBe("/settings/teams/t1"));
+    expect(await within(content()).findByRole("heading", { name: "platform" })).toBeTruthy();
+  });
+
+  it("opens Profile, not a refusal, when the switcher holds a team the caller left", async () => {
+    // The stored key outlives the team. While the queries load, the scope
+    // provider keeps it, because it cannot yet tell the team is gone.
+    window.sessionStorage.setItem("valet:workspace", "gone-team");
+    membershipLoaded = false;
+    const router = await mount("/settings/team");
+    expect(router.state.location.pathname).toBe("/settings/team");
+    act(() => resolveMembership());
+    await waitFor(() => expect(router.state.location.pathname).toBe("/settings/profile"));
+    expect(within(content()).getByText("Profile page")).toBeTruthy();
+    expect(screen.queryByText(/not a member of this team/)).toBeNull();
   });
 });
 
