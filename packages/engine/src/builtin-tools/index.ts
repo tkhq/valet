@@ -121,14 +121,15 @@ function abortErrorFrom(signal: AbortSignal): Error {
  * The foreground timeout text (fix wave 2, M16). A short command usually
  * needs a larger timeout, not background mode, so the background advice
  * appears only after a command ran a minute or more. It names every field
- * background mode requires, so the retry does not fail validation.
+ * background mode requires, so the retry does not fail validation. At the
+ * 3600-second max, a larger timeout is not an option (fix wave 3, UX L5).
  */
-function timeoutHint(timeoutMs: number): string {
+export function timeoutHint(timeoutMs: number): string {
   const seconds = Math.round(timeoutMs / 1000);
+  const background = "For work longer than an hour, rerun with background: true, deadline_hours, and reason.";
+  if (seconds >= 3600) return `[timed out after ${seconds}s] This is the largest timeout. ${background}`;
   const base = `[timed out after ${seconds}s] Rerun with a larger timeout (max 3600).`;
-  return seconds >= 60
-    ? `${base} For work longer than an hour, rerun with background: true, deadline_hours, and reason.`
-    : base;
+  return seconds >= 60 ? `${base} ${background}` : base;
 }
 
 /**
@@ -333,8 +334,12 @@ export const bashTool = defineTool({
     "in job mode (poll-based, non-blocking on the transport) when the " +
     "sandbox supports it. `background: true` starts the command as a " +
     "detached sandbox process and returns at once; give `deadline_hours` " +
-    "and `reason`. The thread receives a `process.exited` signal when it " +
-    "ends. Use it for work longer than an hour.",
+    "(1 to the deploy max) and `reason`. The process is killed at the " +
+    "deadline, and the deadline cannot be extended; `timeout` does not " +
+    "apply to it. The thread receives a `process.exited` signal when it " +
+    "ends. Use it for work longer than an hour. When the session has " +
+    "/scratch, put large temporary files there; it is wiped when the " +
+    "sandbox stops.",
   parameters: Type.Object({
     command: Type.String(),
     timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600 })),

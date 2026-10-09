@@ -150,6 +150,19 @@ describe("jobKickoffCommand", () => {
     expect(echoExitIdx).toBeLessThan(waitIdx);
   });
 
+  it("appends the cap marker to .out once output passes the cap (fix wave 3, k8s M-B)", () => {
+    const cmd = jobKickoffCommand("job-1", "echo hi", 1024);
+    expect(cmd).toContain("head -c 1 | wc -c");
+    expect(cmd).toContain("[valet: log capped at 1024 bytes; later output dropped]");
+  });
+
+  it("prunes the files of jobs that ended more than a day ago, and reports the count (fix wave 3, k8s M-B)", () => {
+    const cmd = jobKickoffCommand("job-1", "echo hi");
+    expect(cmd).toContain("-mmin +1440");
+    expect(cmd).toContain("pruned=");
+    expect(cmd.indexOf("-mmin +1440")).toBeLessThan(cmd.indexOf("already has files"));
+  });
+
   it("floors and clamps a fractional/negative maxOutputBytes to a safe non-negative integer", () => {
     expect(jobKickoffCommand("job-1", "echo hi", 10.9)).toContain("head -c 10 >");
     expect(jobKickoffCommand("job-1", "echo hi", -5)).toContain("head -c 0 >");

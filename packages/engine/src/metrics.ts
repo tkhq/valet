@@ -89,6 +89,8 @@ interface Instruments {
   wakeupBadRows: Counter;
   wakeupSweepOkAt: ObservableGauge;
   wakeupSweepFailed: Counter;
+  jobLogsPruned: Counter;
+  dockerJobOutputDropped: Counter;
   leasesSettleOverDeadline: Counter;
 }
 
@@ -165,7 +167,8 @@ function inst(): Instruments {
         "Compaction passes that refused to write a checkpoint because the summarizer input carried none of the history the checkpoint would replace. This is an invariant violation, not a workload property: any sustained rate means threads stop compacting (TKAI-461).",
     }),
     wakeupsTotal: meter.createCounter("valet.wakeups.total", {
-      description: "Wakeups that ended, by kind (process/watch/timer) and cause. See WakeupCause.",
+      description:
+        "Wakeups that ended, by kind (process/watch/timer) and cause. See WakeupCause. cause=session_deleted counts open wakeups a session delete ended.",
     }),
     wakeupSignalsLost: meter.createCounter("valet.wakeups.signal_lost", {
       description:
@@ -177,7 +180,7 @@ function inst(): Instruments {
     }),
     leasesOrphanReleased: meter.createCounter("valet.leases.orphan_released", {
       description:
-        "Process or watch leases the WakeWatcher released because their wakeup row was missing or terminal, or their deadline passed, by owner_kind. A crash between two writes can cause one; a sustained rate means a lease writer is broken.",
+        "Process or watch leases the WakeWatcher released outside the normal transition, by owner_kind and reason. reason=missing_owner or terminal_owner: a crash between two writes can cause one; a sustained rate means a lease writer is broken. reason=deadline: the WakeWatcher failed to end the owner at its deadline for two ticks, which is a bug; alert on any count.",
     }),
     wakeupBadRows: meter.createCounter("valet.wakeups.bad_rows", {
       description:
@@ -186,7 +189,15 @@ function inst(): Instruments {
     wakeupSweepOkAt: meter.createObservableGauge("valet.wakeups.sweep_ok_at", {
       unit: "s",
       description:
-        "Unix time of the last WakeWatcher pass that finished. Alert when it falls behind now by more than a few intervals: the other wakeup and lease gauges then hold stale values.",
+        "Unix time of the last WakeWatcher pass that finished, or of the watcher start before the first pass. Prometheus exports it as valet_wakeups_sweep_ok_at_seconds. Alert when time() minus it exceeds a few intervals: the other wakeup and lease gauges then hold stale values.",
+    }),
+    jobLogsPruned: meter.createCounter("valet.jobs.logs_pruned", {
+      description:
+        "Detached job file sets a kubernetes kickoff deleted because the job ended more than a day ago. Job logs count against /scratch, so a zero rate with growing scratch use means the prune is not running.",
+    }),
+    dockerJobOutputDropped: meter.createCounter("valet.jobs.docker_output_dropped", {
+      description:
+        "Finished detached job buffers the docker backend dropped because one sandbox's buffers passed their total cap. A dropped job's log reads as empty. Dev backend only.",
     }),
     wakeupSweepFailed: meter.createCounter("valet.wakeups.sweep_failed", {
       description: "WakeWatcher passes that threw before they finished. A sustained rate means no wakeup moves and no hold expires.",
@@ -205,11 +216,11 @@ function inst(): Instruments {
     }),
     leasesOverDeadline: meter.createObservableGauge("valet.leases.over_deadline", {
       description:
-        "A lease active past its deadline for two ticks means the WakeWatcher failed to release it. This is the alert signal for the alert-don't-auto-repair rule. The only repair is the crash-window release, which valet.leases.orphan_released counts.",
+        "Leases active past their deadline for two ticks, measured at the start of each WakeWatcher pass, before its repair runs. Non-zero means the WakeWatcher failed to end their owners. This is the alert signal for the alert-don't-auto-repair rule; the repair that follows counts in valet.leases.orphan_released{reason=deadline}.",
     }),
     leasesUnannotated: meter.createObservableGauge("valet.leases.unannotated", {
       description:
-        "Leased sandboxes the last WakeWatcher reconcile found without eviction protection: a pod that lacked safe-to-evict=false past two ticks, a failed patch, or a lease with no resolvable sandbox id. Any non-zero value pages (INV-3).",
+        "Leased sandboxes the last WakeWatcher reconcile found without eviction protection: a pod that lacked safe-to-evict=false past two ticks, or a failed patch. A lease whose session has no sandbox yet is not counted. Any non-zero value pages (INV-3).",
     }),
     scratchRequestedBytes: meter.createObservableGauge("valet.sandbox.scratch.requested_bytes", {
       description:
@@ -346,7 +357,7 @@ export function recordGateUnownedExpired(gateType: string): void {
 
 /** A wakeup that reached a terminal status. Record once per wakeup, at the
  * transition into done/cancelled/expired/lost. */
-export function recordWakeupEnded(kind: WakeupKind, cause: WakeupCause): void {
+export function recordWakeupEnded(kind: WakeupKind, cause: WakeupCause | "session_deleted"): void {
   inst().wakeupsTotal.add(1, { kind, cause });
 }
 
@@ -379,10 +390,14 @@ export function recordLeaseNodeSeconds(ownerKind: LeaseOwnerKind, seconds: numbe
   inst().leaseNodeSeconds.add(seconds, { owner_kind: ownerKind });
 }
 
-/** A process or watch lease released by the WakeWatcher's crash-window
- * repair: its owner row was missing or terminal, or its deadline passed. */
-export function recordLeaseOrphanReleased(ownerKind: LeaseOwnerKind): void {
-  inst().leasesOrphanReleased.add(1, { owner_kind: ownerKind });
+/** Why the WakeWatcher released a process or watch lease outside the normal transition. */
+export type OrphanReleaseReason = "missing_owner" | "terminal_owner" | "deadline";
+
+/** A process or watch lease released by the WakeWatcher's repair: its owner
+ * row was missing or terminal (a crash window), or its owner was not ended
+ * at its deadline (a bug; fix wave 3, M2). */
+export function recordLeaseOrphanReleased(ownerKind: LeaseOwnerKind, reason: OrphanReleaseReason): void {
+  inst().leasesOrphanReleased.add(1, { owner_kind: ownerKind, reason });
 }
 
 /** A wakeup or lease row a store read skipped because it did not narrow. */
@@ -394,6 +409,16 @@ export function recordWakeupBadRow(table: "engine_wakeups" | "engine_leases"): v
 export function recordWakeupSweepOk(unixSeconds: number): void {
   inst();
   setGauge(wakeupSweepOkState, {}, unixSeconds);
+}
+
+/** A kubernetes kickoff deleted `count` job file sets older than a day (fix wave 3, k8s M-B). */
+export function recordJobLogsPruned(count: number): void {
+  inst().jobLogsPruned.add(count);
+}
+
+/** The docker backend dropped one finished detached job's output buffer to stay under its per-sandbox cap. */
+export function recordDockerJobOutputDropped(): void {
+  inst().dockerJobOutputDropped.add(1);
 }
 
 /** A WakeWatcher pass threw before it finished. */

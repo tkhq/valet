@@ -15,6 +15,8 @@ import {
   wakeupListTool,
   wakeupCancelTool,
 } from "../src/builtin-tools/index.js";
+import { startBackgroundProcess } from "../src/builtin-tools/wakeups.js";
+import { wakeupsUnavailable } from "../src/wakeups/validate.js";
 import type {
   Credential,
   CredentialProvider,
@@ -230,13 +232,69 @@ describe("wakeups seam absent", () => {
   it("every tool refuses without the seam", async () => {
     const ctx = makeCtx({});
     delete ctx.wakeups;
-    const unavailable = "[wakeups_unavailable] this session cannot schedule wakeups. Run the work in the foreground.";
-    expect((await watchTool.execute({ command: "x", reason: "r", max_hours: 1 }, ctx)).text).toBe(unavailable);
-    expect((await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, ctx)).text).toBe(unavailable);
-    expect((await holdSandboxTool.execute({ hours: 1, reason: "r" }, ctx)).text).toBe(unavailable);
-    expect((await processReadTool.execute({ id: "x" }, ctx)).text).toBe(unavailable);
-    expect((await wakeupListTool.execute({}, ctx)).text).toBe(unavailable);
-    expect((await wakeupCancelTool.execute({ id: "x" }, ctx)).text).toBe(unavailable);
+    expect((await watchTool.execute({ command: "x", reason: "r", max_hours: 1 }, ctx)).text).toBe(wakeupsUnavailable("watch"));
+    expect((await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, ctx)).text).toBe(wakeupsUnavailable("wake_at"));
+    expect((await holdSandboxTool.execute({ hours: 1, reason: "r" }, ctx)).text).toBe(wakeupsUnavailable("hold_sandbox"));
+    expect((await processReadTool.execute({ id: "x" }, ctx)).text).toBe(wakeupsUnavailable("process_read"));
+    expect((await wakeupListTool.execute({}, ctx)).text).toBe(wakeupsUnavailable("wakeup_list"));
+    expect((await wakeupCancelTool.execute({ id: "x" }, ctx)).text).toBe(wakeupsUnavailable("wakeup_cancel"));
+    expect(wakeupsUnavailable("wake_at")).not.toContain("foreground");
+  });
+});
+
+describe("fix wave 3 tool texts", () => {
+  const NOW = Date.UTC(2026, 9, 9, 12, 0, 0);
+
+  it("wakeup_list shows the elapsed time and JSON-quotes the reason (UX L4)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    try {
+      const list = vi.fn(async () => ({
+        wakeups: [{ ...baseWakeup, id: "wk_a", reason: 'build "core"', createdAt: NOW - (2 * 3600 + 5 * 60) * 1000, deadlineAt: NOW + 3_600_000 }],
+        leases: [],
+        otherThreads: 0,
+      }));
+      const r = await wakeupListTool.execute({}, makeCtx({ list }));
+      expect(r.text).toBe(`wk_a process running "build \\"core\\"" deadline ${new Date(NOW + 3_600_000).toISOString()}, started 2h 5m ago`);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("process_read says when the log hit its cap (k8s M-B)", async () => {
+    const readLog = vi.fn(async () => ({ text: "x\n[valet: log capped at 10 bytes; later output dropped]\n", nextOffset: 60, eof: false }));
+    const r = await processReadTool.execute({ id: "wk_a", tail: true }, makeCtx({ readLog }));
+    expect(r.text).toContain("[log capped: output after the cap was dropped. The process.exited signal reports the exit code.]");
+  });
+
+  it("returns a bash_background start refusal as text, not a tool error (UX L9)", async () => {
+    const create = vi.fn(async () => {
+      throw new Error("[bash_background] The start of wk_x took too long, so it was stopped. Run the command again.");
+    });
+    const r = await startBackgroundProcess(makeCtx({ create }), "make", { deadlineHours: 1, reason: "r" });
+    expect(r.text).toBe("[bash_background] The start of wk_x took too long, so it was stopped. Run the command again.");
+  });
+
+  it("returns a wake_at seam refusal as text", async () => {
+    const create = vi.fn(async () => {
+      throw new Error("[wake_at] This session was deleted, so the timer was not set.");
+    });
+    const r = await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, makeCtx({ create }));
+    expect(r.text).toBe("[wake_at] This session was deleted, so the timer was not set.");
+  });
+
+  it("tells the agent to end its turn after a start (UX prompt 1)", async () => {
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_p", deadlineAt: NOW } }));
+    const r = await startBackgroundProcess(makeCtx({ create }), "make", { deadlineHours: 1, reason: "r" });
+    expect(r.text).toContain("End your turn now with a one-line status");
+    const w = await watchTool.execute({ command: "tail -f x", reason: "ci", max_hours: 2 }, makeCtx({ create }));
+    expect(w.text).toContain("End your turn now with a one-line status");
+    expect(w.text).toContain("at most one watch.event every 120 seconds");
+  });
+
+  it("describes wake_at as scheduling a new turn, not a pause (UX prompt 2)", () => {
+    expect(wakeAtTool.description).not.toContain("Pause this thread");
+    expect(wakeAtTool.description).toContain("end your turn");
   });
 });
 
@@ -249,7 +307,7 @@ describe("per-session limit", () => {
     }));
     const r = await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, makeCtx({ list }));
     expect(r.text).toBe(
-      "[wakeups_limit] This thread already has 20 active wakeups and holds (limit 20, sandbox.wakeupsPerSession). Cancel one of them with wakeup_cancel.",
+      "[wakeups_limit] This thread already has 20 active wakeups and holds (limit 20 per thread, set by sandbox.wakeupsPerSession). Cancel one of them with wakeup_cancel.",
     );
   });
 

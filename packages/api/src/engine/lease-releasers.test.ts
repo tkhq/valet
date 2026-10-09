@@ -6,7 +6,9 @@ import { describe, expect, it } from "vitest";
 /**
  * INV-6 (spec 2026-10-08): only the WakeWatcher and `wakeup_cancel` release
  * a lease. This test is the invariant's mechanism. It scans every package's
- * `src` for `releaseLease(` and fails on a caller outside the allowed set.
+ * `src` for `releaseLease(` in any case, so `transitionWakeupAndReleaseLease(`
+ * matches too (fix wave 3, data L2), and fails on a caller outside the
+ * allowed set.
  * The stores define the method, the engine types declare it, and the store
  * contract suite exercises it.
  */
@@ -33,7 +35,7 @@ async function sourceFiles(dir: string): Promise<string[]> {
 }
 
 describe("INV-6: lease releasers", () => {
-  it("calls releaseLease( only from the WakeWatcher, the wakeups seam, and the stores", async () => {
+  it("calls releaseLease( or transitionWakeupAndReleaseLease( only from the WakeWatcher, the wakeups seam, and the stores", async () => {
     const packagesDir = join(REPO_ROOT, "packages");
     const callers: string[] = [];
     for (const pkg of await readdir(packagesDir, { withFileTypes: true })) {
@@ -46,7 +48,7 @@ describe("INV-6: lease releasers", () => {
         continue;
       }
       for (const file of files) {
-        if ((await readFile(file, "utf8")).includes("releaseLease(")) callers.push(relative(REPO_ROOT, file));
+        if (/releaselease\(/i.test(await readFile(file, "utf8"))) callers.push(relative(REPO_ROOT, file));
       }
     }
     expect(callers.length).toBeGreaterThan(0);

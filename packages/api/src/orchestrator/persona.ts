@@ -260,6 +260,16 @@ already has the answer, act on it instead of asking for the same detail. Keep
 explicit channel replies brief, direct, and grounded in the conversation.`;
 
 /**
+ * Wakeup signals (fix wave 3, UX prompts 7 and 10). The watcher delivers
+ * them with manual replies, so nothing auto-posts, and the envelope then
+ * reads `addressed="false"`. The channel rules above tell the assistant to
+ * stay silent on such turns, so this section says a wakeup is its own work.
+ */
+const BACKGROUND_WORK = `## Background work
+
+A \`<wakeup>\` signal is your own scheduled work, even when it shows \`addressed="false"\`: a timer you set with \`wake_at\`, or a process or watch you started. Act on it. When it carries an origin, report the result there with the origin service's reply_to_origin action. To come back to something later, call \`wake_at\` and end your turn; do not ask the person to remind you.`;
+
+/**
  * The orchestrator runs no sandbox prep, so it has no secrets command. Told
  * nothing, it reached for the vendor CLI it knows and blamed the vault when
  * that returned nothing; told the command's name, it ran the command itself
@@ -286,5 +296,5 @@ Do not tell the user to look the secret up themselves, and never ask anyone to p
  * persona names it, so the assistant never surfaces a raw `team_<uuid>`.
  */
 export function orchestratorPersona(owner: Principal, displayName?: string): string {
-  return `${personaBody(owner, displayName)}\n\n${CAPABILITY_RULES}\n\n${DECISION_FLOW}\n\n${DELEGATION_RULES}\n\n${SECRETS_RULES}\n\n${MEMORY_RULES}\n\n${CHANNEL_REPLY}`;
+  return `${personaBody(owner, displayName)}\n\n${CAPABILITY_RULES}\n\n${DECISION_FLOW}\n\n${DELEGATION_RULES}\n\n${SECRETS_RULES}\n\n${MEMORY_RULES}\n\n${CHANNEL_REPLY}\n\n${BACKGROUND_WORK}`;
 }

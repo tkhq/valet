@@ -107,16 +107,26 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     expect(CODING_SYSTEM_PROMPT).toContain("background: true");
     expect(CODING_SYSTEM_PROMPT).toContain("deadline_hours");
     expect(CODING_SYSTEM_PROMPT).toContain("do not poll it");
-    expect(CODING_SYSTEM_PROMPT).toContain("/scratch` is wiped when the sandbox stops");
   });
 
-  // Fix wave 2 (H6): a child that sets a timer stays unsettled until it
-  // fires, so the prompt must say so instead of recommending wake_at bare.
-  it("says a child's wake_at keeps the child unsettled until the timer's turn ends", () => {
+  // Fix wave 3 (UX prompt 8): only a session with /scratch hears about it.
+  it("names /scratch only when the host says the session has it", () => {
+    expect(codingSystemPrompt({ secretsCli: true })).not.toContain("/scratch");
+    expect(codingSystemPrompt({ secretsCli: true, scratchEnabled: false })).not.toContain("/scratch");
+    expect(codingSystemPrompt({ secretsCli: true, scratchEnabled: true })).toContain("`/scratch` is wiped when the sandbox stops");
+  });
+
+  // Fix wave 3 (UX prompts 1, 9, M6): end the turn after a start, cover
+  // watch and holds, and bound the child timer promise.
+  it("tells the model to end its turn after a start and bounds the child wake_at promise", () => {
+    expect(CODING_SYSTEM_PROMPT).toContain("end your turn with a one-line status");
+    expect(CODING_SYSTEM_PROMPT).toContain("`watch`");
+    expect(CODING_SYSTEM_PROMPT).toContain("`hold_sandbox`");
     expect(CODING_SYSTEM_PROMPT).not.toContain("Use `wake_at` to pause instead of `sleep`");
     expect(CODING_SYSTEM_PROMPT).toContain(
-      "In a child session, a pending `wake_at` keeps the child unsettled until the timer fires and that turn ends",
+      "In a child session, a pending `wake_at` that fires within 24 hours keeps the child unsettled until that turn ends",
     );
+    expect(CODING_SYSTEM_PROMPT).toContain("A later timer does not hold the parent");
   });
 
   it("composes the secrets paragraph from whether prep installs the CLI", () => {

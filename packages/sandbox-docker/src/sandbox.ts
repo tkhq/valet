@@ -29,6 +29,7 @@ import {
   CappedOutputBuffer,
   CONTAINER_DEATH_PATTERN,
   parseResourceQuantity,
+  recordDockerJobOutputDropped,
   SandboxGoneError,
 } from "@valet/engine";
 
@@ -52,6 +53,36 @@ const DETACHED_UNPOLLED_BACKSTOP_MS = 60 * 60 * 1000;
  * the tail, which joins at exit (see `CappedOutputBuffer`).
  */
 const DETACHED_OUTPUT_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Most bytes all detached job buffers of one sandbox may hold together
+ * (fix wave 3, security L4). The per-thread wakeup cap allows 20 jobs, so
+ * the per-job cap alone allowed about 1.25 GiB of api heap per thread.
+ */
+const DETACHED_OUTPUT_TOTAL_MAX_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Drops the oldest finished detached job buffers until the detached total
+ * fits `capBytes`, and returns the dropped ids. A running job is never
+ * dropped, so the total can stay over the cap while jobs run. A dropped
+ * job's poll then reads as an unknown job.
+ */
+export function dropFinishedDetachedOutputs<J extends { detached: boolean; status: string; output: string }>(
+  jobs: Map<string, J>,
+  capBytes: number,
+): string[] {
+  let total = 0;
+  for (const job of jobs.values()) if (job.detached) total += Buffer.byteLength(job.output);
+  const dropped: string[] = [];
+  for (const [id, job] of jobs) {
+    if (total <= capBytes) break;
+    if (!job.detached || job.status === "running") continue;
+    total -= Buffer.byteLength(job.output);
+    jobs.delete(id);
+    dropped.push(id);
+  }
+  return dropped;
+}
 
 interface DockerJobState {
   status: "running" | "done" | "failed";
@@ -802,6 +833,7 @@ export class DockerSandbox implements Sandbox {
     }
     const detached = opts?.detached === true;
     const limit = jobOutputLimit(opts);
+    if (detached) this.capDetachedOutputs();
 
     const child = spawn("docker", this.execArgs(command, opts), {
       stdio: ["pipe", "pipe", "pipe"],
@@ -903,6 +935,7 @@ export class DockerSandbox implements Sandbox {
         } finally {
           resolveClosed();
           scheduleEviction();
+          if (detached) this.capDetachedOutputs();
         }
       })();
     });
@@ -956,6 +989,17 @@ export class DockerSandbox implements Sandbox {
     if (state.detached) {
       if (state.evictTimer) clearTimeout(state.evictTimer);
       this.jobs.delete(execId);
+    }
+  }
+
+  /** Keeps this sandbox's detached buffers under their total cap, counting each drop. */
+  private capDetachedOutputs(): void {
+    const before = new Map(this.jobs);
+    for (const id of dropFinishedDetachedOutputs(this.jobs, DETACHED_OUTPUT_TOTAL_MAX_BYTES)) {
+      const timer = before.get(id)?.evictTimer;
+      if (timer) clearTimeout(timer);
+      recordDockerJobOutputDropped();
+      console.warn(`DockerSandbox ${this.id}: dropped the output of finished job ${id} to keep detached job buffers under 256 MiB.`);
     }
   }
 
@@ -1426,10 +1470,12 @@ export class DockerSandboxProvider implements SandboxProvider {
     else if (!await this.inventory.reserve(value)) return this.restore(id);
     if (value.credsHostDir && opts.credsFiles) await writeCredsFiles(value.credsHostDir, opts.credsFiles, { docker: Boolean(opts.docker || opts.browser?.enabled) });
     if (value.scratchHostDir) {
-      await fs.mkdir(value.scratchHostDir, { recursive: true, mode: 0o777 });
+      await fs.mkdir(value.scratchHostDir, { recursive: true, mode: 0o1777 });
       // The process umask masks the mkdir mode, so set it explicitly. The
-      // sandbox user must be able to write /scratch.
-      await fs.chmod(value.scratchHostDir, 0o777);
+      // sandbox user must be able to write /scratch. The sticky bit stops
+      // the workload user from replacing a path that root code trusts
+      // (fix wave 3, security H-1).
+      await fs.chmod(value.scratchHostDir, 0o1777);
       // Deviation from the spec's size-limited /scratch (emptyDir with
       // ephemeral-storage sums on kubernetes): a docker bind mount has no
       // quota mechanism. Dev-only backend; tracked for the spec Deviations.

@@ -46,8 +46,12 @@ export interface Wakeup {
   origin?: ChannelOrigin;
   /** `watch`: start of the current rate window (ms). */
   windowStartAt?: number;
-  /** `watch`: `watch.event` signals emitted in the current rate window. */
+  /** `watch`: poll ticks with new output in the current rate window (fix wave 3, M1). */
   windowCount?: number;
+  /** `watch`: complete lines read but not yet sent, coalesced until the next emit. "" when empty. */
+  watchBuffer?: string;
+  /** `watch`: when the last `watch.event` went out (ms). */
+  lastEmitAt?: number;
 }
 
 /** What kind of owner holds a lease open. */
@@ -83,7 +87,12 @@ export interface WakeupCursor {
 export type WakeupPatch = Partial<
   Pick<
     Wakeup,
-    "cause" | "exitCode" | "endedAt" | "logOffset" | "logTail" | "eventCount" | "execId" | "leaseId" | "windowStartAt" | "windowCount"
+    "cause" | "exitCode" | "endedAt" | "logOffset" | "logTail" | "eventCount" | "execId"
+    | "leaseId"
+    | "windowStartAt"
+    | "windowCount"
+    | "watchBuffer"
+    | "lastEmitAt"
   >
 >;
 
@@ -99,6 +108,27 @@ export interface WakeupLimits {
   timerMaxHours: number;
   perSession: number;
   watchMaxEventsPerHour: number;
+  /**
+   * Shortest gap between two `watch.event` signals of one watch (ms). Lines
+   * read in between are buffered and sent together. Absent means the
+   * default, `DEFAULT_WATCH_MIN_INTERVAL_MS` (fix wave 3, M1).
+   */
+  watchMinIntervalMs?: number;
+}
+
+/** Default `WakeupLimits.watchMinIntervalMs`: one signal per two minutes. */
+export const DEFAULT_WATCH_MIN_INTERVAL_MS = 120_000;
+
+/**
+ * The start of the line a provider appends to a detached job's log when
+ * the log cap drops output: `[valet: log capped at <n> bytes; later output
+ * dropped]` (fix wave 3, k8s M-B). Readers look for this prefix.
+ */
+export const JOB_LOG_CAPPED_MARKER = "[valet: log capped at ";
+
+/** The full marker line for a cap of `bytes`, newline-terminated. */
+export function jobLogCappedLine(bytes: number): string {
+  return `${JOB_LOG_CAPPED_MARKER}${bytes} bytes; later output dropped]\n`;
 }
 
 export type WakeupCreateInput = (

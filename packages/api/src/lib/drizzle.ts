@@ -1694,7 +1694,8 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   "fire_at" bigint, "deadline_at" bigint, "exit_code" integer, "cause" text,
   "log_offset" bigint NOT NULL DEFAULT 0, "log_tail" text NOT NULL DEFAULT '', "event_count" integer NOT NULL DEFAULT 0,
   "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL, "ended_at" bigint,
-  "origin_json" text, "window_start_at" bigint, "window_count" integer
+  "origin_json" text, "window_start_at" bigint, "window_count" integer,
+  "watch_buffer" text, "last_emit_at" bigint
 )`,
   },
   {
@@ -1714,6 +1715,18 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "engine_wakeups.window_count column",
     probe: { kind: "column", table: "engine_wakeups", column: "window_count" },
     sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "window_count" integer',
+  },
+  {
+    // Fix wave 3 (M1): lines a watch holds between coalesced emits.
+    // Engine table: the same ENGINE_SCHEMA_VERSION caveat as above.
+    describe: "engine_wakeups.watch_buffer column",
+    probe: { kind: "column", table: "engine_wakeups", column: "watch_buffer" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "watch_buffer" text',
+  },
+  {
+    describe: "engine_wakeups.last_emit_at column",
+    probe: { kind: "column", table: "engine_wakeups", column: "last_emit_at" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "last_emit_at" bigint',
   },
   {
     describe: "engine_wakeups_session index (spec 2026-10-08)",

@@ -284,7 +284,7 @@ export class InMemorySessionStore implements SessionStore {
     // (fix wave 2, M12). The watcher reads a missing row as a lost CAS.
     for (const w of [...this.wakeups.values()]) {
       if (w.sessionId !== id) continue;
-      if (w.status === "pending" || w.status === "running") recordWakeupEnded(w.kind, "sandbox_unavailable");
+      if (w.status === "pending" || w.status === "running") recordWakeupEnded(w.kind, "session_deleted");
       this.wakeups.delete(w.id);
     }
     for (const l of [...this.leases.values()]) {

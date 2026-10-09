@@ -246,7 +246,9 @@ CREATE TABLE "engine_wakeups" (
 	"ended_at" bigint,
 	"origin_json" text,
 	"window_start_at" bigint,
-	"window_count" integer
+	"window_count" integer,
+	"watch_buffer" text,
+	"last_emit_at" bigint
 );
 --> statement-breakpoint
 CREATE INDEX "engine_wakeups_session" ON "engine_wakeups" ("session_id","status");

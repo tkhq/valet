@@ -52,6 +52,19 @@ describe("orchestratorPersona", () => {
     }
   });
 
+  // Fix wave 3 (UX prompts 7, 10): a wakeup signal is the assistant's own
+  // scheduled work. It renders addressed="false" because nothing may
+  // auto-post, so the persona must say to act on it anyway.
+  it("treats a wakeup signal as addressed to the assistant and names the background tools", () => {
+    for (const owner of OWNERS) {
+      const persona = orchestratorPersona(owner);
+      expect(persona).toContain("## Background work");
+      expect(persona).toContain('A `<wakeup>` signal is your own scheduled work, even when it shows `addressed="false"`');
+      expect(persona).toContain("reply_to_origin");
+      expect(persona).toContain("`wake_at`");
+    }
+  });
+
   it("names the team when a display name is given, never the raw id", () => {
     const persona = flat(orchestratorPersona({ type: "team", id: "team_c7268244" }, "Platform"));
     expect(persona).toContain("Platform");
