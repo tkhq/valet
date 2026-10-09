@@ -16,12 +16,12 @@ import { errorText } from "~/lib/error-text";
 
 export type BulkDecision = "approve" | "deny";
 
-/** The engine's built-in approval gate actions (`requestApprovalDecision` in
- * `engine/src/plugin-catalog.ts` and the default actions in
- * `engine/src/decision-gate.ts`). "approve" allows one call only. The policy
- * resolver adds `approve_session` and `always_allow`
- * (`api/src/policies/service.ts`); both write a lasting grant, so a bulk
- * answer never sends them. */
+/** The engine's built-in approval gate actions. A gate qualifies only when
+ * the server marks it `oneShot`: a tool approval whose "approve" allows that
+ * one call. Other approval gates also use these ids (`ask_approval`,
+ * `sec_start`), but their approval can cover later work. The policy resolver
+ * adds `approve_session` and `always_allow` (`api/src/policies/service.ts`);
+ * both write a lasting grant, so a bulk answer never sends them. */
 const ONE_TIME_APPROVE = "approve";
 const DENY = "deny";
 
@@ -34,7 +34,7 @@ export interface DecisionTarget { kind: "decision"; key: string; title: string; 
 export interface WorkflowTarget { kind: "workflow"; key: string; title: string; context?: string; runId: string; nodeId: string; iteration?: number; policy: boolean }
 export type BulkTarget = DecisionTarget | WorkflowTarget;
 
-export type SkipReason = "needs_answer" | "needs_credential" | "waiting_on_other" | "shares_your_account" | "no_one_time_action" | "not_pending";
+export type SkipReason = "needs_answer" | "needs_credential" | "waiting_on_other" | "shares_your_account" | "not_one_shot" | "not_pending";
 
 export interface SkippedItem { key: string; title: string; reason: SkipReason }
 
@@ -43,7 +43,7 @@ export const SKIP_REASON_TEXT: Record<SkipReason, string> = {
   needs_credential: "Needs a credential.",
   waiting_on_other: "Waits on another member.",
   shares_your_account: "Lends your shared account. Answer it on its own.",
-  no_one_time_action: "Has no one-time approve and deny choice.",
+  not_one_shot: "Its approval can cover more than this one call. Answer it on its own.",
   not_pending: "Is no longer pending.",
 };
 
@@ -61,7 +61,7 @@ function decisionSkipReason({ gate }: DecisionItem, meId: string | undefined): S
   const approver = approverReason(gate.approver, meId);
   if (approver) return approver;
   const ids = new Set(gate.actions.map(a => a.id));
-  if (!ids.has(ONE_TIME_APPROVE) || !ids.has(DENY)) return "no_one_time_action";
+  if (gate.oneShot !== true || !ids.has(ONE_TIME_APPROVE) || !ids.has(DENY)) return "not_one_shot";
   return undefined;
 }
 

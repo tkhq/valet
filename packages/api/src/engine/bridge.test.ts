@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { BusEvent, MessageEntry, MessagePart as EngineMessagePart } from "@valet/engine";
-import { busEventToWire, engineSignalToWire, engineToWireParts } from "./bridge.js";
+import type { BusEvent, DecisionGate, MessageEntry, MessagePart as EngineMessagePart } from "@valet/engine";
+import { busEventToWire, engineGateToWire, engineSignalToWire, engineToWireParts } from "./bridge.js";
 
 function ev(event: BusEvent["event"], threadId = "t1"): BusEvent {
   return { sessionId: "s1", threadId, userId: "u1", event, timestamp: 100 };
@@ -405,5 +405,25 @@ describe("busEventToWire", () => {
       }),
     );
     expect(out).toEqual([{ type: "sandbox.status", state: "ready", epoch: 1, estimateMs: undefined }]);
+  });
+});
+
+describe("engineGateToWire oneShot", () => {
+  const gate = (context?: Record<string, unknown>): DecisionGate => ({
+    id: "g1", sessionId: "s1", threadId: "t1", queueItemId: "q1", resumeKey: "k", ordinal: 0, type: "approval",
+    title: "Approve?", actions: [{ id: "approve", label: "Approve" }, { id: "deny", label: "Deny" }],
+    status: "pending", createdAt: 1, updatedAt: 1, ...(context ? { context } : {}),
+  });
+
+  it("marks a tool approval gate whose approve allows only this call", () => {
+    expect(engineGateToWire(gate({ tool_id: "github.get_issue", oneShot: true })).oneShot).toBe(true);
+  });
+
+  it("leaves it off a gate that covers later work or lends an account", () => {
+    // sec_start and ask_approval open plain approval gates with approve/deny and no tool context.
+    expect(engineGateToWire(gate()).oneShot).toBeUndefined();
+    expect(engineGateToWire(gate({ tool_id: "github.get_issue" })).oneShot).toBeUndefined();
+    expect(engineGateToWire(gate({ tool_id: "github.get_issue", oneShot: true, approver: { userId: "bea" } })).oneShot).toBeUndefined();
+    expect(engineGateToWire(gate({ oneShot: true })).oneShot).toBeUndefined();
   });
 });

@@ -1,3 +1,4 @@
+import { toolApprovalGateContext } from "@valet/engine";
 import type {
   CommandResultEntry,
   DeliveredBusEvent,
@@ -26,10 +27,13 @@ import type {
  * decision 4): the wire carries a validated `DecisionGateProvenance` so gate
  * surfaces can render WHY the gate opened. `context.approver` rides along the
  * same way, so a surface can say whose answer the gate waits on.
+ * `oneShot` comes from the tool approval context the engine stamps
+ * (`toolApprovalGateContext`); the bell's bulk answer reads it.
  */
 export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
   const provenance = gateProvenance(g.context);
   const approver = gateApprover(g);
+  const oneShot = g.type === "approval" && !approver && toolApprovalGateContext(g.context)?.oneShot === true;
   return {
     id: g.id,
     sessionId: g.sessionId,
@@ -44,6 +48,7 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
     updatedAt: g.updatedAt,
     ...(provenance ? { provenance } : {}),
     ...(approver ? { approver } : {}),
+    ...(oneShot ? { oneShot: true as const } : {}),
   };
 }
 

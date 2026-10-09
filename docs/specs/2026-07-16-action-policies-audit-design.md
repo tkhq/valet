@@ -227,3 +227,9 @@ a successful check. A prior approval cannot bypass an unread team deny.
 ### Workflow action execution time (2026-09-25)
 
 The workflow action invoker writes `started_at` when it records an action outcome. An approval gate can create an audit row days before execution. Usage queries use `started_at` to place the action in a time window and fall back to `created_at` for old rows. A denied or pending action has no execution duration and does not count as an executed tool action.
+
+### One-shot tool approval gates (2026-10-09)
+
+The engine stamps `oneShot: true` on the context of every tool approval gate that `approvalGateRequest` opens, on both the resolver path and the risk-derived path. Its "approve" allows that one call and writes no grant, because approvals are not sticky: a later call opens a new gate. A shared-account gate drops the flag, because allowing a borrow also covers later calls in the thread or run. `toolApprovalGateContext` exposes it as a boolean.
+
+`engineGateToWire` sets the wire `DecisionGate.oneShot: true` only for an approval gate with that flag and no approver. Other approval gates use the same `approve` and `deny` ids but do not carry the flag. Two examples are `ask_approval` and `sec_start`, whose approval covers every later cell dispatch. The bell's bulk answer covers only gates with `oneShot` (`docs/specs/2026-08-14-workflow-approval-ux-design.md`, "Bulk answers in the bell"). Pinned by `policy-resolver-seam.test.ts` and `bridge.test.ts`.

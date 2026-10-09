@@ -411,11 +411,11 @@ Eligible items (`planBulkAnswers` in `packages/web/src/components/layout/bulk-an
 
 | Item | Eligible when | Approve sends | Deny sends |
 | ---- | ------------- | ------------- | ---------- |
-| Thread decision gate | `type` is `approval`, `status` is `pending`, no `approver`, and `actions` include both `approve` and `deny` | `{ actionId: "approve" }` | `{ actionId: "deny" }` |
+| Thread decision gate | `type` is `approval`, `status` is `pending`, `oneShot` is true, no `approver`, and `actions` include both `approve` and `deny` | `{ actionId: "approve" }` | `{ actionId: "deny" }` |
 | Workflow approval node | No `approver` | `{ approved: true, iteration }` | `{ approved: false, iteration }` |
 | Workflow policy gate | No `approver` | `{ approved: true, scope: "once", iteration }` | `{ approved: false, iteration }` |
 
-`approve` and `deny` are the engine's built-in gate actions. A bulk approval never sends `approve_session`, `always_allow`, or a `run` or `workflow` scope, because each of those writes a lasting grant. A gate that names an approver lends a member's shared account, and its approval also covers later calls in the thread or run. The bell skips it: "Waits on another member" when the approver is someone else, and "Lends your shared account" when the approver is the caller. Questions and credential requests are never eligible, because they need a typed answer or a credential.
+`approve` and `deny` are the engine's built-in gate actions. Other approval gates use the same ids, so the bell does not infer one-shot behavior from them. The server sets `oneShot` only on a tool approval gate whose approval allows exactly that one call (`docs/specs/2026-07-16-action-policies-audit-design.md`). `ask_approval` and `sec_start` gates do not carry it. A bulk approval never sends `approve_session`, `always_allow`, or a `run` or `workflow` scope, because each of those writes a lasting grant. A gate that names an approver lends a member's shared account, and its approval also covers later calls in the thread or run. The bell skips it: "Waits on another member" when the approver is someone else, and "Lends your shared account" when the approver is the caller. Questions and credential requests are never eligible, because they need a typed answer or a credential.
 
 The bell opens a confirmation dialog before it sends anything. The dialog lists each covered item and each skipped item with its reason. On confirm, the web client sends each answer through the same endpoint as the per-item button, so the server applies the same authorization.
 

@@ -36,7 +36,7 @@ vi.mock("~/components/workflows/workflow-approval-item", () => ({ WorkflowApprov
 function decision(id: string, gate: Partial<DecisionGate> = {}): DecisionItem {
   return {
     sessionId: `session-${id}`, title: `Thread ${id}`,
-    gate: { id, sessionId: `session-${id}`, threadId: `thread-${id}`, type: "approval", title: `Approve ${id}?`, status: "pending",
+    gate: { id, sessionId: `session-${id}`, threadId: `thread-${id}`, type: "approval", title: `Approve ${id}?`, status: "pending", oneShot: true,
       createdAt: 1, updatedAt: 1, actions: [{ id: "approve", label: "Approve" }, { id: "deny", label: "Deny" }, { id: "always_allow", label: "Always allow (org)" }], ...gate },
   };
 }

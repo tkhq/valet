@@ -8,7 +8,7 @@ type DecisionItem = ListNotificationDecisionsResponse["items"][number];
 function decision(id: string, gate: Partial<DecisionGate> = {}): DecisionItem {
   return {
     sessionId: `session-${id}`, title: `Thread ${id}`,
-    gate: { id, sessionId: `session-${id}`, threadId: `thread-${id}`, type: "approval", title: `Approve ${id}?`, status: "pending",
+    gate: { id, sessionId: `session-${id}`, threadId: `thread-${id}`, type: "approval", title: `Approve ${id}?`, status: "pending", oneShot: true,
       createdAt: 1, updatedAt: 1, actions: [{ id: "approve", label: "Approve" }, { id: "deny", label: "Deny" }], ...gate },
   };
 }
@@ -51,9 +51,17 @@ describe("planBulkAnswers", () => {
       decision("no-deny", { actions: [{ id: "approve", label: "Approve" }, ...lasting] }),
     ], "me");
     expect(plan.targets.map(t => t.key)).toEqual(["decision:full"]);
-    expect(plan.skipped.map(s => [s.key, s.reason])).toEqual([["decision:no-once", "no_one_time_action"], ["decision:no-deny", "no_one_time_action"]]);
+    expect(plan.skipped.map(s => [s.key, s.reason])).toEqual([["decision:no-once", "not_one_shot"], ["decision:no-deny", "not_one_shot"]]);
     expect(decisionRequest("approve")).toEqual({ actionId: "approve" });
     expect(decisionRequest("deny")).toEqual({ actionId: "deny" });
+  });
+
+  it("skips an approval gate whose approval covers more than one call", () => {
+    // sec_start: a plain approval gate with approve and deny, but its approval covers every later dispatch.
+    const engagement = decision("sec", { title: "Start the security engagement on acme/api?", oneShot: undefined });
+    const plan = planBulkAnswers([], [engagement], "me");
+    expect(plan.targets).toEqual([]);
+    expect(plan.skipped.map(s => [s.key, s.reason])).toEqual([["decision:sec", "not_one_shot"]]);
   });
 
   it("skips a gate that is no longer pending", () => {

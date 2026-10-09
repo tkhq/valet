@@ -410,6 +410,10 @@ export interface ToolApprovalGateContext {
   service?: string;
   args?: Record<string, unknown>;
   summary?: string;
+  /** True when "approve" allows exactly this one call and writes no grant.
+   * A gate that lends a member's shared account is not one-shot: allowing it
+   * also covers later calls in the thread or run. */
+  oneShot: boolean;
 }
 
 /** Narrow a gate's context to {@link ToolApprovalGateContext}; `null` when
@@ -425,6 +429,7 @@ export function toolApprovalGateContext(
     service: typeof context.service === "string" ? context.service : undefined,
     args: args !== null && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined,
     summary: typeof context.summary === "string" ? context.summary : undefined,
+    oneShot: context.oneShot === true,
   };
 }
 
@@ -456,6 +461,9 @@ function approvalGateRequest(
       // The one-line human summary, separate from the machine-readable body
       // above. Channel deliverers render it instead of the tool_id/args dump.
       summary,
+      // Approvals are not sticky (`findStickyTerminalGate`): a later call
+      // opens a new gate. The policy path clears this for a borrow gate.
+      oneShot: true,
     },
   };
 }
@@ -666,7 +674,8 @@ export async function invokeAction(
         { id: "deny", label: "Deny", style: "danger" },
         ...extras,
       ],
-      context: { ...baseReq.context, provenance: decision.provenance, ...(decision.approver ? { approver: decision.approver } : {}) },
+      // A borrow approval also covers later calls, so it drops `oneShot`.
+      context: { ...baseReq.context, provenance: decision.provenance, ...(decision.approver ? { approver: decision.approver, oneShot: undefined } : {}) },
     });
     if (gateOutcome.kind === "expired") {
       // The gate opened and nobody answered before the deadline — a terminal
