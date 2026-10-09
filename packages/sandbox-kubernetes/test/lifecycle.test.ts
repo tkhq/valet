@@ -766,6 +766,39 @@ describe("applySandbox", () => {
   });
 });
 
+describe("podStatusApiAdapter pod age and events (fix wave 2, B5)", () => {
+  it("reports the pod's creation time, ephemeral request, and events", async () => {
+    let selector: string | undefined;
+    const adapter = podStatusApiAdapter({
+      readNamespacedPod: async (): Promise<V1Pod> => ({
+        metadata: { creationTimestamp: new Date("2026-09-07T12:00:00.000Z") },
+        spec: { containers: [{ name: "sandbox", image: "image:v1", resources: { requests: { "ephemeral-storage": "802Gi" } } }] },
+        status: { phase: "Pending" },
+      }),
+      listNamespacedEvent: async (params) => {
+        selector = params.fieldSelector;
+        return { items: [{
+          metadata: {}, involvedObject: {}, reason: "TriggeredScaleUp", message: "scale-up",
+          lastTimestamp: new Date("2026-09-07T12:01:00.000Z"),
+        }] };
+      },
+    });
+
+    const status = await adapter.getPodStatus("ns", "pod-1");
+    expect(status?.createdAt).toBe("2026-09-07T12:00:00.000Z");
+    expect(status?.ephemeralStorageRequest).toBe("802Gi");
+    expect(await adapter.listPodEvents?.("ns", "pod-1")).toEqual([
+      { reason: "TriggeredScaleUp", message: "scale-up", timestamp: Date.parse("2026-09-07T12:01:00.000Z") },
+    ]);
+    expect(selector).toBe("involvedObject.kind=Pod,involvedObject.name=pod-1");
+  });
+
+  it("has no event reader without listNamespacedEvent", () => {
+    const adapter = podStatusApiAdapter({ readNamespacedPod: async (): Promise<V1Pod> => ({}) });
+    expect(adapter.listPodEvents).toBeUndefined();
+  });
+});
+
 describe("resourceFingerprint back-compat (fix wave 2, B4)", () => {
   // Pinned from the pre-scratch logic at af3863503. A CR without scratch
   // must keep its hash byte for byte, or every pod rolls on upgrade.

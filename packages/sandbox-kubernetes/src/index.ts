@@ -92,6 +92,7 @@ export {
   type PatchSandboxParams,
   type PodContainerStatus,
   type PodStatusCondition,
+  type PodEventSummary,
   type PodStatusInfo,
   type ReplaceSandboxParams,
   type SandboxCustomObjectsApi,

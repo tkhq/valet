@@ -1125,6 +1125,19 @@ export interface PodStatusInfo {
   resourceFingerprint?: string;
   /** Requested-image generation, unchanged when admission rewrites the image. */
   imageFingerprint?: string;
+  /** The pod's own `metadata.creationTimestamp` (ISO 8601). The Pending
+   * grace runs from here: a resumed or adopted CR is older than its pod. */
+  createdAt?: string;
+  /** The sandbox container's ephemeral-storage request, scratch included. */
+  ephemeralStorageRequest?: string;
+}
+
+/** One Kubernetes event about a pod, reduced to what the Pending verdict reads. */
+export interface PodEventSummary {
+  reason?: string;
+  message?: string;
+  /** Last observed time, epoch milliseconds. */
+  timestamp?: number;
 }
 
 /** The subset of `@kubernetes/client-node`'s `CoreV1Api` needed to GET a
@@ -1136,6 +1149,9 @@ export interface SandboxPodStatusApi {
    * the "absent" case, since a Sandbox CR that hasn't reconciled a pod yet
    * is a normal (not-error) state. */
   getPodStatus(namespace: string, podName: string): Promise<PodStatusInfo | null>;
+  /** Events whose involved object is this pod. Optional: without it the
+   * Pending verdict ignores autoscaler scale-up events. */
+  listPodEvents?(namespace: string, podName: string): Promise<PodEventSummary[]>;
 }
 
 /** The subset of `@kubernetes/client-node`'s `CoreV1Api` needed to delete
@@ -1147,8 +1163,21 @@ export interface SandboxPodDeleteApi {
 }
 
 /** Wraps a real `k8s.CoreV1Api` instance. */
-export function podStatusApiAdapter(api: Pick<k8s.CoreV1Api, "readNamespacedPod">): SandboxPodStatusApi {
+export function podStatusApiAdapter(
+  api: Pick<k8s.CoreV1Api, "readNamespacedPod"> & Partial<Pick<k8s.CoreV1Api, "listNamespacedEvent">>,
+): SandboxPodStatusApi {
+  const listEvent = api.listNamespacedEvent?.bind(api);
   return {
+    ...(listEvent ? {
+      async listPodEvents(namespace: string, podName: string): Promise<PodEventSummary[]> {
+        const result = await listEvent({ namespace, fieldSelector: `involvedObject.kind=Pod,involvedObject.name=${podName}` });
+        return result.items.map((event) => ({
+          reason: event.reason,
+          message: event.message,
+          timestamp: (event.series?.lastObservedTime ?? event.lastTimestamp ?? event.eventTime ?? event.metadata?.creationTimestamp)?.getTime(),
+        }));
+      },
+    } : {}),
     async getPodStatus(namespace, podName) {
       let pod: k8s.V1Pod;
       try {
@@ -1178,7 +1207,11 @@ export function podStatusApiAdapter(api: Pick<k8s.CoreV1Api, "readNamespacedPod"
       const fingerprint = sandboxContainer?.env?.find((entry) => entry.name === RESOURCE_FINGERPRINT_ENV);
       const requestedImage = sandboxContainer?.env?.find((entry) => entry.name === IMAGE_FINGERPRINT_ENV);
       const homeLayout = sandboxContainer?.env?.find((entry) => entry.name === HOME_LAYOUT_ENV);
+      const ephemeralRequest: unknown = sandboxContainer?.resources?.requests?.["ephemeral-storage"];
+      const createdAt = pod.metadata?.creationTimestamp;
       return {
+        ...(createdAt instanceof Date && !Number.isNaN(createdAt.getTime()) ? { createdAt: createdAt.toISOString() } : {}),
+        ...(typeof ephemeralRequest === "string" ? { ephemeralStorageRequest: ephemeralRequest } : {}),
         phase: pod.status?.phase, containerStatuses, conditions,
         browserFingerprint: browserRuntimeFingerprint({ spec: pod.spec }),
         browserReady: pod.status?.containerStatuses?.find(container => container.name === "browser")?.ready,

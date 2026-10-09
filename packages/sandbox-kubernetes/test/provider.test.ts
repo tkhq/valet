@@ -1327,6 +1327,10 @@ class CapacityPendingObjectsApi implements SandboxCustomObjectsApi {
   }
 
   async patchNamespacedCustomObject(params: PatchSandboxParams): Promise<unknown> {
+    if (this.cr !== null && "spec" in params.body) {
+      this.cr.spec = { ...this.cr.spec, operatingMode: params.body.spec.operatingMode };
+      return this.cr;
+    }
     if (this.cr !== null && "metadata" in params.body && "annotations" in params.body.metadata) {
       this.cr.metadata.annotations = Object.fromEntries(Object.entries({
         ...this.cr.metadata.annotations,
@@ -1341,9 +1345,15 @@ function makeCapacityPendingProvider(opts: {
   createdAt?: string;
   schedulerMessage?: string | null;
   requests?: { cpu?: string | number; memory?: string | number };
+  scratch?: string;
+  ephemeralStorageRequest?: string;
 }) {
   const objectsApi = new CapacityPendingObjectsApi(opts.createdAt);
   let schedulerMessage = opts.schedulerMessage;
+  // The pod's own creation time. Undefined follows the CR (the pod was
+  // created with it); null means the pod reports no timestamp.
+  let podCreatedAt: string | null | undefined;
+  const podEvents: { reason?: string; message?: string; timestamp?: number }[] = [];
   const podIdentity = { name: "pod-capacity-1", uid: "pod-capacity-uid-1" };
   const podReads: { name: string; uid: string }[] = [];
   const podStatusApi: SandboxPodStatusApi = {
@@ -1360,10 +1370,16 @@ function makeCapacityPendingProvider(opts: {
           conditions: [{ type: "Ready", status: "True" }],
         };
       }
+      const createdAt = podCreatedAt === undefined ? objectsApi.cr?.metadata.creationTimestamp : podCreatedAt ?? undefined;
       return {
         phase: "Pending",
+        ...(createdAt !== undefined ? { createdAt } : {}),
         sandboxImage: providerCfg.defaultImage,
-        sandboxResources: opts.requests === undefined ? {} : { requests: opts.requests },
+        sandboxResources: {
+          ...(opts.requests === undefined ? {} : { requests: opts.requests }),
+          ...(opts.scratch === undefined ? {} : { scratch: opts.scratch }),
+        },
+        ...(opts.ephemeralStorageRequest === undefined ? {} : { ephemeralStorageRequest: opts.ephemeralStorageRequest }),
         resourceFingerprint: resourceFingerprint({}),
         conditions: schedulerMessage === null ? [] : [{
           type: "PodScheduled",
@@ -1372,6 +1388,9 @@ function makeCapacityPendingProvider(opts: {
           message: schedulerMessage ?? "0/3 nodes are available: 3 Insufficient cpu.",
         }],
       };
+    },
+    async listPodEvents() {
+      return podEvents;
     },
   };
   const podDeleteApi: SandboxPodDeleteApi = {
@@ -1404,7 +1423,10 @@ function makeCapacityPendingProvider(opts: {
   const setSchedulerMessage = (message: string | null): void => {
     schedulerMessage = message;
   };
-  return { provider, restart, objectsApi, podDeleteApi, podReads, setSchedulerMessage };
+  const setPodCreatedAt = (value: string | null): void => {
+    podCreatedAt = value;
+  };
+  return { provider, restart, objectsApi, podDeleteApi, podReads, podEvents, setSchedulerMessage, setPodCreatedAt };
 }
 
 async function captureAfter(promise: Promise<unknown>, elapsedMs: number): Promise<unknown> {
@@ -1643,6 +1665,138 @@ describe("create() capacity retention and diagnosis", () => {
       expect(error.message).toMatch(/deployment.*ephemeral-storage request/i);
       expect(error.message).not.toMatch(/lower (CPU|memory)/i);
       expect(error.message).not.toContain("task.resources");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names the scratch value, the ephemeral request, and the scratch knob on an ephemeral-storage shortage (M8)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:10:00.000Z"));
+    try {
+      const { provider } = makeCapacityPendingProvider({
+        createdAt: "2026-09-07T12:00:00.000Z",
+        schedulerMessage: "0/3 nodes are available: 3 Insufficient ephemeral-storage.",
+        requests: { cpu: "4", memory: "8Gi" },
+        scratch: "800Gi",
+        ephemeralStorageRequest: "802Gi",
+      });
+
+      const error = expectError(await captureAfter(provider.create({ workspace: "/ws/capacity" }), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toContain("3 Insufficient ephemeral-storage) (scratch 800Gi).");
+      expect(error.message).toContain("Pod requests: cpu=4, memory=8Gi, ephemeral-storage=802Gi.");
+      expect(error.message).toContain(
+        "Lower resources.scratch in .valet/prebuild.yaml or task.resources.scratch, or ask an admin to add a node pool with enough local disk.",
+      );
+      expect(error.message).not.toMatch(/deployment.*ephemeral-storage request/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("pending grace measured from the pod (B5)", () => {
+  /** A hibernated CR from two hours ago whose template survives a resume. */
+  function makeHibernated() {
+    const fixture = makeCapacityPendingProvider({
+      createdAt: "2026-09-07T10:00:00.000Z",
+      schedulerMessage: "0/3 nodes are available: 3 Insufficient ephemeral-storage.",
+      scratch: "800Gi",
+    });
+    const cr = fixture.objectsApi.cr;
+    if (cr === null) throw new Error("fixture CR missing");
+    cr.spec = { ...cr.spec, operatingMode: "Suspended", podTemplate: buildSandboxManifest(providerCfg, "ws-capacity", {}).spec.podTemplate };
+    return fixture;
+  }
+
+  it("a resume of an old CR with a young pending pod stays retryable", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:00:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt } = makeHibernated();
+      setPodCreatedAt("2026-09-07T12:00:00.000Z");
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).not.toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toContain("did not become ready within 60000ms");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a resume fails terminally once the pod itself is past the grace", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:11:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt } = makeHibernated();
+      setPodCreatedAt("2026-09-07T12:00:00.000Z");
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
+      expect(error.message).toContain("(scratch 800Gi)");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a pod with no creation time measures the grace from the call", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:00:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt } = makeHibernated();
+      setPodCreatedAt(null);
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).not.toBeInstanceOf(SandboxStartupError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a recent TriggeredScaleUp event keeps an old pending pod retryable", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:11:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt, podEvents } = makeHibernated();
+      setPodCreatedAt("2026-09-07T12:00:00.000Z");
+      podEvents.push({ reason: "TriggeredScaleUp", message: "pod triggered scale-up", timestamp: Date.parse("2026-09-07T12:08:00.000Z") });
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).not.toBeInstanceOf(SandboxStartupError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a later NotTriggerScaleUp event ends the scale-up deferral", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:11:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt, podEvents } = makeHibernated();
+      setPodCreatedAt("2026-09-07T12:00:00.000Z");
+      podEvents.push(
+        { reason: "TriggeredScaleUp", timestamp: Date.parse("2026-09-07T12:05:00.000Z") },
+        { reason: "NotTriggerScaleUp", timestamp: Date.parse("2026-09-07T12:09:00.000Z") },
+      );
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a scale-up stops deferring the verdict after the cap", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-07T12:31:00.000Z"));
+    try {
+      const { provider, setPodCreatedAt, podEvents } = makeHibernated();
+      setPodCreatedAt("2026-09-07T12:00:00.000Z");
+      podEvents.push({ reason: "TriggeredScaleUp", timestamp: Date.parse("2026-09-07T12:30:00.000Z") });
+
+      const error = expectError(await captureAfter(provider.resume("ws-capacity"), 60_000));
+      expect(error).toBeInstanceOf(SandboxStartupError);
     } finally {
       vi.useRealTimers();
     }

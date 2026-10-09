@@ -124,6 +124,7 @@ import {
   type SandboxCustomObjectsApi,
   type SandboxPodDeleteApi,
   type SandboxPodsApi,
+  type PodEventSummary,
   type SandboxPodStatusApi,
 } from "./lifecycle.js";
 import {
@@ -176,7 +177,7 @@ function reportAdoptedWorkspacePvcError(args: {
   recordSandboxWorkspaceGrow("error");
 }
 
-/** How old the Sandbox CR must be before an unscheduled Pending pod is a
+/** How old the backing POD must be before an unscheduled Pending pod is a
  * TERMINAL capacity verdict rather than a retryable timeout. A cluster
  * autoscaler provisions a node in 2–5 minutes, and the retryable timeout
  * RETAINS the CR — whose Pending pod is the autoscaler's scale-up signal.
@@ -184,8 +185,15 @@ function reportAdoptedWorkspacePvcError(args: {
  * would remove the signal and hard-fail sessions a later retry would have
  * served. Past this age, unscheduled means capacity is genuinely absent —
  * fail with the cause instead of re-queueing forever (the 2026-08-22
- * incident's sessions waited 47h behind retryable timeouts). */
+ * incident's sessions waited 47h behind retryable timeouts). The age is the
+ * pod's, not the CR's: a resumed or adopted CR is always older than the
+ * grace while its new pod waits for a node pool to scale up from zero. */
 const PENDING_TERMINAL_GRACE_MS = 10 * 60_000;
+
+/** A `TriggeredScaleUp` event newer than the grace keeps a Pending pod
+ * retryable, but only until the pod is this old. A scale-up that loops
+ * without placing the pod still reaches the terminal verdict. */
+const SCALE_UP_DEFERRAL_CAP_MS = 30 * 60_000;
 
 interface PendingPodDiagnosis {
   detail: string;
@@ -193,6 +201,22 @@ interface PendingPodDiagnosis {
     cpu?: string | number;
     memory?: string | number;
   };
+  ephemeralStorage?: string;
+  scratch?: string;
+}
+
+/** True when the autoscaler's latest verdict on this pod is a scale-up
+ * inside the grace window. A later `NotTriggerScaleUp` or `FailedScaleUp`
+ * ends it. */
+export function scaleUpInFlight(events: readonly PodEventSummary[], nowMs: number): boolean {
+  let latest: PodEventSummary | undefined;
+  for (const event of events) {
+    if (event.timestamp === undefined) continue;
+    if (!["TriggeredScaleUp", "NotTriggerScaleUp", "FailedScaleUp"].includes(event.reason ?? "")) continue;
+    if (latest?.timestamp === undefined || event.timestamp > latest.timestamp) latest = event;
+  }
+  return latest?.reason === "TriggeredScaleUp" && latest.timestamp !== undefined &&
+    nowMs - latest.timestamp < PENDING_TERMINAL_GRACE_MS;
 }
 
 /** This error marks all post-grace Pending failures eligible for owned cleanup. */
@@ -1462,13 +1486,14 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * throwing a plain `Error` — that IS a transient, retry-shaped condition.
    */
   private async waitReady(name: string, expected?: { image?: string; resourceFingerprint?: string; homeLayoutVersion?: string; browserFingerprint?: string }): Promise<void> {
-    const deadline = Date.now() + READY_TIMEOUT_MS;
+    const startedAtMs = Date.now();
+    const deadline = startedAtMs + READY_TIMEOUT_MS;
     const expectedImageFingerprint = expected?.image !== undefined ? imageFingerprint(expected.image) : undefined;
     const rolledGenerations = new Set<string>();
     let lastReadError: string | undefined;
     let lastState: SandboxStatus["state"] = "provisioning";
     for (;;) {
-      const pendingError = await this.pendingTerminalError(name);
+      const pendingError = await this.pendingTerminalError(name, startedAtMs);
       if (pendingError !== null) throw pendingError;
       try {
         const status = await sandboxStatus(this.deps.objectsApi, this.cfg, name, this.deps.podsApi, this.deps.podStatusApi);
@@ -1531,27 +1556,45 @@ export class KubernetesSandboxProvider implements SandboxProvider {
 
   /** Return the backing pod's post-grace Pending diagnosis. Return null if
    * the pod is absent, past Pending, unresolvable, or inside the grace period.
-   * Transient API errors and autoscaler scale-up windows stay retryable. */
-  private async podPendingDiagnosis(name: string): Promise<PendingPodDiagnosis | null> {
+   * The grace runs from the pod's creation time, or from `startedAtMs` (the
+   * readiness wait's start) when the pod reports none. Transient API errors
+   * and autoscaler scale-up windows stay retryable. */
+  private async podPendingDiagnosis(name: string, startedAtMs: number): Promise<PendingPodDiagnosis | null> {
     if (!this.deps.podStatusApi) return null;
+    // A pod is never older than its CR, so a young CR (or one with no
+    // readable age) skips the pod reads.
     const cr = await getSandbox(this.deps.objectsApi, this.cfg, name).catch(() => null);
-    const bornAtMs = cr?.metadata.creationTimestamp ? Date.parse(cr.metadata.creationTimestamp) : Number.NaN;
-    if (Number.isNaN(bornAtMs) || Date.now() - bornAtMs < PENDING_TERMINAL_GRACE_MS) return null;
+    const crBornAtMs = cr?.metadata.creationTimestamp ? Date.parse(cr.metadata.creationTimestamp) : Number.NaN;
+    if (Number.isNaN(crBornAtMs) || Date.now() - crBornAtMs < PENDING_TERMINAL_GRACE_MS) return null;
     const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name).catch(() => null);
     if (!podName) return null;
     const pod = await this.deps.podStatusApi.getPodStatus(this.cfg.namespace, podName).catch(() => null);
     const detail = classifyPodPending(pod);
     if (detail === null) return null;
-    return { detail, requests: pod?.sandboxResources?.requests ?? {} };
+    const podBornAtMs = pod?.createdAt ? Date.parse(pod.createdAt) : Number.NaN;
+    const bornAtMs = Number.isNaN(podBornAtMs) ? startedAtMs : podBornAtMs;
+    const ageMs = Date.now() - bornAtMs;
+    if (ageMs < PENDING_TERMINAL_GRACE_MS) return null;
+    if (ageMs < SCALE_UP_DEFERRAL_CAP_MS && this.deps.podStatusApi.listPodEvents) {
+      const events = await this.deps.podStatusApi.listPodEvents(this.cfg.namespace, podName).catch(() => []);
+      if (scaleUpInFlight(events, Date.now())) return null;
+    }
+    return {
+      detail,
+      requests: pod?.sandboxResources?.requests ?? {},
+      ...(pod?.ephemeralStorageRequest !== undefined ? { ephemeralStorage: pod.ephemeralStorageRequest } : {}),
+      ...(pod?.sandboxResources?.scratch !== undefined ? { scratch: pod.sandboxResources.scratch } : {}),
+    };
   }
 
   /** Return a terminal error when an unscheduled pod is past the grace period. */
-  private async pendingTerminalError(name: string): Promise<SandboxStartupError | null> {
-    const pending = await this.podPendingDiagnosis(name);
+  private async pendingTerminalError(name: string, startedAtMs: number): Promise<SandboxStartupError | null> {
+    const pending = await this.podPendingDiagnosis(name, startedAtMs);
     if (pending === null) return null;
     const requests = [
       ...(pending.requests.cpu === undefined ? [] : [`cpu=${pending.requests.cpu}`]),
       ...(pending.requests.memory === undefined ? [] : [`memory=${pending.requests.memory}`]),
+      ...(pending.ephemeralStorage === undefined ? [] : [`ephemeral-storage=${pending.ephemeralStorage}`]),
     ];
     const requestDetail = requests.length === 0 ? "" : ` Pod requests: ${requests.join(", ")}.`;
     const shortages = classifyPodCapacityShortages(pending.detail);
@@ -1563,7 +1606,13 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         "If a lower value fails, check the largest node's available CPU and memory.",
       );
     }
-    if (shortages.includes("ephemeral-storage")) {
+    const scratchShortage = shortages.includes("ephemeral-storage") && pending.scratch !== undefined;
+    if (scratchShortage) {
+      actions.push(
+        "Lower resources.scratch in .valet/prebuild.yaml or task.resources.scratch, " +
+        "or ask an admin to add a node pool with enough local disk.",
+      );
+    } else if (shortages.includes("ephemeral-storage")) {
       actions.push(
         "Check node ephemeral-storage capacity. Check the deployment ephemeral-storage request. " +
         "If you correct the capacity mismatch, retry.",
@@ -1571,8 +1620,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
     const action = actions.length === 0 ? "Free or add node capacity. Then retry." : actions.join(" ");
     const schedulerDetail = pending.detail.replace(/[.!?]+$/, "");
+    const scratchDetail = scratchShortage ? ` (scratch ${pending.scratch})` : "";
     const message = `pod has been Pending for over ${Math.round(PENDING_TERMINAL_GRACE_MS / 60_000)} minutes ` +
-      `(${schedulerDetail}).${requestDetail} The cluster has no schedulable capacity for this sandbox. ${action}`;
+      `(${schedulerDetail})${scratchDetail}.${requestDetail} The cluster has no schedulable capacity for this sandbox. ${action}`;
     return new PendingTerminalStartupError(name, message);
   }
 }
