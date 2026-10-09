@@ -99,6 +99,14 @@ export interface ChildrenDeps {
   /** Poll interval for `ChildWatcher`'s active-lease wait. Tests only. */
   leasePollMs?: number;
   /**
+   * Grace window `ChildWatcher` re-polls for the owed wakeup-signal turn
+   * after a lease's count reaches 0. Covers the race where the
+   * WakeWatcher releases the lease before it admits the terminal signal:
+   * a single read right at the count-reaches-0 moment can land in that
+   * gap and see no unsettled submission yet. Default 90s.
+   */
+  leaseSettleGraceMs?: number;
+  /**
    * Deploy and agent caps for a `task`-requested `/scratch` volume
    * (`resolveScratchCaps(process.env)` at real boot). `buildChildSpawner`
    * validates `req.resources.scratch` against these before the child's
@@ -706,6 +714,13 @@ export class ChildWatcher {
     // submission (a user prompt admitted after settlement) is not a signal
     // turn and must not delay this watcher. `parkChildSandbox` already
     // owns skipping teardown for that case.
+    //
+    // The WakeWatcher releases the lease and admits the terminal signal as
+    // two separate steps, lease release first. A read taken right when the
+    // count hits 0 can land in that gap and see no unsettled submission
+    // yet. So once the count reaches 0, re-poll instead of reading once:
+    // keep checking every `leasePollMs` until a submission appears or the
+    // `leaseSettleGraceMs` grace window runs out.
     let waitedOnLease = false;
     for (;;) {
       while ((await this.deps.engineStore.countActiveLeases(watch.childSessionId)) > 0) {
@@ -713,7 +728,13 @@ export class ChildWatcher {
         await new Promise((resolve) => setTimeout(resolve, this.deps.leasePollMs ?? 30_000).unref());
       }
       if (!waitedOnLease) break;
-      const owedTurn = await this.deps.engineStore.listUnsettledSubmissions(watch.childSessionId);
+      const pollMs = this.deps.leasePollMs ?? 30_000;
+      const graceDeadline = Date.now() + (this.deps.leaseSettleGraceMs ?? 90_000);
+      let owedTurn = await this.deps.engineStore.listUnsettledSubmissions(watch.childSessionId);
+      while (owedTurn.length === 0 && Date.now() < graceDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, pollMs).unref());
+        owedTurn = await this.deps.engineStore.listUnsettledSubmissions(watch.childSessionId);
+      }
       if (owedTurn.length === 0) break;
       await childSession.thread().awaitResult(owedTurn[owedTurn.length - 1]!.id);
     }

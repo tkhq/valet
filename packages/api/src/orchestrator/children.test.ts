@@ -1119,7 +1119,10 @@ describe("ChildWatcher", () => {
 
   it("holds off child.settled while an active lease exists; delivers it once the lease is released", async () => {
     api = await bootTestApi();
-    const deps = childrenDeps(api, { leasePollMs: 1 });
+    // No owed turn ever shows up here (the tracked submission already
+    // settled, and nothing new is admitted), so a short grace window keeps
+    // this test fast once the lease clears.
+    const deps = childrenDeps(api, { leasePollMs: 1, leaseSettleGraceMs: 50 });
     const watcher = new ChildWatcher(deps);
     const { engineHost, engineStore, db } = api.providers;
 
@@ -1199,6 +1202,123 @@ describe("ChildWatcher", () => {
     });
 
     const unsettled = await engineStore.listUnsettledSubmissions("parent-leased");
+    const settledSignals = unsettled.filter(
+      (i) =>
+        typeof i.content === "object" &&
+        i.content !== null &&
+        "kind" in i.content &&
+        i.content.kind === "signal" &&
+        (i.content as SignalContent).signalType === "child.settled",
+    );
+    expect(settledSignals).toHaveLength(1);
+  });
+
+  it("waits out the grace window for a signal turn admitted after the lease clears", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api, { leasePollMs: 1, leaseSettleGraceMs: 200 });
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const parent = await engineHost.sessionFor("parent-leased-gap", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+
+    const child = await engineHost.childSessionFor("child-leased-gap", {
+      parentSessionId: "parent-leased-gap",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    // Keep the queue from running the signal item into a real (failing)
+    // turn. It must stay queued until this test settles it explicitly.
+    await child.pause();
+
+    const itemId = "qi-leased-gap-1";
+    await engineStore.admitSubmission("child-leased-gap", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-leased-gap", childThread.id, itemId, { outcome: "completed" });
+
+    await engineStore.createLease({
+      id: "lease-leased-gap-1",
+      sessionId: "child-leased-gap",
+      ownerKind: "process",
+      reason: "long build",
+      createdAt: Date.now(),
+      deadlineAt: Date.now() + 3_600_000,
+    });
+
+    await db.insert(agentSessions).values({
+      id: "child-leased-gap",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      status: "active",
+      ownerType: "user",
+      ownerId: "local-user",
+      profile: "headless",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const watch = {
+      childSessionId: "child-leased-gap",
+      queueItemId: itemId,
+      parentSessionId: "parent-leased-gap",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
+
+    watcher.arm(watch);
+
+    // Give the lease-wait loop time to observe the active lease before it
+    // is released, so the watcher actually waits on it instead of racing
+    // past an already-cleared count.
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Real WakeWatcher ordering: release the lease first, and only admit
+    // the terminal signal as a later, separate step.
+    await engineStore.releaseLease("lease-leased-gap-1", "owner_ended", Date.now());
+
+    // Longer than leasePollMs (1ms), shorter than leaseSettleGraceMs
+    // (200ms). The admission lands inside the grace window, not at the
+    // instant the lease count reached 0.
+    await new Promise((r) => setTimeout(r, 50));
+    const signalItemId = "qi-leased-gap-signal";
+    await engineStore.admitSubmission(
+      "child-leased-gap",
+      childThread.id,
+      queuedItem(signalItemId, childThread.id, "wakeup signal"),
+    );
+
+    // The signal turn is still unsettled: child.settled must not fire yet.
+    await new Promise((r) => setTimeout(r, 100));
+    const stillUnsettled = await db
+      .select()
+      .from(childWatches)
+      .where(eq(childWatches.childSessionId, "child-leased-gap"))
+      .limit(1);
+    expect(stillUnsettled[0]?.settled).toBe(false);
+
+    await engineStore.settleUnclaimed("child-leased-gap", childThread.id, signalItemId, { outcome: "completed" });
+
+    await waitFor(async () => {
+      const rows = await db
+        .select()
+        .from(childWatches)
+        .where(eq(childWatches.childSessionId, "child-leased-gap"))
+        .limit(1);
+      return rows[0]?.settled === true;
+    });
+
+    const unsettled = await engineStore.listUnsettledSubmissions("parent-leased-gap");
     const settledSignals = unsettled.filter(
       (i) =>
         typeof i.content === "object" &&
