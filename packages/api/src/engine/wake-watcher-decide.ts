@@ -76,7 +76,7 @@ function terminalSignal(now: number, row: Wakeup, cause: WakeupCause, exitCode: 
 }
 
 /** Splits new watch output into complete lines, holding back a trailing partial line. */
-function splitWatchLines(output: string): { lines: string[]; consumedBytes: number } {
+function splitWatchLines(output: string): { lines: string[]; consumedText: string; consumedBytes: number } {
   const parts = output.split("\n");
   // The last element is the trailing partial line (no terminating "\n"), or
   // "" when output ends with "\n". Either way it stays unconsumed.
@@ -85,8 +85,8 @@ function splitWatchLines(output: string): { lines: string[]; consumedBytes: numb
   if (lines.length > 200) {
     lines = lines.slice(0, 200);
   }
-  const consumedBytes = lines.length === 0 ? 0 : Buffer.byteLength(lines.join("\n") + "\n");
-  return { lines, consumedBytes };
+  const consumedText = lines.length === 0 ? "" : lines.join("\n") + "\n";
+  return { lines, consumedText, consumedBytes: Buffer.byteLength(consumedText) };
 }
 
 function watchEventSignal(row: Wakeup, lines: string[], newEventCount: number): SignalDraft {
@@ -105,9 +105,12 @@ function watchEventSignal(row: Wakeup, lines: string[], newEventCount: number): 
 }
 
 function timerFiredSignal(now: number, row: Wakeup): SignalDraft {
+  if (row.prompt === undefined) {
+    throw new Error(`timer wakeup ${row.id} has no prompt`);
+  }
   return {
     signalType: "timer.fired",
-    body: row.prompt ?? "",
+    body: row.prompt,
     attributes: {
       wakeupId: row.id,
       kind: row.kind,
@@ -168,6 +171,7 @@ export function decideWakeup(
       cause: "pid_missing",
       patch: { cause: "pid_missing", endedAt: now },
       signals: [terminalSignal(now, row, "pid_missing", undefined, tail(row.logTail + probe.output))],
+      releaseLease: "owner_ended",
     };
   }
 
@@ -193,16 +197,23 @@ export function decideWakeup(
   }
 
   // row.kind === "watch"
-  const { lines, consumedBytes } = splitWatchLines(probe.output);
+  const { lines, consumedText, consumedBytes } = splitWatchLines(probe.output);
   if (lines.length === 0) return null;
   const newEventCount = row.eventCount + lines.length;
+  const newLogTail = tail(row.logTail + consumedText);
   const hours = Math.max(1, (now - row.createdAt) / 3_600_000);
   if (newEventCount > limits.watchMaxEventsPerHour * hours) {
     return {
       to: "expired",
       cause: "rate",
       kill: true,
-      patch: { cause: "rate", endedAt: now, logOffset: row.logOffset + consumedBytes, eventCount: newEventCount },
+      patch: {
+        cause: "rate",
+        endedAt: now,
+        logOffset: row.logOffset + consumedBytes,
+        logTail: newLogTail,
+        eventCount: newEventCount,
+      },
       signals: [
         terminalSignal(
           now,
@@ -217,7 +228,7 @@ export function decideWakeup(
   }
   return {
     to: "running",
-    patch: { logOffset: row.logOffset + consumedBytes, eventCount: newEventCount },
+    patch: { logOffset: row.logOffset + consumedBytes, logTail: newLogTail, eventCount: newEventCount },
     signals: [watchEventSignal(row, lines, newEventCount)],
   };
 }
