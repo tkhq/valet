@@ -28,6 +28,8 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   buildChildReader,
   buildChildSender,
+  childSendPromptOptions,
+  isParentDelegation,
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
@@ -208,6 +210,10 @@ describe("buildChildSpawner", () => {
     );
     expect(result.childSessionId).toMatch(/^child_/);
     expect(result.queueItemId).toBeTruthy();
+    // The spawned work carries parent delegation provenance, so a later
+    // promotion of it is not mistaken for a person taking over.
+    const spawnedItem = await api.providers.engineStore.getQueueItem(result.childSessionId, result.queueItemId);
+    expect(isParentDelegation(spawnedItem)).toBe(true);
 
     const child = api.providers.engineHost.liveSession(result.childSessionId);
     expect(child).not.toBeNull();
@@ -2560,10 +2566,10 @@ describe("buildChildSender", () => {
     // shape (also the shape of a user steering the child directly).
     const child = engineHost.liveSession("child-heal");
     expect(child).not.toBeNull();
-    const receipt = await child!.prompt("changed my mind — do it differently", {
-      ...(humanTakeover ? { author: { id: "local-user" } } : {}),
-      queueMode: "steer",
-    });
+    // A person's steer, or the parent's own child_send with the real sender's options.
+    const receipt = await child!.prompt("changed my mind — do it differently", humanTakeover
+      ? { author: { id: "local-user" }, queueMode: "steer" }
+      : childSendPromptOptions({ parentSessionId: "parent-heal", actorUserId: "local-user" }, false));
 
     // The stale watcher wakes on the superseded original and must move the
     // watch to the successor instead of going silent (or reporting it).

@@ -27,7 +27,7 @@ import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@vale
 import { isAgentCaller, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
-import { agentSessions, assistants, assistantExecutions, childWatches, legacyAssistantRuntimes, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
 import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
@@ -947,30 +947,8 @@ export async function submitSessionPrompt(
       })
     : Promise.resolve();
 
-  // Human input that supersedes the delegated item takes that work away
-  // from the channel turn that delegated it. A followup, or input on another
-  // thread, leaves the item to finish for that turn. Check only after the
-  // engine accepts the input: a rejected prompt changes nothing. The engine
-  // store and the app database cannot share a transaction, so the watcher
-  // also clears the route when it follows a human-authored successor
-  // (`ChildWatcher.attempt`).
-  const releaseChildReplyRoute = async (submittedItemId: string) => {
-    if (!author || !submittedItemId) return;
-    const [watch] = await db.select({ queueItemId: childWatches.queueItemId }).from(childWatches).where(and(
-      eq(childWatches.childSessionId, row.id), eq(childWatches.orgId, row.orgId), eq(childWatches.settled, false),
-    )).limit(1);
-    if (!watch) return;
-    const watched = await engineSession.providers.store.getQueueItem(row.id, watch.queueItemId);
-    if (watched?.supersededByItemId !== submittedItemId) return;
-    await db.update(childWatches).set({ originJson: null }).where(and(
-      eq(childWatches.childSessionId, row.id), eq(childWatches.orgId, row.orgId),
-      eq(childWatches.queueItemId, watch.queueItemId),
-    ));
-  };
-
   if (admission.promoteItemId) {
     const receipt = await thread.promoteQueuedItem(admission.promoteItemId);
-    await releaseChildReplyRoute(receipt.queueItemId);
     const activityAt = Date.now();
     await recordSessionActivity(db, row.id, activityAt);
     await recordThreadActivityBestEffort(() => recordActivity(activityAt));
@@ -1096,7 +1074,6 @@ export async function submitSessionPrompt(
     attachmentRefStore.restore(resolvedFileAttachments);
     throw err;
   }
-  await releaseChildReplyRoute(receipt.queueItemId);
 
   // Session recency is completion time. `activityAt` marks request start and
   // can be older than a later submission that already finished.

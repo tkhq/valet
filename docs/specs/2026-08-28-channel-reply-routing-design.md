@@ -342,11 +342,16 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   thread changes the stored policy to `manual`, so that thread's context
   never posts to the original channel thread automatically. The parent can
   still reply there explicitly.
-  The web admission path clears the stored channel origin only when the
-  engine accepts human input that supersedes the watched child submission.
-  A followup, a promotion that runs ahead of queued delegated work, input on
-  another child thread, and a rejected prompt leave the origin intact.
-  The watcher also clears it when it follows human steering. Parent-directed steering
+  The spawner and `child_send` stamp each child submission with parent
+  delegation provenance (`metadata.parentDelegation`). Promotion copies
+  metadata, so delegated work that a person sends now keeps it. The watcher
+  is the only owner of the route clear. When the watched submission is
+  superseded, the watcher follows its successor and clears the stored
+  origin only when the successor has no parent delegation provenance: a
+  person took over the child. It does not read `author`, because a
+  `child_send` names the steering member as its author. A followup, input on
+  another child thread, and a rejected prompt never supersede the watched
+  submission, so they leave the origin intact. Parent-directed steering
   retains the origin, including recovery after an interrupted `child_send`.
 - **Automatic child completion replies have durable delivery intents.** The
   watcher stores an intent before it submits `child.settled`. It stores the

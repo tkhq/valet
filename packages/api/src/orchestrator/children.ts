@@ -261,6 +261,40 @@ function parseOriginJson(raw: string | null): ChannelOrigin | undefined {
 }
 
 /**
+ * Submission metadata that marks child work the parent delegated, by spawn
+ * or `child_send`. The engine stores it at admission and copies it when a
+ * queued item is promoted, so moved delegated work keeps it. Reply route
+ * decisions read this, not `author`: a `child_send` submission also names
+ * the steering member as its author.
+ */
+export const PARENT_DELEGATION_METADATA_KEY = "parentDelegation";
+
+export function parentDelegationMetadata(parentSessionId: string): Record<string, unknown> {
+  return { [PARENT_DELEGATION_METADATA_KEY]: { parentSessionId } };
+}
+
+/** True when the submission is work the parent delegated, not input from a person. */
+export function isParentDelegation(item: { metadata?: Record<string, unknown> } | null | undefined): boolean {
+  const provenance = item?.metadata?.[PARENT_DELEGATION_METADATA_KEY];
+  return provenance !== null && typeof provenance === "object";
+}
+
+/** The prompt options of a parent `child_send`. Tests use them to model the real sender. */
+export function childSendPromptOptions(
+  ctx: { parentSessionId: string; actorUserId: string },
+  queue: boolean,
+): { author: { id: string; name: string }; queueMode: "followup" | "steer"; metadata: Record<string, unknown> } {
+  return {
+    // The agent writes the text, but the steering member supplies its
+    // authority. Persist that actor on the submission instead of inheriting
+    // the spawner.
+    author: { id: ctx.actorUserId, name: "Valet" },
+    queueMode: queue ? "followup" : "steer",
+    metadata: parentDelegationMetadata(ctx.parentSessionId),
+  };
+}
+
+/**
  * Builds the `ChildSpawner` handed to orchestrator sessions via
  * `toolConfig.childSpawner`. `watcher.arm` is called (never awaited) once
  * the `child_watches` row is durably inserted — decision 11's "insert
@@ -419,6 +453,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       // Per-turn role overlay (the security dispatch names the persona
       // role; the claimed child's build registered it in options.roles).
       ...(req.role !== undefined ? { role: req.role } : {}),
+      metadata: parentDelegationMetadata(ctx.parentSessionId),
     }).catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
     await deps.db
@@ -724,10 +759,14 @@ export class ChildWatcher {
       }
       const successorItem = await this.deps.engineStore.getQueueItem(watch.childSessionId, successor);
       if (!successorItem) throw new Error(`Missing child successor submission ${successor}`);
-      // Human takeover starts a different task. Remove its external reply route durably.
+      // A successor the parent did not delegate is a person taking over the
+      // child: a different task, so remove its external reply route durably.
+      // This watcher is the only owner of that decision. It reads the
+      // submission's provenance, because parent work also names an author.
+      const takeover = !isParentDelegation(successorItem);
       await this.deps.db
         .update(childWatches)
-        .set({ queueItemId: successor, settled: false, ...(successorItem.author !== undefined ? { originJson: null } : {}) })
+        .set({ queueItemId: successor, settled: false, ...(takeover ? { originJson: null } : {}) })
         .where(
           and(
             eq(childWatches.childSessionId, watch.childSessionId),
@@ -1331,12 +1370,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // active even when the revived turn never touches the sandbox.
     await deps.engineHost.markSessionUsed(req.childSessionId);
 
-    // The agent writes the text, but the steering member supplies its authority.
-    // Persist that actor on the submission instead of inheriting the spawner.
-    const receipt = await childSession.prompt(req.message, {
-      author: { id: ctx.actorUserId, name: "Valet" },
-      queueMode: req.queue === true ? "followup" : "steer",
-    });
+    const receipt = await childSession.prompt(req.message, childSendPromptOptions(ctx, req.queue === true));
 
     // Only the parent thread that delegated the work keeps automatic posts
     // to its channel thread. Work continued from another parent thread can
