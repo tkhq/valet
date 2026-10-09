@@ -305,8 +305,11 @@ function settlementOrigin(originJson: string | null, replyRoute: string | null):
 
 /**
  * The reply route after the watch moves to new child work. Work a person
- * started (no parent delegation provenance) has no route. Parent work from
- * another parent thread downgrades an automatic route to manual.
+ * started (no parent delegation provenance) has no route. Parent work after
+ * a takeover gets a manual route back: the person's input is in the child's
+ * transcript, so the parent may answer the channel thread but never posts
+ * there automatically. Parent work from another parent thread downgrades an
+ * automatic route to manual.
  */
 export function nextReplyRoute(
   current: string | null,
@@ -314,6 +317,7 @@ export function nextReplyRoute(
   delegatingThreadId: string,
 ): string | null {
   if (!work.delegated) return "none";
+  if (current === "none") return "manual";
   if (current === "origin" && work.parentThreadId !== delegatingThreadId) return "manual";
   return current;
 }
@@ -1443,7 +1447,8 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // Only the parent thread that delegated the work keeps automatic posts
     // to its channel thread. Work continued from another parent thread can
     // carry that thread's context, so from then on the parent replies to the
-    // channel thread only when it chooses to (`reply: "manual"`).
+    // channel thread only when it chooses to (`reply: "manual"`). Parent work
+    // after a takeover gets a manual route back.
     const replyRoute = nextReplyRoute(watchRow.replyRoute, { delegated: true, parentThreadId: ctx.parentThreadId },
       watchRow.parentThreadId);
 

@@ -350,6 +350,50 @@ describe("delegated child completion over a channel", () => {
     expect(await db.select().from(childReplyDeliveries)).toHaveLength(0);
   });
 
+  it("lets the delegating thread reply to the channel thread again after a takeover", async () => {
+    const run = await bootDelegation("child-retake");
+    const { db, engineStore } = api!.providers;
+    const [childRow] = await db.select().from(agentSessions).where(eq(agentSessions.id, "child-retake"));
+    if (!childRow) throw new Error("child session row missing");
+    const watchRow = async () => {
+      const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-retake"));
+      return watch;
+    };
+
+    // A person takes over, and their work settles with no channel route.
+    const takeover = await submitSessionPrompt(api!.providers, childRow, "Do it my way", {
+      threadId: run.childThreadId, queueMode: "steer", author: { id: USER_ID },
+    });
+    const takeoverId = takeover?.messageId;
+    if (!takeoverId) throw new Error("human steer was not admitted");
+    await vi.waitFor(async () => expect((await watchRow())?.queueItemId).toBe(takeoverId), { timeout: 30_000, interval: 20 });
+    await engineStore.settleUnclaimed("child-retake", run.childThreadId, takeoverId, { outcome: "completed" });
+    await vi.waitFor(async () => expect((await watchRow())?.settled).toBe(true), { timeout: 30_000, interval: 20 });
+
+    // The delegating thread sends new work. The person's context is in the
+    // child's transcript, so the route comes back as manual, not automatic.
+    const sender = buildChildSender(run.deps, run.watcher);
+    const resumed = await sender(
+      { childSessionId: "child-retake", message: "now finish the original task" },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID },
+    );
+    if (!resumed) throw new Error("child_send did not admit the follow-up");
+    await engineStore.settleUnclaimed("child-retake", run.childThreadId, resumed.queueItemId, { outcome: "completed" });
+    const signals = await vi.waitFor(async () => {
+      const found = await childSettledSignals(run.parentId);
+      if (found.length < 2) throw new Error("the resumed settlement is not admitted yet");
+      return found;
+    }, { timeout: 30_000, interval: 20 });
+    await run.parentThread.awaitResult(signals[1]!.id);
+    await api!.providers.channelHost.retryChildReplies();
+
+    // The parent can answer the channel thread with reply_to_origin, which
+    // reads the signal origin. Nothing posts automatically.
+    expect(signals.map((signal) => signal.content.origin)).toEqual([undefined, { ...ORIGIN, reply: "manual" }]);
+    expect(run.transport.sent).toHaveLength(0);
+    expect((await watchRow())?.replyRoute).toBe("manual");
+  });
+
   it("drops the origin thread when a person takes over the child", async () => {
     const run = await bootDelegation("child-takeover");
     const { db, engineStore } = api!.providers;

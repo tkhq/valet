@@ -359,7 +359,10 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   is the only owner of the takeover decision. When the watched submission
   is superseded, the watcher follows its successor and sets `reply_route`
   to `none` only when the successor has no parent delegation provenance: a
-  person took over the child. It does not read `author`, because a
+  person took over the child. Parent work sent after a takeover, from any parent
+  thread, sets the route back to `manual`. The person's input is in the
+  child's transcript, so the parent can answer the channel thread with
+  `reply_to_origin` but never posts there automatically. It does not read `author`, because a
   `child_send` names the steering member as its author. A followup, input on
   another child thread, and a rejected prompt never supersede the watched
   submission, so they leave the route intact. Parent-directed steering
