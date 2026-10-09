@@ -470,6 +470,46 @@ describe("GET /api/usage/outcomes", () => {
   });
 });
 
+describe("a deleted workflow's usage", () => {
+  it("keeps its outcomes, action calls, and skills with its cost, so cost per outcome holds", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const now = Date.now();
+    await db.execute(sql`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at)
+      VALUES ('wf-gone','local-org','user','local-user','Gone','{}'::jsonb,${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at)
+      VALUES ('run-gone','wf-gone','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now})`);
+    await seedEngineEntry(api, "gone-cost", "wf:run-gone:agent", now);
+    const pr = JSON.stringify({ success: true, data: { title: "Fix", html_url: "https://github.com/acme/app/pull/3" } });
+    await db.execute(sql`INSERT INTO action_invocations (invocation_id, created_at, org_id, workflow_execution_id, service, action_id, result, status, duration_ms)
+      VALUES ('gone-pr',${now},'local-org','run-gone','github','github.create_pull_request',${pr}::jsonb,'completed',10)`);
+    await db.insert(skillInvocations).values({
+      id: "gone-skill", createdAt: now, orgId: "local-org", sessionId: "wf:run-gone:agent", threadId: "th",
+      invokerUserId: "local-user", invocationEntryId: null, path: "slash_context", skillKey: "stored:triage",
+      skillName: "triage", storedSkillId: "triage", pluginName: null, origin: "local", contentSha: "sha",
+      injectedCharacters: 40, estimatedBodyTokens: 10,
+    });
+    const read = async () => {
+      const outcomes = (await (await fetch(`${api!.baseUrl}/api/usage/outcomes?window=7d`)).json()) as UsageOutcomesResponse;
+      const tools = (await (await fetch(`${api!.baseUrl}/api/usage/tool-efficiency?window=7d`)).json()) as UsageToolEfficiencyResponse;
+      const breakdown = (await (await fetch(`${api!.baseUrl}/api/usage/breakdown?window=7d`)).json()) as UsageBreakdownResponse;
+      return {
+        cost: breakdown.totalCostUsd,
+        pullRequests: outcomes.byOutcome.find((row) => row.kind === "pull_request_created"),
+        workflowActions: tools.byUseCase.find((row) => row.useCase === "workflow")?.modelFreeActions,
+        skills: breakdown.skillBreakdown.map((row) => row.skillKey),
+      };
+    };
+    const before = await read();
+    expect(before).toMatchObject({ pullRequests: { count: 1, estimatedCostUsd: 0.003 }, workflowActions: 1, skills: ["stored:triage"] });
+    expect(before.cost).toBeCloseTo(0.003, 6);
+
+    await db.execute(sql`DELETE FROM workflow_definitions WHERE id = 'wf-gone'`);
+
+    expect(await read()).toEqual(before);
+  });
+});
+
 describe("GET /api/usage/sessions", () => {
   it("lists per-session spend and marks child sessions from child_watches", async () => {
     api = await bootTestApi();
