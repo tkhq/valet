@@ -25,14 +25,39 @@ App webhooks (HMAC-verified).
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/sessions` | GET / POST | List / create sessions |
-| `/api/sessions/:id` | GET / PATCH / DELETE | Detail, update (title etc.), delete |
-| `/api/sessions/:id/pause` | POST | Pause the session. Returns 409 while background work holds a lease; `?force=true` or `{ "force": true }` cancels that work first |
-| `/api/sessions/:id/sandbox/replace` | POST | Replace the sandbox. Same 409 and `force` rule as pause |
+| `/api/sessions/:id` | GET / PATCH / DELETE | Detail, update (title etc.), delete. An owner move (`teamId`) stops all background work; a `profile` change of a running sandbox stops process, watch, and hold work. Both follow the background-work rule below. A move can 403 for a caller who may not stop the work |
+| `/api/sessions/:id/pause` | POST | Pause the session. Follows the background-work rule for process, watch, and hold work; timers keep their schedule. 409 `sandbox is not ready to pause` before any cancel when the sandbox is not attached |
+| `/api/sessions/:id/sandbox/replace` | POST | Replace the sandbox. Same rule as pause |
 | `/api/sessions/:id/wakeups` | GET | Open wakeups and active leases → `{ wakeups, leases }` (no command or exec id) |
 | `/api/sessions/:id/wakeups/:wakeupId/cancel` | POST | Cancel one wakeup (`wk_`) or hold (`ls_`) as a person. The agent gets the terminal signal with `cause=cancelled`. Session admins only |
 | `/api/sessions/:id/sandbox-jwt` | POST | Mint a short-lived gateway JWT |
 | `/api/sessions/:id/ws` | WebSocket | Live event stream (`?fromOffset=` to resume) |
 | `/api/sessions/:id/gateway/*` | ALL | Authenticated proxy to the sandbox gateway (terminal, VS Code) |
+
+### Background-work rule
+
+Pause, replace, a profile change, an owner move, and a thread archive stop
+background work. While such work is open, these actions return 409 with a
+`BackgroundWorkConflict` body:
+`{ error, code: "background_work", work, hiddenCount, forceAllowed }`.
+
+- `work` lists only work on threads the caller can see: id, kind, reason,
+  thread, deadline or fire time, and start time. `hiddenCount` counts the
+  rest. Their reasons are not shown.
+- To stop the work and act, retry with `force: true` in the JSON body. Pause
+  and replace also accept `?force=true`.
+- `force` needs the right to cancel background work (session admins). A
+  caller without it gets 403.
+- `force` is refused (409, `forceAllowed: false`) while work runs on threads
+  the caller cannot see. Ask the people in those threads to stop it.
+- A forced action cancels each item as a person. The agent gets the
+  terminal signal with `cause=cancelled`. Pause and replace send it after the
+  sandbox stops. A move sends it after the owner change. An archive sends it
+  to the session's main thread.
+- The response lists the stopped ids: `cancelledWork` (pause, replace,
+  archive), and `cancelledWork` with `cancelledWorkCount` (PATCH).
+- If a turn starts while the work stops, the action returns 409. The work is
+  already stopped. Wait for the turn to finish, then retry.
 
 ### Messages, threads, decisions
 
@@ -40,7 +65,7 @@ App webhooks (HMAC-verified).
 |----------|--------|-------------|
 | `/api/sessions/:id/messages` | GET / POST | Thread history (`?threadId=`) / send a prompt → `{ messageId, threadId }` |
 | `/api/sessions/:id/threads` | GET / POST | List / create threads |
-| `/api/sessions/:id/threads/:threadId` | PATCH | Rename, set queue mode |
+| `/api/sessions/:id/threads/:threadId` | PATCH | Rename, set queue mode, archive. An archive of a thread with background work follows the background-work rule |
 | `/api/sessions/:id/threads/:threadId/abort` | POST | Abort the running turn |
 | `/api/sessions/:id/decisions` | GET | List decision gates |
 | `/api/sessions/:id/decisions/:gateId/resolve` | POST | Resolve a gate |

@@ -1009,3 +1009,46 @@ with an earlier entry, the entry below wins.
   thread's key as `warningThreadKey`, so a scratch warning from that
   build lands on that thread. The create route targets the default
   thread, which is already the fallback.
+- **C3: one background-work rule.** Pause, replace, a profile change of
+  a running sandbox, an owner move, and a thread archive share
+  `gateBackgroundWork` (`routes/wakeups.ts`). It supersedes the "C: pause
+  and replace", "C: thread archive", and "C: owner move" bullets. The 409
+  body is `BackgroundWorkConflict`: the text names each visible item by
+  reason, kind, and deadline (no ids), and says to cancel it first or
+  retry with `force=true`. `work` lists the visible items with ids.
+  Pause, replace, and profile select process, watch, and hold work; move
+  and archive also select timers.
+- **C3: team visibility.** The text and `work` name only work on threads
+  the caller can see (`keepVisibleThreads`). Hidden work is counted
+  (`hiddenCount`) with no reasons. `force` is refused (409,
+  `forceAllowed: false`) while hidden work exists, so a forced action never
+  stops work on a private thread, and `cancelledWork` never echoes a hidden
+  id. A caller without `canCancelSessionWakeup` gets 403 on `force`.
+- **C3: signals on force.** A forced pause or replace defers the signals
+  until the sandbox stopped, as before. A forced move or profile change
+  now sends them too, after the owner write and into the rebuilt session,
+  attributed to the mover. A forced archive sends them to the session's
+  main thread, so the agent learns why the work ended even if the thread
+  is unarchived later.
+- **C3: ordering.** A forced pause checks that the attachment can suspend
+  (`current() !== null`) before it cancels. After an api restart the
+  attachment is `detached`, and the pause returns `sandbox is not ready to
+  pause` with the work still running. Pause, replace, and PATCH re-check
+  for an unsettled submission after the cancel; if a turn started, they
+  send the signals and return 409 saying the work already stopped.
+- **C3: other archive paths.** A brief dismissal and the settled-run
+  thread archive (`run-attention.ts`) do not archive a thread with open
+  background work, and do not cancel it. The dismissal counts it as
+  `keptRunning`. A person archives such a thread through the 409 rule.
+- **C3: web.** Pause, replace, the profile switch, archive (menu, `A`
+  key, catch-up Archive), and move catch the 409, list the visible work,
+  and resend with `force` from a confirm ("Stop background work and
+  pause", and so on). With `forceAllowed: false` the dialog shows the
+  server text and no confirm. Replace errors in the thread list now show.
+  The move dialog lists the work up front and reports how many items
+  stopped. Badge rows show `running 3h` or `starting`. Consecutive
+  `watch.event` cards of one watch, and the quiet turns between them,
+  render as one expandable card; quiet turns elsewhere still render as
+  before. The card shows `from <channel>` when `MessageSignal.origin` is
+  set; `engineSignalToWire` (`bridge.ts`, not group C's) must copy
+  `origin.channelType` for that to show.
