@@ -17,6 +17,7 @@ import type { Usage } from "@earendil-works/pi-ai/compat";
 import * as piAi from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { agentInputPrompt } from "./agent-files.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage, workflowRunThreadKey } from "./engine-deps.js";
 import { eq } from "drizzle-orm";
 import { legacyWorkflowAdmissions, assistants, orgs, workflowDefinitions } from "../schema/index.js";
@@ -429,7 +430,7 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       origin: { assistantSessionId: root.sessionId, threadId: originThread.id } },
     { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
     const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
-    const options = { dispatchId: `workflow:${runId}:report`, queueMode: "followup", ownerHint: { ownerType: "team", ownerId: team.id } } as const;
+    const options = { dispatchId: `workflow:${runId}:report`, queueMode: "followup" as const, ownerHint: { ownerType: "team", ownerId: team.id }, files: [{ path: "audience.txt", content: "private input" }] };
     const receipt = await deps.promptOrchestrator("report into the original audience", options);
     expect(receipt.sessionId).not.toBe(root.sessionId);
     expect(await engineStore.getSession(receipt.sessionId)).toMatchObject({ parentSessionId: root.sessionId, parentThreadId: originThread.id });
@@ -440,8 +441,16 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     await engineStore.admitSubmission(root.sessionId, originThread.id, { id: "old-admission", threadId: originThread.id,
       dispatchId: `workflow:${runId}:old-report`, content: { kind: "signal", signalType: "workflow.request", body: "old report", attributes: { runId } },
       status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now });
+    const retainedOptions = { ...options, dispatchId: `workflow:${runId}:retained-files` };
+    await engineStore.admitSubmission(root.sessionId, originThread.id, { id: "retained-files", threadId: originThread.id,
+      dispatchId: retainedOptions.dispatchId,
+      content: { kind: "signal", signalType: "workflow.request",
+        body: agentInputPrompt(engineHost.sandboxWorkingDirectory(root.session), "retained report", retainedOptions), attributes: { runId } },
+      status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now });
+    expect(await deps.promptOrchestrator("retained report", retainedOptions))
+      .toEqual({ sessionId: root.sessionId, threadId: originThread.id, queueItemId: "retained-files" });
     engineHost.evictCache(root.sessionId);
-    const oldReceipt = await deps.promptOrchestrator("old report", { ...options, dispatchId: `workflow:${runId}:old-report` });
+    const oldReceipt = await deps.promptOrchestrator("old report", { ...options, files: undefined, dispatchId: `workflow:${runId}:old-report` });
     expect(oldReceipt).toEqual({ sessionId: root.sessionId, threadId: originThread.id, queueItemId: "old-admission" });
     expect(await deps.awaitResult(oldReceipt.sessionId, oldReceipt.threadId, oldReceipt.queueItemId)).toMatchObject({ outcome: "aborted" });
   });

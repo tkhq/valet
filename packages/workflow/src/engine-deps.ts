@@ -13,6 +13,7 @@
 
 import type { QueueMode, SessionPurpose, SubmissionResult } from '@valet/engine';
 import type { TSchema } from 'typebox';
+import type { RenderedAgentFile } from './dag/agent-files.js';
 import type { ToolCredentialMode } from './dag/nodes.js';
 
 export interface WorkflowCreateSessionOptions {
@@ -22,6 +23,8 @@ export interface WorkflowCreateSessionOptions {
 }
 
 export interface WorkflowPromptOptions {
+  /** Rendered inputs. The host writes these before admitting the submission. Never checkpoint contents. */
+  files?: RenderedAgentFile[];
   /** Idempotent admission key: `workflow:{runId}:{nodeId}[:{iteration}][:repair]`. */
   dispatchId: string;
   model?: string;
@@ -74,6 +77,8 @@ export interface WorkflowLlmCompleteResult {
 }
 
 export interface WorkflowPromptOrchestratorOptions {
+  /** Rendered inputs, written in the resolved execution sandbox before admission. */
+  files?: RenderedAgentFile[];
   /** Idempotent admission key: `workflow:{runId}:{nodeId}[:{iteration}][:repair]`. */
   dispatchId: string;
   /**

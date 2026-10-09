@@ -31,6 +31,7 @@
  */
 
 import type { ThreadNode } from '../dag/nodes.js';
+import { renderAgentFiles } from '../dag/agent-files.js';
 import { renderTemplate, type TemplateContext } from '../dag/expression.js';
 import { executeSubmissionNode, withOutputSchemaPrompt, type SubmissionDispatch } from './submission-node.js';
 import { iterationSuffix, resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
@@ -89,9 +90,11 @@ export async function executeThread(args: NodeExecutorArgs<ThreadNode>): Promise
       waitMode: node.wait?.mode,
       outputSchema: node.outputSchema,
       dispatch: async (id): Promise<SubmissionDispatch> => {
+        const files = renderAgentFiles(node.files, templateContext, run.definition);
         const promptText = withOutputSchemaPrompt(renderText(node.prompt, templateContext), node.outputSchema);
         const dispatched = await engine.promptOrchestrator(promptText, {
           dispatchId: id,
+          ...(files.length ? { files } : {}),
           queueMode: 'followup',
           ownerHint: owner,
         });

@@ -25,6 +25,7 @@
 import type { SubmissionResult } from '@valet/engine';
 import { ValidationError } from '@valet/engine';
 
+import { AgentInputFileError } from '../dag/agent-files.js';
 import type { WorkflowPromptReceipt, WorkflowEngineDeps } from '../engine-deps.js';
 import type { NodeCheckpoint, WorkflowRun, WorkflowStore } from '../store.js';
 
@@ -109,7 +110,7 @@ export async function executeSubmissionNode<TDispatched, TSettled>(
     try {
       dispatch = await hooks.dispatch(hooks.dispatchId);
     } catch (err) {
-      if (!(err instanceof ValidationError)) throw err;
+      if (!(err instanceof ValidationError) && !(err instanceof AgentInputFileError)) throw err;
       const error = err.message;
       await store.completeCheckpoint(run.runId, nodeId, iteration, attempt, {
         runId: run.runId,
@@ -260,7 +261,7 @@ async function handleOutcome<TDispatched, TSettled>(
   try {
     repairReceipt = await hooks.dispatchRepair(`${hooks.dispatchId}:repair`, repairText, sessionId);
   } catch (err) {
-    if (!(err instanceof ValidationError)) throw err;
+    if (!(err instanceof ValidationError) && !(err instanceof AgentInputFileError)) throw err;
     const error = err.message;
     await store.completeCheckpoint(run.runId, nodeId, iteration, attempt, {
       runId: run.runId,

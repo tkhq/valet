@@ -58,14 +58,40 @@ Node types:
 - `if` — conditional; outgoing edges use `"fromOutput": "true"` / `"false"`
 - `wait` — pause for a duration (`{ "mode": "duration", "duration": "5m" }`)
 - `approval` — park until a human approves/denies (`prompt`, optional `summary`, `details`, `timeout`, `onDeny`)
-- `session` — start an agent session with a `prompt` (optional `title`, `model`, `outputSchema`, `wait`)
-- `orchestrator` — prompt the workspace assistant in a durable workflow thread (optional `outputSchema`, `wait`). The app labels this step "Thread".
+- `session` — start an agent session with a `prompt` (optional `title`, `model`, `outputSchema`, `wait`, `files`)
+- `orchestrator` — prompt the workspace assistant in a durable workflow thread (optional `outputSchema`, `wait`, `files`). The app labels this step "Thread".
 - `tool` — invoke a plugin action (`service`, `action`, `params`)
 - `llm` — one-shot LLM call (`model`, `prompt`, optional `system`, `outputSchema`)
 - `foreach` — iterate `items` over `body` nodes (optional `maxItems`, `concurrency`)
 - `stop` — terminal node (`outcome`, optional `output`, `message`)
 
 Edges may carry `"when"` (an expression) to gate a branch.
+
+## Pass data to an agent step as files
+
+Use `files` on `session` and `orchestrator` nodes instead of pasting data into prompts.
+The host writes the files before the first turn. The prompt receives absolute paths and byte sizes.
+Tell the agent to read those files. Do not ask it to retype the data.
+
+```json
+{
+  "id": "build", "type": "session", "mode": "start",
+  "prompt": "Build the dashboard from the input files listed below.",
+  "files": {
+    "jobs.json": "{{nodes.jobs.result.data}}",
+    "scorecards.json": "{{nodes.scorecards.result.items}}",
+    "notes.md": "Run for {{trigger.data.team}}"
+  }
+}
+```
+
+Keys are literal, normalized relative paths. Use `/` between segments of letters, digits, dots, underscores, and hyphens.
+Do not use templates, dot segments, empty segments, absolute paths, or backslashes in keys.
+Values are template strings. A single expression preserves its type: strings are UTF-8 text; other values become pretty-printed JSON.
+Missing paths follow `policy.onUnresolvedPath`: `empty` uses the existing empty/null rendering; `fail` stops the node before dispatch.
+A foreach body can use `item` and `index` in values. Each iteration has its own directory.
+The host scopes directories by run, node, and iteration. Limits are 100 files, 10 MiB per file, and 25 MiB total.
+`llm` and `tool` nodes do not accept `files`.
 
 ## Model selection
 

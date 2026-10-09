@@ -1,3 +1,4 @@
+import { agentInputPrompt, writeAgentInputFiles } from "./agent-files.js";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 /**
  * `WorkflowEngineDeps` (Phase 5 plan decision 15) implemented over
@@ -374,7 +375,8 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         }
         return { threadId: previous.threadId, queueItemId: previous.queueItemId };
       }
-      const receipt = await thread.submitPrompt(text, {
+      const deliveredText = await writeAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), text, promptOpts);
+      const receipt = await thread.submitPrompt(deliveredText, {
         dispatchId: promptOpts.dispatchId,
         model: promptOpts.model,
         ...(context.presence ? { metadata: { presence: context.presence } } : {}),
@@ -593,7 +595,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
           const item = await opts.engineStore.getQueueItem(session.id, target.priorQueueItemId);
           const content = item?.content;
           if (!content || typeof content === "string" || !("kind" in content) || content.kind !== "signal" ||
-              content.signalType !== "workflow.request" || content.body !== promptText || content.attributes?.runId !== runId) {
+              content.signalType !== "workflow.request" || content.body !== agentInputPrompt(opts.host.sandboxWorkingDirectory(session), promptText, promptOpts) || content.attributes?.runId !== runId) {
             throw new Error("The legacy workflow dispatch has different content. Start a new workflow run.");
           }
           return { sessionId: session.id, threadId: thread.id, queueItemId: target.priorQueueItemId };
@@ -605,10 +607,11 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // string-valued by contract (`SignalContent`), and nothing set it
       // before — which is why a workflow report showed up in a person's
       // assistant as an envelope labelled "workflow.request" and nothing else.
+      const deliveredText = await writeAgentInputFiles(session, opts.host.sandboxWorkingDirectory(session), promptText, promptOpts);
       const content: SignalContent = {
         kind: "signal",
         signalType: "workflow.request",
-        body: promptText,
+        body: deliveredText,
         attributes: { runId },
       };
       const receipt = await thread.submitPrompt(content, {
