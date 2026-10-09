@@ -894,10 +894,10 @@ export function UsagePage() {
         <div className="rounded border border-line bg-paper px-4 py-3 text-sm text-muted">
           Generate a key and set up your tools in{" "}
           <Link
-            to="/settings/proxy"
+            to="/settings/api-keys"
             className="text-moss underline-offset-2 hover:underline"
           >
-            Settings → Proxy
+            Personal workspace → API keys and proxy
           </Link>
           .
         </div>
