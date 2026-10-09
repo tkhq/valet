@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
 import { oauthAccessToken, orgMembers, orgs, skills, users } from "../schema/index.js";
+import { eq } from "drizzle-orm";
 import { seedMcpConsent } from "../integration/_mcp-consent.js";
 import { createWorkflowDefinition } from "../workflows/service.js";
 
@@ -110,6 +111,29 @@ describe("MCP workspace tools", () => {
     expect(bobRead.isError).toBe(true);
   });
 
+  it("patches, moves, and deletes personal memory without crossing users", async () => {
+    const { testApi, alice, bob } = await boot();
+    await tool(testApi.baseUrl, alice, "write_memory", { path: "notes/release.md", content: "# Release\n\nWe deploy on Tuesdays." });
+
+    const patched = await tool(testApi.baseUrl, alice, "patch_memory", { path: "notes/release.md", old_string: "Tuesdays", new_string: "Wednesdays" });
+    expect(patched.data).toMatchObject({ path: "notes/release.md", patched: true });
+    const missing = await tool(testApi.baseUrl, alice, "patch_memory", { path: "notes/release.md", old_string: "Fridays", new_string: "x" });
+    expect(missing.isError).toBe(true);
+    // "e" appears many times: a first-match replace would edit the wrong passage.
+    const ambiguous = await tool(testApi.baseUrl, alice, "patch_memory", { path: "notes/release.md", old_string: "e", new_string: "E" });
+    expect(ambiguous.isError).toBe(true);
+    expect(ambiguous.text).toContain("appears more than once");
+
+    expect((await tool(testApi.baseUrl, alice, "move_memory", { from: "notes/release.md", to: "projects/release.md" })).data).toMatchObject({ moved: true });
+    expect((await tool(testApi.baseUrl, alice, "read_memory", { path: "projects/release.md" })).text).toContain("Wednesdays");
+    expect((await tool(testApi.baseUrl, alice, "read_memory", { path: "notes/release.md" })).isError).toBe(true);
+
+    // Bob's personal scope has no such file, so his delete cannot reach Alice's.
+    expect((await tool(testApi.baseUrl, bob, "delete_memory", { path: "projects/release.md" })).isError).toBe(true);
+    expect((await tool(testApi.baseUrl, alice, "delete_memory", { path: "projects/release.md" })).data).toEqual({ path: "projects/release.md", deleted: true });
+    expect((await tool(testApi.baseUrl, alice, "read_memory", { path: "projects/release.md" })).isError).toBe(true);
+  });
+
   it("runs a workflow to completion and shows a policy-gated run in the inbox", async () => {
     const { testApi, alice, bob } = await boot();
     const p = testApi.providers;
@@ -137,6 +161,14 @@ describe("MCP workspace tools", () => {
     expect(inbox.data.workflow_approvals).toEqual([expect.objectContaining({ run_id: parked.data.run_id, workflow: "Risky", action: "demo.risky" })]);
     expect((await tool(testApi.baseUrl, bob, "list_inbox")).data.workflow_approvals).toEqual([]);
     expect((await tool(testApi.baseUrl, bob, "get_workflow_run", { run_id: parked.data.run_id })).isError).toBe(true);
+
+    // Bob cannot stop Alice's run. Alice cancels it, then retries it, and the retry parks on the same gate.
+    expect((await tool(testApi.baseUrl, bob, "cancel_workflow_run", { run_id: parked.data.run_id })).isError).toBe(true);
+    const cancelled = await tool(testApi.baseUrl, alice, "cancel_workflow_run", { run_id: parked.data.run_id });
+    expect(cancelled.data).toMatchObject({ run_id: parked.data.run_id, status: "settled", outcome: "cancelled" });
+    const retried = await tool(testApi.baseUrl, alice, "retry_workflow_run", { run_id: parked.data.run_id, wait_seconds: 30 });
+    expect(retried.isError).toBe(false);
+    expect(retried.data).toMatchObject({ pending_approvals: [expect.objectContaining({ kind: "policy_gate", action: "demo.risky" })] });
   });
 
   it("lists a thread approval in the inbox but refuses to let an MCP agent approve it", async () => {
@@ -192,5 +224,22 @@ describe("MCP workspace tools", () => {
     const limited = await tool(testApi.baseUrl, alice, "list_artifacts", { limit: 1 });
     expect(limited.data.artifacts).toHaveLength(1);
     expect(limited.data.more).toContain("2 more artifacts match");
+  });
+
+  it("unpublishes an artifact only for the person who can manage it", async () => {
+    const { testApi, alice, bob } = await boot();
+    await tool(testApi.baseUrl, alice, "publish_artifact", { key: "reports/oops", title: "Oops", content: "# leaked" });
+    const listed = await tool(testApi.baseUrl, alice, "list_artifacts");
+    const [item] = listed.data.artifacts as Array<{ artifact_id: string; key: string }>;
+    expect(item).toMatchObject({ key: "reports/oops", artifact_id: expect.any(String) });
+
+    expect((await tool(testApi.baseUrl, bob, "unpublish_artifact", { artifact_id: item?.artifact_id })).isError).toBe(true);
+    // An org admin may revoke any artifact in the browser, but not through an agent.
+    await testApi.providers.db.update(orgMembers).set({ role: "admin" }).where(eq(orgMembers.userId, "bob"));
+    const asAdmin = await tool(testApi.baseUrl, bob, "unpublish_artifact", { artifact_id: item?.artifact_id });
+    expect(asAdmin.isError).toBe(true);
+    expect(asAdmin.text).toContain("An agent can unpublish only artifacts you published");
+    expect((await tool(testApi.baseUrl, alice, "unpublish_artifact", { artifact_id: item?.artifact_id })).data).toMatchObject({ unpublished: true });
+    expect((await tool(testApi.baseUrl, alice, "list_artifacts")).data.artifacts).toEqual([]);
   });
 });

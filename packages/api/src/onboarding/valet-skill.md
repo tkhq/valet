@@ -20,12 +20,14 @@ Valet runs at {{VALET_URL}}. It holds the organization's integration credentials
 |---|---|---|
 | Call an integration (create an issue, read a channel, query a dashboard) | `search_tools`, `describe_tool`, `call_tool` | `valet tools search`, `describe`, `call` |
 | Hand off long, remote, or team work | `start_thread`, `send_message`, `get_thread` | `valet threads new`, `valet send --thread` |
+| Stop a delegated turn that went the wrong way | `stop_thread` | none |
 | Find what the team already knows | `search_memory`, `read_memory` | none |
-| Save a durable decision or convention | `write_memory` | none |
+| Save a durable decision or convention | `write_memory`, or `patch_memory` to edit one passage | none |
+| Rename, reorganize, or remove a memory file | `move_memory`, `delete_memory` | none |
 | Follow the team's playbook for a task | `list_skills`, `get_skill` | none |
-| Run a saved automation | `list_workflows`, `run_workflow`, `get_workflow_run` | none |
+| Run a saved automation | `list_workflows`, `run_workflow`, `get_workflow_run`, `cancel_workflow_run`, `retry_workflow_run` | none |
 | See what waits for the person | `list_inbox` | none (`valet gates list --thread <id>` for one thread) |
-| Share a report or page with the organization | `publish_artifact` | none |
+| Share a report or page with the organization | `publish_artifact`, or `unpublish_artifact` to take one down | none |
 
 Use your own tools for local work: files, the shell, and the local repository. Use Valet for what needs the organization's accounts, shared context, or Valet's cloud sandboxes.
 

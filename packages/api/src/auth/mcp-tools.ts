@@ -31,13 +31,13 @@ import type {
 import { capOutput } from "./mcp-output.js";
 
 /** One in-process call to an `/api` route as the verified MCP user. */
-export type ApiCaller = (method: "GET" | "POST" | "PUT", path: string, body?: unknown) => Promise<{ status: number; body: unknown }>;
+export type ApiCaller = (method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown) => Promise<{ status: number; body: unknown }>;
 
 export interface McpToolDeps {
   api: ApiCaller;
   engineStore: Pick<Providers["engineStore"], "getQueueItem">;
   /** The newest queue item (turn) in a thread, or the newest with `status`. Callers pass ids an authorized route returned. */
-  latestQueueItem: (sessionId: string, threadId: string, status?: "blocked_on_decision_gate") => Promise<string | undefined>;
+  latestQueueItem: (sessionId: string, threadId: string, status?: "running" | "blocked_on_decision_gate") => Promise<string | undefined>;
   /** Public origin for thread links, e.g. `https://valet.example.com`. */
   origin: string;
   /** Injectable for tests. */
@@ -53,6 +53,8 @@ const MAX_WAIT_SECONDS = 55;
 const POLL_MS = 1_000;
 const MAX_TEXT_CHARS = 8_000;
 const MAX_MERGE_HOPS = 5;
+/** A stopped turn settles in well under a second; this bounds the report wait. */
+const STOP_WAIT_SECONDS = 5;
 
 class ApiError extends Error {}
 
@@ -153,7 +155,7 @@ export type TurnStatus = "completed" | "failed" | "aborted" | "superseded" | "wa
 
 /** Every status `waitForTurn` returns, for tool descriptions. */
 const TURN_STATUSES =
-  "completed (the turn finished; reply has the answer), failed (error says why), aborted (a person stopped the turn), " +
+  "completed (the turn finished; reply has the answer), failed (error says why), aborted (a person or stop_thread stopped the turn), " +
   "superseded (a newer message replaced the turn), waiting_for_decision (answer pending_decisions with resolve_decision), " +
   "or running (the wait ended first; call get_thread with wait_seconds to wait again)";
 const COMMAND_STATUS = "command_ran (the prompt was a slash command, so no turn started; call get_thread to see its effect)";
@@ -360,6 +362,31 @@ export function registerAgentTools(server: McpServer, deps: McpToolDeps): void {
         url: threadUrl(deps, thread_id),
       };
     }, "Set messages to a smaller number to see fewer, or open the thread url."),
+  );
+
+  server.registerTool(
+    "stop_thread",
+    {
+      description:
+        "Stops the thread's active turn, for example a delegated task that went the wrong way. " +
+        "Work the turn already did is not undone. Send a follow-up with send_message to redirect it. " +
+        `Result status: ${TURN_STATUSES}, or ${IDLE_STATUS}.`,
+      inputSchema: { thread_id: z.string().min(1).describe("Thread id from start_thread or list_threads.") },
+      annotations: { destructiveHint: true },
+    },
+    run(async ({ thread_id }: { thread_id: string }) => {
+      const sessionId = await sessionOf(deps, thread_id);
+      // Stop the active turn, as the web Stop button does. A follow-up queued
+      // behind it is newer, so "newest" alone would stop the wrong turn.
+      const target = await deps.latestQueueItem(sessionId, thread_id, "running")
+        ?? await deps.latestQueueItem(sessionId, thread_id, "blocked_on_decision_gate")
+        ?? await deps.latestQueueItem(sessionId, thread_id);
+      if (!target) return { thread_id, status: "idle", url: threadUrl(deps, thread_id) };
+      // The route stops only the named turn, so a turn queued after this
+      // read is never stopped by mistake.
+      await call<unknown>(deps, "POST", `/api/threads/${encodeURIComponent(thread_id)}/abort`, "Thread", { targetItemId: target });
+      return waitForTurn(deps, { sessionId, threadId: thread_id, queueItemId: target, waitSeconds: STOP_WAIT_SECONDS });
+    }),
   );
 
   server.registerTool(

@@ -432,6 +432,8 @@ const AGENT_WRITES: ReadonlyArray<{ method: string; pattern: RegExp }> = [
   { method: "POST", pattern: /^\/api\/threads$/ },
   { method: "POST", pattern: /^\/api\/threads\/[^/]+\/messages$/ },
   { method: "POST", pattern: /^\/api\/threads\/[^/]+\/decisions\/[^/]+\/resolve$/ },
+  // Stop a turn. The route needs the turn's queue item, so a late Stop cannot hit its successor.
+  { method: "POST", pattern: /^\/api\/threads\/[^/]+\/abort$/ },
   { method: "POST", pattern: /^\/api\/sessions$/ },
   { method: "POST", pattern: /^\/api\/sessions\/[^/]+\/messages$/ },
   { method: "POST", pattern: /^\/api\/sessions\/[^/]+\/files$/ },
@@ -440,8 +442,13 @@ const AGENT_WRITES: ReadonlyArray<{ method: string; pattern: RegExp }> = [
   // Tools, memory, workflow runs, and artifacts.
   { method: "POST", pattern: /^\/api\/actions\/[^/]+\/invoke$/ },
   { method: "PUT", pattern: /^\/api\/memory$/ },
+  { method: "DELETE", pattern: /^\/api\/memory$/ },
+  { method: "POST", pattern: /^\/api\/memory\/(patch|move)$/ },
   { method: "POST", pattern: /^\/api\/workflows\/[^/]+\/runs$/ },
+  // Cancel and retry act on a run. Neither changes the workflow definition or its grants.
+  { method: "POST", pattern: /^\/api\/workflows\/runs\/[^/]+\/(cancel|retry)$/ },
   { method: "POST", pattern: /^\/api\/artifacts\/share$/ },
+  { method: "DELETE", pattern: /^\/api\/artifacts\/[^/]+$/ },
   // A policy preview changes nothing.
   { method: "POST", pattern: /^\/api\/org\/policies\/preview$/ },
 ];
@@ -456,7 +463,7 @@ export function agentRefusedRoute(method: string, path: string): boolean {
 export function refuseAgentAuthority(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     if (c.var.authVia && isAgentCaller(c.var.authVia) && agentRefusedRoute(c.req.method, c.req.path)) {
-      return c.json({ error: "A person must do this in Valet in the browser. Agent credentials (MCP apps and `valet login`) can start and continue threads, answer questions, use tools, run workflows, write memory, and publish artifacts, and nothing else." }, 403);
+      return c.json({ error: "A person must do this in Valet in the browser. Agent credentials (MCP apps and `valet login`) can start, continue, and stop threads, answer questions, use tools, run, cancel, and retry workflow runs, edit memory, and publish and unpublish artifacts, and nothing else." }, 403);
     }
     await next();
   };

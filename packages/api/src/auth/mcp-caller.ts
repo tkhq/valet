@@ -45,6 +45,7 @@ const MCP_ALLOWED_ROUTES: ReadonlyArray<{ method: string; pattern: RegExp }> = [
   { method: "POST", pattern: /^\/api\/threads\/[^/]+\/messages$/ },
   { method: "GET", pattern: /^\/api\/threads\/[^/]+\/decisions$/ },
   { method: "POST", pattern: /^\/api\/threads\/[^/]+\/decisions\/[^/]+\/resolve$/ },
+  { method: "POST", pattern: /^\/api\/threads\/[^/]+\/abort$/ },
   { method: "GET", pattern: /^\/api\/actions$/ },
   { method: "GET", pattern: /^\/api\/actions\/[^/]+$/ },
   { method: "POST", pattern: /^\/api\/actions\/[^/]+\/invoke$/ },
@@ -53,13 +54,17 @@ const MCP_ALLOWED_ROUTES: ReadonlyArray<{ method: string; pattern: RegExp }> = [
   { method: "GET", pattern: /^\/api\/memory$/ },
   { method: "GET", pattern: /^\/api\/memory\/search$/ },
   { method: "PUT", pattern: /^\/api\/memory$/ },
+  { method: "DELETE", pattern: /^\/api\/memory$/ },
+  { method: "POST", pattern: /^\/api\/memory\/(patch|move)$/ },
   { method: "GET", pattern: /^\/api\/workflows$/ },
   { method: "GET", pattern: /^\/api\/workflows\/action-required$/ },
   { method: "POST", pattern: /^\/api\/workflows\/[^/]+\/runs$/ },
   { method: "GET", pattern: /^\/api\/workflows\/runs\/[^/]+$/ },
+  { method: "POST", pattern: /^\/api\/workflows\/runs\/[^/]+\/(cancel|retry)$/ },
   { method: "GET", pattern: /^\/api\/notifications\/decisions$/ },
   { method: "GET", pattern: /^\/api\/artifacts$/ },
   { method: "POST", pattern: /^\/api\/artifacts\/share$/ },
+  { method: "DELETE", pattern: /^\/api\/artifacts\/[^/]+$/ },
 ];
 
 /** Whether an MCP caller may use this route. */

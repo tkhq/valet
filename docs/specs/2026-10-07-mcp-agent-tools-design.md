@@ -19,6 +19,7 @@ The CLI is not a good substitute for an agent. `valet send` subscribes to its st
 | `get_thread` | Status, recent messages, pending decisions. Optional wait for the latest turn. |
 | `list_decisions` | Pending approvals and questions in a thread. |
 | `resolve_decision` | Answers a question, then optionally waits for the turn to continue. Approvals need a person. |
+| `stop_thread` | Stops the thread's active turn through `POST /api/threads/:id/abort`: the running turn, else one blocked on a decision, else the newest. It sends that turn's queue item as `targetItemId`, so a follow-up queued behind it, or one queued after the read, is never stopped. It then waits up to 5 seconds and reports the turn status. |
 
 `whoami` and `list_sessions` stay for existing clients.
 
@@ -54,9 +55,12 @@ These tools give a local agent the rest of the workspace. Each one calls the rou
 | `list_skills`, `get_skill` | `GET /api/skills`, `GET /api/skills/:name` | Lists the skills the caller can use and returns one skill's instructions. `args` fills `{{placeholders}}` with the engine's `renderTemplate`. |
 | `search_memory`, `read_memory` | `GET /api/memory/search`, `GET /api/memory` | Searches and reads personal or team memory. |
 | `write_memory` | `PUT /api/memory` | Creates or replaces a memory file. A team write needs team admin rights, as in the web client. |
+| `patch_memory`, `move_memory`, `delete_memory` | `POST /api/memory/patch`, `POST /api/memory/move`, `DELETE /api/memory` | Replaces one exact passage (a passage that matches more than once is refused, for `mem_patch` too), moves a file to a free path, or deletes a file. Team scope needs the same rights as a team write. |
 | `list_workflows`, `run_workflow`, `get_workflow_run` | `GET /api/workflows`, `POST /api/workflows/:id/runs`, `GET /api/workflows/runs/:runId` | Lists and starts workflows. A run waits on the server until it settles, stops for approval, or the wait ends. |
+| `cancel_workflow_run`, `retry_workflow_run` | `POST /api/workflows/runs/:runId/cancel`, `POST /api/workflows/runs/:runId/retry` | Cancels a run and waits up to 10 seconds for it to settle, or starts a failed or cancelled run again. A cancel waits for `settled` only, because the gate it cancels stays pending until then. A retry meets the same approval gates as the first run. |
 | `list_inbox` | `GET /api/notifications/decisions`, `GET /api/workflows/action-required` | Lists thread decisions and workflow approvals that wait for the caller. |
-| `list_artifacts`, `publish_artifact` | `GET /api/artifacts`, `POST /api/artifacts/share` | Lists and publishes artifact pages. The list is newest update first. `query` matches the title or key, and `limit` (default 25) caps the list. The tool applies both, because the route pages only under an owner filter. A repeated key adds a version at the same link. Artifacts are visible to the whole organization (the narrowest visibility), and the tool says so, so an agent does not publish what the person has not agreed to share. |
+| `list_artifacts`, `publish_artifact` | `GET /api/artifacts`, `POST /api/artifacts/share` | Lists and publishes artifact pages. The list is newest update first. `query` matches the title or key, and `limit` (default 25) caps the list. The tool applies both, because the route pages only under an owner filter. A repeated key adds a version at the same link. Artifacts are visible to the whole organization (the narrowest visibility), and the tool says so, so an agent does not publish what the person has not agreed to share. The list returns each `artifact_id`. |
+| `unpublish_artifact` | `DELETE /api/artifacts/:id` | Revokes an artifact, so its link stops working. A revoke cannot be undone, so an agent may revoke only artifacts its user published. An org admin revokes another member's artifact in the browser. |
 
 A team workspace maps to `ownerType=team&ownerId=<team id>` on the memory, skills, workflow, and artifact routes.
 
@@ -66,7 +70,7 @@ MCP prompts are not exposed. The server is created for each request, so listing 
 
 An MCP client is an agent, and so is the CLI token `valet login` gets (`authVia: "cli"`, see "CLI device sign-in" in the auth spec), because the onboarding has the agent run that login. `isAgentCaller` covers both. The thread decision route refuses an `approval` or `credential_request` gate from an agent, and returns "A person must approve this request." Without this rule, one agent could approve another agent's `require_approval` action. An agent can still answer a `question` gate. `list_inbox` marks each thread decision with `agent_can_answer`.
 
-`refuseAgentAuthority` also limits an agent's writes to `AGENT_WRITES` in `middleware/auth.ts`: the routes the CLI and the MCP tools use. Every other write gets 403, so an agent cannot change policies, grants, browser approvals, linked chat accounts, workflow definitions, or organization and team settings. A key created in Settings keeps full authority. A workflow step change by Valet's own assistant, which other agents can steer through a thread, revokes the workflow's grants (`WorkflowOwner.agentEditor`), so a person approves the new steps.
+`refuseAgentAuthority` also limits an agent's writes to `AGENT_WRITES` in `middleware/auth.ts`: the routes the CLI and the MCP tools use. Every other write gets 403, so an agent cannot change policies, grants, browser approvals, linked chat accounts, workflow definitions, or organization and team settings. Stopping a turn, cancelling or retrying a run, editing memory, and unpublishing an artifact are allowed, because each one acts on work the agent can already start. Approving or dismissing a workflow gate, withdrawing a decision, and changing an artifact's visibility stay refused. A key created in Settings keeps full authority. A workflow step change by Valet's own assistant, which other agents can steer through a thread, revokes the workflow's grants (`WorkflowOwner.agentEditor`), so a person approves the new steps.
 
 ### Agent onboarding
 

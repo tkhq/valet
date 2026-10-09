@@ -315,6 +315,11 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
   if (idx === -1) {
     throw new ValidationError(`oldString not found in ${path}`);
   }
+  // Both callers (mem_patch and the MCP patch_memory) promise an exact single
+  // match. Replacing the first of several would silently edit the wrong passage.
+  if (existing.content.indexOf(params.oldString, idx + params.oldString.length) !== -1) {
+    throw new ValidationError(`oldString appears more than once in ${path}. Include more surrounding text so it matches exactly once.`);
+  }
   const newContent =
     existing.content.slice(0, idx) + params.newString + existing.content.slice(idx + params.oldString.length);
 
