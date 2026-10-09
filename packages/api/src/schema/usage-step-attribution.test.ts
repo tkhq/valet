@@ -143,7 +143,20 @@ describe("usage workflow step attribution", () => {
     expect(await orgTotals(db)).toEqual(before);
   });
 
-  it("counts a workflow's engine sessions as active agents, never its billing-only step ids", async () => {
+  it("counts the assistant that ran a Thread step as an active agent, in every Usage panel", async () => {
+    // The assistant's only usage is one Thread-step turn, which bills to the step.
+    await queueItem(db, "q-thread", "workflow:run-1:think");
+    await assistantTurn(db, "e-thread", "q-thread");
+    const scope = { scope: "org", orgId: "org-a" } as const;
+    const window = { windowMs: 86_400_000, now: NOW + 3_600_000, scope };
+    const breakdown = await getUsageBreakdown(appDb, window);
+    expect(breakdown.totalCostUsd).toBeCloseTo(0.003);
+    expect(breakdown.activeAgents).toBe(1);
+    const activity = await getDailyAgentActivity(appDb, window);
+    expect(activity.days.map((d) => [d.dayMs, d.kind, d.activeAgents])).toEqual([[Math.floor(NOW / 86_400_000) * 86_400_000, "assistant", 1]]);
+  });
+
+  it("counts the sessions that made model calls as active agents, never billing-only step ids", async () => {
     // A session step runs in its own engine session.
     await db.query(`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, created_at, updated_at)
       VALUES ('wf:run-1:review', 'user', 'u-alice', 'u-alice', 'org-a', '/tmp/w', 'workflow', 'active', $1, $1)`, [NOW]);
@@ -159,10 +172,10 @@ describe("usage workflow step attribution", () => {
     const scope = { scope: "org", orgId: "org-a" } as const;
     const window = { windowMs: 86_400_000, now: NOW + 3_600_000, scope };
     const activity = await getDailyAgentActivity(appDb, window);
-    expect(activity.days.map((d) => [d.kind, d.activeAgents])).toEqual([["workflow", 1]]);
-    expect((await getUsageBreakdown(appDb, window)).activeAgents).toBe(1);
+    // The session step and the assistant that ran the Thread step; never the LLM step's ids.
+    expect(activity.days.map((d) => [d.kind, d.activeAgents])).toEqual([["assistant", 1], ["workflow", 1]]);
+    expect((await getUsageBreakdown(appDb, window)).activeAgents).toBe(2);
     const memberDays = await getMemberAgentDays(appDb, scope, { startMs: NOW - 3_600_000, endMs: NOW + 3_600_000, kind: "lookback", label: "test" });
-    // Member activity keys the Thread step's turn by its real session, the assistant.
     expect(memberDays.map((r) => [r.actor_id, Number(r.agent_days)])).toEqual([["u-alice", 1], [null, 1]]);
   });
 });

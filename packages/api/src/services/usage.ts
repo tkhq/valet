@@ -7,9 +7,9 @@
  */
 import { eq, inArray, sql, type SQL } from "drizzle-orm";
 import { usageRead } from "./usage-read.js";
-import { getMemberAgentDays } from "./usage-member-activity.js";
+import { getMemberAgentDays, scopedAgentActivity } from "./usage-member-activity.js";
 import { getActionToolCalls, getActionOutcomes, getSkillBreakdown } from "./usage-aux-rollups.js";
-import { isAgentSession, proxyPeriodRows, usagePeriodRows, HOURLY_BUCKET_COLS } from "./usage-hourly.js";
+import { proxyPeriodRows, usagePeriodRows, HOURLY_BUCKET_COLS } from "./usage-hourly.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgs, users } from "../schema/index.js";
 import { isOrgAdmin } from "./org.js";
@@ -274,31 +274,25 @@ async function queryDailyAgentActivity(
 ): Promise<DailyAgentActivityResponse> {
   const period = periodFromOpts(opts);
   const activityPeriod = period.activityStartMs === undefined ? period : { ...period, startMs: period.activityStartMs };
-  const where = scopeWhere("ce.", activityPeriod, opts.scope);
   type ActivityRow = {
     day_ms: unknown; team_id: string | null; team_name: string | null;
     kind: "assistant" | "child" | "workflow" | "session"; active_agents: unknown;
   };
   // AppDb abstracts Postgres and PGlite; the selected columns define this result.
+  // Keyed by the session that made each call, as every active-agent count is.
   const rows = await db.execute(sql`
-    SELECT (floor(ce.created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
-      CASE WHEN ce.owner_type = 'team' THEN ce.owner_id END AS team_id,
+    SELECT (floor(x.created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
+      CASE WHEN x.owner_type = 'team' THEN x.owner_id END AS team_id,
       t.name AS team_name,
       CASE
-        WHEN ce.use_case = 'workflow' THEN 'workflow'
-        WHEN ce.session_id LIKE 'orchestrator:%' OR EXISTS (
-          SELECT 1 FROM assistants a WHERE a.session_id = ce.session_id AND a.org_id = ce.org_id
-        ) THEN 'assistant'
-        WHEN EXISTS (
-          SELECT 1 FROM child_watches w WHERE w.child_session_id = ce.session_id AND w.org_id = ce.org_id
-        ) THEN 'child'
+        WHEN x.session_id LIKE 'wf:%' THEN 'workflow'
+        WHEN x.assistant THEN 'assistant'
+        WHEN x.child THEN 'child'
         ELSE 'session'
       END AS kind,
-      COUNT(DISTINCT ce.session_id) AS active_agents
-    FROM ${usagePeriodRows(activityPeriod)} ce
-    LEFT JOIN teams t ON ce.owner_type = 'team' AND t.id = ce.owner_id AND t.org_id = ce.org_id
-    WHERE ${where}
-      AND ce.session_id IS NOT NULL AND ce.positive_turns > 0 AND ${isAgentSession(sql`ce.session_id`)}
+      COUNT(DISTINCT x.session_id) AS active_agents
+    FROM ${scopedAgentActivity(opts.scope, activityPeriod)} x
+    LEFT JOIN teams t ON x.owner_type = 'team' AND t.id = x.owner_id AND t.org_id = x.org_id
     GROUP BY 1, 2, 3, 4 ORDER BY 1, 2 NULLS FIRST, 4
   `) as { rows: ActivityRow[] };
   return {
@@ -332,11 +326,11 @@ async function queryUsageBreakdown(
 
   interface GroupRow extends BucketRow {
     grouping_key: unknown; use_case: string | null; model: string | null;
-    day_ms: unknown; user_id: string | null; active_agents: unknown;
+    day_ms: unknown; user_id: string | null;
   }
   // One cost view scan produces the use-case, model, day, member, and total
   // buckets. GROUPING distinguishes a real NULL value from an omitted column.
-  const [grouped, skillBreakdown, agentDays] = await Promise.all([
+  const [grouped, agents, skillBreakdown, agentDays] = await Promise.all([
     db.execute(sql`
       WITH scoped AS MATERIALIZED (
         SELECT use_case, model, user_id, session_id,
@@ -349,11 +343,11 @@ async function queryUsageBreakdown(
         use_case, model, day_ms, user_id, ${HOURLY_BUCKET_COLS}
       FROM scoped
       GROUP BY GROUPING SETS ((use_case), (model), (day_ms), (user_id), ())
-      ) SELECT grouped.*, CASE WHEN grouping_key=15 THEN
-        (SELECT COUNT(DISTINCT session_id) FROM scoped WHERE session_id IS NOT NULL AND positive_turns>0
-          AND ${isAgentSession(sql`session_id`)})
-        ELSE 0 END AS active_agents FROM grouped
+      ) SELECT grouped.* FROM grouped
     `) as Promise<{ rows: GroupRow[] }>,
+    // Agents are the sessions that made the calls, not the billing keys.
+    db.execute(sql`SELECT COUNT(DISTINCT x.session_id) AS active_agents
+      FROM ${scopedAgentActivity(opts.scope, period)} x`) as Promise<{ rows: { active_agents: unknown }[] }>,
     getSkillBreakdown(db, period, opts.scope),
     agentWindow ? getMemberAgentDays(db, opts.scope, { ...period, startMs: agentWindow.sinceMs }) : Promise.resolve([]),
   ]);
@@ -382,7 +376,7 @@ async function queryUsageBreakdown(
   return {
     windowMs: period.windowMs ?? period.endMs - period.startMs,
     scope: opts.scope.scope,
-    activeAgents: toNum(totals?.active_agents),
+    activeAgents: toNum(agents.rows[0]?.active_agents),
     totalCostUsd: total.costUsd,
     totalTokens: total.totalTokens,
     totalInputTokens: total.inputTokens,
