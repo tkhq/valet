@@ -17,8 +17,12 @@ export type ChildReplyOutcome =
   | { kind: "waiting" }
   | { kind: "undeliverable"; reason: string };
 
-/** After this many failed attempts, the intent fails terminally. */
-export const CHILD_REPLY_MAX_ATTEMPTS = 10;
+/**
+ * After this many failed attempts, the intent fails terminally. With the
+ * backoff below, the retries span about an hour, so a provider outage or a
+ * channel restart shorter than that still delivers the reply.
+ */
+export const CHILD_REPLY_MAX_ATTEMPTS = 20;
 const RETRY_BASE_MS = 1_000;
 const RETRY_CAP_MS = 5 * 60_000;
 /** First check interval while the parent update is admitted or runs. */

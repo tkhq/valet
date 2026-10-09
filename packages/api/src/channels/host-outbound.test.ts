@@ -40,6 +40,7 @@ import { wireAttentionRouter } from "../orchestrator/attention-wiring.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
 import { ChannelHost, type ChannelHostDeps } from "./host.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
+import { CHILD_REPLY_MAX_ATTEMPTS, childReplyRetryDelayMs } from "./child-replies.js";
 
 const ORG_ID = "local-org";
 const USER_ID = "local-user";
@@ -982,13 +983,13 @@ describe("ChannelHost outbound delivery", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       const delays: number[] = [];
-      for (let attempt = 1; attempt <= 10; attempt++) {
+      for (let attempt = 1; attempt <= CHILD_REPLY_MAX_ATTEMPTS; attempt++) {
         await timed.retryChildReplies();
         const after = await row();
         expect(after.attempts).toBe(attempt);
         expect(after.lastError).toContain("Slack is unavailable");
         expect(after.completedAt).toBeNull();
-        if (attempt < 10) {
+        if (attempt < CHILD_REPLY_MAX_ATTEMPTS) {
           expect(after.failedAt).toBeNull();
           delays.push(after.nextAttemptAt - clock.now);
           // Not yet due: a pass before the backoff ends sends nothing.
@@ -998,7 +999,7 @@ describe("ChannelHost outbound delivery", () => {
           clock.now = after.nextAttemptAt;
         }
       }
-      expect(delays).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000]);
+      expect(delays).toEqual(Array.from({ length: CHILD_REPLY_MAX_ATTEMPTS - 1 }, (_, index) => childReplyRetryDelayMs(index + 1)));
       const terminal = await row();
       expect(terminal.failedAt).toBe(clock.now);
       const drops = await testDb.appDb.select().from(eventDropLog).where(eq(eventDropLog.reason, "child_reply_failed"));
@@ -1008,7 +1009,7 @@ describe("ChannelHost outbound delivery", () => {
 
       clock.now += 24 * 60 * 60_000;
       await timed.retryChildReplies();
-      expect(send).toHaveBeenCalledTimes(10);
+      expect(send).toHaveBeenCalledTimes(CHILD_REPLY_MAX_ATTEMPTS);
       expect(fakeTransport.sent).toHaveLength(0);
     } finally {
       await timed.stop();

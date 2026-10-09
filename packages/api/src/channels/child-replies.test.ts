@@ -9,8 +9,8 @@ describe("childReplyRetryDelayMs", () => {
     ]);
   });
 
-  it("gives up after roughly eight and a half minutes of retries", () => {
+  it("keeps retrying for about an hour, longer than a typical provider incident", () => {
     const waits = Array.from({ length: CHILD_REPLY_MAX_ATTEMPTS - 1 }, (_, index) => childReplyRetryDelayMs(index + 1));
-    expect(waits.reduce((total, wait) => total + wait, 0)).toBe(511_000);
+    expect(waits.reduce((total, wait) => total + wait, 0)).toBe(3_511_000);
   });
 });

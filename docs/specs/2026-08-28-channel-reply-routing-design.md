@@ -378,9 +378,11 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   is a failed attempt. Each failed attempt records `attempts` and
   `last_error`, logs the intent ID, and increments the
   `valet.channels.child_reply.failures` counter. The next attempt waits one
-  second, doubling to a five-minute cap. After ten failed attempts, about 8.5
-  minutes, the dispatcher sets `failed_at` and writes a `child_reply_failed`
-  problem row in one transaction. It does not try again. A successful send
+  second, doubling to a five-minute cap. After 20 failed attempts, which
+  span about one hour, the dispatcher sets `failed_at` and writes a
+  `child_reply_failed` problem row in one transaction. It does not try
+  again. A provider outage or channel restart longer than one hour needs a
+  person to ask the agent to post the result again. A successful send
   completes the intent and clears `last_error`. The dispatcher deletes
   completed intents after seven days and failed intents after 30 days, at
   most once per hour. An explicit reply or an
