@@ -76,6 +76,7 @@ import type {
   ExecResult,
   GatewayEndpoint,
   JobPoll,
+  JobPollOpts,
   Sandbox,
   SandboxCapabilities,
   SandboxCommandChannel,
@@ -108,6 +109,7 @@ import {
   deleteSandbox,
   EVICTION_PROTECT_ANNOTATION,
   getSandbox,
+  readResourceOverridesAnnotation,
   imageFingerprint,
   LEASED_LABEL,
   listSandboxMetadata,
@@ -137,7 +139,7 @@ import {
   SESSION_LABEL_KEY,
   NEVER_READY_OWNER_ANNOTATION_KEY,
 } from "./manifest.js";
-import type { K8sProviderConfig } from "./types.js";
+import type { K8sProviderConfig, SandboxCRRead } from "./types.js";
 import { deleteRuntimeState, ensureRuntimeState, listRuntimeStateOwners, RUNTIME_STATE_ANNOTATION, type RuntimeStateApi } from "./runtime-state.js";
 import {
   growWorkspacePvc,
@@ -711,10 +713,10 @@ export class KubernetesSandbox implements Sandbox {
     }
   }
 
-  async pollJob(execId: string, offset: number): Promise<JobPoll> {
+  async pollJob(execId: string, offset: number, opts?: JobPollOpts): Promise<JobPoll> {
     assertSafeExecId(execId);
     return this.withJobPod(execId, async ({ podName, uid }) => {
-      const poll = await pollJobInPod(this.execDeps(), podName, execId, offset);
+      const poll = await pollJobInPod(this.execDeps(), podName, execId, offset, opts);
       if (poll.status === "done") await this.checkExitForDeath(podName, uid, poll.exitCode);
       if (poll.status !== "running") this.jobPods.delete(execId);
       return poll;
@@ -951,6 +953,19 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         });
         throw error;
       }
+    }
+
+    // A leased session's live pod must survive a cold re-attach (spec
+    // INV-8). Skip the CR update and every roll, and wait for readiness
+    // with no expectations: `waitReady` deletes a pod that does not match
+    // them. The change lands after the lease releases.
+    if (opts.preserveLivePod && previous && previous.spec.operatingMode !== "Suspended" && await this.hasLivePod(name)) {
+      console.log(`k8s sandbox ${name}: keeping the live pod unchanged while a lease is active`);
+      await this.waitReady(name);
+      const kept = this.sandboxFromCr(name, previous);
+      kept.adopted = true;
+      kept.resourceOverrides = readResourceOverridesAnnotation(previous);
+      return kept;
     }
 
     // `adopted` decides cleanup for ordinary startup failures below. A CR
@@ -1192,6 +1207,17 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     if (cr === null) {
       throw new Error(`KubernetesSandboxProvider.restore: Sandbox CR "${id}" not found`);
     }
+    return this.sandboxFromCr(id, cr);
+  }
+
+  /** True when the CR's backing pod exists. */
+  private async hasLivePod(name: string): Promise<boolean> {
+    const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name);
+    return podName !== null && (await this.deps.livenessApi.getPodUid(this.cfg.namespace, podName)) !== null;
+  }
+
+  /** A handle shaped by the CR's persisted labels, not by create options. */
+  private sandboxFromCr(id: string, cr: SandboxCRRead): KubernetesSandbox {
     // Either persisted browser marker requires the protected workload identity.
     const browser = Boolean(
       cr.metadata.annotations?.[RUNTIME_STATE_ANNOTATION] ||

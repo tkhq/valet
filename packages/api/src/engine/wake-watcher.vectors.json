@@ -597,5 +597,137 @@
       ],
       "releaseLease": "owner_ended"
     }
+  },
+  {
+    "name": "process_probe_error_before_deadline",
+    "now": 4000,
+    "row": {
+      "id": "wk_013",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "process",
+      "status": "running",
+      "reason": "soak",
+      "command": "run soak",
+      "execId": "exec13",
+      "leaseId": "ls_13",
+      "deadlineAt": 5000,
+      "logOffset": 7,
+      "logTail": "last line\n",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": {
+      "kind": "error"
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120
+    },
+    "expected": null
+  },
+  {
+    "name": "process_probe_error_past_deadline",
+    "now": 5000,
+    "row": {
+      "id": "wk_014",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "process",
+      "status": "running",
+      "reason": "soak",
+      "command": "run soak",
+      "execId": "exec14",
+      "leaseId": "ls_14",
+      "deadlineAt": 5000,
+      "logOffset": 7,
+      "logTail": "last line\n",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": {
+      "kind": "error"
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120
+    },
+    "expected": {
+      "to": "expired",
+      "cause": "deadline",
+      "kill": true,
+      "patch": {
+        "cause": "deadline",
+        "endedAt": 5000
+      },
+      "signals": [
+        {
+          "signalType": "process.exited",
+          "body": "last line\n",
+          "attributes": {
+            "wakeupId": "wk_014",
+            "kind": "process",
+            "reason": "soak",
+            "cause": "deadline",
+            "durationSeconds": "5",
+            "logPath": "/tmp/valet-jobs/exec14.out"
+          },
+          "dispatchId": "wakeup:wk_014:terminal"
+        }
+      ],
+      "releaseLease": "deadline"
+    }
+  },
+  {
+    "name": "watch_probe_error_past_deadline",
+    "now": 6000,
+    "row": {
+      "id": "wk_015",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "watch",
+      "status": "running",
+      "reason": "soak",
+      "command": "tail -f x",
+      "execId": "exec15",
+      "leaseId": "ls_15",
+      "deadlineAt": 5000,
+      "logOffset": 7,
+      "logTail": "last line\n",
+      "eventCount": 4,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": {
+      "kind": "error"
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120
+    },
+    "expected": {
+      "to": "expired",
+      "cause": "deadline",
+      "kill": true,
+      "patch": {
+        "cause": "deadline",
+        "endedAt": 6000
+      },
+      "signals": [
+        {
+          "signalType": "watch.exited",
+          "body": "last line\n",
+          "attributes": {
+            "wakeupId": "wk_015",
+            "kind": "watch",
+            "reason": "soak",
+            "cause": "deadline",
+            "durationSeconds": "6",
+            "logPath": "/tmp/valet-jobs/exec15.out"
+          },
+          "dispatchId": "wakeup:wk_015:terminal"
+        }
+      ],
+      "releaseLease": "deadline"
+    }
   }
 ]

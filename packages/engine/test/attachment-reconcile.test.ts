@@ -36,6 +36,7 @@ class RecordingProvider implements SandboxProvider {
   createWorkspaceStorage: (string | undefined)[] = [];
   preserveResourcesOnAdopt: boolean[] = [];
   preserveResourceFieldsOnAdopt: SandboxCreateOpts["preserveResourceFieldsOnAdopt"][] = [];
+  preserveLivePod: boolean[] = [];
   destroyCalls: string[] = [];
   releaseCalls: string[] = [];
   suspendCalls: string[] = [];
@@ -100,12 +101,14 @@ class RecordingProvider implements SandboxProvider {
     this.createWorkspaceStorage.push(opts.workspaceStorage);
     this.preserveResourcesOnAdopt.push(opts.preserveResourcesOnAdopt === true);
     this.preserveResourceFieldsOnAdopt.push(opts.preserveResourceFieldsOnAdopt);
+    this.preserveLivePod.push(opts.preserveLivePod === true);
     const preservesOnAdopt = opts.preserveResourcesOnAdopt ||
       (opts.preserveResourceFieldsOnAdopt?.length ?? 0) > 0;
-    if (this.adopt && preservesOnAdopt && this.rollAdoptedImage) {
+    if (this.adopt && preservesOnAdopt && this.rollAdoptedImage && !opts.preserveLivePod) {
       this.resourceOverrides = await opts.readResourceOverrides?.(this.adopt) ?? null;
     }
-    const sb = this.adopt && preservesOnAdopt && !this.rollAdoptedImage
+    // preserveLivePod: a real provider keeps the live pod and its template.
+    const sb = this.adopt && (opts.preserveLivePod || (preservesOnAdopt && !this.rollAdoptedImage))
       ? this.adopt
       : new VirtualSandbox(`sb-${this.nextId++}`);
     Object.assign(sb, { resourceOverrides: this.resourceOverrides, adopted: this.adopt !== undefined });
@@ -753,6 +756,56 @@ describe("SandboxAttachment.reconcile", () => {
     expect(att.observedImage()).toBe("img:v1");
     expect(warnSpy).toHaveBeenCalledWith("sandbox sb-1: deferring image/resource change while a lease is active");
     warnSpy.mockRestore();
+  });
+
+  it("a cold attachment adopts a leased pod without rolling it, then replaces after the lease releases (INV-8)", async () => {
+    // An api restart rebuilt the session: the attachment is fresh, the live
+    // pod runs img:v1, and the desired spec moved to img:v2 with new resources.
+    const adopted = new VirtualSandbox("sb-live");
+    const liveResources = { cpu: 2, memory: "4Gi" };
+    await adopted.writeFile("/etc/valet/applied.json", JSON.stringify({
+      image: "img:v1", specHash: "h1", steps: { s1: "sh1" }, resources: liveResources,
+    }));
+    // rollAdoptedImage: without preserveLivePod this provider would replace the pod.
+    const provider = new RecordingProvider({ adopt: adopted, rollAdoptedImage: true, release: true });
+    const fake = new FakeSpecProvider({
+      image: "img:v2", specHash: "h2", resources: { cpu: 4, memory: "8Gi" }, steps: [step("s1", "sh1")],
+    });
+    let leased = true;
+    const att = new SandboxAttachment(provider, { image: "img:v2" }, fake.provider(), undefined, async () => leased);
+    await att.ensureReady({ timeoutMs: 5000 });
+
+    expect(provider.preserveLivePod).toEqual([true]);
+    expect(att.current()).toBe(adopted);
+    expect(att.state).toBe("ready");
+    // The applied state still names the live image and resources, so the
+    // deferred change stays visible to the next reconcile.
+    const state = await readAppliedState(adopted);
+    expect(state?.image).toBe("img:v1");
+    expect(state?.resources).toEqual(liveResources);
+    expect(att.observedImage()).toBe("img:v1");
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await att.reconcile();
+    warnSpy.mockRestore();
+    expect(att.current()).toBe(adopted);
+    expect(att.currentEpoch()).toBe(1);
+
+    leased = false;
+    await att.reconcile();
+    await att.ensureReady({ timeoutMs: 5000 });
+    expect(att.currentEpoch()).toBe(2);
+    expect(provider.createImages.at(-1)).toBe("img:v2");
+    expect(provider.preserveLivePod.at(-1)).toBe(false);
+    expect(att.observedImage()).toBe("img:v2");
+  });
+
+  it("a cold attachment with no lease does not ask the provider to keep the live pod", async () => {
+    const provider = new RecordingProvider();
+    const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: [] });
+    const att = new SandboxAttachment(provider, { image: "img:v1" }, fake.provider(), undefined, async () => false);
+    await att.ensureReady({ timeoutMs: 5000 });
+    expect(provider.preserveLivePod).toEqual([false]);
   });
 
   it("an unleased sandbox still replaces on image drift when isLeased is wired", async () => {

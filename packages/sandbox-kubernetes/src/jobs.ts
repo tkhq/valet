@@ -83,7 +83,7 @@
  * whole group death was somehow otherwise observed, which for SIGKILL never
  * comes). See `jobKickoffCommand`'s capped branch for the fifo wiring.
  */
-import type { ExecJobHandle, ExecOpts, JobPoll } from "@valet/engine";
+import type { ExecJobHandle, ExecOpts, JobPoll, JobPollOpts } from "@valet/engine";
 import { buildShellCommand, execInPod, JOBS_DIR, shQuote, type ExecDeps } from "./exec.js";
 
 function jobOutPath(execId: string): string {
@@ -94,6 +94,11 @@ function jobExitPath(execId: string): string {
 }
 function jobPidPath(execId: string): string {
   return `${JOBS_DIR}/${execId}.pid`;
+}
+/** Marker the image start scripts write for a job that a container restart
+ * killed (docker/start-headless.sh, docker/start-full.sh). */
+function jobDeadPath(execId: string): string {
+  return `${JOBS_DIR}/${execId}.dead`;
 }
 function jobFifoPath(execId: string): string {
   return `${JOBS_DIR}/${execId}.fifo`;
@@ -256,19 +261,51 @@ export function jobKickoffCommand(execId: string, innerCommand: string, maxOutpu
  * poll script's stdio is entirely separate from the job's own captured
  * `.out` file content — it's a fresh exec, not the job process itself.
  */
-export function pollCommand(execId: string, offset: number): string {
-  const outFile = jobOutPath(execId);
-  const exitFile = jobExitPath(execId);
+export function pollCommand(execId: string, offset: number, opts: JobPollOpts = {}): string {
+  const outFile = shQuote(jobOutPath(execId));
+  const exitFile = shQuote(jobExitPath(execId));
+  const pidFile = shQuote(jobPidPath(execId));
+  const deadFile = shQuote(jobDeadPath(execId));
   const tailFrom = offset + 1;
+  const maxBytes = opts.maxBytes === undefined ? undefined : Math.max(0, Math.floor(opts.maxBytes));
+  // Status is read BEFORE the output: a job whose `.exit` exists has written
+  // all of its output, so the bytes read next are complete.
+  //
+  // No `.exit` and a pid group that no longer exists means the job died
+  // without its wrapper writing `.exit`, for example when a container
+  // restart killed it but `/scratch` kept the files. The one-second recheck
+  // covers the short gap between the job's exit and the wrapper's `.exit`
+  // write. A `.dead` marker from the start scripts covers pid reuse after a
+  // restart (spec B4).
+  const status =
+    `if [ -f ${exitFile} ]; then st=$(cat ${exitFile}); ` +
+    `elif [ -f ${deadFile} ]; then st=dead; ` +
+    `elif [ -f ${pidFile} ] && ! kill -0 -"$(cat ${pidFile})" 2>/dev/null; then ` +
+    `sleep 1; if [ -f ${exitFile} ]; then st=$(cat ${exitFile}); else st=dead; fi; ` +
+    `else st=running; fi; `;
+  let read: string;
+  if (maxBytes === undefined) {
+    read = `tail -c +${tailFrom} ${outFile} | base64 -w0; echo "$st" 1>&2`;
+  } else if (opts.tail) {
+    // The size is read once, so the bytes returned and the end offset agree
+    // even while the job keeps writing.
+    read =
+      `size=$(wc -c < ${outFile}); ` +
+      `head -c $size ${outFile} | tail -c +${tailFrom} | tail -c ${maxBytes} | base64 -w0; ` +
+      `echo "$st" 1>&2; echo $size 1>&2`;
+  } else {
+    // One byte past the cap tells the caller that more output remains.
+    read = `tail -c +${tailFrom} ${outFile} | head -c ${maxBytes + 1} | base64 -w0; echo "$st" 1>&2`;
+  }
   return (
     // Absent .out file means this execId was never started here (or the
     // pod lost /tmp — recreated out from under a tracked job) — a distinct
     // "unknown" stderr marker so pollJobInPod can report the engine's
     // Map-miss-equivalent "failed" shape instead of misreading it as
     // "running" or trying to parse an empty exit code.
-    `if [ ! -f ${shQuote(outFile)} ]; then echo unknown 1>&2; exit 0; fi; ` +
-    `tail -c +${tailFrom} ${shQuote(outFile)} | base64 -w0; ` +
-    `if [ -f ${shQuote(exitFile)} ]; then cat ${shQuote(exitFile)} 1>&2; else echo running 1>&2; fi`
+    `if [ ! -f ${outFile} ]; then echo unknown 1>&2; exit 0; fi; ` +
+    status +
+    read
   );
 }
 
@@ -332,7 +369,8 @@ export async function execJobInPod(
  * testing without a cluster. */
 export function parseJobStatus(statusText: string): { status: "running" | "done" | "failed"; exitCode?: number } {
   const trimmed = statusText.trim();
-  if (trimmed === "unknown") return { status: "failed" };
+  // `dead`: the job's process group is gone and it wrote no exit code.
+  if (trimmed === "unknown" || trimmed === "dead") return { status: "failed" };
   if (trimmed === "running") return { status: "running" };
   const exitCode = Number(trimmed);
   if (!/^\d+$/.test(trimmed) || exitCode > 255) {
@@ -417,18 +455,49 @@ export function decodeUtf8HoldingTail(buf: Buffer): { text: string; deliveredByt
  * *valid* UTF-8 is exactly what this function fixes and is no longer a
  * source of corruption).
  */
-export async function pollJobInPod(deps: ExecDeps, podName: string, execId: string, offset: number): Promise<JobPoll> {
-  const result = await execInPod(deps, podName, pollCommand(execId, offset));
+export async function pollJobInPod(
+  deps: ExecDeps,
+  podName: string,
+  execId: string,
+  offset: number,
+  opts: JobPollOpts = {},
+): Promise<JobPoll> {
+  const result = await execInPod(deps, podName, pollCommand(execId, offset, opts));
   if (result.exitCode !== 0) {
     throw new Error(`pollJob failed (exit ${result.exitCode}): ${result.stderr.trim() || "no diagnostic output"}. Check the sandbox pod status before retrying.`);
   }
-  const { status, exitCode } = parseJobStatus(result.stderr);
-  if (status === "failed") {
+  const [statusLine = "", sizeLine] = result.stderr.trim().split("\n");
+  const { status, exitCode } = parseJobStatus(statusLine);
+  if (statusLine.trim() === "unknown") {
     return { status, output: "", nextOffset: offset };
   }
-  const fetched = Buffer.from(result.stdout.trim(), "base64");
+  let fetched = Buffer.from(result.stdout.trim(), "base64");
+  const maxBytes = opts.maxBytes === undefined ? undefined : Math.max(0, Math.floor(opts.maxBytes));
+  if (maxBytes !== undefined && opts.tail) {
+    const size = Number(sizeLine?.trim());
+    if (!Number.isInteger(size) || size < 0) {
+      throw new Error(`pollJob: unexpected log size ${JSON.stringify(sizeLine)}. Check the sandbox pod status before retrying.`);
+    }
+    // A cut start can land inside a codepoint. Drop its continuation bytes.
+    if (size - offset > fetched.length) {
+      let skipped = 0;
+      while (skipped < fetched.length && skipped < 3 && ((fetched[skipped] ?? 0) & 0xc0) === 0x80) skipped++;
+      fetched = fetched.subarray(skipped);
+    }
+    const { text, deliveredBytes } = decodeUtf8HoldingTail(fetched);
+    const nextOffset = Math.max(offset, size - (fetched.length - deliveredBytes));
+    return { status, ...(exitCode !== undefined ? { exitCode } : {}), output: text, nextOffset };
+  }
+  let more = false;
+  if (maxBytes !== undefined && fetched.length > maxBytes) {
+    more = true;
+    fetched = fetched.subarray(0, maxBytes);
+  }
   const { text, deliveredBytes } = decodeUtf8HoldingTail(fetched);
   const nextOffset = offset + deliveredBytes;
+  // Bytes left past the cap keep the job "running" for this caller, so it
+  // polls again from nextOffset before it sees the exit.
+  if (more) return { status: "running", output: text, nextOffset };
   return { status, exitCode, output: text, nextOffset };
 }
 

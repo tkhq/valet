@@ -110,6 +110,7 @@ export {
   recordToolExecution,
   recordTurn,
   recordWakeupEnded,
+  recordWakeupSignalLost,
   recordWakeupsActive,
   type SandboxDestroyReason,
   type SandboxFlagKind,

@@ -11,7 +11,7 @@
  * cluster gate.
  */
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -20,8 +20,9 @@ import {
   jobKickoffCommand,
   parseJobStatus,
   pollCommand,
+  pollJobInPod,
 } from "../src/jobs.js";
-import { JOBS_DIR } from "../src/exec.js";
+import { JOBS_DIR, type ExecDeps, type ExecStatus, type PodExecApi, type PodExecSocket } from "../src/exec.js";
 
 function sh(command: string): { stdout: string; stderr: string; status: number | null } {
   const r = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8" });
@@ -344,4 +345,122 @@ describe.skipIf(!hasSetsid || !hasBase64W0)("job-mode shell protocol against a r
     expect(status.status).toBe("done");
     expect(status.exitCode).not.toBe(0);
   }, 10_000);
+});
+
+/** Runs `execInPod`'s composed command on the local `/bin/sh`, so
+ * `pollJobInPod` parses real shell output without a cluster. */
+class LocalShellPodExecApi implements PodExecApi {
+  async exec(
+    _namespace: string,
+    _podName: string,
+    _containerName: string,
+    command: string[],
+    stdout: NodeJS.WritableStream | null,
+    stderr: NodeJS.WritableStream | null,
+    _stdin: NodeJS.ReadableStream | null,
+    _tty: boolean,
+    statusCallback?: (status: ExecStatus) => void,
+  ): Promise<PodExecSocket> {
+    const [file = "/bin/sh", ...args] = command;
+    const r = spawnSync(file, args, { encoding: "utf8" });
+    stdout?.write(r.stdout);
+    stderr?.write(r.stderr);
+    statusCallback?.(
+      r.status === 0
+        ? { status: "Success" }
+        : { status: "Failure", details: { causes: [{ reason: "ExitCode", message: String(r.status) }] } },
+    );
+    return { close: () => {} };
+  }
+}
+
+const localDeps: ExecDeps = { api: new LocalShellPodExecApi(), namespace: "ns", containerName: "sandbox" };
+
+/** A process group id that no longer exists: a finished child's own pid. */
+function deadPgid(): number {
+  return Number(sh("sh -c 'echo $$'").stdout.trim());
+}
+
+/** `pollJobInPod` trims stdout before it decodes, so a `base64 -w0` that
+ * adds a trailing newline (FreeBSD, macOS) still works for these tests. */
+const hasBase64W0Trimmed = spawnSync("/bin/sh", ["-c", "printf ab | base64 -w0"], { encoding: "utf8" }).stdout.trim() === "YWI=";
+
+describe.skipIf(!hasBase64W0Trimmed)("pollJobInPod: dead-process detection and read bounds (spec B4)", () => {
+  afterEach(async () => {
+    for (const id of execIds) await rm(`${JOBS_DIR}/${id}.dead`, { force: true });
+  });
+
+  it("reports failed with no exit code when the pid group is gone and no .exit exists", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    await writeFile(`${JOBS_DIR}/${execId}.out`, "partial\n");
+    await writeFile(`${JOBS_DIR}/${execId}.pid`, `${deadPgid()}\n`);
+    const poll = await pollJobInPod(localDeps, "pod-1", execId, 0);
+    expect(poll.status).toBe("failed");
+    expect(poll.exitCode).toBeUndefined();
+    expect(poll.output).toBe("partial\n");
+  }, 10_000);
+
+  it("reports failed for a job the start script marked dead, even with a live pid", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    const child = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+    try {
+      await writeFile(`${JOBS_DIR}/${execId}.out`, "");
+      // A live group stands in for a pid that a new container reused.
+      await writeFile(`${JOBS_DIR}/${execId}.pid`, `${child.pid}\n`);
+      await writeFile(`${JOBS_DIR}/${execId}.dead`, "");
+      const poll = await pollJobInPod(localDeps, "pod-1", execId, 0);
+      expect(poll.status).toBe("failed");
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  it("reports running while the pid group is alive", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    const child = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+    try {
+      await writeFile(`${JOBS_DIR}/${execId}.out`, "");
+      await writeFile(`${JOBS_DIR}/${execId}.pid`, `${child.pid}\n`);
+      const poll = await pollJobInPod(localDeps, "pod-1", execId, 0);
+      expect(poll.status).toBe("running");
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  it("caps a forward read at maxBytes and stays running until the rest is read", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    await writeFile(`${JOBS_DIR}/${execId}.out`, "0123456789");
+    await writeFile(`${JOBS_DIR}/${execId}.exit`, "0\n");
+    const first = await pollJobInPod(localDeps, "pod-1", execId, 0, { maxBytes: 4 });
+    expect(first).toEqual({ status: "running", output: "0123", nextOffset: 4 });
+    const last = await pollJobInPod(localDeps, "pod-1", execId, 8, { maxBytes: 4 });
+    expect(last).toEqual({ status: "done", exitCode: 0, output: "89", nextOffset: 10 });
+  });
+
+  it("reads only the tail in tail mode and moves nextOffset to the end", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    await writeFile(`${JOBS_DIR}/${execId}.out`, "0123456789");
+    await writeFile(`${JOBS_DIR}/${execId}.exit`, "3\n");
+    const poll = await pollJobInPod(localDeps, "pod-1", execId, 2, { maxBytes: 3, tail: true });
+    expect(poll).toEqual({ status: "done", exitCode: 3, output: "789", nextOffset: 10 });
+    const short = await pollJobInPod(localDeps, "pod-1", execId, 8, { maxBytes: 3, tail: true });
+    expect(short).toEqual({ status: "done", exitCode: 3, output: "89", nextOffset: 10 });
+  });
+
+  it("drops a cut codepoint's continuation bytes at the start of a tail read", async () => {
+    const execId = newExecId();
+    await mkdir(JOBS_DIR, { recursive: true });
+    // "€" is 3 bytes. The last 4 bytes start inside it.
+    await writeFile(`${JOBS_DIR}/${execId}.out`, "ab€cde");
+    await writeFile(`${JOBS_DIR}/${execId}.exit`, "0\n");
+    const poll = await pollJobInPod(localDeps, "pod-1", execId, 0, { maxBytes: 4, tail: true });
+    expect(poll.output).toBe("cde");
+    expect(poll.nextOffset).toBe(Buffer.byteLength("ab€cde"));
+  });
 });

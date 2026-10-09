@@ -12,6 +12,12 @@ if [ -d /scratch ]; then
   chmod 1777 /scratch/tmp
   # Background process logs live on scratch when it exists (spec B4).
   ln -sfn /scratch/valet-jobs /tmp/valet-jobs
+  # A container restart killed every job, but /scratch kept its files. Mark
+  # each job with no exit code dead, so a poll does not trust a reused pid.
+  for pidfile in /scratch/valet-jobs/*.pid; do
+    [ -e "$pidfile" ] || continue
+    [ -e "${pidfile%.pid}.exit" ] || : > "${pidfile%.pid}.dead"
+  done
 fi
 if [ "${VALET_BROWSER_VIEWER:-0}" = 1 ]; then exec node /gateway/dist/bin.js; fi
 exec tail -f /dev/null

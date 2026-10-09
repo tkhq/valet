@@ -1,18 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
-import { InMemorySessionStore, recordWakeupEnded, SandboxUnavailableError } from "@valet/engine";
-import type { ExecResult, JobPoll, Lease, PromptContent, PromptOptions, Sandbox, Wakeup } from "@valet/engine";
-vi.mock("@valet/engine", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@valet/engine")>();
-  return { ...actual, recordWakeupEnded: vi.fn() };
-});
-
+import { InMemorySessionStore, SandboxSupersededError, SandboxUnavailableError } from "@valet/engine";
+import type {
+  ExecResult,
+  JobPoll,
+  JobPollOpts,
+  Lease,
+  PromptContent,
+  PromptOptions,
+  Sandbox,
+  Wakeup,
+  WakeupCause,
+  WakeupKind,
+} from "@valet/engine";
 import { WakeWatcher, type WakeWatcherDeps, type WakeWatcherSession } from "./wake-watcher.js";
 
 const NOW = 1_700_000_000_000;
 const HOUR = 3_600_000;
 const LIMITS = { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 };
 
-type PollScript = (execId: string, offset: number) => Promise<JobPoll>;
+type PollScript = (execId: string, offset: number, opts?: JobPollOpts) => Promise<JobPoll>;
 
 function fakeSandbox(id: string, pollJob: PollScript, cancelJob = vi.fn(async (_execId: string) => {})): Sandbox {
   const unused = async (): Promise<never> => {
@@ -44,7 +50,10 @@ interface Harness {
   listEvictionProtected: ReturnType<typeof vi.fn<() => Promise<string[]>>>;
   cancelJob: ReturnType<typeof vi.fn<(execId: string) => Promise<void>>>;
   sessionFor: ReturnType<typeof vi.fn<(sessionId: string) => Promise<WakeWatcherSession>>>;
-  watcher(): WakeWatcher;
+  wakeupEnded: ReturnType<typeof vi.fn<(kind: WakeupKind, cause: WakeupCause) => void>>;
+  signalLost: ReturnType<typeof vi.fn<(kind: WakeupKind | "hold") => void>>;
+  leasesUnannotated: ReturnType<typeof vi.fn<(count: number) => void>>;
+  watcher(extra?: Pick<WakeWatcherDeps, "batchSize">): WakeWatcher;
 }
 
 function harness(poll: PollScript = async () => ({ status: "running", output: "", nextOffset: 0 })): Harness {
@@ -61,12 +70,19 @@ function harness(poll: PollScript = async () => ({ status: "running", output: ""
     attachment: { current: () => null },
   };
   const sessionFor = vi.fn(async (_sessionId: string) => session);
+  // Injected spies, not a module mock: the unit project runs with
+  // isolate: false, so a vi.mock of @valet/engine can miss a wake-watcher
+  // module another test file already loaded.
+  const wakeupEnded = vi.fn((_kind: WakeupKind, _cause: WakeupCause) => {});
+  const signalLost = vi.fn((_kind: WakeupKind | "hold") => {});
+  const leasesUnannotated = vi.fn((_count: number) => {});
   const deps: WakeWatcherDeps = {
     engineStore: store,
     engineHost: { sessionFor, liveSession: () => null },
     loadSession: async (sessionId) => sessionFor(sessionId),
     provider: { restore, setEvictionProtection, listEvictionProtected },
     limits: LIMITS,
+    metrics: { wakeupEnded, signalLost, leasesUnannotated },
     now: () => NOW,
   };
   return {
@@ -78,7 +94,10 @@ function harness(poll: PollScript = async () => ({ status: "running", output: ""
     listEvictionProtected,
     cancelJob,
     sessionFor,
-    watcher: () => new WakeWatcher(deps),
+    wakeupEnded,
+    signalLost,
+    leasesUnannotated,
+    watcher: (extra = {}) => new WakeWatcher({ ...deps, ...extra }),
   };
 }
 
@@ -432,13 +451,12 @@ describe("WakeWatcher", () => {
     const h = harness(async () => ({ status: "done", exitCode: 0, output: "", nextOffset: 0 }));
     await seedProcess(h.store);
     vi.spyOn(h.store, "releaseLease").mockRejectedValueOnce(new Error("db blip"));
-    vi.mocked(recordWakeupEnded).mockClear();
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await expect(h.watcher().sweep()).resolves.toBeUndefined();
 
     expect(h.prompt).toHaveBeenCalledTimes(1);
-    expect(recordWakeupEnded).toHaveBeenCalledWith("process", "exit");
+    expect(h.wakeupEnded).toHaveBeenCalledWith("process", "exit");
     expect(error.mock.calls.some((c) => String(c[0]).includes("lease ls_a release failed after wakeup wk_a moved to done"))).toBe(true);
     expect(error.mock.calls.some((c) => String(c[0]).includes("stays due"))).toBe(false);
     error.mockRestore();
@@ -477,5 +495,131 @@ describe("WakeWatcher", () => {
       now: () => NOW,
     });
     await expect(watcher.sweep()).resolves.toBeUndefined();
+  });
+
+  describe("fix wave 1: rows never outlive their deadline (C2)", () => {
+    it("treats a kubernetes restore miss (CR not found) as unavailable", async () => {
+      const h = harness();
+      h.restore.mockRejectedValueOnce(new Error('KubernetesSandboxProvider.restore: Sandbox CR "sb-1" not found'));
+      await seedProcess(h.store);
+      await h.watcher().sweep();
+      expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "lost", cause: "sandbox_unavailable" });
+      expect(await h.store.countActiveLeases("sess-1")).toBe(0);
+    });
+
+    it("treats SandboxSupersededError as unavailable", async () => {
+      const h = harness(async () => {
+        throw new SandboxSupersededError(2);
+      });
+      await seedProcess(h.store);
+      await h.watcher().sweep();
+      expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "lost", cause: "sandbox_unavailable" });
+    });
+
+    it("expires a row whose probe keeps failing once its deadline passes", async () => {
+      const h = harness(async () => {
+        throw new Error("transient exec hiccup");
+      });
+      await seedProcess(h.store, { deadlineAt: NOW - 1 });
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      await h.watcher().sweep();
+      error.mockRestore();
+      expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "expired", cause: "deadline" });
+      expect(await h.store.countActiveLeases("sess-1")).toBe(0);
+      expect(h.wakeupEnded).toHaveBeenCalledWith("process", "deadline");
+    });
+
+    it("ends a row whose lease was released out of band as unavailable", async () => {
+      const h = harness();
+      await seedProcess(h.store);
+      await h.store.releaseLease("ls_a", "owner_ended", NOW - 1);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await h.watcher().sweep();
+      warn.mockRestore();
+      expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "lost", cause: "sandbox_unavailable" });
+      expect(h.restore).not.toHaveBeenCalled();
+    });
+
+    it("resolves a lease with no sandbox id from the session row and writes it back", async () => {
+      const h = harness(async () => ({ status: "done", exitCode: 0, output: "", nextOffset: 0 }));
+      await h.store.saveSession({
+        id: "sess-1",
+        owner: { type: "user", id: "u1" },
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/",
+        purpose: "interactive",
+        status: "running",
+        sandboxId: "sb-from-row",
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      await seedProcess(h.store, {}, { sandboxId: undefined });
+      await h.watcher().sweep();
+      expect(h.restore).toHaveBeenCalledWith("sb-from-row");
+      expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "done", cause: "exit" });
+    });
+
+    it("pages past a full batch of always-due rows so a newer timer still fires", async () => {
+      const h = harness();
+      for (const id of ["wk_1", "wk_2", "wk_3"]) {
+        await seedProcess(h.store, { id, leaseId: `ls_${id}`, execId: `exec-${id}`, createdAt: NOW - 90_000 }, { id: `ls_${id}`, ownerId: id });
+      }
+      await h.store.createWakeup(
+        wakeup({ id: "wk_t", kind: "timer", status: "pending", prompt: "ping", fireAt: NOW - 1, createdAt: NOW - 10, execId: undefined, leaseId: undefined, command: undefined }),
+      );
+      await h.watcher({ batchSize: 2 }).sweep();
+      expect(await h.store.getWakeup("wk_t")).toMatchObject({ status: "done", cause: "fired" });
+      expect(h.restore).toHaveBeenCalledTimes(3);
+    });
+
+    it("reads a process log tail and a watch log in bounded slices (I1)", async () => {
+      const seen: Array<JobPollOpts | undefined> = [];
+      const h = harness(async (_execId, _offset, opts) => {
+        seen.push(opts);
+        return { status: "running", output: "", nextOffset: 0 };
+      });
+      await seedProcess(h.store);
+      await seedProcess(h.store, { id: "wk_w", kind: "watch", leaseId: "ls_w", execId: "exec-w" }, { id: "ls_w", ownerKind: "watch", ownerId: "wk_w" });
+      await h.watcher().sweep();
+      expect(seen).toContainEqual({ maxBytes: 4096, tail: true });
+      expect(seen).toContainEqual({ maxBytes: 64 * 1024 });
+    });
+  });
+
+  describe("fix wave 1: metrics (I7, I8)", () => {
+    it("counts a lost signal when delivery fails after the CAS", async () => {
+      const h = harness();
+      h.prompt.mockRejectedValue(new Error("engine down"));
+      await h.store.createWakeup(
+        wakeup({ kind: "timer", status: "pending", prompt: "ping", fireAt: NOW - 1, execId: undefined, leaseId: undefined }),
+      );
+      await h.store.createLease(lease({ id: "ls_h", ownerKind: "hold", ownerId: undefined, deadlineAt: NOW - 1 }));
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      await h.watcher().sweep();
+      error.mockRestore();
+      expect(h.signalLost).toHaveBeenCalledWith("timer");
+      expect(h.signalLost).toHaveBeenCalledWith("hold");
+    });
+
+    it("counts a failed protection patch and a stale lease with no resolvable sandbox id as unannotated", async () => {
+      const h = harness();
+      h.setEvictionProtection.mockRejectedValue(new Error("pods patch forbidden"));
+      await seedProcess(h.store);
+      await h.store.createLease(
+        lease({ id: "ls_orphan", sessionId: "sess-gone", ownerKind: "hold", ownerId: undefined, sandboxId: undefined, createdAt: NOW - 10 * 60_000 }),
+      );
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      await h.watcher().sweep();
+      error.mockRestore();
+      expect(h.leasesUnannotated).toHaveBeenLastCalledWith(2);
+    });
+
+    it("does not count a fresh lease that has no sandbox id yet", async () => {
+      const h = harness();
+      await h.store.createLease(lease({ id: "ls_new", ownerKind: "hold", ownerId: undefined, sandboxId: undefined, createdAt: NOW - 1_000 }));
+      await h.watcher().sweep();
+      expect(h.leasesUnannotated).toHaveBeenLastCalledWith(0);
+    });
   });
 });
