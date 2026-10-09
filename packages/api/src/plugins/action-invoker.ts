@@ -507,8 +507,9 @@ async function computeResult(
       });
     }
     // A bare schema path ("/: must have required properties repo") names no
-    // fix. The caller can always read the tool's schema and send matching params.
-    return { ok: false, error: `Invalid params for ${policyActionId}: ${prepared.error}. Read the tool's parameter schema, then call it again with params that match.` };
+    // fix. Workflow nodes and external callers share this text, so the fix is
+    // worded for both: an agent changes its call, a person edits the node.
+    return { ok: false, error: `Invalid params for ${policyActionId}: ${prepared.error}. Change the params to match the tool's parameter schema.` };
   }
 
   const actionCtx = buildActionContext(req, ctx, credentials, action.id, opts.db);

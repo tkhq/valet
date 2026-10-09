@@ -202,7 +202,7 @@ describe("MCP tool broker", () => {
     const bad = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "demo.ping", params: { text: 7 } });
     expect(bad.data).toMatchObject({ tool_id: "demo.ping", status: "failed" });
     expect(bad.data.error).toContain("Invalid params for demo.ping: /text:");
-    expect(bad.data.error).toContain("Read the tool's parameter schema");
+    expect(bad.data.error).toContain("Change the params to match the tool's parameter schema.");
     expect(demo.calls["demo.ping"]).toBeUndefined();
   });
 

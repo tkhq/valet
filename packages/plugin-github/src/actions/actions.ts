@@ -129,77 +129,38 @@ function action<TParams extends TSchema>(parameters: TParams) {
   }): PluginAction<TParams> => ({ ...rest, parameters });
 }
 
-/** The repository fields `repoView` reads. The full and minimal GitHub
- * repository shapes both satisfy it, so one view serves get and list. */
-interface RepoFields {
-  id: number;
-  name: string;
-  full_name: string;
-  owner: { login: string; type?: string } | null;
-  private: boolean;
-  visibility?: string;
-  description: string | null;
-  fork: boolean;
-  html_url: string;
-  clone_url?: string;
-  ssh_url?: string;
-  homepage?: string | null;
-  default_branch?: string;
-  language?: string | null;
-  topics?: string[];
-  archived?: boolean;
-  disabled?: boolean;
-  is_template?: boolean;
-  stargazers_count?: number;
-  forks_count?: number;
-  open_issues_count?: number;
-  license?: { spdx_id: string | null } | null;
-  permissions?: Record<string, boolean>;
-  created_at?: string | null;
-  updated_at?: string | null;
-  pushed_at?: string | null;
-  parent?: { full_name: string; html_url: string };
-  source?: { full_name: string; html_url: string };
+/** Link fields a caller can use without a token. Every other `*_url` field is
+ * an API link template (`hooks_url`, `issues_url{/number}`) and is dropped. */
+const KEPT_REPO_URLS = new Set(["html_url", "clone_url", "ssh_url", "git_url", "svn_url", "mirror_url"]);
+
+/** Nested objects that shrink to their identity. A fork's `parent` and
+ * `source` are full repositories, each with its own owner and link templates. */
+const NESTED_ACCOUNT = new Set(["owner", "organization"]);
+const NESTED_REPO = new Set(["parent", "source", "template_repository"]);
+
+function pickFields(value: unknown, fields: readonly string[]): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => fields.includes(key)));
 }
 
 /**
- * A repository without GitHub's API link templates (`*_url`) or nested full
- * owner, parent, and source objects. The raw response is about 15,000
- * characters for a fork, most of it links a caller cannot follow without a
- * token. Field names match GitHub's, so a reader of the raw shape still
- * finds the fields it used.
+ * A repository without GitHub's API link templates. The raw response is about
+ * 15,000 characters for a fork, most of it `*_url` templates and full copies of
+ * the parent and source repositories. Every scalar setting (`allow_*`,
+ * `has_*`, `delete_branch_on_merge`, `size`) and every other field keeps its
+ * GitHub name and shape, so a reader of the raw response still finds it. Only
+ * the link templates go, and the nested owner and repositories shrink.
  */
-function repoView(repo: RepoFields) {
-  return {
-    id: repo.id,
-    name: repo.name,
-    full_name: repo.full_name,
-    owner: repo.owner ? { login: repo.owner.login, type: repo.owner.type } : null,
-    private: repo.private,
-    visibility: repo.visibility,
-    description: repo.description,
-    fork: repo.fork,
-    ...(repo.parent ? { parent: { full_name: repo.parent.full_name, html_url: repo.parent.html_url } } : {}),
-    ...(repo.source ? { source: { full_name: repo.source.full_name, html_url: repo.source.html_url } } : {}),
-    html_url: repo.html_url,
-    clone_url: repo.clone_url,
-    ssh_url: repo.ssh_url,
-    homepage: repo.homepage || undefined,
-    default_branch: repo.default_branch,
-    language: repo.language,
-    topics: repo.topics,
-    archived: repo.archived,
-    disabled: repo.disabled,
-    is_template: repo.is_template,
-    stargazers_count: repo.stargazers_count,
-    forks_count: repo.forks_count,
-    open_issues_count: repo.open_issues_count,
-    license: repo.license?.spdx_id ?? null,
-    permissions: repo.permissions,
-    created_at: repo.created_at,
-    updated_at: repo.updated_at,
-    pushed_at: repo.pushed_at,
-  };
+function repoView(repo: object): Record<string, unknown> {
+  const view: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(repo)) {
+    if (key.endsWith("_url") && !KEPT_REPO_URLS.has(key)) continue;
+    if (NESTED_ACCOUNT.has(key)) view[key] = pickFields(value, ["login", "id", "type"]);
+    else if (NESTED_REPO.has(key)) view[key] = pickFields(value, ["id", "full_name", "html_url", "default_branch"]);
+    else if (key === "license") view[key] = pickFields(value, ["key", "name", "spdx_id"]);
+    else view[key] = value;
+  }
+  return view;
 }
 
 // ─── Actions ────────────────────────────────────────────────────────────────

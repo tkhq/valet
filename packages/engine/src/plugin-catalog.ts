@@ -1276,7 +1276,9 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
     case "pending-approval":
       return { text: `denied: user did not approve ${toolId}` };
     case "invalid-args":
-      return { text: `invalid params for ${toolId}: ${outcome.error}` };
+      return {
+        text: `invalid params for ${toolId}: ${outcome.error}. Call list_tools (service: "${toolId.split(".")[0]}") to read its parameter schema, then call ${toolId} again with params that match.`,
+      };
     case "missing-credential":
       return {
         text: `${toolId} failed: credential ${outcome.service} not connected — Connect ${outcome.service} on the Integrations page (/integrations). After connecting, call list_tools (service: "${outcome.service}") to confirm — actions appear when the connection worked; otherwise this warning returns with the reason.`,

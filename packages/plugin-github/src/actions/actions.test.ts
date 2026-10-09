@@ -61,7 +61,7 @@ describe("github action base URL", () => {
 describe("github.get_repository result", () => {
   // A raw fork response was about 15,000 characters, mostly API link
   // templates and the full parent and source repositories.
-  it("drops API link templates and nested repositories but keeps GitHub field names", async () => {
+  it("drops API link templates and shrinks nested objects but keeps every setting", async () => {
     const owner = { login: "acme", type: "Organization", id: 1, url: "https://api.github.com/users/acme", repos_url: "https://api.github.com/users/acme/repos" };
     const parent = { full_name: "upstream/widgets", html_url: "https://github.com/upstream/widgets", owner, hooks_url: "https://api.github.com/repos/upstream/widgets/hooks" };
     useFixture({
@@ -70,7 +70,8 @@ describe("github.get_repository result", () => {
           id: 7, name: "widgets", full_name: "acme/widgets", owner, private: false, visibility: "public",
           description: "Widgets", fork: true, parent, source: parent,
           html_url: "https://github.com/acme/widgets", clone_url: "https://github.com/acme/widgets.git",
-          default_branch: "main", license: { key: "mit", spdx_id: "MIT", url: "https://api.github.com/licenses/mit" },
+          default_branch: "main", license: { key: "mit", name: "MIT License", spdx_id: "MIT", url: "https://api.github.com/licenses/mit", node_id: "L1" },
+          allow_merge_commit: false, allow_squash_merge: true, delete_branch_on_merge: true, has_issues: false, size: 640, node_id: "R1",
           permissions: { admin: false, push: true, pull: true },
           hooks_url: "https://api.github.com/repos/acme/widgets/hooks",
           issues_url: "https://api.github.com/repos/acme/widgets/issues{/number}",
@@ -84,13 +85,17 @@ describe("github.get_repository result", () => {
     if (!result.success) throw new Error("expected success");
     expect(result.data).toMatchObject({
       full_name: "acme/widgets",
-      owner: { login: "acme", type: "Organization" },
+      owner: { login: "acme", id: 1, type: "Organization" },
       parent: { full_name: "upstream/widgets", html_url: "https://github.com/upstream/widgets" },
       html_url: "https://github.com/acme/widgets",
+      clone_url: "https://github.com/acme/widgets.git",
       default_branch: "main",
-      license: "MIT",
+      license: { key: "mit", name: "MIT License", spdx_id: "MIT" },
       permissions: { push: true },
+      // Callers pick a merge method from these; merge_pull_request defaults to "merge".
+      allow_merge_commit: false, allow_squash_merge: true, delete_branch_on_merge: true, has_issues: false, size: 640, node_id: "R1",
     });
+    expect(result.data).not.toHaveProperty("hooks_url");
     const text = JSON.stringify(result.data);
     expect(text).not.toContain("api.github.com");
   });

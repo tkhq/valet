@@ -379,13 +379,17 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
         .filter((a) => !a.revoked)
         .filter((a) => !needle || a.path.toLowerCase().includes(needle) || a.title.toLowerCase().includes(needle))
         .sort((a, b) => b.updatedAt - a.updatedAt);
-      const shown = matched.slice(0, limit ?? 25);
+      const cap = limit ?? 25;
+      const shown = matched.slice(0, cap);
       return {
         artifacts: shown.map((a) => ({
           key: a.path, title: a.title, format: a.format, version: a.version, visibility: a.visibility, url: a.url,
           updated_at: new Date(a.updatedAt).toISOString(),
         })),
-        ...(matched.length > shown.length ? { more: `${matched.length - shown.length} more artifacts match. Set a query or a larger limit.` } : {}),
+        // No cursor: past the 100 cap, only a narrower query reaches later rows.
+        ...(matched.length > shown.length
+          ? { more: `${matched.length - shown.length} more artifacts match. Set a narrower query${cap < 100 ? " or a larger limit" : ""}.` }
+          : {}),
       };
     }, "Set a smaller limit or a query to see fewer artifacts."),
   );
