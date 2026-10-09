@@ -20,6 +20,7 @@ import type {
   SandboxStatus,
   PluginActionContext,
   SignalContent,
+  Wakeup,
 } from "@valet/engine";
 import { VirtualSandbox } from "@valet/engine";
 import { startGithubFixture } from "../test-helpers/github-fixture.js";
@@ -1283,20 +1284,23 @@ describe("ChildWatcher", () => {
     // past an already-cleared count.
     await new Promise((r) => setTimeout(r, 100));
 
-    // Real WakeWatcher ordering: release the lease first, and only admit
-    // the terminal signal as a later, separate step.
+    // Real WakeWatcher ordering: the row ends and the lease releases in one
+    // write, and the terminal signal is admitted as a later step.
+    await engineStore.createWakeup({
+      id: "wk_gap", sessionId: "child-leased-gap", threadId: childThread.id, kind: "process", status: "done",
+      reason: "long build", command: "make", execId: "job-gap-12345678", leaseId: "lease-leased-gap-1", cause: "exit",
+      exitCode: 0, logOffset: 0, logTail: "", eventCount: 0, createdAt: Date.now(), updatedAt: Date.now(), endedAt: Date.now(),
+    });
     await engineStore.releaseLease("lease-leased-gap-1", "owner_ended", Date.now());
 
     // Longer than leasePollMs (1ms), shorter than leaseSettleGraceMs
-    // (200ms). The admission lands inside the grace window, not at the
-    // instant the lease count reached 0.
+    // (200ms). The admission lands inside the grace window.
     await new Promise((r) => setTimeout(r, 50));
     const signalItemId = "qi-leased-gap-signal";
-    await engineStore.admitSubmission(
-      "child-leased-gap",
-      childThread.id,
-      queuedItem(signalItemId, childThread.id, "wakeup signal"),
-    );
+    await engineStore.admitSubmission("child-leased-gap", childThread.id, {
+      ...queuedItem(signalItemId, childThread.id, "wakeup signal"),
+      dispatchId: "wakeup:wk_gap:terminal",
+    });
 
     // The signal turn is still unsettled: child.settled must not fire yet.
     await new Promise((r) => setTimeout(r, 100));
@@ -1336,6 +1340,133 @@ describe("ChildWatcher", () => {
     const settled = settledSignals[0]?.content as SignalContent;
     expect(settled.attributes?.outcome).toBe("failed");
     expect(settled.body).toContain("post-exit turn: 3 tests failed");
+  });
+
+  describe("fix wave 2: settle on facts (B2, H6, H9)", () => {
+    /** A parent, a paused child whose watched turn already settled, and an armed watch. */
+    async function armedChild(name: string, overrides: Partial<ChildrenDeps> = {}) {
+      api = await bootTestApi();
+      const deps = childrenDeps(api, { leasePollMs: 1, leaseSettleGraceMs: 200, ...overrides });
+      const watcher = new ChildWatcher(deps);
+      const { engineHost, engineStore, db } = api.providers;
+      const parent = await engineHost.sessionFor(`parent-${name}`, { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+      const parentThread = parent.thread("web:default");
+      await parent.pause();
+      const child = await engineHost.childSessionFor(`child-${name}`, {
+        parentSessionId: `parent-${name}`,
+        parentThreadId: parentThread.id,
+        actorUserId: "local-user",
+        orgId: "local-org",
+        owner: { type: "user", id: "local-user" },
+        workspace: "/tmp",
+      });
+      const childThread = child.thread("web:default");
+      await child.pause();
+      const itemId = `qi-${name}-1`;
+      await engineStore.admitSubmission(`child-${name}`, childThread.id, queuedItem(itemId, childThread.id, "work"));
+      await engineStore.settleUnclaimed(`child-${name}`, childThread.id, itemId, { outcome: "completed" });
+      await db.insert(agentSessions).values({
+        id: `child-${name}`, userId: "local-user", orgId: "local-org", workspace: "/tmp", status: "active",
+        ownerType: "user", ownerId: "local-user", profile: "headless", createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      const watch = {
+        childSessionId: `child-${name}`, queueItemId: itemId, parentSessionId: `parent-${name}`,
+        parentThreadId: parentThread.id, actorUserId: "local-user", orgId: "local-org",
+      };
+      await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now() });
+      const settled = async () =>
+        (await db.select().from(childWatches).where(eq(childWatches.childSessionId, `child-${name}`)).limit(1))[0]?.settled === true;
+      const settledSignal = async () =>
+        (await engineStore.listUnsettledSubmissions(`parent-${name}`))
+          .map((i) => i.content)
+          .find((c): c is SignalContent => typeof c === "object" && c !== null && "kind" in c && c.kind === "signal" && c.signalType === "child.settled");
+      return { watcher, watch, engineStore, childThread, settled, settledSignal };
+    }
+
+    function terminalWakeup(sessionId: string, threadId: string, id: string, over: Partial<Wakeup> = {}): Wakeup {
+      const now = Date.now();
+      return {
+        id, sessionId, threadId, kind: "process", status: "done", reason: "build", command: "make", execId: "job-x-12345678",
+        cause: "exit", exitCode: 0, logOffset: 0, logTail: "", eventCount: 0, createdAt: now, updatedAt: now, endedAt: now, ...over,
+      };
+    }
+
+    it("waits for the signal turn of a process that ended during the first turn, with no lease seen (H9)", async () => {
+      const c = await armedChild("first-turn-exit");
+      await c.engineStore.createWakeup(terminalWakeup(c.watch.childSessionId, c.childThread.id, "wk_fast"));
+      const signalItem = "qi-first-turn-exit-signal";
+      await c.engineStore.admitSubmission(c.watch.childSessionId, c.childThread.id, {
+        ...queuedItem(signalItem, c.childThread.id, "process.exited"),
+        dispatchId: "wakeup:wk_fast:terminal",
+      });
+
+      c.watcher.arm(c.watch);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(await c.settled()).toBe(false);
+
+      await c.engineStore.settleUnclaimed(c.watch.childSessionId, c.childThread.id, signalItem, { outcome: "failed", error: "tests failed after exit" });
+      await waitFor(c.settled);
+      expect((await c.settledSignal())?.body).toContain("tests failed after exit");
+    });
+
+    it("holds the settle while a timer is pending, then reports the timer's turn (H6)", async () => {
+      const c = await armedChild("timer");
+      const fireAt = Date.now() + 60_000;
+      await c.engineStore.createWakeup({
+        id: "wk_timer", sessionId: c.watch.childSessionId, threadId: c.childThread.id, kind: "timer", status: "pending",
+        reason: "check CI", prompt: "check CI", fireAt, logOffset: 0, logTail: "", eventCount: 0, createdAt: Date.now(), updatedAt: Date.now(),
+      });
+
+      c.watcher.arm(c.watch);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(await c.settled()).toBe(false);
+
+      // The timer fires: the row ends and its signal turn runs.
+      await c.engineStore.transitionWakeup("wk_timer", ["pending"], "done", { cause: "fired", endedAt: Date.now() }, Date.now());
+      const signalItem = "qi-timer-signal";
+      await c.engineStore.admitSubmission(c.watch.childSessionId, c.childThread.id, {
+        ...queuedItem(signalItem, c.childThread.id, "timer.fired"),
+        dispatchId: "wakeup:wk_timer:terminal",
+      });
+      await c.engineStore.settleUnclaimed(c.watch.childSessionId, c.childThread.id, signalItem, { outcome: "failed", error: "CI is red" });
+
+      await waitFor(c.settled);
+      expect((await c.settledSignal())?.body).toContain("CI is red");
+    });
+
+    it("does not wait for a timer set beyond the retention window", async () => {
+      const c = await armedChild("far-timer", { retentionMs: 60_000 });
+      await c.engineStore.createWakeup({
+        id: "wk_far", sessionId: c.watch.childSessionId, threadId: c.childThread.id, kind: "timer", status: "pending",
+        reason: "next week", prompt: "next week", fireAt: Date.now() + 7 * 24 * 3_600_000, logOffset: 0, logTail: "",
+        eventCount: 0, createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes("timer(s) set to fire after"))).toBe(true);
+      warn.mockRestore();
+    });
+
+    it("settles a child whose lease stays past its deadline instead of waiting forever (B2)", async () => {
+      const c = await armedChild("stuck-lease");
+      await c.engineStore.createLease({
+        id: "ls_stuck", sessionId: c.watch.childSessionId, ownerKind: "process", ownerId: "wk_gone", reason: "build",
+        createdAt: Date.now() - 3_600_000, deadlineAt: Date.now() - 60_000,
+      });
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      expect(error.mock.calls.some((call) => String(call[0]).includes("past their deadline"))).toBe(true);
+      error.mockRestore();
+    });
+
+    it("does not wait for an agent-cancelled wakeup, which sends no signal", async () => {
+      const c = await armedChild("cancelled");
+      await c.engineStore.createWakeup(terminalWakeup(c.watch.childSessionId, c.childThread.id, "wk_cx", { status: "cancelled", cause: "cancelled" }));
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+    });
   });
 
   it.each(["failed", "aborted"] as const)(

@@ -133,7 +133,7 @@ export const SECRETS_RULES = SECRETS_RULES_WITH_CLI;
  */
 export const BACKGROUND_WORK_RULES = `## Background work
 
-For a command longer than an hour, run \`bash\` with \`background: true\`, a \`deadline_hours\`, and a \`reason\`. You receive a \`process.exited\` signal when it ends; do not poll it. Use \`wake_at\` to pause instead of \`sleep\`. \`/scratch\` is wiped when the sandbox stops; keep anything you need in /workspace or push it.`;
+For a command longer than an hour, run \`bash\` with \`background: true\`, a \`deadline_hours\`, and a \`reason\`. You receive a \`process.exited\` signal when it ends; do not poll it. To check progress, call \`process_read\` with \`tail: true\`. To pause for more than 5 minutes, use \`wake_at\`, not \`sleep\`. In a child session, a pending \`wake_at\` keeps the child unsettled until the timer fires and that turn ends, so the parent waits for it. \`/scratch\` is wiped when the sandbox stops; keep anything you need in /workspace or push it.`;
 
 /**
  * System prompt for sandbox coding sessions. `secretsCli` says whether this

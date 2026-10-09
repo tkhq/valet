@@ -21,6 +21,7 @@ import { and, count, eq, isNull, lte, notExists, sql } from "drizzle-orm";
 import { governingThreadKeySql, isOutsideThreadKey, outsideReaderMayReach, sharedWithWholeTeamSql } from "../services/thread-access.js";
 import {
   PendingCapError,
+  recordChildSettleOverDeadline,
   recordSandboxDestroyed,
   recordScratchRequested,
   ValidationError as EngineValidationError,
@@ -59,6 +60,12 @@ const DEFAULT_WATCHER_RETRY_DELAY_MS = 30_000;
 const DEFAULT_WATCHER_MAX_ATTEMPTS = 3;
 /** Cadence of the parked-sandbox retention sweep. Coarse on purpose — retention windows are hours. */
 const DEFAULT_RETENTION_SWEEP_INTERVAL_MS = 15 * 60_000;
+/**
+ * How far ahead a child's pending timer still holds its settle when no
+ * retention window is set (fix wave 2, H6). Matches the 24h child
+ * retention the spec names in C4.
+ */
+const DEFAULT_CHILD_TIMER_WAIT_MS = 24 * 3_600_000;
 
 export interface ChildrenDeps {
   db: AppDb;
@@ -100,11 +107,10 @@ export interface ChildrenDeps {
   /** Poll interval for `ChildWatcher`'s active-lease wait. Tests only. */
   leasePollMs?: number;
   /**
-   * Grace window `ChildWatcher` re-polls for the owed wakeup-signal turn
-   * after a lease's count reaches 0. Covers the race where the
-   * WakeWatcher releases the lease before it admits the terminal signal:
-   * a single read right at the count-reaches-0 moment can land in that
-   * gap and see no unsettled submission yet. Default 90s.
+   * How long `ChildWatcher` waits for an ended wakeup's terminal signal
+   * to be admitted, counted from when the wakeup ended. The WakeWatcher
+   * ends the row and then delivers the signal, so a read in between sees
+   * no queue item yet. Default 90s.
    */
   leaseSettleGraceMs?: number;
   /**
@@ -706,43 +712,9 @@ export class ChildWatcher {
     // The spawner always prompts the child's default thread — see
     // `buildChildSpawner`'s `childSession.prompt(...)` call.
     const result = await childSession.thread().awaitResult(watch.queueItemId);
-
-    // A child with an active lease is not settled (wakeups spec C4): its
-    // background process still runs and its terminal signal still owes a
-    // turn. Wait here; a lease always has a deadline, so this loop ends.
-    // Gated on having seen a lease at all. An unrelated unsettled
-    // submission (a user prompt admitted after settlement) is not a signal
-    // turn and must not delay this watcher. `parkChildSandbox` already
-    // owns skipping teardown for that case.
-    //
-    // The WakeWatcher releases the lease and admits the terminal signal as
-    // two separate steps, lease release first. A read taken right when the
-    // count hits 0 can land in that gap and see no unsettled submission
-    // yet. So once the count reaches 0, re-poll instead of reading once:
-    // keep checking every `leasePollMs` until a submission appears or the
-    // `leaseSettleGraceMs` grace window runs out.
-    let waitedOnLease = false;
-    // The settle body reports the child's latest turn. After a lease wait
-    // that is the turn that handled the terminal signal, not the first one.
-    let settleResult = result;
-    for (;;) {
-      while ((await this.deps.engineStore.countActiveLeases(watch.childSessionId)) > 0) {
-        waitedOnLease = true;
-        await new Promise((resolve) => setTimeout(resolve, this.deps.leasePollMs ?? 30_000).unref());
-      }
-      if (!waitedOnLease) break;
-      const pollMs = this.deps.leasePollMs ?? 30_000;
-      const graceDeadline = Date.now() + (this.deps.leaseSettleGraceMs ?? 90_000);
-      let owedTurn = await this.deps.engineStore.listUnsettledSubmissions(watch.childSessionId);
-      while (owedTurn.length === 0 && Date.now() < graceDeadline) {
-        await new Promise((resolve) => setTimeout(resolve, pollMs).unref());
-        owedTurn = await this.deps.engineStore.listUnsettledSubmissions(watch.childSessionId);
-      }
-      if (owedTurn.length === 0) break;
-      const owed = await childSession.thread().awaitResult(owedTurn[owedTurn.length - 1]!.id);
-      // A superseded turn is not a result; keep the last real one.
-      if (owed.outcome !== "superseded") settleResult = owed;
-    }
+    // The settle body reports the child's latest awaited turn: after a
+    // background wait, the turn that handled the last signal.
+    const settleResult = await this.awaitBackgroundWork(watch, childSession.thread(), result);
 
     // Re-point guard (`child_send`): the sender moves the watch row to its
     // new submission and arms a fresh watcher on it. A watcher that wakes
@@ -841,6 +813,97 @@ export class ChildWatcher {
 
     await this.markSettled(watch.childSessionId, watch.queueItemId);
     await this.parkChildSandbox(watch.childSessionId);
+  }
+
+  /**
+   * Waits until the child's background work owes no more turns (wakeups
+   * spec C4, fix wave 2 B2, H6, H9). Each pass checks facts in order:
+   *
+   * 1. An active lease: a process or watch still runs, or a hold is open.
+   *    The wait is bounded at the latest lease deadline plus one poll. The
+   *    WakeWatcher releases every lease by then, so a lease past the bound
+   *    is a bug: log it, count it, and settle anyway.
+   * 2. A pending timer: its turn is still owed. A timer that fires beyond
+   *    the retention window does not hold the settle; it is logged.
+   * 3. A wakeup that ended after the watched submission was admitted: its
+   *    terminal signal turn (dispatch id `wakeup:<id>:terminal`) is owed.
+   *    Await it once admitted. Until admission, wait at most
+   *    `leaseSettleGraceMs` after the wakeup ended. An agent cancel sends
+   *    no signal, so it owes nothing.
+   *
+   * A turn this loop awaits can start new work, so the loop checks again.
+   * The result is the last awaited turn that was not superseded.
+   */
+  private async awaitBackgroundWork(
+    watch: ArmArgs,
+    thread: { awaitResult(queueItemId: string): Promise<SubmissionResult> },
+    first: SubmissionResult,
+  ): Promise<SubmissionResult> {
+    const store = this.deps.engineStore;
+    const child = watch.childSessionId;
+    const pollMs = this.deps.leasePollMs ?? 30_000;
+    const graceMs = this.deps.leaseSettleGraceMs ?? 90_000;
+    const retentionMs = this.deps.retentionMs ?? 0;
+    const timerBoundMs = retentionMs > 0 ? retentionMs : DEFAULT_CHILD_TIMER_WAIT_MS;
+    const pause = () => new Promise((resolve) => setTimeout(resolve, pollMs).unref());
+    const admittedAt = (await store.getQueueItem(child, watch.queueItemId))?.createdAt ?? 0;
+    const awaited = new Set<string>([watch.queueItemId]);
+    let settleResult = first;
+
+    for (;;) {
+      const now = Date.now();
+      const leases = await store.listActiveLeases(child);
+      if (leases.length > 0) {
+        const bound = Math.max(...leases.map((l) => l.deadlineAt)) + pollMs;
+        if (now <= bound) {
+          await pause();
+          continue;
+        }
+        recordChildSettleOverDeadline();
+        console.error(
+          `ChildWatcher: ${child} still holds ${leases.length} lease(s) past their deadline (${leases.map((l) => l.id).join(", ")}); settling it anyway. The WakeWatcher should have released them.`,
+        );
+        break;
+      }
+
+      const wakeups = await store.listWakeups(child, []);
+      const timers = wakeups.filter((w) => w.kind === "timer" && w.status === "pending");
+      if (timers.some((t) => t.fireAt === undefined || t.fireAt <= now + timerBoundMs)) {
+        await pause();
+        continue;
+      }
+
+      const ended = wakeups
+        .filter((w) => w.endedAt !== undefined && w.endedAt >= admittedAt && w.status !== "cancelled" && w.status !== "pending" && w.status !== "running")
+        .sort((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0));
+      let owed = false;
+      let unadmitted = false;
+      for (const w of ended) {
+        const item = await store.getQueueItemByDispatchId(child, `wakeup:${w.id}:terminal`);
+        if (!item) {
+          if (now - (w.endedAt ?? 0) < graceMs) unadmitted = true;
+          continue;
+        }
+        if (awaited.has(item.id)) continue;
+        awaited.add(item.id);
+        owed = true;
+        const r = await thread.awaitResult(item.id);
+        // A superseded turn is not a result; keep the last real one.
+        if (r.outcome !== "superseded") settleResult = r;
+      }
+      if (owed) continue;
+      if (unadmitted) {
+        await pause();
+        continue;
+      }
+      if (timers.length > 0) {
+        console.warn(
+          `ChildWatcher: ${child} settles with ${timers.length} timer(s) set to fire after the ${Math.round(timerBoundMs / 3_600_000)}h wait bound; the parent will not hear their turns.`,
+        );
+      }
+      break;
+    }
+    return settleResult;
   }
 
   private async latestContinuationCheckpoint(
