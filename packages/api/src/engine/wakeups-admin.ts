@@ -89,6 +89,8 @@ export interface BlockingWork {
   /** `wk_` for a wakeup, `ls_` for a hold. A process or watch lease shows as its wakeup. */
   id: string;
   kind: WakeupKind | "hold";
+  /** `pending` while a process or watch starts, or a timer waits to fire. A hold is `running`. */
+  status: "pending" | "running";
   reason: string;
   threadId?: string;
   deadlineAt?: number;
@@ -98,7 +100,11 @@ export interface BlockingWork {
 
 /** Which background work a route stops or a refusal names. */
 export interface BackgroundWorkFilter {
-  /** Only the work of this thread. A hold with no thread belongs to no single thread and stays. */
+  /**
+   * Only the work of this thread. A hold with no thread belongs to no single
+   * thread, so this filter leaves it out. It is session-level work: only a
+   * filter with no thread selects it.
+   */
   threadId?: string;
   /** Only work that holds a lease: process, watch, and hold. Timers keep their schedule. */
   leasedOnly?: boolean;
@@ -118,6 +124,8 @@ export function selectWork(work: BackgroundWork, filter: BackgroundWorkFilter): 
     .map((w) => ({
       id: w.id,
       kind: w.kind,
+      // `selectWork` reads only open rows.
+      status: w.status === "pending" ? "pending" : "running",
       reason: w.reason,
       threadId: w.threadId,
       ...(w.deadlineAt !== undefined ? { deadlineAt: w.deadlineAt } : {}),
@@ -129,6 +137,7 @@ export function selectWork(work: BackgroundWork, filter: BackgroundWorkFilter): 
     .map((l) => ({
       id: l.id,
       kind: "hold",
+      status: "running",
       reason: l.reason,
       ...(l.threadId !== undefined ? { threadId: l.threadId } : {}),
       deadlineAt: l.deadlineAt,
@@ -185,8 +194,10 @@ export function backgroundWorkRefusal(
     parts.push(`Ask the people in those threads to cancel it, then ${verb}.`);
   } else if (forceAllowed) {
     parts.push(`Cancel it first, or retry with force=true to stop it and ${verb}.`);
+  } else if (scope === "thread") {
+    parts.push("Ask the agent in this thread to cancel it (wakeup_cancel), or ask a team admin.");
   } else {
-    parts.push(`Ask a session admin to cancel it, then ${verb}.`);
+    parts.push(`Ask the agent to cancel it (wakeup_cancel), or ask a team admin, then ${verb}.`);
   }
   return parts.join(" ");
 }
@@ -206,11 +217,10 @@ export interface HumanCancelOptions {
   actorUserId: string;
   /**
    * `deliver` sends the spec B6 terminal signal with `cause=cancelled`.
-   * `suppress` sends none. Thread archive suppresses it: the thread is
-   * hidden, and the main thread can belong to other people. Owner move
-   * suppresses it: a signal turn would run as the new owner. `defer`
-   * returns the send as `sendSignal`, so a route can stop the sandbox
-   * first and only then start the signal turn (pause, replace).
+   * `suppress` sends none. `defer` returns the send as `sendSignal`, so a
+   * route can stop the sandbox or apply its change first and only then
+   * start the signal turn (pause, replace, profile change, owner move). A
+   * forced thread archive delivers, to the main thread (`deliverTo`).
    */
   signal: "deliver" | "suppress" | "defer";
   /** One sentence the signal body adds, such as why the person stopped the work. */
@@ -218,7 +228,9 @@ export interface HumanCancelOptions {
   /**
    * Where the signal goes. `work-thread` (the default) is the thread that
    * started the work. `main` is the session's main thread: a forced archive
-   * uses it, because the work's own thread is about to be hidden.
+   * uses it, because the work's own thread is about to be hidden. A signal
+   * that lands on a thread other than the work's own carries no log tail
+   * and no channel origin: that thread can have other readers.
    */
   deliverTo?: "work-thread" | "main";
   now?: () => number;
@@ -261,7 +273,12 @@ async function routeSignal(
 
 const DEFAULT_CANCEL_NOTE = "Do not start it again unless someone asks.";
 
-function wakeupCancelledSignal(row: Wakeup, opts: HumanCancelOptions, nowMs: number): SignalContent {
+/**
+ * The terminal signal of a human-cancelled wakeup. `ownThread` false means
+ * the signal lands on a thread other than the one that started the work,
+ * so the body leaves out the log tail.
+ */
+function wakeupCancelledSignal(row: Wakeup, opts: HumanCancelOptions, nowMs: number, ownThread: boolean): SignalContent {
   const at = new Date(nowMs).toISOString();
   const attributes: Record<string, string> = {
     wakeupId: row.id,
@@ -275,13 +292,13 @@ function wakeupCancelledSignal(row: Wakeup, opts: HumanCancelOptions, nowMs: num
     return {
       kind: "signal",
       signalType: "timer.cancelled",
-      body: `A person cancelled this scheduled wakeup at ${at}, before it fired. Do not run its prompt unless someone asks.`,
+      body: `A person cancelled this scheduled wakeup at ${at}, before it fired. ${opts.note ?? "Do not run its prompt unless someone asks."}`,
       attributes,
       tagName: "wakeup",
     };
   }
   attributes.durationSeconds = String(Math.round((nowMs - row.createdAt) / 1000));
-  const lastOutput = row.logTail ? `\n\nLast output:\n${row.logTail}` : "";
+  const lastOutput = ownThread && row.logTail ?`\n\nLast output:\n${row.logTail}` : "";
   return {
     kind: "signal",
     signalType: `${row.kind}.exited`,
@@ -308,23 +325,31 @@ function holdReleasedSignal(lease: Lease, opts: HumanCancelOptions, nowMs: numbe
 }
 
 /**
- * Submits one human-cancel signal to `threadId`, or to the main thread when
- * the session has no such thread (spec B5). The channel origin rides along
- * with manual replies, as in the WakeWatcher. A failed submit is logged and
+ * Submits one human-cancel signal to the work's thread, or to the main
+ * thread when the caller asks for it or the session has no such thread
+ * (spec B5). On the work's own thread the channel origin rides along with
+ * manual replies, as in the WakeWatcher. On any other thread the signal
+ * has no origin and `build(false)` leaves out the log tail (fix wave 4,
+ * N3): that thread can have other readers. A failed submit is logged and
  * counted; the cancel already happened.
  */
 async function deliverCancelSignal(
   session: HumanCancelSession,
   target: { threadId: string | undefined; origin: Wakeup["origin"]; dispatchId: string; kind: WakeupKind | "hold" },
-  content: SignalContent,
+  build: (ownThread: boolean) => SignalContent,
   opts: HumanCancelOptions,
 ): Promise<void> {
   const { origin, dispatchId, kind } = target;
-  const threadId = opts.deliverTo === "main" ? undefined : target.threadId;
-  const signal: SignalContent = origin !== undefined ? { ...content, origin: { ...origin, reply: "manual" } } : content;
+  const wanted = opts.deliverTo === "main" ? undefined : target.threadId;
+  const threadId = wanted !== undefined && session.threadById(wanted) ? wanted : undefined;
+  // Work with no thread is session-level, so the main thread is its own.
+  const ownThread = target.threadId === undefined || threadId === target.threadId;
+  const content = build(ownThread);
+  const signal: SignalContent =
+    ownThread && origin !== undefined ? { ...content, origin: { ...origin, reply: "manual" } } : content;
   const base: PromptOptions = { dispatchId, queueMode: "followup" };
   try {
-    if (threadId !== undefined && session.threadById(threadId)) {
+    if (threadId !== undefined) {
       await session.prompt(signal, { threadId, ...base });
     } else {
       await session.prompt(signal, base);
@@ -367,7 +392,7 @@ export async function cancelWorkAsHuman(
       deliverCancelSignal(
         target ?? session,
         { threadId: lease.threadId, origin: lease.origin, dispatchId: `lease:${lease.id}:released`, kind: "hold" },
-        signal,
+        () => signal,
         opts,
       ),
     );
@@ -385,12 +410,12 @@ export async function cancelWorkAsHuman(
   const outcome = await seam.cancel(id);
   // A lost CAS means the WakeWatcher ended the row first. Its own signal stands.
   if (outcome?.kind !== "wakeup") return { kind: "not_found" };
-  const signal = wakeupCancelledSignal(row, opts, now());
+  const at = now();
   const routed = await routeSignal(opts, (target) =>
     deliverCancelSignal(
       target ?? session,
       { threadId: row.threadId, origin: row.origin, dispatchId: `wakeup:${row.id}:terminal`, kind: row.kind },
-      signal,
+      (ownThread) => wakeupCancelledSignal(row, opts, at, ownThread),
       opts,
     ),
   );

@@ -249,9 +249,10 @@ export function usePauseSession(sessionId: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
-      // A forced pause stopped background work; the badge drops it now.
-      qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) });
     },
+    // A forced pause can stop background work and still fail (a turn
+    // started), so the badge refreshes on every outcome.
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) }),
   });
 }
 
@@ -270,8 +271,9 @@ export function useReplaceSandbox(sessionId: string) {
     mutationFn: (opts) => api.replaceSandbox(sessionId, opts ?? undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
-      qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) });
     },
+    // A forced replace can stop background work and still fail.
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) }),
   });
 }
 
@@ -399,8 +401,9 @@ export function useMoveSession(sessionId: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
-      qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) });
     },
+    // A forced change can stop background work and still fail.
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) }),
   });
 }
 
@@ -414,8 +417,9 @@ export function useSetSessionProfile(sessionId: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
       qc.invalidateQueries({ queryKey: qk.sessions() });
-      qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) });
     },
+    // A forced change can stop background work and still fail.
+    onSettled: () => qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) }),
   });
 }
 

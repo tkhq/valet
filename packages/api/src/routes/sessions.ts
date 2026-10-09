@@ -4,10 +4,10 @@ import { Hono, type Context } from "hono";
 import { and, count, desc, eq, inArray, notExists, or, sql } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { parseAssistantSessionId, type Principal } from "@valet/engine";
+import { parseAssistantSessionId, type Principal, type SessionStore } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { cancelAllWorkAsHuman, type CancelAllResult } from "../engine/wakeups-admin.js";
+import { cancelAllWorkAsHuman, listBackgroundWork, selectWork, type CancelAllResult } from "../engine/wakeups-admin.js";
 import { gateBackgroundWork, type BackgroundWorkGate } from "./wakeups.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
 import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
@@ -1119,13 +1119,16 @@ sessionsRouter.patch("/:id", async (c) => {
   // Background work blocks a change that would stop it, before any write
   // (fix wave 3, H2 and M3). An owner move ends all of it: a timer or a
   // process signal would otherwise start a turn billed to, and credentialed
-  // as, the new owner. A profile change of a running sandbox replaces it,
-  // which ends process, watch, and hold work; timers keep their schedule.
-  // `force: true` stops the work first, as a human cancel by the caller.
+  // as, the new owner. A profile change replaces the sandbox, now or at the
+  // next build, which ends process, watch, and hold work; timers keep their
+  // schedule. The profile gate reads the durable leases, not `hadSandbox`:
+  // after an api restart a sandbox with leased work is not live, but it
+  // still runs (fix wave 4, R1). `force: true` stops the work first, as a
+  // human cancel by the caller.
   let gate: BackgroundWorkGate = { kind: "clear" };
   if (nextOwner !== undefined) {
     gate = await gateBackgroundWork(c, row, "move", {}, body.force === true);
-  } else if (nextProfile !== undefined && hadSandbox) {
+  } else if (nextProfile !== undefined) {
     gate = await gateBackgroundWork(c, row, "profile", { leasedOnly: true }, body.force === true);
   }
   if (gate.kind === "refused") return gate.response;
@@ -1370,6 +1373,17 @@ sessionsRouter.post("/:id/pause", async (c) => {
     return c.json({ error: "a turn is running" }, 409);
   }
 
+  const session = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
+  // `suspend()` silently no-ops unless the attachment is `ready`. Check
+  // before the background-work gate and any cancel: after an api restart
+  // the attachment stays `detached` until a turn uses the sandbox. A forced
+  // pause would otherwise stop the work and then fail to pause (fix wave 3,
+  // M1), and a plain one would ask to stop work it cannot pause past (fix
+  // wave 4, N7).
+  if (session.attachment.current() === null) {
+    return c.json({ error: SANDBOX_NOT_ATTACHED }, 409);
+  }
+
   // Active leases block a pause, as they block the idle sweeps (spec C3,
   // fix wave 2 B8): suspending deletes the running process and /scratch.
   // `force=true` stops that work first, as a human cancel. The 409 names
@@ -1377,14 +1391,6 @@ sessionsRouter.post("/:id/pause", async (c) => {
   const gate = await gateBackgroundWork(c, row, "pause", { leasedOnly: true }, await wantsForce(c));
   if (gate.kind === "refused") return gate.response;
 
-  const session = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
-  // `suspend()` silently no-ops unless the attachment is `ready`. Check
-  // before any cancel: after an api restart the attachment stays `detached`
-  // until a turn uses the sandbox, and a forced pause would otherwise stop
-  // the work and then fail to pause (fix wave 3, M1).
-  if (session.attachment.current() === null) {
-    return c.json({ error: "sandbox is not ready to pause" }, 409);
-  }
   const stopped = gate.kind === "force"
     ? await cancelAllWorkAsHuman(engineStore, session, id, { leasedOnly: true, ids: gate.ids }, {
         actorUserId: userId,
@@ -1397,6 +1403,12 @@ sessionsRouter.post("/:id/pause", async (c) => {
   if ((await engineStore.listUnsettledSubmissions(id)).length > 0) {
     await stopped?.sendSignals();
     return c.json({ error: turnStartedError("pause the session", stopped !== undefined) }, 409);
+  }
+  // Work that started after the gate, such as a turn that ran inside the
+  // session build or the cancel, would die with the sandbox (fix wave 4, N5).
+  if (await leasedWorkStarted(engineStore, id)) {
+    await stopped?.sendSignals();
+    return c.json({ error: workStartedError("pause the session", stopped !== undefined) }, 409);
   }
   await session.attachment.suspend();
 
@@ -1430,6 +1442,27 @@ sessionsRouter.post("/:id/pause", async (c) => {
 function turnStartedError(action: string, stoppedWork: boolean): string {
   const already = stoppedWork ? " The background work already stopped." : "";
   return `a turn started, so the request did not ${action}.${already} Wait for the turn to finish, then retry.`;
+}
+
+/** The 409 text of pause when the attachment has no sandbox yet (fix wave 4, N7). */
+const SANDBOX_NOT_ATTACHED = "The sandbox is not attached yet. Send a message in the session, then pause again.";
+
+/**
+ * The 409 text when new background work started between the gate and the
+ * stop (fix wave 4, N5). `stoppedWork` says the forced cancel already ran.
+ */
+function workStartedError(action: string, stoppedWork: boolean): string {
+  const already = stoppedWork ? " The background work already stopped." : "";
+  return `background work started, so the request did not ${action}.${already} Retry to see the new work.`;
+}
+
+/**
+ * True when the session holds work that a sandbox stop would end: a
+ * process, watch, or hold. A forced stop already cancelled the work it
+ * selected, so whatever this finds started after the gate.
+ */
+async function leasedWorkStarted(engineStore: SessionStore, sessionId: string): Promise<boolean> {
+  return selectWork(await listBackgroundWork(engineStore, sessionId), { leasedOnly: true }).length > 0;
 }
 
 /**
@@ -1509,6 +1542,12 @@ sessionsRouter.post("/:id/sandbox/replace", async (c) => {
   if (stopped && (await engineStore.listUnsettledSubmissions(id)).length > 0) {
     await stopped.sendSignals();
     return c.json({ error: turnStartedError("replace the sandbox", true) }, 409);
+  }
+  // Work that started after the gate, such as one created while the
+  // session built, would die with the old sandbox (fix wave 4, N5).
+  if (await leasedWorkStarted(engineStore, id)) {
+    await stopped?.sendSignals();
+    return c.json({ error: workStartedError("replace the sandbox", stopped !== undefined) }, 409);
   }
 
   try {

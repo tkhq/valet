@@ -1,6 +1,6 @@
 import { useCallback, useState, type ReactNode } from "react";
 import type { BackgroundWorkConflict, BackgroundWorkItem } from "@valet/api/wire";
-import { backgroundWorkConflict } from "~/api/client";
+import { ApiError, backgroundWorkConflict } from "~/api/client";
 import { Button, Dialog, DialogContent, DialogFooter } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { itemDetail } from "./background-work-badge";
@@ -13,29 +13,63 @@ export interface GuardedAction {
   confirmLabel: string;
 }
 
-/** Pure: one line of detail under a refused action's work item. A 409 lists only started work. */
+/** Pure: one line of detail under a refused action's work item. Work still starting reads "starting". */
 export function workItemDetail(item: BackgroundWorkItem, now: number = Date.now()): string {
-  return itemDetail({ ...item, status: "running" }, now);
+  return itemDetail(item, now);
 }
 
-/** The work rows a confirm shows. */
-export function BackgroundWorkList({ items }: { items: BackgroundWorkItem[] }) {
+/** The work rows a confirm shows. `stopped` marks every row as stopped. */
+export function BackgroundWorkList({ items, stopped = false }: { items: BackgroundWorkItem[]; stopped?: boolean }) {
   return (
     <ul className="space-y-2" aria-label="Background work">
       {items.map((item) => (
         <li key={item.id} className="text-xs">
           <p className="break-words text-ink">{item.reason}</p>
-          <p className="text-muted">{workItemDetail(item)}</p>
+          <p className="text-muted">{stopped ? "Stopped" : workItemDetail(item)}</p>
         </li>
       ))}
     </ul>
   );
 }
 
+/**
+ * Pure: true when a forced retry stopped the work but did not finish the
+ * action (409 "... The background work already stopped. ..."), because a
+ * turn or new work started in between.
+ */
+export function workAlreadyStopped(err: unknown): boolean {
+  if (!(err instanceof ApiError) || err.status !== 409 || backgroundWorkConflict(err) !== null) return false;
+  return errorText(err).includes("The background work already stopped.");
+}
+
+/** Pure: the dialog title and description for a refusal. */
+export function confirmCopy(
+  conflict: BackgroundWorkConflict,
+  action: GuardedAction,
+  stopped: boolean,
+): { title: string; description: string } {
+  if (stopped) return { title: "Background work stopped", description: "The work below stopped, but the action did not finish." };
+  if (conflict.forceAllowed) {
+    return { title: action.title, description: "This stops the background work below. The agent gets a message that you stopped it." };
+  }
+  if (conflict.hiddenCount > 0) {
+    return {
+      title: "Background work is running",
+      description: "Some of this work runs on threads you cannot see. Ask the people in those threads to cancel it, then try again.",
+    };
+  }
+  return {
+    title: "Background work is running",
+    description: "You cannot stop this work. Ask the agent in its thread to cancel it (wakeup_cancel), or ask a team admin.",
+  };
+}
+
 interface Prompt {
   conflict: BackgroundWorkConflict;
   action: GuardedAction;
   retry: () => Promise<void>;
+  /** The forced retry stopped the work, but the action did not finish. */
+  stopped?: boolean;
 }
 
 /**
@@ -59,14 +93,14 @@ export function BackgroundWorkConfirmDialog({
   onClose: () => void;
 }) {
   const conflict = prompt?.conflict;
-  const description = conflict?.forceAllowed
-    ? "This stops the background work below. The agent gets a message that you stopped it."
-    : (conflict?.error ?? "");
+  const stopped = prompt?.stopped === true;
+  const copy = prompt ? confirmCopy(prompt.conflict, prompt.action, stopped) : { title: "", description: "" };
+  const canConfirm = conflict?.forceAllowed === true && !stopped;
   return (
     <Dialog open={prompt !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent title={prompt?.action.title ?? ""} description={description}>
-        {conflict && conflict.work.length > 0 && <BackgroundWorkList items={conflict.work} />}
-        {conflict && conflict.hiddenCount > 0 && (
+      <DialogContent title={copy.title} description={copy.description}>
+        {conflict && conflict.work.length > 0 && <BackgroundWorkList items={conflict.work} stopped={stopped} />}
+        {conflict && !stopped && conflict.hiddenCount > 0 && (
           <p className="text-xs text-muted">
             {conflict.hiddenCount === 1
               ? "1 more item runs on a thread you cannot see."
@@ -75,9 +109,9 @@ export function BackgroundWorkConfirmDialog({
         )}
         <DialogFooter>
           <Button type="button" variant="secondary" onClick={onClose}>
-            {conflict?.forceAllowed ? "Cancel" : "Close"}
+            {canConfirm ? "Cancel" : "Close"}
           </Button>
-          {conflict?.forceAllowed && (
+          {canConfirm && (
             <Button type="button" variant="danger" disabled={pending} onClick={onConfirm}>
               {pending ? "Stopping…" : prompt?.action.confirmLabel}
             </Button>
@@ -146,9 +180,11 @@ export function useBackgroundWorkGuard(): {
       await prompt.retry();
       setPrompt(null);
     } catch (err) {
-      // A newer refusal (more work started) replaces the list.
+      // A newer refusal (more work started) replaces the list. A 409 after
+      // the work already stopped marks the list stopped and ends the confirm.
       const conflict = backgroundWorkConflict(err);
       if (conflict) setPrompt({ ...prompt, conflict });
+      else if (workAlreadyStopped(err)) setPrompt({ ...prompt, stopped: true });
       setError(conflict ? conflict.error : errorText(err));
     } finally {
       setPending(false);

@@ -11,7 +11,8 @@
  * session). The cancel gates on `canCancelSessionWakeup`, the same rule as
  * pause: stopping work that holds the sandbox is an administrative act on
  * the session, never inherited from view access. On a team session both
- * routes also hide work whose thread the caller cannot see.
+ * routes also hide work whose thread the caller cannot see. Work with no
+ * thread is session-level: it shows to callers who may cancel it.
  */
 import { Hono, type Context } from "hono";
 import { and, eq, inArray } from "drizzle-orm";
@@ -68,10 +69,32 @@ export type BackgroundWorkGate =
   /** The caller forced the action. Cancel exactly `ids`, then act. */
   | { kind: "force"; ids: ReadonlySet<string> };
 
+/**
+ * The items of a session's background work that this request may see. On a
+ * team session, work on a thread shows only to people who may see that
+ * thread. Work with no thread belongs to the session, not to one thread
+ * (fix wave 4, N4): it shows to anyone who may cancel the session's work
+ * (`mayCancel`), so it never blocks every caller.
+ */
+async function keepVisibleWork<T extends { threadId?: string }>(
+  c: Context<AppEnv>,
+  row: { id: string; ownerType: string },
+  items: T[],
+  mayCancel: boolean,
+): Promise<T[]> {
+  if (row.ownerType !== "team") return items;
+  const threaded = items.flatMap((item) =>
+    item.threadId !== undefined ? [{ sessionId: row.id, threadId: item.threadId, item }] : [],
+  );
+  const shown = new Set((await keepVisibleThreads(c, { type: row.ownerType }, threaded)).map((t) => t.item));
+  return items.filter((item) => (item.threadId === undefined ? mayCancel : shown.has(item)));
+}
+
 function toWorkItem(w: BlockingWork): BackgroundWorkItem {
   return {
     id: w.id,
     kind: w.kind,
+    status: w.status,
     reason: w.reason,
     ...(w.threadId !== undefined ? { threadId: w.threadId } : {}),
     ...(w.deadlineAt !== undefined ? { deadlineAt: w.deadlineAt } : {}),
@@ -100,13 +123,9 @@ export async function gateBackgroundWork(
   const { db, engineStore } = c.var.providers;
   const items = selectWork(await listBackgroundWork(engineStore, row.id), filter);
   if (items.length === 0) return { kind: "clear" };
-  const visible = await keepVisibleThreads(
-    c,
-    { type: row.ownerType },
-    items.map((w) => ({ ...w, sessionId: row.id })),
-  );
-  const hiddenCount = items.length - visible.length;
   const mayCancel = await canCancelSessionWakeup(db, row, c.var.principal);
+  const visible = await keepVisibleWork(c, row, items, mayCancel);
+  const hiddenCount = items.length - visible.length;
   const forceAllowed = mayCancel && hiddenCount === 0;
   if (force && forceAllowed) return { kind: "force", ids: new Set(visible.map((w) => w.id)) };
   const body: BackgroundWorkConflict = {
@@ -164,10 +183,10 @@ wakeupsRouter.get("/:id/wakeups", async (c) => {
     return c.json({ error: "session not found" }, 404);
   }
   const work = await listBackgroundWork(engineStore, id);
-  const owner = { type: row.ownerType };
+  const mayCancel = await canCancelSessionWakeup(db, row, c.var.principal);
   const body: ListSessionWakeupsResponse = {
-    wakeups: (await keepVisibleThreads(c, owner, work.wakeups)).map(wakeupToSummary),
-    leases: (await keepVisibleThreads(c, owner, work.leases)).map(leaseToSummary),
+    wakeups: (await keepVisibleWork(c, row, work.wakeups, mayCancel)).map(wakeupToSummary),
+    leases: (await keepVisibleWork(c, row, work.leases, mayCancel)).map(leaseToSummary),
   };
   return c.json(body);
 });
@@ -182,11 +201,11 @@ wakeupsRouter.post("/:id/wakeups/:wakeupId/cancel", async (c) => {
   }
 
   // The target must be open work of this session on a thread the caller can see.
+  // The caller passed `canCancelSessionWakeup` above, so work with no thread counts.
   const work = await listBackgroundWork(engineStore, id);
-  const owner = { type: row.ownerType };
   const target =
-    (await keepVisibleThreads(c, owner, work.wakeups)).find((w) => w.id === wakeupId) ??
-    (await keepVisibleThreads(c, owner, work.leases)).find((l) => l.id === wakeupId);
+    (await keepVisibleWork(c, row, work.wakeups, true)).find((w) => w.id === wakeupId) ??
+    (await keepVisibleWork(c, row, work.leases, true)).find((l) => l.id === wakeupId);
   if (!target) {
     return c.json({ error: "background work not found. It may have ended already. Reload the list." }, 404);
   }

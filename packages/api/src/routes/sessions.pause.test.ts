@@ -317,7 +317,7 @@ describe("POST /api/sessions/:id/pause", () => {
     const res = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/pause`, { method: "POST" });
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string };
-    expect(body).toEqual({ error: "sandbox is not ready to pause" });
+    expect(body).toEqual({ error: "The sandbox is not attached yet. Send a message in the session, then pause again." });
     expect(provider.suspendCalls).toEqual([]);
 
     const rows = await api.providers.db

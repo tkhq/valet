@@ -58,13 +58,17 @@ beforeEach(() => {
 });
 
 describe("MoveSessionDialog with background work", () => {
-  it("lists the work a move stops and sends force from its confirm", async () => {
-    wakeups = {
-      wakeups: [
-        { id: "wk_1", threadId: "t1", kind: "process", status: "running", reason: "full proof build", deadlineAt: Date.now() + 49 * HOUR, createdAt: Date.now() - 2 * HOUR - 60_000 },
-      ],
-      leases: [],
-    };
+  it("lists the work a move stops, and sends force only after a fresh 409 (fix wave 4, N9)", async () => {
+    const proc = { id: "wk_1", threadId: "t1", kind: "process" as const, status: "running" as const, reason: "full proof build", deadlineAt: Date.now() + 49 * HOUR, createdAt: Date.now() - 2 * HOUR - 60_000 };
+    wakeups = { wakeups: [proc], leases: [] };
+    moveMutate.mockImplementationOnce((_vars: unknown, opts: { onError?: (e: unknown) => void }) =>
+      opts.onError?.(new ApiError(409, "PATCH → 409", {
+        error: "This session has background work running.",
+        code: "background_work",
+        work: [proc],
+        hiddenCount: 0,
+        forceAllowed: true,
+      })));
     const user = userEvent.setup();
     renderDialog();
     const dialog = screen.getByRole("dialog");
@@ -73,8 +77,11 @@ describe("MoveSessionDialog with background work", () => {
     expect(within(dialog).getByText("Process · running 2h · deadline in 2d")).toBeTruthy();
 
     await pickTeam(user);
-    await user.click(within(dialog).getByRole("button", { name: "Stop background work and move" }));
-    expect(moveMutate).toHaveBeenCalledWith({ teamId: "team_1", force: true }, expect.anything());
+    // The polled list can be a minute old, so the first submit never forces.
+    await user.click(within(dialog).getByRole("button", { name: "Move runtime" }));
+    expect(moveMutate).toHaveBeenLastCalledWith({ teamId: "team_1" }, expect.anything());
+    await user.click(await within(dialog).findByRole("button", { name: "Stop background work and move" }));
+    expect(moveMutate).toHaveBeenLastCalledWith({ teamId: "team_1", force: true }, expect.anything());
   });
 
   it("moves without force when nothing runs, and closes", async () => {
@@ -88,13 +95,23 @@ describe("MoveSessionDialog with background work", () => {
   });
 
   it("shows how many items the move stopped", async () => {
-    wakeups = { wakeups: [], leases: [{ id: "ls_1", threadId: "t1", ownerKind: "hold", reason: "terminal work", deadlineAt: Date.now() + HOUR, createdAt: Date.now() }] };
-    moveMutate.mockImplementation((_vars: unknown, opts: { onSuccess?: (r: Partial<PatchSessionResponse>) => void }) =>
-      opts.onSuccess?.({ cancelledWorkCount: 1, cancelledWork: ["ls_1"] }));
+    const hold = { id: "ls_1", kind: "hold" as const, status: "running" as const, reason: "terminal work", deadlineAt: Date.now() + HOUR, createdAt: Date.now() };
+    moveMutate
+      .mockImplementationOnce((_vars: unknown, opts: { onError?: (e: unknown) => void }) =>
+        opts.onError?.(new ApiError(409, "PATCH → 409", {
+          error: "This session has background work running.",
+          code: "background_work",
+          work: [hold],
+          hiddenCount: 0,
+          forceAllowed: true,
+        })))
+      .mockImplementation((_vars: unknown, opts: { onSuccess?: (r: Partial<PatchSessionResponse>) => void }) =>
+        opts.onSuccess?.({ cancelledWorkCount: 1, cancelledWork: ["ls_1"] }));
     const user = userEvent.setup();
     renderDialog();
     await pickTeam(user);
-    await user.click(screen.getByRole("button", { name: "Stop background work and move" }));
+    await user.click(screen.getByRole("button", { name: "Move runtime" }));
+    await user.click(await screen.findByRole("button", { name: "Stop background work and move" }));
     expect(await screen.findByText("Moved. Stopped 1 background item. The agent got a message about it.")).toBeTruthy();
   });
 

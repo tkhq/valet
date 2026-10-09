@@ -9,6 +9,7 @@
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   VirtualSandbox,
+  type ChannelOrigin,
   type Lease,
   type Sandbox,
   type SandboxCapabilities,
@@ -19,7 +20,7 @@ import {
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, teamMembers, teams } from "../schema/index.js";
+import { agentSessions, sessionThreads, teamMembers, teams } from "../schema/index.js";
 import type {
   BackgroundWorkConflict,
   CancelSessionWakeupResponse,
@@ -140,6 +141,7 @@ async function seedProcess(
   threadId: string,
   n: number,
   sandboxId?: string,
+  origin?: ChannelOrigin,
 ): Promise<{ wakeup: Wakeup; lease: Lease }> {
   const now = Date.now();
   const lease: Lease = {
@@ -167,6 +169,7 @@ async function seedProcess(
     logOffset: 0,
     logTail: "building 41/90",
     eventCount: 0,
+    ...(origin !== undefined ? { origin } : {}),
     createdAt: now - 60_000,
     updatedAt: now,
   };
@@ -419,10 +422,76 @@ describe("forced pause and replace ordering (fix wave 3)", () => {
 
     const res = await post(api, "/api/sessions/wk-detached/pause?force=true");
     expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe("sandbox is not ready to pause");
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "The sandbox is not attached yet. Send a message in the session, then pause again.",
+    );
     expect(await api.providers.engineStore.getWakeup("wk_proc1")).toMatchObject({ status: "running" });
     expect(provider.cancelledJobs).toEqual([]);
     expect(await api.providers.engineStore.getQueueItemByDispatchId("wk-detached", "wakeup:wk_proc1:terminal")).toBeNull();
+  });
+
+  it("a pause of a sandbox that is not attached says so before it names any work (fix wave 4, N7)", async () => {
+    const provider = new LeaseTestProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    await seedSession(api, "wk-detached-plain");
+    const session = await api.providers.engineHost.sessionFor("wk-detached-plain", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/wakeups-route-wk-detached-plain",
+    });
+    const thread = await session.ensureDefaultThread();
+    await seedProcess(api, "wk-detached-plain", thread.id, 1, "lrt-gone");
+
+    const res = await post(api, "/api/sessions/wk-detached-plain/pause");
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; code?: string };
+    expect(body.code).toBeUndefined();
+    expect(body.error).toBe("The sandbox is not attached yet. Send a message in the session, then pause again.");
+  });
+
+  it("work that starts during a forced pause stops the pause, and the signals still go out (fix wave 4, N5)", async () => {
+    const provider = new LeaseTestProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    await seedSession(api, "wk-lease-race");
+    const session = await warmSession(api, "wk-lease-race");
+    const thread = await session.ensureDefaultThread();
+    await seedProcess(api, "wk-lease-race", thread.id, 1, session.attachment.sandboxId);
+    const t = api;
+    provider.onCancel = async () => {
+      provider.onCancel = undefined;
+      await seedHold(t, "wk-lease-race", thread.id, 9);
+    };
+
+    const res = await post(api, "/api/sessions/wk-lease-race/pause?force=true");
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("The background work already stopped.");
+    expect(provider.suspendCalls).toEqual([]);
+    expect(await api.providers.engineStore.getWakeup("wk_proc1")).toMatchObject({ status: "cancelled" });
+    expect(await api.providers.engineStore.getQueueItemByDispatchId("wk-lease-race", "wakeup:wk_proc1:terminal")).not.toBeNull();
+    expect(await api.providers.engineStore.countActiveLeases("wk-lease-race")).toBe(1);
+  });
+
+  it("a lease created while a replace builds the session stops the replace (fix wave 4, N5)", async () => {
+    const provider = new LeaseTestProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    await seedSession(api, "wk-replace-race");
+    const session = await warmSession(api, "wk-replace-race");
+    const thread = await session.ensureDefaultThread();
+    const sandboxBefore = session.attachment.sandboxId;
+    const host = api.providers.engineHost;
+    const original = host.sessionFor.bind(host);
+    const t = api;
+    const spy = vi.spyOn(host, "sessionFor").mockImplementation(async (...args) => {
+      spy.mockRestore();
+      const built = await original(...args);
+      await seedHold(t, "wk-replace-race", thread.id, 9);
+      return built;
+    });
+
+    const res = await post(api, "/api/sessions/wk-replace-race/sandbox/replace");
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("background work started");
+    expect(session.attachment.sandboxId).toBe(sandboxBefore);
   });
 
   it("a turn that starts during a forced pause stops the pause, and the signals still go out", async () => {
@@ -609,6 +678,8 @@ describe("owner move stops background work only on force (H11, fix wave 3 H2)", 
     if (typeof content === "object" && content !== null && "kind" in content && content.kind === "signal") {
       expect(content.signalType).toBe("timer.cancelled");
       expect(content.attributes).toMatchObject({ cancelledBy: "user:local-user" });
+      // The route's note reaches a timer too (fix wave 4, N15).
+      expect(content.body).toContain("They moved the session to another workspace.");
     } else {
       throw new Error("the move sent no timer.cancelled signal");
     }
@@ -628,5 +699,177 @@ describe("owner move stops background work only on force (H11, fix wave 3 H2)", 
     });
     expect(res.status).toBe(200);
     expect("cancelledWorkCount" in ((await res.json()) as PatchSessionResponse)).toBe(false);
+  });
+});
+
+describe("forced archive of a private thread keeps its details off the main thread (fix wave 4, N3)", () => {
+  it("sends no log tail and no origin to the main thread, and notes the stop on the archived thread", async () => {
+    const provider = new LeaseTestProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    await seedTeam(api, "team_arch", [
+      { userId: "local-user", role: "admin" },
+      { userId: "test-member", role: "member" },
+    ]);
+    await seedSession(api, "wk-arch-private", { type: "team", id: "team_arch" });
+    const session = await warmSession(api, "wk-arch-private");
+    const main = await session.ensureDefaultThread();
+    const priv = await session.createThread("app-assistant:local-user");
+    await seedProcess(api, "wk-arch-private", priv.id, 1, session.attachment.sandboxId, {
+      channelType: "slack",
+      threadKey: "slack:C123:1700000000.000100",
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/wk-arch-private/threads/${priv.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archived: true, force: true }),
+    });
+    expect(res.status).toBe(200);
+
+    const store = api.providers.engineStore;
+    const item = await store.getQueueItemByDispatchId("wk-arch-private", "wakeup:wk_proc1:terminal");
+    expect(item?.threadId).toBe(main.id);
+    const content = item?.content;
+    if (typeof content === "object" && content !== null && "kind" in content && content.kind === "signal") {
+      expect(content.body).toContain("They archived the thread it ran in.");
+      expect(content.body).not.toContain("Last output");
+      expect(content.body).not.toContain("building 41/90");
+      expect(content.origin).toBeUndefined();
+      expect(content.attributes).toMatchObject({ reason: "full proof build 1", cause: "cancelled" });
+    } else {
+      throw new Error("the archive sent no process.exited signal");
+    }
+
+    const snapshot = await store.getThreadSnapshot("wk-arch-private", priv.id);
+    const notes = (snapshot?.entries ?? []).flatMap((e) =>
+      e.type === "message" && e.role === "system" && typeof e.content === "string" ? [e.content] : [],
+    );
+    expect(notes.some((n) => n.includes("full proof build 1") && n.includes("archived"))).toBe(true);
+  });
+});
+
+describe("archive waits for a running turn in the thread (fix wave 4, P4)", () => {
+  it("409s a plain archive while the thread has an unsettled submission", async () => {
+    api = await bootTestApi();
+    await seedSession(api, "wk-arch-busy");
+    const session = await api.providers.engineHost.sessionFor("wk-arch-busy", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/wakeups-route-wk-arch-busy",
+    });
+    await session.ensureDefaultThread();
+    const side = await session.createThread("web:busy");
+    const now = Date.now();
+    await api.providers.engineStore.admitSubmission("wk-arch-busy", side.id, {
+      id: "q-arch-busy",
+      threadId: side.id,
+      content: "still going",
+      status: "queued",
+      attemptCount: 0,
+      maxAttempts: 10,
+      timeoutAt: now + HOUR_MS,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/wk-arch-busy/threads/${side.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archived: true }),
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      "A turn is running in this thread. Wait for it to finish, then archive.",
+    );
+    const rows = await api.providers.db.select().from(sessionThreads).where(eq(sessionThreads.id, side.id));
+    expect(rows[0]?.archivedAt ?? null).toBeNull();
+  });
+});
+
+describe("profile change gates leased work after an api restart (fix wave 4, R1)", () => {
+  it("409s a profile change of a session that is not live but holds leased work", async () => {
+    const provider = new LeaseTestProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    await seedSession(api, "wk-profile-cold");
+    await seedProcess(api, "wk-profile-cold", "th-cold", 1, "lrt-old");
+    expect(api.providers.engineHost.isLive("wk-profile-cold")).toBe(false);
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/wk-profile-cold`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile: "full" }),
+    });
+    expect(res.status).toBe(409);
+    const conflict = (await res.json()) as BackgroundWorkConflict;
+    expect(conflict.work.map((w) => w.id)).toEqual(["wk_proc1"]);
+    const rows = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, "wk-profile-cold"));
+    expect(rows[0]?.profile).not.toBe("full");
+  });
+});
+
+describe("a hold with no thread is session-level work (fix wave 4, N4)", () => {
+  it("an admin sees it, may force past it, and may cancel it; a member does not see it", async () => {
+    const provider = new LeaseTestProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    await seedTeam(api, "team_nothread", [
+      { userId: "local-user", role: "admin" },
+      { userId: "test-member", role: "member" },
+    ]);
+    await seedSession(api, "wk-nothread", { type: "team", id: "team_nothread" });
+    await warmSession(api, "wk-nothread");
+    const now = Date.now();
+    await api.providers.engineStore.createLease({
+      id: "ls_nothread",
+      sessionId: "wk-nothread",
+      sandboxId: "lrt-1",
+      ownerKind: "hold",
+      reason: "legacy hold",
+      createdAt: now,
+      deadlineAt: now + 4 * HOUR_MS,
+    });
+
+    const listed = (await (await fetch(`${api.baseUrl}/api/sessions/wk-nothread/wakeups`)).json()) as ListSessionWakeupsResponse;
+    expect(listed.leases.map((l) => l.id)).toEqual(["ls_nothread"]);
+    const asMember = { "x-valet-test-user-id": "test-member" };
+    const memberList = (await (
+      await fetch(`${api.baseUrl}/api/sessions/wk-nothread/wakeups`, { headers: asMember })
+    ).json()) as ListSessionWakeupsResponse;
+    expect(memberList.leases).toEqual([]);
+
+    const refused = await post(api, "/api/sessions/wk-nothread/pause");
+    expect(refused.status).toBe(409);
+    const conflict = (await refused.json()) as BackgroundWorkConflict;
+    expect(conflict).toMatchObject({ hiddenCount: 0, forceAllowed: true });
+    expect(conflict.work.map((w) => w.id)).toEqual(["ls_nothread"]);
+
+    const cancelled = await post(api, "/api/sessions/wk-nothread/wakeups/ls_nothread/cancel");
+    expect(cancelled.status).toBe(200);
+    expect(await api.providers.engineStore.countActiveLeases("wk-nothread")).toBe(0);
+  });
+});
+
+describe("refusal items carry their status (fix wave 4, N11)", () => {
+  it("ships pending for a timer and running for a process", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "team_status", [{ userId: "local-user", role: "admin" }]);
+    await seedSession(api, "wk-status");
+    const session = await api.providers.engineHost.sessionFor("wk-status", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/wakeups-route-wk-status",
+    });
+    const thread = await session.ensureDefaultThread();
+    await seedTimer(api, "wk-status", thread.id, 1);
+    await seedProcess(api, "wk-status", thread.id, 2);
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/wk-status`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ teamId: "team_status" }),
+    });
+    expect(res.status).toBe(409);
+    const conflict = (await res.json()) as BackgroundWorkConflict;
+    const status = Object.fromEntries(conflict.work.map((w) => [w.id, w.status]));
+    expect(status).toEqual({ wk_timer1: "pending", wk_proc2: "running" });
   });
 });

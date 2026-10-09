@@ -153,13 +153,40 @@ export function isWakeupSignal(signal: MessageSignal): boolean {
   );
 }
 
-/** Pure: the outcome badge of a wakeup signal, or null when it reports no end. */
-export function wakeupOutcome(attrs: Record<string, string>): { label: string; failed: boolean } | null {
+/** The words a wakeup signal's `cause` shows as (fix wave 4, L3). An unknown cause shows as sent. */
+const CAUSE_LABEL: Record<string, string> = {
+  pid_missing: "process not found",
+  sandbox_unavailable: "sandbox stopped",
+  rate: "too many events",
+  deadline: "deadline reached",
+  cancelled: "cancelled",
+};
+
+/**
+ * Pure: the outcome badge of a wakeup signal, or null when it reports no
+ * end. A clean exit is `success`. A person's cancel is `neutral`: it is a
+ * choice, not a failure. Every other end is `danger`.
+ */
+export function wakeupOutcome(
+  attrs: Record<string, string>,
+): { label: string; tone: "success" | "danger" | "neutral" } | null {
   const { cause, exitCode } = attrs;
   if (cause === undefined && exitCode === undefined) return null;
-  const failed = (cause !== undefined && cause !== "exit") || (exitCode !== undefined && exitCode !== "0");
-  if (cause === undefined || cause === "exit") return { label: `exit ${exitCode ?? "?"}`, failed };
-  return { label: exitCode !== undefined ? `${cause} · exit ${exitCode}` : cause, failed };
+  if (cause === undefined || cause === "exit") {
+    return { label: `exit ${exitCode ?? "?"}`, tone: exitCode === "0" ? "success" : "danger" };
+  }
+  const words = CAUSE_LABEL[cause] ?? cause;
+  return {
+    label: exitCode !== undefined ? `${words} · exit ${exitCode}` : words,
+    tone: cause === "cancelled" ? "neutral" : "danger",
+  };
+}
+
+/** Pure: who stopped the work, from `cancelledBy` (`user:<id>`), or null. */
+export function cancelledByLabel(attrs: Record<string, string>): string | null {
+  const by = attrs.cancelledBy;
+  if (!by) return null;
+  return by.startsWith("user:") ? "by a person" : `by ${by}`;
 }
 
 /** Pure: a duration in seconds as "45s", "12m", "3h 4m", or "2d 1h". */
@@ -193,6 +220,7 @@ export function originLabel(signal: MessageSignal): string | null {
 function WakeupCard({ message, signal }: { message: Message; signal: MessageSignal }) {
   const attrs = signal.attributes ?? {};
   const outcome = wakeupOutcome(attrs);
+  const cancelledBy = cancelledByLabel(attrs);
   const duration = formatDurationSeconds(attrs.durationSeconds);
   const origin = originLabel(signal);
   return (
@@ -200,7 +228,8 @@ function WakeupCard({ message, signal }: { message: Message; signal: MessageSign
       <div className="flex flex-wrap items-center gap-2">
         <span className="min-w-0 truncate text-sm font-medium text-ink">{attrs.reason || signal.signalType}</span>
         <Badge variant="neutral">{signal.signalType}</Badge>
-        {outcome && <Badge variant={outcome.failed ? "danger" : "success"}>{outcome.label}</Badge>}
+        {outcome && <Badge variant={outcome.tone}>{outcome.label}</Badge>}
+        {cancelledBy && <span className="text-xs text-muted">{cancelledBy}</span>}
         {duration && <span className="text-xs text-muted">ran {duration}</span>}
         {origin && <span className="text-xs text-muted">{origin}</span>}
       </div>

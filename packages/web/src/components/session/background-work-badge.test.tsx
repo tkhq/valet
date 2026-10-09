@@ -43,8 +43,22 @@ describe("background work helpers", () => {
     expect(backgroundItems(undefined)).toEqual([]);
   });
 
-  it("labels the badge with the count and the nearest deadline", () => {
-    expect(badgeLabel(backgroundItems(listing(NOW)), NOW)).toBe("3 background · next deadline in 3h");
+  it("labels the badge with the soonest event across all kinds, timers included (fix wave 4, L2)", () => {
+    // The timer fires in 2h, before the hold's 3h deadline.
+    expect(badgeLabel(backgroundItems(listing(NOW)), NOW)).toBe("3 background · next wakeup in 2h");
+    const [proc, , hold] = backgroundItems(listing(NOW));
+    expect(proc && hold && badgeLabel([proc, hold], NOW)).toBe("2 background · next deadline in 3h");
+  });
+
+  it("rounds a time to the nearest unit (fix wave 4, L2)", () => {
+    expect(timeUntil(NOW + 47 * HOUR, NOW)).toBe("in 2d");
+    expect(timeUntil(NOW + 90 * 60_000, NOW)).toBe("in 2h");
+    expect(timeUntil(NOW + 59.6 * 60_000, NOW)).toBe("in 1h");
+    expect(timeUntil(NOW + 23.7 * HOUR, NOW)).toBe("in 1d");
+    expect(timeUntil(NOW + 10 * 60_000, NOW)).toBe("in 10m");
+  });
+
+  it("labels a lone timer as the next wakeup", () => {
     expect(badgeLabel([{ id: "wk_t", kind: "timer", reason: "x", fireAt: NOW + 10 * 60_000, createdAt: NOW, status: "pending" }], NOW)).toBe(
       "1 background · next wakeup in 10m",
     );

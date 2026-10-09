@@ -330,12 +330,27 @@ export function memoryCopyConflict(error: unknown): { version: string | null; ch
 
 const WORK_KINDS: ReadonlySet<string> = new Set(["process", "watch", "timer", "hold"]);
 
-function isWorkItem(value: unknown): value is BackgroundWorkItem {
-  if (typeof value !== "object" || value === null) return false;
-  if (!("id" in value) || typeof value.id !== "string") return false;
-  if (!("kind" in value) || typeof value.kind !== "string" || !WORK_KINDS.has(value.kind)) return false;
-  if (!("reason" in value) || typeof value.reason !== "string") return false;
-  return "createdAt" in value && typeof value.createdAt === "number";
+function isWorkKind(kind: string): kind is BackgroundWorkItem["kind"] {
+  return WORK_KINDS.has(kind);
+}
+
+/** One work item of a 409 body, or null when it is malformed. A missing `status` reads as running. */
+function toWorkItem(value: unknown): BackgroundWorkItem | null {
+  if (typeof value !== "object" || value === null) return null;
+  if (!("id" in value) || typeof value.id !== "string") return null;
+  if (!("kind" in value) || typeof value.kind !== "string" || !isWorkKind(value.kind)) return null;
+  if (!("reason" in value) || typeof value.reason !== "string") return null;
+  if (!("createdAt" in value) || typeof value.createdAt !== "number") return null;
+  return {
+    id: value.id,
+    kind: value.kind,
+    status: "status" in value && value.status === "pending" ? "pending" : "running",
+    reason: value.reason,
+    ...("threadId" in value && typeof value.threadId === "string" ? { threadId: value.threadId } : {}),
+    ...("deadlineAt" in value && typeof value.deadlineAt === "number" ? { deadlineAt: value.deadlineAt } : {}),
+    ...("fireAt" in value && typeof value.fireAt === "number" ? { fireAt: value.fireAt } : {}),
+    createdAt: value.createdAt,
+  };
 }
 
 /**
@@ -353,7 +368,7 @@ export function backgroundWorkConflict(error: unknown): BackgroundWorkConflict |
   const work: unknown[] = payload.work;
   const hiddenCount = "hiddenCount" in payload && typeof payload.hiddenCount === "number" ? payload.hiddenCount : 0;
   const forceAllowed = "forceAllowed" in payload && payload.forceAllowed === true;
-  return { error: payload.error, code: "background_work", work: work.filter(isWorkItem), hiddenCount, forceAllowed };
+  return { error: payload.error, code: "background_work", work: work.flatMap((v) => { const item = toWorkItem(v); return item ? [item] : []; }), hiddenCount, forceAllowed };
 }
 
 // `GET /api/auth-config` is unauthenticated and doesn't change without a

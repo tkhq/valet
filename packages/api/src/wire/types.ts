@@ -863,7 +863,10 @@ export interface BackgroundWorkItem {
   /** The id a person cancels: `wk_` for a wakeup, `ls_` for a hold. */
   id: string;
   kind: WakeupKindWire | "hold";
+  /** `pending` while a process or watch starts, or a timer waits to fire. A hold is `running`. */
+  status: WakeupStatusWire;
   reason: string;
+  /** Absent for session-level work, such as a hold written before leases had a thread. */
   threadId?: string;
   /** `process`, `watch`, and `hold`: when the work stops on its own (ms). */
   deadlineAt?: number;
