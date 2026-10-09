@@ -6,8 +6,8 @@
  *
  * The persisted tool result is pi-agent-core's AgentToolResult plus the
  * engine's flattened `text` (thread.ts `tool_execution_end`): the image
- * actions' PNG arrives as a base64 `{ type: "image", data, mimeType }`
- * content block, so the Body can render it inline with no extra fetch.
+ * actions' image arrives as a base64 `{ type: "image", data, mimeType }`
+ * content block. The Preview renders it outside the collapsible tool card.
  */
 import { Sparkles } from "lucide-react";
 import { resultText, structuredResult, type ToolRenderer, type ToolRendererProps } from "./types";
@@ -48,8 +48,9 @@ export function imageDataUrl(result: unknown): string | undefined {
     if (!isRecord(block) || block.type !== "image") continue;
     const data = block.data;
     const mimeType = block.mimeType;
-    if (typeof data === "string" && data.length > 0) {
-      return `data:${typeof mimeType === "string" ? mimeType : "image/png"};base64,${data}`;
+    if (typeof data === "string" && data.length > 0 && typeof mimeType === "string" &&
+      ["image/png", "image/jpeg", "image/webp"].includes(mimeType)) {
+      return `data:${mimeType};base64,${data}`;
     }
   }
   return undefined;
@@ -92,6 +93,28 @@ function formatSummary(args: unknown, result: unknown): string | undefined {
   return typeof data.path === "string" ? data.path.split("/").pop() : undefined;
 }
 
+function Preview({ args, result, status, error }: ToolRendererProps) {
+  if (status !== "completed" || error) return null;
+  const action = openaiActionId(args);
+  if (action !== "openai.generate_image" && action !== "openai.edit_image") return null;
+  const imageUrl = imageDataUrl(result);
+  if (!imageUrl) return null;
+  const data = openaiResultData(result);
+  const prompt = openaiParams(args).prompt;
+  return (
+    <figure className="space-y-2">
+      <img
+        src={imageUrl}
+        alt={typeof prompt === "string" ? prompt : "generated image"}
+        className="max-h-96 max-w-full rounded border border-line object-contain"
+      />
+      {typeof data.path === "string" ? (
+        <figcaption className="break-all font-mono text-xs text-muted">{data.path}</figcaption>
+      ) : null}
+    </figure>
+  );
+}
+
 function Body({ args, result, status, error }: ToolRendererProps) {
   if (status === "running" || status === "streaming") {
     return <ToolBody>Working…</ToolBody>;
@@ -111,13 +134,6 @@ function Body({ args, result, status, error }: ToolRendererProps) {
   }
   return (
     <ToolBody className="space-y-2">
-      {imageUrl ? (
-        <img
-          src={imageUrl}
-          alt={typeof openaiParams(args).prompt === "string" ? String(openaiParams(args).prompt) : "generated image"}
-          className="max-h-96 max-w-full rounded border border-neutral-200 dark:border-neutral-800"
-        />
-      ) : null}
       {transcript !== undefined ? (
         <TruncatedText text={transcript} />
       ) : null}
@@ -138,4 +154,5 @@ export const openaiMediaRenderer: ToolRenderer = {
   formatTarget,
   formatSummary,
   Body,
+  Preview,
 };

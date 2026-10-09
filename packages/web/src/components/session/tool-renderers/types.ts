@@ -69,6 +69,8 @@ export interface ToolRenderer {
   ): string | undefined;
   /** Body view rendered when expanded. */
   Body: FC<ToolRendererProps>;
+  /** Output that stays visible outside the collapsible tool card. */
+  Preview?: FC<ToolRendererProps>;
   /**
    * Opt in to rendering the Body while args are still streaming
    * (`status === "streaming"`, args partial and possibly jagged — every
