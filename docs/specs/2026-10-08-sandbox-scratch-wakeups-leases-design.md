@@ -241,14 +241,29 @@ the `SCHEMA_REPAIRS` entry, do not bump `ENGINE_SCHEMA_VERSION`.
 | `exit_code` | int null | |
 | `cause` | text null | terminal cause, see B6 |
 | `log_offset` | bigint | `watch`: bytes already turned into events |
+| `log_tail` | text | the last 4 KB of the log, NUL replaced; default `''` |
 | `event_count` | int | `watch` |
 | `created_at`, `updated_at`, `ended_at` | bigint | ms |
+| `origin_json` | text null | the channel origin of the creating turn |
+| `window_start_at` | bigint null | `watch`: start of the rate window |
+| `window_count` | int null | `watch`: polls with new output in the window |
+| `watch_buffer` | text null | `watch`: lines read but not yet sent; `''` when empty |
+| `last_emit_at` | bigint null | `watch`: when the last `watch.event` went out |
 
-Store methods: `createWakeup`, `getWakeup`, `listWakeups(sessionId, status?)`,
-`listDueWakeups(now, limit, after?)` (running `process`/`watch`, and pending
-`timer` with `fire_at <= now`, in `(created_at, id)` order; `after` is a
-keyset cursor, so a caller reads every due row page by page), `transitionWakeup(id, from[], to, patch)`
-(a single-statement CAS that returns the row only when `from` matched).
+Store methods: `createWakeup`, `createWakeupWithLease(wakeup, lease)` (both
+rows in one transaction), `getWakeup`, `listWakeups(sessionId, statuses?)`,
+`listDueWakeups(now, limit, after?)`, `countWakeupsByKindAndStatus(statuses)`,
+`transitionWakeup(id, from[], to, patch, updatedAt)` (a single-statement CAS
+that returns the row only when `from` matched), and
+`transitionWakeupAndReleaseLease(id, from[], to, patch, updatedAt, cause)`
+(the same CAS and the release of the row's lease in one statement).
+
+`listDueWakeups` returns `{ rows, next }`. `rows` holds the running and
+pending `process`/`watch` rows and the pending `timer` rows with
+`fire_at <= now`, in `(created_at, id)` order, and skips an unreadable row.
+`next` is the keyset cursor of the last row the page read, readable or
+not, or null when the page read fewer than `limit` rows. A caller pages on
+`next`, so it reads every due row.
 
 ### B2. Kinds
 
@@ -431,10 +446,14 @@ from the UI emits its terminal signal with `cause=cancelled`.
 | `deadline_at` | bigint | NOT NULL |
 | `released_at` | bigint null | |
 | `release_cause` | text null | `owner_ended` \| `cancelled` \| `deadline` |
+| `thread_id` | text null | the thread that created it; `lease.expired` goes there |
+| `origin_json` | text null | the channel origin of the creating turn |
 
-Store methods: `createLease`, `releaseLease(id, cause)` (CAS on
-`released_at IS NULL`), `listActiveLeases(sessionId)`,
-`listActiveLeasesBySandbox()`, `countActiveLeases(sessionId)`.
+Store methods: `createLease`, `releaseLease(id, cause, releasedAt)` (CAS on
+`released_at IS NULL`), `getLease(id)` (released or not),
+`listActiveLeases(sessionId)`, `listAllActiveLeases()`,
+`countActiveLeases(sessionId)`, and `setLeaseSandboxId(id, sandboxId)`
+(fills a missing sandbox id on an active lease).
 
 ### C2. Owners
 
@@ -474,7 +493,7 @@ For every sandbox with at least one active lease, the pod MUST carry
 `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` and the label
 `valet.dev/leased: "true"`. The WakeWatcher reconciles this each tick:
 
-1. For each sandbox in `listActiveLeasesBySandbox()`, patch the pod when
+1. For each sandbox that `listAllActiveLeases()` names, patch the pod when
    the annotation is absent.
 2. List pods with the label. For each with zero active leases, remove the
    annotation and the label.
@@ -491,7 +510,9 @@ window after the last lease releases, and logs the deferral.
 The WakeWatcher and `wakeup_cancel` are the only releasers of leases. A
 lease that is active past `deadline_at` for more than 2 ticks is an
 invariant violation (INV-6): it raises `valet_leases_over_deadline` and
-pages. No other code path releases it.
+pages. The WakeWatcher's lease pass then ends the open owner as
+`expired/deadline` and counts it in `valet_leases_orphan_released_total`
+with `reason=deadline` (Deviations, A3). No other code path releases it.
 
 ## Part D: Policy and limits
 
@@ -548,7 +569,11 @@ otherwise, like the existing workspace default/max check.
    bump.
 3. agents-dev values: `scratchMax: 1Ti`, `scratchAgentMax: 100Gi`,
    `leaseMaxHours: 72`.
-4. Alerts: `valet_leases_over_deadline > 0` for 5m;
+4. Alerts: the INV-6 page is the counter
+   `valet_leases_orphan_released_total{reason="deadline"}` (Part G). The
+   gauge is non-zero for one pass only, because the same pass repairs the
+   lease, so `valet_leases_over_deadline > 0` for 5m fires only when the
+   repair itself keeps failing. Also:
    `valet_leases_unannotated > 0` for 5m; `increase(valet_wakeups_total{cause="rate"}[1h]) > 3`.
    The existing `SandboxPodUnschedulable` covers a scratch pod that no
    node fits. Fleet scratch: `valet_sandbox_scratch_live_bytes > 4Ti` for
@@ -589,12 +614,21 @@ Example alert rules. The OTel Prometheus export appends the unit, so the
 `valet.wakeups.sweep_ok_at` gauge (unit `s`) exports as
 `valet_wakeups_sweep_ok_at_seconds`.
 
+OTel creates a counter series at its first value, so `increase()` alone
+misses the first event of each label set. Each counter rule adds the
+series that did not exist one window ago, the pattern in
+`deploy/chart/valet/alerts/prebuild.yaml`.
+
 ```
 time() - valet_wakeups_sweep_ok_at_seconds > 300 or absent(valet_wakeups_sweep_ok_at_seconds)
 valet_leases_over_deadline > 0                                     for 5m
-increase(valet_leases_orphan_released_total{reason="deadline"}[1h]) > 0
-increase(valet_wakeups_bad_rows_total[1h]) > 0
-increase(valet_wakeups_signal_lost_total[1h]) > 0
+(sum(increase(valet_leases_orphan_released_total{reason="deadline"}[1h])) or vector(0))
+  + (sum(valet_leases_orphan_released_total{reason="deadline"}
+      unless valet_leases_orphan_released_total{reason="deadline"} offset 1h) or vector(0)) > 0
+(sum(increase(valet_wakeups_bad_rows_total[1h])) or vector(0))
+  + (sum(valet_wakeups_bad_rows_total unless valet_wakeups_bad_rows_total offset 1h) or vector(0)) > 0
+(sum(increase(valet_wakeups_signal_lost_total[1h])) or vector(0))
+  + (sum(valet_wakeups_signal_lost_total unless valet_wakeups_signal_lost_total offset 1h) or vector(0)) > 0
 ```
 
 UI: a wakeups strip on the session page lists active wakeups and leases
@@ -1132,8 +1166,9 @@ with an earlier entry, the entry below wins.
   found the signal-count limit unreachable. One signal per 30-second tick
   gives at most 120 per hour, and the check needed 121. The window now
   counts WakeWatcher polls that read new lines, and it starts over only
-  when it is more than one hour old. So a watch with output on every poll
-  stops on the 121st poll, at the 3600-second mark, at the defaults.
+  when it is more than one hour plus one tick old (fix wave 4). So a watch
+  with output on every poll stops on the 121st such poll at the defaults,
+  even when each tick lands a little late.
 - **A3: coalesced watch signals.** A watch sends at most one
   `watch.event` per `watchMinIntervalMs` (default 120000,
   `VALET_WATCH_MIN_INTERVAL_MS`). The first signal goes out at once. Lines
@@ -1223,3 +1258,62 @@ with an earlier entry, the entry below wins.
 - **Wave 3, wakeup signals and `addressed`.** The envelope still renders
   `addressed="false"` for a `<wakeup>` signal. The orchestrator persona
   rule names the signal as the assistant's own work, which is enough.
+- **A4: rate window and drift.** A rate window starts over only when it
+  is more than one hour plus one WakeWatcher tick old. The watcher passes
+  its interval to the kernel as `tickMs`. A `setInterval` tick lands a
+  little after the last one. So a window of exactly one hour started over
+  one poll before the 121st, and the limit never tripped.
+- **A4: due-row cursor.** `listDueWakeups` returns `{ rows, next }`.
+  `next` is the cursor of the last raw row, so an unreadable row in a full
+  page no longer ends the pass. Both stores and the contract cover it.
+  `SessionStore` gains `getLease(id)` so the contract can read back a
+  released lease.
+- **A4: watch bodies.** Deadline, `sandbox_unavailable`, and rate bodies
+  carry the unsent watch lines, up to 64 KiB. They used a 4 KB tail. A
+  human cancel of a watch adds them after `Last output`. One `watch.event`
+  holds at most 64 KiB of lines. A larger buffer keeps the rest for the
+  next emit, which is due at once while the buffer stays full. At exit,
+  the lines go out as several `watch.event` signals of at most 64 KiB.
+- **A4: pending rows and adoption.** A pending row past its start grace
+  waits for its deadline when its probe fails, as a running row does. When the seam's running write loses to a WakeWatcher adoption, the
+  seam returns the running row and kills nothing.
+- **A4: docker.** A finished detached job stays in memory until a
+  terminal poll reads its exit. Docker writes no cap marker. Its poll
+  reports `truncated`, and the exit body and `process_read` add the same
+  capped-log notice the kubernetes marker gives. `readLog` returns
+  `capped: true` for it.
+- **A4: seam refusals.** A raw sandbox with no job mode ends the row with
+  no `pid_missing` count and returns the `[bash_background]` unavailable
+  text. `hold_sandbox` on a session with no running sandbox refuses with
+  `The sandbox is not running. Send a command that needs it first, then
+  hold it.` A create can land after its session delete. It then runs the
+  session delete cascade again, which deletes its rows and counts its
+  open wakeups in `valet.wakeups.total`. The validators refuse a NUL
+  byte in `command`, `reason`, or `prompt` and name the field.
+- **A4: shutdown.** `close()` raises the WakeWatcher's stop flag before
+  the other awaited stops and awaits it before `evictAll`. A stopping pass
+  skips the lease reconcile. A row's kill runs after its signal delivery.
+  When the hard exit cuts a pass, the signal is already submitted and only
+  the kill is lost.
+- **A4: leases.** A lease lookup that throws skips the unprotect pass for
+  that tick, so a leased sandbox keeps its eviction protection.
+  `node_seconds` counts each sandbox once per pass, from its oldest lease,
+  under that lease's owner kind. The bad-row count read records each group
+  with one `add(n)`.
+- **A4: texts.** The `wake_at` result tells the agent to end its turn.
+  The watch start says a full 64 KiB buffer can emit sooner than the
+  interval. The deadline line names `max_hours` for a watch, and it does
+  not offer a larger deadline when the deadline was `leaseMaxHours`. The
+  child `wake_at` sentence uses the resolved
+  `VALET_CHILD_SANDBOX_RETENTION_HOURS`, the bound the ChildWatcher holds.
+- **A4: child replace.** The ChildWatcher keeps waiting while the child's
+  attachment is `provisioning`, and `parkChildSandbox` leaves a
+  provisioning sandbox alone. A forced replace or profile change sends its
+  deferred signals only after the new sandbox is up. A settle during the
+  replace was stale, and it destroyed the sandbox the route was building.
+- **A4: kickoff prune.** The prune passes names through `find -exec`, so a
+  workload-chosen name is never split or globbed. A job counts once, and
+  only when its `.exit` and `.dead` are both gone after the `rm`.
+- **A4: job log cap default.** The dead `resolveJobLogMaxBytes` copy in
+  `wakeups-admin.ts` is gone. The seam imports the default from
+  `providers/sandbox-backend.ts`.
