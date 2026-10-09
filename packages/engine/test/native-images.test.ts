@@ -306,3 +306,16 @@ it("does not retry a streamed image-tool error as a request-time rejection", asy
   expect((await new NativeImageBridge().stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, new VirtualSandbox("stream-rejection")).result()).stopReason).toBe("error");
   expect(fetchMock).toHaveBeenCalledTimes(1);
 });
+
+it("propagates a replay-tool abort instead of treating it as a preview failure", async () => {
+  const helpers = await import("../src/image-output.js");
+  const controller = new AbortController();
+  const preview = vi.spyOn(helpers, "imageAttachment").mockImplementation(async () => { controller.abort(); return png; });
+  try {
+    const sandbox = new VirtualSandbox("replay-abort");
+    const path = "generated-images/1234-abcd.png";
+    await sandbox.writeBinary(path, png);
+    await expect(new NativeImageBridge().tool().execute({ path, image_id: "img_saved" }, { sandbox, signal: controller.signal } as ToolContext)).rejects.toMatchObject({ name: "AbortError" });
+    expect(Buffer.from(await sandbox.readBinary(path)).equals(png)).toBe(true);
+  } finally { preview.mockRestore(); }
+});

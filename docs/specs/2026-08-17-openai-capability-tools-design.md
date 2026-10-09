@@ -91,7 +91,7 @@ The adapter writes validated original bytes before making the preview. It regist
 If the preview fails, the receipt returns the saved path and a warning instead of asking for another paid generation.
 The web renderer keeps that path visible without a preview.
 If a later stream event fails, completed images still produce receipts with a stream warning.
-An abort after saving reports the paths in its error. A turn that saved an image cannot use transient-turn retries or provider fallback.
+An abort after saving reports the paths in its error. Receipt replay still propagates aborts; it does not treat them as preview failures. A turn that saved an image cannot use transient-turn retries or provider fallback.
 
 ### Responses replay
 

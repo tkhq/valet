@@ -75,6 +75,7 @@ export class NativeImageBridge {
       signal?.throwIfAborted();
       return { ...result, attachments: [{ type: "image", data: preview, mimeType: IMAGE_FORMATS[format].mime, name: path.slice(path.lastIndexOf("/") + 1) }] };
     } catch {
+      signal?.throwIfAborted();
       return this.receipt(bytes, path, id, format, "Image saved without a preview. Use the saved original; do not regenerate it.");
     }
   }
