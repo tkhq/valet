@@ -401,8 +401,9 @@ export function recordLeaseOrphanReleased(ownerKind: LeaseOwnerKind, reason: Orp
 }
 
 /** A wakeup or lease row a store read skipped because it did not narrow. */
-export function recordWakeupBadRow(table: "engine_wakeups" | "engine_leases"): void {
-  inst().wakeupBadRows.add(1, { table });
+export function recordWakeupBadRow(table: "engine_wakeups" | "engine_leases", count = 1): void {
+  if (count <= 0) return;
+  inst().wakeupBadRows.add(count, { table });
 }
 
 /** The WakeWatcher finished a pass at `unixSeconds`. */

@@ -50,6 +50,13 @@ function makeFactory(db: PgDb): () => Promise<PgSessionStore> {
   };
 }
 
+/** Gives the wakeup an unknown cause, which no row mapper accepts. */
+function corrupter(db: PgDb): (_store: unknown, id: string) => Promise<void> {
+  return async (_store, id) => {
+    await db.query(`UPDATE engine_wakeups SET cause = 'bogus' WHERE id = $1`, [id]);
+  };
+}
+
 describe("PgSessionStore (PGlite)", () => {
   const pglite = new PGlite();
   const db = pgDbFromPglite(pglite);
@@ -59,7 +66,7 @@ describe("PgSessionStore (PGlite)", () => {
     await db.close();
   });
 
-  runSessionStoreContract("PgSessionStore (PGlite)", { factory });
+  runSessionStoreContract("PgSessionStore (PGlite)", { factory, corruptWakeup: corrupter(db) });
   runSubmissionLifecycleContract("PgSessionStore (PGlite)", { factory });
 
   it("skips an unreadable wakeup or lease row instead of failing the whole read (fix wave 2, M5)", async () => {
@@ -76,7 +83,7 @@ describe("PgSessionStore (PGlite)", () => {
     await db.query(`UPDATE engine_leases SET owner_kind = 'bogus' WHERE id = 'ls_bad'`);
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      expect((await store.listDueWakeups(10, 10)).map((w) => w.id)).toEqual(["wk_good"]);
+      expect((await store.listDueWakeups(10, 10)).rows.map((w) => w.id)).toEqual(["wk_good"]);
       expect((await store.listAllActiveLeases()).map((l) => l.id)).toEqual(["ls_good"]);
       expect(errors).toHaveBeenCalledWith(expect.stringContaining("wk_bad"), expect.anything());
     } finally {
@@ -145,6 +152,6 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PgSessionStore (docker-pg)", ()
     await db.close();
   });
 
-  runSessionStoreContract("PgSessionStore (docker-pg)", { factory });
+  runSessionStoreContract("PgSessionStore (docker-pg)", { factory, corruptWakeup: corrupter(db) });
   runSubmissionLifecycleContract("PgSessionStore (docker-pg)", { factory });
 });
