@@ -435,7 +435,7 @@ describe("PATCH /api/org/sources/:id", () => {
       const overCap = await patch({ sandboxResources: { scratch: "2Ti" } });
       expect(overCap.status).toBe(400);
       expect(await overCap.json()).toMatchObject({
-        error: 'scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or ask an admin to raise the cap.',
+        error: 'scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or set a higher sandbox.scratchMax in the Valet chart (an admin task).',
       });
 
       const invalid = await patch({ sandboxResources: { scratch: "x" } });
