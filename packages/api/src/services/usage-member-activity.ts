@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { AppDb } from '../lib/drizzle.js';
 import type { UsageScope } from './usage.js';
 import type { ResolvedUsagePeriod } from './usage-period.js';
+import { isAgentSession } from './usage-hourly.js';
 const HOUR = 3600000;
 const DAY = HOUR * 24;
 
@@ -26,12 +27,11 @@ export async function getMemberAgentDays(db: AppDb, scope: UsageScope, period: R
       SELECT id AS session_id,org_id,user_id,owner_type,NULLIF(owner_id,'') AS owner_id
       FROM agent_sessions
       UNION ALL
-      SELECT DISTINCT f.session_id,d.org_id,
+      SELECT DISTINCT f.session_id,r.org_id,
         CASE WHEN r.owner_type='user' THEN NULLIF(r.owner_id,'') END,
         r.owner_type,NULLIF(r.owner_id,'')
       FROM (SELECT DISTINCT session_id FROM activity WHERE session_id LIKE 'wf:%') f
       JOIN workflow_runs r ON r.id=split_part(f.session_id,':',2)
-      JOIN workflow_definitions d ON d.id=r.workflow_id
       WHERE NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id=f.session_id)
     ), active AS (
       SELECT activity.session_id,(floor(activity.created_at::numeric/${DAY})*${DAY})::bigint AS day_ms,
@@ -40,7 +40,7 @@ export async function getMemberAgentDays(db: AppDb, scope: UsageScope, period: R
       FROM activity JOIN owners ON owners.session_id=activity.session_id
       LEFT JOIN child_watches cw ON cw.child_session_id=activity.session_id AND cw.org_id=owners.org_id
       LEFT JOIN assistants a ON a.session_id=activity.session_id AND a.org_id=owners.org_id
-      WHERE owners.org_id=${scope.orgId} ${scopeFilter}
+      WHERE owners.org_id=${scope.orgId} ${scopeFilter} AND ${isAgentSession(sql`activity.session_id`)}
     ), daily AS (
       SELECT actor_id,day_ms,COUNT(DISTINCT session_id) AS active_agents
       FROM active GROUP BY actor_id,day_ms

@@ -9,7 +9,7 @@ import { eq, inArray, sql, type SQL } from "drizzle-orm";
 import { usageRead } from "./usage-read.js";
 import { getMemberAgentDays } from "./usage-member-activity.js";
 import { getActionToolCalls, getActionOutcomes, getSkillBreakdown } from "./usage-aux-rollups.js";
-import { proxyPeriodRows, usagePeriodRows, HOURLY_BUCKET_COLS } from "./usage-hourly.js";
+import { isAgentSession, proxyPeriodRows, usagePeriodRows, HOURLY_BUCKET_COLS } from "./usage-hourly.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgs, users } from "../schema/index.js";
 import { isOrgAdmin } from "./org.js";
@@ -298,7 +298,7 @@ async function queryDailyAgentActivity(
     FROM ${usagePeriodRows(activityPeriod)} ce
     LEFT JOIN teams t ON ce.owner_type = 'team' AND t.id = ce.owner_id AND t.org_id = ce.org_id
     WHERE ${where}
-      AND ce.session_id IS NOT NULL AND ce.positive_turns > 0
+      AND ce.session_id IS NOT NULL AND ce.positive_turns > 0 AND ${isAgentSession(sql`ce.session_id`)}
     GROUP BY 1, 2, 3, 4 ORDER BY 1, 2 NULLS FIRST, 4
   `) as { rows: ActivityRow[] };
   return {
@@ -350,7 +350,8 @@ async function queryUsageBreakdown(
       FROM scoped
       GROUP BY GROUPING SETS ((use_case), (model), (day_ms), (user_id), ())
       ) SELECT grouped.*, CASE WHEN grouping_key=15 THEN
-        (SELECT COUNT(DISTINCT session_id) FROM scoped WHERE session_id IS NOT NULL AND positive_turns>0)
+        (SELECT COUNT(DISTINCT session_id) FROM scoped WHERE session_id IS NOT NULL AND positive_turns>0
+          AND ${isAgentSession(sql`session_id`)})
         ELSE 0 END AS active_agents FROM grouped
     `) as Promise<{ rows: GroupRow[] }>,
     getSkillBreakdown(db, period, opts.scope),

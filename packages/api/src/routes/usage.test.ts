@@ -37,6 +37,17 @@ async function seedEngineEntry(api: TestApi, id: string, sessionId: string, now:
   `);
 }
 
+/** A session step runs in an engine session with its step's id; only such
+ * a workflow id counts as an active agent. */
+async function seedWorkflowStepSessions(api: TestApi, ids: string[], now: number): Promise<void> {
+  for (const id of ids) {
+    await api.providers.db.execute(sql`
+      INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, created_at, updated_at)
+      VALUES (${id}, 'user', 'local-user', 'local-user', 'local-org', '/w', 'workflow', 'active', ${now}, ${now})
+    `);
+  }
+}
+
 describe("GET /api/usage/breakdown", () => {
   it("breaks the caller's spend down by use case (session, orchestrator, proxy)", async () => {
     api = await bootTestApi();
@@ -842,6 +853,7 @@ describe("GET /api/usage/daily-agents", () => {
     await db.insert(workflowDefinitions).values({ id: "activity-workflow", orgId: "local-org", ownerType: "team", ownerId: "activity-a", name: "Activity workflow", definition: {}, createdAt: day, updatedAt: day });
     await api.providers.workflowStore.createRun("activity-run", { workflowId: "activity-workflow", definitionVersionId: "v1" },
       { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "activity-a" });
+    await seedWorkflowStepSessions(api, ["wf:activity-run:node", "wf:activity-run:node:1"], day);
     await seedEngineEntry(api, "activity-wf1", "wf:activity-run:node", day);
     await seedEngineEntry(api, "activity-wf2", "wf:activity-run:node", day);
     await seedEngineEntry(api, "activity-wf3", "wf:activity-run:node:1", day);
@@ -930,6 +942,7 @@ describe("GET /api/usage/breakdown — team daily active agents", () => {
     await entry("a-future", "activity-assistant", now + 1, "future-actor");
     await entry("child-1", "activity-child", today);
     await entry("child-2", "activity-child", today + 1);
+    await seedWorkflowStepSessions(testApi, ["wf:activity-run:node", "wf:activity-run:node:1"], today);
     await entry("wf-1", "wf:activity-run:node", today);
     await entry("wf-2", "wf:activity-run:node", today + 1);
     await entry("wf-iteration", "wf:activity-run:node:1", today);

@@ -18,6 +18,8 @@ import { applyAppMigrations, missingSchemaRepairs, type AppDb } from "../lib/dri
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { prepareUsageStepAttribution } from "../lib/usage-step-attribution.js";
 import { recordLlmStepUsage, stepUsageEntry } from "../workflows/step-usage.js";
+import { getDailyAgentActivity, getUsageBreakdown } from "../services/usage.js";
+import { getMemberAgentDays } from "../services/usage-member-activity.js";
 
 const NOW = 1_700_000_000_000;
 const ASSISTANT = "orchestrator:u-alice";
@@ -138,6 +140,29 @@ describe("usage workflow step attribution", () => {
 
     expect(await factFor(db, "e-thread")).toEqual({ session_id: ASSISTANT, workflow_run_id: null });
     expect(await orgTotals(db)).toEqual(before);
+  });
+
+  it("counts a workflow's engine sessions as active agents, never its billing-only step ids", async () => {
+    // A session step runs in its own engine session.
+    await db.query(`INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, created_at, updated_at)
+      VALUES ('wf:run-1:review', 'user', 'u-alice', 'u-alice', 'org-a', '/tmp/w', 'workflow', 'active', $1, $1)`, [NOW]);
+    await db.query(`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, model, usage, cost, created_at)
+      VALUES ('e-review', 'wf:run-1:review', 'th', 'message', 'assistant', 'claude', $1, $2, $3)`, [USAGE, COST, NOW]);
+    // Five LLM-step iterations and a Thread step: spend, but no engine session of their own.
+    for (const iteration of [0, 1, 2, 3, 4]) {
+      await recordLlmStepUsage(appDb, { runId: "run-1", nodeId: "summarize", iteration, model: "claude", usage: piUsage(10, 0.001), now: NOW });
+    }
+    await queueItem(db, "q-thread", "workflow:run-1:think");
+    await assistantTurn(db, "e-thread", "q-thread");
+
+    const scope = { scope: "org", orgId: "org-a" } as const;
+    const window = { windowMs: 86_400_000, now: NOW + 3_600_000, scope };
+    const activity = await getDailyAgentActivity(appDb, window);
+    expect(activity.days.map((d) => [d.kind, d.activeAgents])).toEqual([["workflow", 1]]);
+    expect((await getUsageBreakdown(appDb, window)).activeAgents).toBe(1);
+    const memberDays = await getMemberAgentDays(appDb, scope, { startMs: NOW - 3_600_000, endMs: NOW + 3_600_000, kind: "lookback", label: "test" });
+    // Member activity keys the Thread step's turn by its real session, the assistant.
+    expect(memberDays.map((r) => [r.actor_id, Number(r.agent_days)])).toEqual([["u-alice", 1], [null, 1]]);
   });
 });
 
