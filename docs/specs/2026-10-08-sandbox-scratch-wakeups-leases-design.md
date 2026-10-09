@@ -964,3 +964,48 @@ with an earlier entry, the entry below wins.
   and counted, never thrown), `valet.leases.orphan_released{owner_kind}`,
   and `valet.leases.settle_over_deadline`. A lease with no sandbox to
   protect no longer counts toward `valet_leases_unannotated`.
+- **C: B6, human cancel.** `cancelWorkAsHuman` in `wakeups-admin.ts`
+  calls the seam's own cancel, then submits the terminal signal with
+  `cause=cancelled` and `cancelledBy=user:<id>` to the wakeup's thread
+  (the main thread when that thread is gone). A process or watch sends
+  `process.exited` or `watch.exited`; the body says a person stopped it
+  and keeps the stored log tail. A timer sends the new type
+  `timer.cancelled`, so the agent does not read the cancel as its prompt.
+  A hold sends the new type `lease.released`. A process or watch
+  lease id resolves to its wakeup. A lost CAS sends nothing, because the
+  WakeWatcher's own signal stands.
+- **C: routes.** `GET /api/sessions/:id/wakeups` lists open wakeups and
+  active leases with no command and no exec id. `POST
+  /api/sessions/:id/wakeups/:wakeupId/cancel` is a human cancel. The list
+  needs view access; the cancel needs `canCancelSessionWakeup`, which is
+  the pause rule (`canAdministerSession`). On a team session both hide
+  work on threads the caller cannot see.
+- **C: pause and replace.** Both return 409 while
+  `countActiveLeases > 0`, with the text `This session has active
+  background work: <wakeup or hold id> "<reason>" (deadline <ISO>). Ask
+  the agent to cancel it, or send force=true to stop it.` With
+  `force=true` (query or JSON body) they cancel the leased work (process,
+  watch, hold) as a human cancel, stop the sandbox, and only then submit
+  the signals. Timers keep their schedule, because they do not use the
+  sandbox. The response names the cancelled ids in `cancelledWork`.
+- **C: thread archive.** Archive cancels the thread's wakeups and holds
+  as a human cancel with no signal. The thread is hidden, and the main
+  thread of a team session can belong to other people, so no thread is
+  a safe target. A caller who may not cancel gets a 409 that names the
+  action, as for a pending approval.
+- **C: owner move.** A move cancels every open wakeup and hold before the
+  owner write, with no signal, because a signal turn would run as the new
+  owner. The response carries `cancelledWorkCount`. The engine store is
+  outside the app database transaction, so the cancel runs just before
+  the owner write.
+- **C: web.** A wakeup signal card shows the reason, a cause or exit
+  badge (danger unless `exit 0`), the run time, and the log in a `<pre>`
+  block. The wire does not ship the envelope tag, so the card keys on the
+  signal type prefix and a `wakeupId` or `leaseId` attribute. A
+  background `bash` card shows the reason and the deadline. The session
+  header shows `N background · next deadline in …` with a list and a
+  Cancel per row for session admins.
+- **C: startup warning thread.** The prompt route passes the target
+  thread's key as `warningThreadKey`, so a scratch warning from that
+  build lands on that thread. The create route targets the default
+  thread, which is already the fallback.

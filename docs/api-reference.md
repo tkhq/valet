@@ -26,7 +26,10 @@ App webhooks (HMAC-verified).
 |----------|--------|-------------|
 | `/api/sessions` | GET / POST | List / create sessions |
 | `/api/sessions/:id` | GET / PATCH / DELETE | Detail, update (title etc.), delete |
-| `/api/sessions/:id/pause` | POST | Pause the session |
+| `/api/sessions/:id/pause` | POST | Pause the session. Returns 409 while background work holds a lease; `?force=true` or `{ "force": true }` cancels that work first |
+| `/api/sessions/:id/sandbox/replace` | POST | Replace the sandbox. Same 409 and `force` rule as pause |
+| `/api/sessions/:id/wakeups` | GET | Open wakeups and active leases → `{ wakeups, leases }` (no command or exec id) |
+| `/api/sessions/:id/wakeups/:wakeupId/cancel` | POST | Cancel one wakeup (`wk_`) or hold (`ls_`) as a person. The agent gets the terminal signal with `cause=cancelled`. Session admins only |
 | `/api/sessions/:id/sandbox-jwt` | POST | Mint a short-lived gateway JWT |
 | `/api/sessions/:id/ws` | WebSocket | Live event stream (`?fromOffset=` to resume) |
 | `/api/sessions/:id/gateway/*` | ALL | Authenticated proxy to the sandbox gateway (terminal, VS Code) |
