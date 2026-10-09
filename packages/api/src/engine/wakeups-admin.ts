@@ -19,7 +19,6 @@ import type {
   WakeupKind,
   WakeupsSeam,
 } from "@valet/engine";
-import { parseResourceQuantity } from "@valet/shared";
 
 /**
  * Error texts that mean the sandbox is gone: the kubernetes provider's
@@ -43,26 +42,6 @@ export function isSandboxGone(err: unknown): boolean {
     return true;
   }
   return err instanceof Error && SANDBOX_GONE.test(err.message);
-}
-
-/** Default cap on one detached job's log: 2 GiB (fix wave 2, M6). */
-export const DEFAULT_JOB_LOG_MAX_BYTES = 2 * 1024 ** 3;
-
-/**
- * The detached job log cap from `VALET_JOB_LOG_MAX_BYTES`: a plain byte
- * count or a quantity such as `2Gi`. Unset means the default. A value that
- * does not parse to a positive whole number of bytes stops the boot.
- */
-export function resolveJobLogMaxBytes(env: Record<string, string | undefined>): number {
-  const raw = env.VALET_JOB_LOG_MAX_BYTES?.trim();
-  if (raw === undefined || raw === "") return DEFAULT_JOB_LOG_MAX_BYTES;
-  const bytes = /^\d+$/.test(raw) ? Number(raw) : parseResourceQuantity(raw);
-  if (bytes === null || !Number.isSafeInteger(bytes) || bytes < 1) {
-    throw new Error(
-      `VALET_JOB_LOG_MAX_BYTES="${raw}" is not a byte size. Set a whole number of bytes or a quantity such as 2Gi.`,
-    );
-  }
-  return bytes;
 }
 
 // ── Human surface (fix wave 2, group C) ─────────────────────────────────────

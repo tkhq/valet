@@ -545,7 +545,7 @@ describe("buildWakeupsSeam", () => {
         attachment: { sandboxId: undefined, current: () => null },
       }));
       await expect(seam.hold({ hours: 1, reason: "r" })).rejects.toThrow(
-        "[hold_sandbox] No sandbox is running. Start work that needs the sandbox first.",
+        "[hold_sandbox] The sandbox is not running. Send a command that needs it first, then hold it.",
       );
       expect(await store.countActiveLeases("session-1")).toBe(0);
     });
@@ -720,6 +720,83 @@ describe("buildWakeupsSeam", () => {
       await expect(seam.readLog("wk_nope", 0, 10)).rejects.toThrow(
         "[process_read] wk_nope is not a background process or watch of this session. Call wakeup_list to see this thread's ids.",
       );
+    });
+  });
+
+  describe("fix wave 4", () => {
+    it("deletes the rows when the session was deleted during the create (data probable 2)", async () => {
+      const store = new InMemorySessionStore();
+      const recordEnded = vi.fn();
+      const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, recordEnded, now: () => NOW }, "session-1", () => fakeSession(fakeSandbox()));
+      await expect(seam.create("thread-1", { kind: "watch", command: "x", reason: "r", maxHours: 1 })).rejects.toThrow("[bash_background]");
+      await expect(seam.create("thread-1", { kind: "timer", prompt: "p", fireAt: NOW + 60_000 })).rejects.toThrow("[wake_at]");
+      await expect(seam.hold({ hours: 1, reason: "r" })).rejects.toThrow("[hold_sandbox]");
+      expect(await store.listWakeups("session-1")).toEqual([]);
+      expect(await store.listActiveLeases("session-1")).toEqual([]);
+      expect(await store.listAllActiveLeases()).toEqual([]);
+    });
+
+    it("returns a job the watcher adopted during the start, and does not kill it (UX N4)", async () => {
+      const store = await storeWithSession();
+      const rawCancel = vi.fn().mockResolvedValue(undefined);
+      const execJob = vi.fn(async (_cmd: string, opts?: { execId?: string }) => {
+        const [row] = await store.listWakeups("session-1");
+        if (row) await store.transitionWakeup(row.id, ["pending"], "running", {}, NOW);
+        return { execId: opts?.execId ?? "x" } satisfies ExecJobHandle;
+      });
+      const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => NOW }, "session-1", () =>
+        fakeSession(fakeSandbox({ execJob }), "sb-1", fakeSandbox({ cancelJob: rawCancel })),
+      );
+      const { wakeup, lease } = await seam.create("thread-1", { kind: "process", command: "make", reason: "r", deadlineHours: 1 });
+      expect(wakeup.status).toBe("running");
+      expect(lease?.id).toBe(wakeup.leaseId);
+      expect(rawCancel).not.toHaveBeenCalled();
+      expect(await store.countActiveLeases("session-1")).toBe(1);
+    });
+
+    it("maps a sandbox without job mode to the unavailable refusal and counts no pid_missing (UX N12)", async () => {
+      const store = await storeWithSession();
+      const recordEnded = vi.fn();
+      const rawCancel = vi.fn();
+      const execJob = vi.fn().mockRejectedValue(new Error("[job_unsupported] this sandbox does not support job-mode exec"));
+      const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, recordEnded, now: () => NOW }, "session-1", () =>
+        fakeSession(fakeSandbox({ execJob }), "sb-1", fakeSandbox({ cancelJob: rawCancel })),
+      );
+      await expect(seam.create("thread-1", { kind: "process", command: "make", reason: "r", deadlineHours: 1 })).rejects.toThrow(
+        "[bash_background] This sandbox backend cannot run background processes. Run the command in the foreground with a timeout of up to 3600 seconds.",
+      );
+      expect(recordEnded).not.toHaveBeenCalled();
+      expect(rawCancel).not.toHaveBeenCalled();
+      expect(await store.listWakeups("session-1", ["pending", "running"])).toEqual([]);
+      expect(await store.countActiveLeases("session-1")).toBe(0);
+    });
+
+    it("refuses a hold on a hibernated session and names the action (UX P4)", async () => {
+      const store = await storeWithSession();
+      const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => NOW }, "session-1", () =>
+        fakeSession(fakeSandbox(), "sb-1", null),
+      );
+      await expect(seam.hold({ hours: 1, reason: "r" })).rejects.toThrow(
+        "[hold_sandbox] The sandbox is not running. Send a command that needs it first, then hold it.",
+      );
+      expect(await store.countActiveLeases("session-1")).toBe(0);
+    });
+
+    it("reports a provider cap drop with no marker as capped (UX N5)", async () => {
+      const store = await storeWithSession();
+      await store.createWakeupWithLease(
+        {
+          id: "wk_c", sessionId: "session-1", threadId: "thread-1", kind: "process", status: "running", reason: "r", command: "c",
+          execId: "job-c-12345678", leaseId: "ls_c", deadlineAt: NOW + 3_600_000, logOffset: 0, logTail: "", eventCount: 0,
+          createdAt: NOW, updatedAt: NOW,
+        },
+        { id: "ls_c", sessionId: "session-1", sandboxId: "sb-1", ownerKind: "process", ownerId: "wk_c", reason: "r", createdAt: NOW, deadlineAt: NOW + 3_600_000 },
+      );
+      const rawPoll = vi.fn().mockResolvedValue({ status: "done", exitCode: 0, output: "head", nextOffset: 4, truncated: true } satisfies JobPoll);
+      const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => NOW }, "session-1", () =>
+        fakeSession(fakeSandbox(), "sb-1", fakeSandbox({ pollJob: rawPoll })),
+      );
+      expect(await seam.readLog("wk_c", 0, 10)).toEqual({ text: "head", nextOffset: 4, eof: true, capped: true });
     });
   });
 });

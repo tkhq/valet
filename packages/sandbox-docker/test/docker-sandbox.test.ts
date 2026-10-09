@@ -653,17 +653,27 @@ describe("docker job output helpers (fix wave 2)", () => {
 });
 
 describe("dropFinishedDetachedOutputs (fix wave 3, security L4)", () => {
-  type Job = { detached: boolean; status: "running" | "done" | "failed"; output: string };
+  type Job = { detached: boolean; status: "running" | "done" | "failed"; output: string; terminalPolled?: boolean };
   it("drops the oldest finished detached buffers until the total fits, and keeps running jobs", () => {
     const jobs = new Map<string, Job>([
-      ["a", { detached: true, status: "done", output: "x".repeat(40) }],
+      ["a", { detached: true, status: "done", output: "x".repeat(40), terminalPolled: true }],
       ["b", { detached: true, status: "running", output: "x".repeat(40) }],
-      ["c", { detached: true, status: "failed", output: "x".repeat(40) }],
+      ["c", { detached: true, status: "failed", output: "x".repeat(40), terminalPolled: true }],
       ["d", { detached: false, status: "done", output: "x".repeat(40) }],
-      ["e", { detached: true, status: "done", output: "x".repeat(40) }],
+      ["e", { detached: true, status: "done", output: "x".repeat(40), terminalPolled: true }],
     ]);
     expect(dropFinishedDetachedOutputs(jobs, 100)).toEqual(["a", "c"]);
     expect([...jobs.keys()]).toEqual(["b", "d", "e"]);
+  });
+
+  it("keeps a finished job whose exit no terminal poll has read yet (fix wave 4, data N3)", () => {
+    const jobs = new Map<string, Job>([
+      ["a", { detached: true, status: "done", output: "x".repeat(40) }],
+      ["b", { detached: true, status: "done", output: "x".repeat(40), terminalPolled: true }],
+      ["c", { detached: true, status: "done", output: "x".repeat(40) }],
+    ]);
+    expect(dropFinishedDetachedOutputs(jobs, 50)).toEqual(["b"]);
+    expect([...jobs.keys()]).toEqual(["a", "c"]);
   });
 
   it("drops nothing under the cap, and nothing it may not drop over it", () => {
