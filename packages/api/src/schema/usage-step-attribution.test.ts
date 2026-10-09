@@ -87,6 +87,21 @@ describe("usage workflow step attribution", () => {
     expect(await hourlyCost(db, ASSISTANT)).toBeCloseTo(0.003);
   });
 
+  it("bills a promoted Thread-step prompt's turn to the step it was promoted from", async () => {
+    await queueItem(db, "q-thread", "workflow:run-1:think");
+    // Send-now promotes a queued item into a new one that names its source;
+    // the new item cannot repeat the dispatch id, which is unique per session.
+    await queueItem(db, "q-promoted", null);
+    await db.query("UPDATE engine_queue_items SET metadata = $1 WHERE id = 'q-promoted'", [JSON.stringify({ promotedFromItemId: "q-thread" })]);
+    await assistantTurn(db, "e-promoted", "q-promoted");
+    expect(await factFor(db, "e-promoted")).toEqual({ session_id: "wf:run-1:think", workflow_run_id: "run-1" });
+
+    // Turns recorded before the rule move too.
+    await db.query("UPDATE usage_entry_facts SET session_id = $1, workflow_run_id = NULL WHERE entry_id = 'e-promoted'", [ASSISTANT]);
+    await prepareUsageStepAttribution(db);
+    expect(await factFor(db, "e-promoted")).toEqual({ session_id: "wf:run-1:think", workflow_run_id: "run-1" });
+  });
+
   it("moves Thread-step turns recorded before the rule, hours included", async () => {
     await queueItem(db, "q-thread", "workflow:run-1:think");
     await assistantTurn(db, "e-thread", "q-thread");

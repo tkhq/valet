@@ -64,9 +64,16 @@ export async function prepareUsageStepAttribution(db: PgDb): Promise<void> {
       SELECT id, session_id FROM engine_queue_items
       WHERE id > $1 AND dispatch_id LIKE 'workflow:%' AND session_id NOT LIKE 'wf:%'
       ORDER BY id LIMIT 200
+    ), targets AS (
+      SELECT id, session_id FROM items
+      UNION ALL
+      -- A prompt that send-now promoted runs as a new item naming its source.
+      SELECT p.id, p.session_id FROM items i JOIN engine_queue_items p ON p.session_id = i.session_id
+        AND p.dispatch_id IS NULL AND p.metadata LIKE '%"promotedFromItemId"%'
+        AND p.metadata::jsonb->>'promotedFromItemId' = i.id
     ), moved AS (
       UPDATE usage_entry_facts f SET session_id = n.session_id, workflow_run_id = n.workflow_run_id
-      FROM items i JOIN engine_entries e ON e.queue_item_id = i.id AND e.session_id = i.session_id
+      FROM targets i JOIN engine_entries e ON e.queue_item_id = i.id AND e.session_id = i.session_id
       CROSS JOIN LATERAL valet_usage_fact(e) n
       WHERE f.entry_id = e.id AND f.session_id IS DISTINCT FROM n.session_id
     ) SELECT MAX(id) AS cursor FROM items`, [cursor]);

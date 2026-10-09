@@ -1586,14 +1586,19 @@ BEGIN
   -- workflow run and the step, not to the assistant. A run with no org (its
   -- workflow was deleted before runs kept their org) cannot be scoped to a
   -- tenant, so its turns stay on the assistant and keep counting there.
-  -- The step id of a Thread-step turn, or NULL. One indexed probe of the
-  -- queue item, then of the run.
+  -- The step id of a Thread-step turn, or NULL. Indexed probes of the queue
+  -- item, its source, and the run. A queued prompt that send-now promoted is
+  -- a new item without the dispatch id, which is unique per session; it
+  -- names its source in `promotedFromItemId`, and the source carries the id.
   CREATE OR REPLACE FUNCTION valet_usage_step_session(e engine_entries) RETURNS text
   LANGUAGE sql STABLE AS $step$
-    SELECT 'wf:' || regexp_replace(substr(q.dispatch_id, 10), ':repair$', '')
-    FROM engine_queue_items q JOIN workflow_runs r ON r.id = split_part(q.dispatch_id, ':', 2)
-    WHERE q.id = e.queue_item_id AND q.session_id = e.session_id
-      AND q.dispatch_id LIKE 'workflow:%' AND r.org_id IS NOT NULL
+    SELECT 'wf:' || regexp_replace(substr(src.dispatch_id, 10), ':repair$', '')
+    FROM engine_queue_items src JOIN workflow_runs r ON r.id = split_part(src.dispatch_id, ':', 2)
+    WHERE src.session_id = e.session_id AND src.dispatch_id LIKE 'workflow:%' AND r.org_id IS NOT NULL
+      -- A scalar source id keeps this a primary-key probe.
+      AND src.id = (SELECT CASE WHEN q.dispatch_id IS NULL AND q.metadata LIKE '%"promotedFromItemId"%'
+          THEN q.metadata::jsonb->>'promotedFromItemId' ELSE q.id END
+        FROM engine_queue_items q WHERE q.id = e.queue_item_id AND q.session_id = e.session_id)
   $step$;
 
   -- The fact of an entry billed to `billing_session`.
