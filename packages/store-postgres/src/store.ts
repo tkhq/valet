@@ -1,4 +1,13 @@
-import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError, withSpan } from "@valet/engine";
+import {
+  ConflictError,
+  NotFoundError,
+  PendingCapError,
+  recordWakeupBadRow,
+  recordWakeupEnded,
+  StaleAttemptError,
+  ValidationError,
+  withSpan,
+} from "@valet/engine";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -22,6 +31,8 @@ import type {
   SuspendedTurnState,
   ThreadData,
   Wakeup,
+  WakeupCount,
+  WakeupKind,
   WakeupPatch,
   WakeupCursor,
   WakeupStatus,
@@ -30,6 +41,7 @@ import type {
 import { isPgUniqueViolation } from "./db.js";
 import type { PgDb, PgQueryable } from "./db.js";
 import {
+  asString,
   entryToRow,
   jsonOrNull,
   parseJson,
@@ -1403,33 +1415,59 @@ export class PgSessionStore implements SessionStore {
   // === Wakeups and leases (spec 2026-10-08) ===
 
   async createWakeup(w: Wakeup): Promise<void> {
-    await this.db.query(
-      `INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, command, prompt, exec_id, lease_id,
-         fire_at, deadline_at, exit_code, cause, log_offset, log_tail, event_count, created_at, updated_at, ended_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
-      [
-        w.id,
-        w.sessionId,
-        w.threadId,
-        w.kind,
-        w.status,
-        w.reason,
-        w.command ?? null,
-        w.prompt ?? null,
-        w.execId ?? null,
-        w.leaseId ?? null,
-        w.fireAt ?? null,
-        w.deadlineAt ?? null,
-        w.exitCode ?? null,
-        w.cause ?? null,
-        w.logOffset,
-        w.logTail,
-        w.eventCount,
-        w.createdAt,
-        w.updatedAt,
-        w.endedAt ?? null,
-      ],
+    await insertWakeup(this.db, w);
+  }
+
+  async createWakeupWithLease(w: Wakeup, lease: Lease): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await insertLease(tx, lease);
+      await insertWakeup(tx, w);
+    });
+  }
+
+  async countWakeupsByKindAndStatus(statuses: readonly WakeupStatus[]): Promise<WakeupCount[]> {
+    const r = await this.db.query(
+      `SELECT kind, status, count(*)::int AS n FROM engine_wakeups WHERE status = ANY($1::text[]) GROUP BY kind, status`,
+      [[...statuses]],
     );
+    const out: WakeupCount[] = [];
+    for (const raw of r.rows) {
+      const kind = asString(raw.kind, "kind");
+      const status = asString(raw.status, "status");
+      // An unknown kind or status is a bad row; listDueWakeups counts it.
+      if (!isWakeupKind(kind) || !isWakeupStatus(status)) continue;
+      out.push({ kind, status, count: toNum(raw.n, "n") });
+    }
+    return out;
+  }
+
+  async transitionWakeupAndReleaseLease(
+    id: string,
+    from: readonly WakeupStatus[],
+    to: WakeupStatus,
+    patch: WakeupPatch,
+    updatedAt: number,
+    releaseCause: LeaseReleaseCause,
+  ): Promise<Wakeup | null> {
+    // One statement: the CAS and the lease release commit together, so a
+    // crash cannot leave a terminal row with an active lease (fix wave 2, B2).
+    const r = await this.db.query(
+      `WITH t AS (${TRANSITION_SQL} RETURNING *),
+       r AS (UPDATE engine_leases SET released_at = $4, release_cause = $15
+             WHERE id = (SELECT lease_id FROM t) AND released_at IS NULL RETURNING id)
+       SELECT * FROM t`,
+      [...transitionParams(id, from, to, patch, updatedAt), releaseCause],
+    );
+    return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
+  }
+
+  async getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null> {
+    const result = await this.db.query("SELECT * FROM engine_queue_items WHERE session_id = $1 AND dispatch_id = $2", [
+      sessionId,
+      dispatchId,
+    ]);
+    const raw = result.rows[0];
+    return raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
   }
 
   async getWakeup(id: string): Promise<Wakeup | null> {
@@ -1442,10 +1480,10 @@ export class PgSessionStore implements SessionStore {
     let where = "session_id = $1";
     if (statuses && statuses.length > 0) {
       params.push([...statuses]);
-      where += ` AND status = ANY($2)`;
+      where += ` AND status = ANY($2::text[])`;
     }
     const r = await this.db.query(`SELECT * FROM engine_wakeups WHERE ${where} ORDER BY created_at, id`, params);
-    return r.rows.map((raw) => rowToWakeup(rawToWakeupRow(raw)));
+    return mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)));
   }
 
   async listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<Wakeup[]> {
@@ -1457,12 +1495,12 @@ export class PgSessionStore implements SessionStore {
     }
     const r = await this.db.query(
       `SELECT * FROM engine_wakeups
-       WHERE ((status = 'running' AND kind IN ('process','watch'))
+       WHERE ((status IN ('running','pending') AND kind IN ('process','watch'))
           OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1))${keyset}
        ORDER BY created_at, id LIMIT $2`,
       params,
     );
-    return r.rows.map((raw) => rowToWakeup(rawToWakeupRow(raw)));
+    return mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)));
   }
 
   async transitionWakeup(
@@ -1472,47 +1510,12 @@ export class PgSessionStore implements SessionStore {
     patch: WakeupPatch,
     updatedAt: number,
   ): Promise<Wakeup | null> {
-    const r = await this.db.query(
-      `UPDATE engine_wakeups SET status = $3, updated_at = $4,
-         cause = COALESCE($5, cause), exit_code = COALESCE($6, exit_code), ended_at = COALESCE($7, ended_at),
-         log_offset = COALESCE($8, log_offset), log_tail = COALESCE($9, log_tail), event_count = COALESCE($10, event_count),
-         exec_id = COALESCE($11, exec_id), lease_id = COALESCE($12, lease_id)
-       WHERE id = $1 AND status = ANY($2) RETURNING *`,
-      [
-        id,
-        [...from],
-        to,
-        updatedAt,
-        patch.cause ?? null,
-        patch.exitCode ?? null,
-        patch.endedAt ?? null,
-        patch.logOffset ?? null,
-        patch.logTail ?? null,
-        patch.eventCount ?? null,
-        patch.execId ?? null,
-        patch.leaseId ?? null,
-      ],
-    );
+    const r = await this.db.query(`${TRANSITION_SQL} RETURNING *`, transitionParams(id, from, to, patch, updatedAt));
     return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
   }
 
   async createLease(lease: Lease): Promise<void> {
-    await this.db.query(
-      `INSERT INTO engine_leases (id, session_id, sandbox_id, owner_kind, owner_id, reason, created_at, deadline_at, released_at, release_cause)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [
-        lease.id,
-        lease.sessionId,
-        lease.sandboxId ?? null,
-        lease.ownerKind,
-        lease.ownerId ?? null,
-        lease.reason,
-        lease.createdAt,
-        lease.deadlineAt,
-        lease.releasedAt ?? null,
-        lease.releaseCause ?? null,
-      ],
-    );
+    await insertLease(this.db, lease);
   }
 
   async releaseLease(id: string, cause: LeaseReleaseCause, releasedAt: number): Promise<Lease | null> {
@@ -1525,15 +1528,15 @@ export class PgSessionStore implements SessionStore {
 
   async listActiveLeases(sessionId: string): Promise<Lease[]> {
     const r = await this.db.query(
-      `SELECT * FROM engine_leases WHERE session_id = $1 AND released_at IS NULL ORDER BY created_at`,
+      `SELECT * FROM engine_leases WHERE session_id = $1 AND released_at IS NULL ORDER BY created_at, id`,
       [sessionId],
     );
-    return r.rows.map((raw) => rowToLease(rawToLeaseRow(raw)));
+    return mapGoodRows(r.rows, "engine_leases", (raw) => rowToLease(rawToLeaseRow(raw)));
   }
 
   async listAllActiveLeases(): Promise<Lease[]> {
-    const r = await this.db.query(`SELECT * FROM engine_leases WHERE released_at IS NULL ORDER BY created_at`);
-    return r.rows.map((raw) => rowToLease(rawToLeaseRow(raw)));
+    const r = await this.db.query(`SELECT * FROM engine_leases WHERE released_at IS NULL ORDER BY created_at, id`);
+    return mapGoodRows(r.rows, "engine_leases", (raw) => rowToLease(rawToLeaseRow(raw)));
   }
 
   async countActiveLeases(sessionId: string): Promise<number> {
@@ -1553,19 +1556,13 @@ export class PgSessionStore implements SessionStore {
   }
 
   async deleteSession(id: string): Promise<void> {
-    const now = Date.now();
-    await this.db.transaction(async (tx) => {
+    const ended = await this.db.transaction(async (tx) => {
       // A deleted session has no sandbox left to probe, so its open wakeups
-      // and leases end here (spec C2). Otherwise they stay due forever.
-      await tx.query(
-        `UPDATE engine_wakeups SET status = 'lost', cause = 'sandbox_unavailable', ended_at = $2, updated_at = $2
-         WHERE session_id = $1 AND status IN ('pending','running')`,
-        [id, now],
-      );
-      await tx.query(
-        `UPDATE engine_leases SET released_at = $2, release_cause = 'owner_ended' WHERE session_id = $1 AND released_at IS NULL`,
-        [id, now],
-      );
+      // end here (spec C2). The rows hold the command, the prompt, and a
+      // log tail, so they go with the rest of the session (fix wave 2, M12).
+      // The watcher reads a missing row as a lost CAS.
+      const wakeups = await tx.query(`DELETE FROM engine_wakeups WHERE session_id = $1 RETURNING kind, status`, [id]);
+      await tx.query(`DELETE FROM engine_leases WHERE session_id = $1`, [id]);
       // Lock every queue-item row of the session before deleting so a
       // concurrent single-statement CAS (claimSubmission, settleUnclaimed,
       // etc.) either lands before this transaction opens or blocks until it
@@ -1583,8 +1580,137 @@ export class PgSessionStore implements SessionStore {
       await tx.query("DELETE FROM engine_threads WHERE session_id = $1", [id]);
       await tx.query("DELETE FROM engine_events WHERE session_id = $1", [id]);
       await tx.query("DELETE FROM engine_sessions WHERE id = $1", [id]);
+      return wakeups.rows;
     });
+    // Count after the commit: a rolled-back delete ended nothing.
+    for (const raw of ended) {
+      const kind = asString(raw.kind, "kind");
+      const status = asString(raw.status, "status");
+      if (isWakeupKind(kind) && (status === "pending" || status === "running")) {
+        recordWakeupEnded(kind, "sandbox_unavailable");
+      }
+    }
   }
+}
+
+/**
+ * The wakeup CAS, shared by `transitionWakeup` and
+ * `transitionWakeupAndReleaseLease`. `COALESCE` keeps a column the patch
+ * does not set. Parameters come from `transitionParams`.
+ */
+const TRANSITION_SQL = `UPDATE engine_wakeups SET status = $3, updated_at = $4,
+         cause = COALESCE($5, cause), exit_code = COALESCE($6, exit_code), ended_at = COALESCE($7, ended_at),
+         log_offset = COALESCE($8, log_offset), log_tail = COALESCE($9, log_tail), event_count = COALESCE($10, event_count),
+         exec_id = COALESCE($11, exec_id), lease_id = COALESCE($12, lease_id),
+         window_start_at = COALESCE($13, window_start_at), window_count = COALESCE($14, window_count)
+       WHERE id = $1 AND status = ANY($2::text[])`;
+
+function transitionParams(
+  id: string,
+  from: readonly WakeupStatus[],
+  to: WakeupStatus,
+  patch: WakeupPatch,
+  updatedAt: number,
+): unknown[] {
+  return [
+    id,
+    [...from],
+    to,
+    updatedAt,
+    patch.cause ?? null,
+    patch.exitCode ?? null,
+    patch.endedAt ?? null,
+    patch.logOffset ?? null,
+    patch.logTail ?? null,
+    patch.eventCount ?? null,
+    patch.execId ?? null,
+    patch.leaseId ?? null,
+    patch.windowStartAt ?? null,
+    patch.windowCount ?? null,
+  ];
+}
+
+async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
+  await db.query(
+    `INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, command, prompt, exec_id, lease_id,
+       fire_at, deadline_at, exit_code, cause, log_offset, log_tail, event_count, created_at, updated_at, ended_at,
+       origin_json, window_start_at, window_count)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
+    [
+      w.id,
+      w.sessionId,
+      w.threadId,
+      w.kind,
+      w.status,
+      w.reason,
+      w.command ?? null,
+      w.prompt ?? null,
+      w.execId ?? null,
+      w.leaseId ?? null,
+      w.fireAt ?? null,
+      w.deadlineAt ?? null,
+      w.exitCode ?? null,
+      w.cause ?? null,
+      w.logOffset,
+      w.logTail,
+      w.eventCount,
+      w.createdAt,
+      w.updatedAt,
+      w.endedAt ?? null,
+      jsonOrNull(w.origin),
+      w.windowStartAt ?? null,
+      w.windowCount ?? null,
+    ],
+  );
+}
+
+async function insertLease(db: PgQueryable, lease: Lease): Promise<void> {
+  await db.query(
+    `INSERT INTO engine_leases (id, session_id, sandbox_id, owner_kind, owner_id, reason, created_at, deadline_at,
+       released_at, release_cause, thread_id, origin_json)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+    [
+      lease.id,
+      lease.sessionId,
+      lease.sandboxId ?? null,
+      lease.ownerKind,
+      lease.ownerId ?? null,
+      lease.reason,
+      lease.createdAt,
+      lease.deadlineAt,
+      lease.releasedAt ?? null,
+      lease.releaseCause ?? null,
+      lease.threadId ?? null,
+      jsonOrNull(lease.origin),
+    ],
+  );
+}
+
+/**
+ * Maps rows one by one. A row that fails to narrow (an unknown enum from a
+ * hand edit or a rolled-back release) is skipped and counted in
+ * `valet.wakeups.bad_rows`, so one bad row never stops the whole sweep
+ * (fix wave 2, M5). The count pages a human; the row stays for them.
+ */
+function mapGoodRows<T>(rows: Record<string, unknown>[], table: "engine_wakeups" | "engine_leases", map: (raw: Record<string, unknown>) => T): T[] {
+  const out: T[] = [];
+  for (const raw of rows) {
+    try {
+      out.push(map(raw));
+    } catch (err) {
+      recordWakeupBadRow(table);
+      console.error(`store-postgres: skipped unreadable ${table} row ${JSON.stringify(raw.id)}:`, err);
+    }
+  }
+  return out;
+}
+
+function isWakeupKind(v: string): v is WakeupKind {
+  return v === "process" || v === "watch" || v === "timer";
+}
+
+function isWakeupStatus(v: string): v is WakeupStatus {
+  return v === "pending" || v === "running" || v === "done" || v === "cancelled" || v === "expired" || v === "lost";
 }
 
 function rowToSession(r: SessionRow): SessionData {

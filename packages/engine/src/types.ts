@@ -4,7 +4,16 @@ import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
-import type { Lease, LeaseReleaseCause, Wakeup, WakeupCursor, WakeupPatch, WakeupsSeam, WakeupStatus } from "./wakeups/types.js";
+import type {
+  Lease,
+  LeaseReleaseCause,
+  Wakeup,
+  WakeupCount,
+  WakeupCursor,
+  WakeupPatch,
+  WakeupsSeam,
+  WakeupStatus,
+} from "./wakeups/types.js";
 
 // Wakeup and lease contracts (spec 2026-10-08). Type-only re-export: no
 // runtime code, so the engine barrel stays browser-safe.
@@ -2028,6 +2037,8 @@ export interface SessionStore {
   /** Settled queue items whose updatedAt is strictly before `cutoff`. Used by the event-retention prune. */
   listSettledSubmissionsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]>;
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
+  /** The session's queue item admitted with this exact `dispatchId`, or null. */
+  getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null>;
   /**
    * Max last-touched timestamp across the session's queue items, or null when
    * the session has no items. Reads the `updatedAt` column: it is stamped on
@@ -2186,22 +2197,30 @@ export interface SessionStore {
   ): Promise<DecisionGate[]>;
   getSuspendedTurn(sessionId: string, threadId: string): Promise<SuspendedTurnState | null>;
   /**
-   * Deletes the session. Its `pending` and `running` wakeups end `lost` with
-   * `cause=sandbox_unavailable`, and its active leases release with
-   * `owner_ended` (spec C2). The wakeup and lease rows stay.
+   * Deletes the session in one transaction. Its `pending` and `running`
+   * wakeups end (counted in `valet.wakeups.total` with
+   * `cause=sandbox_unavailable`), and then its wakeup and lease rows are
+   * deleted with every other row of the session (spec C2, fix wave 2 M12).
    */
   deleteSession(id: string): Promise<void>;
 
   // === Wakeups and leases (spec 2026-10-08) ===
   createWakeup(wakeup: Wakeup): Promise<void>;
+  /** Writes a process or watch wakeup and its lease in one transaction (spec C2). */
+  createWakeupWithLease(wakeup: Wakeup, lease: Lease): Promise<void>;
   getWakeup(id: string): Promise<Wakeup | null>;
+  /** An empty or absent `statuses` returns every row of the session. */
   listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]>;
   /**
-   * Running process/watch wakeups (always due) plus pending timer wakeups
-   * whose fireAt <= now, in (createdAt, id) order. `after` pages: it returns
-   * only rows strictly after that position, so a caller reads every due row.
+   * Running process/watch wakeups (always due), pending process/watch
+   * wakeups (a start that has not finished, or one a crash cut short), and
+   * pending timer wakeups whose fireAt <= now, in (createdAt, id) order.
+   * `after` pages: it returns only rows strictly after that position, so a
+   * caller reads every due row.
    */
   listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<Wakeup[]>;
+  /** Wakeup counts per (kind, status) over `statuses`. Groups with no rows are absent. */
+  countWakeupsByKindAndStatus(statuses: readonly WakeupStatus[]): Promise<WakeupCount[]>;
   /** CAS: succeeds only when the row's current status is in `from`. Null when the CAS loses. */
   transitionWakeup(
     id: string,
@@ -2209,6 +2228,19 @@ export interface SessionStore {
     to: WakeupStatus,
     patch: WakeupPatch,
     updatedAt: number,
+  ): Promise<Wakeup | null>;
+  /**
+   * `transitionWakeup`, and when the CAS matches, the release of the row's
+   * `lease_id` with `releaseCause` at `updatedAt`, in one statement. A lost
+   * CAS returns null and releases nothing.
+   */
+  transitionWakeupAndReleaseLease(
+    id: string,
+    from: readonly WakeupStatus[],
+    to: WakeupStatus,
+    patch: WakeupPatch,
+    updatedAt: number,
+    releaseCause: LeaseReleaseCause,
   ): Promise<Wakeup | null>;
   createLease(lease: Lease): Promise<void>;
   /** CAS release: succeeds only when the lease is not already released. Null when already released. */

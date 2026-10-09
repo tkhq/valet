@@ -1,5 +1,6 @@
 import type {
   BranchSummaryEntry,
+  ChannelOrigin,
   CommandResultEntry,
   CompactionEntry,
   DecisionGate,
@@ -731,6 +732,32 @@ export interface WakeupRow {
   created_at: number;
   updated_at: number;
   ended_at: number | null;
+  origin_json: string | null;
+  window_start_at: number | null;
+  window_count: number | null;
+}
+
+/**
+ * Narrows a stored `origin_json` to a `ChannelOrigin`. Null or unreadable
+ * JSON reads as no origin: a signal then goes out without one, never a throw.
+ */
+export function parseOriginJson(raw: string | null): ChannelOrigin | undefined {
+  if (raw === null) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object") return undefined;
+  const o: Record<string, unknown> = { ...parsed };
+  if (typeof o.channelType !== "string" || typeof o.threadKey !== "string") return undefined;
+  return {
+    channelType: o.channelType,
+    threadKey: o.threadKey,
+    ...(o.reply === "auto" || o.reply === "manual" ? { reply: o.reply } : {}),
+    ...(typeof o.messageTs === "string" ? { messageTs: o.messageTs } : {}),
+  };
 }
 
 export function rawToWakeupRow(raw: Record<string, unknown>): WakeupRow {
@@ -755,6 +782,9 @@ export function rawToWakeupRow(raw: Record<string, unknown>): WakeupRow {
     created_at: toNum(raw.created_at, "created_at"),
     updated_at: toNum(raw.updated_at, "updated_at"),
     ended_at: toNumOrNull(raw.ended_at, "ended_at"),
+    origin_json: asStringOrNull(raw.origin_json, "origin_json"),
+    window_start_at: toNumOrNull(raw.window_start_at, "window_start_at"),
+    window_count: toNumOrNull(raw.window_count, "window_count"),
   };
 }
 
@@ -797,7 +827,15 @@ export function rowToWakeup(row: WakeupRow): Wakeup {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.ended_at !== null ? { endedAt: row.ended_at } : {}),
+    ...withOrigin(row.origin_json),
+    ...(row.window_start_at !== null ? { windowStartAt: row.window_start_at } : {}),
+    ...(row.window_count !== null ? { windowCount: row.window_count } : {}),
   };
+}
+
+function withOrigin(raw: string | null): { origin?: ChannelOrigin } {
+  const origin = parseOriginJson(raw);
+  return origin ? { origin } : {};
 }
 
 /** Raw column shape of a `SELECT * FROM engine_leases` row. */
@@ -812,6 +850,8 @@ export interface LeaseRow {
   deadline_at: number;
   released_at: number | null;
   release_cause: string | null;
+  thread_id: string | null;
+  origin_json: string | null;
 }
 
 export function rawToLeaseRow(raw: Record<string, unknown>): LeaseRow {
@@ -826,6 +866,8 @@ export function rawToLeaseRow(raw: Record<string, unknown>): LeaseRow {
     deadline_at: toNum(raw.deadline_at, "deadline_at"),
     released_at: toNumOrNull(raw.released_at, "released_at"),
     release_cause: asStringOrNull(raw.release_cause, "release_cause"),
+    thread_id: asStringOrNull(raw.thread_id, "thread_id"),
+    origin_json: asStringOrNull(raw.origin_json, "origin_json"),
   };
 }
 
@@ -850,6 +892,8 @@ export function rowToLease(row: LeaseRow): Lease {
     ...(row.sandbox_id !== null ? { sandboxId: row.sandbox_id } : {}),
     ownerKind: row.owner_kind,
     ...(row.owner_id !== null ? { ownerId: row.owner_id } : {}),
+    ...(row.thread_id !== null ? { threadId: row.thread_id } : {}),
+    ...withOrigin(row.origin_json),
     reason: row.reason,
     createdAt: row.created_at,
     deadlineAt: row.deadline_at,

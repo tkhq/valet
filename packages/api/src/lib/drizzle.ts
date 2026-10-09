@@ -1693,8 +1693,27 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   "command" text, "prompt" text, "exec_id" text, "lease_id" text,
   "fire_at" bigint, "deadline_at" bigint, "exit_code" integer, "cause" text,
   "log_offset" bigint NOT NULL DEFAULT 0, "log_tail" text NOT NULL DEFAULT '', "event_count" integer NOT NULL DEFAULT 0,
-  "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL, "ended_at" bigint
+  "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL, "ended_at" bigint,
+  "origin_json" text, "window_start_at" bigint, "window_count" integer
 )`,
+  },
+  {
+    // Fix wave 2 (H3): the channel origin a wakeup signal replies to.
+    // Engine table: the same ENGINE_SCHEMA_VERSION caveat as above.
+    describe: "engine_wakeups.origin_json column",
+    probe: { kind: "column", table: "engine_wakeups", column: "origin_json" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "origin_json" text',
+  },
+  {
+    // Fix wave 2 (B7): the watch rate window.
+    describe: "engine_wakeups.window_start_at column",
+    probe: { kind: "column", table: "engine_wakeups", column: "window_start_at" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "window_start_at" bigint',
+  },
+  {
+    describe: "engine_wakeups.window_count column",
+    probe: { kind: "column", table: "engine_wakeups", column: "window_count" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "window_count" integer',
   },
   {
     describe: "engine_wakeups_session index (spec 2026-10-08)",
@@ -1713,8 +1732,21 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: `CREATE TABLE IF NOT EXISTS "engine_leases" (
   "id" text PRIMARY KEY NOT NULL, "session_id" text NOT NULL, "sandbox_id" text,
   "owner_kind" text NOT NULL, "owner_id" text, "reason" text NOT NULL,
-  "created_at" bigint NOT NULL, "deadline_at" bigint NOT NULL, "released_at" bigint, "release_cause" text
+  "created_at" bigint NOT NULL, "deadline_at" bigint NOT NULL, "released_at" bigint, "release_cause" text,
+  "thread_id" text, "origin_json" text
 )`,
+  },
+  {
+    // Fix wave 2 (M17): the thread that receives `lease.expired`.
+    describe: "engine_leases.thread_id column",
+    probe: { kind: "column", table: "engine_leases", column: "thread_id" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "thread_id" text',
+  },
+  {
+    // Fix wave 2 (H3).
+    describe: "engine_leases.origin_json column",
+    probe: { kind: "column", table: "engine_leases", column: "origin_json" },
+    sql: 'ALTER TABLE "engine_leases" ADD COLUMN IF NOT EXISTS "origin_json" text',
   },
   {
     describe: "engine_leases_active index (spec 2026-10-08)",
