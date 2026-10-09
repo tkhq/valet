@@ -751,6 +751,8 @@ export class EngineHost {
   private buildEpoch = new Map<string, number>();
   /** Repo keys whose conservative resource-withholding warning is active. */
   private resourceWithholdingWarnings = new Set<string>();
+  /** Repo keys whose dropped-scratch warning is active. */
+  private scratchCapWarnings = new Set<string>();
 
   /**
    * Idle-sweep interval handle (sandbox hibernation plan, Task 3), or
@@ -2084,13 +2086,11 @@ export class EngineHost {
       : resolved;
     const overridden = applySandboxResourceOverrides(effective, meta.sandboxResourceOverrides);
     // `applyScratchCaps` records the refusal metric itself (it has the
-    // `ScratchRequestError.reason`); this call site only logs and surfaces
-    // the warning text to callers (REST sessions log it; children push it
-    // onto `startupWarnings` in `childSessionFor`).
+    // `ScratchRequestError.reason`); this call site logs a warning,
+    // deduplicated per repo below (mirroring `resourcesWithheld`), and
+    // surfaces the warning text to callers (REST sessions log it; children
+    // push it onto `startupWarnings` in `childSessionFor`).
     const capped = applyScratchCaps(overridden, this.opts.scratchCaps);
-    if (capped.warning) {
-      console.warn(`EngineHost: session ${sessionId}: ${capped.warning}`);
-    }
     const result = { ...capped.flags, ...(capped.warning ? { scratchWarning: capped.warning } : {}) };
     if (primary) {
       const warningKey = `${meta.orgId}/${primary.host ?? "github"}/${primary.fullName}`;
@@ -2105,6 +2105,18 @@ export class EngineHost {
       } else {
         this.resourceWithholdingWarnings.delete(warningKey);
       }
+      if (capped.warning) {
+        if (!this.scratchCapWarnings.has(warningKey)) {
+          console.warn(`EngineHost: session ${sessionId}: ${capped.warning}`);
+          this.scratchCapWarnings.add(warningKey);
+        }
+      } else {
+        this.scratchCapWarnings.delete(warningKey);
+      }
+    } else if (capped.warning) {
+      // No repo key to dedup against with no primary binding, so log every
+      // call, same as before this change.
+      console.warn(`EngineHost: session ${sessionId}: ${capped.warning}`);
     }
     return result;
   }
