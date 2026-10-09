@@ -233,7 +233,8 @@ by hand as each user signs in. No wipe and no re-import is needed.
 | `VALET_SANDBOX_IMAGE` | Sandbox image ref (required for kubernetes; docker defaults to `node:20-bookworm`) |
 | `VALET_SANDBOX_CPU` | Optional Kubernetes sandbox CPU default. Use a value greater than 0 and at most 64, such as `4` or `0.5`. Empty leaves it unset. |
 | `VALET_SANDBOX_MEMORY` | Optional Kubernetes sandbox memory default. Use a positive quantity, such as `8Gi` or `500Mi`. Empty leaves it unset. |
-| `VALET_SANDBOX_SCRATCH_MAX` | Deploy-wide cap for the per-sandbox `/scratch` volume. Unset (the default) or `0` disables scratch for the whole deployment. Use a positive quantity, such as `1Ti`. The chart sets it from `sandbox.scratchMax`. A refused request tells the user to ask an admin to change that value. |
+| `VALET_SANDBOX_SCRATCH_MAX` | Deploy-wide cap for the per-sandbox `/scratch` volume. Unset (the default) or `0` disables scratch for the whole deployment. Use a positive quantity, such as `1Ti`. The chart sets it from `sandbox.scratchMax`. A refused request tells the user to ask an admin to change that value. A request must be whole bytes or use a `Ki`, `Mi`, `Gi`, or `Ti` suffix. Keep this at `0` until a local-NVMe scratch node pool exists. |
+| `VALET_SANDBOX_SCRATCH_POOL_READY` | Set to `1` when the scratch node pool exists. While `VALET_SANDBOX_SCRATCH_MAX` is above `0` and this is not `1`, the API logs a WARNING at startup. The chart sets it from `sandbox.scratchPoolReady`. |
 | `VALET_SANDBOX_SCRATCH_AGENT_MAX` | Cap on a `/scratch` size the `task` tool can request for a child session (default `100Gi`). `0` removes the agent cap; a repository or saved default can still request up to `VALET_SANDBOX_SCRATCH_MAX`. Must not exceed `VALET_SANDBOX_SCRATCH_MAX`, or API startup fails and names both variables. |
 | `VALET_SANDBOX_IDLE_MINUTES` | Idle-hibernation window (default `30`, `0` disables). Only effective on backends with hibernation (kubernetes) |
 | `VALET_SANDBOX_NAMESPACE` | Kubernetes namespace for Sandbox CRs |
@@ -244,7 +245,8 @@ by hand as each user signs in. No wipe and no re-import is needed.
 | `VALET_TIMER_MAX_HOURS` | Max hours ahead a `wake_at` timer may fire (default `720`). Use plain digits from 1 to 8760, or API startup fails. |
 | `VALET_WAKEUPS_PER_SESSION` | Max active wakeups and leases one session may hold at once (default `20`). Use plain digits from 1 to 1000, or API startup fails. |
 | `VALET_WATCH_MAX_EVENTS_PER_HOUR` | Max `watch.event` signals one `watch` wakeup may emit in one hour (default `120`). A watch emits at most one signal per WakeWatcher tick. The hour window starts at the first signal after the previous window ends. A watch over the limit stops with `cause=rate`. Use plain digits from 1 to 100000, or API startup fails. |
-| `VALET_JOB_LOG_MAX_BYTES` | Cap on one detached background process log (default `2Gi`, a Kubernetes quantity). Output past the cap is dropped; the process keeps running. |
+| `VALET_JOB_LOG_MAX_BYTES` | Cap on one detached background process log (default `2Gi`, whole bytes or a Kubernetes quantity). Output past the cap is dropped; the process keeps running. On a scratch pod the logs live on `/scratch` and count against its size, so keep the cap below the scratch a session uses. API startup fails when the value does not parse, or when it exceeds a non-zero `VALET_SANDBOX_SCRATCH_MAX`. |
+| `VALET_WATCH_MIN_INTERVAL_MS` | Shortest time in milliseconds between two `watch.event` signal turns of one watch (default `120000`). Use plain digits from 1 to 86400000, or API startup fails. The chart sets it from `sandbox.watchMinIntervalMs`. |
 
 The Helm chart maps `sandbox.resources.cpu` and `sandbox.resources.memory` to
 these defaults. Repository YAML overrides saved repository defaults, which override

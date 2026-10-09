@@ -61,7 +61,10 @@ data:
   VALET_TIMER_MAX_HOURS: {{ .Values.sandbox.timerMaxHours | quote }}
   VALET_WAKEUPS_PER_SESSION: {{ .Values.sandbox.wakeupsPerSession | quote }}
   VALET_WATCH_MAX_EVENTS_PER_HOUR: {{ .Values.sandbox.watchMaxEventsPerHour | quote }}
+  VALET_WATCH_MIN_INTERVAL_MS: {{ .Values.sandbox.watchMinIntervalMs | quote }}
   VALET_JOB_LOG_MAX_BYTES: {{ .Values.sandbox.jobLogMaxBytes | quote }}
+  # "1" says the scratch node pool exists. See values.yaml (sandbox.scratchPoolReady).
+  VALET_SANDBOX_SCRATCH_POOL_READY: {{ ternary "1" "0" .Values.sandbox.scratchPoolReady | quote }}
   # Idle-retention windows before a suspended sandbox's workspace volume is
   # reclaimed (see values.yaml). Children churn fast and get the short
   # window; every other session class gets the long one. The api reads the

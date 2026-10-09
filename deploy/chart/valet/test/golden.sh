@@ -103,6 +103,20 @@ grep -q 'VALET_JOB_LOG_MAX_BYTES: "512Mi"' "$TMP_DIR/job-log.yaml" \
   || fail "sandbox.jobLogMaxBytes override was lost"
 pass "job log cap and scratch defaults render"
 
+# Watch interval and scratch pool marker (fix wave 3).
+grep -q 'VALET_WATCH_MIN_INTERVAL_MS: "120000"' "$TMP_DIR/bundled.yaml" \
+  || fail "default render must carry VALET_WATCH_MIN_INTERVAL_MS \"120000\""
+grep -q 'VALET_SANDBOX_SCRATCH_POOL_READY: "0"' "$TMP_DIR/bundled.yaml" \
+  || fail "the scratch pool must default to not ready"
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set sandbox.scratchPoolReady=true \
+  --set sandbox.watchMinIntervalMs=30000 > "$TMP_DIR/scratch-pool.yaml"
+grep -q 'VALET_SANDBOX_SCRATCH_POOL_READY: "1"' "$TMP_DIR/scratch-pool.yaml" \
+  || fail "sandbox.scratchPoolReady=true must render \"1\""
+grep -q 'VALET_WATCH_MIN_INTERVAL_MS: "30000"' "$TMP_DIR/scratch-pool.yaml" \
+  || fail "sandbox.watchMinIntervalMs override was lost"
+pass "watch interval and scratch pool marker render"
+
 # --- sandbox namespace ownership -----------------------------------------
 [ "$(grep -c '^kind: Namespace$' "$TMP_DIR/bundled.yaml")" -eq 1 ] \
   || fail "default render must include exactly one sandbox Namespace"
