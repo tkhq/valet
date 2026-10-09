@@ -57,12 +57,14 @@ function avatarUrl(value: unknown): string | undefined {
 }
 
 /**
- * Whose profile to read. An assistant session passes its own assistant id:
- * the singleton cutover moved a team's extra assistants to tombstone owners
- * but keeps them running (`legacyAssistantRow` in `service.ts`), and an
- * owner lookup would hand such an assistant the surviving assistant's
- * profile. A post with no assistant of its own, such as a workflow action,
- * passes the owner and reads the workspace's live assistant.
+ * Whose profile to read. A post that belongs to one assistant passes that
+ * assistant's id: the singleton cutover moved a team's extra assistants to
+ * tombstone owners but keeps them running (`legacyAssistantRow` in
+ * `service.ts`), and an owner lookup would hand such an assistant the
+ * surviving assistant's profile. A post that no assistant claims passes the
+ * owner. It reads the workspace's live assistant only while no retained
+ * assistant of that owner still runs; otherwise it reads nothing, and the
+ * post uses the workspace name as before the restore.
  */
 export type LegacyProfileKey = { assistantId: string } | { owner: Principal };
 
@@ -76,7 +78,11 @@ export async function loadLegacyAssistantProfile(
   // row, and a retained assistant's row is archived under its tombstone owner.
   const match = "assistantId" in key
     ? sql`a.id = ${key.assistantId}`
-    : sql`a.owner_type = ${key.owner.type} AND a.owner_id = ${key.owner.id} AND a.archived_at IS NULL`;
+    : sql`a.owner_type = ${key.owner.type} AND a.owner_id = ${key.owner.id} AND a.archived_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM legacy_assistant_runtimes l JOIN assistants r ON r.session_id = l.session_id
+        WHERE l.org_id = ${orgId} AND l.owner_type = ${key.owner.type} AND l.owner_id = ${key.owner.id}
+          AND r.owner_id = l.owner_id || ':retired:' || r.id
+          AND NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = l.session_id AND s.status = 'deleted'))`;
   const result = await db.execute(sql`SELECT p->>'name' AS name, p->>'avatar_url' AS avatar_url,
       p->>'personality' AS personality,
       (SELECT m.applied_at FROM __valet_app_migrations m WHERE m.filename = ${LEGACY_RUNTIME_MARKER}) AS upgraded_at

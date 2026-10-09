@@ -3716,7 +3716,10 @@ export class EngineHost {
     );
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
-    const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner);
+    // A child posts as its parent assistant, so a child of a migration-retained
+    // assistant never takes the surviving assistant's carried-over profile.
+    const parentAssistant = this.opts.db ? await loadAssistantBySessionId(this.opts.db, opts.parentSessionId) : undefined;
+    const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner, parentAssistant?.id);
     // A child spawned with a repo binding (the spawner inserts the
     // `session_repos` row before calling in here) gets the same declarative
     // clone prep a REST-created session gets. Only this first build decides —
@@ -3904,6 +3907,8 @@ export class EngineHost {
       workspace: string;
       title?: string;
       modelId?: string;
+      /** The assistant the run belongs to, for its carried-over sender profile. */
+      assistantId?: string;
     },
   ): Promise<Session> {
     this.assertSessionBuildAllowed(sessionId);
@@ -3928,6 +3933,7 @@ export class EngineHost {
       workspace: string;
       title?: string;
       modelId?: string;
+      assistantId?: string;
     },
   ): Promise<Session> {
     // `opts.owner` is the run's own principal (`WorkflowRun.owner`, which
@@ -3980,7 +3986,7 @@ export class EngineHost {
     const specProvider = await this.buildSpecProvider(sessionId, meta);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
-    const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner);
+    const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner, opts.assistantId);
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
