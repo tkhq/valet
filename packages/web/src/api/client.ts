@@ -171,6 +171,8 @@ import type {
   PatchSessionRequest,
   PatchSessionResponse,
   PauseSessionResponse,
+  ListSessionWakeupsResponse,
+  CancelSessionWakeupResponse,
   GetSessionRatingsResponse,
   PutRatingRequest,
   PutRatingResponse,
@@ -718,6 +720,13 @@ export const api = {
     request<PauseSessionResponse>("POST", `/sessions/${encodeURIComponent(id)}/pause`),
   replaceSandbox: (id: string) =>
     request<{ ok: true }>("POST", `/sessions/${encodeURIComponent(id)}/sandbox/replace`),
+  listSessionWakeups: (id: string) =>
+    request<ListSessionWakeupsResponse>("GET", `/sessions/${encodeURIComponent(id)}/wakeups`),
+  cancelSessionWakeup: (id: string, wakeupId: string) =>
+    request<CancelSessionWakeupResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/wakeups/${encodeURIComponent(wakeupId)}/cancel`,
+    ),
   // workspace runtime: these entry points take a workspace key, never a raw
   // session id, and only ensure the runtime exists
   ensureWorkspaceConversation: (workspace: string) =>

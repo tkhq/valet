@@ -51,6 +51,7 @@ import {
   type AgentStatus,
   type ConnectionStatus,
 } from "~/stores/stream";
+import { BackgroundWorkBadge } from "./background-work-badge";
 import { ModelPicker } from "./model-picker";
 import { MoveSessionDialog } from "./move-session-dialog";
 import { ThreadStatusIcon } from "./thread-status-icon";
@@ -427,6 +428,7 @@ export function SessionHeader({
         {modelSaving && (
           <span role="status" className="text-xs text-neutral-500">Saving model…</span>
         )}
+        <BackgroundWorkBadge sessionId={session.id} canCancel={canAdminister} />
         <div className="hidden sm:contents">
           <ThreadStatusIcon status={agentStatus} busy={threadBusy} needsApproval={Boolean(pendingGate)} conn={conn} />
           <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (runtime/thread + raw tool calls + env)"}>

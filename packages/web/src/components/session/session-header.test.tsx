@@ -74,6 +74,9 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useRenameSession: () => ({ isPending: false, mutateAsync: renameMutateAsync }),
     useSetSessionProfile: () => ({ isPending: false, mutateAsync: setProfileMutateAsync }),
     useSessionRatings: () => ({ data: { session: sessionRating, entries: {} }, isLoading: false, error: null }),
+    // The background work badge renders nothing with no work.
+    useSessionWakeups: () => ({ data: { wakeups: [], leases: [] } }),
+    useCancelSessionWakeup: () => ({ isPending: false, mutateAsync: vi.fn() }),
   };
 });
 
