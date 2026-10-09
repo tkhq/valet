@@ -39,7 +39,8 @@ The portable executor renders file contents into a host-only prompt option. It d
 The host resolves the execution session through the existing owner and audience routing before writing.
 The host calls `attachment.ensureReady` before prompt admission. This provisions a cold sandbox or wakes a suspended sandbox through the normal lifecycle.
 It creates parent directories and writes bytes through `Sandbox.writeBinary`, the same primitive used by file uploads.
-No shell command carries file contents.
+No shell command carries file contents as command text. Docker transports base64 bytes through stdin.
+The host stages each file and the age marker beside its destination, then uses atomic rename to replace it.
 
 The input root is `<working-directory>/.valet/workflow-inputs/<runId>/<nodeId>/<iteration>/`.
 Iteration 0 is explicit, matching existing workflow working-directory conventions. Foreach checkpoint iterations and template indexes both start at 0.
@@ -60,20 +61,25 @@ A one-time provisioning failure must leave an intent checkpoint and complete on 
 ## Durability
 
 The existing intent checkpoint precedes input writes and prompt admission.
-Before writing, the host checks the existing dispatch admission. Existing files must have identical bytes; conflicts never overwrite them.
-A duplicate dispatch checks bytes without writing, sweeping, or changing timestamps. Normal admission still checks prompt content.
-If a crash occurs before the receipt checkpoint, re-dispatch writes only missing files and returns the existing receipt.
-The host records the resolved session and an `inputFilesAttempted` flag before writing, using the drive's attempt fence.
+The engine store exposes dispatch-admission lookup through its portable contract.
+Before admission, each attempt freely replaces files through same-directory staging and atomic rename. This repairs partial transport writes.
+After admission, replay performs no filesystem checks, writes, sweep, readiness calls, or timestamp updates.
+The host reconstructs the manifest in memory. Engine prompt admission remains the authority for prompt-content conflicts and returns the deduplicated receipt.
+Before attempting writes, the host reports the resolved session through an awaited `onInputTarget` callback.
+The executor records that session and `inputFilesAttempted` under the drive's attempt fence. The host never mutates workflow checkpoints.
 This identifies partial writes for cleanup without storing contents. Normal completed receipt effects remain unchanged.
 Once the receipt exists, resume checks that submission instead of starting another turn or rewriting files during its work.
 Format repair uses the same sandbox and existing inputs. It does not require a second manifest.
 Run-scoped directories prevent personal and legacy assistant runs from overwriting each other's inputs.
 Inputs are ephemeral and exist only while their consuming step runs. Node settlement removes its iteration directory, including after failure.
-The run-settled hook removes the whole run directory on completed, failed, and cancelled outcomes, before cache eviction or sandbox reclaim.
-Cleanup restores a known execution when needed. It logs failures and never changes the node or run outcome.
+After attention and origin reporting, the run-settled hook starts best-effort cleanup without blocking archival or sandbox reclaim.
+Cleanup uses only cached sessions with ready attachments. It never creates, restores, or wakes a sandbox.
+Run cleanup skips `wf:` sessions because the workflow sandbox reclaimer destroys them.
+Cleanup logs failures and never changes the node or run outcome.
 Crash windows can miss cleanup. Each new input write scans up to `AGENT_INPUT_SWEEP_LIMIT` (100) sibling run directories.
-The scan rotates across siblings. It excludes the current run and removes directories older than `AGENT_INPUT_RETENTION_MS` (7 days).
-A host-created `.created-at` marker records the first input write. Missing or unreadable markers are logged, never guessed.
+The scan rotates across siblings. It excludes the current run and preserves every live sibling, regardless of marker age.
+Only absent or settled runs with markers older than `AGENT_INPUT_RETENTION_MS` (7 days) can be removed.
+Each pre-admission attempt refreshes the host-created `.created-at` marker atomically. Missing or unreadable markers are logged, never guessed.
 The sweep uses sandbox file primitives, not shell interpolation. Duplicate admission never triggers it.
 This feature adds no reverse output-file interface.
 
@@ -81,20 +87,14 @@ This feature adds no reverse output-file interface.
 
 File delivery reuses `canAccessSessionResources` to verify the resolved execution's governing audience and ancestry.
 The existing `isLegacyAssistantRuntime` predicate identifies retained shared team sandboxes, which are rejected even when legacy resource access permits them.
-An unverified Slack audience fails closed. A clear node error directs authors to a session step or a new private thread.
+Personal roots can also execute channel turns. File delivery rejects Slack-event origins, outside-channel thread keys, and other users' assistant threads on that root.
+This check rejects shared personal roots rather than claiming that owner-only API access proves sandbox isolation.
+An unverified resource audience, including Slack executions without verifiable membership, fails closed. A clear node error directs authors to a session step or a new private thread.
 Attended report routing still resolves an isolated execution before this check. Existing text-only legacy admissions remain compatible.
-
-## Real constraints
-
-The repository is cloned at `/workspace/valet`, not directly at `/workspace`.
-The architecture overview describes sandbox-less orchestrators. Current runtime code provisions their sandboxes lazily and supports readiness before admission.
-New team workflow reports use isolated execution sessions. Personal, attended, and retained legacy routes can share a sandbox, so run scoping remains required.
-Definition action schemas intentionally use unknown payloads. The common definition linter validates full saves and node patches; no separate node schema needs expansion.
-The web editor preserves complete node objects. Tests pin file preservation across inspector edits and canvas projection.
 
 ## Validation
 
 Tests cover path grammar, unsupported node types, template syntax and references, audits, UTF-8 rendering, both unresolved policies, and byte caps.
 API tests use PGlite, VirtualSandboxProvider, and a faux model transport to inspect files before the first model call.
-Tests also cover prefix collisions in both orders, retries, foreach cleanup, shared-runtime rejection, immutable duplicate admission, all settlement outcomes, and bounded retention.
+Tests also cover prefix collisions in both orders, retries, foreach cleanup, shared-runtime rejection, lost-receipt replay after agent edits or deletion, all settlement outcomes, cancellation during reading, no-wake cleanup, and retention that protects live runs.
 Run the workflow suite, API workflow and session suites, web editor tests, `pnpm typecheck`, and `make e2e` before handoff.

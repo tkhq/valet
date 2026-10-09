@@ -28,7 +28,8 @@
  * result shapes.
  */
 
-import { AgentInputFileError, renderAgentFiles } from '../dag/agent-files.js';
+import type { WorkflowDefinition } from '../dag/shape.js';
+import { AgentInputFileError, agentFileWaitError, renderAgentFiles } from '../dag/agent-files.js';
 import { renderTemplate, type TemplateContext } from '../dag/expression.js';
 import type { SessionNode } from '../dag/nodes.js';
 import type { WorkflowPromptReceipt } from '../engine-deps.js';
@@ -63,14 +64,13 @@ export async function executeSession(args: NodeExecutorArgs<SessionNode>): Promi
       initialEffects: { sessionId },
       waitMode: node.wait?.mode,
       outputSchema: node.outputSchema,
-      dispatch: async (id): Promise<SubmissionDispatch> => {
-        const files = renderAgentFiles(node.files, templateContext, run.definition);
-        if (files.length && node.wait?.mode === 'none') {
-          throw new AgentInputFileError('files require wait.mode until_idle so inputs survive the consuming turn. Remove wait.mode none.');
-        }
+      dispatch: async (id, onInputTarget): Promise<SubmissionDispatch> => {
+        const files = renderAgentFiles(node.files, templateContext, run.definition as WorkflowDefinition); // Validated snapshot, as in the interpreter.
+        const waitError = agentFileWaitError(node.files, node.wait);
+        if (waitError) throw new AgentInputFileError(waitError);
         await engine.createSession({ id: sessionId, title: node.title, purpose: 'workflow' });
         const promptText = withOutputSchemaPrompt(renderText(node.prompt, templateContext), node.outputSchema);
-        const receipt = await engine.prompt(sessionId, promptText, { dispatchId: id, model: node.model, ...(files.length ? { files, workflowAttempt: attempt } : {}) });
+        const receipt = await engine.prompt(sessionId, promptText, { dispatchId: id, model: node.model, ...(files.length ? { files, onInputTarget } : {}) });
         return { sessionId, receipt };
       },
       dispatchRepair: async (repairDispatchId, repairPrompt, id) =>

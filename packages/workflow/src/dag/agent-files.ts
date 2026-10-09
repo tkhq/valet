@@ -1,3 +1,4 @@
+import type { WorkflowDefinition } from './shape.js';
 import { collectUnresolvedTemplatePaths, renderTemplate, type TemplateContext } from './expression.js';
 
 /** A definition or sandbox input failure that must settle the node, not retry the drive. */
@@ -85,17 +86,20 @@ function checkRenderedFile(file: RenderedAgentFile, paths: Set<string>, total: n
   return total;
 }
 
+export function agentFileWaitError(files: Record<string, string> | undefined, wait: { mode?: string } | undefined): string | undefined {
+  return files && Object.keys(files).length && wait?.mode === 'none'
+    ? 'files require wait.mode until_idle so inputs survive the consuming turn. Remove wait.mode none.' : undefined;
+}
+
 export function renderAgentFiles(
   files: Record<string, string> | undefined,
   ctx: TemplateContext,
-  definition: unknown,
+  definition: Pick<WorkflowDefinition, 'policy'>,
 ): RenderedAgentFile[] {
   if (files === undefined) return [];
   const errors = validateAgentFiles(files);
   if (errors.length) throw new AgentInputFileError(errors.join('\n'));
-  const strict = definition !== null && typeof definition === 'object' && 'policy' in definition &&
-    definition.policy !== null && typeof definition.policy === 'object' &&
-    'onUnresolvedPath' in definition.policy && definition.policy.onUnresolvedPath === 'fail';
+  const strict = definition.policy?.onUnresolvedPath === 'fail';
   const rendered: RenderedAgentFile[] = [];
   const paths = new Set<string>();
   let total = 0;

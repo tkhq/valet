@@ -31,7 +31,7 @@ import { validatePresence } from '@valet/shared';
  * downstream, the web canvas).
  */
 
-import { validateAgentFiles } from './agent-files.js';
+import { agentFileWaitError, validateAgentFiles } from './agent-files.js';
 import { parseDurationMs } from './duration.js';
 import {
   collectExpressionPaths,
@@ -522,8 +522,9 @@ function validateNodeFields(
       break;
     case 'session':
       checkAgentFiles(node.files, label, refCtx, errors);
-      if (node.files && Object.keys(node.files).length && node.wait?.mode === 'none') {
-        errors.push(`${label}: files require wait.mode until_idle so inputs survive the consuming turn. Remove wait.mode none.`);
+      {
+        const waitError = agentFileWaitError(node.files, node.wait);
+        if (waitError) errors.push(`${label}: ${waitError}`);
       }
       if (node.mode !== 'start') {
         errors.push(`${label}: session.mode must be the string "start"`);
@@ -577,8 +578,9 @@ function validateNodeFields(
       break;
     case 'orchestrator':
       checkAgentFiles(node.files, label, refCtx, errors);
-      if (node.files && Object.keys(node.files).length && node.wait?.mode === 'none') {
-        errors.push(`${label}: files require wait.mode until_idle so inputs survive the consuming turn. Remove wait.mode none.`);
+      {
+        const waitError = agentFileWaitError(node.files, node.wait);
+        if (waitError) errors.push(`${label}: ${waitError}`);
       }
       if (!isNonEmptyString(node.prompt)) {
         errors.push(`${label}: orchestrator.prompt must be a non-empty string`);

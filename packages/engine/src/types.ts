@@ -1976,6 +1976,8 @@ export interface SessionStore {
   listSessionIdsWithUnsettledSubmissions(): Promise<string[]>;
   /** Settled queue items whose updatedAt is strictly before `cutoff`. Used by the event-retention prune. */
   listSettledSubmissionsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]>;
+  /** Lookup the durable admission before preparing workflow input files. */
+  getSubmissionByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null>;
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
   /**
    * Max last-touched timestamp across the session's queue items, or null when

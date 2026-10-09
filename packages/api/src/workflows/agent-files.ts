@@ -1,5 +1,7 @@
-import { ConflictError, SANDBOX_READY_TIMEOUT_MS, type Sandbox, type Session } from "@valet/engine";
+import { SANDBOX_READY_TIMEOUT_MS, type Sandbox, type Session } from "@valet/engine";
 import { AgentInputFileError, validateRenderedAgentFiles, type RenderedAgentFile } from "@valet/workflow";
+import { randomUUID } from "node:crypto";
+import type { WorkflowStore } from "@valet/workflow";
 import { posix } from "node:path";
 
 /** Crash windows can miss settlement cleanup. Bound that residual retention. */
@@ -55,50 +57,37 @@ function hasCode(err: unknown, code: string): boolean {
   return err !== null && typeof err === "object" && "code" in err && err.code === code;
 }
 
-/** Check every existing input before changing anything. Admitted data is immutable. */
-async function missingInputs(sandbox: Sandbox, inputs: Array<{ path: string; bytes: Uint8Array }>, duplicate: boolean) {
-  const missing: typeof inputs = [];
-  for (const input of inputs) {
-    let existing: Uint8Array;
-    try {
-      await sandbox.stat(input.path);
-      existing = await sandbox.readBinary(input.path);
-    } catch (err) {
-      if (!hasCode(err, "ENOENT")) throw err;
-      if (duplicate) throw new ConflictError("Workflow inputs are no longer available for this dispatch. Start a new run.");
-      missing.push(input);
-      continue;
-    }
-    if (existing.length !== input.bytes.length || existing.some((byte, index) => byte !== input.bytes[index])) {
-      throw new ConflictError(`Workflow input ${input.path} already has different bytes. Start a new run.`);
-    }
+/** Only paths enter the rename command. Contents go through writeBinary/stdin. */
+async function atomicWrite(sandbox: Sandbox, path: string, bytes: Uint8Array): Promise<void> {
+  const temporary = `${path}.tmp-${randomUUID()}`;
+  try {
+    await sandbox.writeBinary(temporary, bytes);
+    const quote = (value: string) => `'${value.replace(/'/g, "'\"'\"'")}'`;
+    const result = await sandbox.exec(`mv -f -- ${quote(temporary)} ${quote(path)}`);
+    if (result.exitCode !== 0) throw new AgentInputFileError(`Could not rename workflow input: ${result.stderr}. Check sandbox permissions and retry the run.`);
+  } finally {
+    try { await sandbox.rm(temporary); }
+    catch (err) { console.warn(`workflow input temporary cleanup failed for ${temporary}:`, err); }
   }
-  return missing;
 }
 
 /** Readiness and unknown transport failures retain normal drive retry semantics. */
 export async function writeAgentInputFiles(
-  session: Session, workspace: string, prompt: string, opts: InputFileOptions, duplicate = false,
+  session: Session, workspace: string, prompt: string, opts: InputFileOptions, store: Pick<WorkflowStore, "getRun">,
 ): Promise<string> {
   const inputs = prepareInputs(workspace, opts);
   if (!inputs.length) return prompt;
   const { sandbox } = await session.attachment.ensureReady({ timeoutMs: SANDBOX_READY_TIMEOUT_MS });
   try {
-    const missing = await missingInputs(sandbox, inputs, duplicate);
-    if (!duplicate) {
-      const runRoot = posix.dirname(posix.dirname(inputDirectory(workspace, opts.dispatchId)));
-      await sandbox.mkdir(runRoot);
-      const marker = posix.join(runRoot, AGE_MARKER);
-      try { await sandbox.stat(marker); }
-      catch (err) {
-        if (!hasCode(err, "ENOENT")) throw err;
-        await sandbox.writeFile(marker, String(Date.now()));
-      }
-      await sweepAgentInputFiles(sandbox, workspace, opts.dispatchId.split(":")[1]);
-      for (const input of missing) {
-        await sandbox.mkdir(posix.dirname(input.path));
-        await sandbox.writeBinary(input.path, input.bytes);
-      }
+    const runRoot = posix.dirname(posix.dirname(inputDirectory(workspace, opts.dispatchId)));
+    await sandbox.mkdir(runRoot);
+    await atomicWrite(sandbox, posix.join(runRoot, AGE_MARKER), new TextEncoder().encode(String(Date.now())));
+    await sweepAgentInputFiles(sandbox, workspace, opts.dispatchId.split(":")[1], store);
+    // Before admission no turn can read these files. Replace any incomplete
+    // prior attempt instead of treating transport truncation as a conflict.
+    for (const input of inputs) {
+      await sandbox.mkdir(posix.dirname(input.path));
+      await atomicWrite(sandbox, input.path, input.bytes);
     }
   } catch (err) {
     // Only deterministic filesystem failures settle the node. Provider/transport
@@ -112,7 +101,7 @@ export async function writeAgentInputFiles(
 }
 
 /** Bounded, rotating scan. Crash leftovers are expected; failures remain visible. */
-export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, currentRun: string, now = Date.now()): Promise<void> {
+export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, currentRun: string, store: Pick<WorkflowStore, "getRun">, now = Date.now()): Promise<void> {
   const root = posix.resolve(workspace, INPUT_ROOT);
   try {
     const names = (await sandbox.readdir(root)).filter(name => /^[A-Za-z0-9_-]+$/.test(name) && name !== currentRun).sort();
@@ -125,7 +114,8 @@ export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, 
       try {
         const createdAt = Number(await sandbox.readFile(posix.join(directory, AGE_MARKER)));
         if (Number.isFinite(createdAt) && createdAt > 0 && createdAt < now - AGENT_INPUT_RETENTION_MS) {
-          await sandbox.rm(directory, { recursive: true });
+          const run = await store.getRun(names[(offset + i) % names.length]);
+          if (!run || run.status === "settled") await sandbox.rm(directory, { recursive: true });
         }
       } catch (err) {
         console.warn(`workflow input sweep failed for ${directory}:`, err);
@@ -142,7 +132,9 @@ export async function cleanupAgentInputFiles(session: Session, workspace: string
     const directory = "dispatchId" in scope ? inputDirectory(workspace, scope.dispatchId)
       : /^[A-Za-z0-9_-]+$/.test(scope.runId) ? posix.resolve(workspace, INPUT_ROOT, scope.runId) : undefined;
     if (!directory) throw new Error("Invalid workflow run ID for input cleanup");
-    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: SANDBOX_READY_TIMEOUT_MS });
+    if (session.attachment.state !== "ready") return;
+    const sandbox = session.attachment.current();
+    if (!sandbox) return;
     await sandbox.rm(directory, { recursive: true });
   } catch (err) {
     if (!hasCode(err, "ENOENT")) console.warn(`workflow input cleanup failed for ${session.id}:`, err);

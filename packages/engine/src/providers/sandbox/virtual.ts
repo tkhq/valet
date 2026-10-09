@@ -77,6 +77,13 @@ export class VirtualSandbox implements Sandbox {
     this.fs.set(norm, { type: "file", content: data });
   }
 
+  async rename(source: string, destination: string): Promise<void> {
+    const entry = this.fs.get(normalize(source));
+    if (!entry) throw Object.assign(new Error(`ENOENT: ${source}`), { code: "ENOENT" });
+    this.fs.set(normalize(destination), entry);
+    this.fs.delete(normalize(source));
+  }
+
   async readdir(path: string): Promise<string[]> {
     const norm = normalize(path);
     if (!this.fs.has(norm)) throw new Error(`ENOENT: ${path}`);
@@ -221,6 +228,13 @@ async function runVirtualCommand(
   const mkdirMatch = trimmed.match(/^mkdir\s+(?:-p\s+)?(\S+)$/);
   if (mkdirMatch) {
     await sb.mkdir(resolveRel(cwd, mkdirMatch[1]));
+    return ok("");
+  }
+
+  // Workflow input staging renames quote both paths and carry no file contents.
+  const move = trimmed.match(/^mv -f -- '([^']*)' '([^']*)'$/);
+  if (move) {
+    await sb.rename(resolveRel(cwd, move[1]), resolveRel(cwd, move[2]));
     return ok("");
   }
 

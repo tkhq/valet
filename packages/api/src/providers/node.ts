@@ -766,15 +766,15 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // Then the sandbox reclaim — both are contained by contract, so a
     // failure in either never abandons the drive lease.
     onRunSettled: async (info) => {
-      await cleanupWorkflowRunInputs({ host: engineHost, store: workflowStore, db, engineStore,
-        actionPluginByService, credentials: engineCredentials }, info.runId);
       await runSettledAttention(info);
       // The run's own assistant thread leaves the sidebar here, and only
       // here: no sweep archives it later (`run-attention.ts`).
-      await runThreadArchive(info);
       // A run a thread started reports back to it, so the thread continues
       // from the result instead of waiting for someone to ask.
       await runOriginReport(info);
+      void cleanupWorkflowRunInputs({ host: engineHost, store: workflowStore, db, engineStore,
+        actionPluginByService, credentials: engineCredentials }, info.runId);
+      await runThreadArchive(info);
       await workflowSandboxReclaimer.reclaimRun(info.runId);
     },
     crashAt: opts.workflowCrashAt,

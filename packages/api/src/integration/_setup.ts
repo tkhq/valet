@@ -494,9 +494,9 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     // the archive of the run's own assistant thread. The sandbox reclaim
     // stays manual here, for the reason given above it.
     onRunSettled: async (info) => {
-      await cleanupWorkflowRunInputs({ host: engineHost, store: workflowStore, db, engineStore,
-        actionPluginByService, credentials: engineCredentials }, info.runId);
       await buildRunSettledAttention({ db, store: workflowStore })(info);
+      void cleanupWorkflowRunInputs({ host: engineHost, store: workflowStore, db, engineStore,
+        actionPluginByService, credentials: engineCredentials }, info.runId);
       await buildRunThreadArchive({ db, store: workflowStore, engineStore })(info);
     },
   });

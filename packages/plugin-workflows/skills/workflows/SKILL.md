@@ -96,7 +96,10 @@ Inputs are ephemeral. The host removes them when the consuming step settles and 
 Use the default `until_idle` wait mode. `files` cannot use `wait.mode: "none"` because settlement would remove data before consumption.
 A bounded sweep removes crash leftovers older than 7 days. Cleanup failures are logged without failing the run.
 Shared legacy team sandboxes and unverifiable audiences cannot receive files. Use a session step or start a new private thread.
-Provisioning and transport failures retain normal retries. A duplicate dispatch cannot overwrite previously delivered bytes.
+Provisioning and transport failures retain normal retries. Before admission, retries replace incomplete inputs atomically.
+After admission, duplicate dispatch skips all file operations, even if the agent edited or deleted an input.
+Personal assistant roots with channel audiences or other participants cannot receive files.
+Cleanup never wakes a sandbox. Residual sweeps retain live runs and apply a seven-day floor to absent or settled runs.
 `llm` and `tool` nodes do not accept `files`.
 
 ## Model selection

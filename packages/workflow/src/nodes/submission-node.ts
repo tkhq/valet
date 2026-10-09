@@ -58,7 +58,7 @@ export interface SubmissionNodeHooks<TDispatched, TSettled> {
   waitMode: 'none' | 'until_idle' | undefined;
   outputSchema: Record<string, unknown> | undefined;
   /** Issues (or, on re-entry with an identical `dispatchId`, re-issues idempotently) the primary submission. */
-  dispatch(dispatchId: string): Promise<SubmissionDispatch>;
+  dispatch(dispatchId: string, onInputTarget: (sessionId: string) => Promise<void>): Promise<SubmissionDispatch>;
   /** Issues the ONE bounded repair submission against the already-dispatched session. */
   dispatchRepair(repairDispatchId: string, repairPrompt: string, sessionId: string): Promise<WorkflowPromptReceipt>;
   buildDispatchedResult(dispatch: SubmissionDispatch): TDispatched;
@@ -81,16 +81,17 @@ export async function executeSubmissionNode<TDispatched, TSettled>(
   | { status: 'failed'; error: string }
   | { status: 'parked'; waitingOn: [{ kind: 'submission'; nodeId: string; sessionId: string; threadId: string; queueItemId: string }] }
 > {
-  const outcome = await executeSubmission(ctx, hooks);
-  if (outcome.status !== 'parked' && hooks.hasInputFiles && ctx.engine.cleanupAgentInputs) {
-    try {
-      const checkpoint = (await ctx.store.getCheckpoints(ctx.run.runId))
-        .find(cp => cp.nodeId === ctx.nodeId && cp.iteration === ctx.iteration);
-      const sessionId = checkpoint?.effects?.sessionId;
-      if (typeof sessionId === 'string' && (checkpoint?.effects?.inputFilesAttempted || checkpoint?.effects?.receipt)) await ctx.engine.cleanupAgentInputs(sessionId, hooks.dispatchId);
-    } catch (err) {
-      console.warn(`workflow input cleanup failed for ${hooks.dispatchId}:`, err);
-    }
+  let inputSessionId = readSubmissionEffects(ctx.existingCheckpoint).sessionId;
+  const onInputTarget = async (sessionId: string) => {
+    inputSessionId = sessionId;
+    await ctx.store.putIntent({ runId: ctx.run.runId, nodeId: ctx.nodeId, iteration: ctx.iteration,
+      status: 'intent', attempt: ctx.attempt, createdAt: ctx.clock(),
+      effects: { ...hooks.initialEffects, sessionId, inputFilesAttempted: true } });
+  };
+  const outcome = await executeSubmission(ctx, hooks, onInputTarget, () => inputSessionId);
+  if (outcome.status !== 'parked' && hooks.hasInputFiles && inputSessionId && ctx.engine.cleanupAgentInputs) {
+    try { await ctx.engine.cleanupAgentInputs(inputSessionId, hooks.dispatchId); }
+    catch (err) { console.warn(`workflow input cleanup failed for ${hooks.dispatchId}:`, err); }
   }
   return outcome;
 }
@@ -98,6 +99,8 @@ export async function executeSubmissionNode<TDispatched, TSettled>(
 async function executeSubmission<TDispatched, TSettled>(
   ctx: SubmissionNodeContext,
   hooks: SubmissionNodeHooks<TDispatched, TSettled>,
+  onInputTarget: (sessionId: string) => Promise<void>,
+  inputSessionId: () => string | undefined,
 ): Promise<
   | { status: 'completed'; result: TDispatched | TSettled }
   | { status: 'failed'; error: string }
@@ -118,7 +121,7 @@ async function executeSubmission<TDispatched, TSettled>(
         status: 'intent',
         attempt,
         createdAt: clock(),
-        effects: hooks.initialEffects,
+        effects: { ...hooks.initialEffects, ...(hooks.hasInputFiles ? { inputFilesAttempted: true } : {}) },
       });
     }
 
@@ -131,18 +134,17 @@ async function executeSubmission<TDispatched, TSettled>(
     // keep propagating for the drive's retry semantics.
     let dispatch: SubmissionDispatch;
     try {
-      dispatch = await hooks.dispatch(hooks.dispatchId);
+      dispatch = await hooks.dispatch(hooks.dispatchId, onInputTarget);
     } catch (err) {
       if (!(err instanceof ValidationError) && !(err instanceof AgentInputFileError)) throw err;
       const error = err.message;
-      const target = (await store.getCheckpoints(run.runId)).find(cp => cp.nodeId === nodeId && cp.iteration === iteration);
       await store.completeCheckpoint(run.runId, nodeId, iteration, attempt, {
         runId: run.runId,
         nodeId,
         iteration,
         status: 'failed',
         error,
-        effects: { ...hooks.initialEffects, ...target?.effects },
+        effects: { ...hooks.initialEffects, ...(hooks.hasInputFiles ? { inputFilesAttempted: true, sessionId: inputSessionId() } : {}) },
         attempt,
         createdAt: clock(),
       });

@@ -135,7 +135,7 @@ describe("workflow sandbox input dispatch", () => {
     }
   });
 
-  it.each(["session", "orchestrator"] as const)("duplicate %s admission never mutates v1 inputs with v2", async type => {
+  it.each(["session", "orchestrator"] as const)("lost-receipt %s replay ignores edited or deleted inputs", async type => {
     const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
     await h.createRun("retry-run");
     faux?.setResponses([fauxAssistantMessage("ok")]);
@@ -150,10 +150,24 @@ describe("workflow sandbox input dispatch", () => {
     if (!sandbox) throw new Error("Missing sandbox");
     const write = vi.spyOn(sandbox, "writeBinary");
     expect(await submit("v1")).toEqual(first);
-    for (const value of ["v2!", "v2"]) {
-      await expect(submit(value)).rejects.toThrow("different bytes");
-      expect(await sandbox.readFile(`${inputRoot("retry-run")}/data.txt`)).toBe("v1");
-    }
+    await sandbox.writeFile(`${inputRoot("retry-run")}/data.txt`, "agent changed the input");
+    write.mockClear();
+    const read = vi.spyOn(sandbox, "readBinary");
+    expect(await submit("v1")).toEqual(first);
+    await sandbox.rm(`${inputRoot("retry-run")}/data.txt`);
+    expect(await submit("v1")).toEqual(first);
+    const file = vi.spyOn(sandbox, "readFile");
+    const list = vi.spyOn(sandbox, "readdir");
+    const stat = vi.spyOn(sandbox, "stat");
+    const exec = vi.spyOn(sandbox, "exec");
+    const ready = vi.spyOn(h.engineHost.liveSession(id)!.attachment, "ensureReady");
+    expect(await submit("v1")).toEqual(first);
+    expect(read).not.toHaveBeenCalled();
+    expect(file).not.toHaveBeenCalled();
+    expect(list).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
+    expect(exec).not.toHaveBeenCalled();
+    expect(ready).not.toHaveBeenCalled();
     expect(write).not.toHaveBeenCalled();
     expect(faux?.state.callCount).toBe(1);
   });
@@ -176,8 +190,114 @@ describe("workflow sandbox input dispatch", () => {
     await expect(session.attachment.current()?.stat(inputRoot("transient-run"))).rejects.toThrow("ENOENT");
   });
 
+  it("repairs a truncated transport write before admission on the next drive", async () => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read", files: { "data.txt": "0123456789" } });
+    const attempt = await h.createRun("partial-run");
+    const session = await ensureWorkflowSession(h.opts, "wf:partial-run:build");
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    const original = sandbox.writeBinary.bind(sandbox);
+    let truncated = false;
+    vi.spyOn(sandbox, "writeBinary").mockImplementation(async (path, bytes) => {
+      if (path.includes("data.txt") && !truncated) {
+        truncated = true;
+        await original(path, bytes.slice(0, 4));
+        throw new Error("transport lost after four bytes");
+      }
+      await original(path, bytes);
+    });
+    faux?.setResponses([async () => {
+      expect(await sandbox.readFile(`${inputRoot("partial-run")}/data.txt`)).toBe("0123456789");
+      return fauxAssistantMessage("ok");
+    }]);
+    await expect(h.drive("partial-run", attempt)).rejects.toThrow("transport lost");
+    expect((await h.workflowStore.getCheckpoints("partial-run")).find(cp => cp.nodeId === "build"))
+      .toMatchObject({ status: "intent", effects: { inputFilesAttempted: true, sessionId: session.id } });
+    expect(faux?.state.callCount).toBe(0);
+    await h.drive("partial-run", attempt);
+    await vi.waitFor(async () => expect((await h.drive("partial-run", attempt)).outcome).toBe("completed"), { timeout: 15_000 });
+    expect(faux?.state.callCount).toBe(1);
+  });
+
+  it("cleans deterministic orchestrator mid-write failure using executor-owned intent", async () => {
+    const h = await setup({ id: "build", type: "orchestrator", prompt: "Read", files: { "one.txt": "one", "two.txt": "two" } });
+    const attempt = await h.createRun("partial-failure");
+    const { session } = await ensureDefaultAssistantSession(h, { type: "user", id: LOCAL_USER.id }, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    const original = sandbox.writeBinary.bind(sandbox);
+    vi.spyOn(sandbox, "writeBinary").mockImplementation(async (path, bytes) => {
+      if (path.includes("two.txt")) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      await original(path, bytes);
+    });
+    expect((await h.drive("partial-failure", attempt)).outcome).toBe("failed");
+    expect((await h.workflowStore.getCheckpoints("partial-failure")).find(cp => cp.nodeId === "build"))
+      .toMatchObject({ status: "failed", effects: { sessionId: session.id, inputFilesAttempted: true } });
+    await expect(sandbox.stat("/workspace/.valet/workflow-inputs/partial-failure")).rejects.toThrow("ENOENT");
+    expect(faux?.state.callCount).toBe(0);
+  });
+
+  it("aborts active input reading before cancellation cleanup", async () => {
+    const h = await setup({ id: "build", type: "orchestrator", prompt: "Read", files: { "data.txt": "v1" } });
+    const attempt = await h.createRun("reading-cancel");
+    let reading = false;
+    let aborted = false;
+    faux?.setResponses([async (_ctx, options) => {
+      const { session } = await ensureDefaultAssistantSession(h, { type: "user", id: LOCAL_USER.id }, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+      expect(await session.attachment.current()?.readFile(`${inputRoot("reading-cancel")}/data.txt`)).toBe("v1");
+      reading = true;
+      await new Promise<void>(resolve => {
+        if (options?.signal?.aborted) { aborted = true; resolve(); }
+        else options?.signal?.addEventListener("abort", () => { aborted = true; resolve(); }, { once: true });
+      });
+      return fauxAssistantMessage("aborted");
+    }]);
+    await h.drive("reading-cancel", attempt);
+    await vi.waitFor(() => expect(reading).toBe(true), { timeout: 15_000 });
+    await h.workflowStore.insertSignal({ runId: "reading-cancel", signalId: "cancel", signalType: "cancel", createdAt: Date.now() });
+    expect((await h.drive("reading-cancel", attempt)).outcome).toBe("cancelled");
+    expect(aborted).toBe(true);
+    const assistant = await resolveDefaultAssistant(h.db, LOCAL_ORG.id, { type: "user", id: LOCAL_USER.id });
+    await expect(h.engineHost.liveSession(assistant.sessionId)?.attachment.current()?.stat(inputRoot("reading-cancel"))).rejects.toThrow("ENOENT");
+  });
+
+  it("cleanup never provisions detached or uncached sessions and skips workflow run sandboxes", async () => {
+    const provider = new VirtualSandboxProvider();
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" }, undefined, provider);
+    const attempt = await h.createRun("cold-cleanup");
+    const session = await ensureWorkflowSession(h.opts, "wf:cold-cleanup:build");
+    const ready = vi.spyOn(session.attachment, "ensureReady");
+    const create = vi.spyOn(provider, "create");
+    await h.engine.cleanupAgentInputs?.(session.id, "workflow:cold-cleanup:build");
+    await h.workflowStore.putIntent({ runId: "cold-cleanup", nodeId: "build", iteration: 0, status: "intent", attempt, createdAt: Date.now(), effects: { sessionId: session.id, inputFilesAttempted: true } });
+    await cleanupWorkflowRunInputs(h.opts, "cold-cleanup");
+    h.engineHost.evictCache(session.id);
+    await h.engine.cleanupAgentInputs?.(session.id, "workflow:cold-cleanup:build");
+    expect(ready).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("cleanup does not wake a suspended assistant sandbox", async () => {
+    class HibernatingProvider extends VirtualSandboxProvider {
+      async suspend(_id: string): Promise<void> {}
+      async resume(id: string) { return this.restore(id); }
+    }
+    const provider = new HibernatingProvider();
+    const h = await setup({ id: "build", type: "orchestrator", prompt: "Read" }, undefined, provider);
+    await h.createRun("suspended-cleanup");
+    const { session } = await ensureDefaultAssistantSession(h, { type: "user", id: LOCAL_USER.id }, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    await sandbox.mkdir(inputRoot("suspended-cleanup"));
+    await session.attachment.suspend();
+    const resume = vi.spyOn(provider, "resume");
+    const ready = vi.spyOn(session.attachment, "ensureReady");
+    await h.engine.cleanupAgentInputs?.(session.id, "workflow:suspended-cleanup:build");
+    expect(session.attachment.state).toBe("suspended");
+    expect(resume).not.toHaveBeenCalled();
+    expect(ready).not.toHaveBeenCalled();
+    expect((await sandbox.stat(inputRoot("suspended-cleanup"))).isDirectory).toBe(true);
+  });
+
   it("cleans a settled node while the run is parked, then cleans the run on cancellation", async () => {
-    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read", files: { "data.txt": "v1" } }, undefined, new VirtualSandboxProvider(), { id: "pause", type: "wait", mode: "duration", duration: "1h" });
+    const h = await setup({ id: "build", type: "orchestrator", prompt: "Read", files: { "data.txt": "v1" } }, undefined, new VirtualSandboxProvider(), { id: "pause", type: "wait", mode: "duration", duration: "1h" });
     faux?.setResponses([fauxAssistantMessage("ok")]);
     const attempt = await h.createRun("node-cleanup");
     await h.drive("node-cleanup", attempt);
@@ -185,7 +305,8 @@ describe("workflow sandbox input dispatch", () => {
       await h.drive("node-cleanup", attempt);
       expect((await h.workflowStore.getCheckpoints("node-cleanup")).find(cp => cp.nodeId === "build")?.status).toBe("completed");
     }, { timeout: 15_000 });
-    const sandbox = h.engineHost.liveSession("wf:node-cleanup:build")?.attachment.current();
+    const cp = (await h.workflowStore.getCheckpoints("node-cleanup")).find(cp => cp.nodeId === "build");
+    const sandbox = typeof cp?.effects?.sessionId === "string" ? h.engineHost.liveSession(cp.effects.sessionId)?.attachment.current() : undefined;
     if (!sandbox) throw new Error("Missing sandbox");
     await expect(sandbox.stat(inputRoot("node-cleanup"))).rejects.toThrow("ENOENT");
     expect((await sandbox.stat("/workspace/.valet/workflow-inputs/node-cleanup")).isDirectory).toBe(true);
@@ -202,10 +323,11 @@ describe("workflow sandbox input dispatch", () => {
     const old = "/workspace/.valet/workflow-inputs/old";
     await sandbox.mkdir(old);
     await sandbox.writeFile(`${old}/.created-at`, "1");
-    vi.spyOn(sandbox, "rm").mockRejectedValueOnce(new Error("transport down"));
+    const originalRm = sandbox.rm.bind(sandbox);
+    vi.spyOn(sandbox, "rm").mockImplementation((path, opts) => path === old ? Promise.reject(new Error("transport down")) : originalRm(path, opts));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      await writeAgentInputFiles(session, "/workspace", "Read", { dispatchId: "workflow:sweep-error:build", files: [{ path: "data.txt", content: "v1" }] });
+      await writeAgentInputFiles(session, "/workspace", "Read", { dispatchId: "workflow:sweep-error:build", files: [{ path: "data.txt", content: "v1" }] }, h.workflowStore);
       expect(await sandbox.readFile(`${inputRoot("sweep-error")}/data.txt`)).toBe("v1");
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("sweep failed"), expect.any(Error));
     } finally { warn.mockRestore(); }
@@ -217,7 +339,7 @@ describe("workflow sandbox input dispatch", () => {
     const { session } = await ensureDefaultAssistantSession(h, { type: "user", id: LOCAL_USER.id }, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
     await h.workflowStore.putIntent({ runId: "cleanup-run", nodeId: "build", iteration: 0, status: "intent", attempt, createdAt: Date.now(), effects: { sessionId: session.id, inputFilesAttempted: true } });
     for (const run of ["cleanup-run", "sibling-run"]) {
-      await writeAgentInputFiles(session, "/workspace", "Read", { dispatchId: `workflow:${run}:build`, files: [{ path: "data.txt", content: "v1" }] });
+      await writeAgentInputFiles(session, "/workspace", "Read", { dispatchId: `workflow:${run}:build`, files: [{ path: "data.txt", content: "v1" }] }, h.workflowStore);
     }
     await h.workflowStore.beginTerminalize("cleanup-run", attempt, outcome);
     await h.workflowStore.settleRun("cleanup-run", outcome);
@@ -251,18 +373,22 @@ describe("workflow sandbox input dispatch", () => {
       await sandbox.mkdir(`${root}/old-${i}`);
       await sandbox.writeFile(`${root}/old-${i}/.created-at`, String(now - AGENT_INPUT_RETENTION_MS - 1));
     }
-    for (const run of ["current", "fresh"]) {
+    await h.createRun("live-old");
+    const settledAttempt = await h.createRun("settled-old");
+    await h.workflowStore.beginTerminalize("settled-old", settledAttempt, "completed");
+    await h.workflowStore.settleRun("settled-old", "completed");
+    for (const run of ["current", "fresh", "live-old", "settled-old"]) {
       await sandbox.mkdir(`${root}/${run}`);
       await sandbox.writeFile(`${root}/${run}/.created-at`, String(run === "fresh" ? now : 1));
     }
     const rm = vi.spyOn(sandbox, "rm");
-    await sweepAgentInputFiles(sandbox, "/workspace", "current", now);
+    await sweepAgentInputFiles(sandbox, "/workspace", "current", h.workflowStore, now);
     expect(rm.mock.calls.length).toBeLessThanOrEqual(AGENT_INPUT_SWEEP_LIMIT);
     expect((await sandbox.readdir(root)).filter(name => name.startsWith("old-"))).not.toHaveLength(0);
-    await sweepAgentInputFiles(sandbox, "/workspace", "current", now);
-    expect((await sandbox.readdir(root)).sort()).toEqual(["current", "fresh"]);
+    await sweepAgentInputFiles(sandbox, "/workspace", "current", h.workflowStore, now);
+    expect((await sandbox.readdir(root)).sort()).toEqual(["current", "fresh", "live-old"]);
     // Actual input delivery invokes the sweep as well.
-    await writeAgentInputFiles(session, "/workspace", "Read", { dispatchId: "workflow:fresh:build", files: [{ path: "data.txt", content: "v1" }] });
+    await writeAgentInputFiles(session, "/workspace", "Read", { dispatchId: "workflow:fresh:build", files: [{ path: "data.txt", content: "v1" }] }, h.workflowStore);
     await expect(sandbox.stat(`${root}/current`)).rejects.toThrow("ENOENT");
   });
 
@@ -301,8 +427,8 @@ describe("workflow sandbox input dispatch", () => {
     expect((await h.drive("failure-run", attempt)).outcome).toBe("failed");
     const cp = (await h.workflowStore.getCheckpoints("failure-run")).find((row) => row.nodeId === "build");
     expect(cp?.error).toContain("disk full");
-    await expect(sandbox.stat("/workspace/.valet/workflow-inputs/failure-run")).rejects.toThrow("ENOENT");
+    await expect(sandbox.stat(inputRoot("failure-run"))).rejects.toThrow("ENOENT");
     expect(faux?.state.callCount).toBe(0);
-    await expect(writeAgentInputFiles(session, "/workspace", "Read", { dispatchId: "workflow:../run:build", files: [{ path: "safe.txt", content: "x" }] })).rejects.toThrow("dispatch ID is invalid");
+    await expect(writeAgentInputFiles(session, "/workspace", "Read", { dispatchId: "workflow:../run:build", files: [{ path: "safe.txt", content: "x" }] }, h.workflowStore)).rejects.toThrow("dispatch ID is invalid");
   });
 });

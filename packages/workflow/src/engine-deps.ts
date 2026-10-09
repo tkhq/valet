@@ -25,8 +25,9 @@ export interface WorkflowCreateSessionOptions {
 export interface WorkflowPromptOptions {
   /** Rendered inputs. The host writes these before admitting the submission. Never checkpoint contents. */
   files?: RenderedAgentFile[];
-  /** Drive fence for recording the resolved sandbox target before input writes. */
-  workflowAttempt?: number;
+  /** Executor-owned intent writer. Host reports the target before attempting file writes;
+   * it must await this callback, never write workflow checkpoints itself. */
+  onInputTarget?: (sessionId: string) => Promise<void>;
   /** Idempotent admission key: `workflow:{runId}:{nodeId}[:{iteration}][:repair]`. */
   dispatchId: string;
   model?: string;
@@ -81,8 +82,9 @@ export interface WorkflowLlmCompleteResult {
 export interface WorkflowPromptOrchestratorOptions {
   /** Rendered inputs, written in the resolved execution sandbox before admission. */
   files?: RenderedAgentFile[];
-  /** Drive fence for recording the resolved sandbox target before input writes. */
-  workflowAttempt?: number;
+  /** Executor-owned intent writer. Host reports the target before attempting file writes;
+   * it must await this callback, never write workflow checkpoints itself. */
+  onInputTarget?: (sessionId: string) => Promise<void>;
   /** Idempotent admission key: `workflow:{runId}:{nodeId}[:{iteration}][:repair]`. */
   dispatchId: string;
   /**
