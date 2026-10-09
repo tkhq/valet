@@ -129,6 +129,29 @@ describe("process_read", () => {
     const r = await processReadTool.execute({ id: "wk_a", offset: 5 }, makeCtx({ readLog }));
     expect(r.text).toBe("(no new output)\n[nextOffset 5] [eof]");
   });
+
+  it("returns the seam's refusal text for an unknown id instead of throwing", async () => {
+    const readLog = vi.fn(async () => {
+      throw new Error("[process_read] wk_nope is not an active wakeup. Call wakeup_list to see active ids.");
+    });
+    const r = await processReadTool.execute({ id: "wk_nope" }, makeCtx({ readLog }));
+    expect(r.text).toBe("[process_read] wk_nope is not an active wakeup. Call wakeup_list to see active ids.");
+  });
+
+  it("returns the seam's refusal text for a timer id, which has no log", async () => {
+    const readLog = vi.fn(async () => {
+      throw new Error("[process_read] wk_timer is a timer and has no log. Only a background process or watch has a log.");
+    });
+    const r = await processReadTool.execute({ id: "wk_timer" }, makeCtx({ readLog }));
+    expect(r.text).toBe("[process_read] wk_timer is a timer and has no log. Only a background process or watch has a log.");
+  });
+
+  it("re-throws an error that is not a [process_read] refusal", async () => {
+    const readLog = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    await expect(processReadTool.execute({ id: "wk_a" }, makeCtx({ readLog }))).rejects.toThrow("boom");
+  });
 });
 
 describe("wakeup_list", () => {

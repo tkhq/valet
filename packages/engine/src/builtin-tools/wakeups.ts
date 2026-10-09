@@ -148,7 +148,17 @@ export const processReadTool = defineTool({
   execute: async (args, ctx) => {
     const seam = ctx.wakeups;
     if (!seam) return { text: WAKEUPS_UNAVAILABLE };
-    const result = await seam.readLog(args.id, args.offset ?? 0, args.bytes ?? 4096);
+    let result;
+    try {
+      result = await seam.readLog(args.id, args.offset ?? 0, args.bytes ?? 4096);
+    } catch (err) {
+      // A refusal the seam names for the model (unknown id, a timer with no
+      // log, no job-mode support), not a crash. Any other error propagates.
+      if (err instanceof Error && err.message.startsWith("[process_read]")) {
+        return { text: err.message };
+      }
+      throw err;
+    }
     const body = result.text.length > 0 ? result.text : "(no new output)";
     const eofSuffix = result.eof ? " [eof]" : "";
     return { text: `${body}\n[nextOffset ${result.nextOffset}]${eofSuffix}` };
