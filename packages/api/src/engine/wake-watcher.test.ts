@@ -59,7 +59,7 @@ interface Harness {
   wakeupEnded: ReturnType<typeof vi.fn<(kind: WakeupKind, cause: WakeupCause) => void>>;
   signalLost: ReturnType<typeof vi.fn<(kind: WakeupKind | "hold") => void>>;
   leasesUnannotated: ReturnType<typeof vi.fn<(count: number) => void>>;
-  watcher(extra?: Partial<Pick<WakeWatcherDeps, "batchSize" | "metrics" | "jobLogDir">>): WakeWatcher;
+  watcher(extra?: Partial<Pick<WakeWatcherDeps, "batchSize" | "metrics" | "jobLogDir" | "sweepIntervalMs">>): WakeWatcher;
 }
 
 function harness(poll: PollScript = async () => ({ status: "running", output: "", nextOffset: 0 })): Harness {
@@ -318,8 +318,9 @@ describe("WakeWatcher", () => {
     expect(h.prompt).not.toHaveBeenCalled();
   });
 
-  it("logs a corrupted timer row and continues the tick", async () => {
+  it("ends a timer row with no prompt as lost, counts it as a bad row, and continues the tick (fix wave 3, data L6)", async () => {
     const h = harness();
+    const badRow = vi.fn();
     await h.store.createWakeup(
       wakeup({ id: "wk_bad", kind: "timer", status: "pending", prompt: undefined, fireAt: NOW - 1, execId: undefined, leaseId: undefined }),
     );
@@ -328,10 +329,12 @@ describe("WakeWatcher", () => {
     );
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    await h.watcher().sweep();
+    await h.watcher({ metrics: { badRow } }).sweep();
 
     expect(await h.store.getWakeup("wk_ok")).toMatchObject({ status: "done" });
-    expect(await h.store.getWakeup("wk_bad")).toMatchObject({ status: "pending" });
+    expect(await h.store.getWakeup("wk_bad")).toMatchObject({ status: "lost" });
+    expect(badRow).toHaveBeenCalledWith("engine_wakeups");
+    expect(h.prompt).toHaveBeenCalledTimes(1);
     expect(error.mock.calls.some((c) => String(c[0]).includes("wk_bad"))).toBe(true);
     error.mockRestore();
   });
@@ -656,8 +659,9 @@ describe("WakeWatcher", () => {
     });
 
     it("ends a pending process past the start grace, kills its requested id, and releases its lease (B2, H10)", async () => {
-      const h = harness();
-      await seedProcess(h.store, { status: "pending", execId: "job-a-12345678", createdAt: NOW - 15 * 60_000 });
+      // The probe finds no job for the requested id (fix wave 3: pending rows are probed past the grace).
+      const h = harness(async () => ({ status: "failed", output: "", nextOffset: 0 }));
+      await seedProcess(h.store, { status: "pending", execId: "job-a-12345678", createdAt: NOW - 45 * 60_000 });
       await seedProcess(h.store, { id: "wk_young", status: "pending", leaseId: "ls_young", execId: "job-b-12345678", createdAt: NOW - 60_000 }, { id: "ls_young", ownerId: "wk_young" });
 
       await h.watcher().sweep();
@@ -683,7 +687,8 @@ describe("WakeWatcher", () => {
 
       expect((await h.store.listActiveLeases("sess-1")).map((l) => l.id)).toEqual(["ls_live"]);
       expect(orphanReleased).toHaveBeenCalledTimes(2);
-      expect(orphanReleased).toHaveBeenCalledWith("process");
+      expect(orphanReleased).toHaveBeenCalledWith("process", "missing_owner");
+      expect(orphanReleased).toHaveBeenCalledWith("process", "terminal_owner");
     });
 
     it("attaches the stored origin with manual replies to every signal (H3)", async () => {
@@ -770,6 +775,115 @@ describe("WakeWatcher", () => {
       await seedProcess(k8s.store);
       await k8s.watcher({ jobLogDir: "/tmp/valet-jobs" }).sweep();
       expect(attr(signalOf(k8s.prompt.mock.calls[0]).content, "logPath")).toBe("/tmp/valet-jobs/exec-1.out");
+    });
+  });
+
+  describe("fix wave 3", () => {
+    it("measures over_deadline at the start of the pass, before the pass ends the owner (M2)", async () => {
+      const h = harness(async () => ({ status: "running", output: "", nextOffset: 0 }));
+      const leasesOverDeadline = vi.fn();
+      await seedProcess(h.store, { deadlineAt: NOW - 61_000 }, { deadlineAt: NOW - 61_000 });
+      await h.watcher({ metrics: { leasesOverDeadline } }).sweep();
+      expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "expired", cause: "deadline" });
+      expect(leasesOverDeadline).toHaveBeenCalledWith(1);
+    });
+
+    it("ends a running owner past its deadline as expired, kills it, and counts reason=deadline (M2, concurrency L5)", async () => {
+      const h = harness(async () => ({ status: "running", output: "", nextOffset: 0 }));
+      const orphanReleased = vi.fn();
+      const wakeupEnded = vi.fn();
+      await seedProcess(h.store, { deadlineAt: NOW - 61_000 }, { deadlineAt: NOW - 61_000 });
+      // The row's own transition fails this tick, so only the lease repair can end it.
+      const real = h.store.transitionWakeupAndReleaseLease.bind(h.store);
+      vi.spyOn(h.store, "transitionWakeupAndReleaseLease")
+        .mockRejectedValueOnce(new Error("db blip"))
+        .mockImplementation(real);
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await h.watcher({ metrics: { orphanReleased, wakeupEnded } }).sweep();
+      error.mockRestore();
+      warn.mockRestore();
+      expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "expired", cause: "deadline" });
+      expect(await h.store.countActiveLeases("sess-1")).toBe(0);
+      expect(h.cancelJob).toHaveBeenCalledWith("exec-1");
+      expect(orphanReleased).toHaveBeenCalledWith("process", "deadline");
+      expect(wakeupEnded).toHaveBeenCalledWith("process", "deadline");
+      expect(attr(signalOf(h.prompt.mock.calls[0]).content, "cause")).toBe("deadline");
+    });
+
+    it("counts at most one interval of node seconds for an old lease on the first pass after a restart (data L1)", async () => {
+      const h = harness();
+      const nodeSeconds = vi.fn();
+      await h.store.createLease(lease({ id: "ls_h", ownerKind: "hold", ownerId: undefined, createdAt: NOW - 24 * HOUR, deadlineAt: NOW + HOUR }));
+      await h.watcher({ metrics: { nodeSeconds } }).sweep(NOW);
+      expect(nodeSeconds.mock.calls).toEqual([["hold", 30]]);
+    });
+
+    it("stamps endedAt with the clock at the transition, not the pass start (concurrency M1)", async () => {
+      const h = harness(async () => ({ status: "done", exitCode: 0, output: "", nextOffset: 0 }));
+      await seedProcess(h.store);
+      let t = NOW;
+      const w = new WakeWatcher({
+        engineStore: h.store,
+        engineHost: { sessionFor: h.sessionFor, liveSession: () => null },
+        loadSession: async (id) => h.sessionFor(id),
+        provider: { restore: h.restore },
+        limits: LIMITS,
+        now: () => (t += 50_000),
+      });
+      await w.sweep(NOW);
+      const row = await h.store.getWakeup("wk_a");
+      expect(row?.endedAt).toBeGreaterThan(NOW);
+      expect(row?.updatedAt).toBe(row?.endedAt);
+    });
+
+    it("adopts a pending row past the grace when the probe finds its job running (concurrency L6, P9)", async () => {
+      const h = harness(async () => ({ status: "running", output: "", nextOffset: 0 }));
+      await seedProcess(h.store, { status: "pending", createdAt: NOW - 45 * 60_000 });
+      await h.watcher().sweep();
+      expect(await h.store.getWakeup("wk_a")).toMatchObject({ status: "running" });
+      expect(h.cancelJob).not.toHaveBeenCalled();
+      expect(h.prompt).not.toHaveBeenCalled();
+    });
+
+    it("coalesces watch output with the limits' watchMinIntervalMs (M1)", async () => {
+      const h = harness(async () => ({ status: "running", output: "b\n", nextOffset: 4 }));
+      await seedProcess(h.store, { kind: "watch", logOffset: 2, eventCount: 1, lastEmitAt: NOW - 1_000 }, { ownerKind: "watch" });
+      await h.watcher().sweep();
+      expect(h.prompt).not.toHaveBeenCalled();
+      expect(await h.store.getWakeup("wk_a")).toMatchObject({ watchBuffer: "b\n", logOffset: 4 });
+    });
+
+    it("stops between rows once stop() is called, and stop() waits for the row in flight (concurrency M6)", async () => {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const polled: string[] = [];
+      const h = harness(async (execId) => {
+        polled.push(execId);
+        if (execId === "exec-1") await gate;
+        return { status: "running", output: "", nextOffset: 0 };
+      });
+      await seedProcess(h.store);
+      await seedProcess(h.store, { id: "wk_b", execId: "exec-2", leaseId: "ls_b", createdAt: NOW }, { id: "ls_b", ownerId: "wk_b" });
+      const w = h.watcher({ sweepIntervalMs: 60_000 });
+      const pass = w.sweep();
+      await vi.waitFor(() => expect(polled).toEqual(["exec-1"]));
+      const stopped = w.stop();
+      release();
+      await pass;
+      await stopped;
+      expect(polled).toEqual(["exec-1"]);
+    });
+
+    it("records sweep_ok_at when it starts, so a watcher that never finishes a pass still has the series (data L3)", async () => {
+      const h = harness();
+      const sweepOk = vi.fn();
+      const w = h.watcher({ metrics: { sweepOk }, sweepIntervalMs: 60_000 });
+      w.start();
+      expect(sweepOk).toHaveBeenCalledWith(Math.floor(NOW / 1000));
+      await w.stop();
     });
   });
 });

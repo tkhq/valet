@@ -1,3 +1,4 @@
+import { DEFAULT_WATCH_MIN_INTERVAL_MS } from "@valet/engine";
 import type { LeaseReleaseCause, Wakeup, WakeupCause, WakeupLimits, WakeupPatch, WakeupStatus } from "@valet/engine";
 
 /**
@@ -34,10 +35,12 @@ export interface WakeupDecision {
   releaseLease?: LeaseReleaseCause;
   /** The watcher kills the process group after a successful CAS (spec B5, fix wave 2). */
   kill?: boolean;
+  /** The row cannot be acted on as stored. The watcher counts it in `valet.wakeups.bad_rows`. */
+  badRow?: true;
 }
 
 /** Inputs to `decideWakeup` besides the row and the probe. */
-export interface DecideOptions extends Pick<WakeupLimits, "watchMaxEventsPerHour"> {
+export interface DecideOptions extends Pick<WakeupLimits, "watchMaxEventsPerHour" | "watchMinIntervalMs"> {
   /**
    * The in-sandbox directory that holds job logs, for the `logPath`
    * attribute. Absent for a provider that writes no log file (docker), so
@@ -54,11 +57,43 @@ export const WATCH_RATE_WINDOW_MS = 3_600_000;
 
 /**
  * How long a `pending` process or watch may stay pending before the
- * watcher ends it. The seam writes the row before the job starts, and a
- * start can include a cold sandbox provision of several minutes. A row
- * older than this belongs to a start that a crash cut short.
+ * watcher probes it. The seam writes the row before the job starts, and a
+ * start can include a cold sandbox provision: the kubernetes provider
+ * waits up to 30 minutes for a scale-up, plus the image pull. Past this,
+ * the watcher adopts a job it finds and ends the row when it finds none
+ * (fix wave 3, UX M7).
  */
-export const PENDING_START_GRACE_MS = 15 * 60_000;
+export const PENDING_START_GRACE_MS = 45 * 60_000;
+
+/** Most bytes a watch buffers between emits; a fuller buffer goes out at once (fix wave 3, M1). */
+export const WATCH_BUFFER_BYTES = 64 * 1024;
+
+/** The marker a capped job log ends with (fix wave 3, k8s M-B). */
+export const LOG_CAPPED_MARKER = "[valet: log capped at ";
+
+/** What the agent should do after each way a process can end without an exit code (fix wave 3, UX). */
+const CAUSE_GUIDANCE: Partial<Record<WakeupCause, string>> = {
+  pid_missing:
+    "[valet: the process ended without an exit code. The container or the api restarted. Check /workspace for partial output, and tell the person before you run it again.]",
+  sandbox_unavailable:
+    "[valet: The sandbox stopped, so the process ended with it. Files outside /workspace are gone. Tell the person before you run it again.]",
+  deadline:
+    "[valet: the process reached its deadline and was stopped. Run it again with a larger deadline only if it was making progress.]",
+};
+
+const CAPPED_GUIDANCE =
+  "[valet: The log hit its size cap, so this tail is not the end of the output. Write long output to a file in /workspace and read that file.]";
+
+/** The terminal body: the log tail, then a line that names the next step. */
+function terminalBody(logTail: string, cause: WakeupCause): string {
+  const notes: string[] = [];
+  if (logTail.includes(LOG_CAPPED_MARKER)) notes.push(CAPPED_GUIDANCE);
+  const guidance = CAUSE_GUIDANCE[cause];
+  if (guidance) notes.push(guidance);
+  if (notes.length === 0) return logTail;
+  const sep = logTail === "" || logTail.endsWith("\n") ? "" : "\n";
+  return `${logTail}${sep}${notes.join("\n")}`;
+}
 
 /**
  * Postgres `text` rejects NUL, so one NUL byte in a log would fail every
@@ -169,13 +204,10 @@ function watchEventSignal(row: Wakeup, lines: string[], eventCount: number): Sig
   };
 }
 
-function timerFiredSignal(now: number, row: Wakeup): SignalDraft {
-  if (row.prompt === undefined) {
-    throw new Error(`timer wakeup ${row.id} has no prompt`);
-  }
+function timerFiredSignal(now: number, row: Wakeup, prompt: string): SignalDraft {
   return {
     signalType: "timer.fired",
-    body: row.prompt,
+    body: prompt,
     attributes: {
       wakeupId: row.id,
       kind: row.kind,
@@ -188,12 +220,15 @@ function timerFiredSignal(now: number, row: Wakeup): SignalDraft {
 }
 
 /**
- * The rate window after one more `watch.event` at `now`: a window older
- * than `WATCH_RATE_WINDOW_MS` starts over. `over` is true when that event
- * would exceed the limit (spec B5: signals per rolling hour).
+ * The rate window after one more poll tick with new output at `now`. The
+ * window counts output ticks, not emitted signals: emits are coalesced, so
+ * a signal count could never reach the limit (fix wave 3, M1). A window
+ * starts over only when it is more than `WATCH_RATE_WINDOW_MS` old, so a
+ * watch with output on every 30-second tick reaches 121 ticks at the
+ * 3600-second mark. `over` is true when the count exceeds the limit.
  */
 function nextWindow(now: number, row: Wakeup, max: number): { windowStartAt: number; windowCount: number; over: boolean } {
-  const fresh = row.windowStartAt === undefined || now - row.windowStartAt >= WATCH_RATE_WINDOW_MS;
+  const fresh = row.windowStartAt === undefined || now - row.windowStartAt > WATCH_RATE_WINDOW_MS;
   const windowStartAt = fresh || row.windowStartAt === undefined ? now : row.windowStartAt;
   const windowCount = (fresh ? 0 : (row.windowCount ?? 0)) + 1;
   return { windowStartAt, windowCount, over: windowCount > max };
@@ -208,36 +243,44 @@ function nextWindow(now: number, row: Wakeup, max: number): { windowStartAt: num
 export function decideWakeup(now: number, row: Wakeup, probe: WakeupProbe, opts: DecideOptions): WakeupDecision | null {
   if (row.kind === "timer") {
     if (row.fireAt === undefined || row.fireAt > now) return null;
+    // A timer with no prompt has nothing to deliver. Ending it keeps it
+    // from failing every tick unseen (fix wave 3, data L6).
+    if (row.prompt === undefined) return { to: "lost", patch: { endedAt: now }, signals: [], badRow: true };
     return {
       to: "done",
       cause: "fired",
       patch: { cause: "fired", endedAt: now },
-      signals: [timerFiredSignal(now, row)],
+      signals: [timerFiredSignal(now, row, row.prompt)],
     };
   }
 
   // A pending process or watch is a start the seam has not confirmed. Past
-  // the grace window the start was cut short (fix wave 2, B2 and H10): end
-  // it and kill the requested id in case the job did start.
+  // the grace window the watcher probes it: a job it finds is adopted, so a
+  // seam that lost its running write never makes the agent run the command
+  // twice (fix wave 3, concurrency L6 and P9). With no job found, the start
+  // was cut short: end the row and kill the requested id in case it ran.
   if (row.status === "pending") {
     if (now - row.createdAt < PENDING_START_GRACE_MS) return null;
-    return {
-      to: "lost",
-      cause: "pid_missing",
-      kill: true,
-      patch: { cause: "pid_missing", endedAt: now },
-      signals: [
-        terminalSignal(
-          now,
-          row,
-          "pid_missing",
-          undefined,
-          `This background ${row.kind} never finished starting, so its result is unknown. Check whether it ran before you start it again.`,
-          opts,
-        ),
-      ],
-      releaseLease: "owner_ended",
-    };
+    if (probe.kind === "poll" && probe.status === "running") return { to: "running", patch: {}, signals: [] };
+    if (!(probe.kind === "poll" && probe.status === "done" && probe.exitCode !== undefined)) {
+      return {
+        to: "lost",
+        cause: "pid_missing",
+        kill: true,
+        patch: { cause: "pid_missing", endedAt: now },
+        signals: [
+          terminalSignal(
+            now,
+            row,
+            "pid_missing",
+            undefined,
+            `This background ${row.kind} never finished starting, so its result is unknown. Check whether it ran before you start it again.`,
+            opts,
+          ),
+        ],
+        releaseLease: "owner_ended",
+      };
+    }
   }
 
   if (probe.kind === "unavailable") {
@@ -245,7 +288,7 @@ export function decideWakeup(now: number, row: Wakeup, probe: WakeupProbe, opts:
       to: "lost",
       cause: "sandbox_unavailable",
       patch: { cause: "sandbox_unavailable", endedAt: now },
-      signals: [terminalSignal(now, row, "sandbox_unavailable", undefined, tail(row.logTail), opts)],
+      signals: [terminalSignal(now, row, "sandbox_unavailable", undefined, terminalBody(tail(row.logTail), "sandbox_unavailable"), opts)],
       releaseLease: "owner_ended",
     };
   }
@@ -262,29 +305,33 @@ export function decideWakeup(now: number, row: Wakeup, probe: WakeupProbe, opts:
       cause: "deadline",
       kill: true,
       patch: { cause: "deadline", endedAt: now },
-      signals: [terminalSignal(now, row, "deadline", undefined, tail(row.logTail), opts)],
+      signals: [terminalSignal(now, row, "deadline", undefined, terminalBody(tail(row.logTail), "deadline"), opts)],
       releaseLease: "deadline",
     };
   }
 
   const readBytes = Math.max(0, probe.nextOffset - row.logOffset);
+  const buffered = row.watchBuffer ?? "";
 
   if (probe.status === "done" || probe.status === "failed") {
-    // A watch's last lines become a last watch.event before watch.exited
-    // (fix wave 2, L6). The rate limit does not apply at exit.
+    // A watch's buffered and last lines become a last watch.event before
+    // watch.exited (fix wave 2, L6). The rate limit does not apply at exit.
     const signals: SignalDraft[] = [];
     const patch: WakeupPatch = {};
     if (row.kind === "watch") {
       const { lines } = splitWatchLines(probe.output, readBytes, true);
-      if (lines.length > 0) {
+      const all = [...bufferedLines(buffered), ...lines];
+      if (all.length > 0) {
         const eventCount = row.eventCount + 1;
-        signals.push(watchEventSignal(row, lines, eventCount));
+        signals.push(watchEventSignal(row, all, eventCount));
         patch.eventCount = eventCount;
+        patch.watchBuffer = "";
+        patch.lastEmitAt = now;
       }
     }
-    const body = tail(row.logTail + probe.output);
+    const logTail = tail(row.logTail + probe.output);
     if (probe.exitCode !== undefined) {
-      signals.push(terminalSignal(now, row, "exit", probe.exitCode, body, opts));
+      signals.push(terminalSignal(now, row, "exit", probe.exitCode, terminalBody(logTail, "exit"), opts));
       return {
         to: "done",
         cause: "exit",
@@ -293,7 +340,7 @@ export function decideWakeup(now: number, row: Wakeup, probe: WakeupProbe, opts:
         releaseLease: "owner_ended",
       };
     }
-    signals.push(terminalSignal(now, row, "pid_missing", undefined, body, opts));
+    signals.push(terminalSignal(now, row, "pid_missing", undefined, terminalBody(logTail, "pid_missing"), opts));
     return {
       to: "lost",
       cause: "pid_missing",
@@ -310,7 +357,7 @@ export function decideWakeup(now: number, row: Wakeup, probe: WakeupProbe, opts:
       cause: "deadline",
       kill: true,
       patch: { cause: "deadline", endedAt: now },
-      signals: [terminalSignal(now, row, "deadline", undefined, tail(row.logTail + probe.output), opts)],
+      signals: [terminalSignal(now, row, "deadline", undefined, terminalBody(tail(row.logTail + probe.output), "deadline"), opts)],
       releaseLease: "deadline",
     };
   }
@@ -324,41 +371,71 @@ export function decideWakeup(now: number, row: Wakeup, probe: WakeupProbe, opts:
     };
   }
 
-  // row.kind === "watch": one tick emits at most one watch.event, and the
-  // rate limit counts those signals (fix wave 2, B7).
-  const { lines, consumedText, consumedBytes } = splitWatchLines(probe.output, readBytes, false);
-  if (lines.length === 0) return null;
-  const newLogTail = tail(row.logTail + consumedText);
-  const window = nextWindow(now, row, opts.watchMaxEventsPerHour);
-  if (window.over) {
+  return decideWatchTick(now, row, probe.output, readBytes, buffered, opts);
+}
+
+/** The complete lines of a watch buffer ("" holds none). */
+function bufferedLines(buffer: string): string[] {
+  if (buffer === "") return [];
+  return (buffer.endsWith("\n") ? buffer.slice(0, -1) : buffer).split("\n");
+}
+
+/**
+ * One running watch tick (fix wave 3, M1). New complete lines join the
+ * buffer, and each tick with new lines counts toward the rate window. The
+ * buffer goes out as one `watch.event` when the watch has not emitted yet,
+ * when `watchMinIntervalMs` passed since the last emit, or when it holds
+ * `WATCH_BUFFER_BYTES`. So a chatty watch costs at most one turn per
+ * interval, and a quiet one still reports its first line at once.
+ */
+function decideWatchTick(
+  now: number,
+  row: Wakeup,
+  output: string,
+  readBytes: number,
+  buffered: string,
+  opts: DecideOptions,
+): WakeupDecision | null {
+  const { lines, consumedText, consumedBytes } = splitWatchLines(output, readBytes, false);
+  const hasNew = lines.length > 0;
+  const buffer = hasNew ? `${buffered}${lines.join("\n")}\n` : buffered;
+  const newLogTail = hasNew ? tail(row.logTail + consumedText) : row.logTail;
+  const read: WakeupPatch = hasNew ? { logOffset: row.logOffset + consumedBytes, logTail: newLogTail } : {};
+  const window = hasNew ? nextWindow(now, row, opts.watchMaxEventsPerHour) : undefined;
+  if (window?.over) {
+    const body = tail(buffer || newLogTail);
+    const sep = body === "" || body.endsWith("\n") ? "" : "\n";
     return {
       to: "expired",
       cause: "rate",
       kill: true,
-      patch: { cause: "rate", endedAt: now, logOffset: row.logOffset + consumedBytes, logTail: newLogTail },
+      patch: { ...read, cause: "rate", endedAt: now, watchBuffer: "" },
       signals: [
         terminalSignal(
           now,
           row,
           "rate",
           undefined,
-          `${newLogTail}\n[watch stopped: it emitted more than ${opts.watchMaxEventsPerHour} watch.event signals in one hour (sandbox.watchMaxEventsPerHour). Print fewer lines, or poll less often.]`,
+          `${body}${sep}[watch stopped: its command printed new lines in more than ${opts.watchMaxEventsPerHour} polls within one hour (sandbox.watchMaxEventsPerHour). Print only the lines you will act on, for example through grep, and start the watch again.]`,
           opts,
         ),
       ],
       releaseLease: "deadline",
     };
   }
+  const windowPatch: WakeupPatch = window ? { windowStartAt: window.windowStartAt, windowCount: window.windowCount } : {};
+  if (buffer === "") return null;
+  const minInterval = opts.watchMinIntervalMs ?? DEFAULT_WATCH_MIN_INTERVAL_MS;
+  const due =
+    row.lastEmitAt === undefined || now - row.lastEmitAt >= minInterval || Buffer.byteLength(buffer) >= WATCH_BUFFER_BYTES;
+  if (!due) {
+    if (!hasNew) return null;
+    return { to: "running", patch: { ...read, ...windowPatch, watchBuffer: buffer }, signals: [] };
+  }
   const eventCount = row.eventCount + 1;
   return {
     to: "running",
-    patch: {
-      logOffset: row.logOffset + consumedBytes,
-      logTail: newLogTail,
-      eventCount,
-      windowStartAt: window.windowStartAt,
-      windowCount: window.windowCount,
-    },
-    signals: [watchEventSignal(row, lines, eventCount)],
+    patch: { ...read, ...windowPatch, eventCount, watchBuffer: "", lastEmitAt: now },
+    signals: [watchEventSignal(row, bufferedLines(buffer), eventCount)],
   };
 }

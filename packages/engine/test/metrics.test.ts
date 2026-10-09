@@ -220,14 +220,28 @@ describe("lease metrics", () => {
 });
 
 describe("fix wave 2 wakeup and lease metrics", () => {
-  it("counts an orphan lease release by owner kind (B2)", () => {
-    recordLeaseOrphanReleased("process");
+  it("counts an orphan lease release by owner kind and reason (B2, fix wave 3 M2)", () => {
+    recordLeaseOrphanReleased("process", "deadline");
     expect(metricState.descriptions.get("valet.leases.orphan_released")).toContain("crash");
     expect(metricState.points).toContainEqual({
       name: "valet.leases.orphan_released",
       value: 1,
-      attributes: { owner_kind: "process" },
+      attributes: { owner_kind: "process", reason: "deadline" },
     });
+  });
+
+  it("counts a wakeup a session delete ended under its own cause (fix wave 3, UX L7)", () => {
+    recordWakeupEnded("timer", "session_deleted");
+    expect(metricState.points).toContainEqual({
+      name: "valet.wakeups.total",
+      value: 1,
+      attributes: { kind: "timer", cause: "session_deleted" },
+    });
+  });
+
+  it("names the exported sweep_ok_at series in its description (fix wave 3, data L3)", () => {
+    recordWakeupSweepOk(1);
+    expect(metricState.descriptions.get("valet.wakeups.sweep_ok_at")).toContain("valet_wakeups_sweep_ok_at_seconds");
   });
 
   it("counts a skipped bad row by table (M5)", () => {
