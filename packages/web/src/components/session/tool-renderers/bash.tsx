@@ -28,6 +28,16 @@ export function backgroundArgs(args: unknown): { deadlineHours?: number; reason?
 }
 
 /**
+ * The background fields of a `bash` call that started a sandbox process,
+ * or null. A refused or failed start returns other text, so it renders as a
+ * plain result (fix wave 4, N6).
+ */
+export function startedBackground(args: unknown, result: unknown): { deadlineHours?: number; reason?: string } | null {
+  const bg = backgroundArgs(args);
+  return bg && resultText(result).startsWith("started sandbox process") ? bg : null;
+}
+
+/**
  * The command excerpt shown in the header — single-line, character-budgeted.
  * For multi-line commands, collapses whitespace so the header stays clean
  * (the full command renders in the body).
@@ -54,7 +64,7 @@ export const bashRenderer: ToolRenderer = {
   formatTarget: (args) => commandExcerpt(getCommand(args)) || undefined,
   formatSummary: (args, result, status) => {
     // A background call returns at once; its exit arrives later as a signal.
-    const bg = backgroundArgs(args);
+    const bg = startedBackground(args, result);
     if (bg) return bg.deadlineHours !== undefined ? `background · ${bg.deadlineHours}h deadline` : "background";
     if (status !== "completed" && status !== "error") return undefined;
     const text = resultText(result);
@@ -67,7 +77,7 @@ export const bashRenderer: ToolRenderer = {
     const command = getCommand(args);
     const raw = error ?? resultText(result);
     const { body, exit } = parseExit(raw);
-    const bg = backgroundArgs(args);
+    const bg = startedBackground(args, result);
 
     return (
       <ToolBody className="bg-neutral-950 dark:bg-black text-emerald-300/95 px-0 py-0">

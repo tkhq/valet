@@ -25,6 +25,15 @@ describe("bashRenderer: background calls (fix wave 2, M7)", () => {
     expect(bashRenderer.formatSummary?.(args, { text: started }, "completed", "bash")).toBe("background · 48h deadline");
   });
 
+  it("renders a refused background start as a plain result (fix wave 4, N6)", () => {
+    const args = { command: "lake build", background: true, deadline_hours: 48, reason: "full proof build" };
+    const refused = "background work limit reached: 20 items. Cancel one with wakeup_cancel, then retry.";
+    render(<bashRenderer.Body toolName="bash" args={args} result={{ text: refused }} status="completed" />);
+    expect(screen.queryByText("background")).toBeNull();
+    expect(screen.queryByText("deadline 48h")).toBeNull();
+    expect(bashRenderer.formatSummary?.(args, { text: refused }, "completed", "bash")).toBeUndefined();
+  });
+
   it("leaves a foreground call without the strip", () => {
     render(<bashRenderer.Body toolName="bash" args={{ command: "ls" }} result={{ text: "a\nb" }} status="completed" />);
     expect(screen.queryByText("background")).toBeNull();

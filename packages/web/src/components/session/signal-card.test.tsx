@@ -196,7 +196,7 @@ describe("SignalCard: wakeup signals (fix wave 2, H5)", () => {
     expect(screen.getByText("exit 137").className).toContain("danger");
     unmount();
     render(<SignalCard message={wakeupMessage({ wakeupId: "wk_3", reason: "proof", cause: "deadline" }, "tail")} />);
-    expect(screen.getByText("deadline").className).toContain("danger");
+    expect(screen.getByText("deadline reached").className).toContain("danger");
   });
 
   it("renders the log in a pre block, not as Markdown", () => {
@@ -222,11 +222,38 @@ describe("SignalCard: wakeup signals (fix wave 2, H5)", () => {
     expect(isWakeupSignal({ signalType: "process.exited" })).toBe(false);
     expect(isWakeupSignal({ signalType: "github.push", attributes: { wakeupId: "wk_1" } })).toBe(false);
     expect(wakeupOutcome({})).toBeNull();
-    expect(wakeupOutcome({ cause: "cancelled" })).toEqual({ label: "cancelled", failed: true });
-    expect(wakeupOutcome({ cause: "exit", exitCode: "0" })).toEqual({ label: "exit 0", failed: false });
+    expect(wakeupOutcome({ cause: "cancelled" })).toEqual({ label: "cancelled", tone: "neutral" });
+    expect(wakeupOutcome({ cause: "exit", exitCode: "0" })).toEqual({ label: "exit 0", tone: "success" });
+    expect(wakeupOutcome({ cause: "exit", exitCode: "2" })).toEqual({ label: "exit 2", tone: "danger" });
     expect(formatDurationSeconds("45")).toBe("45s");
     expect(formatDurationSeconds("90000")).toBe("1d 1h");
     expect(formatDurationSeconds("x")).toBeUndefined();
+  });
+});
+
+describe("wakeup causes in words (fix wave 4, L3)", () => {
+  it("names each cause in words", () => {
+    expect(wakeupOutcome({ cause: "pid_missing" })).toEqual({ label: "process not found", tone: "danger" });
+    expect(wakeupOutcome({ cause: "sandbox_unavailable" })).toEqual({ label: "sandbox stopped", tone: "danger" });
+    expect(wakeupOutcome({ cause: "rate" })).toEqual({ label: "too many events", tone: "danger" });
+    expect(wakeupOutcome({ cause: "deadline", exitCode: "137" })).toEqual({ label: "deadline reached · exit 137", tone: "danger" });
+  });
+
+  it("renders a human cancel as neutral and says a person stopped it", () => {
+    render(
+      <SignalCard
+        message={baseMessage({
+          content: "A person stopped this process.",
+          parts: [{ kind: "text", text: "A person stopped this process." }],
+          signal: {
+            signalType: "process.exited",
+            attributes: { wakeupId: "wk_c", reason: "proof", cause: "cancelled", cancelledBy: "user:u-1" },
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("cancelled").className).not.toContain("danger");
+    expect(screen.getByText("by a person")).toBeTruthy();
   });
 });
 
