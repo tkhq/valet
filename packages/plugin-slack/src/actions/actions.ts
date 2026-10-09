@@ -78,8 +78,9 @@ async function actionIdentity(ctx: PluginActionContext): Promise<{ username?: st
 /**
  * Post with the current assistant identity. If Slack rejects cosmetic override
  * fields, retry once without them so the message body still lands. If Slack
- * rejects a generated native table block, post the same content once more
- * with `fallbackBlocks`, its Markdown rendering, instead of losing it.
+ * rejects a generated native table block on any attempt, post the same
+ * content once more with `fallbackBlocks`, its Markdown rendering, instead
+ * of losing it.
  */
 async function postActionMessage(
   token: string,
@@ -108,21 +109,24 @@ async function postActionMessage(
   const { iconUrl, ...rest } = override;
   const withIdentity = (postBody: Record<string, unknown>) =>
     ({ ...postBody, ...rest, ...(iconUrl ? { icon_url: iconUrl } : {}) });
-  // The table rejection comes first, so the Markdown rendering is what any
-  // later identity retry sends.
+  // Either rejection can come first: a token without chat:write.customize
+  // fails on the identity before Slack validates the blocks. So the table
+  // fallback applies after every attempt, the identity retry included.
   let sent = body;
-  let result = await post(withIdentity(sent));
-  if (fallbackBlocks && result.data.error === 'invalid_blocks') {
+  const postWithFallback = async (identity: boolean) => {
+    const result = await post(identity ? withIdentity(sent) : sent);
+    if (!fallbackBlocks || sent.blocks === fallbackBlocks || result.data.error !== 'invalid_blocks') return result;
     sent = { ...body, blocks: fallbackBlocks };
-    result = await post(withIdentity(sent));
-  }
+    return post(identity ? withIdentity(sent) : sent);
+  };
+  const result = await postWithFallback(true);
   if (
     !result.providerRejected ||
     (override.username === undefined && override.iconUrl === undefined)
   ) {
     return result;
   }
-  return post(sent);
+  return postWithFallback(false);
 }
 
 /** The Markdown rendering of generated blocks, for a table block Slack rejects. */

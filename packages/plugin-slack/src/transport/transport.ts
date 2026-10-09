@@ -817,8 +817,9 @@ export class SlackTransport implements ChannelTransport {
    * Network errors and malformed success responses remain single-attempt.
    *
    * If Slack rejects a generated table block, `fallbackBlocks` (its Markdown
-   * rendering) is posted instead. That happens before the identity retry, so
-   * a rejected identity override retries the content Slack accepted.
+   * rendering) is posted instead. Each attempt applies both retries, so the
+   * fallback also follows a retry without the identity, which can be the
+   * first request that reaches block validation.
    */
   private async postMessageAs(
     opts: Parameters<SlackApi["postMessage"]>[0],
@@ -840,7 +841,7 @@ export class SlackTransport implements ChannelTransport {
         err.status < 300
       ) {
         const { username: _u, iconUrl: _i, ...rest } = opts;
-        return this.api.postMessage(rest);
+        return this.postMessageAs(rest, fallbackBlocks);
       }
       throw err;
     }

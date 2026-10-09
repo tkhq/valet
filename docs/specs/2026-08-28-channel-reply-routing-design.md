@@ -482,10 +482,13 @@ message to 10,000 characters in total. A table outside these limits, a header-on
 table, or a result that needs more blocks than the caller's budget keeps the single
 Markdown block, so nothing renders worse than before. If Slack still rejects a
 generated table block with `invalid_blocks`, the sender posts the same content
-once more as a Markdown block. This happens before the retry without the
-assistant identity, so that retry carries the content Slack accepted and a
-second, unrelated error cannot hide the fallback. Caller-supplied blocks never
-get this retry.
+once more as a Markdown block. The sender checks for this rejection after
+every attempt, the retry without the assistant identity included. A token
+without `chat:write.customize` fails on the identity first, so that retry can
+be the first request Slack validates the blocks on. A table rejection that
+comes first switches to the Markdown block before the identity retry, so that
+retry carries the content Slack accepted. Caller-supplied blocks never get
+this retry.
 
 A message with more than one pipe table keeps the single Markdown block. Slack
 has documented a limit of one table per message and rejected a second table

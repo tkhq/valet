@@ -1270,6 +1270,26 @@ describe("discrete sends", () => {
       .toEqual([["Ledger", "table"], ["Ledger", "markdown"]]);
   });
 
+  it("sends the Markdown fallback after the retry without the sender identity", async () => {
+    // A token without chat:write.customize fails on the identity first, so
+    // the table first reaches block validation on the retry without it.
+    fake.rejectWhen("chat.postMessage", (body) => {
+      if (body.username !== undefined) return "missing_scope";
+      if ((body.blocks as { type: string }[] | undefined)?.some((block) => block.type === "table")) return "invalid_blocks";
+      return undefined;
+    });
+    try {
+      const transport = makeTransport();
+      const markdown = '| PR | Related |\n| --- | --- |\n| a | b<br>c |';
+      await transport.send(KEY, { markdown, sender: { displayName: "Ledger" } });
+      const posts = fake.calls.filter((call) => call.method === "chat.postMessage");
+      expect(posts.map((post) => [post.body.username, ...(post.body.blocks as { type: string }[]).map((block) => block.type)]))
+        .toEqual([["Ledger", "table"], [undefined, "table"], [undefined, "markdown"]]);
+    } finally {
+      fake.rejectWhen("chat.postMessage");
+    }
+  });
+
   it("replies in the turn's thread", async () => {
     const transport = makeTransport();
     const turnKey = primeTurn(transport, "1700000000.000300");

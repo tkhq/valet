@@ -1286,6 +1286,33 @@ describe('slack actions', () => {
     },
   );
 
+  it.each(['slack.send_message', 'slack.dm_user'])(
+    '%s sends the Markdown fallback after retrying without the assistant identity', async (name) => {
+      if (name === 'slack.dm_user') {
+        fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }));
+      } else {
+        mockGuardAllowsPublicChannel(fetchMock);
+      }
+      // A token without chat:write.customize fails on the identity first, so
+      // the table first reaches block validation on the retry without it.
+      fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { username?: string; blocks?: { type: string }[] } : {};
+        if (body.username !== undefined) return jsonResponse(200, { ok: false, error: 'missing_scope' });
+        if (body.blocks?.some((block) => block.type === 'table')) return jsonResponse(200, { ok: false, error: 'invalid_blocks' });
+        return jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' });
+      });
+      const text = '| PR | Related |\n|---|---|\n| a | b<br>c |';
+      const result = await action(name).execute(
+        { channel: 'C1', user: 'U123', text },
+        pluginCtx({ resolveOutboundSender: async () => ({ displayName: 'Ledger' }) }),
+      );
+      expect(result.success).toBe(true);
+      const posts = fetchMock.mock.calls.slice(1).map(([, init]) => JSON.parse((init as RequestInit).body as string) as { username?: string; blocks?: { type: string }[] });
+      expect(posts.map((post) => [post.username, ...(post.blocks ?? []).map((block) => block.type)]))
+        .toEqual([['Ledger', 'table'], [undefined, 'table'], [undefined, 'markdown']]);
+    },
+  );
+
   it('send_message converts CommonMark text to Slack mrkdwn', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' }));
