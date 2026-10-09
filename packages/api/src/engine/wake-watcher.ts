@@ -453,8 +453,26 @@ export class WakeWatcher {
       ...(origin !== undefined ? { origin: { ...origin, reply: "manual" } } : {}),
     };
     const base: PromptOptions = { dispatchId: draft.dispatchId, queueMode: "followup" };
-    if (threadId === undefined || !session.threadById(threadId)) {
+    if (threadId === undefined) {
       await session.prompt(content, base);
+      return;
+    }
+    if (!session.threadById(threadId)) {
+      // The work's thread is gone, so the signal lands on the main thread.
+      // On a team session that thread can have readers the work's thread
+      // did not have: keep the output and the channel origin out of it,
+      // as a human cancel does (fix wave 4, security N3).
+      const { origin: _origin, ...plain } = content;
+      await session.prompt(
+        {
+          ...plain,
+          body:
+            `This ${draft.attributes.kind ?? "work"} ("${draft.attributes.reason ?? draft.attributes.wakeupId ?? ""}") ` +
+            `ended with ${draft.signalType}, but the thread it ran in is gone. Its output stays out of this thread. ` +
+            `Use process_read with its id if the log still exists.`,
+        },
+        base,
+      );
       return;
     }
     await session.prompt(content, { threadId, ...base });

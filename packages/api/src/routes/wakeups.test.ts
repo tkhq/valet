@@ -781,6 +781,13 @@ describe("archive waits for a running turn in the thread (fix wave 4, P4)", () =
     expect(((await res.json()) as { error: string }).error).toBe(
       "A turn is running in this thread. Wait for it to finish, then archive.",
     );
+    // `force` stops background work; it does not skip the turn (re-review F2).
+    const forced = await fetch(`${api.baseUrl}/api/sessions/wk-arch-busy/threads/${side.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archived: true, force: true }),
+    });
+    expect(forced.status).toBe(409);
     const rows = await api.providers.db.select().from(sessionThreads).where(eq(sessionThreads.id, side.id));
     expect(rows[0]?.archivedAt ?? null).toBeNull();
   });

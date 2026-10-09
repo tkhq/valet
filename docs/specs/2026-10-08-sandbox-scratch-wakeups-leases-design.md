@@ -1336,7 +1336,10 @@ with an earlier entry, the entry below wins.
   after the gate, they send the deferred signals and return 409:
   `background work started, so the request did not <action>.` The text
   adds that the work already stopped when a forced cancel ran, and ends
-  with `Retry to see the new work.`
+  with `Retry to see the new work.` The profile PATCH runs the same
+  re-check before its replace; its 409 keeps the `Profile saved, but the
+  sandbox did not restart` shape, with the same "already stopped"
+  sentence after a forced cancel.
 - **C4: profile gate after a restart.** A profile change runs the
   background-work gate whenever leased work exists. The gate no longer
   depends on a live engine session. After an api restart the session
@@ -1344,8 +1347,9 @@ with an earlier entry, the entry below wins.
   cancels the work. The next build replaces the sandbox, as before.
 - **C4: work with no thread.** A hold with no `threadId` is session-level
   work. On a team session, a caller who passes `canCancelSessionWakeup`
-  sees it in the list, can cancel it, and can force past it. Other
-  callers do not see it, and it does not count as hidden work for them.
+  sees it in the list, can cancel it, and can force past it. The gate
+  names it to every caller, with the "ask the agent or a team admin" text
+  for a caller who may not cancel; it never counts as hidden work.
 - **A4: rate window and drift.** A rate window starts over only when it
   is more than one hour plus one WakeWatcher tick old. The watcher passes
   its interval to the kernel as `tickMs`. A `setInterval` tick lands a

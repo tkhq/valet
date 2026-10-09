@@ -107,8 +107,10 @@ export function buildWakeupsSeam(
    * session delete cascade is idempotent: it removes every wakeup and lease
    * row of the id and counts each open wakeup in `valet.wakeups.total`.
    */
-  async function deleteLateRows(): Promise<void> {
-    await engineStore.deleteSession(sessionId);
+  async function deleteLateRows(rows: { wakeupId?: string; leaseId?: string }): Promise<void> {
+    // Only the rows this create wrote: a same-id session that appears in
+    // this window keeps its history (fix wave 4 re-review, F4).
+    await engineStore.deleteWakeupRows(sessionId, rows);
   }
 
   /**
@@ -209,7 +211,7 @@ export function buildWakeupsSeam(
     // lost and kills; it never leaves a process that no row tracks.
     await engineStore.createWakeupWithLease(pending, lease);
     if (await sessionGone()) {
-      await deleteLateRows();
+      await deleteLateRows({ wakeupId: pending.id, leaseId: lease.id });
       throw new Error("[bash_background] This session was deleted, so the command did not start.");
     }
 
@@ -303,7 +305,7 @@ export function buildWakeupsSeam(
     };
     await engineStore.createWakeup(wakeup);
     if (await sessionGone()) {
-      await deleteLateRows();
+      await deleteLateRows({ wakeupId: wakeup.id });
       throw new Error("[wake_at] This session was deleted, so the timer was not set.");
     }
     return { wakeup };
@@ -343,7 +345,7 @@ export function buildWakeupsSeam(
       };
       await engineStore.createLease(lease);
       if (await sessionGone()) {
-        await deleteLateRows();
+        await deleteLateRows({ leaseId: lease.id });
         throw new Error("[hold_sandbox] This session was deleted, so no hold was set.");
       }
       return lease;
