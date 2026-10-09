@@ -490,9 +490,17 @@ get this retry.
 A message with more than one pipe table keeps the single Markdown block. Slack
 has documented a limit of one table per message and rejected a second table
 with `only_one_table_allowed`, which the `invalid_blocks` retry does not catch.
-A table that continues a blockquote, a list item, or an HTML block stays in that
-container, because Markdown reads it as part of the container. A blank line
-ends the container, and a table after it renders natively.
+
+The message is split only where Markdown reads the table as a block of its
+own. The single Markdown block stays when a table continues a blockquote or
+list item, follows an indented line with no blank line between them, has an
+indented delimiter row, or is followed directly by a line without a pipe,
+which GFM reads as another row. It also stays when the message has a link
+reference or footnote definition, because a definition applies to the whole
+document, when it has an HTML block, and when it has a fence inside a list
+item or blockquote, because the scanner tracks top-level fences only.
+Messages with Slack-native spans use the labeled-row path, which converts
+every table, also one that continues a list or blockquote.
 
 ### Images in question answers
 

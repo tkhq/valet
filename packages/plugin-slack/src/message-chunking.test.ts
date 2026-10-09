@@ -203,6 +203,15 @@ describe("Slack spans in generated blocks", () => {
     }]);
   });
 
+  it("renders labeled rows for a table that continues a list", () => {
+    const text = "Owners:\n- <@U123> owns these\n| PR | State |\n| --- | --- |\n| #1 | open |";
+    const blocks = buildContentBlocks(text, markdownToSlackMrkdwn(text), undefined, { preserveSlackNativeSpans: true });
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ type: 'section', text: { type: 'mrkdwn' } });
+    expect((blocks[0].text as { text: string }).text).toContain('*PR*: #1\n*State*: open');
+    expect(JSON.stringify(blocks)).not.toContain('| PR |');
+  });
+
   it("honors the section size and block count limits", () => {
     const text = '| Doc | Notes |\n|-|-|\n| <https://example.com|doc> | ' + 'x'.repeat(9000) + ' |';
     const blocks = buildContentBlocks(text, markdownToSlackMrkdwn(text), 2, { preserveSlackNativeSpans: true });

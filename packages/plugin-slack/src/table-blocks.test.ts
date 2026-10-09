@@ -168,6 +168,38 @@ describe('tablesToTableBlocks', () => {
     expect(blocks?.[0]).toEqual({ type: 'markdown', text: '```\n| a |\n|-|\n| 1 |\n```' });
   });
 
+  it.each([
+    ['a reference link', 'See [docs][1].\n\n| Link |\n| --- |\n| [open][1] |\n\n[1]: https://example.com'],
+    ['a reference link inside a list item', '| Link |\n|-|\n| [open][1] |\n\n- [1]: https://example.com'],
+    ['a footnote', 'Note[^1]\n\n| a |\n|-|\n| 1 |\n\n[^1]: the note'],
+  ])('keeps the Markdown block when the message defines %s', (_name, source) => {
+    // A definition applies to the whole document; a split block cannot see it.
+    expect(tablesToTableBlocks(source, 50)).toBeUndefined();
+  });
+
+  it.each([
+    ['a fenced block in a list item', '- ```md\n  intro\n\n  | a | b |\n  | --- | --- |\n  | 1 | 2 |\n  ```'],
+    ['an indented list item continuation', '- item\n\n  | a | b |\n  |-|-|\n  | 1 | 2 |'],
+    ['a list item paragraph it continues lazily', '- a\n\n  b\nc | d\n|-|-|\n| 1 | 2 |'],
+    ['a pre element across a blank line', '<pre>\n\n| a | b |\n|-|-|\n| 1 | 2 |\n\n</pre>'],
+    ['an HTML comment across a blank line', '<!--\n\n| a | b |\n|-|-|\n| 1 | 2 |\n\n-->'],
+    ['a fence after a list item fence', '- ```\n  x\n  ```\n\n```\n\n| a |\n|-|\n| 1 |\n```'],
+    ['a fence after an HTML block', '<div>\n```\n\n| a |\n|-|\n| 1 |\n\n```\n\n| b |\n|-|\n| 2 |'],
+  ])('leaves a table inside %s as Markdown', (_name, source) => {
+    expect(tablesToTableBlocks(source, 50)).toBeUndefined();
+  });
+
+  it.each([
+    ['a plain line', '| a | b |\n|-|-|\n| 1 | 2 |\nfoo'],
+    ['a setext underline', '| a | b |\n|-|-|\n| 1 | 2 |\n==='],
+  ])('keeps the Markdown block when GFM reads %s after the rows as a row', (_name, source) => {
+    expect(tablesToTableBlocks(source, 50)).toBeUndefined();
+  });
+
+  it('keeps the Markdown block when the delimiter row is indented code', () => {
+    expect(tablesToTableBlocks('| a |\n    |-|\n| 1 |', 50)).toBeUndefined();
+  });
+
   it('returns undefined when the text has no table', () => {
     expect(tablesToTableBlocks('just **prose**\n\na | b', 50)).toBeUndefined();
   });

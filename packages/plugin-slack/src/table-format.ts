@@ -55,6 +55,9 @@ export interface MarkdownTable {
   alignments: TableAlignment[];
   /** Body rows as written; a row may be shorter or longer than the header. */
   rows: string[][];
+  /** False when Markdown could read the table as part of the lines around
+   * it, so lifting it out as its own block would change the document. */
+  standalone: boolean;
 }
 
 export type MarkdownSegment =
@@ -66,11 +69,10 @@ export type MarkdownSegment =
 const BLOCK_START = /^ {0,3}(?:[`~]{3,}|>|#{1,6}\s|[-+*]\s|\d+[.)]\s)/;
 
 /** A line that opens a container whose following lines belong to it until a
- * blank line: a blockquote or list item (lazy continuation lines), or an
- * HTML block. A pipe table there is part of the container, so lifting it out
- * as its own table would break the container in two. Slack's own `<https://…>`
- * links and `<@U…>` mentions are not tags, so they open nothing. */
-const CONTAINER_START = /^ {0,3}(?:>|[-+*]\s|\d+[.)]\s|<(?:\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/>]|$)|!--|\?))/;
+ * blank line: a blockquote or list item (lazy continuation lines). A pipe
+ * table there is part of the container. An indented line can continue a list
+ * item, even after a blank line, and opens the same state. */
+const CONTAINER_START = /^ {0,3}(?:>|[-+*]\s|\d+[.)]\s)/;
 
 /**
  * Split Markdown into prose runs and pipe tables. Fenced and indented code
@@ -90,7 +92,7 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     if (!fence && /^\s*$/.test(line)) inContainer = false;
-    else if (!fence && CONTAINER_START.test(line)) inContainer = true;
+    else if (!fence && (CONTAINER_START.test(line) || /^[ \t]/.test(line))) inContainer = true;
     if (fence) {
       prose(line);
       if (new RegExp(`^ {0,3}${fence[0]}{${fence.length},}[ \\t]*$`).test(line)) fence = undefined;
@@ -103,7 +105,7 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
       continue;
     }
     const delimiter = lines[index + 1];
-    if (inContainer || /^(?: {4}|\t)/.test(line) || BLOCK_START.test(line) || delimiter === undefined || !isTableDelimiterRow(delimiter)) {
+    if (/^(?: {4}|\t)/.test(line) || BLOCK_START.test(line) || delimiter === undefined || !isTableDelimiterRow(delimiter)) {
       prose(line);
       continue;
     }
@@ -113,17 +115,23 @@ export function splitMarkdownTables(text: string): MarkdownSegment[] {
       prose(line);
       continue;
     }
+    // An indented delimiter row may be code, and the header may continue a
+    // container. GFM also reads a following line without a pipe as a row.
+    let standalone = !inContainer && !/^\s/.test(delimiter);
     index += 1;
     const rows: string[][] = [];
     while (index + 1 < lines.length) {
       const next = lines[index + 1];
       if (/^\s*$|^(?: {4}|\t)/.test(next) || BLOCK_START.test(next)) break;
       const cells = tableCells(next);
-      if (!cells) break;
+      if (!cells) {
+        standalone = false;
+        break;
+      }
       rows.push(cells);
       index += 1;
     }
-    segments.push({ type: 'table', table: { headers, alignments: separators.map(alignmentOf), rows } });
+    segments.push({ type: 'table', table: { headers, alignments: separators.map(alignmentOf), rows, standalone } });
   }
   return segments;
 }

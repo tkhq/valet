@@ -195,13 +195,28 @@ function tableBlock(table: MarkdownTable): { block: Block; characters: number } 
   };
 }
 
+/** Markdown the line scanner cannot split without changing its meaning. A
+ * false match only keeps the Markdown block. */
+const UNSPLITTABLE = [
+  // A link reference or footnote definition applies to the whole document.
+  /\]:/,
+  // An HTML block hides a table or fence; a comment or `pre` element even
+  // runs past blank lines. Slack's `<https://…>` links open no block.
+  /^ {0,3}<(?:\/?[A-Za-z][A-Za-z0-9-]*(?:[\s/>]|$)|[!?])/m,
+  // A fence inside a list item or blockquote. The scanner tracks top-level
+  // fences only, so a fence it misses can hide a later table in code.
+  /^(?:[ \t]|>|[-+*][ \t]|\d{1,9}[.)][ \t])+(?:`{3}|~{3})/m,
+];
+
 /**
  * Split Markdown into `markdown` blocks for prose and `table` blocks for
  * pipe tables. Returns undefined when the text has no renderable table or
- * more than one, a table exceeds Slack's limits, or the result needs more than `maxBlocks`
- * blocks, so the caller keeps its existing rendering.
+ * more than one, a table cannot leave the text around it without changing
+ * its meaning, a table exceeds Slack's limits, or the result needs more than
+ * `maxBlocks` blocks, so the caller keeps its existing rendering.
  */
 export function tablesToTableBlocks(text: string, maxBlocks: number): Block[] | undefined {
+  if (UNSPLITTABLE.some((pattern) => pattern.test(text))) return undefined;
   const blocks: Block[] = [];
   let characters = 0;
   let tables = 0;
@@ -215,7 +230,7 @@ export function tablesToTableBlocks(text: string, maxBlocks: number): Block[] | 
       if (lines.length) blocks.push({ type: 'markdown', text: lines.join('\n') });
       continue;
     }
-    const table = tableBlock(segment.table);
+    const table = segment.table.standalone ? tableBlock(segment.table) : undefined;
     if (!table) return undefined;
     characters += table.characters;
     if (characters > SLACK_TABLE_CHARACTER_LIMIT) return undefined;
