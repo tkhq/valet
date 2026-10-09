@@ -725,7 +725,6 @@ export class ChildWatcher {
       const successorItem = await this.deps.engineStore.getQueueItem(watch.childSessionId, successor);
       if (!successorItem) throw new Error(`Missing child successor submission ${successor}`);
       // Human takeover starts a different task. Remove its external reply route durably.
-      const originJson = successorItem.author !== undefined ? null : row.originJson;
       await this.deps.db
         .update(childWatches)
         .set({ queueItemId: successor, settled: false, ...(successorItem.author !== undefined ? { originJson: null } : {}) })
@@ -735,7 +734,7 @@ export class ChildWatcher {
             eq(childWatches.queueItemId, watch.queueItemId),
           ),
         );
-      this.arm({ ...watch, queueItemId: successor, origin: parseOriginJson(originJson) });
+      this.arm({ ...watch, queueItemId: successor });
       return;
     }
 
@@ -1340,7 +1339,6 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
       parentThreadId: watchRow.parentThreadId,
       actorUserId: ctx.actorUserId,
       orgId: watchRow.orgId,
-      origin: parseOriginJson(watchRow.originJson),
     });
 
     return { queueItemId: receipt.queueItemId };
