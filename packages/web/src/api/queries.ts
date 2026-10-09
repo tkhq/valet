@@ -459,6 +459,12 @@ export function useNotificationDecisions(cursor?: string, enabled = true) {
   return useQuery({ queryKey: ["notification-decisions", cursor], queryFn: () => api.listNotificationDecisions(cursor), enabled, refetchInterval: 5000 });
 }
 
+// Approval-only views poll the notification inbox without a session stream.
+function invalidateDecisionState(qc: QueryClient, sessionId: string) {
+  void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) });
+  void qc.invalidateQueries({ queryKey: ["notification-decisions"] });
+}
+
 export function useResolveDecision(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<
@@ -467,11 +473,21 @@ export function useResolveDecision(sessionId: string) {
     { gateId: string; body: ResolveDecisionRequest }
   >({
     mutationFn: ({ gateId, body }) => api.resolveDecision(sessionId, gateId, body),
-    // Approval-only views poll this query without a session stream.
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) });
-      void qc.invalidateQueries({ queryKey: ["notification-decisions"] });
-    },
+    onSuccess: () => invalidateDecisionState(qc, sessionId),
+  });
+}
+
+/** `useResolveDecision` for gates in many sessions: the bell's bulk answer
+ * resolves each gate through the same endpoint. */
+export function useResolveDecisions() {
+  const qc = useQueryClient();
+  return useMutation<
+    { ok: true },
+    Error,
+    { sessionId: string; gateId: string; body: ResolveDecisionRequest }
+  >({
+    mutationFn: ({ sessionId, gateId, body }) => api.resolveDecision(sessionId, gateId, body),
+    onSuccess: (_data, { sessionId }) => invalidateDecisionState(qc, sessionId),
   });
 }
 
@@ -480,10 +496,7 @@ export function useWithdrawDecision(sessionId: string) {
   return useMutation<{ ok: true }, Error, { gateId: string }>({
     mutationFn: ({ gateId }) =>
       api.withdrawDecision(sessionId, gateId, { reason: "cancel" }),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) });
-      void qc.invalidateQueries({ queryKey: ["notification-decisions"] });
-    },
+    onSuccess: () => invalidateDecisionState(qc, sessionId),
   });
 }
 

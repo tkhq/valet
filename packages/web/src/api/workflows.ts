@@ -375,6 +375,21 @@ export function useResolveApproval(runId: string) {
   });
 }
 
+/** `useResolveApproval` for gates in many runs: the bell's bulk answer
+ * resolves each gate through the same endpoint, with the same cache updates. */
+export function useResolveWorkflowApprovals() {
+  const qc = useQueryClient();
+  return useMutation<
+    { ok: true },
+    Error,
+    { runId: string; nodeId: string; body: ResolveWorkflowApprovalRequest }
+  >({
+    mutationFn: ({ runId, nodeId, body }) => api.resolveWorkflowApproval(runId, nodeId, body),
+    onSuccess: (_data, { runId, nodeId, body }) => removeResolvedWorkflowAction(qc, runId, nodeId, body.iteration),
+    onError: (_error, { runId }) => invalidateWorkflowApprovalState(qc, runId),
+  });
+}
+
 /**
  * Retry a settled failed/cancelled run — starts a fresh run of the same
  * workflow with the original input and returns the new runId. Invalidates the

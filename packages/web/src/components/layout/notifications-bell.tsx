@@ -7,6 +7,7 @@ import { Badge, Button, Popover, PopoverContent, PopoverTrigger, StatusDot } fro
 import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { relativeTime } from "~/lib/relative-time";
+import { NeedsActionHeader } from "./needs-action-header";
 
 /** Unread updates, newest first, one row per title: a workflow that fails
  * every few minutes is one row with a count, not a list. Read updates leave
@@ -67,7 +68,9 @@ export function NotificationsBell() {
           <Button variant="ghost" size="sm" aria-label="Close notifications" onClick={() => changeOpen(false)}><X className="h-4 w-4" /></Button>
         </div>
         <section aria-label="Needs action" className="space-y-3 p-4">
-          <div className="flex items-center justify-between"><h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Needs action</h3><Badge variant={pendingCount ? "warning" : "neutral"}>{pendingCount}{partialCount ? "+" : ""}</Badge></div>
+          <NeedsActionHeader pendingCount={pendingCount} partialCount={partialCount} workflows={workflows.data?.items ?? []}
+            decisions={decisions.data?.items ?? []} partial={!!moreDecisions || !!decisionCursor}
+            onSettled={() => { void workflows.refetch(); void decisions.refetch(); }} />
           {loading && <p className="text-sm text-muted">Loading approvals…</p>}
           {failed && <div role="alert" className="text-sm text-danger-500">Could not load all approvals. <button className="underline" onClick={() => { void workflows.refetch(); void decisions.refetch(); }}>Retry</button></div>}
           {!loading && !failed && pendingCount === 0 && !moreDecisions && !decisionCursor && <p className="text-sm text-muted">You're all caught up. No decisions are waiting.</p>}

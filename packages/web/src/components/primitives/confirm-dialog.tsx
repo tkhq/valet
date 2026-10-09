@@ -18,6 +18,7 @@ export function ConfirmDialog({
   pending = false,
   error,
   onConfirm,
+  onCloseAutoFocus,
   children,
 }: {
   open: boolean;
@@ -30,11 +31,14 @@ export function ConfirmDialog({
   pending?: boolean;
   error?: ReactNode;
   onConfirm: () => void;
+  /** Radix focuses the element that opened the dialog when it closes. Call
+   * `preventDefault()` here to move focus somewhere else. */
+  onCloseAutoFocus?: (event: Event) => void;
   children?: ReactNode;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title={title} description={description}>
+      <DialogContent title={title} description={description} onCloseAutoFocus={onCloseAutoFocus}>
         {children}
         <DialogFooter>
           <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>
