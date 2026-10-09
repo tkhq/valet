@@ -25,29 +25,30 @@ interface FactRow {
   total_tokens: number | string; models: string[] | null;
 }
 
-/** Each sub-run reachable from `checkpoints`, mapped to the root-run step that started it. */
-async function subRunSteps(store: Pick<WorkflowStore, "getCheckpoints">, checkpoints: NodeCheckpoint[]): Promise<Map<string, StepKey>> {
+function childRuns(checkpoints: NodeCheckpoint[], step?: StepKey): { runId: string; step: StepKey }[] {
+  return checkpoints.flatMap((cp) => typeof cp.effects?.childRunId === "string"
+    ? [{ runId: cp.effects.childRunId, step: step ?? { nodeId: cp.nodeId, iteration: cp.iteration } }] : []);
+}
+
+/** Each sub-run reachable from `runId`, mapped to the root-run step that
+ * started it. Each level of nesting reads its runs' checkpoints at once. */
+async function subRunSteps(store: Pick<WorkflowStore, "getCheckpoints">, runId: string): Promise<Map<string, StepKey>> {
   const owners = new Map<string, StepKey>();
-  let frontier = checkpoints.flatMap((cp) => typeof cp.effects?.childRunId === "string"
-    ? [{ runId: cp.effects.childRunId, step: { nodeId: cp.nodeId, iteration: cp.iteration } }] : []);
+  let frontier = childRuns(await store.getCheckpoints(runId));
   for (let depth = 0; depth < MAX_SUB_RUN_DEPTH && frontier.length > 0; depth++) {
-    const next: typeof frontier = [];
-    for (const { runId, step } of frontier) {
-      if (owners.has(runId)) continue;
-      owners.set(runId, step);
-      for (const cp of await store.getCheckpoints(runId)) {
-        if (typeof cp.effects?.childRunId === "string") next.push({ runId: cp.effects.childRunId, step });
-      }
-    }
-    frontier = next;
+    const level = frontier.filter(({ runId: child }) => !owners.has(child) && child !== runId);
+    for (const { runId: child, step } of level) owners.set(child, step);
+    const reads = await Promise.all(level.map(async ({ runId: child, step }) => childRuns(await store.getCheckpoints(child), step)));
+    frontier = reads.flat();
   }
   return owners;
 }
 
+/** Read by the run page route only: the walk reads every sub-run's checkpoints. */
 export async function workflowRunStepCosts(
-  db: AppDb, store: Pick<WorkflowStore, "getCheckpoints">, runId: string, checkpoints: NodeCheckpoint[],
+  db: AppDb, store: Pick<WorkflowStore, "getCheckpoints">, runId: string,
 ): Promise<WorkflowStepCost[]> {
-  const owners = await subRunSteps(store, checkpoints);
+  const owners = await subRunSteps(store, runId);
   const runIds = [runId, ...owners.keys()];
   const result = await db.execute(sql`
     SELECT workflow_run_id, split_part(session_id, ':', 3) AS node_id,

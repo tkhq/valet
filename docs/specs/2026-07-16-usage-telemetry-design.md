@@ -378,6 +378,6 @@ Deployed databases receive the billing rule through the `usage workflow step att
 
 Usage → Breakdown → Workflows lists one row per workflow, linked to its page, with the number of runs that spent in the period. Its steps follow, by cost, each with the average cost per run. Foreach iterations of one step add up. A sub-workflow bills to its own workflow there.
 
-`GET /api/workflows/runs/:runId` returns `stepCosts`: cost, calls, unpriced calls, tokens, and models per step and iteration, read from `usage_entry_facts`. A `workflow` step includes the runs it started, up to five levels deep, found through the checkpoints' `childRunId`. The Steps list shows each step's cost and the run total. A `+` marks a step with unpriced calls, whose cost is a lower bound.
+`GET /api/workflows/runs/:runId` returns `stepCosts`, and only that route computes it. The run reads behind the approval inbox and the agent's workflow tools leave it out, so they do not walk sub-runs. `stepCosts` lists cost, calls, unpriced calls, tokens, and models per step and iteration, read from `usage_entry_facts`. A `workflow` step includes the runs it started, up to five levels deep, found through the checkpoints' `childRunId`. The Steps list shows each step's cost and the run total. A `+` marks a step with unpriced calls, whose cost is a lower bound.
 
 Child sessions that a session step spawns keep their own ids and do not roll up into the step.
