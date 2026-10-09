@@ -28,7 +28,7 @@ async function makePolicySandbox(raw: FakeSandbox): Promise<PolicySandbox> {
 }
 
 describe("PolicySandbox.execJob detached", () => {
-  it("omits the output cap and leaves pendingJobCount at zero", async () => {
+  it("caps the log at 2 GiB by default and leaves pendingJobCount at zero (fix wave 2, M6)", async () => {
     const seen: ExecOpts[] = [];
     const raw: FakeSandbox = {
       id: "sb",
@@ -41,8 +41,24 @@ describe("PolicySandbox.execJob detached", () => {
     };
     const policy = await makePolicySandbox(raw);
     await policy.execJob("sleep 1000", { detached: true });
-    expect(seen[0]?.maxOutputBytes).toBeUndefined();
+    expect(seen[0]?.maxOutputBytes).toBe(2 * 1024 ** 3);
     expect(policy.pendingJobCount()).toBe(0);
+  });
+
+  it("passes a configured detached cap and the requested exec id through", async () => {
+    const seen: ExecOpts[] = [];
+    const raw: FakeSandbox = {
+      id: "sb",
+      execJob: async (_c, opts): Promise<ExecJobHandle> => {
+        seen.push(opts ?? {});
+        return { execId: opts?.execId ?? "job-x" };
+      },
+    };
+    const policy = await makePolicySandbox(raw);
+    await expect(policy.execJob("yes", { detached: true, maxOutputBytes: 1000, execId: "job-a-12345678" })).resolves.toEqual({
+      execId: "job-a-12345678",
+    });
+    expect(seen[0]).toMatchObject({ maxOutputBytes: 1000, execId: "job-a-12345678" });
   });
 
   it("keeps the cap and the pending count for a foreground job", async () => {

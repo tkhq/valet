@@ -20,6 +20,8 @@ export const SANDBOX_READY_TIMEOUT_MS = 60_000;
 
 /** Default `exec`/`execJob` output cap when the caller passes none (decision 3). */
 const DEFAULT_MAX_OUTPUT_BYTES = 262_144;
+/** A detached job's log cap when the caller sets none: 2 GiB (`VALET_JOB_LOG_MAX_BYTES` default). */
+const DEFAULT_DETACHED_MAX_OUTPUT_BYTES = 2 * 1024 ** 3;
 
 /**
  * Transport-level failure signatures (decision 3). A rejection whose message
@@ -297,9 +299,10 @@ export class PolicySandbox implements Sandbox {
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
     if (opts?.signal?.aborted) throw this.abortError(opts.signal);
     const effectiveOpts: ExecOpts = opts?.detached
-      // A detached sandbox process (wakeups spec B4): uncapped output on
-      // disk, and no pending-job entry because a lease owns its lifetime.
-      ? { ...opts, maxOutputBytes: undefined }
+      // A detached sandbox process (wakeups spec B4): a large cap, so a
+      // chatty job cannot fill the node disk or the api heap (fix wave 2,
+      // M6, H2), and no pending-job entry because a lease owns its lifetime.
+      ? { ...opts, maxOutputBytes: opts.maxOutputBytes ?? DEFAULT_DETACHED_MAX_OUTPUT_BYTES }
       : { ...opts, maxOutputBytes: opts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES };
     // Job-mode kickoff only — the job's own runtime is polled, not awaited,
     // so this span measures dispatch latency, not the command's duration.
