@@ -9,6 +9,12 @@ if [ -x /start-docker.sh ]; then /start-docker.sh; fi
 if [ "${VALET_BROWSER_ENABLED:-0}" = 1 ]; then /browser-preflight.sh; fi
 WORK_DIR=/workspace
 mkdir -p "$WORK_DIR"
+if [ -d /scratch ]; then
+  mkdir -p /scratch/tmp /scratch/valet-jobs
+  chmod 1777 /scratch/tmp
+  # Background process logs live on scratch when it exists (spec B4).
+  ln -sfn /scratch/valet-jobs /tmp/valet-jobs
+fi
 if [ "${VALET_SANDBOX_PROFILE:-headless}" = "full" ]; then
   WORKLOAD_COMMAND=()
   if [ "${VALET_BROWSER_ENABLED:-0}" = 1 ]; then

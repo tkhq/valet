@@ -457,6 +457,38 @@ describeDocker("DockerSandbox", () => {
     await expect(access(credsDir)).rejects.toThrow();
   });
 
+  it("resources.scratch: create mounts /scratch read-write with TMPDIR, destroy removes host dir", async () => {
+    const sb = await makeSandbox({ resources: { scratch: "1Gi" } });
+    const sbId = sb.id;
+    const scratchDir = sb.scratchHostDir!;
+    expect(scratchDir).toBeTruthy();
+    try {
+      const write = await sb.exec("echo hi > /scratch/test && cat /scratch/test");
+      expect(write.exitCode).toBe(0);
+      expect(write.stdout.trim()).toBe("hi");
+
+      const tmpdir = await sb.exec("echo $TMPDIR");
+      expect(tmpdir.exitCode).toBe(0);
+      expect(tmpdir.stdout.trim()).toBe("/scratch/tmp");
+    } finally {
+      await provider.destroy(sbId);
+    }
+
+    // After destroy, the host scratch dir must be gone.
+    await expect(access(scratchDir)).rejects.toThrow();
+  });
+
+  it("without resources.scratch — no /scratch mount and no TMPDIR override", async () => {
+    const sb = await makeSandbox();
+    try {
+      expect(sb.scratchHostDir).toBeUndefined();
+      const probe = await sb.exec("test -d /scratch");
+      expect(probe.exitCode).not.toBe(0);
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
   it("updateCreds removes files absent from the new map (stale key rotation)", async () => {
     // Create with two creds files: cred-a and cred-b.
     // Use same-length values for initial and updated cred-a so a VirtioFS

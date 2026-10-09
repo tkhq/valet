@@ -192,4 +192,34 @@ describe.skipIf(!available)("durable Docker ownership", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+  it("retains the scratch bind mount across an API restart and removes it at final destroy", async () => {
+    const root = await createSandboxWorkspace("valet-scratch-durable-");
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    const config = { inventoryRoot: join(root, "private") };
+    const opts = {
+      workspace,
+      image: "alpine:3.20",
+      sessionId: `session-${root.split("/").at(-1)}`,
+      resources: { scratch: "1Gi" },
+    };
+    const first = new DockerSandboxProvider(config);
+    const sandbox = await first.create(opts);
+    const restarted = new DockerSandboxProvider(config);
+    const scratchHostDir = join(config.inventoryRoot, "scratch", sandbox.id);
+    try {
+      await sandbox.exec("printf scratch-state > /scratch/marker");
+      const adopted = await restarted.restore(sandbox.id);
+      expect((await adopted.exec("cat /scratch/marker")).stdout).toBe(
+        "scratch-state",
+      );
+      await restarted.destroy(sandbox.id);
+      await expect(
+        readFile(join(scratchHostDir, "marker"), "utf8"),
+      ).rejects.toThrow();
+    } finally {
+      await restarted.destroy(sandbox.id).catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

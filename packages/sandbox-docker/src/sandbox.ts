@@ -150,6 +150,10 @@ export interface DockerSandboxOptions {
   /** Absolute host path for the creds bind mount (~/.valet/creds/<sandboxId>/).
    * Present only when the sandbox was created with credsFiles. */
   credsHostDir?: string;
+  /** Absolute host path for the scratch bind mount. Present only when the
+   * sandbox was created with resources.scratch. No size limit is enforced
+   * on this backend (dev only). See DockerSandboxProvider.create. */
+  scratchHostDir?: string;
   /** Rootless docker-in-sandbox (SandboxCreateOpts.docker). When set,
    * non-privileged execs run as the `dockerd` workload user (see
    * `buildDockerExecArgs`). The durable inventory restores this flag and
@@ -293,6 +297,10 @@ export interface BuildDockerRunArgsOpts {
    * (create()) is responsible for writing the files BEFORE invoking docker run.
    * When absent, no creds volume is added. */
   credsHostDir?: string;
+  /** Absolute host path for the scratch bind mount. When set, the directory
+   * is mounted read-write at /scratch and TMPDIR points there. When absent,
+   * no scratch volume is added. */
+  scratchHostDir?: string;
   /** Rootless docker-in-sandbox (SandboxCreateOpts.docker). Adds the
    * seccomp/AppArmor/systempaths relaxations, CAP_SYS_ADMIN, CAP_NET_ADMIN,
    * /dev/fuse, /dev/net/tun, and VALET_SANDBOX_DOCKER=1 — never --privileged. */
@@ -334,6 +342,10 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
     if (opts.browser.viewer) runArgs.push("--env", "VALET_BROWSER_VIEWER=1");
   }
   if (opts.credsHostDir) runArgs.push(...bindMount(opts.credsHostDir, "/etc/valet/creds", true));
+  if (opts.scratchHostDir) {
+    runArgs.push(...bindMount(opts.scratchHostDir, "/scratch"));
+    runArgs.push("--env", "TMPDIR=/scratch/tmp");
+  }
   if (opts.docker) {
     runArgs.push("--security-opt", "seccomp=unconfined");
     runArgs.push("--security-opt", "apparmor=unconfined");
@@ -471,6 +483,7 @@ export class DockerSandbox implements Sandbox {
   readonly containerWorkspace: string;
   readonly image: string;
   readonly credsHostDir?: string;
+  readonly scratchHostDir?: string;
   readonly docker?: boolean;
   readonly runtimeStateDir?: string;
   readonly browser?: boolean;
@@ -487,6 +500,7 @@ export class DockerSandbox implements Sandbox {
     this.containerWorkspace = opts.containerWorkspace;
     this.image = opts.image;
     this.credsHostDir = opts.credsHostDir;
+    this.scratchHostDir = opts.scratchHostDir;
     this.docker = opts.docker;
     this.runtimeStateDir = opts.runtimeStateDir;
     this.onDestroy = opts.onDestroy;
@@ -709,6 +723,10 @@ export class DockerSandbox implements Sandbox {
     // Remove the host-side creds dir. Best-effort: a missing dir is not an error.
     if (this.credsHostDir) {
       await fs.rm(this.credsHostDir, { recursive: true, force: true });
+    }
+    // Remove the host-side scratch dir. Best-effort: a missing dir is not an error.
+    if (this.scratchHostDir) {
+      await fs.rm(this.scratchHostDir, { recursive: true, force: true });
     }
   }
 
@@ -991,6 +1009,15 @@ function credsHostDir(sandboxId: string): string {
   return join(homedir(), ".valet", "creds", sandboxId);
 }
 
+/** Absolute host path for the scratch dir of a given sandbox id, sibling
+ * of credsHostDir. e.g. ~/.valet/scratch/dsb-1/. The provider itself
+ * derives this path from its configurable inventory root (see
+ * DockerSandboxProvider.create), not this default-root helper. Same
+ * split as credsHostDir above. */
+function scratchHostDir(sandboxId: string): string {
+  return join(homedir(), ".valet", "scratch", sandboxId);
+}
+
 /** Throw when any name is not a plain filename ("../evil", "a/b", ".", "..").
  * Guards every place a creds key becomes part of a path — host writes and
  * the in-container check script alike. */
@@ -1144,14 +1171,15 @@ export class DockerSandboxProvider implements SandboxProvider {
       const expectedStateDir = value.workloadStateDir ? join(this.inventory.root, "browser-state", id) : stateDir;
       if (value.runtimeStateDir !== expectedStateDir ||
           (value.workloadStateDir !== undefined && (value.workloadStateDir !== stateDir || !value.browser?.enabled)) ||
-          (value.credsHostDir !== undefined && value.credsHostDir !== join(this.inventory.root, "creds", id)))
+          (value.credsHostDir !== undefined && value.credsHostDir !== join(this.inventory.root, "creds", id)) ||
+          (value.scratchHostDir !== undefined && value.scratchHostDir !== join(this.inventory.root, "scratch", id)))
         throw new Error("Docker inventory state paths differ from their owner. Inspect the saved inventory before retrying.");
     }
     return value;
   }
   private sandbox(value: DockerInventoryRecord): DockerSandbox {
     if (!value.containerId) throw new Error("Docker inventory has no container identity. Inspect the pending container before retrying.");
-    const sandbox = new DockerSandbox(value.id, { containerId: value.containerId, workspace: value.workspace, containerWorkspace: CONTAINER_WORKSPACE, image: value.image, credsHostDir: value.credsHostDir, runtimeStateDir: value.runtimeStateDir, docker: value.docker, browser: value.browser?.enabled, browserContainerId: value.browserCompanion?.containerId, onDestroy: () => this.destroy(value.id) });
+    const sandbox = new DockerSandbox(value.id, { containerId: value.containerId, workspace: value.workspace, containerWorkspace: CONTAINER_WORKSPACE, image: value.image, credsHostDir: value.credsHostDir, scratchHostDir: value.scratchHostDir, runtimeStateDir: value.runtimeStateDir, docker: value.docker, browser: value.browser?.enabled, browserContainerId: value.browserCompanion?.containerId, onDestroy: () => this.destroy(value.id) });
     this.sandboxes.set(value.id, sandbox);
     return sandbox;
   }
@@ -1305,13 +1333,20 @@ export class DockerSandboxProvider implements SandboxProvider {
     const workloadStateDir = browserUpgrade ? existing?.runtimeStateDir : existing?.workloadStateDir;
     const runtimeStateDir = browserUpgrade ? join(this.inventory.root, "browser-state", id) : existing?.runtimeStateDir ?? join(this.inventory.root, "state", id);
     if (!existing || browserUpgrade) await fs.mkdir(runtimeStateDir, { recursive: true, mode: 0o700 });
-    const value: DockerInventoryRecord = { version: 1, id, sessionId: opts.sessionId ?? id, providerId, containerName: `${CONTAINER_PREFIX}${id}`, workspace, runtimeStateDir, ...(workloadStateDir ? { workloadStateDir } : {}), image, docker: Boolean(opts.docker), state: "creating", ...(opts.browser ? { browser: opts.browser } : {}), ...(companion ? { browserCompanion: { containerName: `${CONTAINER_PREFIX}${id}-browser`, image: this.browserImage! } } : {}), ...(opts.credsFiles && Object.keys(opts.credsFiles).length ? { credsHostDir: join(this.inventory.root, "creds", id) } : {}) };
+    const value: DockerInventoryRecord = { version: 1, id, sessionId: opts.sessionId ?? id, providerId, containerName: `${CONTAINER_PREFIX}${id}`, workspace, runtimeStateDir, ...(workloadStateDir ? { workloadStateDir } : {}), image, docker: Boolean(opts.docker), state: "creating", ...(opts.browser ? { browser: opts.browser } : {}), ...(companion ? { browserCompanion: { containerName: `${CONTAINER_PREFIX}${id}-browser`, image: this.browserImage! } } : {}), ...(opts.credsFiles && Object.keys(opts.credsFiles).length ? { credsHostDir: join(this.inventory.root, "creds", id) } : {}), ...(opts.resources?.scratch ? { scratchHostDir: join(this.inventory.root, "scratch", id) } : {}) };
     if (existing) await this.inventory.write(value);
     else if (!await this.inventory.reserve(value)) return this.restore(id);
     if (value.credsHostDir && opts.credsFiles) await writeCredsFiles(value.credsHostDir, opts.credsFiles, { docker: Boolean(opts.docker || opts.browser?.enabled) });
+    if (value.scratchHostDir) {
+      await fs.mkdir(value.scratchHostDir, { recursive: true, mode: 0o777 });
+      // Deviation from the spec's size-limited /scratch (emptyDir with
+      // ephemeral-storage sums on kubernetes): a docker bind mount has no
+      // quota mechanism. Dev-only backend; tracked for the spec Deviations.
+      console.warn("scratch is not size-limited on the docker backend.");
+    }
     const uid = process.getuid?.() || 1501;
     const gid = process.getgid?.() || 1501;
-    const runArgs = buildDockerRunArgs({ containerName: value.containerName, image, workspaceHostPath: workspace, network: dockerOpts.network ?? "bridge", env: { ...(companion ? Object.fromEntries(Object.entries(dockerOpts.env ?? {}).filter(([key]) => !key.startsWith("VALET_BROWSER_"))) : dockerOpts.env), VALET_SESSION_ID: value.sessionId, ...(opts.browser?.enabled && !companion ? { VALET_BROWSER_UID: String(uid), VALET_BROWSER_GID: String(gid) } : {}) }, resources: opts.resources, profile: opts.profile, credsHostDir: value.credsHostDir, docker: opts.docker, runtimeStateDir: companion ? undefined : runtimeStateDir, browser: companion ? undefined : opts.browser, browserSeccompProfile: this.browserSeccompProfile, labels: dockerOwnerLabels(value) });
+    const runArgs = buildDockerRunArgs({ containerName: value.containerName, image, workspaceHostPath: workspace, network: dockerOpts.network ?? "bridge", env: { ...(companion ? Object.fromEntries(Object.entries(dockerOpts.env ?? {}).filter(([key]) => !key.startsWith("VALET_BROWSER_"))) : dockerOpts.env), VALET_SESSION_ID: value.sessionId, ...(opts.browser?.enabled && !companion ? { VALET_BROWSER_UID: String(uid), VALET_BROWSER_GID: String(gid) } : {}) }, resources: opts.resources, profile: opts.profile, credsHostDir: value.credsHostDir, scratchHostDir: value.scratchHostDir, docker: opts.docker, runtimeStateDir: companion ? undefined : runtimeStateDir, browser: companion ? undefined : opts.browser, browserSeccompProfile: this.browserSeccompProfile, labels: dockerOwnerLabels(value) });
     const started = await execProcess("docker", runArgs, {});
     if (started.exitCode !== 0) {
       // Keep the reservation and state: a competing creator or transport loss can leave a live owner.
@@ -1422,6 +1457,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     await fs.rm(value.runtimeStateDir, { recursive: true, force: true });
     if (value.workloadStateDir) await fs.rm(value.workloadStateDir, { recursive: true, force: true });
     if (value.credsHostDir) await fs.rm(value.credsHostDir, { recursive: true, force: true });
+    if (value.scratchHostDir) await fs.rm(value.scratchHostDir, { recursive: true, force: true });
     await this.inventory.remove(id); this.sandboxes.delete(id);
   }
 
