@@ -31,6 +31,22 @@ describe("CheckpointList", () => {
     expect(notify.textContent).not.toContain("$");
   });
 
+  it("keeps every status but Completed visible on a phone, where the glyph alone shows a denied step as done", () => {
+    render(
+      <CheckpointList
+        checkpoints={[
+          { nodeId: "done", iteration: 0, status: "completed" },
+          { nodeId: "blocked", iteration: 0, status: "completed", result: { policyDenied: true } },
+          { nodeId: "broken", iteration: 0, status: "failed", error: "boom" },
+        ]}
+      />,
+    );
+    // Below `sm` an `sr-only` label is hidden; only the glyph shows.
+    expect(screen.getByText("Completed").className).toContain("sr-only");
+    expect(screen.getByText("Denied").className).not.toContain("sr-only");
+    expect(screen.getByText("Failed").className).not.toContain("sr-only");
+  });
+
   it("shows a fallback line when there are no checkpoints", () => {
     render(<CheckpointList checkpoints={[]} />);
     expect(screen.getByText("No steps have started yet.")).toBeTruthy();
