@@ -11,7 +11,8 @@ WORK_DIR=/workspace
 mkdir -p "$WORK_DIR"
 if [ -d /scratch ]; then
   mkdir -p /scratch/tmp /scratch/valet-jobs
-  chmod 1777 /scratch/tmp
+  # Sticky and world-writable: non-privileged execs run as dockerd.
+  chmod 1777 /scratch/tmp /scratch/valet-jobs
   # Background process logs live on scratch when it exists (spec B4).
   ln -sfn /scratch/valet-jobs /tmp/valet-jobs
   # A container restart killed every job, but /scratch kept its files. Mark
