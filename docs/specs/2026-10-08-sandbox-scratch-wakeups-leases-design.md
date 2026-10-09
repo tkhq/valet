@@ -1109,8 +1109,9 @@ with an earlier entry, the entry below wins.
   is unarchived later.
 - **C3: ordering.** A forced pause checks that the attachment can suspend
   (`current() !== null`) before it cancels. After an api restart the
-  attachment is `detached`, and the pause returns `sandbox is not ready to
-  pause` with the work still running. Pause, replace, and PATCH re-check
+  attachment is `detached`, and the pause refuses with the work still
+  running (wave 4 moved this check before the gate and gave it the next
+  step; see "C4: pause on a detached sandbox"). Pause, replace, and PATCH re-check
   for an unsettled submission after the cancel; if a turn started, they
   send the signals and return 409 saying the work already stopped.
 - **C3: other archive paths.** A brief dismissal and the settled-run
