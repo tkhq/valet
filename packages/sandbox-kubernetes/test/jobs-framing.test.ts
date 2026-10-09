@@ -155,7 +155,24 @@ describe("pollCommand", () => {
   it("reports an unknown execId distinctly from running/done", () => {
     const cmd = pollCommand("job-1", 0);
     expect(cmd).toContain("echo unknown 1>&2");
-    expect(cmd).toContain("echo running 1>&2");
+    expect(cmd).toContain("st=running");
+    expect(cmd).toContain(`echo "$st" 1>&2`);
+  });
+
+  it("checks the pid group with kill -0 (no `--`) and the start-script dead marker when no exit file exists", () => {
+    const cmd = pollCommand("job-1", 0);
+    expect(cmd).toContain(`kill -0 -"$(cat ${shQuote(`${JOBS_DIR}/job-1.pid`)})"`);
+    expect(cmd).toContain(`-f ${shQuote(`${JOBS_DIR}/job-1.dead`)}`);
+    expect(cmd).toContain("st=dead");
+    // Status before output: a present exit file means the output is complete.
+    expect(cmd.indexOf("st=")).toBeLessThan(cmd.indexOf("base64 -w0"));
+  });
+
+  it("caps a forward read one byte past maxBytes, and reads the size in tail mode", () => {
+    expect(pollCommand("job-1", 0, { maxBytes: 100 })).toContain("| head -c 101 |");
+    const tailCmd = pollCommand("job-1", 5, { maxBytes: 100, tail: true });
+    expect(tailCmd).toContain("size=$(wc -c <");
+    expect(tailCmd).toContain("| tail -c +6 | tail -c 100 | base64 -w0");
   });
 
   it("base64-encodes the tail output (-w0, no line wrap) so raw bytes survive execInPod's own UTF-8 decode", () => {
@@ -195,6 +212,10 @@ describe("parseJobStatus", () => {
 
   it("parses 'unknown' as failed (job never started / lost)", () => {
     expect(parseJobStatus("unknown\n")).toEqual({ status: "failed" });
+  });
+
+  it("parses 'dead' as failed with no exit code (pid group gone, no exit file)", () => {
+    expect(parseJobStatus("dead\n")).toEqual({ status: "failed" });
   });
 
   it("throws on garbage", () => {

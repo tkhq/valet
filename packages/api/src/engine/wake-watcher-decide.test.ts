@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { Wakeup, WakeupLimits } from "@valet/engine";
-import { decideWakeup, tail, LOG_TAIL_BYTES, type WakeupDecision, type WakeupProbe } from "./wake-watcher-decide.js";
+import { decideWakeup, tail, LOG_TAIL_BYTES, WATCH_READ_BYTES, type WakeupDecision, type WakeupProbe } from "./wake-watcher-decide.js";
 
 interface Vector {
   name: string;
@@ -42,5 +42,29 @@ describe("tail", () => {
     const long = "€".repeat(2000);
     const result = tail(long);
     expect(Buffer.byteLength(result)).toBeLessThanOrEqual(LOG_TAIL_BYTES);
+  });
+});
+
+describe("watch reads bounded at WATCH_READ_BYTES", () => {
+  it("turns one line that fills the whole read into an event instead of stalling", () => {
+    const line = "x".repeat(WATCH_READ_BYTES);
+    const row: Wakeup = {
+      id: "wk_long", sessionId: "s1", threadId: "t1", kind: "watch", status: "running", reason: "long line",
+      command: "emit", execId: "e1", leaseId: "ls_1", deadlineAt: 10_000_000, logOffset: 0, logTail: "",
+      eventCount: 0, createdAt: 0, updatedAt: 0,
+    };
+    const decision = decideWakeup(1000, row, { kind: "poll", status: "running", output: line, nextOffset: WATCH_READ_BYTES }, { watchMaxEventsPerHour: 120 });
+    expect(decision?.to).toBe("running");
+    expect(decision?.patch.logOffset).toBe(WATCH_READ_BYTES);
+    expect(decision?.signals[0]?.body).toBe(line);
+  });
+
+  it("still holds back a short partial line", () => {
+    const row: Wakeup = {
+      id: "wk_short", sessionId: "s1", threadId: "t1", kind: "watch", status: "running", reason: "short",
+      command: "emit", execId: "e1", leaseId: "ls_1", deadlineAt: 10_000_000, logOffset: 0, logTail: "",
+      eventCount: 0, createdAt: 0, updatedAt: 0,
+    };
+    expect(decideWakeup(1000, row, { kind: "poll", status: "running", output: "partial", nextOffset: 7 }, { watchMaxEventsPerHour: 120 })).toBeNull();
   });
 });

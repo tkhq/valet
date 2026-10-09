@@ -204,7 +204,7 @@ export function resourceFingerprint(resources: SandboxCpuMemoryResources): strin
   return createHash("sha256").update(JSON.stringify(values)).digest("hex");
 }
 
-function readResourceOverridesAnnotation(cr: SandboxCRRead): Sandbox["resourceOverrides"] {
+export function readResourceOverridesAnnotation(cr: SandboxCRRead): Sandbox["resourceOverrides"] {
   const serialized = cr.metadata.annotations?.[RESOURCE_OVERRIDES_ANNOTATION];
   if (serialized === undefined) return undefined;
   let value: unknown;

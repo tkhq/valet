@@ -739,6 +739,53 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.countActiveLeases("sess-1")).toBe(0);
         expect((await store.listAllActiveLeases()).map((l) => l.id)).toEqual(["ls_b"]);
       });
+
+      it("pages due wakeups by (createdAt, id) so no row starves behind a full batch", async () => {
+        // Three always-due running rows are older than the due timer. With a
+        // batch of 2, the timer is reachable only through the cursor.
+        await store.createWakeup(wakeup({ id: "wk_1", createdAt: 1 }));
+        await store.createWakeup(wakeup({ id: "wk_2", createdAt: 2 }));
+        await store.createWakeup(wakeup({ id: "wk_3", createdAt: 2 }));
+        await store.createWakeup(wakeup({ id: "wk_t", kind: "timer", status: "pending", prompt: "p", fireAt: 5, createdAt: 9, command: undefined, execId: undefined, leaseId: undefined, deadlineAt: undefined }));
+        const first = await store.listDueWakeups(10, 2);
+        expect(first.map((w) => w.id)).toEqual(["wk_1", "wk_2"]);
+        const second = await store.listDueWakeups(10, 2, { createdAt: 2, id: "wk_2" });
+        expect(second.map((w) => w.id)).toEqual(["wk_3", "wk_t"]);
+        expect(await store.listDueWakeups(10, 2, { createdAt: 9, id: "wk_t" })).toEqual([]);
+      });
+
+      it("fills a missing lease sandbox id once, and only on an active lease", async () => {
+        await store.createLease(lease({ sandboxId: undefined }));
+        expect(await store.setLeaseSandboxId("ls_a", "sb-9")).toBe(true);
+        expect(await store.setLeaseSandboxId("ls_a", "sb-10")).toBe(false);
+        expect((await store.listActiveLeases("sess-1"))[0]?.sandboxId).toBe("sb-9");
+        await store.createLease(lease({ id: "ls_r", sandboxId: undefined }));
+        await store.releaseLease("ls_r", "cancelled", 5);
+        expect(await store.setLeaseSandboxId("ls_r", "sb-9")).toBe(false);
+      });
+
+      it("deleteSession ends the session's open wakeups and releases its leases", async () => {
+        await store.saveSession(newSession());
+        await store.createWakeup(wakeup());
+        await store.createWakeup(wakeup({ id: "wk_t", kind: "timer", status: "pending", prompt: "p", fireAt: 500, command: undefined, execId: undefined, leaseId: undefined, deadlineAt: undefined }));
+        await store.createWakeup(wakeup({ id: "wk_done", status: "done", cause: "exit", leaseId: undefined }));
+        await store.createWakeup(wakeup({ id: "wk_other", sessionId: "sess-2", leaseId: "ls_o" }));
+        await store.createLease(lease());
+        await store.createLease(lease({ id: "ls_h", ownerKind: "hold", ownerId: undefined }));
+        await store.createLease(lease({ id: "ls_o", sessionId: "sess-2", ownerId: "wk_other" }));
+
+        await store.deleteSession("sess-1");
+
+        expect(await store.getWakeup("wk_a")).toMatchObject({ status: "lost", cause: "sandbox_unavailable" });
+        expect((await store.getWakeup("wk_a"))?.endedAt).toBeTypeOf("number");
+        expect(await store.getWakeup("wk_t")).toMatchObject({ status: "lost", cause: "sandbox_unavailable" });
+        expect(await store.getWakeup("wk_done")).toMatchObject({ status: "done", cause: "exit" });
+        expect(await store.getWakeup("wk_other")).toMatchObject({ status: "running" });
+        expect(await store.countActiveLeases("sess-1")).toBe(0);
+        expect((await store.listAllActiveLeases()).map((l) => l.id)).toEqual(["ls_o"]);
+        expect(await store.releaseLease("ls_h", "deadline", 1)).toBeNull();
+        expect(await store.listDueWakeups(1_000, 10)).toEqual([expect.objectContaining({ id: "wk_other" })]);
+      });
     });
 
     it("latestActivityAt: null when empty, tracks the max queue-item updatedAt through admit + settle", async () => {

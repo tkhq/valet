@@ -10,6 +10,7 @@ import type {
   ExecResult,
   GatewayEndpoint,
   JobPoll,
+  JobPollOpts,
   Sandbox,
   SandboxCapabilities,
   SandboxCreateOpts,
@@ -849,7 +850,7 @@ export class DockerSandbox implements Sandbox {
     return { execId };
   }
 
-  async pollJob(execId: string, offset: number): Promise<JobPoll> {
+  async pollJob(execId: string, offset: number, opts?: JobPollOpts): Promise<JobPoll> {
     const state = this.jobs.get(execId);
     if (!state) return { status: "failed", output: "", nextOffset: offset };
 
@@ -862,13 +863,24 @@ export class DockerSandbox implements Sandbox {
       throw state.transportError;
     }
 
-    const output = state.output.slice(offset);
-    const nextOffset = state.output.length;
-    const result: JobPoll = { status: state.status, output, nextOffset };
-    if (state.status === "done") result.exitCode = state.exitCode;
+    // Docker offsets count UTF-16 code units of the in-memory buffer, not
+    // bytes. `maxBytes` bounds the same units (spec Deviations, B4).
+    const end = state.output.length;
+    let start = offset;
+    let stop = end;
+    if (opts?.maxBytes !== undefined) {
+      if (opts.tail) start = Math.max(offset, end - opts.maxBytes);
+      else stop = Math.min(end, offset + opts.maxBytes);
+    }
+    // Output left past the cap keeps the job "running" for this caller, so
+    // it polls again and the job state is not evicted early.
+    const more = stop < end;
+    const status = more ? "running" : state.status;
+    const result: JobPoll = { status, output: state.output.slice(start, stop), nextOffset: stop };
+    if (status === "done") result.exitCode = state.exitCode;
     if (state.truncated) result.truncated = true;
 
-    if (state.status !== "running") {
+    if (status !== "running") {
       if (state.evictTimer) clearTimeout(state.evictTimer);
       this.jobs.delete(execId);
     }
@@ -1315,7 +1327,8 @@ export class DockerSandboxProvider implements SandboxProvider {
       await fs.access(this.browserSeccompProfile).catch(() => { throw new Error("The browser seccomp profile is missing. Install the reviewed profile before creating this sandbox."); });
     }
     if (existing && existing.state !== "released" && !browserUpgrade) {
-      if (existing.image !== image || existing.docker !== Boolean(opts.docker) || Boolean(existing.browser?.enabled) !== Boolean(opts.browser?.enabled) || (existing.browserCompanion && existing.browserCompanion.image !== this.browserImage)) throw new Error("The existing Docker sandbox uses another runtime image or browser configuration. Release that execution environment before replacement.");
+      // preserveLivePod: a lease holds this container, so keep it on its own image (spec INV-8).
+      if ((existing.image !== image && !opts.preserveLivePod) ||existing.docker !== Boolean(opts.docker) || Boolean(existing.browser?.enabled) !== Boolean(opts.browser?.enabled) || (existing.browserCompanion && existing.browserCompanion.image !== this.browserImage)) throw new Error("The existing Docker sandbox uses another runtime image or browser configuration. Release that execution environment before replacement.");
       return this.restore(id);
     }
     if (browserUpgrade && existing?.state === "creating") throw new Error("Docker creation is pending. Inspect and release the pending runtime before enabling its browser.");
@@ -1339,6 +1352,9 @@ export class DockerSandboxProvider implements SandboxProvider {
     if (value.credsHostDir && opts.credsFiles) await writeCredsFiles(value.credsHostDir, opts.credsFiles, { docker: Boolean(opts.docker || opts.browser?.enabled) });
     if (value.scratchHostDir) {
       await fs.mkdir(value.scratchHostDir, { recursive: true, mode: 0o777 });
+      // The process umask masks the mkdir mode, so set it explicitly. The
+      // sandbox user must be able to write /scratch.
+      await fs.chmod(value.scratchHostDir, 0o777);
       // Deviation from the spec's size-limited /scratch (emptyDir with
       // ephemeral-storage sums on kubernetes): a docker bind mount has no
       // quota mechanism. Dev-only backend; tracked for the spec Deviations.

@@ -76,6 +76,7 @@ interface Instruments {
   cacheBreaks: Counter;
   compactionCoverageGaps: Counter;
   wakeupsTotal: Counter;
+  wakeupSignalsLost: Counter;
   wakeupsActive: ObservableGauge;
   leasesActive: ObservableGauge;
   leaseNodeSeconds: Counter;
@@ -160,6 +161,10 @@ function inst(): Instruments {
     wakeupsTotal: meter.createCounter("valet.wakeups.total", {
       description: "Wakeups that ended, by kind (process/watch/timer) and cause. See WakeupCause.",
     }),
+    wakeupSignalsLost: meter.createCounter("valet.wakeups.signal_lost", {
+      description:
+        "Wakeup signals the WakeWatcher could not deliver after the row moved, by kind (process/watch/timer/hold). The row does not retry, so each count is a turn the agent never got. Any sustained rate needs a human.",
+    }),
     wakeupsActive: meter.createObservableGauge("valet.wakeups.active", {
       description:
         "Wakeups currently pending or running, by kind. Reported by the host's WakeWatcher sweep; a count that only grows means wakeups are not reaching a terminal status.",
@@ -178,7 +183,7 @@ function inst(): Instruments {
     }),
     leasesUnannotated: meter.createObservableGauge("valet.leases.unannotated", {
       description:
-        "A lease with no owning wakeup or hold record. This should not happen; a non-zero count means a lease outlived or never got its owner annotation.",
+        "Leased sandboxes the last WakeWatcher reconcile found without eviction protection: a pod that lacked safe-to-evict=false past two ticks, a failed patch, or a lease with no resolvable sandbox id. Any non-zero value pages (INV-3).",
     }),
     scratchRequestedBytes: meter.createObservableGauge("valet.sandbox.scratch.requested_bytes", {
       description:
@@ -318,6 +323,14 @@ export function recordWakeupEnded(kind: WakeupKind, cause: WakeupCause): void {
   inst().wakeupsTotal.add(1, { kind, cause });
 }
 
+/** A wakeup signal the WakeWatcher failed to deliver after its CAS. The
+ * watcher does not retry it (spec Deviations, B5), so this counter is the
+ * only record besides the log line. `kind` is the wakeup kind, or `hold`
+ * for `lease.expired`. */
+export function recordWakeupSignalLost(kind: WakeupKind | "hold"): void {
+  inst().wakeupSignalsLost.add(1, { kind });
+}
+
 /** Wakeups currently pending or running, by kind. The caller (the host's
  * WakeWatcher sweep) owns re-setting this every pass. A stale value just
  * means the sweep stopped running, which has its own liveness check. */
@@ -348,8 +361,8 @@ export function recordLeasesOverDeadline(count: number): void {
   setGauge(leasesOverDeadlineState, {}, count);
 }
 
-/** Leases with no owning wakeup or hold record. Should stay at zero; a
- * non-zero count means a lease lost its owner annotation. */
+/** Leased sandboxes the last reconcile found unprotected (spec INV-3). The
+ * WakeWatcher re-sets it every tick. Should stay at zero. */
 export function recordLeasesUnannotated(count: number): void {
   inst();
   setGauge(leasesUnannotatedState, {}, count);

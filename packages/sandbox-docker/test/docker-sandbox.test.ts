@@ -220,6 +220,38 @@ describeDocker("DockerSandbox", () => {
     }
   });
 
+  it("job-mode: pollJob bounds a forward read and a tail read (spec B4)", async () => {
+    const sb = await makeSandbox();
+    try {
+      const { execId } = await sb.execJob("printf 0123456789", { detached: true });
+      // Wait until the job finished, reading only the tail so nothing is evicted.
+      let tailPoll = await sb.pollJob(execId, 0, { maxBytes: 3, tail: true });
+      for (let i = 0; i < 100 && tailPoll.status === "running"; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        tailPoll = await sb.pollJob(execId, 0, { maxBytes: 3, tail: true });
+      }
+      // A finished job is evicted after a terminal poll, so the forward
+      // checks use a second job.
+      expect(tailPoll).toMatchObject({ status: "done", exitCode: 0, output: "789", nextOffset: 10 });
+
+      const second = await sb.execJob("printf 0123456789", { detached: true });
+      let first = await sb.pollJob(second.execId, 0, { maxBytes: 4 });
+      for (let i = 0; i < 100 && first.output.length < 4; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        first = await sb.pollJob(second.execId, 0, { maxBytes: 4 });
+      }
+      expect(first).toMatchObject({ status: "running", output: "0123", nextOffset: 4 });
+      let rest = await sb.pollJob(second.execId, 4, { maxBytes: 100 });
+      for (let i = 0; i < 100 && rest.status === "running"; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        rest = await sb.pollJob(second.execId, 4, { maxBytes: 100 });
+      }
+      expect(rest).toMatchObject({ status: "done", exitCode: 0, output: "456789", nextOffset: 10 });
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
   it("job-mode: execJob against an already-removed container rejects on poll (transport failure, not a normal terminal poll)", async () => {
     const sb = await makeSandbox();
     // Remove the container before kicking off the job — execJob is

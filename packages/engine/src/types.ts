@@ -4,7 +4,7 @@ import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
-import type { Lease, LeaseReleaseCause, Wakeup, WakeupPatch, WakeupsSeam, WakeupStatus } from "./wakeups/types.js";
+import type { Lease, LeaseReleaseCause, Wakeup, WakeupCursor, WakeupPatch, WakeupsSeam, WakeupStatus } from "./wakeups/types.js";
 
 // Wakeup and lease contracts (spec 2026-10-08). Type-only re-export: no
 // runtime code, so the engine barrel stays browser-safe.
@@ -1262,6 +1262,22 @@ export interface JobPoll {
   truncated?: boolean;
 }
 
+/** Read bounds for one `Sandbox.pollJob` call (spec B4). */
+export interface JobPollOpts {
+  /**
+   * Most output bytes this poll returns. Without `tail`, the poll reads from
+   * `offset` forward. While bytes remain past the cap, it reports
+   * `status: "running"` so the caller polls again from `nextOffset`.
+   */
+  maxBytes?: number;
+  /**
+   * With `maxBytes`: return only the last `maxBytes` bytes between `offset`
+   * and the end of the log, and set `nextOffset` to the end. For a caller
+   * that needs only the tail of a long log.
+   */
+  tail?: boolean;
+}
+
 export interface GatewayEndpoint {
   host: string;
   port: number;
@@ -1332,7 +1348,7 @@ export interface Sandbox {
   /** Job-mode exec (decision 9). Optional — providers that support long-running,
    * detached commands implement all three of execJob/pollJob/cancelJob. */
   execJob?(command: string, opts?: ExecOpts): Promise<ExecJobHandle>;
-  pollJob?(execId: string, offset: number): Promise<JobPoll>;
+  pollJob?(execId: string, offset: number, opts?: JobPollOpts): Promise<JobPoll>;
   cancelJob?(execId: string): Promise<void>;
   /**
    * The in-sandbox auth gateway's reachable endpoint, or null when this
@@ -1411,6 +1427,14 @@ export interface SandboxCreateOpts {
    * Undefined means no record exists; it must not become stale create resources.
    * A read error aborts adoption before replacement. Fresh creation skips it. */
   readResourceOverrides?: (sandbox: Sandbox) => Promise<Pick<SandboxResources, "cpu" | "memory"> | undefined>;
+  /**
+   * Internal lease intent (spec INV-8). If true and live compute exists, an
+   * adopting provider returns it unchanged: it keeps the live pod and its
+   * template and ignores image and resource drift. With no live compute,
+   * the provider creates from these options as usual. The attachment sets
+   * this when the session holds an active lease.
+   */
+  preserveLivePod?: boolean;
   metadata?: Record<string, unknown>;
   /**
    * The owning session's id. `Engine.materializeSandbox` stamps this on
@@ -2155,14 +2179,23 @@ export interface SessionStore {
     queueItemId: string,
   ): Promise<DecisionGate[]>;
   getSuspendedTurn(sessionId: string, threadId: string): Promise<SuspendedTurnState | null>;
+  /**
+   * Deletes the session. Its `pending` and `running` wakeups end `lost` with
+   * `cause=sandbox_unavailable`, and its active leases release with
+   * `owner_ended` (spec C2). The wakeup and lease rows stay.
+   */
   deleteSession(id: string): Promise<void>;
 
   // === Wakeups and leases (spec 2026-10-08) ===
   createWakeup(wakeup: Wakeup): Promise<void>;
   getWakeup(id: string): Promise<Wakeup | null>;
   listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]>;
-  /** Running process/watch wakeups (always due) plus pending timer wakeups whose fireAt <= now. */
-  listDueWakeups(now: number, limit: number): Promise<Wakeup[]>;
+  /**
+   * Running process/watch wakeups (always due) plus pending timer wakeups
+   * whose fireAt <= now, in (createdAt, id) order. `after` pages: it returns
+   * only rows strictly after that position, so a caller reads every due row.
+   */
+  listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<Wakeup[]>;
   /** CAS: succeeds only when the row's current status is in `from`. Null when the CAS loses. */
   transitionWakeup(
     id: string,
@@ -2177,6 +2210,8 @@ export interface SessionStore {
   listActiveLeases(sessionId: string): Promise<Lease[]>;
   listAllActiveLeases(): Promise<Lease[]>;
   countActiveLeases(sessionId: string): Promise<number>;
+  /** Fills `sandboxId` on an active lease that has none. False when the lease is released or already has one. */
+  setLeaseSandboxId(id: string, sandboxId: string): Promise<boolean>;
 }
 
 // ── Sandbox spec / prep steps ─────────────────────────────────────

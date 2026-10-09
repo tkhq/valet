@@ -21,6 +21,7 @@ import type {
   ThreadData,
   Wakeup,
   WakeupPatch,
+  WakeupCursor,
   WakeupStatus,
   WriteFence,
 } from "../../types.js";
@@ -276,6 +277,17 @@ export class InMemorySessionStore implements SessionStore {
 
   async deleteSession(id: string): Promise<void> {
     this.rows.delete(id);
+    // A deleted session has no sandbox left to probe, so its open wakeups
+    // and leases end here (spec C2). Otherwise they stay due forever.
+    const now = Date.now();
+    for (const w of this.wakeups.values()) {
+      if (w.sessionId !== id || (w.status !== "pending" && w.status !== "running")) continue;
+      this.wakeups.set(w.id, { ...w, status: "lost", cause: "sandbox_unavailable", endedAt: now, updatedAt: now });
+    }
+    for (const l of this.leases.values()) {
+      if (l.sessionId !== id || l.releasedAt !== undefined) continue;
+      this.leases.set(l.id, { ...l, releasedAt: now, releaseCause: "owner_ended" });
+    }
   }
 
   // ── wakeups and leases ──────────────────────────────────────────
@@ -295,14 +307,15 @@ export class InMemorySessionStore implements SessionStore {
       .map((w) => ({ ...w }));
   }
 
-  async listDueWakeups(now: number, limit: number): Promise<Wakeup[]> {
+  async listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<Wakeup[]> {
     return [...this.wakeups.values()]
       .filter(
         (w) =>
           (w.status === "running" && (w.kind === "process" || w.kind === "watch")) ||
           (w.status === "pending" && w.kind === "timer" && w.fireAt !== undefined && w.fireAt <= now),
       )
-      .sort((a, b) => a.createdAt - b.createdAt)
+      .filter((w) => !after || w.createdAt > after.createdAt || (w.createdAt === after.createdAt && w.id > after.id))
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .slice(0, limit)
       .map((w) => ({ ...w }));
   }
@@ -345,6 +358,13 @@ export class InMemorySessionStore implements SessionStore {
 
   async countActiveLeases(sessionId: string): Promise<number> {
     return (await this.listActiveLeases(sessionId)).length;
+  }
+
+  async setLeaseSandboxId(id: string, sandboxId: string): Promise<boolean> {
+    const l = this.leases.get(id);
+    if (!l || l.releasedAt !== undefined || l.sandboxId !== undefined) return false;
+    this.leases.set(id, { ...l, sandboxId });
+    return true;
   }
 
   // ── submission lifecycle ───────────────────────────────────────

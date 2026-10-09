@@ -23,6 +23,7 @@ import type {
   ThreadData,
   Wakeup,
   WakeupPatch,
+  WakeupCursor,
   WakeupStatus,
   WriteFence,
 } from "@valet/engine";
@@ -1447,13 +1448,19 @@ export class PgSessionStore implements SessionStore {
     return r.rows.map((raw) => rowToWakeup(rawToWakeupRow(raw)));
   }
 
-  async listDueWakeups(now: number, limit: number): Promise<Wakeup[]> {
+  async listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<Wakeup[]> {
+    const params: unknown[] = [now, limit];
+    let keyset = "";
+    if (after) {
+      params.push(after.createdAt, after.id);
+      keyset = " AND (created_at, id) > ($3, $4)";
+    }
     const r = await this.db.query(
       `SELECT * FROM engine_wakeups
-       WHERE (status = 'running' AND kind IN ('process','watch'))
-          OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1)
+       WHERE ((status = 'running' AND kind IN ('process','watch'))
+          OR (status = 'pending' AND kind = 'timer' AND fire_at IS NOT NULL AND fire_at <= $1))${keyset}
        ORDER BY created_at, id LIMIT $2`,
-      [now, limit],
+      params,
     );
     return r.rows.map((raw) => rowToWakeup(rawToWakeupRow(raw)));
   }
@@ -1537,8 +1544,28 @@ export class PgSessionStore implements SessionStore {
     return toNum(r.rows[0]?.n, "n");
   }
 
+  async setLeaseSandboxId(id: string, sandboxId: string): Promise<boolean> {
+    const r = await this.db.query(
+      `UPDATE engine_leases SET sandbox_id = $2 WHERE id = $1 AND released_at IS NULL AND sandbox_id IS NULL RETURNING id`,
+      [id, sandboxId],
+    );
+    return r.rows.length > 0;
+  }
+
   async deleteSession(id: string): Promise<void> {
+    const now = Date.now();
     await this.db.transaction(async (tx) => {
+      // A deleted session has no sandbox left to probe, so its open wakeups
+      // and leases end here (spec C2). Otherwise they stay due forever.
+      await tx.query(
+        `UPDATE engine_wakeups SET status = 'lost', cause = 'sandbox_unavailable', ended_at = $2, updated_at = $2
+         WHERE session_id = $1 AND status IN ('pending','running')`,
+        [id, now],
+      );
+      await tx.query(
+        `UPDATE engine_leases SET released_at = $2, release_cause = 'owner_ended' WHERE session_id = $1 AND released_at IS NULL`,
+        [id, now],
+      );
       // Lock every queue-item row of the session before deleting so a
       // concurrent single-statement CAS (claimSubmission, settleUnclaimed,
       // etc.) either lands before this transaction opens or blocks until it

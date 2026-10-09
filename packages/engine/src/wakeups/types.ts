@@ -61,6 +61,12 @@ export interface Lease {
   releaseCause?: LeaseReleaseCause;
 }
 
+/** Keyset position for paging `listDueWakeups` in (createdAt, id) order. */
+export interface WakeupCursor {
+  createdAt: number;
+  id: string;
+}
+
 /** Fields a store transition may patch on a wakeup, alongside status. */
 export type WakeupPatch = Partial<
   Pick<Wakeup, "cause" | "exitCode" | "endedAt" | "logOffset" | "logTail" | "eventCount" | "execId" | "leaseId">
@@ -85,6 +91,7 @@ export interface WakeupsSeam {
   hold(input: { hours: number; reason: string }): Promise<Lease>;
   get(id: string): Promise<Wakeup | null>;
   list(): Promise<{ wakeups: Wakeup[]; leases: Lease[] }>;
-  cancel(id: string): Promise<{ kind: "wakeup" | "lease" } | null>;
+  /** Null for an unknown, ended, or foreign id. `refused` carries the text the tool returns. */
+  cancel(id: string): Promise<{ kind: "wakeup" | "lease" } | { kind: "refused"; text: string } | null>;
   readLog(id: string, offset: number, bytes: number): Promise<{ text: string; nextOffset: number; eof: boolean }>;
 }

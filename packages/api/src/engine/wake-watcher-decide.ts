@@ -2,12 +2,15 @@ import type { LeaseReleaseCause, Wakeup, WakeupCause, WakeupLimits, WakeupPatch,
 
 /**
  * The outcome of one WakeWatcher probe against a due wakeup row. `poll`
- * covers `process` and `watch` when the sandbox exec succeeded; `unavailable`
- * covers a failed exec; `none` is for `timer`, which needs no exec at all.
+ * covers `process` and `watch` when the sandbox exec succeeded;
+ * `unavailable` covers a sandbox that is gone; `error` covers a probe that
+ * failed for another reason and may succeed next tick; `none` is for
+ * `timer`, which needs no exec at all.
  */
 export type WakeupProbe =
   | { kind: "poll"; status: "running" | "done" | "failed"; exitCode?: number; output: string; nextOffset: number }
   | { kind: "unavailable" }
+  | { kind: "error" }
   | { kind: "none" };
 
 /** A signal the watcher should submit, before it knows the thread to target. */
@@ -75,12 +78,24 @@ function terminalSignal(now: number, row: Wakeup, cause: WakeupCause, exitCode: 
   };
 }
 
+/**
+ * Most bytes the WakeWatcher reads from a `watch` log per tick (spec B4).
+ * The watcher passes it as the `pollJob` bound.
+ */
+export const WATCH_READ_BYTES = 64 * 1024;
+
 /** Splits new watch output into complete lines, holding back a trailing partial line. */
 function splitWatchLines(output: string): { lines: string[]; consumedText: string; consumedBytes: number } {
   const parts = output.split("\n");
   // The last element is the trailing partial line (no terminating "\n"), or
   // "" when output ends with "\n". Either way it stays unconsumed.
-  parts.pop();
+  const partial = parts.pop() ?? "";
+  // A provider can hold back up to 3 bytes of a split codepoint.
+  if (parts.length === 0 && Buffer.byteLength(partial) > WATCH_READ_BYTES - 4) {
+    // One line fills the whole bounded read. Holding it back would stall
+    // the watch forever, so the slice becomes one event.
+    return { lines: [partial], consumedText: partial, consumedBytes: Buffer.byteLength(partial) };
+  }
   let lines = parts;
   if (lines.length > 200) {
     lines = lines.slice(0, 200);
@@ -155,6 +170,21 @@ export function decideWakeup(
   }
 
   if (probe.kind === "none") return null;
+
+  // A failed probe says nothing about the process, but the deadline still
+  // holds: past it the row expires, so a probe that always fails cannot
+  // keep the row and its lease alive forever (spec C6).
+  if (probe.kind === "error") {
+    if (row.deadlineAt === undefined || row.deadlineAt > now) return null;
+    return {
+      to: "expired",
+      cause: "deadline",
+      kill: true,
+      patch: { cause: "deadline", endedAt: now },
+      signals: [terminalSignal(now, row, "deadline", undefined, tail(row.logTail))],
+      releaseLease: "deadline",
+    };
+  }
 
   if (probe.status === "done" || probe.status === "failed") {
     if (probe.exitCode !== undefined) {

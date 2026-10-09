@@ -4,6 +4,7 @@ import type {
   ExecResult,
   GatewayEndpoint,
   JobPoll,
+  JobPollOpts,
   Sandbox,
   SandboxCommandChannel,
   SandboxCommandChannelOptions,
@@ -325,12 +326,12 @@ export class PolicySandbox implements Sandbox {
     );
   }
 
-  async pollJob(execId: string, offset: number): Promise<JobPoll> {
+  async pollJob(execId: string, offset: number, opts?: JobPollOpts): Promise<JobPoll> {
     let poll: JobPoll;
     try {
       poll = await this.dispatch((sb) => {
         if (!sb.pollJob) throw jobUnsupportedError();
-        return sb.pollJob(execId, offset);
+        return opts === undefined ? sb.pollJob(execId, offset) : sb.pollJob(execId, offset, opts);
       });
     } catch (err) {
       // A transport failure (SandboxUnavailableError) or epoch bump

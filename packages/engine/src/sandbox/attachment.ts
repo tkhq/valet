@@ -1074,8 +1074,14 @@ export class SandboxAttachment {
       this.persistResources(desired?.resources, desired?.preserveResourceFields);
       const preserveResourceFieldsOnAdopt = desired?.preserveResourceFields ??
         (desired !== undefined && desired.resources === undefined ? DRIFT_FIELDS : undefined);
+      // A cold attachment (api restart, cache eviction) adopts the live pod
+      // here, not in reconcile. While a lease is active the provider keeps
+      // that pod as is. The change waits for a run-start window after the
+      // last lease releases (spec INV-8).
+      const leased = this.isLeased ? await this.isLeased() : false;
       const sandbox = await provider.create({
         ...this.createOpts,
+        ...(leased ? { preserveLivePod: true } : {}),
         image: bootImage,
         preserveResourcesOnAdopt: desired !== undefined && desired.resources === undefined,
         preserveResourceFieldsOnAdopt,
@@ -1114,6 +1120,11 @@ export class SandboxAttachment {
             // Discard rejected options now so a later no-opinion replacement
             // cannot revive them. Keep any recovered applied opinion instead.
             this.persistResources(resources ?? {});
+          }
+          if (leased && sandbox.adopted) {
+            // The kept pod runs its live resources. Record those, not the
+            // desired ones, so the deferred change still reads as drift.
+            resources = applied?.resources;
           }
           const landed = await applyPlan(sandbox, { ...desired, resources }, appliedImage, applied);
           // Cache what the returned sandbox ACTUALLY has applied (spec decision

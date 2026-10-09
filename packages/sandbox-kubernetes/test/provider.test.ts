@@ -939,6 +939,26 @@ describe("create() resource adoption and pod rollout", () => {
     });
   });
 
+  it("preserveLivePod keeps a leased pod and its template through image and resource drift (INV-8)", async () => {
+    const { provider, objectsApi, deletedPods } = setup(prior);
+    const templateBefore = JSON.parse(JSON.stringify(objectsApi.cr.spec.podTemplate)) as unknown;
+
+    const sandbox = await provider.create({
+      workspace: "/ws/resources", image: "image:new", resources: { cpu: 8, memory: "16Gi", scratch: "50Gi" }, preserveLivePod: true,
+    });
+
+    expect(deletedPods).toEqual([]);
+    expect(objectsApi.calls).not.toContain("replace");
+    expect(objectsApi.cr.spec.podTemplate).toEqual(templateBefore);
+    expect(sandbox.adopted).toBe(true);
+  });
+
+  it("without preserveLivePod the same drift rolls the pod", async () => {
+    const { provider, deletedPods } = setup(prior);
+    await provider.create({ workspace: "/ws/resources", image: "image:new", resources: { cpu: 8, memory: "16Gi" } });
+    expect(deletedPods.length).toBeGreaterThan(0);
+  });
+
   it("accepts a live image rewritten by admission when its requested-image fingerprint matches", async () => {
     const { provider, setLivePod, deletedPods } = setup(prior);
     setLivePod("pod-mutated", {
