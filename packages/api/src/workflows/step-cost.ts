@@ -52,7 +52,8 @@ export async function workflowRunStepCosts(
   const runIds = [runId, ...owners.keys()];
   const result = await db.execute(sql`
     SELECT workflow_run_id, split_part(session_id, ':', 3) AS node_id,
-      COALESCE(NULLIF(split_part(session_id, ':', 4), '')::int, 0) AS iteration,
+      -- Cast only digits: a read must never fail on an id it does not expect.
+      CASE WHEN split_part(session_id, ':', 4) ~ '^[0-9]{1,9}$' THEN split_part(session_id, ':', 4)::int ELSE 0 END AS iteration,
       COALESCE(SUM((cost->>'total')::float8), 0) AS cost_usd, COUNT(*) AS turns,
       COUNT(*) FILTER (WHERE cost->>'total' IS NULL) AS unpriced_turns,
       COALESCE(SUM((usage->>'total')::bigint), 0) AS total_tokens,

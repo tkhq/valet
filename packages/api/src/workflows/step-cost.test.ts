@@ -64,6 +64,13 @@ describe("workflowRunStepCosts", () => {
     expect(costs[1].totalTokens).toBe(20);
     expect(costs[1].models).toEqual(["claude"]);
   });
+
+  it("never fails on a session id whose fourth part is not an iteration", async () => {
+    await turn(db, "e-odd", "wf:run-2:odd:name", 0.01);
+    const store = { getCheckpoints: async () => [] };
+    expect((await workflowRunStepCosts(appDb, store, "run-2")).map(({ nodeId, iteration }) => [nodeId, iteration]))
+      .toEqual([["odd", 0]]);
+  });
 });
 
 describe("run step costs on the run page", () => {
