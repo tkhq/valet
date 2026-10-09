@@ -36,13 +36,13 @@ describe("validateScratchRequest", () => {
 
   it("refuses when scratch is disabled", () => {
     expect(() => validateScratchRequest("10Gi", "prebuild", {})).toThrow(
-      "scratch is not enabled on this deployment. Ask an admin to set sandbox.scratchMax.",
+      "scratch is not enabled on this deployment. Set sandbox.scratchMax in the Valet chart (an admin task), or VALET_SANDBOX_SCRATCH_MAX in a dev stack.",
     );
   });
 
   it("refuses over the deploy cap, never clamps", () => {
     expect(() => validateScratchRequest("2Ti", "prebuild", caps)).toThrow(
-      "scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or ask an admin to raise the cap.",
+      "scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or set a higher sandbox.scratchMax in the Valet chart (an admin task).",
     );
   });
 

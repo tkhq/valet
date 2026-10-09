@@ -44,7 +44,9 @@ export function isScratchRequestError(err: unknown): err is ScratchRequestError 
 
 /**
  * One validation for every scratch source (spec INV-4). Refuses, never
- * clamps. The refusal text names the knob and the corrective action.
+ * clamps. The refusal text names the knob and the corrective action. The
+ * deploy cap is a chart value an admin sets; the agent cap text points a
+ * `task` caller at the repository file, which may request more.
  */
 export function validateScratchRequest(value: unknown, source: ScratchSource, caps: ScratchCaps): string {
   const text = typeof value === "string" ? value.trim() : "";
@@ -57,12 +59,17 @@ export function validateScratchRequest(value: unknown, source: ScratchSource, ca
   }
   const maxBytes = caps.max ? parseResourceQuantity(caps.max) : null;
   if (maxBytes === null || maxBytes <= 0) {
-    throw new ScratchRequestError("disabled", "scratch is not enabled on this deployment. Ask an admin to set sandbox.scratchMax.");
+    throw new ScratchRequestError(
+      "disabled",
+      "scratch is not enabled on this deployment. Set sandbox.scratchMax in the Valet chart (an admin task), " +
+        "or VALET_SANDBOX_SCRATCH_MAX in a dev stack.",
+    );
   }
   if (bytes > maxBytes) {
     throw new ScratchRequestError(
       "deploy_cap",
-      `scratch ${text} exceeds the ${caps.max} deploy cap (sandbox.scratchMax). Request at most ${caps.max}, or ask an admin to raise the cap.`,
+      `scratch ${text} exceeds the ${caps.max} deploy cap (sandbox.scratchMax). Request at most ${caps.max}, ` +
+        "or set a higher sandbox.scratchMax in the Valet chart (an admin task).",
     );
   }
   if (source === "task") {

@@ -476,6 +476,12 @@ export interface EngineHostOpts {
 /** `agent_sessions.credential_owner_mode`; see {@link SessionMeta.credentialOwnerMode}. */
 export type CredentialOwnerMode = "owner" | "actor";
 
+/** A system-prompt paragraph that tells the model a dropped scratch
+ * request left the session without `/scratch`. Empty when nothing dropped. */
+export function scratchWarningPrompt(warning: string | undefined): string {
+  return warning ? `\n\n## Startup warning\n\nThis session has no /scratch. ${warning}` : "";
+}
+
 export interface SessionMeta {
   userId: string;
   orgId: string;
@@ -493,6 +499,9 @@ export interface SessionMeta {
   kubernetes?: boolean;
   /** Per-child CPU and memory overrides persisted on the app session row. */
   sandboxResourceOverrides?: PrebuildResources;
+  /** Thread key of the request that triggered this build. A REST session's
+   * startup warning goes on this thread. Absent means `web:default`. */
+  warningThreadKey?: string;
   /**
    * Repo bindings for this session (GitHub/repo integration plan, Task 9),
    * in position order. When non-empty, `buildSession` wires a `specProvider`
@@ -1253,7 +1262,7 @@ export class EngineHost {
             resolveModel,
             resolveFallbackModel,
             ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
-            systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
+            systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }) + scratchWarningPrompt(repoFlags.scratchWarning),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1286,7 +1295,7 @@ export class EngineHost {
           resolveModel,
           resolveFallbackModel,
           ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
-          systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
+          systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }) + scratchWarningPrompt(repoFlags.scratchWarning),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1312,9 +1321,10 @@ export class EngineHost {
       pendingStartRef = undefined;
     }
     // A child reports this warning to its parent (`startupWarnings`). A
-    // REST session has no parent, so the warning goes on its thread.
+    // REST session has no parent, so the warning goes on the thread that
+    // triggered the build. The system prompt carries it for the model.
     if (repoFlags.scratchWarning) {
-      await this.noteSessionWarning(session, repoFlags.scratchWarning);
+      await this.noteSessionWarning(session, repoFlags.scratchWarning, meta.warningThreadKey ?? "web:default");
     }
 
     extras.bindSession(session);
@@ -2412,15 +2422,16 @@ export class EngineHost {
   }
 
   /**
-   * Shows a startup warning as a `system` entry on the session's default
-   * thread, where the session page renders it. The model does not see
-   * `system` entries (`entriesToAgentMessages` skips them). A rebuild after
-   * a restart finds the entry and does not write it again. Best-effort: a
-   * failed write is logged and never blocks the session.
+   * Shows a startup warning as a `system` entry on `threadKey`, where the
+   * session page renders it. The model does not see `system` entries
+   * (`entriesToAgentMessages` skips them); `scratchWarningPrompt` gives it
+   * the same text. A rebuild after a restart finds the entry and does not
+   * write it again. Best-effort: a failed write is logged and never blocks
+   * the session.
    */
-  private async noteSessionWarning(session: Session, text: string): Promise<void> {
+  private async noteSessionWarning(session: Session, text: string, threadKey: string): Promise<void> {
     try {
-      const thread = await session.createThread("web:default");
+      const thread = await session.createThread(threadKey);
       const snapshot = await this.opts.engineStore.getThreadSnapshot(session.id, thread.id);
       if (snapshot?.entries.some((e) => e.type === "message" && e.role === "system" && e.content === text)) return;
       await thread.appendEntry({
@@ -3946,7 +3957,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       resolveFallbackModel: this.makeResolveFallbackModel(opts.orgId),
       ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
-      systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
+      systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }) + scratchWarningPrompt(repoFlags.scratchWarning),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
