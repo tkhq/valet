@@ -25,6 +25,8 @@ export interface WorkflowCreateSessionOptions {
 export interface WorkflowPromptOptions {
   /** Rendered inputs. The host writes these before admitting the submission. Never checkpoint contents. */
   files?: RenderedAgentFile[];
+  /** Run attempt used to isolate staging and clean only older attempts. */
+  inputAttempt?: number;
   /** Executor-owned intent writer. Host reports the target before attempting file writes;
    * it must await this callback, never write workflow checkpoints itself. */
   onInputTarget?: (sessionId: string) => Promise<void>;
@@ -82,6 +84,8 @@ export interface WorkflowLlmCompleteResult {
 export interface WorkflowPromptOrchestratorOptions {
   /** Rendered inputs, written in the resolved execution sandbox before admission. */
   files?: RenderedAgentFile[];
+  /** Run attempt used to isolate staging and clean only older attempts. */
+  inputAttempt?: number;
   /** Executor-owned intent writer. Host reports the target before attempting file writes;
    * it must await this callback, never write workflow checkpoints itself. */
   onInputTarget?: (sessionId: string) => Promise<void>;

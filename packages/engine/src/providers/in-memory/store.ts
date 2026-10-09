@@ -17,7 +17,6 @@ import type {
   SubmissionOutcome,
   SuspendedTurnState,
   ThreadData,
-  PromptAuthor,
   WriteFence,
 } from "../../types.js";
 
@@ -203,19 +202,8 @@ export class InMemorySessionStore implements SessionStore {
     return this.row(sessionId).threads.get(threadId) ?? null;
   }
 
-  async listThreads(sessionId: string, opts?: { keyPrefixes: string[]; excludeArchived?: boolean }): Promise<ThreadData[]> {
-    return [...this.row(sessionId).threads.values()].filter(thread => !opts ||
-      (opts.keyPrefixes.some(prefix => thread.key.startsWith(prefix)) && (!opts.excludeArchived || thread.status !== "archived")));
-  }
-
-  async listThreadAuthors(sessionId: string, threadId: string): Promise<PromptAuthor[]> {
-    const row = this.row(sessionId);
-    const authors = [
-      ...(row.entriesByThread.get(threadId) ?? []).flatMap(entry =>
-        entry.type === "message" && entry.role === "user" && entry.author ? [entry.author] : []),
-      ...[...row.queueItems.values()].flatMap(item => item.threadId === threadId && item.author ? [item.author] : []),
-    ];
-    return [...new Map(authors.map(author => [JSON.stringify(author), author])).values()];
+  async listThreads(sessionId: string): Promise<ThreadData[]> {
+    return [...this.row(sessionId).threads.values()];
   }
 
   async getEntries(

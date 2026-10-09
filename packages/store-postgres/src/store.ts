@@ -682,31 +682,9 @@ export class PgSessionStore implements SessionStore {
     return raw ? rowToThread(rawToThreadRow(raw)) : null;
   }
 
-  async listThreads(sessionId: string, opts?: { keyPrefixes: string[]; excludeArchived?: boolean }): Promise<ThreadData[]> {
-    const params: unknown[] = [sessionId];
-    const conditions = ["session_id = $1"];
-    if (opts) {
-      if (!opts.keyPrefixes.length) return [];
-      const prefixes = opts.keyPrefixes.map(prefix => {
-        params.push(prefix);
-        return `left(key, length($${params.length}::text)) = $${params.length}`;
-      });
-      conditions.push(`(${prefixes.join(" OR ")})`);
-      if (opts.excludeArchived) conditions.push("status <> 'archived'");
-    }
-    const result = await this.db.query(`SELECT * FROM engine_threads WHERE ${conditions.join(" AND ")}`, params);
+  async listThreads(sessionId: string): Promise<ThreadData[]> {
+    const result = await this.db.query("SELECT * FROM engine_threads WHERE session_id = $1", [sessionId]);
     return result.rows.map((r) => rowToThread(rawToThreadRow(r)));
-  }
-
-  async listThreadAuthors(sessionId: string, threadId: string): Promise<PromptAuthor[]> {
-    const result = await this.db.query(`SELECT DISTINCT author FROM engine_entries
-      WHERE session_id = $1 AND thread_id = $2 AND role = 'user' AND author IS NOT NULL
-      UNION SELECT DISTINCT author FROM engine_queue_items
-      WHERE session_id = $1 AND thread_id = $2 AND author IS NOT NULL`, [sessionId, threadId]);
-    return result.rows.flatMap(row => {
-      const author = parseJson<PromptAuthor>(typeof row.author === "string" ? row.author : null);
-      return author ? [author] : [];
-    });
   }
 
   async getEntries(sessionId: string, threadId: string, opts?: MessageQuery): Promise<SessionEntry[]> {

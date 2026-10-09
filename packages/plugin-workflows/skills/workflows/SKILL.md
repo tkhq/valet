@@ -69,7 +69,8 @@ Edges may carry `"when"` (an expression) to gate a branch.
 
 ## Pass data to an agent step as files
 
-Use `files` on `session` and `orchestrator` nodes instead of pasting data into prompts.
+Use a `session` step with `files` for agent work that needs input data. Its dedicated sandbox is reclaimed after the run.
+`orchestrator` steps support files only in verified, non-legacy team execution sandboxes.
 The host writes the files before the first turn. The prompt receives absolute paths and byte sizes.
 Tell the agent to read those files. Do not ask it to retype the data.
 
@@ -96,12 +97,12 @@ Inputs are ephemeral. The host removes them when the consuming step settles and 
 Use the default `until_idle` wait mode. `files` cannot use `wait.mode: "none"` because settlement would remove data before consumption.
 A bounded sweep removes crash leftovers older than 7 days. Cleanup failures are logged without failing the run.
 Shared legacy team sandboxes and unverifiable audiences cannot receive files. Use a session step or start a new private thread.
-Provisioning and transport failures retain normal retries. Before admission, retries replace incomplete inputs atomically.
+Provisioning and transport failures retain normal retries. Before admission, retries replace incomplete inputs atomically. Staging cleanup removes only lower-attempt files.
 After admission, duplicate dispatch skips all file operations, even if the agent edited or deleted an input.
-Personal roots allow the owner's own linked DMs. Archived conversations and settled workflow-run threads do not block files.
-Active shared channels, group DMs, and DMs with known other participants block files.
-The host uses durable authors and identity links. Without participant data, only non-DM conversations count as shared.
-The error is: "Workflow files cannot be delivered to a personal sandbox with another participant. Use a session step or archive the shared conversation."
+Personal assistant roots never receive orchestrator files. Channel delivery can reach their shared sandbox even after sidebar archival.
+Use a session step instead. Team ownership is not sufficient if routing selects a legacy or shared runtime.
+The error is: "Workflow input files cannot be delivered into a shared assistant sandbox. Use a session step for agent work that needs input files."
+Known user-owned definitions receive the same error at save/patch time. Other routes must pass the runtime execution-scope check.
 Cleanup never wakes a sandbox. Skips emit a warning and `valet.workflow.inputs.cleanup_skipped`.
 Residual sweeps protect only live runs with the same org and owner. Foreign runs count as absent.
 Sweeps apply a seven-day floor to absent or settled runs. Without another file write, residual inputs persist until sandbox destruction.

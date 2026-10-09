@@ -31,8 +31,7 @@
  * than assuming the session `createSession` warmed is still cached.
  */
 
-import { personalInputAudienceIsShared, PERSONAL_INPUT_AUDIENCE_ERROR } from "./input-audience.js";
-import { agentInputPrompt, cleanupAgentInputFiles, logInputCleanupSkipped, writeAgentInputFiles } from "./agent-files.js";
+import { agentInputPrompt, cleanupAgentInputFiles, logInputCleanupSkipped, SHARED_ASSISTANT_INPUT_ERROR, writeAgentInputFiles } from "./agent-files.js";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import type { Usage } from "@earendil-works/pi-ai/compat";
@@ -610,6 +609,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         throw new Error("Workflow origin owner is no longer a team member. Start a new run from an authorized assistant.");
       }
       if (previous) {
+        if (promptOpts.files?.length) throw new AgentInputFileError(SHARED_ASSISTANT_INPUT_ERROR);
         return { sessionId: previous.sessionId, threadId: previous.threadId, queueItemId: previous.queueItemId };
       }
       // Through the shared helper, so a runtime first woken by a workflow
@@ -645,6 +645,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         const target = await resolveWorkflowReportTarget(deps,
           { type: assistant.ownerType, id: assistant.ownerId }, meta, session, thread, promptOpts.dispatchId);
         if (target.priorQueueItemId) {
+          if (promptOpts.files?.length) throw new AgentInputFileError(SHARED_ASSISTANT_INPUT_ERROR);
           const item = await opts.engineStore.getQueueItem(session.id, target.priorQueueItemId);
           const content = item?.content;
           if (!content || typeof content === "string" || !("kind" in content) || content.kind !== "signal" ||
@@ -660,23 +661,18 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // string-valued by contract (`SignalContent`), and nothing set it
       // before — which is why a workflow report showed up in a person's
       // assistant as an envelope labelled "workflow.request" and nothing else.
-      const admitted = promptOpts.files?.length
-        ? await opts.engineStore.getSubmissionByDispatchId(session.id, promptOpts.dispatchId) : null;
-      if (promptOpts.files?.length && !admitted) {
+      if (promptOpts.files?.length) {
         const data = await session.toData();
-        if (data.owner.type === "user" && await personalInputAudienceIsShared(opts.db, opts.engineStore, session.id,
-          { orgId: data.orgId, ownerType: data.owner.type, ownerId: data.owner.id })) {
-          throw new AgentInputFileError(PERSONAL_INPUT_AUDIENCE_ERROR);
+        if (data.owner.type !== "team" || !data.parentSessionId || !data.parentThreadId ||
+            await isLegacyAssistantRuntime(opts.db, session.id, ctx.orgId)) {
+          throw new AgentInputFileError(SHARED_ASSISTANT_INPUT_ERROR);
         }
-        const legacyShared = data.owner.type === "team" && await isLegacyAssistantRuntime(opts.db, session.id, ctx.orgId);
         const audienceAccess = await canAccessSessionResources({ db: opts.db, engineStore: opts.engineStore,
           engineCredentials: opts.credentials, onePassword: opts.onePassword },
           { ...data, ownerType: data.owner.type, ownerId: data.owner.id },
           principal.type === "team" && ctx.actorUserId === `team:${principal.id}`
             ? { type: "team", id: principal.id } : { type: "user", id: ctx.actorUserId });
-        if (legacyShared || !audienceAccess) {
-          throw new AgentInputFileError("Workflow files cannot be delivered to a shared or unverifiable sandbox audience. Use a session step or start a new private thread.");
-        }
+        if (!audienceAccess) throw new AgentInputFileError(SHARED_ASSISTANT_INPUT_ERROR);
       }
       const deliveredText = await deliverInputs(opts, session, promptText, promptOpts);
       const content: SignalContent = {

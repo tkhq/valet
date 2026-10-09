@@ -70,7 +70,7 @@ export async function executeSession(args: NodeExecutorArgs<SessionNode>): Promi
         if (waitError) throw new AgentInputFileError(waitError);
         await engine.createSession({ id: sessionId, title: node.title, purpose: 'workflow' });
         const promptText = withOutputSchemaPrompt(renderText(node.prompt, templateContext), node.outputSchema);
-        const receipt = await engine.prompt(sessionId, promptText, { dispatchId: id, model: node.model, ...(files.length ? { files, onInputTarget } : {}) });
+        const receipt = await engine.prompt(sessionId, promptText, { dispatchId: id, model: node.model, ...(files.length ? { files, onInputTarget, inputAttempt: attempt } : {}) });
         return { sessionId, receipt };
       },
       dispatchRepair: async (repairDispatchId, repairPrompt, id) =>

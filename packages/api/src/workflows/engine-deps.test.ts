@@ -18,8 +18,7 @@ import * as piAi from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { linkIdentity } from "../channels/identity-links.js";
-import { PERSONAL_INPUT_AUDIENCE_ERROR } from "./input-audience.js";
-import { agentInputPrompt } from "./agent-files.js";
+import { agentInputPrompt, SHARED_ASSISTANT_INPUT_ERROR } from "./agent-files.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage, workflowRunThreadKey } from "./engine-deps.js";
 import { eq } from "drizzle-orm";
 import { legacyAssistantRuntimes, legacyWorkflowRuntimes, legacyWorkflowAdmissions, assistants, orgs, sessionThreads, workflowDefinitions } from "../schema/index.js";
@@ -453,79 +452,31 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       content: { kind: "signal", signalType: "workflow.request",
         body: agentInputPrompt(engineHost.sandboxWorkingDirectory(root.session), "retained report", retainedOptions), attributes: { runId } },
       status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now });
-    expect(await deps.promptOrchestrator("retained report", retainedOptions))
-      .toEqual({ sessionId: root.sessionId, threadId: originThread.id, queueItemId: "retained-files" });
+    await expect(deps.promptOrchestrator("retained report", retainedOptions))
+      .rejects.toMatchObject({ name: "AgentInputFileError", message: SHARED_ASSISTANT_INPUT_ERROR });
     engineHost.evictCache(root.sessionId);
     const oldReceipt = await deps.promptOrchestrator("old report", { ...options, files: undefined, dispatchId: `workflow:${runId}:old-report` });
     expect(oldReceipt).toEqual({ sessionId: root.sessionId, threadId: originThread.id, queueItemId: "old-admission" });
     expect(await deps.awaitResult(oldReceipt.sessionId, oldReceipt.threadId, oldReceipt.queueItemId)).toMatchObject({ outcome: "aborted" });
   });
 
-  it.each(["slack:C_PRIVATE:1.2", "slack:G_GROUP:1.2", "telegram:chat", "github:repo", "app-assistant:other-user", "workflow:editor:other-user"])("rejects files on a personal root reachable by %s", async key => {
+  it.each(["no channels", "owner DM", "archived shared thread"])("rejects personal-root orchestrator files with %s before any write", async scenario => {
     api = await bootTestApi();
     const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
     const root = await ensureDefaultAssistantSession(api.providers, { type: "user", id: LOCAL_USER.id }, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
-    await root.session.createThread(key);
-    await seedRun(api, "personal-channel", "personal-channel-wf");
+    if (scenario !== "no channels") {
+      const thread = await root.session.createThread(scenario === "owner DM" ? "slack:D_OWN:1.2" : "slack:C_SHARED:1.2");
+      if (scenario === "owner DM") await linkIdentity(db, { provider: "slack", externalId: "U_OWNER", userId: LOCAL_USER.id });
+      else await db.insert(sessionThreads).values({ id: thread.id, sessionId: root.sessionId, createdAt: Date.now(), archivedAt: Date.now() });
+    }
+    await seedRun(api, "personal-inputs", "personal-inputs-wf");
     const ready = vi.spyOn(root.session.attachment, "ensureReady");
     const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
-    await expect(deps.promptOrchestrator("Read", { dispatchId: "workflow:personal-channel:build", queueMode: "followup",
+    await expect(deps.promptOrchestrator("Read", { dispatchId: "workflow:personal-inputs:build", queueMode: "followup",
       ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id }, files: [{ path: "private.txt", content: "secret" }] }))
-      .rejects.toMatchObject({ name: "AgentInputFileError", message: PERSONAL_INPUT_AUDIENCE_ERROR });
+      .rejects.toMatchObject({ name: "AgentInputFileError", message: SHARED_ASSISTANT_INPUT_ERROR });
     expect(ready).not.toHaveBeenCalled();
     expect(await engineStore.listUnsettledSubmissions(root.sessionId)).toEqual([]);
-  });
-
-  it.each(["own Slack DM", "own Telegram DM", "archived shared thread", "settled workflow thread", "unobserved Slack DM", "legacy personal editor"])("allows personal input delivery with an %s", async kind => {
-    api = await bootTestApi();
-    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
-    const root = await ensureDefaultAssistantSession(api.providers, { type: "user", id: LOCAL_USER.id }, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
-    const key = kind === "own Slack DM" ? "slack:D_OWN:1.2" : kind === "own Telegram DM" ? "telegram:99" :
-      kind === "archived shared thread" ? "slack:C_SHARED:1.2" : kind === "unobserved Slack DM" ? "slack:D_UNKNOWN:1.2" :
-      kind === "legacy personal editor" ? "workflow:editor" : "slack-events:C_SHARED:workflow:old-run";
-    const thread = await root.session.createThread(key);
-    if (kind.startsWith("own")) {
-      const provider = kind === "own Slack DM" ? "slack" : "telegram";
-      const externalId = provider === "slack" ? "U_OWNER" : "99";
-      await linkIdentity(db, { provider, externalId, userId: LOCAL_USER.id });
-      await engineStore.appendEntries(root.sessionId, thread.id, [{ id: "own-message", sessionId: root.sessionId,
-        threadId: thread.id, parentId: null, type: "message", role: "user", content: "hello",
-        author: { id: LOCAL_USER.id, externalId }, createdAt: Date.now() }]);
-    }
-    if (kind === "archived shared thread") {
-      await db.insert(sessionThreads).values({ id: thread.id, sessionId: root.sessionId, createdAt: Date.now(), archivedAt: Date.now() });
-    }
-    if (kind === "settled workflow thread") {
-      await seedRun(api, "old-run", "old-wf");
-      const claim = await workflowStore.claimRun("old-run", "owner", 60_000);
-      if (!claim) throw new Error("Missing claim");
-      await workflowStore.beginTerminalize("old-run", claim.attempt, "completed");
-      await workflowStore.settleRun("old-run", "completed");
-    }
-    await seedRun(api, "allowed-files", "allowed-wf");
-    const list = vi.spyOn(engineStore, "listThreads");
-    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
-    const receipt = await deps.promptOrchestrator("Read", { dispatchId: "workflow:allowed-files:build", queueMode: "followup",
-      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id }, files: [{ path: "private.txt", content: "secret" }] });
-    expect(await engineHost.liveSession(receipt.sessionId)?.attachment.current()?.readFile(
-      "/workspace/.valet/workflow-inputs/allowed-files/build/0/private.txt")).toBe("secret");
-    expect(list.mock.calls.some(([, opts]) => opts?.excludeArchived === true && opts.keyPrefixes.includes("slack:"))).toBe(true);
-  });
-
-  it("rejects another person's DM even when its turn acts as the root owner", async () => {
-    api = await bootTestApi();
-    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
-    const root = await ensureDefaultAssistantSession(api.providers, { type: "user", id: LOCAL_USER.id }, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
-    const thread = await root.session.createThread("slack:D_OTHER:1.2");
-    await linkIdentity(db, { provider: "slack", externalId: "U_OWNER", userId: LOCAL_USER.id });
-    await engineStore.appendEntries(root.sessionId, thread.id, [{ id: "other-message", sessionId: root.sessionId,
-      threadId: thread.id, parentId: null, type: "message", role: "user", content: "hello",
-      author: { id: LOCAL_USER.id, externalId: "U_OTHER", externalSender: true }, createdAt: Date.now() }]);
-    await seedRun(api, "other-dm", "other-dm-wf");
-    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
-    await expect(deps.promptOrchestrator("Read", { dispatchId: "workflow:other-dm:build", queueMode: "followup",
-      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id }, files: [{ path: "private.txt", content: "secret" }] }))
-      .rejects.toMatchObject({ name: "AgentInputFileError", message: PERSONAL_INPUT_AUDIENCE_ERROR });
   });
 
   it("rejects a team Slack execution whose resource audience cannot be verified", async () => {
@@ -544,7 +495,7 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
     await expect(deps.promptOrchestrator("Read", { dispatchId: `workflow:${runId}:build`, queueMode: "followup",
       ownerHint: { ownerType: "team", ownerId: team.id }, files: [{ path: "private.txt", content: "secret" }] }))
-      .rejects.toMatchObject({ name: "AgentInputFileError", message: expect.stringContaining("unverifiable sandbox audience") });
+      .rejects.toMatchObject({ name: "AgentInputFileError", message: SHARED_ASSISTANT_INPUT_ERROR });
     const sessions = await engineStore.listSessions(LOCAL_USER.id);
     for (const session of sessions) {
       expect(await engineStore.listUnsettledSubmissions(session.id)).toEqual([]);
@@ -568,7 +519,7 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
     const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
     await expect(deps.promptOrchestrator("Read", { dispatchId: `workflow:${runId}:build`, queueMode: "followup",
       ownerHint: { ownerType: "team", ownerId: team.id }, files: [{ path: "private.txt", content: "secret" }] }))
-      .rejects.toMatchObject({ name: "AgentInputFileError", message: expect.stringContaining("Use a session step or start a new private thread") });
+      .rejects.toMatchObject({ name: "AgentInputFileError", message: SHARED_ASSISTANT_INPUT_ERROR });
     expect(ready).not.toHaveBeenCalled();
     expect(await engineStore.listUnsettledSubmissions(root.sessionId)).toEqual([]);
   });

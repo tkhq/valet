@@ -118,28 +118,6 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(threads.map((t) => t.key).sort()).toEqual(["task:A", "task:B"]);
     });
 
-    it("targets thread prefixes and excludes archived threads without crossing sessions", async () => {
-      await store.saveSession(newSession());
-      await store.saveThread("sess-1", newThread("sess-1", "slack:D1:1", "dm"));
-      await store.saveThread("sess-1", { ...newThread("sess-1", "slack:C1:1", "old"), status: "archived" });
-      await store.saveThread("sess-1", newThread("sess-1", "web:default", "web"));
-      expect((await store.listThreads("sess-1", { keyPrefixes: ["slack:"], excludeArchived: true })).map(t => t.id)).toEqual(["dm"]);
-      expect(await store.listThreads("sess-1", { keyPrefixes: [] })).toEqual([]);
-    });
-
-    it("reads durable user authors and queued participants, without assistant or other-thread authors", async () => {
-      await store.saveSession(newSession());
-      await store.saveThread("sess-1", newThread("sess-1"));
-      await store.saveThread("sess-1", newThread("sess-1", "other", "th-2"));
-      await store.appendEntries("sess-1", "th-1", [
-        { ...msg("u", "user", "hello", 1), author: { id: "u1", externalId: "U1" } },
-        { ...msg("a", "assistant", "hello", 2), author: { id: "bot" } },
-      ]);
-      await store.admitSubmission("sess-1", "th-1", { ...queueItem("q1", 3, 3), author: { id: "u2", externalId: "U2" } });
-      await store.appendEntries("sess-1", "th-2", [{ ...msg("other", "user", "hello", 4), threadId: "th-2", author: { id: "u3" } }]);
-      expect((await store.listThreadAuthors("sess-1", "th-1")).map(a => a.id).sort()).toEqual(["u1", "u2"]);
-    });
-
     it("getThreadSnapshot keeps its active leaf in the returned entries", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1"));

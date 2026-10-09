@@ -6,6 +6,7 @@ import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflo
  * (`workflows/actions.ts`). Cross-owner access returns null (routes map
  * that to 404) so an owned row and a missing row stay indistinguishable.
  */
+import { SHARED_ASSISTANT_INPUT_ERROR } from "./agent-files.js";
 import type { ActionPlugin, Principal, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
 import { normalizeLegacyDefinition, type RunHost, type RunWaitCondition } from "@valet/workflow";
@@ -178,6 +179,7 @@ export function newWorkflowId(prefix: string): string {
 export function validateDefinitionInput(
   value: unknown,
   env?: ValidateEnvironment,
+  ownerType?: string,
 ): { ok: true; definition: WorkflowDefinition } | { ok: false; errors: string[] } {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return { ok: false, errors: ["definition must be an object"] };
@@ -195,6 +197,14 @@ export function validateDefinitionInput(
   const definition = value as WorkflowDefinition;
   const result = validateWorkflowDefinition(definition, env);
   if (!result.ok) return { ok: false, errors: result.errors };
+  if (ownerType === "user") {
+    const errors = definition.nodes.flatMap(node => {
+      const agent = node.type === "foreach" ? node.body : node;
+      return agent.type === "orchestrator" && agent.files && Object.keys(agent.files).length
+        ? [`node ${agent.id}: ${SHARED_ASSISTANT_INPUT_ERROR}`] : [];
+    });
+    if (errors.length) return { ok: false, errors };
+  }
   return { ok: true, definition };
 }
 

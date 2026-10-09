@@ -98,7 +98,7 @@ export async function executeThread(args: NodeExecutorArgs<ThreadNode>): Promise
         const promptText = withOutputSchemaPrompt(renderText(node.prompt, templateContext), node.outputSchema);
         const dispatched = await engine.promptOrchestrator(promptText, {
           dispatchId: id,
-          ...(files.length ? { files, onInputTarget } : {}),
+          ...(files.length ? { files, onInputTarget, inputAttempt: attempt } : {}),
           queueMode: 'followup',
           ownerHint: owner,
         });

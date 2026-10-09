@@ -2108,10 +2108,7 @@ export interface SessionStore {
   getSession(id: string): Promise<SessionData | null>;
   listSessions(userId: string, opts?: ListOpts): Promise<SessionData[]>;
   getThread(sessionId: string, threadId: string): Promise<ThreadData | null>;
-  /** Filter candidates in the store instead of loading every thread. Prefixes are literal. */
-  listThreads(sessionId: string, opts?: { keyPrefixes: string[]; excludeArchived?: boolean }): Promise<ThreadData[]>;
-  /** Durable participants from messages and submissions, including compacted history. */
-  listThreadAuthors(sessionId: string, threadId: string): Promise<PromptAuthor[]>;
+  listThreads(sessionId: string): Promise<ThreadData[]>;
   getEntries(
     sessionId: string,
     threadId: string,
