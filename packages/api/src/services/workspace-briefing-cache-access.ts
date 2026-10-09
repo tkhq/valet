@@ -32,10 +32,14 @@ export async function canReadCachedBriefingSources(db: AppDb, orgId: string, own
       -- source with no thread to judge, fails the cached briefing.
       ${owner.type === "team" ? sql`AND (v.session_id IS NULL OR (v.thread_id IS NOT NULL
         AND ${sharedBriefingOrigin(orgId, owner.id, sql`v.session_id`, sql`v.thread_id`)}))
-        AND (v.run_id IS NULL OR ${sharedBriefingRun(orgId, owner.id, sql`r.params`)})
+        AND (v.run_id IS NULL OR (r.id IS NULL AND v.kind <> 'workflow' AND s.id IS NOT NULL)
+          OR ${sharedBriefingRun(orgId, owner.id, sql`r.params`)})
         AND (a.id IS NULL OR a.source_session_id IS NULL OR
           ${sharedBriefingOrigin(orgId, owner.id, sql`a.source_session_id`, sql`a.source_thread_id`)})` : sql``}
-      AND (v.run_id IS NULL OR r.id IS NOT NULL)
+      -- A source's own session is its provenance; its run id only adds a
+      -- link. A team run's Thread step that reports in a member's personal
+      -- session stays readable to that member through the session.
+      AND (v.run_id IS NULL OR r.id IS NOT NULL OR (v.kind <> 'workflow' AND s.id IS NOT NULL))
       AND (v.thread_id IS NULL OR t.id IS NOT NULL OR (v.session_id IS NULL AND r.id IS NOT NULL))
       AND CASE v.kind
         WHEN 'thread' THEN t.id IS NOT NULL
