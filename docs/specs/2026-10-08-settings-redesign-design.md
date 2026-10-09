@@ -53,7 +53,9 @@ on these pages, not the switcher's.
 - **A team** opens `/settings/teams/$teamId`, a page with tabs: General (the
   team panel: members, defaults, Slack home channel, connections), API keys and
   proxy, and Policies. `/settings/team` redirects to the team selected in the
-  switcher, or to Profile when the switcher is on the personal workspace.
+  switcher, or to Profile when the switcher is on the personal workspace. A
+  draft on one team's tab does not carry to another team's page. Deleting the
+  team, or removing yourself from it, on this page opens Profile.
 - **Organization** keeps every existing route. The rail shows four items, and
   each item's page shows a tab bar over the routes it groups:
   - General: General, Members, Teams
@@ -61,7 +63,9 @@ on these pages, not the switcher's.
   - Apps and plugins: Plugins, GitHub, Slack, Linear, 1Password, Library
   - Security and audit: Policies, Sandbox settings, Action log
 
-  A plain member still sees only Teams and 1Password, as two rail items.
+  A plain member still sees only Teams and 1Password, as two rail items, and
+  no tab bar.
+- While organizations are off, Personal workspace also lists Models.
 - Below `sm`, the rail becomes one menu with the same groups.
 
 ### 3. Visual language
@@ -73,51 +77,80 @@ Settings matches the thread UI:
 - A `Section` is a heading, an optional description, and its rows in one
   `rounded-2xl bg-ink-wash` group divided by hairlines. `FieldRow` keeps the
   label on the left and the control on the right.
-- No boxed cards inside a section.
+- No boxed cards inside a section. A group with no rows is hidden.
 
 ### 4. One place per thing
 
 - Connected accounts keeps identity linking (Slack, Telegram), GitHub, and the
   personal 1Password token. Its second credential list is removed. Integrations
-  owns service connections, and Connected accounts links to it.
+  owns service connections, and Connected accounts links to it with
+  `?workspace=user`, so the link opens your personal Integrations whatever the
+  switcher holds.
 - The unconfigured-channel copy names Settings → Organization, where the bot
   token lives.
 
 ### 5. Integrations
 
-Integrations becomes a list, like Claude's Connectors page:
+Integrations becomes a list, like Claude's Connectors page. It follows the
+switcher.
 
-- Two groups: **Connected** and **Available**. Each row shows the icon, name,
-  a one-line status, and its primary action on the right.
-- Connected holds a plugin with a service that the caller connected or the
-  organization provides. Available holds a plugin the caller can still
-  connect. A third group, **Built in**, holds a plugin that needs no
+- Three groups. **Connected** holds a plugin with a service that the caller
+  connected or the organization provides. **Available** holds a plugin the
+  caller can still connect. **Built in** holds a plugin that needs no
   account, so built-in tools do not crowd the Connected group.
+- A row is one line: the mark, the name, and the description (hidden below
+  `sm`). On the right it shows a badge only when the connection needs
+  attention (Expired, Refresh failed, Sign-in only, or Not configured for a
+  leftover credential on an unconfigured service). An unconnected row shows
+  what it offers instead: Connect, Set up (an org admin can configure it), or
+  Organization (the organization provides it). A healthy connection shows no
+  badge. The name truncates before the badge does.
+- A row is a link to `?service=<plugin>`, which opens the plugin's details
+  in a modal panel: who owns the connection (Your account, or Managed by your
+  organization), its reach, the account, pairing, repair notes, the controls,
+  and the tools. A link can open the panel. Closing it replaces the history
+  entry and keeps `?q=`, so Back does not reopen it. An unknown `?service=`
+  opens nothing. Disconnect on a credential that stores a 1Password reference
+  says that the 1Password item is not deleted.
 - A saved credential that no listed service covers, for example one left by
   a removed plugin, gets a row with Revoke under **Other saved credentials**.
   The removed Connected accounts list was the only Revoke control for such a
   credential, so Integrations keeps one.
-- A row is a link to `?service=<plugin>`, which opens the plugin's details
-  (owner, reach, account, pairing, repair notes, controls, and tools) in a
-  modal panel. The panel is a URL, so a link can open it. Closing it replaces
-  the history entry and keeps `?q=`, so Back does not reopen it. An unknown
-  `?service=` opens nothing.
-- A team or organization-provided connection shows its scope on the row.
-- The team view uses the same row and group components.
+- The team view lists the team's connections under Connected and the
+  services the team can still connect under Available, with the team's
+  1Password row in the group that matches its state. It uses the same parts
+  (`Section`, `IntegrationList`, `CardHeading`), but its rows carry their
+  controls in line and open no panel, and it ignores `?service=`. On a phone,
+  a team row states why its control is disabled on a line under the row.
 
 ### 6. Skills
 
-Skills uses the same list language. Each row shows the name, a one-line
-description, the scope, and the kind (skill or prompt), and the whole row
-opens the skill. The filters, search, the Catalog and Sources tabs, and New
-skill stay.
+Skills uses the same list language. Each row shows the mark, the name, the
+scope badge (a team row names its team), a Repo badge for a repository skill,
+a prompt badge for a stored prompt, the description (hidden below `sm`), and
+the id an agent passes (hidden below `md`). The whole row opens the skill.
+The filters, search, the Catalog and Sources tabs, and New skill stay.
 
 ## Testing
 
-- The rail tests assert the four groups, the team list, the admin and member
-  Organization items, and that the rail does not change with the switcher.
-- Route tests cover the redirects (`/settings/appearance`, `/settings/threads`,
-  `/settings/proxy`, `/settings/team`) and that a team page pins its team scope.
-- Integrations and Skills tests assert the row structure and the
-  Connected and Available split.
+- `settings-rail.test.tsx`: the four groups, teams by name through the typed
+  team route, the admin and member Organization items, Models while
+  organizations are off, the phone menu, and a rail that does not change with
+  the switcher.
+- `-settings.routes.test.tsx` (real router, real layout and scope provider):
+  the redirects from `/settings/appearance`, `/settings/threads`, and
+  `/settings/proxy`; Preferences with both parts; personal Policies pinned while
+  the switcher holds a team; a team's API keys and proxy and Policies tabs;
+  and the Organization tabs for an admin but not a member.
+- `-settings.team.test.tsx`: the team page pins its team, marks its tab,
+  refuses a team the caller is not on, and drops a draft when another of the
+  caller's teams opens; `/settings/team` redirects; the personal API keys and
+  proxy page pins personal scope.
+- `workspace-scope-pinned.test.tsx`: a pinned scope and the tab title.
+- `-integrations.test.tsx` and `-integrations.router.test.tsx`: the three
+  groups, the row states and offers, the panel as a URL (Back, `?q=`, an
+  unknown service), `?workspace=user`, and Other saved credentials.
+  `-integrations-workspace.test.tsx` covers the team view.
+- `-skills.index.test.tsx` and `-skills.stored.test.tsx`: one list and the
+  scope badges.
 - `make e2e` passes before a deploy.
