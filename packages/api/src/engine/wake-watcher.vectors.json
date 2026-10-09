@@ -1,0 +1,401 @@
+[
+  {
+    "name": "process_done_exit",
+    "now": 1000,
+    "row": {
+      "id": "wk_001",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "process",
+      "status": "running",
+      "reason": "build",
+      "command": "make build",
+      "execId": "exec1",
+      "leaseId": "ls_1",
+      "deadlineAt": 100000,
+      "logOffset": 0,
+      "logTail": "",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": { "kind": "poll", "status": "done", "exitCode": 0, "output": "build complete\n", "nextOffset": 15 },
+    "limits": { "watchMaxEventsPerHour": 120 },
+    "expected": {
+      "to": "done",
+      "cause": "exit",
+      "patch": { "cause": "exit", "exitCode": 0, "endedAt": 1000 },
+      "signals": [
+        {
+          "signalType": "process.exited",
+          "body": "build complete\n",
+          "attributes": {
+            "wakeupId": "wk_001",
+            "kind": "process",
+            "reason": "build",
+            "cause": "exit",
+            "exitCode": "0",
+            "durationSeconds": "1",
+            "logPath": "/tmp/valet-jobs/exec1.out"
+          },
+          "dispatchId": "wakeup:wk_001:terminal"
+        }
+      ],
+      "releaseLease": "owner_ended"
+    }
+  },
+  {
+    "name": "process_pid_missing",
+    "now": 2000,
+    "row": {
+      "id": "wk_002",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "process",
+      "status": "running",
+      "reason": "test",
+      "command": "run tests",
+      "execId": "exec2",
+      "leaseId": "ls_2",
+      "deadlineAt": 100000,
+      "logOffset": 10,
+      "logTail": "old tail",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": { "kind": "poll", "status": "failed", "output": "", "nextOffset": 10 },
+    "limits": { "watchMaxEventsPerHour": 120 },
+    "expected": {
+      "to": "lost",
+      "cause": "pid_missing",
+      "patch": { "cause": "pid_missing", "endedAt": 2000 },
+      "signals": [
+        {
+          "signalType": "process.exited",
+          "body": "old tail",
+          "attributes": {
+            "wakeupId": "wk_002",
+            "kind": "process",
+            "reason": "test",
+            "cause": "pid_missing",
+            "durationSeconds": "2",
+            "logPath": "/tmp/valet-jobs/exec2.out"
+          },
+          "dispatchId": "wakeup:wk_002:terminal"
+        }
+      ]
+    }
+  },
+  {
+    "name": "process_sandbox_unavailable",
+    "now": 3000,
+    "row": {
+      "id": "wk_003",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "process",
+      "status": "running",
+      "reason": "deploy",
+      "command": "deploy app",
+      "execId": "exec3",
+      "leaseId": "ls_3",
+      "deadlineAt": 50000,
+      "logOffset": 5,
+      "logTail": "partial output",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": { "kind": "unavailable" },
+    "limits": { "watchMaxEventsPerHour": 120 },
+    "expected": {
+      "to": "lost",
+      "cause": "sandbox_unavailable",
+      "patch": { "cause": "sandbox_unavailable", "endedAt": 3000 },
+      "signals": [
+        {
+          "signalType": "process.exited",
+          "body": "partial output",
+          "attributes": {
+            "wakeupId": "wk_003",
+            "kind": "process",
+            "reason": "deploy",
+            "cause": "sandbox_unavailable",
+            "durationSeconds": "3",
+            "logPath": "/tmp/valet-jobs/exec3.out"
+          },
+          "dispatchId": "wakeup:wk_003:terminal"
+        }
+      ],
+      "releaseLease": "owner_ended"
+    }
+  },
+  {
+    "name": "process_deadline_expired",
+    "now": 6000,
+    "row": {
+      "id": "wk_004",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "process",
+      "status": "running",
+      "reason": "long job",
+      "command": "long running job",
+      "execId": "exec4",
+      "leaseId": "ls_4",
+      "deadlineAt": 5000,
+      "logOffset": 20,
+      "logTail": "still going",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": { "kind": "poll", "status": "running", "output": "more output\n", "nextOffset": 33 },
+    "limits": { "watchMaxEventsPerHour": 120 },
+    "expected": {
+      "to": "expired",
+      "cause": "deadline",
+      "kill": true,
+      "patch": { "cause": "deadline", "endedAt": 6000 },
+      "signals": [
+        {
+          "signalType": "process.exited",
+          "body": "still goingmore output\n",
+          "attributes": {
+            "wakeupId": "wk_004",
+            "kind": "process",
+            "reason": "long job",
+            "cause": "deadline",
+            "durationSeconds": "6",
+            "logPath": "/tmp/valet-jobs/exec4.out"
+          },
+          "dispatchId": "wakeup:wk_004:terminal"
+        }
+      ],
+      "releaseLease": "deadline"
+    }
+  },
+  {
+    "name": "watch_new_lines",
+    "now": 1000,
+    "row": {
+      "id": "wk_005",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "watch",
+      "status": "running",
+      "reason": "tail logs",
+      "command": "tail -f app.log",
+      "execId": "exec5",
+      "leaseId": "ls_5",
+      "deadlineAt": 999999,
+      "logOffset": 0,
+      "logTail": "",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": { "kind": "poll", "status": "running", "output": "line1\nline2\nline3\n", "nextOffset": 18 },
+    "limits": { "watchMaxEventsPerHour": 120 },
+    "expected": {
+      "to": "running",
+      "patch": { "logOffset": 18, "eventCount": 3 },
+      "signals": [
+        {
+          "signalType": "watch.event",
+          "body": "line1\nline2\nline3",
+          "attributes": {
+            "wakeupId": "wk_005",
+            "kind": "watch",
+            "reason": "tail logs",
+            "lineCount": "3",
+            "eventCount": "3"
+          },
+          "dispatchId": "wakeup:wk_005:event:3"
+        }
+      ]
+    }
+  },
+  {
+    "name": "watch_rate_exceeded",
+    "now": 1000,
+    "row": {
+      "id": "wk_006",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "watch",
+      "status": "running",
+      "reason": "spam watch",
+      "command": "tail -f spam.log",
+      "execId": "exec6",
+      "leaseId": "ls_6",
+      "deadlineAt": 999999,
+      "logOffset": 0,
+      "logTail": "",
+      "eventCount": 118,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": { "kind": "poll", "status": "running", "output": "a\nb\nc\nd\ne\n", "nextOffset": 10 },
+    "limits": { "watchMaxEventsPerHour": 120 },
+    "expected": {
+      "to": "expired",
+      "cause": "rate",
+      "kill": true,
+      "patch": { "cause": "rate", "endedAt": 1000, "logOffset": 10, "eventCount": 123 },
+      "signals": [
+        {
+          "signalType": "watch.exited",
+          "body": "watch rate limit exceeded: 123 events this hour (limit 120/hour)",
+          "attributes": {
+            "wakeupId": "wk_006",
+            "kind": "watch",
+            "reason": "spam watch",
+            "cause": "rate",
+            "durationSeconds": "1",
+            "logPath": "/tmp/valet-jobs/exec6.out"
+          },
+          "dispatchId": "wakeup:wk_006:terminal"
+        }
+      ],
+      "releaseLease": "deadline"
+    }
+  },
+  {
+    "name": "timer_fired",
+    "now": 5000,
+    "row": {
+      "id": "wk_007",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "timer",
+      "status": "pending",
+      "reason": "check in",
+      "prompt": "Check on the deploy.",
+      "fireAt": 5000,
+      "logOffset": 0,
+      "logTail": "",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": { "kind": "none" },
+    "limits": { "watchMaxEventsPerHour": 120 },
+    "expected": {
+      "to": "done",
+      "cause": "fired",
+      "patch": { "cause": "fired", "endedAt": 5000 },
+      "signals": [
+        {
+          "signalType": "timer.fired",
+          "body": "Check on the deploy.",
+          "attributes": {
+            "wakeupId": "wk_007",
+            "kind": "timer",
+            "reason": "check in",
+            "scheduledAt": "1970-01-01T00:00:05.000Z",
+            "firedAt": "1970-01-01T00:00:05.000Z"
+          },
+          "dispatchId": "wakeup:wk_007:terminal"
+        }
+      ]
+    }
+  },
+  {
+    "name": "timer_not_due",
+    "now": 4000,
+    "row": {
+      "id": "wk_008",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "timer",
+      "status": "pending",
+      "reason": "later",
+      "prompt": "later prompt",
+      "fireAt": 5000,
+      "logOffset": 0,
+      "logTail": "",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": { "kind": "none" },
+    "limits": { "watchMaxEventsPerHour": 120 },
+    "expected": null
+  },
+  {
+    "name": "watch_trailing_partial_line",
+    "now": 1000,
+    "row": {
+      "id": "wk_009",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "watch",
+      "status": "running",
+      "reason": "stream build",
+      "command": "tail -f build.log",
+      "execId": "exec9",
+      "leaseId": "ls_9",
+      "deadlineAt": 999999,
+      "logOffset": 100,
+      "logTail": "",
+      "eventCount": 10,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": {
+      "kind": "poll",
+      "status": "running",
+      "output": "complete one\ncomplete two\npartial start",
+      "nextOffset": 139
+    },
+    "limits": { "watchMaxEventsPerHour": 120 },
+    "expected": {
+      "to": "running",
+      "patch": { "logOffset": 126, "eventCount": 12 },
+      "signals": [
+        {
+          "signalType": "watch.event",
+          "body": "complete one\ncomplete two",
+          "attributes": {
+            "wakeupId": "wk_009",
+            "kind": "watch",
+            "reason": "stream build",
+            "lineCount": "2",
+            "eventCount": "12"
+          },
+          "dispatchId": "wakeup:wk_009:event:12"
+        }
+      ]
+    }
+  },
+  {
+    "name": "process_running_new_output",
+    "now": 1000,
+    "row": {
+      "id": "wk_010",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "process",
+      "status": "running",
+      "reason": "server",
+      "command": "serve",
+      "execId": "exec10",
+      "leaseId": "ls_10",
+      "deadlineAt": 999999,
+      "logOffset": 50,
+      "logTail": "previous ",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": { "kind": "poll", "status": "running", "output": "more data\n", "nextOffset": 60 },
+    "limits": { "watchMaxEventsPerHour": 120 },
+    "expected": {
+      "to": "running",
+      "patch": { "logOffset": 60, "logTail": "previous more data\n" },
+      "signals": []
+    }
+  }
+]
