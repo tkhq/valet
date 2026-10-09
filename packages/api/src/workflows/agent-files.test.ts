@@ -255,7 +255,7 @@ describe("workflow sandbox input dispatch", () => {
     const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
     await h.createRun("local-path");
     const session = await ensureWorkflowSession(h.opts, "wf:local-path:build");
-    const workspace = await mkdtemp("/workspace/workflow-input-local-");
+    const workspace = await mkdtemp(`${process.cwd()}/workflow-input-local-`);
     const sandbox = new LocalSandbox("input-local", workspace);
     const ready = vi.spyOn(session.attachment, "ensureReady").mockResolvedValue({ sandbox, epoch: 0 });
     try {
