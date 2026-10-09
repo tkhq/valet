@@ -1595,9 +1595,14 @@ BEGIN
     SELECT 'wf:' || regexp_replace(substr(src.dispatch_id, 10), ':repair$', '')
     FROM engine_queue_items src JOIN workflow_runs r ON r.id = split_part(src.dispatch_id, ':', 2)
     WHERE src.session_id = e.session_id AND src.dispatch_id LIKE 'workflow:%' AND r.org_id IS NOT NULL
-      -- A scalar source id keeps this a primary-key probe.
-      AND src.id = (SELECT CASE WHEN q.dispatch_id IS NULL AND q.metadata LIKE '%"promotedFromItemId"%'
-          THEN q.metadata::jsonb->>'promotedFromItemId' ELSE q.id END
+      -- A scalar source id keeps this a primary-key probe. The id is read
+      -- from the metadata text, never through a jsonb cast: the metadata
+      -- copies prompt arguments, and text jsonb rejects (a lone surrogate
+      -- escape) would make the cast throw and fail the entry's write. The
+      -- engine writes the key at the top level; a copy nested in a string
+      -- value is escaped (\") and does not match.
+      AND src.id = (SELECT CASE WHEN q.dispatch_id IS NULL
+          THEN substring(q.metadata FROM '"promotedFromItemId":"([^"\\]+)"') ELSE q.id END
         FROM engine_queue_items q WHERE q.id = e.queue_item_id AND q.session_id = e.session_id)
   $step$;
 

@@ -102,6 +102,31 @@ describe("usage workflow step attribution", () => {
     expect(await factFor(db, "e-promoted")).toEqual({ session_id: "wf:run-1:think", workflow_run_id: "run-1" });
   });
 
+  it("never lets a promoted item's metadata break the turn's write or the repair", async () => {
+    await queueItem(db, "q-thread", "workflow:run-1:think");
+    await queueItem(db, "q-promoted", null);
+    // Valid text that jsonb rejects: a lone surrogate escape in a copied skill argument.
+    const metadata = '{"skillArgs":"\\ud800","promotedFromItemId":"q-thread"}';
+    await expect(db.query("SELECT $1::jsonb", [metadata])).rejects.toThrow();
+    await db.query("UPDATE engine_queue_items SET metadata = $1 WHERE id = 'q-promoted'", [metadata]);
+    await assistantTurn(db, "e-promoted", "q-promoted");
+    expect(await factFor(db, "e-promoted")).toEqual({ session_id: "wf:run-1:think", workflow_run_id: "run-1" });
+
+    await db.query("UPDATE usage_entry_facts SET session_id = $1, workflow_run_id = NULL WHERE entry_id = 'e-promoted'", [ASSISTANT]);
+    await prepareUsageStepAttribution(db);
+    expect(await factFor(db, "e-promoted")).toEqual({ session_id: "wf:run-1:think", workflow_run_id: "run-1" });
+  });
+
+  it("names its source only through the engine's top-level key, never a nested copy", async () => {
+    await queueItem(db, "q-thread", "workflow:run-1:think");
+    await queueItem(db, "q-plain", null);
+    // A prompt argument that merely contains the key, escaped inside a string value.
+    await db.query("UPDATE engine_queue_items SET metadata = $1 WHERE id = 'q-plain'",
+      [JSON.stringify({ skillArgs: '"promotedFromItemId":"q-thread"' })]);
+    await assistantTurn(db, "e-plain", "q-plain");
+    expect(await factFor(db, "e-plain")).toEqual({ session_id: ASSISTANT, workflow_run_id: null });
+  });
+
   it("moves Thread-step turns recorded before the rule, hours included", async () => {
     await queueItem(db, "q-thread", "workflow:run-1:think");
     await assistantTurn(db, "e-thread", "q-thread");

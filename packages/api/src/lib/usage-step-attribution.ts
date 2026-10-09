@@ -68,9 +68,11 @@ export async function prepareUsageStepAttribution(db: PgDb): Promise<void> {
       SELECT id, session_id FROM items
       UNION ALL
       -- A prompt that send-now promoted runs as a new item naming its source.
+      -- Read without a jsonb cast, as valet_usage_step_session does, so one
+      -- unparsable metadata row cannot abort the repair and the boot.
       SELECT p.id, p.session_id FROM items i JOIN engine_queue_items p ON p.session_id = i.session_id
-        AND p.dispatch_id IS NULL AND p.metadata LIKE '%"promotedFromItemId"%'
-        AND p.metadata::jsonb->>'promotedFromItemId' = i.id
+        AND p.dispatch_id IS NULL
+        AND substring(p.metadata FROM '"promotedFromItemId":"([^"\\\\]+)"') = i.id
     ), moved AS (
       UPDATE usage_entry_facts f SET session_id = n.session_id, workflow_run_id = n.workflow_run_id
       FROM targets i JOIN engine_entries e ON e.queue_item_id = i.id AND e.session_id = i.session_id
