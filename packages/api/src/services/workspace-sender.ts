@@ -3,6 +3,7 @@ import { and, eq } from "drizzle-orm";
 import type { Presence } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { loadLegacyAssistantProfile } from "../assistants/legacy-profile.js";
+import { loadAssistantBySessionId } from "../assistants/service.js";
 import { orgs, teams } from "../schema/index.js";
 
 /**
@@ -10,11 +11,13 @@ import { orgs, teams } from "../schema/index.js";
  * subscription, or action presence applies. A workspace whose assistant was
  * customized before the workspace runtime keeps that name and avatar
  * (`legacy-profile.ts`). Otherwise personal posts use the bot identity and
- * shared posts use the workspace name.
+ * shared posts use the workspace name. `assistantId` names the posting
+ * assistant when there is one, so a migration-retained assistant reads its
+ * own profile, not the workspace's live assistant's.
  */
-export async function workspaceSenderIdentity(db: AppDb, orgId: string, owner: Principal): Promise<Presence | undefined> {
+export async function workspaceSenderIdentity(db: AppDb, orgId: string, owner: Principal, assistantId?: string): Promise<Presence | undefined> {
   try {
-    const legacy = await loadLegacyAssistantProfile(db, orgId, owner);
+    const legacy = await loadLegacyAssistantProfile(db, orgId, assistantId ? { assistantId } : { owner });
     if (legacy?.name) return { displayName: legacy.name, ...(legacy.avatarUrl ? { avatarUrl: legacy.avatarUrl } : {}) };
     if (owner.type === "user") return legacy?.avatarUrl ? { avatarUrl: legacy.avatarUrl } : undefined;
     const [row] = owner.type === "team"
@@ -26,4 +29,11 @@ export async function workspaceSenderIdentity(db: AppDb, orgId: string, owner: P
     console.error("[workspace-sender] Cannot read the workspace name; using the bot identity.", error);
     return undefined;
   }
+}
+
+/** The base identity for one assistant session's channel posts, or
+ * undefined when the session is not an assistant's. */
+export async function assistantSessionSender(db: AppDb, sessionId: string): Promise<Presence | undefined> {
+  const row = await loadAssistantBySessionId(db, sessionId);
+  return row ? workspaceSenderIdentity(db, row.orgId, { type: row.ownerType, id: row.ownerId }, row.id) : undefined;
 }

@@ -56,17 +56,31 @@ function avatarUrl(value: unknown): string | undefined {
   return url && !/\s/.test(url) && validatePresence({ avatarUrl: url }) === null ? url : undefined;
 }
 
-/** The workspace assistant's carried-over profile, or undefined when it has none. */
+/**
+ * Whose profile to read. An assistant session passes its own assistant id:
+ * the singleton cutover moved a team's extra assistants to tombstone owners
+ * but keeps them running (`legacyAssistantRow` in `service.ts`), and an
+ * owner lookup would hand such an assistant the surviving assistant's
+ * profile. A post with no assistant of its own, such as a workflow action,
+ * passes the owner and reads the workspace's live assistant.
+ */
+export type LegacyProfileKey = { assistantId: string } | { owner: Principal };
+
+/** The carried-over profile, or undefined when it has none. */
 export async function loadLegacyAssistantProfile(
   db: AppDb,
   orgId: string,
-  owner: Principal,
+  key: LegacyProfileKey,
 ): Promise<LegacyAssistantProfile | undefined> {
+  // An id read skips the archived filter: the caller already resolved the
+  // row, and a retained assistant's row is archived under its tombstone owner.
+  const match = "assistantId" in key
+    ? sql`a.id = ${key.assistantId}`
+    : sql`a.owner_type = ${key.owner.type} AND a.owner_id = ${key.owner.id} AND a.archived_at IS NULL`;
   const result = await db.execute(sql`SELECT p->>'name' AS name, p->>'avatar_url' AS avatar_url,
       p->>'personality' AS personality,
       (SELECT m.applied_at FROM __valet_app_migrations m WHERE m.filename = ${LEGACY_RUNTIME_MARKER}) AS upgraded_at
-    FROM (SELECT to_jsonb(a) AS p FROM assistants a WHERE a.org_id = ${orgId} AND a.owner_type = ${owner.type}
-      AND a.owner_id = ${owner.id} AND a.archived_at IS NULL LIMIT 1) live`) as {
+    FROM (SELECT to_jsonb(a) AS p FROM assistants a WHERE a.org_id = ${orgId} AND ${match} LIMIT 1) live`) as {
     rows: Array<{ name: unknown; avatar_url: unknown; personality: unknown; upgraded_at: unknown }>;
   };
   const row = result.rows[0];

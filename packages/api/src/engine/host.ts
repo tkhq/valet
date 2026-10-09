@@ -2584,10 +2584,11 @@ export class EngineHost {
     return promise;
   }
 
-  /** Team and organization display names are workspace configuration. */
-  private outboundSenderResolver(orgId: string, owner: Principal) {
+  /** Team and organization display names are workspace configuration.
+   * An assistant session passes its own id (`workspaceSenderIdentity`). */
+  private outboundSenderResolver(orgId: string, owner: Principal, assistantId?: string) {
     const db = this.opts.db;
-    return db ? () => workspaceSenderIdentity(db, orgId, owner) : undefined;
+    return db ? () => workspaceSenderIdentity(db, orgId, owner, assistantId) : undefined;
   }
 
   private async buildAssistantSession(
@@ -2639,7 +2640,7 @@ export class EngineHost {
     const scope: MemoryScope = { owner: principal, actorUserId: meta.actorUserId, ...(principal.type === "team" ? { namespace: await assistantMemoryNamespace(db, sessionId, principal.id, meta.orgId) } : {}) };
     await ensureTodayJournal(db, scope);
     const snapshotContent = await assembleMemorySnapshot(db, scope);
-    const personaPrefix = await this.resolvePersonaPrefix(db, meta.orgId, scope);
+    const personaPrefix = await this.resolvePersonaPrefix(db, meta.orgId, scope, assistant.id);
     // The owner's human name, so the persona names the workspace instead of
     // its raw id (the "team_<uuid>" leak). A missing row falls back to a
     // neutral phrase inside the persona.
@@ -2730,7 +2731,7 @@ export class EngineHost {
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId);
-    const resolveOutboundSender = this.outboundSenderResolver(meta.orgId, principal);
+    const resolveOutboundSender = this.outboundSenderResolver(meta.orgId, principal, assistant.id);
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
@@ -2862,12 +2863,13 @@ export class EngineHost {
    * personality the workspace's assistant carried over from its profile
    * (`legacy-profile.ts`): the carried-over value keeps its old precedence
    * until someone edits the file after the upgrade. A carried-over name
-   * opens the prefix.
+   * opens the prefix. The profile is the session's own assistant's, so a
+   * migration-retained assistant never takes the surviving one's.
    */
-  private async resolvePersonaPrefix(db: AppDb, orgId: string, scope: MemoryScope): Promise<string> {
+  private async resolvePersonaPrefix(db: AppDb, orgId: string, scope: MemoryScope, assistantId: string): Promise<string> {
     const row = await readOwnFile(db, scope, "assistant/personality.md")
       ?? (scope.owner.type === "team" && scope.namespace ? await readOwnFile(db, { ...scope, namespace: "" }, "assistant/personality.md") : null);
-    const legacy = await loadLegacyAssistantProfile(db, orgId, scope.owner);
+    const legacy = await loadLegacyAssistantProfile(db, orgId, { assistantId });
     return personaPrefixText(effectivePersonality(row, legacy), legacy?.name);
   }
 

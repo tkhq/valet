@@ -7,11 +7,13 @@
  * is edited after the upgrade; a later edit wins.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureDefaultAssistantSession, resolveDefaultAssistant } from "../assistants/service.js";
 import { writeFile } from "../services/memory.js";
+import { assistantSessionSender } from "../services/workspace-sender.js";
+import { assistants, legacyAssistantRuntimes, teamMembers, teams } from "../schema/index.js";
 
 const ORG = "local-org";
 const COLUMN = "Answer in one short paragraph.";
@@ -89,5 +91,45 @@ describe("carried-over personality in the workspace prompt", () => {
   it("uses a file edited after the upgrade over an emptied column", async () => {
     const prompt = await promptFor("persona-neutral-new", { name: null, personality: "" }, { content: FILE, editedAfterUpgrade: true });
     expect(prompt.startsWith(`${FILE}\n\n`)).toBe(true);
+  });
+
+  it("gives a migration-retained assistant its own profile, never the surviving assistant's", async () => {
+    const { db, engineHost } = api.providers;
+    const meta = { orgId: ORG, actorUserId: "local-user" };
+    const owner: Principal = { type: "team", id: "retained-persona-team" };
+    await db.insert(teams).values({ id: owner.id, orgId: ORG, name: "Retained", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: owner.id, userId: "local-user", role: "admin" });
+    // The singleton cutover keeps one live row and moves the other to a
+    // tombstone owner, while legacy_assistant_runtimes keeps it running.
+    const retained = await ensureDefaultAssistantSession(api.providers, owner, meta);
+    await db.insert(legacyAssistantRuntimes).values({ assistantId: retained.assistant.id, sessionId: retained.sessionId,
+      orgId: ORG, ownerType: "team", ownerId: owner.id });
+    await db.update(assistants).set({ ownerId: `${owner.id}:retired:${retained.assistant.id}`, archivedAt: 123 })
+      .where(eq(assistants.id, retained.assistant.id));
+    engineHost.evictCache(retained.sessionId);
+    const survivor = await ensureDefaultAssistantSession(api.providers, owner, meta);
+    await db.execute(sql`UPDATE assistants SET name = 'Desk Helper', avatar_url = 'https://valet.example/desk.png',
+      personality = ${COLUMN} WHERE id = ${survivor.assistant.id}`);
+    await db.execute(sql`UPDATE assistants SET name = 'Night Helper', avatar_url = 'https://valet.example/night.png',
+      personality = 'Reply in two lines.' WHERE id = ${retained.assistant.id}`);
+    engineHost.evictCache(survivor.sessionId);
+
+    const retainedSession = await engineHost.assistantSessionFor(retained.assistant.id, meta, { sessionId: retained.sessionId });
+    expect(retainedSession.options.systemPrompt?.slice(0, 43)).toBe("You are Night Helper. Reply in two lines.\n\n");
+    const own = { displayName: "Night Helper", avatarUrl: "https://valet.example/night.png" };
+    expect(await retainedSession.options.resolveOutboundSender?.()).toEqual(own);
+    expect(await assistantSessionSender(db, retained.sessionId)).toEqual(own);
+
+    const survivorSession = await engineHost.assistantSessionFor(survivor.assistant.id, meta, { sessionId: survivor.sessionId });
+    expect(survivorSession.options.systemPrompt?.startsWith(`You are Desk Helper. ${COLUMN}\n\n`)).toBe(true);
+    expect(await assistantSessionSender(db, survivor.sessionId)).toEqual({ displayName: "Desk Helper", avatarUrl: "https://valet.example/desk.png" });
+
+    // A retained assistant without its own profile gets none, not the survivor's.
+    await db.execute(sql`UPDATE assistants SET name = NULL, avatar_url = NULL, personality = NULL WHERE id = ${retained.assistant.id}`);
+    engineHost.evictCache(retained.sessionId);
+    const bare = await engineHost.assistantSessionFor(retained.assistant.id, meta, { sessionId: retained.sessionId });
+    expect(bare.options.systemPrompt).not.toContain("Desk Helper");
+    expect(bare.options.systemPrompt).not.toContain(COLUMN);
+    expect(await assistantSessionSender(db, retained.sessionId)).toEqual({ displayName: "Retained" });
   });
 });
