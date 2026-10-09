@@ -248,6 +248,52 @@ valet tools call linear.create_issue --params-file issue.json --idempotency-key 
 
 `--workspace <team-id>` uses a team's credentials and policies. `--params-file -` reads the params from stdin. A repeated `--idempotency-key` returns the first result instead of running the tool again. `call` exits `0` when the tool completes, `3` when a policy requires approval (the tool did not run) or an earlier call with the same key is still running, and `4` when it fails. A failed call is not stored, so a retry with the same key runs again. MCP clients get the same tools as `search_tools`, `describe_tool`, and `call_tool`.
 
+### `valet memory search|read|write|patch|mv|rm`
+
+Search, read, and edit Valet memory. A team workspace (`--workspace <team-id>`) needs team admin rights to write.
+
+```bash
+valet memory search "release schedule"
+valet memory read projects/valet/decisions.md
+valet memory write projects/valet/decisions.md --file decisions.md --description "Release decisions"
+valet memory patch journal/2026-10-08.md --old "status: draft" --new "status: done"
+valet memory mv notes/release.md projects/release.md
+valet memory rm notes/stale.md
+```
+
+`write --file -` reads the content from stdin and replaces the file. `patch` replaces one exact passage and refuses text that matches more than once. An empty `--new` deletes the passage. `read /` shows the root index.
+
+### `valet skills list|show`
+
+List the skills the organization and teams maintain, and print one skill's instructions with `show <name>`.
+
+### `valet workflows list|run|status|cancel|retry`
+
+```bash
+valet workflows run wf_123 --input '{"env":"staging"}' --wait 60
+valet workflows status wfrun_456 --wait 30
+valet workflows cancel wfrun_456
+valet workflows retry wfrun_456
+```
+
+`--wait <seconds>` polls until the run settles or stops for approval. The command exits `0` when the run completes, `3` while it runs or waits for approval, and `4` when it fails or is cancelled. `cancel` exits `0` when the run is cancelled. An agent credential cannot approve a run: a person approves it in Valet.
+
+### `valet artifacts list|publish|unpublish`
+
+```bash
+valet artifacts publish weekly-report.md --title "Weekly report"
+valet artifacts list weekly
+valet artifacts unpublish <artifact-id>
+```
+
+`publish` keys the page by `--key`, or by the file name without its extension, and infers `html` from a `.html` file. Publishing the same key again adds a version at the same link. Every member of the organization can open the page. An agent credential can unpublish only artifacts its user published.
+
+### `valet inbox`, `valet whoami`, `valet workspaces`
+
+`inbox` lists the questions, approvals, and workflow runs that wait for you. Answer a question with `valet gates resolve`. `whoami` shows the signed-in user. `workspaces` lists the ids `--workspace` accepts.
+
+`valet threads stop <id>` stops the thread's running turn. A follow-up queued behind it keeps its place.
+
 ### `valet reset [--yes]`
 
 Wipe the local runtime state under the data dir: PGlite, blobs, and the

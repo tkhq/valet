@@ -83,6 +83,12 @@ Implemented on branch `feat/single-binary-cli` (PR against `dev-v2`). Plan: `doc
 
 **Owed test coverage (recorded, not silently dropped).** The CLI e2e suite (`packages/api/src/integration/cli.e2e.test.ts`, opt-in via `VALET_CLI_E2E=1`) covers status / session CRUD / exit-code matrix / keyless login-logout against a real spawned `valet serve`. Deferred: (1) real-auth login e2e (needs a logged-in better-auth session to mint a key); (2) the `gates resolve` round-trip and human-mode `send` (both need a real agent turn, gated on `ANTHROPIC_API_KEY`); (3) native-binary CI release (the `.github/workflows/release-cli.yml` workflow ships the Node bundle on tag; native binaries are owed with the compile decision above).
 
+### Workspace commands (parity with the MCP tools)
+
+The CLI covers the same workspace surface as the MCP agent tools (`docs/specs/2026-10-07-mcp-agent-tools-design.md`), so an agent without MCP can use it: `memory` (search, read, write, patch, mv, rm), `skills` (list, show), `workflows` (list, run, status, cancel, retry), `artifacts` (list, publish, unpublish), `inbox`, `whoami`, `workspaces`, and `threads stop`. Each command calls the route its MCP tool calls, and `cli/command-kit.ts` holds the shared flag and client plumbing. A team workspace maps to `ownerType=team&ownerId=<id>` on the memory, skills, workflow, and artifact routes, as the MCP tools map it.
+
+`valet login` mints an agent credential, so `AGENT_WRITES` limits these commands exactly as it limits the MCP tools: no approvals, no definition or visibility changes, and unpublish only for the user's own artifacts. `threads stop` reads `activeItemId` from `GET /api/threads/:id` (the running turn, else the decision-blocked one) and sends it to `/abort`, because the CLI has no live socket for queue state. `workflows cancel` waits up to 10 seconds for the run to settle and does not stop on the gate it cancels. `cli.e2e.test.ts` round-trips memory and artifacts and smoke-tests the read commands against a real `valet serve`.
+
 ### CLI integration test launcher
 
 The integration suite resolves the tsx loader through the workspace dependency graph. It starts the loader with the current Node executable. A missing package-local binary no longer prevents server startup. Spawn errors fail immediately and remove the test data directory.
