@@ -34,7 +34,8 @@ on: Settings by its rail group, a work page by the switcher.
 A settings page that acts on a workspace pins the scope from its route with
 `PinnedWorkspaceScope` (`lib/workspace-scope.tsx`). The existing sections read
 `useWorkspaceScope()` as before and do not change. The global switcher is not
-changed by visiting Settings.
+changed by visiting Settings. The browser tab title names the pinned workspace
+on these pages, not the switcher's.
 
 ### 2. Rail groups
 

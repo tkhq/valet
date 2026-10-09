@@ -48,6 +48,10 @@ export interface WorkspaceScope {
 
 const WorkspaceScopeContext = createContext<WorkspaceScope | null>(null);
 
+/** Sets the workspace the tab title names while a pinned subtree is
+ * mounted (`PinnedWorkspaceScope`), or clears it with `undefined`. */
+const PinTitleContext = createContext<(key: string | undefined) => void>(() => {});
+
 /**
  * Which workspace is active, given what is currently known.
  *
@@ -117,9 +121,14 @@ export function WorkspaceScopeProvider({ children }: { children: ReactNode }) {
     [key, available, setKey],
   );
 
-  const workspaceName = key === PERSONAL ? "Personal" : teams.find(team => team.id === key)?.name ?? "Team workspace";
+  // A pinned settings page names its own scope in the title, not the switcher's.
+  const [pinnedKey, setPinnedKey] = useState<string>();
+  const titleKey = pinnedKey ?? key;
+  const workspaceName = titleKey === PERSONAL ? "Personal" : teams.find(team => team.id === titleKey)?.name ?? "Team workspace";
   return <WorkspaceScopeContext.Provider value={value}>
-    <PageTitleProvider workspaceName={workspaceName}>{children}</PageTitleProvider>
+    <PinTitleContext.Provider value={setPinnedKey}>
+      <PageTitleProvider workspaceName={workspaceName}>{children}</PageTitleProvider>
+    </PinTitleContext.Provider>
   </WorkspaceScopeContext.Provider>;
 }
 
@@ -153,10 +162,18 @@ export function useWorkspaceScope(): WorkspaceScope {
  * personal workspace page, or `/settings/teams/$teamId`), so its sections
  * must not follow the switcher. They keep reading `useWorkspaceScope()`, and
  * this answers it for them. The switcher itself does not change:
- * `available` and `setKey` still act on the outer scope.
+ * `available` and `setKey` still act on the outer scope. The tab title
+ * names the pinned workspace while the subtree is mounted.
  */
 export function PinnedWorkspaceScope({ teamId, children }: { teamId: string | undefined; children: ReactNode }) {
   const outer = useWorkspaceScope();
+  // The tab title follows the pin too, so a personal page never carries a
+  // team's name. Cleanup runs before the next page's pin on navigation.
+  const pinTitle = useContext(PinTitleContext);
+  useEffect(() => {
+    pinTitle(teamId ?? PERSONAL);
+    return () => pinTitle(undefined);
+  }, [teamId, pinTitle]);
   const value = useMemo<WorkspaceScope>(
     () => ({ key: teamId ?? PERSONAL, teamId, available: outer.available, setKey: outer.setKey }),
     [teamId, outer.available, outer.setKey],
