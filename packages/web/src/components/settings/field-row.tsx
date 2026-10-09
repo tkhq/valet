@@ -17,7 +17,7 @@ export function FieldRow({
   children: ReactNode;
 }) {
   return (
-    <div className="grid grid-cols-1 gap-2 py-3.5 sm:grid-cols-[minmax(0,1fr)_minmax(0,24rem)] sm:items-start sm:gap-6">
+    <div className="grid grid-cols-1 gap-2 py-3.5 first:pt-0.5 last:pb-0.5 sm:grid-cols-[minmax(0,1fr)_minmax(0,24rem)] sm:items-start sm:gap-6">
       <div className="min-w-0 sm:pt-2">
         <div className="text-sm text-ink">{label}</div>
         {hint && <p className="mt-0.5 max-w-xs text-xs leading-5 text-muted">{hint}</p>}

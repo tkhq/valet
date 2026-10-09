@@ -92,8 +92,8 @@ export function TeamCredentials({
       )}
       <ul aria-label="Team connections" className={cards ? "divide-y divide-line" : "mt-1 space-y-3"}>
         {byService(rows).map((group) => (
-          <li key={group.service}>
-            <div className={cards ? "py-3.5" : "py-2"}>
+          <li key={group.service} className={cards ? "py-3.5 first:pt-0.5 last:pb-0.5" : undefined}>
+            <div className={cards ? undefined : "py-2"}>
               <CardHeading
                 title={group.service === "linear" ? "Linear MCP" : displayName(group.service)}
                 slug={group.service}

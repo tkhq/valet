@@ -59,7 +59,7 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
             </IntegrationCard>;
           })}
         </IntegrationList>
-        {!plugins.isLoading && !plugins.error && available.length === 0 && <p className="py-3.5 text-sm text-muted">No available integrations match.</p>}
+        {!plugins.isLoading && !plugins.error && available.length === 0 && <p className="text-sm text-muted">No available integrations match.</p>}
       </Section>
     </div>
     {canConnect && selected && <TeamConnectionDialog key={selected.service} teamId={teamId} service={selected} onClose={() => setSelected(null)} />}

@@ -40,7 +40,7 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                 description="Team actions use the acting member's own account first, then the team connection. Using another member's account asks them first."
               >
                 {!canMutate && (
-                  <p className="py-3.5 text-sm text-muted">Only team or organization admins can remove team connections.</p>
+                  <p className="pb-3 text-sm text-muted">Only team or organization admins can remove team connections.</p>
                 )}
                 {directoryQ.isLoading && <LoadingRow label="Loading member names…" />}
                 {directoryQ.error && (
@@ -52,7 +52,7 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                   orgMembers={directoryQ.error ? [] : directoryQ.data?.users ?? []}
                   canMutate={canMutate}
                 />
-                <div className="flex flex-wrap items-center gap-3 py-3.5">
+                <div className="flex flex-wrap items-center gap-3 pt-3">
                   <PullFromPersonal teamId={teamId} teamName={team.name} />
                   <p className="text-sm text-muted">Shares one of your own connections with this team.</p>
                 </div>

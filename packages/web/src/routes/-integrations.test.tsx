@@ -77,7 +77,7 @@ const pluginsData = {
     },
     {
       // Dynamic tools, no credential declaration (the deepwiki shape) —
-      // is listed with "no key needed", in the Connected group.
+      // is listed with "no key needed", in the Built in group.
       name: "deepwiki",
       version: "0.1.0",
       description: "DeepWiki integration for repository knowledge base",
@@ -317,14 +317,15 @@ describe("IntegrationsPage", () => {
     expect(screen.queryByRole("link", { name: "Install on personal account" })).toBeNull();
   });
 
-  it("lists connected services first, one row each, then the rest", () => {
+  it("lists connected services first, one row each, then the rest, then built-ins", () => {
     render(<IntegrationsPage />);
     const rowNames = (label: string) =>
       within(screen.getByRole("list", { name: label }))
         .getAllByRole("listitem")
         .map((row) => row.querySelector(".font-medium")?.textContent);
-    expect(rowNames("Connected")).toEqual(["DeepWiki", "Slack"]);
+    expect(rowNames("Connected")).toEqual(["Slack"]);
     expect(rowNames("Available")).toEqual(["GitHub", "Typefully"]);
+    expect(rowNames("Built in")).toEqual(["DeepWiki"]);
   });
 
   it("lists connectable services only, with friendly names and honest reach meta", () => {
@@ -344,8 +345,6 @@ describe("IntegrationsPage", () => {
     // Content-only plugins are not listed at all. They need no credential
     // and offer no action, so their row was one nobody could use.
     expect(screen.queryByText("Sandbox tunnels")).toBeNull();
-    expect(screen.queryByText("built in")).toBeNull();
-    expect(screen.queryByText("Built in")).toBeNull();
 
     expect(screen.getByRole("heading", { name: "Connected" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Available" })).toBeTruthy();

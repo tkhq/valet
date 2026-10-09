@@ -5,7 +5,7 @@ import { Spinner, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { SearchInput } from "~/components/search-input";
 import { Section } from "~/components/settings/section";
-import { hasVisibleSurface, IntegrationRow, isConnectedService, isService } from "~/components/integrations/integration-row";
+import { hasVisibleSurface, IntegrationRow, integrationGroup, isService } from "~/components/integrations/integration-row";
 import { IntegrationList } from "~/components/integrations/integration-card";
 import { OrphanCredentials } from "~/components/integrations/orphan-credentials";
 import { pluginDisplayName } from "~/components/integrations/display-name";
@@ -17,8 +17,8 @@ import { IntegrationLimitNotice } from "~/components/integrations/integration-li
 import { useListOwner } from "~/lib/use-list-owner";
 
 /**
- * `/integrations` — the services a person can connect, as two grouped lists
- * in the settings visual idiom: Connected first, then Available
+ * `/integrations` — the services a person can connect, as grouped lists in
+ * the settings visual idiom: Connected first, then Available, then Built in
  * (settings-redesign spec, "Integrations"). Content-only plugins
  * are not listed: they need no credential and offer no action, so a row for
  * one was a row nobody could use. OAuth connect for services declaring
@@ -133,17 +133,35 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
   const services = reachable
     .filter((plugin) => matchesNeedle(query, [pluginDisplayName(plugin), plugin.name, plugin.description]))
     .sort((a, b) => pluginDisplayName(a).localeCompare(pluginDisplayName(b)));
-  const connected = services.filter(isConnectedService);
-  const available = services.filter((plugin) => !isConnectedService(plugin));
+  const connected = services.filter((plugin) => integrationGroup(plugin) === "connected");
+  const available = services.filter((plugin) => integrationGroup(plugin) === "available");
+  const builtin = services.filter((plugin) => integrationGroup(plugin) === "builtin");
   const searching = query.trim().length > 0;
-  // The box stays up through an empty match — hiding it would leave the
-  // search with no box to clear it in.
   const showSearch = reachable.length > 0 || searching;
 
   return (
     <div className="flex-1 overflow-y-auto">
       <div className={cn(pageClass, "max-w-3xl")}>
-        <h1 className="text-2xl font-medium text-ink">Integrations</h1>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <h1 className="text-2xl font-medium text-ink">Integrations</h1>
+          {/* The box stays up through an empty match — hiding it would leave
+              the search with no box to clear it in. */}
+          {!isLoading && !error && showSearch && (
+            <div className="w-full sm:w-56">
+              <SearchInput
+                value={query}
+                onSettled={(next) =>
+                  void navigate({
+                    to: "/integrations",
+                    search: next.trim().length === 0 ? {} : { q: next },
+                  })
+                }
+                placeholder="Search integrations…"
+                aria-label="Search integrations"
+              />
+            </div>
+          )}
+        </div>
         {owner && <IntegrationLimitNotice owner={owner} canClear />}
 
         {/* The live region is on the page from the first paint, and stays
@@ -184,20 +202,6 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
 
           {!isLoading && !error && showSearch && (
             <div className="space-y-10">
-              <div className="ml-auto w-full sm:w-56">
-                <SearchInput
-                  value={query}
-                  onSettled={(next) =>
-                    void navigate({
-                      to: "/integrations",
-                      search: next.trim().length === 0 ? {} : { q: next },
-                    })
-                  }
-                  placeholder="Search integrations…"
-                  aria-label="Search integrations"
-                />
-              </div>
-
               {searching && services.length === 0 && (
                 <div className="text-sm text-muted">No integrations match your search.</div>
               )}
@@ -215,6 +219,15 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                 <Section title="Available" description="Connect a service to let your assistant use it.">
                   <IntegrationList label="Available">
                     {available.map((plugin) => (
+                      <IntegrationRow key={plugin.name} plugin={plugin} />
+                    ))}
+                  </IntegrationList>
+                </Section>
+              )}
+              {builtin.length > 0 && (
+                <Section title="Built in" description="Ready to use. These need no account.">
+                  <IntegrationList label="Built in">
+                    {builtin.map((plugin) => (
                       <IntegrationRow key={plugin.name} plugin={plugin} />
                     ))}
                   </IntegrationList>

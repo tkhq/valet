@@ -21,7 +21,10 @@ export function Section({
         <h2 className="text-lg font-medium text-ink">{title}</h2>
         {description && <p className="text-sm text-muted">{description}</p>}
       </div>
-      <div className="divide-y divide-line rounded-2xl bg-ink-wash px-4">{children}</div>
+      {/* The group pads its own top and bottom, so a child with no padding
+          of its own (a note, a form) does not touch the rounded edge. A row
+          with its own padding trims it at the ends to keep the same inset. */}
+      <div className="divide-y divide-line rounded-2xl bg-ink-wash px-4 py-3">{children}</div>
     </section>
   );
 }

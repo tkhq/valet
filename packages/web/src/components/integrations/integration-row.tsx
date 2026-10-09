@@ -68,10 +68,12 @@ export function isVisibleService(service: PluginServiceSummary): boolean {
   return service.connected || (service.missingEnv?.length ?? 0) > 0;
 }
 
-/** True when the plugin belongs in the Connected group: it needs no key,
- * or the caller or the organization already provides one of its services. */
-export function isConnectedService(plugin: PluginSummary): boolean {
-  return plugin.services.length === 0 || plugin.services.some((service) => service.connected || service.connect === "org");
+/** The list a plugin's row belongs in on `/integrations`: Connected when
+ * the caller or the organization already provides one of its services,
+ * Built in when it needs no account, and Available otherwise. */
+export function integrationGroup(plugin: PluginSummary): "connected" | "available" | "builtin" {
+  if (plugin.services.length === 0) return "builtin";
+  return plugin.services.some((service) => service.connected || service.connect === "org") ? "connected" : "available";
 }
 
 /** True when the plugin has anything left to show in the Services list. */

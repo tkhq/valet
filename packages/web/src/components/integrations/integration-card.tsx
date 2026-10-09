@@ -51,5 +51,6 @@ export function IntegrationList({ label, children }: { label: string; children: 
 }
 
 export function IntegrationCard({ children }: { children: React.ReactNode }) {
-  return <li className="flex flex-col py-3.5">{children}</li>;
+  // Trimmed at the ends: the settings `Section` group pads its own edges.
+  return <li className="flex flex-col py-3.5 first:pt-0.5 last:pb-0.5">{children}</li>;
 }

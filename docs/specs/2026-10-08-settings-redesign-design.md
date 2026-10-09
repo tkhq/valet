@@ -88,9 +88,10 @@ Integrations becomes a list, like Claude's Connectors page:
 
 - Two groups: **Connected** and **Available**. Each row shows the icon, name,
   a one-line status, and its primary action on the right.
-- Connected holds a plugin that needs no key, and a plugin with a service
-  that the caller connected or the organization provides. Available holds
-  the rest.
+- Connected holds a plugin with a service that the caller connected or the
+  organization provides. Available holds a plugin the caller can still
+  connect. A third group, **Built in**, holds a plugin that needs no
+  account, so built-in tools do not crowd the Connected group.
 - A saved credential that no listed service covers, for example one left by
   a removed plugin, gets a row with Revoke under **Other saved credentials**.
   The removed Connected accounts list was the only Revoke control for such a
