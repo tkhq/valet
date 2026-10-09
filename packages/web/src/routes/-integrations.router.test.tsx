@@ -120,3 +120,17 @@ describe("the integration detail panel", () => {
     expect(within(dialog).getByRole("button", { name: "Disconnect Notion" })).toBeTruthy();
   });
 });
+
+describe("integration rows", () => {
+  it("let a long name shrink, so the row fits a phone screen", async () => {
+    plugins = { plugins: [plugin("gw", [service("gw", { connected: true })], "Calendar and Drive")] };
+    plugins.plugins[0]!.displayName = "Google Workspace Calendar and Drive (MCP)";
+    mount();
+    const row = await screen.findByRole("link", { name: /Google Workspace Calendar and Drive/ });
+    const name = within(row).getByText("Google Workspace Calendar and Drive (MCP)");
+    // jsdom has no layout. These classes are what lets the name give up
+    // width to the badge and chevron instead of pushing them off screen.
+    expect(name.className.split(" ")).toEqual(expect.arrayContaining(["min-w-0", "shrink", "truncate"]));
+    expect(name.className.split(" ")).not.toContain("shrink-0");
+  });
+});

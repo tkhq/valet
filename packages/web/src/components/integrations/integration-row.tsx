@@ -41,7 +41,6 @@ import { useDisconnectCredential } from "~/api/integrations";
 import { errorText } from "~/lib/error-text";
 import { Link } from "@tanstack/react-router";
 import { ChevronRight } from "lucide-react";
-import { ServiceIcon } from "~/components/service-icon";
 import { CardHeading } from "./integration-card";
 import { ConnectDialog } from "./connect-dialog";
 import { ShareWithTeam } from "./share-with-team";
@@ -162,19 +161,25 @@ export function IntegrationRow({ plugin, search }: { plugin: PluginSummary; sear
   const state = rowState(plugin);
   return (
     <li>
+      {/* py-2 around the compact row's 32px makes a 48px touch target. */}
       <Link
         to="/integrations"
         search={{ ...search, service: plugin.name }}
-        className="-mx-4 flex min-h-12 items-center gap-3 px-4 py-2 transition-colors hover:bg-ink-wash-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-500/40 touch-manipulation"
+        className="-mx-4 block px-4 py-2 transition-colors hover:bg-ink-wash-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-500/40 touch-manipulation"
       >
-        <ServiceIcon slug={iconSlug(plugin)} label={title} size="sm" />
-        <span className="min-w-0 shrink-0 truncate text-sm font-medium text-ink sm:max-w-[40%]">{title}</span>
-        <span className="hidden min-w-0 flex-1 truncate text-xs text-muted sm:block">{plugin.description}</span>
-        <span className="ml-auto flex shrink-0 items-center gap-2 text-xs">
-          {state.badge && <Badge variant={state.badge.variant}>{state.badge.label}</Badge>}
-          {state.offer && <span className={state.offer === "Connect" ? "text-moss" : "text-muted"}>{state.offer}</span>}
-          <ChevronRight className="h-4 w-4 text-muted" aria-hidden />
-        </span>
+        <CardHeading
+          compact
+          title={title}
+          slug={iconSlug(plugin)}
+          description={plugin.description}
+          right={
+            <span className="flex items-center gap-2 text-xs">
+              {state.badge && <Badge variant={state.badge.variant}>{state.badge.label}</Badge>}
+              {state.offer && <span className={state.offer === "Connect" ? "text-moss" : "text-muted"}>{state.offer}</span>}
+              <ChevronRight className="h-4 w-4 text-muted" aria-hidden />
+            </span>
+          }
+        />
       </Link>
     </li>
   );
