@@ -57,6 +57,19 @@ it("scopes live availability reads for actions and filtered discovery", async ()
   expect(resolveServiceAvailability).toHaveBeenLastCalledWith("one");
 });
 
+it("hides duplicate generation for native models but keeps sandbox-file editing", async () => {
+  const plugin: ActionPlugin = { service: "openai", actions: ["generate_image", "edit_image"].map((name) => ({
+    id: `openai.${name}`, name, description: name, riskLevel: "low", parameters: Type.Object({}),
+    execute: async () => ({ success: true }),
+  })) };
+  const [list] = pluginCatalogTools({ plugins: [plugin] });
+  const native = await list.execute({ service: "openai" }, makeCtx({ nativeImageGeneration: true }));
+  expect(native.text).not.toContain("openai.generate_image");
+  expect(native.text).toContain("openai.edit_image");
+  expect((await list.execute({ service: "openai" }, makeCtx())).text).toContain("openai.generate_image");
+  expect((await invokeAction(buildPluginCatalog([plugin]), "openai.generate_image", {}, makeCtx({ nativeImageGeneration: true }), "generate")).kind).toBe("unknown");
+});
+
 function makeMockPlugin(): {
   plugin: ActionPlugin;
   calls: Array<{ id: string; args: unknown; ctx: PluginActionContext }>;

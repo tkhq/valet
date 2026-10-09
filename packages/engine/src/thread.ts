@@ -2,14 +2,15 @@ import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
-import { isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
+import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
 // utils and is only re-exported from the package root. Provider fallback
 // adds billing/quota and network failures to this transient taxonomy.
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
-import { bundledModel } from "./model-catalog.js";
+import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL } from "./native-images.js";
+import { bundledModel, supportsNativeImageGeneration } from "./model-catalog.js";
 import { appendRuntimeModelContext } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
@@ -4574,7 +4575,7 @@ export class Thread {
     const entries = walkTranscriptDag(snapshot.entries, this.activeLeafEntryId);
 
     // Step 1: pruning pass (cheap, no LLM).
-    const protectedTools = new Set<string>();
+    const protectedTools = new Set<string>([NATIVE_IMAGE_RESULT_TOOL]);
     for (const t of [...session.builtinTools, ...(session.options.tools ?? [])]) {
       if (t.protectedFromPruning) protectedTools.add(t.name);
     }
@@ -4943,6 +4944,8 @@ export class Thread {
     });
   }
 
+  private readonly nativeImages = new NativeImageBridge();
+
   private buildAgent(): Agent {
     // Only wire `getApiKey` when a host resolver is present. Absent → the Agent
     // is constructed with the exact same options as before the seam existed, so
@@ -4964,7 +4967,8 @@ export class Thread {
       streamFn: async (model, context, options) => {
         this.lastRequestModel = model;
         await this.persistSkillContextAttributions();
-        const runtimeModelContext = this.modelSystemPrompt(undefined, model);
+        const runtimeModelContext = this.modelSystemPrompt(undefined, model) + (!this.runningItem?.author?.externalSender && supportsNativeImageGeneration(model)
+          ? "\nUse native image_generation to generate images and edit images already in context. Images are saved automatically and receipts return their paths. For an existing sandbox image not in context, use openai.edit_image. Do not call plugin image generation." : "");
         const initialSystemIndex = context.messages.findIndex((message) => message.role === "system");
         const runtimeSystem = {
           role: "system" as const,
@@ -4987,7 +4991,7 @@ export class Thread {
                 : message,
             ),
         };
-        return streamSimple(model, transcript, {
+        return this.nativeImages.stream(model, transcript, {
           ...options,
           maxRetries: options?.maxRetries ?? TURN_STREAM_MAX_RETRIES,
           maxRetryDelayMs: options?.maxRetryDelayMs ?? TURN_STREAM_MAX_RETRY_DELAY_MS,
@@ -5017,7 +5021,7 @@ export class Thread {
             this.reasoningDisabled ? undefined : this.session.options.sampling?.reasoning,
           ),
           samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
-        });
+        }, this.session.sandbox, !this.runningItem?.author?.externalSender);
       },
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
@@ -5078,7 +5082,7 @@ export class Thread {
   }
 
   private buildTools(): AgentTool[] {
-    const all: ToolDef[] = [...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseExternalSender);
+    const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseExternalSender);
     return all.map((def) =>
       toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
         this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
@@ -5105,6 +5109,7 @@ export class Thread {
     return {
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
+      nativeImageGeneration: !this.runningItem?.author?.externalSender && supportsNativeImageGeneration(this.lastRequestModel ?? this.agent.state.model),
       userId: actorId,
       ...(this.runningItem?.author && !this.runningItem.author.externalSender &&
         runningContent !== undefined && !isSignalContent(runningContent) &&

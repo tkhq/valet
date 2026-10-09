@@ -5,7 +5,8 @@ Status: approved
 
 ## Goal
 
-Give agent sessions four media tools backed by the OpenAI API: `generate_image`,
+Give capable OpenAI session models native image generation in the main agent loop.
+Other models use four plugin media tools backed by the OpenAI API: `generate_image`,
 `edit_image`, `transcribe_audio`, and `text_to_speech`. The tools appear in
 `list_tools` only when an OpenAI API key is configured. They are hidden when no
 key resolves, the same way an unconnected GitHub hides its tools.
@@ -18,7 +19,7 @@ key resolves, the same way an unconnected GitHub hides its tools.
    `ctx.credentials.get(service)` returns null
    (`packages/engine/src/plugin-catalog.ts`). The feature ships as
    `packages/plugin-openai/` with `service: "openai"` and
-   `requiresCredential: true`. Zero engine changes.
+   `requiresCredential: true`. Native image handling is the engine-owned exception described below.
 2. **Key resolution order:** org OpenAI LLM-provider key (credential store,
    service `llm:{rowId}`) → stored `"openai"` credential for the owner (plain
    store read) → `OPENAI_API_KEY` host env var. Implemented as an `"openai"`
@@ -28,7 +29,7 @@ key resolves, the same way an unconnected GitHub hides its tools.
 3. **Image output = sandbox file + attachment.** Image actions write the selected image format
    into the sandbox and also return a `ToolAttachment { type: "image" }`, so
    the model gets vision feedback and the web UI can render the image inline.
-4. **Plain `fetch`, no OpenAI SDK dependency.**
+4. **Fallback transport:** plain `fetch`. Native generation uses the existing OpenAI provider transport and auth.
 5. **Risk:** all actions are `riskLevel: "low"` with
    `defaultApprovalMode: "allow"`. They spend API credits but write only inside
    the sandbox.
@@ -37,8 +38,8 @@ key resolves, the same way an unconnected GitHub hides its tools.
 
 | Action | Endpoint | Model | Input | Output |
 | --- | --- | --- | --- | --- |
-| `generate_image` | Images generations or Responses | selectable, default Sunburst | `prompt`, image options | sandbox image + image attachment + path text |
-| `edit_image` | Images edits or Responses | selectable, default Sunburst | `image_path`, `prompt`, image options | same as `generate_image` |
+| `generate_image` | Images generations | selectable, default Sunburst | `prompt`, image options | sandbox image + image attachment + path text |
+| `edit_image` | Images edits | selectable, default Sunburst | `image_path`, `prompt`, image options | same as `generate_image` |
 | `transcribe_audio` | `POST /v1/audio/transcriptions` | `gpt-4o-transcribe` | `audio_path`, `language?` | transcript text |
 | `text_to_speech` | `POST /v1/audio/speech` | `gpt-4o-mini-tts` | `text`, `voice?`, `format?`, `output_path?` | audio file in sandbox + path text |
 
@@ -49,41 +50,55 @@ key resolves, the same way an unconnected GitHub hides its tools.
 - `output_format`: `png` (default), `jpeg`, or `webp`.
 - `background`: `transparent`, `opaque`, or `auto`. Transparency requires PNG or WebP.
 - `output_compression`: integer from 0 to 100, only for JPEG or WebP.
-- Default output paths: `/workspace/generated-images/<unique-id>-<slug>.<ext>`
+- Default output paths: `generated-images/<unique-id>-<slug>.<ext>`
   and `/workspace/generated-audio/<timestamp>-<slug>.<ext>`.
 - Sandbox file IO uses `ctx.sandbox.readBinary` / `writeBinary`.
 
-## Responses image workflow (TKAI-577)
+## Native image workflow (TKAI-577)
 
-The existing action IDs do not change. Both actions accept optional `responses_model`, separate from the image `model`.
-Without this option, they use the direct Images API. With it, the plugin calls `/v1/responses` on the host.
+The selected session model generates images through the main Responses request, not a second chat-model request inside a plugin.
+The user asks in plain language. The engine offers `image_generation` with Sunburst, PNG, and quality auto.
+The image tool model remains separate from the selected session chat model.
 
-Supported mainline choices are `gpt-6.1-sol`, `gpt-6-astra`, `gpt-5.5`, `gpt-5.4-mini`, and `gpt-5.4-nano`.
-This is a checked subset, not a claim that every chat model supports the tool.
-The [OpenAI guide](https://developers.openai.com/api/docs/guides/image-generation) and model pages were checked on 2026-10-09.
+`supportsNativeImageGeneration` in the engine model registry uses an explicit allowlist:
+`gpt-6.1-sol`, `gpt-6-astra`, `gpt-5.5`, `gpt-5.4-mini`, and `gpt-5.4-nano`.
+The provider must be `openai` and the API must be `openai-responses`. Unknown models use the plugin fallback.
+The [OpenAI guide](https://developers.openai.com/api/docs/guides/image-generation) and official model pages were checked on 2026-10-09.
 
-The request sets the top-level model to `responses_model` and the `image_generation` tool model to `model`.
-The plugin forces one image call with the generate or edit action. Edit input comes from sandbox bytes, not remote URLs.
-Requests use `store: false`. They do not need provider-side conversation history or `previous_response_id`.
-The session chat model does not change. The plugin does not inject hosted tools into Pi's main agent transport.
+Pi-ai 1.0.3 drops `image_generation_call` output. Published versions 1.0.4 and 1.1.0 still drop it.
+Valet keeps the pin and uses its awaited `onPayload` and `onProviderStreamEvent` hooks in one engine adapter.
+The adapter validates every completed image result and writes original bytes into the session sandbox before publishing a receipt.
+It converts receipts into execution-only tool results through the existing agent loop and persistence contract.
+The receipt tool is not offered to the model. It returns the saved path, provider image ID, and bounded image feedback.
 
-Example person prompt: "Generate a red fox through GPT-6.1 Sol with Flare, then use the saved image in my design."
-The agent calls `openai.generate_image` with `responses_model: "gpt-6.1-sol"` and `model: "gpt-image-2.5-flare"`.
-It can then call `openai.edit_image` with the saved `image_path` and the same model choices.
+The next request receives the saved path and image through persisted tool-result context. This supports multi-turn native edits.
+Native models do not see the duplicate `openai.generate_image` action, including pinned and catalog discovery paths.
+`openai.edit_image` remains available deliberately: the existing `read` tool reads text, not binary images.
+It covers edits of arbitrary sandbox files that are not already in vision context. Native editing covers images already in context.
+Other models retain both plugin actions, with selectable image models and Sunburst defaults.
+The plugin has no `responses_model` parameter or Responses code path.
 
-Both API paths validate one completed image result and decode canonical base64.
-Sharp checks the actual format and decodes pixels before the sandbox write. The original encoded bytes remain unchanged in the saved file.
-Attachments larger than 5 MB are resized to fit 1024 by 1024 pixels, preserving their format.
-The smaller attachment is the inline preview and model feedback; the sandbox file retains full resolution.
-The image validator loads Sharp lazily before the provider request.
-If the decoder cannot load, the action asks the agent to repair the installation without making a paid request. Compiled binaries use the existing `__VALET_SHARP__` runtime from extracted assets.
-The file extension, detected format, and attachment MIME must agree. A result reports success only after the write completes.
+Native generation uses the existing provider's host-side auth. It does not resolve another credential or start another model.
+Untrusted external-sender turns do not receive the native hosted tool.
+Requests preserve existing sampling, retry, timeout, and abort settings.
 
-Image inputs and outputs are limited to 20 MB and 16,777,216 pixels. Animated images are not accepted.
-The response reader bounds bytes before JSON parsing. Input size is checked before and after the sandbox read.
-Paths must resolve inside `/workspace`. Sandbox providers retain their own isolation and filesystem policy.
-Credentials remain host-only. Requests use the fixed OpenAI origin and propagate the action's abort signal.
-The plugin does not retry paid requests automatically. Provider errors redact credential values.
+## Shared output validation
+
+Both paths decode canonical base64 and validate the actual format, pixel count, animation, and byte size.
+Image inputs and original outputs are limited to 20 MB and 16,777,216 pixels. Animated images are not accepted.
+Sharp decodes all pixels before saving. Its lazy loader uses the existing `__VALET_SHARP__` native-runtime hook.
+If decoding cannot load, the request fails before spending image-generation credits and names the installation repair.
+
+The original encoded bytes remain unchanged in the sandbox file.
+Model-facing previews are bounded to 5 MB after base64 encoding, with space reserved for metadata.
+Larger images are resized to fit 1024 by 1024 pixels, preserving their format.
+The attachment MIME, file extension, and detected format must agree. No successful receipt precedes its sandbox write.
+Native receipts can recover from an interrupted turn by reading the saved file, without regenerating or paying again.
+
+Relative input and output paths stay relative to the sandbox working directory, including on LocalSandbox.
+Absolute container paths must resolve inside `/workspace`. Sandbox providers retain their own isolation and filesystem policy.
+The fallback response reader bounds bytes before JSON parsing. Input size is checked before and after the sandbox read.
+The plugin does not retry paid image requests automatically. Provider errors redact credential values.
 
 Durable transcript images and sandbox files are separate outputs. Sandbox files follow the session's storage lifecycle.
 `file_attach` remains available for a durable private download. This change does not create public artifact URLs.
@@ -102,7 +117,7 @@ Every error names the corrective action:
 One `openai-media` renderer in
 `packages/web/src/components/session/tool-renderers/`, registered before the
 fallback. It matches `call_tool` invocations whose `tool_id` starts with
-`openai.`, and pinned `openai__*` tools:
+`openai.`, pinned `openai__*` tools, and native `openai_native_image` receipts:
 
 - image actions → inline `<img>` from persisted base64, with the saved path underneath;
 - `transcribe_audio` → transcript text;
@@ -124,8 +139,10 @@ the CLAUDE.md tool-call persistence rule.
 - API tests for the resolver branch: org LLM-provider key wins over env; env
   fallback works; stored `"openai"` credential resolves; none → `null` (tools
   hidden in `list_tools`).
-- Plugin tests cover separate Responses/image models, generation and edits, formats, unsupported options, malformed output, limits, write failures, and aborts.
-- An API integration test drives an ordinary OpenAI chat model with a scripted provider and mocked image HTTP response.
-  It checks real plugin execution, sandbox bytes, agent image feedback, live WebSocket media, Postgres persistence, REST history, and session isolation.
+- Plugin tests cover model selection, generation and edits, formats, unsupported options, malformed output, limits, write failures, aborts, and real LocalSandbox paths.
+- Engine tests exercise capability selection, raw hosted events, null and failed results, write failures, aborts, encoded limits, and fallback discovery.
+- An API integration test uses the real pinned OpenAI streaming provider with scripted SSE responses.
+  It checks native generation, multi-turn editing, sandbox bytes, agent image feedback, live media, Postgres persistence, REST history, process-cache restore, and session isolation.
+- A fallback API test checks direct generation and editing with Sunburst and Flare, sandbox files, and inline persisted results.
 - Web tests cover completion, collapsed-card preferences, serialized reload, MIME rejection, and errors.
 - `pnpm typecheck` + full `make e2e` scorecard.

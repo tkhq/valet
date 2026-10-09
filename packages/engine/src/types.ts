@@ -675,6 +675,8 @@ export type ToolArtifact =
   | { type: "diff"; path?: string; content: string };
 
 export interface ToolContext {
+  /** The current request offers native image generation; duplicate plugin actions are hidden. */
+  nativeImageGeneration?: boolean;
   browserPolicy?: BrowserPolicyService;
   /** Persisted model tool-call ID. Stable when a suspended invocation is replayed. */
   invocationId?: string;

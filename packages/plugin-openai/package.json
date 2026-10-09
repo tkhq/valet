@@ -26,6 +26,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@valet/sandbox-local": "workspace:*",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"
   }

@@ -1,3 +1,7 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { LocalSandbox } from "@valet/sandbox-local";
 import { randomBytes } from "node:crypto";
 import sharp from "sharp";
 import { MAX_IMAGE_BYTES } from "./images.js";
@@ -137,7 +141,7 @@ describe("openaiPlugin", () => {
     const result = await getAction("openai.generate_image").execute({ prompt: "A Red Fox!" }, ctx);
     expect(result.success).toBe(true);
     const data = result.data as { path: string };
-    expect(data.path).toMatch(/^\/workspace\/generated-images\/[a-f0-9-]+-a-red-fox\.png$/);
+    expect(data.path).toMatch(/^generated-images\/[a-f0-9-]+-a-red-fox\.png$/);
   });
 
   it("returns the corrective no-key error when no credential resolves", async () => {
@@ -179,34 +183,29 @@ describe("openaiPlugin", () => {
     expect(form.get("image")).toBeInstanceOf(Blob);
   });
 
+  it("edits relative files in a real LocalSandbox working directory", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "valet-plugin-image-"));
+    try {
+      const { ctx } = makeCtx({ credential: { accessToken: "sk-test" } });
+      ctx.sandbox = new LocalSandbox("local-image", directory);
+      await ctx.sandbox.writeBinary("in.png", PNG_BYTES);
+      mockFetch().mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: PNG_B64 }] })));
+      const result = await getAction("openai.edit_image").execute({ image_path: "in.png", output_path: "out.png", prompt: "make it blue" }, ctx);
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({ path: "out.png" });
+      expect(await ctx.sandbox.readBinary("out.png")).toEqual(new Uint8Array(PNG_BYTES));
+      mockFetch().mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: PNG_B64 }] })));
+      const generated = await getAction("openai.generate_image").execute({ prompt: "fox" }, ctx);
+      if (!generated.data || typeof generated.data !== "object" || !("path" in generated.data) || typeof generated.data.path !== "string") throw new Error("missing path");
+      expect(await ctx.sandbox.readBinary(generated.data.path)).toEqual(new Uint8Array(PNG_BYTES));
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("edit_image names the missing source file in its error", async () => {
     const { ctx } = makeCtx({ credential: { accessToken: "sk-test" } });
     await expect(
       getAction("openai.edit_image").execute({ image_path: "/workspace/nope.png", prompt: "x" }, ctx),
     ).rejects.toThrow("Cannot read the image file at /workspace/nope.png");
-  });
-
-  it.each(["openai.generate_image", "openai.edit_image"])("%s keeps Responses chat and image models separate", async (id) => {
-    mockFetch().mockResolvedValue(new Response(JSON.stringify({ status: "completed", output: [
-      { type: "message", content: [{ type: "output_text", text: "Here is your image" }] },
-      { type: "image_generation_call", status: "completed", result: PNG_B64, revised_prompt: "blue fox" },
-    ] })));
-    const { ctx, files } = makeCtx({ credential: { accessToken: "sk-test" }, files: new Map([["/workspace/in.png", new Uint8Array(PNG_BYTES)]]) });
-    const result = await getAction(id).execute({ prompt: "a blue fox", model: "gpt-image-2.5-flare", responses_model: "gpt-5.4-mini",
-      ...(id === "openai.edit_image" ? { image_path: "/workspace/in.png" } : {}), output_path: "/workspace/out.png" }, ctx);
-    expect(result.success).toBe(true);
-    expect(result.data).toMatchObject({ path: "/workspace/out.png", model: "gpt-image-2.5-flare", responses_model: "gpt-5.4-mini", revised_prompt: "blue fox" });
-    expect(files.get("/workspace/out.png")).toEqual(new Uint8Array(PNG_BYTES));
-    expect(result.attachments?.[0]).toMatchObject({ type: "image", data: files.get("/workspace/out.png"), mimeType: "image/png" });
-    const [url, init] = mockFetch().mock.calls[0];
-    expect(url).toBe(`${OPENAI_API_URL}/v1/responses`);
-    if (!init) throw new Error("missing request");
-    const body: unknown = JSON.parse(String(init.body));
-    expect(body).toMatchObject({ model: "gpt-5.4-mini", store: false, max_tool_calls: 1, tool_choice: { type: "image_generation" },
-      tools: [{ type: "image_generation", model: "gpt-image-2.5-flare", action: id === "openai.edit_image" ? "edit" : "generate", output_format: "png", quality: "auto" }] });
-    expect(body).toMatchObject({ input: [{ content: expect.arrayContaining([{ type: "input_text", text: "a blue fox" }]) }] });
-    if (id === "openai.edit_image") expect(body).toMatchObject({ input: [{ content: expect.arrayContaining([{ type: "input_image", image_url: `data:image/png;base64,${PNG_B64}`, detail: "auto" }]) }] });
-    expect(init.signal).toBe(ctx.signal);
   });
 
   it.each(["openai.generate_image", "openai.edit_image"])("%s accepts an explicit direct image model", async (id) => {
@@ -236,7 +235,7 @@ describe("openaiPlugin", () => {
   });
 
   it.each([
-    { model: "gpt-5.5" }, { responses_model: "claude-sonnet-5-5" }, { model: "gpt-image-1", quality: "max" },
+    { model: "gpt-5.5" }, { model: "gpt-image-1", quality: "max" },
     { background: "transparent", output_format: "jpeg" }, { output_compression: 50 }, { output_format: "gif" },
     { output_format: "webp", output_compression: 101 }, { size: "unbounded" }, { output_path: "/workspace/fox.jpg" },
     { output_path: "/etc/fox.png" }, { output_path: "../fox.png" }, { output_path: "/workspace/../fox.png" }, { prompt: " " },
@@ -255,17 +254,6 @@ describe("openaiPlugin", () => {
     mockFetch().mockResolvedValue(new Response(JSON.stringify(body)));
     const { ctx, files } = makeCtx({ credential: { accessToken: "sk-test" } });
     await expect(getAction("openai.generate_image").execute({ prompt: "fox" }, ctx)).rejects.toThrow();
-    expect(files.size).toBe(0);
-  });
-
-  it.each([
-    { status: "failed", output: [] }, { status: "incomplete", output: [] }, { status: "completed", output: [] },
-    { status: "completed", output: [{ type: "image_generation_call", status: "failed", result: PNG_B64 }] },
-    { status: "completed", output: [{ type: "image_generation_call", status: "completed", result: null }] },
-  ])("rejects incomplete or null Responses output: %j", async (body) => {
-    mockFetch().mockResolvedValue(new Response(JSON.stringify(body)));
-    const { ctx, files } = makeCtx({ credential: { accessToken: "sk-test" } });
-    await expect(getAction("openai.generate_image").execute({ prompt: "fox", responses_model: "gpt-5.5" }, ctx)).rejects.toThrow();
     expect(files.size).toBe(0);
   });
 
@@ -321,13 +309,6 @@ describe("openaiPlugin", () => {
     expect(await getAction("openai.generate_image").execute({ prompt: "fox" }, ctx)).toMatchObject({ success: false, error: expect.stringContaining("502") });
   });
 
-  it("rejects conflicting Responses output-format metadata", async () => {
-    mockFetch().mockResolvedValue(new Response(JSON.stringify({ status: "completed", output: [{ type: "image_generation_call", status: "completed", result: PNG_B64, output_format: "jpeg" }] })));
-    const { ctx, files } = makeCtx({ credential: { accessToken: "sk-test" } });
-    await expect(getAction("openai.generate_image").execute({ prompt: "fox", responses_model: "gpt-5.5" }, ctx)).rejects.toThrow("unexpected output format");
-    expect(files.size).toBe(0);
-  });
-
   it("rejects invalid or oversized edit inputs before reading or spending credits", async () => {
     const { ctx } = makeCtx({ credential: { accessToken: "sk-test" }, files: new Map([["/workspace/in.png", new Uint8Array([1, 2, 3])]]) });
     await expect(getAction("openai.edit_image").execute({ image_path: "/workspace/in.png", prompt: "fox" }, ctx)).rejects.toThrow("malformed");
@@ -361,7 +342,7 @@ describe("openaiPlugin", () => {
     expect(Buffer.from(saved).equals(original)).toBe(true);
     const attachment = result.attachments?.[0];
     if (attachment?.type !== "image") throw new Error("missing image attachment");
-    expect(attachment.data.byteLength).toBeLessThanOrEqual(5 * 1024 * 1024);
+    expect(Buffer.from(attachment.data).toString("base64").length + 128).toBeLessThanOrEqual(5 * 1024 * 1024);
     expect(attachment.mimeType).toBe("image/png");
     const metadata = await sharp(attachment.data).metadata();
     expect(metadata.width).toBe(1024);

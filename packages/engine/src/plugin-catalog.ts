@@ -475,6 +475,9 @@ export async function invokeAction(
   ctx: ToolContext,
   summary: string,
 ): Promise<InvokeActionResult> {
+  if (ctx.nativeImageGeneration && actionId === "openai.generate_image") {
+    return { kind: "unknown", toolId: actionId };
+  }
   let availabilityCheckedService: string | undefined;
   const dotIdx = actionId.indexOf(".");
   if (dotIdx > 0) {
@@ -1150,6 +1153,9 @@ function makeListTool(
         }
       }
 
+      if (ctx.nativeImageGeneration) {
+        entries = entries.filter((entry) => qualifiedId(entry) !== "openai.generate_image");
+      }
       if (query.hasInput) {
         entries = rankSearchResults(query, entries, (entry) => actionFields(entry.action));
       }

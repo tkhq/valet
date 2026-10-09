@@ -94,7 +94,7 @@ async function writeSandboxFile(ctx: PluginActionContext, path: string, data: Ui
 const generateImage = action(Type.Object(imageParameters))({
   id: "openai.generate_image",
   name: "Generate Image",
-  description: "Generate an image with a selectable OpenAI image model, save it in the sandbox, and show it inline. Set responses_model to use a supported chat model through Responses.",
+  description: "Generate an image with a selectable OpenAI image model, save it in the sandbox, and show it inline. Uses the direct Images API.",
   riskLevel: "low",
   execute: async (args, ctx) => executeImage(args, ctx, await getApiKey(ctx), OPENAI_API_URL),
 });
@@ -105,7 +105,7 @@ const editImage = action(Type.Object({
 }))({
   id: "openai.edit_image",
   name: "Edit Image",
-  description: "Edit a sandbox image with a selectable OpenAI image model, save the result, and show it inline. Set responses_model to use a supported chat model through Responses.",
+  description: "Edit a sandbox image with a selectable OpenAI image model, save the result, and show it inline. Uses the direct Images API.",
   riskLevel: "low",
   execute: async (args, ctx) => executeImage(args, ctx, await getApiKey(ctx), OPENAI_API_URL),
 });

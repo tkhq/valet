@@ -65,6 +65,21 @@ describe("sandbox-backed image preview", () => {
     expect(screen.getByRole("button", { name: new RegExp(`openai ${action.replaceAll("_", " ")}`, "i") }).getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("keeps native hosted image receipts visible live and after reload", () => {
+    setToolCardDefault("always-collapsed");
+    const native = message("generate_image", "completed");
+    const part = native.parts[0];
+    if (part.kind !== "tool_call") throw new Error("missing tool call");
+    part.toolName = "openai_native_image";
+    part.args = { path: "/workspace/generated-images/fox.png", image_id: "img_1" };
+    const view = render(tree(native));
+    expect(screen.getByRole("img")).toBeTruthy();
+    expect(screen.getByText("/workspace/generated-images/fox.png")).toBeTruthy();
+    view.unmount();
+    render(tree(JSON.parse(JSON.stringify(native))));
+    expect(screen.getByRole("img").getAttribute("src")).toBe("data:image/png;base64,aGVsbG8=");
+  });
+
   it("smart policy auto-collapse does not hide the finished image", () => {
     const view = render(tree(message("generate_image", "running", false)));
     view.rerender(tree(message("generate_image", "completed")));

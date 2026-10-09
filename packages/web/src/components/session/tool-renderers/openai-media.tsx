@@ -20,7 +20,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function isOpenaiCallTool(toolName: string, args?: unknown): boolean {
-  if (toolName.startsWith("openai__")) return true;
+  if (toolName === "openai_native_image" || toolName.startsWith("openai__")) return true;
   if (toolName !== "call_tool") return false;
   const toolId = isRecord(args) ? args.tool_id : undefined;
   return typeof toolId === "string" && toolId.startsWith(OPENAI_TOOL_PREFIX);
@@ -28,6 +28,7 @@ export function isOpenaiCallTool(toolName: string, args?: unknown): boolean {
 
 /** The `openai.<action>` id of this call, "" when args are still streaming. */
 export function openaiActionId(args: unknown, toolName = "call_tool"): string {
+  if (toolName === "openai_native_image") return "openai.native_image";
   if (toolName.startsWith("openai__")) return toolName.replace("__", ".");
   const toolId = isRecord(args) ? args.tool_id : undefined;
   return typeof toolId === "string" ? toolId : "";
@@ -99,7 +100,7 @@ function formatSummary(args: unknown, result: unknown, _status: ToolRendererProp
 function Preview({ args, result, status, error, toolName }: ToolRendererProps) {
   if (status !== "completed" || error) return null;
   const action = openaiActionId(args, toolName);
-  if (action !== "openai.generate_image" && action !== "openai.edit_image") return null;
+  if (action !== "openai.generate_image" && action !== "openai.edit_image" && action !== "openai.native_image") return null;
   const imageUrl = imageDataUrl(result);
   if (!imageUrl) return null;
   const data = openaiResultData(result);
