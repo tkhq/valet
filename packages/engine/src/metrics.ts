@@ -89,6 +89,8 @@ interface Instruments {
   wakeupBadRows: Counter;
   wakeupSweepOkAt: ObservableGauge;
   wakeupSweepFailed: Counter;
+  jobLogsPruned: Counter;
+  dockerJobOutputDropped: Counter;
   leasesSettleOverDeadline: Counter;
 }
 
@@ -188,6 +190,14 @@ function inst(): Instruments {
       unit: "s",
       description:
         "Unix time of the last WakeWatcher pass that finished, or of the watcher start before the first pass. Prometheus exports it as valet_wakeups_sweep_ok_at_seconds. Alert when time() minus it exceeds a few intervals: the other wakeup and lease gauges then hold stale values.",
+    }),
+    jobLogsPruned: meter.createCounter("valet.jobs.logs_pruned", {
+      description:
+        "Detached job file sets a kubernetes kickoff deleted because the job ended more than a day ago. Job logs count against /scratch, so a zero rate with growing scratch use means the prune is not running.",
+    }),
+    dockerJobOutputDropped: meter.createCounter("valet.jobs.docker_output_dropped", {
+      description:
+        "Finished detached job buffers the docker backend dropped because one sandbox's buffers passed their total cap. A dropped job's log reads as empty. Dev backend only.",
     }),
     wakeupSweepFailed: meter.createCounter("valet.wakeups.sweep_failed", {
       description: "WakeWatcher passes that threw before they finished. A sustained rate means no wakeup moves and no hold expires.",
@@ -399,6 +409,16 @@ export function recordWakeupBadRow(table: "engine_wakeups" | "engine_leases"): v
 export function recordWakeupSweepOk(unixSeconds: number): void {
   inst();
   setGauge(wakeupSweepOkState, {}, unixSeconds);
+}
+
+/** A kubernetes kickoff deleted `count` job file sets older than a day (fix wave 3, k8s M-B). */
+export function recordJobLogsPruned(count: number): void {
+  inst().jobLogsPruned.add(count);
+}
+
+/** The docker backend dropped one finished detached job's output buffer to stay under its per-sandbox cap. */
+export function recordDockerJobOutputDropped(): void {
+  inst().dockerJobOutputDropped.add(1);
 }
 
 /** A WakeWatcher pass threw before it finished. */
