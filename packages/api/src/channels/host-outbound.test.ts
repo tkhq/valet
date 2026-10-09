@@ -937,6 +937,44 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent).toHaveLength(1);
   });
 
+  it("posts a child reply from the round that succeeds after an errored round", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const now = Date.now();
+    await engineStore.admitSubmission(session.id, threadId, {
+      id: "qi-errored-round", threadId, dispatchId: "errored-round", content: "child result", status: "queued",
+      attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now,
+    });
+    await testDb.appDb.insert(childReplyDeliveries).values({
+      id: "errored-round", orgId: ORG_ID, sessionId: session.id, threadId, queueItemId: "qi-errored-round", nextAttemptAt: 0,
+    });
+    // The parent's first round streams partial text, then the provider fails.
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({ sessionId: session.id, threadId, queueItemId: "qi-errored-round", signal: {
+        signalType: "child.settled", tagName: "signal", origin: { channelType: "fake", threadKey: "fake:99", reply: "auto" },
+      } }),
+      { type: "message", id: "reply-errored", sessionId: session.id, threadId, parentId: null,
+        createdAt: now, role: "assistant", content: "Partial answer before the provider failed", queueItemId: "qi-errored-round", stopReason: "error" },
+    ]);
+    await host.retryChildReplies();
+    const [waiting] = await testDb.appDb.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, "errored-round"));
+    expect(waiting?.completedAt).toBeNull();
+    expect(fakeTransport.sent).toHaveLength(0);
+
+    // The retry under the same submission succeeds and the submission settles.
+    await engineStore.appendEntries(session.id, threadId, [
+      { type: "message", id: "reply-retried", sessionId: session.id, threadId, parentId: "reply-errored",
+        createdAt: now + 1, role: "assistant", content: "Final answer after the retry", queueItemId: "qi-errored-round", stopReason: "end_turn" },
+    ]);
+    await engineStore.settleUnclaimed(session.id, threadId, "qi-errored-round", { outcome: "completed" });
+    await testDb.appDb.update(childReplyDeliveries).set({ nextAttemptAt: 0 }).where(eq(childReplyDeliveries.id, "errored-round"));
+    await host.retryChildReplies();
+
+    expect(fakeTransport.sent.map((sent) => sent.message.markdown)).toEqual(["Final answer after the retry"]);
+    const [delivered] = await testDb.appDb.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, "errored-round"));
+    expect(delivered?.completedAt).not.toBeNull();
+  });
+
   it("a feedback turn can reply once without creating a second feedback turn", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("events").id;
