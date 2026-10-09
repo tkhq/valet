@@ -39,6 +39,7 @@ import {
   type SpawnChildResult,
   type SubmissionResult,
   walkTranscriptDag,
+  type AttachmentState,
 } from "@valet/engine";
 import { isScratchRequestError, parseResourceQuantity, validateScratchRequest, type ScratchCaps } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
@@ -54,6 +55,7 @@ import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { WAKE_WATCHER_INTERVAL_MS } from "../engine/wake-watcher.js";
+import { childTimerBoundMs } from "../engine/prompt-rules.js";
 import { DEFAULT_ORG_ACTIVE_SESSION_CEILING, MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR } from "./limits.js";
 
 /** Delay before the in-process retry of a retryable watcher failure (decision 20). */
@@ -63,11 +65,19 @@ const DEFAULT_WATCHER_MAX_ATTEMPTS = 3;
 /** Cadence of the parked-sandbox retention sweep. Coarse on purpose — retention windows are hours. */
 const DEFAULT_RETENTION_SWEEP_INTERVAL_MS = 15 * 60_000;
 /**
- * How far ahead a child's pending timer still holds its settle when no
- * retention window is set (fix wave 2, H6). Matches the 24h child
- * retention the spec names in C4.
+ * What `parkChildSandbox` does with a settled child's sandbox in each
+ * attachment state. A `provisioning` sandbox is skipped: a forced replace
+ * or profile change is building it, and a destroy here would tear it down
+ * mid-replace (fix wave 4, concurrency N1).
  */
-const DEFAULT_CHILD_TIMER_WAIT_MS = 24 * 3_600_000;
+export type ChildParkAction = "skip" | "record_suspended" | "suspend" | "destroy";
+
+export function childParkAction(state: AttachmentState, retainable: boolean): ChildParkAction {
+  if (state === "provisioning") return "skip";
+  if (retainable && state === "suspended") return "record_suspended";
+  if (retainable && state === "ready") return "suspend";
+  return "destroy";
+}
 
 export interface ChildrenDeps {
   db: AppDb;
@@ -866,8 +876,8 @@ export class ChildWatcher {
     const child = watch.childSessionId;
     const pollMs = this.deps.leasePollMs ?? 30_000;
     const graceMs = this.deps.leaseSettleGraceMs ?? 90_000;
-    const retentionMs = this.deps.retentionMs ?? 0;
-    const timerBoundMs = retentionMs > 0 ? retentionMs : DEFAULT_CHILD_TIMER_WAIT_MS;
+    // The same bound the coding prompt promises (fix wave 4, UX N10).
+    const timerBoundMs = childTimerBoundMs(this.deps.retentionMs ?? 0);
     const watcherMs = this.deps.wakeWatcherIntervalMs ?? WAKE_WATCHER_INTERVAL_MS;
     const pause = () => new Promise((resolve) => setTimeout(resolve, pollMs).unref());
     const firstSeenEnded = new Map<string, number>();
@@ -877,6 +887,14 @@ export class ChildWatcher {
 
     for (;;) {
       const now = Date.now();
+      // A forced replace or profile change cancels the work with deferred
+      // signals and sends them only after the new sandbox is up. While the
+      // child's sandbox is provisioning, those signals are still owed, so
+      // the grace below must not lapse (fix wave 4, concurrency N1).
+      if (this.deps.engineHost.liveSession(child)?.attachment.state === "provisioning") {
+        await pause();
+        continue;
+      }
       const leases = await store.listActiveLeases(child);
       if (leases.length > 0) {
         const bound = Math.max(...leases.map((l) => l.deadlineAt)) + 2 * watcherMs + pollMs;
@@ -1003,7 +1021,9 @@ export class ChildWatcher {
 
       const retentionMs = this.deps.retentionMs ?? 0;
       const retainable = retentionMs > 0 && this.deps.engineHost.sandboxHibernationCapable();
-      if (retainable && live.attachment.state === "suspended") {
+      const action = childParkAction(live.attachment.state, retainable);
+      if (action === "skip") return;
+      if (action === "record_suspended") {
         // Already suspended (the idle sweep got there first): the sandbox
         // is parked as-is. Record the handle — suspend keeps it live on
         // the attachment — and leave the reclaim to `sweepRetention`.
@@ -1017,7 +1037,7 @@ export class ChildWatcher {
         await writeHibernated(this.deps.db, childSessionId);
         return;
       }
-      if (retainable && live.attachment.state === "ready") {
+      if (action === "suspend") {
         // Record the provider handle BEFORE suspending: the retention
         // sweep needs it once an api restart evicts the cached session,
         // and nothing else durably tracks a provisioned sandbox's id.
