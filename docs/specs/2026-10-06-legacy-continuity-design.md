@@ -38,6 +38,18 @@ The workspace runtime removed `assistants.name`, `avatar_url`, and `personality`
 - **Normalization.** The old API stored any string as a name. The read turns control and line-separator characters into spaces, trims the name, and caps it at 80 UTF-16 units, the Slack `username` limit and the `validatePresence` cap. So the name stays on its own line in the prompt and in Slack. The read drops an avatar that `validatePresence` rejects or that contains whitespace.
 - **Personality precedence.** Before the upgrade, a set column won over the `assistant/personality.md` memory file, and `""` in the column was an explicitly neutral persona. The file could already exist then: `PATCH /api/orchestrator/info` wrote it on every personality save, and the assistant could write it with its memory tools. After the upgrade the file is the only personality that anyone can change. The prompt therefore uses the column while the file is absent or unchanged since the upgrade, and the file when someone wrote it after the upgrade. The upgrade time is the `applied_at` of the `legacy-runtime-continuity-v1` row in `__valet_app_migrations`, compared with the file's `updated_at`. A null column uses the file, as before. An OKF import keeps the bundle's timestamp, so an imported pre-upgrade file does not count as a later edit.
 
+### Limitation: no editor
+
+The product has no control that changes or clears a carried-over name, avatar, or personality. This is deliberate. A renamed team keeps posting under its old assistant name. A personal workspace posts under its old assistant name, not the bot identity. Workflow, subscription, and action presence can still override the name and avatar for their own posts. An `assistant/personality.md` written after the upgrade overrides the carried-over personality.
+
+To change a value, an operator edits the row in the database. The columns exist only on an upgraded database.
+
+1. Find the workspace's live row: `SELECT id, name, avatar_url, personality FROM assistants WHERE org_id = '<org id>' AND owner_type = '<user|team|org>' AND owner_id = '<owner id>' AND archived_at IS NULL;`
+2. To clear the name, avatar, or both, set the column to NULL: `UPDATE assistants SET name = NULL, avatar_url = NULL WHERE id = '<assistant id>';`
+3. To let the memory file supply the personality, set `personality = NULL`. To keep a neutral persona, set `personality = ''`.
+
+An empty or blank name or avatar reads the same as NULL. Without a name, team and organization posts use the owner's name, and personal posts use the bot identity. The next channel post reads the new values. The prompt reads them when the workspace's session is next built, for example after an API restart.
+
 ## Recovery and external actions
 
 Use the existing fenced queue, approval and checkpoint recovery protocols. Preserve completed tool results and dispatch IDs. Do not replay completed external actions to reconstruct state.

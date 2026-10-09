@@ -88,6 +88,22 @@ describe("carried-over assistant profile", () => {
     }
   });
 
+  it("falls back once an operator clears a value to NULL or an empty string", async () => {
+    await addLegacyColumns(db);
+    await setLegacy(db, TEAM, "Desk Helper", AVATAR, "Warm and brief.");
+    await setLegacy(db, USER, "Home Helper", AVATAR, null);
+    // The operator statements the legacy continuity spec documents.
+    await db.execute(sql`UPDATE assistants SET name = NULL WHERE org_id = ${ORG} AND owner_type = 'team' AND owner_id = ${TEAM.id}`);
+    expect(await workspaceSenderIdentity(db, ORG, TEAM)).toEqual({ displayName: "platform", avatarUrl: AVATAR });
+    await db.execute(sql`UPDATE assistants SET avatar_url = '' WHERE org_id = ${ORG} AND owner_type = 'team' AND owner_id = ${TEAM.id}`);
+    expect(await workspaceSenderIdentity(db, ORG, TEAM)).toEqual({ displayName: "platform" });
+    await db.execute(sql`UPDATE assistants SET personality = NULL WHERE org_id = ${ORG} AND owner_type = 'team' AND owner_id = ${TEAM.id}`);
+    expect(await loadLegacyAssistantProfile(db, ORG, TEAM)).toBeUndefined();
+
+    await db.execute(sql`UPDATE assistants SET name = '', avatar_url = NULL WHERE org_id = ${ORG} AND owner_type = 'user' AND owner_id = ${USER.id}`);
+    expect(await workspaceSenderIdentity(db, ORG, USER)).toBeUndefined();
+  });
+
   it("reads only the workspace's live assistant, not a retired one", async () => {
     await addLegacyColumns(db);
     await db.execute(sql`UPDATE assistants SET name = 'Retired', archived_at = 1
