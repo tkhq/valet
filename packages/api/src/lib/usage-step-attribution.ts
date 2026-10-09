@@ -48,6 +48,10 @@ END $publish$`;
 export async function prepareUsageStepAttribution(db: PgDb): Promise<void> {
   await db.transaction(async (tx) => {
     await tx.query("SET LOCAL lock_timeout = '5s'");
+    // Serializes concurrent boots, as the usage analytics install does: two
+    // transactions replacing one function fail with "tuple concurrently
+    // updated". Writers pause only for this short transaction.
+    await tx.query("LOCK TABLE engine_entries IN SHARE ROW EXCLUSIVE MODE");
     await tx.query(`DO $install$ BEGIN ${functionsSql} END $install$`);
     await tx.query(usageAnalyticsPublishSql);
     await tx.query(usageHourlyPublishSql);
