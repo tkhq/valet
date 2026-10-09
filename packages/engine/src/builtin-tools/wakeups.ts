@@ -20,13 +20,13 @@ import type { ToolContext, ToolResult } from "../types.js";
 /**
  * Refuse a new wakeup or lease once this session already holds
  * `limits.perSession` active ones. "Active" = a non-terminal wakeup
- * (pending or running) or any lease — a lease is, by construction, always
- * active (released leases are not returned by `list()`).
+ * (pending or running) or a hold lease. A process or watch lease belongs
+ * to its wakeup, so it is not counted twice.
  */
 async function assertUnderLimit(seam: WakeupsSeam): Promise<string | null> {
   const { wakeups, leases } = await seam.list();
   const nonTerminal = wakeups.filter((w) => w.status === "pending" || w.status === "running").length;
-  const n = nonTerminal + leases.length;
+  const n = nonTerminal + leases.filter((l) => l.ownerKind === "hold").length;
   return n >= seam.limits.perSession ? wakeupsLimitRefusal(n, seam.limits.perSession) : null;
 }
 
@@ -76,7 +76,7 @@ export const watchTool = defineTool({
     return {
       text:
         `started watch ${wakeup.id} (max ${validation.value.maxHours}h). ` +
-        "You will receive watch.event signals and a watch.ended signal when it stops. " +
+        "You will receive watch.event signals and a watch.exited signal when it stops. " +
         "Read its log with process_read.",
     };
   },
@@ -192,6 +192,7 @@ export const wakeupCancelTool = defineTool({
     if (!result) {
       return { text: `[wakeup_cancel] ${args.id} is not an active wakeup or lease. Call wakeup_list to see active ids.` };
     }
+    if (result.kind === "refused") return { text: result.text };
     return { text: `cancelled ${args.id}` };
   },
 });

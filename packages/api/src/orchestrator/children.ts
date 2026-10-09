@@ -25,6 +25,7 @@ import {
   namespaceInternalDispatchId,
   PendingCapError,
   recordSandboxDestroyed,
+  recordScratchRequested,
   ValidationError as EngineValidationError,
   type ChannelOrigin,
   type ChildReader,
@@ -41,7 +42,7 @@ import {
   type SubmissionResult,
   walkTranscriptDag,
 } from "@valet/engine";
-import { validateScratchRequest, type ScratchCaps } from "@valet/shared";
+import { parseResourceQuantity, validateScratchRequest, type ScratchCaps } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childReplyDeliveries, childWatches, eventDropLog, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
@@ -478,10 +479,9 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     // partial child behind. The `task` tool renders the thrown message
     // verbatim as `[task_resources] <message>`.
     if (req.resources?.scratch !== undefined) {
-      req = {
-        ...req,
-        resources: { ...req.resources, scratch: validateScratchRequest(req.resources.scratch, "task", deps.scratchCaps) },
-      };
+      const scratch = validateScratchRequest(req.resources.scratch, "task", deps.scratchCaps);
+      req = { ...req, resources: { ...req.resources, scratch } };
+      recordScratchRequested("task", parseResourceQuantity(scratch) ?? 0);
     }
 
     await enforceLimits(deps.db, ctx.parentSessionId, orgId, deps.orgSessionCeiling);
@@ -901,6 +901,9 @@ export class ChildWatcher {
     // keep checking every `leasePollMs` until a submission appears or the
     // `leaseSettleGraceMs` grace window runs out.
     let waitedOnLease = false;
+    // The settle body reports the child's latest turn. After a lease wait
+    // that is the turn that handled the terminal signal, not the first one.
+    let settleResult = result;
     for (;;) {
       while ((await this.deps.engineStore.countActiveLeases(watch.childSessionId)) > 0) {
         waitedOnLease = true;
@@ -915,7 +918,9 @@ export class ChildWatcher {
         owedTurn = await this.deps.engineStore.listUnsettledSubmissions(watch.childSessionId);
       }
       if (owedTurn.length === 0) break;
-      await childSession.thread().awaitResult(owedTurn[owedTurn.length - 1]!.id);
+      const owed = await childSession.thread().awaitResult(owedTurn[owedTurn.length - 1]!.id);
+      // A superseded turn is not a result; keep the last real one.
+      if (owed.outcome !== "superseded") settleResult = owed;
     }
 
     // Re-point guard (`child_send`): the sender moves the watch row to its
@@ -1001,7 +1006,7 @@ export class ChildWatcher {
       .limit(1);
     const title = appRows[0]?.title ?? undefined;
     const continuationCheckpoint =
-      result.outcome === "failed" || result.outcome === "aborted"
+      settleResult.outcome === "failed" || settleResult.outcome === "aborted"
         ? await this.latestContinuationCheckpoint(
             watch.childSessionId,
             childSession.thread().id,
@@ -1029,10 +1034,10 @@ export class ChildWatcher {
       content: {
         kind: "signal",
         signalType: "child.settled",
-        body: resultBody(result, watch.childSessionId, continuationCheckpoint),
+        body: resultBody(settleResult, watch.childSessionId, continuationCheckpoint),
         attributes: {
           child_session_id: watch.childSessionId,
-          outcome: result.outcome,
+          outcome: settleResult.outcome,
           ...(title !== undefined ? { title } : {}),
           ...(continuationCheckpoint !== undefined
             ? { continuation_checkpoint_entry_id: continuationCheckpoint.id }

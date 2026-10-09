@@ -175,6 +175,12 @@ describe("wakeup_cancel", () => {
       (await wakeupCancelTool.execute({ id: "nope" }, makeCtx({ cancel: vi.fn(async () => null) }))).text,
     ).toBe("[wakeup_cancel] nope is not an active wakeup or lease. Call wakeup_list to see active ids.");
   });
+
+  it("returns the seam's refusal text for a process-owned lease id", async () => {
+    const text = "[wakeup_cancel] ls_p belongs to process wk_p. Cancel wk_p instead; that stops the process and releases this lease.";
+    const r = await wakeupCancelTool.execute({ id: "ls_p" }, makeCtx({ cancel: vi.fn(async () => ({ kind: "refused" as const, text })) }));
+    expect(r.text).toBe(text);
+  });
 });
 
 describe("wakeups seam absent", () => {
@@ -201,5 +207,33 @@ describe("per-session limit", () => {
     expect(r.text).toBe(
       "[wakeups_limit] This session already has 20 active wakeups and leases (limit 20, sandbox.wakeupsPerSession). Cancel one with wakeup_cancel.",
     );
+  });
+
+  it("counts a process wakeup once, not again for its lease", async () => {
+    const list = vi.fn(async () => ({
+      wakeups: Array.from({ length: 10 }, (_, i) => ({ ...baseWakeup, id: `wk_${i}` })),
+      leases: Array.from({ length: 10 }, (_, i) => ({ ...baseLease, id: `ls_${i}`, ownerKind: "process" as const, ownerId: `wk_${i}` })),
+    }));
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_t", kind: "timer" as const, fireAt: 1_700_000_060_000 } }));
+    const r = await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, makeCtx({ list, create }));
+    expect(r.text).toContain("scheduled wakeup wk_t");
+  });
+
+  it("counts hold leases toward the limit", async () => {
+    const list = vi.fn(async () => ({
+      wakeups: Array.from({ length: 19 }, (_, i) => ({ ...baseWakeup, id: `wk_${i}` })),
+      leases: [{ ...baseLease, id: "ls_h" }],
+    }));
+    const r = await wakeAtTool.execute({ after_seconds: 60, prompt: "p" }, makeCtx({ list }));
+    expect(r.text).toContain("[wakeups_limit]");
+  });
+});
+
+describe("watch result text", () => {
+  it("names the watch.exited signal the kernel emits", async () => {
+    const create = vi.fn(async () => ({ wakeup: { ...baseWakeup, id: "wk_w", kind: "watch" as const } }));
+    const r = await watchTool.execute({ command: "tail -f x", reason: "ci", max_hours: 2 }, makeCtx({ create }));
+    expect(r.text).toContain("watch.exited");
+    expect(r.text).not.toContain("watch.ended");
   });
 });

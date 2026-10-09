@@ -1,10 +1,22 @@
-import type { Lease, Sandbox, SessionStore, Wakeup, WakeupCreateInput, WakeupLimits, WakeupsSeam } from "@valet/engine";
+import { recordWakeupEnded } from "@valet/engine";
+import type {
+  Lease,
+  Sandbox,
+  SandboxProvider,
+  SessionStore,
+  Wakeup,
+  WakeupCause,
+  WakeupCreateInput,
+  WakeupKind,
+  WakeupLimits,
+  WakeupsSeam,
+} from "@valet/engine";
 import { newLeaseId, newWakeupId } from "@valet/engine/wakeups-ids";
 
 /**
  * The slice of a live session the wakeups seam needs: the sandbox's job
- * API and the attachment's current sandbox id. Narrower than the full
- * engine `Session` class on purpose. `Session.attachment` is a
+ * API and the attachment's sandbox id and raw handle. Narrower than the
+ * full engine `Session` class on purpose. `Session.attachment` is a
  * `SandboxAttachment` with private fields, so a test fixture cannot build
  * one without instantiating the real engine. Every real `Session` is
  * structurally assignable to this type, so `host.ts` passes `() =>
@@ -12,12 +24,20 @@ import { newLeaseId, newWakeupId } from "@valet/engine/wakeups-ids";
  */
 export interface WakeupsSeamSession {
   sandbox: Sandbox;
-  attachment: { sandboxId?: string };
+  attachment: {
+    sandboxId?: string;
+    /** The ready sandbox, or null. Reading it never provisions or wakes compute. */
+    current(): Sandbox | null;
+  };
 }
 
 export interface WakeupsSeamDeps {
   engineStore: SessionStore;
   limits: WakeupLimits;
+  /** Restores a lease's sandbox for a best-effort kill when the session holds no ready handle. */
+  provider?: Pick<SandboxProvider, "restore">;
+  /** Records an agent cancel in `valet.wakeups.total`. Tests inject a spy. */
+  recordEnded?: (kind: WakeupKind, cause: WakeupCause) => void;
   now?: () => number;
 }
 
@@ -30,7 +50,8 @@ const HOUR_MS = 3_600_000;
  * spec 2026-10-08). The seam is the only path the engine's background-work
  * tools (`bash background`, `watch`, `wake_at`, `hold_sandbox`,
  * `process_read`, `wakeup_list`, `wakeup_cancel`) use to reach the store
- * and the sandbox's job API.
+ * and the sandbox's job API. Every id it accepts must belong to this
+ * session: an id from another session reads as unknown (spec B3).
  */
 export function buildWakeupsSeam(
   deps: WakeupsSeamDeps,
@@ -39,6 +60,49 @@ export function buildWakeupsSeam(
 ): WakeupsSeam {
   const { engineStore, limits } = deps;
   const now = deps.now ?? (() => Date.now());
+  const recordEnded = deps.recordEnded ?? recordWakeupEnded;
+
+  /**
+   * INV-1: a lease deadline is at most `leaseMaxHours` after creation. The
+   * tool validators bound the hours first. This guard is the invariant's
+   * single owner, because the stores take no limits configuration.
+   */
+  function assertLeaseHours(hours: number): void {
+    if (!(hours > 0) || hours > limits.leaseMaxHours) {
+      throw new Error(
+        `[lease_limit] A lease of ${hours}h exceeds sandbox.leaseMaxHours (${limits.leaseMaxHours}h). Request between 1 and ${limits.leaseMaxHours} hours.`,
+      );
+    }
+  }
+
+  /** This session's wakeup with `id`, or null for an unknown or foreign id. */
+  async function ownWakeup(id: string): Promise<Wakeup | null> {
+    const wakeup = await engineStore.getWakeup(id);
+    return wakeup && wakeup.sessionId === sessionId ? wakeup : null;
+  }
+
+  /**
+   * Best-effort kill of a process or watch group. It uses the raw ready
+   * handle, or a restored one, never the policy sandbox: that path can
+   * provision compute on a cold session. A failure never blocks the cancel.
+   */
+  async function killJob(wakeup: Wakeup, execId: string): Promise<void> {
+    try {
+      const lease = wakeup.leaseId === undefined
+        ? undefined
+        : (await engineStore.listActiveLeases(sessionId)).find((l) => l.id === wakeup.leaseId);
+      const live = session()?.attachment.current() ?? null;
+      let target: Sandbox | null = null;
+      if (live && (lease?.sandboxId === undefined || lease.sandboxId === live.id)) {
+        target = live;
+      } else if (lease?.sandboxId !== undefined && deps.provider) {
+        target = await deps.provider.restore(lease.sandboxId);
+      }
+      await target?.cancelJob?.(execId);
+    } catch (err) {
+      console.warn(`wakeup_cancel: kill of ${wakeup.id} (exec ${execId}) failed; cancelling the row anyway:`, err);
+    }
+  }
 
   async function createProcessOrWatch(
     threadId: string,
@@ -47,6 +111,7 @@ export function buildWakeupsSeam(
     reason: string,
     hours: number,
   ): Promise<{ wakeup: Wakeup; lease: Lease }> {
+    assertLeaseHours(hours);
     const sb = session()?.sandbox;
     if (!sb?.execJob) {
       throw new Error(BASH_BACKGROUND_UNAVAILABLE);
@@ -121,6 +186,7 @@ export function buildWakeupsSeam(
     },
 
     async hold(input: { hours: number; reason: string }): Promise<Lease> {
+      assertLeaseHours(input.hours);
       const nowMs = now();
       const lease: Lease = {
         id: newLeaseId(),
@@ -136,7 +202,7 @@ export function buildWakeupsSeam(
     },
 
     async get(id: string): Promise<Wakeup | null> {
-      return engineStore.getWakeup(id);
+      return ownWakeup(id);
     },
 
     async list() {
@@ -150,12 +216,10 @@ export function buildWakeupsSeam(
     async cancel(id: string) {
       const nowMs = now();
       if (id.startsWith("wk_")) {
-        const wakeup = await engineStore.getWakeup(id);
+        const wakeup = await ownWakeup(id);
         if (!wakeup) return null;
         if ((wakeup.kind === "process" || wakeup.kind === "watch") && wakeup.execId) {
-          // Best-effort: a dead sandbox or an already-exited job must not
-          // block the cancel.
-          await session()?.sandbox.cancelJob?.(wakeup.execId);
+          await killJob(wakeup, wakeup.execId);
         }
         const transitioned = await engineStore.transitionWakeup(
           id,
@@ -165,12 +229,24 @@ export function buildWakeupsSeam(
           nowMs,
         );
         if (!transitioned) return null;
+        recordEnded(wakeup.kind, "cancelled");
         if (wakeup.leaseId) {
           await engineStore.releaseLease(wakeup.leaseId, "cancelled", nowMs);
         }
         return { kind: "wakeup" as const };
       }
       if (id.startsWith("ls_")) {
+        const lease = (await engineStore.listActiveLeases(sessionId)).find((l) => l.id === id);
+        if (!lease) return null;
+        if (lease.ownerKind !== "hold") {
+          // Releasing a process or watch lease alone would leave its wakeup
+          // running with no lease. The wakeup id ends both.
+          const owner = lease.ownerId ?? "its wakeup";
+          return {
+            kind: "refused" as const,
+            text: `[wakeup_cancel] ${id} belongs to ${lease.ownerKind} ${owner}. Cancel ${owner} instead; that stops the ${lease.ownerKind} and releases this lease.`,
+          };
+        }
         const released = await engineStore.releaseLease(id, "cancelled", nowMs);
         return released ? { kind: "lease" as const } : null;
       }
@@ -178,7 +254,7 @@ export function buildWakeupsSeam(
     },
 
     async readLog(id: string, offset: number, bytes: number) {
-      const wakeup = await engineStore.getWakeup(id);
+      const wakeup = await ownWakeup(id);
       if (!wakeup) {
         throw new Error(`[process_read] ${id} is not an active wakeup. Call wakeup_list to see active ids.`);
       }
@@ -191,11 +267,13 @@ export function buildWakeupsSeam(
       if (!sb?.pollJob) {
         throw new Error("[process_read] this sandbox backend cannot read background logs.");
       }
-      const poll = await sb.pollJob(wakeup.execId, offset);
+      const poll = await sb.pollJob(wakeup.execId, offset, { maxBytes: bytes });
+      // A provider that ignores the bound returns more. Cut it here.
       const text = poll.output.slice(0, bytes);
-      const nextOffset = offset + Buffer.byteLength(text);
-      const eof = poll.status !== "running" && text.length === poll.output.length;
-      return { text, nextOffset, eof };
+      if (text.length < poll.output.length) {
+        return { text, nextOffset: offset + Buffer.byteLength(text), eof: false };
+      }
+      return { text, nextOffset: poll.nextOffset, eof: poll.status !== "running" };
     },
   };
 }
