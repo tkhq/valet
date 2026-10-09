@@ -35,6 +35,18 @@ import type {
   ActionInvokeRequest,
   ActionInvokeResponse,
   ActionSearchResponse,
+  GetSkillResponse,
+  GetWorkflowRunResponse,
+  ListArtifactsResponse,
+  ListNotificationDecisionsResponse,
+  ListSkillsResponse,
+  ListTeamsResponse,
+  ListWorkflowActionRequiredResponse,
+  ListWorkflowsResponse,
+  RetryWorkflowRunResponse,
+  ShareArtifactRequest,
+  ShareArtifactResponse,
+  StartWorkflowRunResponse,
 } from "../wire/types.js";
 import * as fs from "fs";
 import * as path from "path";
@@ -49,6 +61,52 @@ export interface ListMessagesOpts {
   threadId?: string;
   cursor?: string;
   limit?: number;
+}
+
+/** `GET /api/threads/:id`. `activeItemId` is the running or decision-blocked turn, when one exists. */
+export interface ThreadDetail {
+  id: string;
+  sessionId: string;
+  title: string | null;
+  createdAt: number;
+  archivedAt: number | null;
+  activeItemId?: string;
+}
+
+/** `GET /api/memory/search`. */
+export interface MemorySearchResponse {
+  results: Array<{ path: string; title?: string; description?: string; snippet?: Array<{ text: string; match: boolean }> }>;
+}
+
+/** `GET /api/memory`: a file, or a directory's rendered index. */
+export interface MemoryReadResponse {
+  kind?: string;
+  path?: string;
+  rendered?: string;
+  file?: { path?: string; title?: string; description?: string; tags?: string[]; content?: string; updatedAt?: number };
+}
+
+/** `PUT /api/memory` and `POST /api/memory/patch`. */
+export interface MemoryWriteResponse {
+  file?: { path?: string; version?: number };
+}
+
+/**
+ * Owner query parameters for the memory, skills, workflow, and artifact
+ * routes, which take `ownerType`/`ownerId` instead of `workspace`. A personal
+ * workspace sends none, matching the MCP tools.
+ */
+function ownerParams(workspace: string | undefined, extra: Record<string, string> = {}): URLSearchParams {
+  const params = new URLSearchParams(extra);
+  if (workspace && workspace !== "user") {
+    params.set("ownerType", "team");
+    params.set("ownerId", workspace);
+  }
+  return params;
+}
+
+function withQuery(base: string, params: URLSearchParams): string {
+  return params.size > 0 ? `${base}?${params.toString()}` : base;
 }
 
 export class InstanceClient {
@@ -215,8 +273,13 @@ export class InstanceClient {
 
   // ── threads ────────────────────────────────────────────────────────────
 
-  getThread(id: string): Promise<{ id: string; sessionId: string; title: string | null; createdAt: number; archivedAt: number | null }> {
+  getThread(id: string): Promise<ThreadDetail> {
     return this.request("GET", `/api/threads/${encodeURIComponent(id)}`);
+  }
+
+  /** `POST /api/threads/:id/abort`. The route stops only the named turn. */
+  async abortThread(id: string, targetItemId: string): Promise<void> {
+    await this.request("POST", `/api/threads/${encodeURIComponent(id)}/abort`, { targetItemId });
   }
 
   listWorkspaceThreads(workspace?: string): Promise<ListThreadsResponse> {
@@ -267,6 +330,94 @@ export class InstanceClient {
       `/api/sessions/${encodeURIComponent(id)}/decisions/${encodeURIComponent(gateId)}/resolve`,
       body,
     );
+  }
+
+  // ── teams ──────────────────────────────────────────────────────────────
+
+  listTeams(): Promise<ListTeamsResponse> {
+    return this.request("GET", "/api/teams");
+  }
+
+  // ── memory (`/api/memory`) ─────────────────────────────────────────────
+
+  searchMemory(query: string, workspace?: string, limit?: number): Promise<MemorySearchResponse> {
+    return this.request("GET", withQuery("/api/memory/search", ownerParams(workspace, { q: query, ...(limit ? { limit: String(limit) } : {}) })));
+  }
+
+  readMemory(memoryPath: string, workspace?: string): Promise<MemoryReadResponse> {
+    return this.request("GET", withQuery("/api/memory", ownerParams(workspace, { path: memoryPath })));
+  }
+
+  writeMemory(body: { path: string; content: string; description?: string; tags?: string[] }, workspace?: string): Promise<MemoryWriteResponse> {
+    return this.request("PUT", withQuery("/api/memory", ownerParams(workspace)), body);
+  }
+
+  patchMemory(body: { path: string; oldString: string; newString: string }, workspace?: string): Promise<MemoryWriteResponse> {
+    return this.request("POST", withQuery("/api/memory/patch", ownerParams(workspace)), body);
+  }
+
+  async moveMemory(from: string, to: string, workspace?: string): Promise<void> {
+    await this.request("POST", withQuery("/api/memory/move", ownerParams(workspace)), { from, to });
+  }
+
+  async deleteMemory(memoryPath: string, workspace?: string): Promise<void> {
+    await this.request("DELETE", withQuery("/api/memory", ownerParams(workspace, { path: memoryPath })));
+  }
+
+  // ── skills (`/api/skills`) ─────────────────────────────────────────────
+
+  listSkills(opts: { query?: string; workspace?: string; limit?: number }): Promise<ListSkillsResponse> {
+    return this.request("GET", withQuery("/api/skills", ownerParams(opts.workspace, {
+      ...(opts.query ? { q: opts.query } : {}), limit: String(opts.limit ?? 50),
+    })));
+  }
+
+  getSkill(name: string): Promise<GetSkillResponse> {
+    return this.request("GET", `/api/skills/${encodeURIComponent(name)}`);
+  }
+
+  // ── workflows (`/api/workflows`) ───────────────────────────────────────
+
+  listWorkflows(workspace?: string): Promise<ListWorkflowsResponse> {
+    return this.request("GET", withQuery("/api/workflows", ownerParams(workspace)));
+  }
+
+  startWorkflowRun(workflowId: string, input?: Record<string, unknown>): Promise<StartWorkflowRunResponse> {
+    return this.request("POST", `/api/workflows/${encodeURIComponent(workflowId)}/runs`, input ? { input } : {});
+  }
+
+  getWorkflowRun(runId: string): Promise<GetWorkflowRunResponse> {
+    return this.request("GET", `/api/workflows/runs/${encodeURIComponent(runId)}`);
+  }
+
+  async cancelWorkflowRun(runId: string): Promise<void> {
+    await this.request("POST", `/api/workflows/runs/${encodeURIComponent(runId)}/cancel`);
+  }
+
+  retryWorkflowRun(runId: string): Promise<RetryWorkflowRunResponse> {
+    return this.request("POST", `/api/workflows/runs/${encodeURIComponent(runId)}/retry`);
+  }
+
+  listWorkflowActionRequired(): Promise<ListWorkflowActionRequiredResponse> {
+    return this.request("GET", "/api/workflows/action-required");
+  }
+
+  // ── artifacts (`/api/artifacts`) and the inbox ─────────────────────────
+
+  listArtifacts(workspace?: string): Promise<ListArtifactsResponse> {
+    return this.request("GET", withQuery("/api/artifacts", ownerParams(workspace)));
+  }
+
+  shareArtifact(body: ShareArtifactRequest, workspace?: string): Promise<ShareArtifactResponse> {
+    return this.request("POST", withQuery("/api/artifacts/share", ownerParams(workspace)), body);
+  }
+
+  async revokeArtifact(id: string): Promise<void> {
+    await this.request("DELETE", `/api/artifacts/${encodeURIComponent(id)}`);
+  }
+
+  listInboxDecisions(): Promise<ListNotificationDecisionsResponse> {
+    return this.request("GET", "/api/notifications/decisions");
   }
 
   // ── file uploads ───────────────────────────────────────────────────────

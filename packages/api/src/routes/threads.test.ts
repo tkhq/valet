@@ -1,11 +1,12 @@
 import type { CreateTeamResponse, CreateTeamApiKeyResponse } from "../wire/types.js";
 import { eq, sql } from "drizzle-orm";
 import { agentSessions, teams, teamMembers } from "../schema/index.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { QueueItem } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 
 let api: TestApi | undefined;
-afterEach(async () => { await api?.cleanup(); api = undefined; });
+afterEach(async () => { vi.restoreAllMocks(); await api?.cleanup(); api = undefined; });
 
 describe("thread addressing compatibility", () => {
   it("withdraws only a decision belonging to the addressed thread", async () => {
@@ -76,6 +77,28 @@ describe("thread addressing compatibility", () => {
     const archived = await fetch(`${api.baseUrl}/api/threads?archived=1`);
     expect(await archived.json()).toMatchObject({ threads: expect.arrayContaining([expect.objectContaining({ id: thread.id })]) });
   });
+  // A client without the live socket (the CLI) needs the active turn's id to
+  // send a target-bound Stop.
+  it("reports the running turn, else the decision-blocked one, as activeItemId", async () => {
+    api = await bootTestApi();
+    const created = await fetch(`${api.baseUrl}/api/threads`, { method: "POST" });
+    const thread = await created.json() as { id: string; sessionId: string };
+    const item = (id: string, threadId: string, status: QueueItem["status"]): QueueItem => ({
+      id, threadId, content: "work", status, attemptCount: 0, maxAttempts: 10, timeoutAt: 0, createdAt: 1, updatedAt: 1,
+    });
+    const store = api.providers.engineStore;
+    const read = async () => (await (await fetch(`${api!.baseUrl}/api/threads/${thread.id}`)).json()) as { activeItemId?: string };
+
+    expect((await read()).activeItemId).toBeUndefined();
+    // A queued follow-up and another thread's running turn are not this thread's active turn.
+    vi.spyOn(store, "listUnsettledSubmissions").mockResolvedValue([
+      item("q-queued", thread.id, "queued"), item("q-other", "other-thread", "running"), item("q-blocked", thread.id, "blocked_on_decision_gate"),
+    ]);
+    expect((await read()).activeItemId).toBe("q-blocked");
+    vi.spyOn(store, "listUnsettledSubmissions").mockResolvedValue([item("q-blocked", thread.id, "blocked_on_decision_gate"), item("q-live", thread.id, "running")]);
+    expect((await read()).activeItemId).toBe("q-live");
+  });
+
   it("withdraws a pending approval when its thread is archived (TKAI-260)", async () => {
     api = await bootTestApi();
     const thread = await (await fetch(`${api.baseUrl}/api/threads`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json() as { id: string; sessionId: string };

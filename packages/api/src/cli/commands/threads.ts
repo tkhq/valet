@@ -4,7 +4,7 @@ import { parseGlobalFlags, printErr, printJson, printLine, renderTable, type Par
 import { resolveInstance } from "../resolve.js";
 import type { CliContext } from "../types.js";
 
-type ThreadsClient = Pick<InstanceClient, "getThread" | "listWorkspaceThreads" | "createWorkspaceThread">;
+type ThreadsClient = Pick<InstanceClient, "getThread" | "listWorkspaceThreads" | "createWorkspaceThread" | "abortThread">;
 export async function runThreads(client: ThreadsClient, flags: ParsedFlags): Promise<number> {
   const workspace = typeof flags.flags.workspace === "string" ? flags.flags.workspace : undefined;
   switch (flags.rest[0]) {
@@ -23,11 +23,25 @@ export async function runThreads(client: ThreadsClient, flags: ParsedFlags): Pro
       const id = flags.rest[1];
       if (!id) break;
       const thread = await client.getThread(id);
-      if (flags.json) printJson(thread); else printLine(`${thread.id}  ${thread.title ?? "Untitled thread"}`);
+      if (flags.json) printJson(thread); else printLine(`${thread.id}  ${thread.title ?? "Untitled thread"}${thread.activeItemId ? "  (working)" : ""}`);
+      return ExitCode.OK;
+    }
+    case "stop": {
+      const id = flags.rest[1];
+      if (!id) break;
+      // Stop the turn the server reports as active, by its id, as the web
+      // Stop button does. A follow-up queued behind it keeps its place.
+      const thread = await client.getThread(id);
+      if (!thread.activeItemId) {
+        if (flags.json) printJson({ thread_id: id, stopped: false }); else printLine("nothing to stop: the thread has no running turn");
+        return ExitCode.OK;
+      }
+      await client.abortThread(id, thread.activeItemId);
+      if (flags.json) printJson({ thread_id: id, stopped: true, message_id: thread.activeItemId }); else printLine(`stopped ${thread.activeItemId}`);
       return ExitCode.OK;
     }
   }
-  printErr("usage: valet threads <list|new|show ID> [--workspace user|TEAM_ID] [--title TITLE]");
+  printErr("usage: valet threads <list|new|show ID|stop ID> [--workspace user|TEAM_ID] [--title TITLE]");
   return ExitCode.Usage;
 }
 
