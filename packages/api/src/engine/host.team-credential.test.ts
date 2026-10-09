@@ -68,6 +68,7 @@ describe("EngineHost team-owned session credentials", () => {
 
   function makeHost(appDb: AppDb, credentials: PgCredentialStore, fixtureUrl: string): EngineHost {
     const h = new EngineHost({
+      scratchCaps: {},
       engineStore: new InMemorySessionStore(),
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new InMemoryEventStream(),
@@ -305,6 +306,7 @@ describe("EngineHost team-owned session credentials", () => {
     };
     fixture = startGithubFixture();
     const h = new EngineHost({
+      scratchCaps: {},
       engineStore: new InMemorySessionStore(),
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new InMemoryEventStream(),
@@ -563,6 +565,7 @@ describe("EngineHost team-owned session credentials", () => {
       });
       fixture = startGithubFixture();
       const h = new EngineHost({
+        scratchCaps: {},
         engineStore: new InMemorySessionStore(),
         sandboxProvider: new VirtualSandboxProvider(),
         eventStream: new InMemoryEventStream(),

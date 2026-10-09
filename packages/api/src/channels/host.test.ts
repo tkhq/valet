@@ -165,6 +165,7 @@ describe("ChannelHost.handleUpdate", () => {
     }
 
     engineHost = new EngineHost({
+      scratchCaps: {},
       engineStore,
       sandboxProvider,
       eventStream,

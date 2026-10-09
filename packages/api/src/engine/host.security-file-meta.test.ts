@@ -143,6 +143,7 @@ describe("verifyFileInSandbox (guardrail 4 pure read)", () => {
 describe("EngineHost.readSandboxFileMeta (guardrail 4 host seam)", () => {
   it("returns null (fail open) for a session that is not live in the cache", async () => {
     const host = new EngineHost({
+      scratchCaps: {},
       engineStore: new InMemorySessionStore(),
       sandboxProvider: new NonIsolatedProvider(),
       eventStream: new InMemoryEventStream(),

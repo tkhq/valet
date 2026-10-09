@@ -146,6 +146,7 @@ describe("long-poll mode", () => {
       transports: [{ channelType: "fake", create: () => transport }],
     };
     engineHost = new EngineHost({
+      scratchCaps: {},
       engineStore,
       sandboxProvider,
       eventStream,
@@ -213,6 +214,7 @@ describe("long-poll mode", () => {
       ],
     };
     engineHost = new EngineHost({
+      scratchCaps: {},
       engineStore,
       sandboxProvider,
       eventStream,

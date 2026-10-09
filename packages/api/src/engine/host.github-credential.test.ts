@@ -62,6 +62,7 @@ describe("EngineHost session github credential resolution", () => {
 
   function makeHost(appDb: AppDb, credentials: PgCredentialStore, fixtureUrl: string): EngineHost {
     const h = new EngineHost({
+      scratchCaps: {},
       engineStore: new InMemorySessionStore(),
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new InMemoryEventStream(),

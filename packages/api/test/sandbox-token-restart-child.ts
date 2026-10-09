@@ -39,6 +39,7 @@ async function main() {
   await db.insert(users).values({ id: "restart-user", email: "restart@test.invalid", name: "Restart test", role: "member" }).onConflictDoNothing();
   const provider = new RecordingProvider();
   const host = new EngineHost({
+    scratchCaps: {},
     engineStore: new PgSessionStore(pgdb),
     eventStream: new PgEventStream(pgdb),
     sandboxProvider: provider,

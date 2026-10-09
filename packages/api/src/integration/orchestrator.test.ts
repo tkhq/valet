@@ -122,6 +122,7 @@ describe("api integration: default assistant lifecycle", () => {
     // against is `sessionFor` rehydrating an assistant id through the
     // generic `buildSession` path (no persona/snapshot/mem tools/steer).
     const restoreHost = new EngineHost({
+      scratchCaps: {},
       engineStore: api.providers.engineStore,
       sandboxProvider: api.providers.sandboxProvider,
       eventStream: api.providers.eventStream,

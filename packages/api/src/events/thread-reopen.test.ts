@@ -23,7 +23,7 @@ it("reopens a Slack conversation with its stable identity, history, pending gate
     const engineStore = new PgSessionStore(pgdb);
     const engineHost = new EngineHost({ db, engineStore, sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new PgEventStream(pgdb), engineCredentials: new PgCredentialStore(pgdb, deriveSecretKey("reopen-test")),
-      apiBaseUrl: "http://127.0.0.1:1", plugins: [],
+      apiBaseUrl: "http://127.0.0.1:1", plugins: [], scratchCaps: {},
     });
     return { pglite, db, engineStore, engineHost };
   }

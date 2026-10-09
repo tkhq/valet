@@ -247,6 +247,7 @@ describe("ChannelHost outbound delivery", () => {
     });
 
     engineHost = new EngineHost({
+      scratchCaps: {},
       engineStore,
       sandboxProvider,
       eventStream,
@@ -2775,6 +2776,7 @@ describe("ChannelHost.attentionDeliverer", () => {
     });
 
     const engineHost = new EngineHost({
+      scratchCaps: {},
       engineStore,
       sandboxProvider,
       eventStream,
