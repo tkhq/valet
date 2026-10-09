@@ -61,6 +61,7 @@ data:
   VALET_TIMER_MAX_HOURS: {{ .Values.sandbox.timerMaxHours | quote }}
   VALET_WAKEUPS_PER_SESSION: {{ .Values.sandbox.wakeupsPerSession | quote }}
   VALET_WATCH_MAX_EVENTS_PER_HOUR: {{ .Values.sandbox.watchMaxEventsPerHour | quote }}
+  VALET_JOB_LOG_MAX_BYTES: {{ .Values.sandbox.jobLogMaxBytes | quote }}
   # Idle-retention windows before a suspended sandbox's workspace volume is
   # reclaimed (see values.yaml). Children churn fast and get the short
   # window; every other session class gets the long one. The api reads the

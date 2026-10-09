@@ -92,6 +92,17 @@ grep -q 'VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "50Gi"' "$TMP_DIR/storage-overri
   || fail "sandbox storage limit override was lost"
 pass "independent sandbox storage request and limit"
 
+# Background job log cap (fix wave 2): the api reads VALET_JOB_LOG_MAX_BYTES.
+grep -q 'VALET_JOB_LOG_MAX_BYTES: "2Gi"' "$TMP_DIR/bundled.yaml" \
+  || fail "default render must carry VALET_JOB_LOG_MAX_BYTES \"2Gi\""
+grep -q 'VALET_SANDBOX_SCRATCH_MAX: "0"' "$TMP_DIR/bundled.yaml" \
+  || fail "scratch must stay disabled by default"
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set-string sandbox.jobLogMaxBytes=512Mi > "$TMP_DIR/job-log.yaml"
+grep -q 'VALET_JOB_LOG_MAX_BYTES: "512Mi"' "$TMP_DIR/job-log.yaml" \
+  || fail "sandbox.jobLogMaxBytes override was lost"
+pass "job log cap and scratch defaults render"
+
 # --- sandbox namespace ownership -----------------------------------------
 [ "$(grep -c '^kind: Namespace$' "$TMP_DIR/bundled.yaml")" -eq 1 ] \
   || fail "default render must include exactly one sandbox Namespace"

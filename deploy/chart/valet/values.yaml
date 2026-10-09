@@ -202,14 +202,26 @@ sandbox:
   # Node-local /scratch per sandbox (spec 2026-10-08 Part A). scratchMax "0"
   # disables scratch. scratchAgentMax bounds what a `task` child may request;
   # a repo's .valet/prebuild.yaml may declare up to scratchMax.
+  # WARNING: if you set scratchMax, keep scratchAgentMax at or below it, or
+  # the api fails at boot. Example: scratchMax "50Gi" with the default
+  # scratchAgentMax "100Gi" crash-loops; set scratchAgentMax "50Gi" too.
+  # A scratch pod needs a node with that much free local disk. Without a
+  # node pool that fits, the session fails after 10 minutes Pending.
   scratchMax: "0"
   scratchAgentMax: "100Gi"
   # Wakeups and leases (spec Part D). A lease keeps a sandbox awake and
-  # unevictable until its deadline; leaseMaxHours caps every deadline.
+  # unevictable until its deadline; leaseMaxHours caps every deadline, so
+  # it is also the longest time one background process can hold a node.
+  # Integer knobs take plain digits: hours 1 to 8760, wakeupsPerSession 1
+  # to 1000, watchMaxEventsPerHour 1 to 100000. Other values fail at boot.
   leaseMaxHours: 72
   timerMaxHours: 720
   wakeupsPerSession: 20
   watchMaxEventsPerHour: 120
+  # Cap on one background job's log file in the sandbox (a quantity, read
+  # as VALET_JOB_LOG_MAX_BYTES). It bounds the node disk one chatty job
+  # can use, so the job cannot fill /scratch and evict the pod.
+  jobLogMaxBytes: "2Gi"
 
   # Size of the PERSISTENT /workspace claim each sandbox provisions. This
   # is the volume that survives pod recreation and hibernation, and it
