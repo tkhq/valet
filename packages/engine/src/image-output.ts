@@ -34,16 +34,19 @@ export async function validateImage(bytes: Uint8Array, sharp: typeof sharpType, 
   }
 }
 
+/** Preview edge lengths, largest first. A dense 1024 px image can still exceed the limit, so smaller edges follow. */
+const PREVIEW_EDGES = [1024, 768, 512];
+
 /** Keep the original file, but bound the preview replayed to the session model. */
 export async function imageAttachment(bytes: Uint8Array, format: "png" | "jpeg" | "webp", sharp: typeof sharpType): Promise<Uint8Array> {
   if (bytes.byteLength <= MAX_ATTACHMENT_BYTES) return bytes;
-  const preview = new Uint8Array(await sharp(bytes, { failOn: "warning", limitInputPixels: MAX_IMAGE_PIXELS })
-    .resize({ width: 1024, height: 1024, fit: "inside", withoutEnlargement: true })
-    .toFormat(format).toBuffer());
-  if (!preview.length || preview.byteLength > MAX_ATTACHMENT_BYTES) {
-    throw new Error("Cannot create an image preview smaller than 5 MB. Request a smaller image.");
+  for (const edge of PREVIEW_EDGES) {
+    const preview = new Uint8Array(await sharp(bytes, { failOn: "warning", limitInputPixels: MAX_IMAGE_PIXELS })
+      .resize({ width: edge, height: edge, fit: "inside", withoutEnlargement: true })
+      .toFormat(format).toBuffer());
+    if (preview.length && preview.byteLength <= MAX_ATTACHMENT_BYTES) return preview;
   }
-  return preview;
+  throw new Error("Cannot create an image preview smaller than 5 MB. Use the saved original file.");
 }
 
 export function decodeImageBase64(b64: unknown): Uint8Array {

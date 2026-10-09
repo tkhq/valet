@@ -80,6 +80,12 @@ The plugin has no `responses_model` parameter or Responses code path.
 
 Native generation uses the existing provider's host-side auth. It does not resolve another credential or start another model.
 Untrusted external-sender turns do not receive the native hosted tool.
+
+The hosted tool is offered only when `openai.generate_image` would run now without a gate.
+Before each request, the thread asks `actionRunsUngated` for that action: the OpenAI plugin must be registered in the session's plugin catalog, its service must be available, and the policy resolver must answer `allow`.
+A `deny` or `require_approval` decision, a resolver error, a missing catalog, or a missing plugin withholds the hosted tool for the turn.
+The plugin action then stays visible, and `invokeAction` applies and audits the same policy when the agent calls it.
+The check opens no gate and writes no audit record.
 Requests preserve existing sampling, timeout, and abort settings. The bridge preserves final results from providers that end without terminal events.
 A request-time 400, 403, 404, or 422 error naming image-tool access or availability triggers one request without the hosted tool.
 That turn uses plugin generation, including catalog and pinned tools. Authentication, quota, unrelated model errors, and stream errors do not trigger this fallback.
@@ -91,7 +97,19 @@ The adapter writes validated original bytes before making the preview. It regist
 If the preview fails, the receipt returns the saved path and a warning instead of asking for another paid generation.
 The web renderer keeps that path visible without a preview.
 If a later stream event fails, completed images still produce receipts with a stream warning.
-An abort after saving reports the paths in its error. Receipt replay still propagates aborts; it does not treat them as preview failures. A request that saved an image cannot use transient-turn retries or provider fallback. Later plain requests retain normal recovery after receipts.
+The warning names the upstream end state: the provider error, `length` for an output-token cutoff, or the incomplete reason such as `content_filter`.
+A cut-off message keeps only tool calls whose arguments finished streaming, plus the receipts. A truncated call never runs.
+An abort after saving appends the paths to the message text and reports them in its error.
+The thread persists an aborted message's text, so the paths survive reload and reach the next request.
+Receipt replay still propagates aborts; it does not treat them as preview failures. A request that saved an image cannot use transient-turn retries or provider fallback. Later plain requests retain normal recovery after receipts.
+The direct Images fallback follows the same order: it writes the validated original, then makes the preview.
+If the preview fails or the turn aborts after the write, the action succeeds with the saved path and a warning, without an attachment.
+
+### Receipts and context pruning
+
+Receipt results are prunable like other tool results. The sandbox file is the durable record.
+Context estimates count each tool-result image as one image, not as its base64 text, so one preview cannot force a prune or compaction by itself.
+When a receipt's output is elided, replay sends the saved path in its place, so the model can still edit the file with `openai.edit_image`.
 
 ### Responses replay
 
@@ -117,7 +135,7 @@ If decoding cannot load, the request fails before spending image-generation cred
 
 The original encoded bytes remain unchanged in the sandbox file.
 Model-facing previews are bounded to 5 MB after base64 encoding, with space reserved for metadata.
-Larger images are resized to fit 1024 by 1024 pixels, preserving their format.
+Larger images are resized to fit 1024 by 1024 pixels, preserving their format. If a dense image still exceeds the limit at 1024, the preview tries 768 and then 512 pixels before it gives up.
 The attachment MIME, file extension, and detected format must agree. No successful receipt precedes its sandbox write.
 Native receipts can recover from an interrupted turn by reading the saved file, without regenerating or paying again.
 
@@ -170,6 +188,7 @@ the CLAUDE.md tool-call persistence rule.
   hidden in `list_tools`).
 - Plugin tests cover model selection, generation and edits, formats, unsupported options, malformed output, limits, write failures, aborts, and real LocalSandbox paths.
 - Engine tests exercise capability selection, raw hosted events, null and failed results, write failures, aborts, encoded limits, and fallback discovery.
+- Engine tests cover cut-off streams with truncated calls, pruned-receipt replay, policy-gated offering with deny, approval, allow, and missing-catalog cases, and image-aware token estimates.
 - An API integration test uses the real pinned OpenAI streaming provider with scripted SSE responses.
   It checks native generation, multi-turn editing, sandbox bytes, agent image feedback, live media, Postgres persistence, REST history, process-cache restore, and session isolation.
 - A fallback API test checks direct generation and editing with Sunburst and Flare, sandbox files, and inline persisted results.

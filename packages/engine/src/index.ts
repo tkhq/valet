@@ -144,6 +144,7 @@ export {
 export {
   pluginCatalogTools,
   buildPluginCatalog,
+  actionRunsUngated,
   invokeAction,
   prepareActionArgs,
   approvalModeForAction,

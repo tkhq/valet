@@ -405,6 +405,37 @@ describe("openaiPlugin", () => {
     expect(files.size).toBe(0);
   });
 
+  it("keeps the saved file and its path when no preview can be made", async () => {
+    const noPreview = (input: Uint8Array, options: sharp.SharpOptions) => {
+      const image = sharp(input, options);
+      image.resize = () => { throw new Error("preview failed"); };
+      return image;
+    };
+    vi.stubGlobal("__VALET_SHARP__", noPreview);
+    const original = await sharp(randomBytes(1536 * 1024 * 4), { raw: { width: 1536, height: 1024, channels: 4 } }).png().toBuffer();
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: original.toString("base64") }] })));
+    const { ctx, files } = makeCtx({ credential: { accessToken: "sk-test" } });
+    const result = await getAction("openai.generate_image").execute({ prompt: "fox", output_path: "/workspace/large.png" }, ctx);
+    expect(result).toMatchObject({ success: true, data: { path: "/workspace/large.png", warning: expect.stringContaining("do not regenerate") } });
+    expect(result.attachments).toBeUndefined();
+    const saved = files.get("/workspace/large.png");
+    if (!saved) throw new Error("missing saved image");
+    expect(Buffer.from(saved).equals(original)).toBe(true);
+  });
+
+  it("returns the saved path when the turn aborts right after the write", async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: PNG_B64 }] })));
+    const { ctx, files } = makeCtx({ credential: { accessToken: "sk-test" } });
+    const abort = new AbortController();
+    ctx.signal = abort.signal;
+    const write = ctx.sandbox.writeBinary;
+    ctx.sandbox.writeBinary = async (path, data) => { await write(path, data); abort.abort(); };
+    const result = await getAction("openai.generate_image").execute({ prompt: "fox", output_path: "/workspace/fox.png" }, ctx);
+    expect(result).toMatchObject({ success: true, data: { path: "/workspace/fox.png", warning: expect.stringContaining("do not regenerate") } });
+    expect(result.attachments).toBeUndefined();
+    expect(files.has("/workspace/fox.png")).toBe(true);
+  });
+
   it("uses the native binary's supplied Sharp runtime for validation", async () => {
     const embeddedSharp = vi.fn((input: Uint8Array, options: sharp.SharpOptions) => sharp(input, options));
     vi.stubGlobal("__VALET_SHARP__", embeddedSharp);

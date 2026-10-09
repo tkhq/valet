@@ -9,7 +9,8 @@ import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
-import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL } from "./native-images.js";
+import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION } from "./native-images.js";
+import { actionRunsUngated } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
@@ -81,6 +82,7 @@ import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
   applyPrune,
+  ELIDED_TOOL_OUTPUT,
   estimateContextTokens,
   estimateLiveContextTokens,
   estimateTokens,
@@ -4578,7 +4580,7 @@ export class Thread {
     const entries = walkTranscriptDag(snapshot.entries, this.activeLeafEntryId);
 
     // Step 1: pruning pass (cheap, no LLM).
-    const protectedTools = new Set<string>([NATIVE_IMAGE_RESULT_TOOL]);
+    const protectedTools = new Set<string>();
     for (const t of [...session.builtinTools, ...(session.options.tools ?? [])]) {
       if (t.protectedFromPruning) protectedTools.add(t.name);
     }
@@ -4925,7 +4927,7 @@ export class Thread {
     for (const m of this.agent.state.messages) {
       if (m.role !== "toolResult") continue;
       if (!elidedCallIds.has(m.toolCallId)) continue;
-      m.content = [{ type: "text", text: "[output elided to save context]" }];
+      m.content = [{ type: "text", text: ELIDED_TOOL_OUTPUT }];
     }
   }
 
@@ -4948,6 +4950,26 @@ export class Thread {
   }
 
   private readonly nativeImages = new NativeImageBridge();
+
+  /**
+   * Native generation spends the chat provider's key, so it is offered only
+   * when the plugin action it replaces would run now without a gate: the
+   * OpenAI plugin is registered, its service is available, and policy
+   * resolves to allow. A deny or approval policy keeps the plugin action
+   * visible instead, and `invokeAction` applies and audits it as usual.
+   */
+  private async nativeImageGenerationPermitted(signal: AbortSignal | undefined): Promise<boolean> {
+    if (this.runningItem?.author?.externalSender) return false;
+    const catalog = this.session.options.pluginCatalog;
+    if (!catalog) return false;
+    const ctx = this.buildToolContext({
+      signal: signal ?? new AbortController().signal,
+      toolCallId: "native-image-policy",
+      toolName: NATIVE_IMAGE_RESULT_TOOL,
+      toolArgs: {},
+    });
+    return actionRunsUngated(catalog, NATIVE_IMAGE_PLUGIN_ACTION, ctx);
+  }
 
   private buildAgent(): Agent {
     // Only wire `getApiKey` when a host resolver is present. Absent → the Agent
@@ -5023,7 +5045,7 @@ export class Thread {
             this.reasoningDisabled ? undefined : this.session.options.sampling?.reasoning,
           ),
           samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
-        }, this.session.sandbox, !this.runningItem?.author?.externalSender);
+        }, this.session.sandbox, () => this.nativeImageGenerationPermitted(options?.signal));
       },
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
@@ -6406,7 +6428,7 @@ export function entriesToAgentMessages(
               text: isError
                 ? p.error ?? "tool call failed"
                 : p.elided
-                  ? "[output elided to save context]"
+                  ? ELIDED_TOOL_OUTPUT
                   : toolResultText(p.result),
             },
             ...(!isError && !p.elided ? toolResultImages(p.result) : []),

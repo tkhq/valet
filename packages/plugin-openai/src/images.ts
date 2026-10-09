@@ -154,8 +154,8 @@ export async function executeImage(args: ImageArgs, ctx: PluginActionContext, ke
     throw new Error("OpenAI returned an unexpected output format. Retry with the requested PNG, JPEG, or WebP format.");
   }
   await validateImage(bytes, sharp, format);
-  const attachment = await imageAttachment(bytes, format, sharp);
   ctx.signal.throwIfAborted();
+  // Save the paid original before any preview work. Nothing after this write may discard its path.
   try {
     await ctx.sandbox.writeBinary(path, bytes);
   } catch (cause) {
@@ -163,11 +163,21 @@ export async function executeImage(args: ImageArgs, ctx: PluginActionContext, ke
     const reason = cause instanceof Error ? cause.message.replaceAll(key, "[redacted]").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]") : "Sandbox write failed";
     throw new Error(`Cannot save the image at ${path}: ${reason}. Use a writable file path inside /workspace.`);
   }
-  ctx.signal.throwIfAborted();
+  const data = { path, bytes: bytes.byteLength, mimeType: FORMATS[format].mime, model,
+    ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {}) };
+  // A post-write abort or preview failure still returns the saved path, so the agent never regenerates.
+  if (ctx.signal.aborted) {
+    return { success: true, data: { ...data, warning: "The turn was aborted after the image was saved. Use the saved original; do not regenerate it." } };
+  }
+  let attachment: Uint8Array;
+  try {
+    attachment = await imageAttachment(bytes, format, sharp);
+  } catch {
+    return { success: true, data: { ...data, warning: "Image saved without a preview. Use the saved original; do not regenerate it." } };
+  }
   return {
     success: true,
-    data: { path, bytes: bytes.byteLength, mimeType: FORMATS[format].mime, model,
-      ...(revisedPrompt ? { revised_prompt: revisedPrompt } : {}) },
+    data,
     attachments: [{ type: "image", data: attachment, mimeType: FORMATS[format].mime, name: posix.basename(path) }],
   };
 }

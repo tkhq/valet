@@ -6,6 +6,7 @@ import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earen
 import {
   pluginCatalogTools,
   buildPluginCatalog,
+  actionRunsUngated,
   invokeAction,
   pinnedToolName,
   prepareActionArgs,
@@ -68,6 +69,50 @@ it("hides duplicate generation for native models but keeps sandbox-file editing"
   expect(native.text).toContain("openai.edit_image");
   expect((await list.execute({ service: "openai" }, makeCtx())).text).toContain("openai.generate_image");
   expect((await invokeAction(buildPluginCatalog([plugin]), "openai.generate_image", {}, makeCtx({ nativeImageGeneration: true }), "generate")).kind).toBe("unknown");
+});
+
+describe("actionRunsUngated", () => {
+  const plugin: ActionPlugin = { service: "openai", actions: [{
+    id: "openai.generate_image", name: "Generate Image", description: "Generate", riskLevel: "low", parameters: Type.Object({}),
+    execute: async () => ({ success: true }),
+  }, {
+    id: "openai.delete_everything", name: "Delete", description: "Delete", riskLevel: "critical", parameters: Type.Object({}),
+    execute: async () => ({ success: true }),
+  }] };
+  const decision = (mode: "allow" | "deny" | "require_approval"): PolicyResolver => ({
+    resolve: async () => ({ mode, provenance: { baseMode: mode, source: "team_policy" } }),
+  });
+
+  it("answers from risk level when no resolver is configured", async () => {
+    const catalog = buildPluginCatalog([plugin]);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx())).toBe(true);
+    expect(await actionRunsUngated(catalog, "openai.delete_everything", makeCtx())).toBe(false);
+    expect(await actionRunsUngated(catalog, "openai.missing", makeCtx())).toBe(false);
+    expect(await actionRunsUngated(buildPluginCatalog([]), "openai.generate_image", makeCtx())).toBe(false);
+  });
+
+  it("follows the resolver decision and fails closed on resolver errors", async () => {
+    const catalog = buildPluginCatalog([plugin]);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: decision("allow") }))).toBe(true);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: decision("deny") }))).toBe(false);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: decision("require_approval") }))).toBe(false);
+    const failing: PolicyResolver = { resolve: async () => { throw new Error("policy store unavailable"); } };
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: failing }))).toBe(false);
+    const resolve = vi.fn(async () => ({ mode: "allow" as const, provenance: { baseMode: "allow" as const, source: "risk_default" as const } }));
+    await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: { resolve }, owner: { type: "team", id: "team-a" } }));
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ teamId: "team-a", service: "openai", actionId: "openai.generate_image", riskLevel: "low", appliesIn: "session" }));
+  });
+
+  it("refuses external senders and unavailable services", async () => {
+    const catalog = buildPluginCatalog([plugin]);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ externalSender: true, policyResolver: decision("allow") }))).toBe(false);
+    const unavailable = buildPluginCatalog([plugin], undefined, { serviceAvailability: [{
+      service: "openai", state: "disabled_by_org", reason: "the organization disabled this service", fix: "Ask an organization administrator to enable openai.",
+    }] });
+    expect(await actionRunsUngated(unavailable, "openai.generate_image", makeCtx({ policyResolver: decision("allow") }))).toBe(false);
+    const failing = buildPluginCatalog([{ ...plugin, requiresCredential: true }], undefined, { resolveServiceAvailability: async () => { throw new Error("availability store down"); } });
+    expect(await actionRunsUngated(failing, "openai.generate_image", makeCtx({ policyResolver: decision("allow") }))).toBe(false);
+  });
 });
 
 function makeMockPlugin(): {

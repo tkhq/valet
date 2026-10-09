@@ -468,6 +468,45 @@ function approvalGateRequest(
   };
 }
 
+/**
+ * Whether `actionId` would run now without a gate: the action is registered,
+ * its service is available, and policy resolves to allow. A hosted provider
+ * tool that stands in for a plugin action asks this before it is offered, so
+ * an administrator's deny or approval policy on the action still holds. It
+ * opens no gate and writes no audit record: the plugin path audits the real
+ * invocation when the hosted tool is withheld. Resolver failures fail closed.
+ */
+export async function actionRunsUngated(
+  catalog: PluginCatalog,
+  actionId: string,
+  ctx: ToolContext,
+): Promise<boolean> {
+  if (ctx.externalSender) return false;
+  const entry = catalog.byId.get(actionId);
+  if (!entry) return false;
+  const availability = await checkServiceAvailability(catalog, entry.service, entry.plugin.requiresCredential === true);
+  if (availability.unavailable || availability.error) return false;
+  const resolver = ctx.policyResolver;
+  if (!resolver) return approvalModeFor(entry) === "allow";
+  try {
+    const decision = await resolver.resolve({
+      teamId: ctx.owner?.type === "team" ? ctx.owner.id : undefined,
+      service: entry.service,
+      actionId: qualifiedId(entry),
+      riskLevel: entry.action.riskLevel,
+      params: undefined,
+      userId: ctx.userId,
+      orgId: ctx.orgId,
+      sessionId: ctx.sessionId,
+      threadId: ctx.threadId,
+      appliesIn: "session",
+    });
+    return decision.mode === "allow";
+  } catch {
+    return false;
+  }
+}
+
 export async function invokeAction(
   catalog: PluginCatalog,
   actionId: string,

@@ -1,9 +1,12 @@
 import { createAssistantMessageEventStream, getApiProvider, registerApiProvider, unregisterApiProviders } from "@earendil-works/pi-ai/compat";
-import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, streamSimple } from "@earendil-works/pi-ai/compat";
 import { randomBytes } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import sharp from "sharp";
-import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider } from "../src/index.js";
+import { Type } from "typebox";
+import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type ActionPlugin, type PolicyResolver } from "../src/index.js";
+import { buildPluginCatalog } from "../src/plugin-catalog.js";
+import { ELIDED_TOOL_OUTPUT } from "../src/compaction.js";
 import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL } from "../src/native-images.js";
 import { bundledModel } from "../src/model-catalog.js";
 import { VirtualSandbox } from "../src/providers/sandbox/virtual.js";
@@ -27,6 +30,19 @@ function mockProvider(items: unknown[], terminal = "completed") {
   return fetchMock;
 }
 function item(id = "img_1") { return { id, type: "image_generation_call", status: "completed", result: base64, output_format: "png" }; }
+/** Raw SSE for streams that end mid-call. `wire` only models complete items. */
+function sse(events: unknown[]): Response {
+  return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+}
+/** The plugin action native generation stands in for. Its policy decides whether the hosted tool is offered. */
+const openaiPlugin: ActionPlugin = { service: "openai", actions: [{
+  id: "openai.generate_image", name: "Generate Image", description: "Generate", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true }),
+}] };
+const openaiCatalog = () => buildPluginCatalog([openaiPlugin]);
+function requestTools(fetchMock: ReturnType<typeof vi.fn<typeof fetch>>, index = 0): string {
+  const [, init] = fetchMock.mock.calls[index];
+  return JSON.stringify(JSON.parse(String(init?.body)).tools ?? []);
+}
 
 it("captures every native result, deduplicates final output, and saves before the receipt", async () => {
   const fetchMock = mockProvider([item(), item("img_2")]);
@@ -284,7 +300,7 @@ it.each([false, true])("retries a later plain request without regenerating the s
   vi.stubGlobal("fetch", fetchMock);
   const session = await engine.createSession({ userId: "u", orgId: "o", workspace: "/workspace", sandbox: {}, model,
     purpose: "child", turnRetry: { maxAttempts: 2, backoffMs: [1] }, resolveFallbackModel: fallback,
-    resolveModel: async () => ({ model, apiKey: "sk-fixture-key" }),
+    resolveModel: async () => ({ model, apiKey: "sk-fixture-key" }), pluginCatalog: openaiCatalog(),
   });
   let settled = false;
   events.subscribe({ sessionId: session.id }, ({ event }) => { if (event.type === "submission_settled") settled = true; });
@@ -313,7 +329,7 @@ it("allows provider fallback for a later plain request after image receipts", as
     .mockImplementation(async () => wire([], "failed"));
   vi.stubGlobal("fetch", fetchMock);
   const session = await engine.createSession({ userId: "u", orgId: "o", workspace: "/workspace", sandbox: {}, model,
-    purpose: "child", resolveFallbackModel: fallback, resolveModel: async () => ({ model, apiKey: "sk-fixture-key" }),
+    purpose: "child", resolveFallbackModel: fallback, resolveModel: async () => ({ model, apiKey: "sk-fixture-key" }), pluginCatalog: openaiCatalog(),
   });
   let settled = false;
   events.subscribe({ sessionId: session.id }, ({ event }) => { if (event.type === "submission_settled") settled = true; });
@@ -344,6 +360,8 @@ it("reports a saved path even if the turn aborts immediately after its write", a
   expect(final.stopReason).toBe("aborted");
   const path = final.errorMessage?.match(/generated-images\/[a-f0-9-]+\.png/)?.[0];
   if (!path) throw new Error("missing saved path in abort error");
+  // The thread persists an aborted message's text, not its error. The path must be in the text.
+  expect(final.content).toContainEqual({ type: "text", text: expect.stringContaining(path) });
   expect(Buffer.from(await sandbox.readBinary(path)).equals(png)).toBe(true);
   expect(bridge.savedInRequest).toBe(true);
 });
@@ -388,4 +406,112 @@ it("preserves a provider final result without a terminal stream event", async ()
     unregisterApiProviders("image-end-result-test");
     if (original) registerApiProvider(original);
   }
+});
+
+const partialWrite = { type: "function_call", id: "fc_write", call_id: "call_write", name: "write", arguments: "", status: "in_progress" };
+const writeDelta = { type: "response.function_call_arguments.delta", item_id: "fc_write", output_index: 1, delta: '{"path":"config.json","content":"{\\"trunc' };
+const completeBash = { type: "function_call", id: "fc_bash", call_id: "call_bash", name: "bash", arguments: '{"command":"ls"}', status: "completed" };
+const cutOffs: Array<[string, unknown]> = [
+  ["response.failed", { type: "response.failed", response: { id: "resp", status: "failed", error: { code: "server_error", message: "upstream failure" }, output: [item(), partialWrite] } }],
+  ["response.incomplete max_output_tokens", { type: "response.incomplete", response: { id: "resp", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [item(), partialWrite] } }],
+  ["response.incomplete content_filter", { type: "response.incomplete", response: { id: "resp", status: "incomplete", incomplete_details: { reason: "content_filter" }, output: [item(), partialWrite] } }],
+];
+it.each(cutOffs)("never runs a cut-off tool call after a saved image (%s)", async (name, terminal) => {
+  vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => sse([
+    { type: "response.output_item.done", output_index: 0, item: item() },
+    { type: "response.output_item.added", output_index: 1, item: partialWrite },
+    writeDelta,
+    terminal,
+  ])));
+  // Without the bridge, pi surfaces the truncated call. The bridge must not let it run.
+  const raw = await streamSimple(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }).result();
+  expect(raw.content).toContainEqual(expect.objectContaining({ type: "toolCall", name: "write" }));
+  const sandbox = new VirtualSandbox("cut-off");
+  const bridge = new NativeImageBridge();
+  const final = await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox).result();
+  expect(final.stopReason).toBe("toolUse");
+  expect(final.errorMessage).toBeUndefined();
+  const calls = final.content.filter((block) => block.type === "toolCall");
+  expect(calls.map((call) => call.name)).toEqual([NATIVE_IMAGE_RESULT_TOOL]);
+  const receipt = await bridge.tool().execute(calls[0].arguments, { sandbox, signal: new AbortController().signal } as ToolContext);
+  const reason = name.includes("max_output_tokens") ? "length" : name.includes("content_filter") ? "content_filter" : "server_error";
+  expect(JSON.parse(receipt.text)).toMatchObject({ stream_warning: expect.stringContaining(reason) });
+  expect(bridge.enabled(model)).toBe(false);
+});
+
+it("keeps a tool call whose arguments finished streaming before the stream failed", async () => {
+  vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => sse([
+    { type: "response.output_item.done", output_index: 0, item: item() },
+    { type: "response.output_item.added", output_index: 1, item: completeBash },
+    { type: "response.output_item.done", output_index: 1, item: completeBash },
+    { type: "response.output_item.added", output_index: 2, item: partialWrite },
+    writeDelta,
+    { type: "response.failed", response: { id: "resp", status: "failed", error: { code: "server_error", message: "upstream failure" }, output: [item(), completeBash, partialWrite] } },
+  ])));
+  const final = await new NativeImageBridge().stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, new VirtualSandbox("complete-call")).result();
+  expect(final.stopReason).toBe("toolUse");
+  expect(final.content.filter((block) => block.type === "toolCall").map((call) => call.name)).toEqual(["bash", NATIVE_IMAGE_RESULT_TOOL]);
+});
+
+it("replays a pruned receipt as its saved path", async () => {
+  const fetchMock = mockProvider([item()]);
+  const bridge = new NativeImageBridge();
+  const sandbox = new VirtualSandbox("pruned-replay");
+  const final = await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox).result();
+  const call = final.content.find((block) => block.type === "toolCall");
+  if (call?.type !== "toolCall" || typeof call.arguments.path !== "string") throw new Error("missing receipt");
+  expect(bridge.tool().protectedFromPruning).toBeUndefined();
+  fetchMock.mockImplementation(async () => wire([]));
+  await bridge.stream(model, { messages: [final, {
+    role: "toolResult", toolCallId: call.id, toolName: NATIVE_IMAGE_RESULT_TOOL,
+    content: [{ type: "text", text: ELIDED_TOOL_OUTPUT }], isError: false, timestamp: 2,
+  }, { role: "user", content: "Make it blue", timestamp: 3 }] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox).result();
+  const [, init] = fetchMock.mock.calls[1];
+  const input: unknown[] = JSON.parse(String(init?.body)).input;
+  expect(input).toContainEqual({ role: "user", content: [{ type: "input_text", text: expect.stringContaining(call.arguments.path) }] });
+  expect(JSON.stringify(input)).not.toContain(ELIDED_TOOL_OUTPUT);
+  expect(JSON.stringify(input)).not.toContain(NATIVE_IMAGE_RESULT_TOOL);
+});
+
+it.each([false, "throw"] as const)("withholds the hosted tool when the policy check answers %s", async (answer) => {
+  const fetchMock = mockProvider([]);
+  const bridge = new NativeImageBridge();
+  const allowed = answer === "throw" ? async () => { throw new Error("policy store unavailable"); } : async () => false;
+  await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, new VirtualSandbox("policy"), allowed).result();
+  expect(requestTools(fetchMock)).not.toContain("image_generation");
+  expect(bridge.enabled(model)).toBe(false);
+  bridge.beginTurn();
+  expect(bridge.enabled(model)).toBe(true);
+});
+
+async function promptWithPolicy(options: { pluginCatalog?: ReturnType<typeof openaiCatalog>; policyResolver?: PolicyResolver }) {
+  const store = new InMemorySessionStore();
+  const events = new InMemoryEventStream();
+  const engine = new Engine({ providers: { store, stream: events, sandboxProvider: new VirtualSandboxProvider() } });
+  const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => wire([{ type: "message", id: "msg_plain", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Done.", annotations: [] }] }]));
+  vi.stubGlobal("fetch", fetchMock);
+  const session = await engine.createSession({ userId: "u", orgId: "o", workspace: "/workspace", sandbox: {}, model,
+    purpose: "child", resolveModel: async () => ({ model, apiKey: "sk-fixture-key" }), ...options });
+  let settled = false;
+  events.subscribe({ sessionId: session.id }, ({ event }) => { if (event.type === "submission_settled") settled = true; });
+  try {
+    await session.prompt("Draw a square");
+    await expect.poll(() => settled).toBe(true);
+  } finally { await session.destroy(); }
+  return requestTools(fetchMock);
+}
+
+it.each(["deny", "require_approval"] as const)("offers no hosted tool when policy resolves %s for openai.generate_image", async (mode) => {
+  const resolve = vi.fn(async () => ({ mode, provenance: { baseMode: mode, source: "team_policy" as const } }));
+  expect(await promptWithPolicy({ pluginCatalog: openaiCatalog(), policyResolver: { resolve } })).not.toContain("image_generation");
+  expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ actionId: "openai.generate_image", service: "openai", appliesIn: "session" }));
+});
+
+it("offers the hosted tool when policy allows the plugin action", async () => {
+  const resolve = vi.fn(async () => ({ mode: "allow" as const, provenance: { baseMode: "allow" as const, source: "risk_default" as const } }));
+  expect(await promptWithPolicy({ pluginCatalog: openaiCatalog(), policyResolver: { resolve } })).toContain("image_generation");
+});
+
+it.each(["no plugin catalog", "catalog without the OpenAI plugin"])("offers no hosted tool with %s", async (setup) => {
+  expect(await promptWithPolicy(setup === "no plugin catalog" ? {} : { pluginCatalog: buildPluginCatalog([]) })).not.toContain("image_generation");
 });

@@ -90,6 +90,20 @@ describe("compaction: estimateTokens / estimateEntryTokens", () => {
     expect(tokens).toBeLessThan(50);
   });
 
+  it("counts a tool-result image as one image, not as its base64 text", () => {
+    const preview = "a".repeat(2_000_000);
+    const result = { content: [{ type: "text", text: "x".repeat(40) }, { type: "image", data: preview, mimeType: "image/png" }] };
+    const e = assistant("a", "", [
+      { type: "tool_call", callId: "c", toolName: "openai_native_image", status: "completed", result },
+    ]);
+    const tokens = estimateEntryTokens(e);
+    expect(tokens).toBeGreaterThanOrEqual(1_500 + 10);
+    expect(tokens).toBeLessThan(2_000);
+    // The same ruler drives pruning: one preview must not blow the protection window.
+    const plan = planPrune({ entries: [e], cfg: { pruneProtectTokens: 40_000 } });
+    expect(plan.toElide.size).toBe(0);
+  });
+
   it("ignores elided tool results", () => {
     const e = assistant("a", "", [
       {
