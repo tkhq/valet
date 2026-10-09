@@ -11,6 +11,18 @@ export function internalPage(value: unknown): string | undefined {
   return url.pathname + url.search + url.hash;
 }
 
+/**
+ * A card's title as the deck shows it. A page's document title carries its
+ * unread count first ("(3) Chat · Team · Valet", `titleWithCount`) and the
+ * product name last; the deck shows the count as a dot instead, and drops
+ * the product name every card shares.
+ */
+export function cardLabel(title: string): { label: string; unread: number } {
+  const match = /^\((\d+)\)\s+/.exec(title);
+  const label = (match ? title.slice(match[0].length) : title).replace(/ · Valet$/, "").trim();
+  return { label: label || "Valet page", unread: match ? Number(match[1]) : 0 };
+}
+
 export function newCard(url = "/chat?workspace=user", title = "New page"): PageCard {
   return { id: crypto.randomUUID(), url, title };
 }

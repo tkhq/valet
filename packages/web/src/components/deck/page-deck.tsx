@@ -4,7 +4,7 @@ import { showCardOnScreen } from "~/lib/use-attention-ping";
 import { useEffect, useRef, useState } from "react";
 import { Columns2, Grid2X2, Maximize2, Plus, X, ArrowUpRight, ChevronLeft, ChevronRight, Layers3, ArrowLeft } from "lucide-react";
 import { ConfirmDialog } from "~/components/primitives/confirm-dialog";
-import { DECK_KEY, MAX_CARDS, internalPage, newCard, restoreDeck, type DeckMode, type PageCard } from "./deck-state";
+import { DECK_KEY, MAX_CARDS, cardLabel, internalPage, newCard, restoreDeck, type DeckMode, type PageCard } from "./deck-state";
 import "./page-deck.css";
 
 function loadDeck() {
@@ -26,7 +26,7 @@ function LivePage({ card, interactive, register }: { card: PageCard; interactive
     return showCardOnScreen(card.id, { pathname: url.pathname, search: url.search, workspace: cardWorkspace(card.id) });
   }, [interactive, card.id, card.url]);
   return <iframe ref={(frame) => register(card.id, frame)} name={`valet-card:${card.id}`} src={initialUrl}
-    title={card.title} inert={!interactive} className="deck-frame" allow="clipboard-write; microphone" />;
+    title={cardLabel(card.title).label} inert={!interactive} className="deck-frame" allow="clipboard-write; microphone" />;
 }
 
 export function PageDeck({ onClose, visible = true }: { onClose?: () => void; visible?: boolean }) {
@@ -41,7 +41,7 @@ export function PageDeck({ onClose, visible = true }: { onClose?: () => void; vi
 
   useEffect(() => {
     try { sessionStorage.setItem(DECK_KEY, JSON.stringify(deck)); } catch { setNotice("Browser storage is full. Keep this window open to retain your cards."); }
-    if (visible) document.title = `${active.title.replace(/ · Valet$/, "")} · Deck`;
+    if (visible) document.title = `${cardLabel(active.title).label} · Deck`;
   }, [deck, active.title, visible]);
 
   useEffect(() => {
@@ -94,26 +94,34 @@ export function PageDeck({ onClose, visible = true }: { onClose?: () => void; vi
     <main className="deck-stage" aria-label="Open Valet pages">
       {deck.cards.map((card, index) => {
         const selected = card.id === deck.active;
+        const { label, unread } = cardLabel(card.title);
         const slot = deck.mode === "overview" ? `overview-${index}` : deck.mode === "compare" && deck.cards.length > 1 ? index === pairStart ? "left" : index === pairStart + 1 ? "right" : "parked" : selected ? "center" : index < activeIndex ? "before" : "after";
         // In Focus, neighbor cards sit off screen. A click on their edge still works, but their controls leave the tab order.
         const peeking = slot === "before" || slot === "after";
-        return <section key={card.id} className="deck-card" data-slot={slot} data-active={selected} aria-label={card.title}
+        return <section key={card.id} className="deck-card" data-slot={slot} data-active={selected} aria-label={label}
           inert={slot === "parked" || peeking && Math.abs(index - activeIndex) > 1}>
           <div className="deck-card-bar" inert={peeking}>
-            <button className="deck-card-name" onClick={() => focus(card.id)}><span className="deck-dot" />{card.title.replace(/ · Valet$/, "")}</button>
-            <a href={card.url} target="_blank" rel="noreferrer" aria-label={`Open ${card.title} in a browser tab`}><ArrowUpRight size={15} /></a>
-            <button onClick={() => setClosing(card.id)} aria-label={`Close ${card.title}`}><X size={15} /></button>
+            <button className="deck-card-name" onClick={() => focus(card.id)} title={label}><span className="deck-dot" data-unread={unread > 0 || undefined} /><span className="deck-label">{label}</span>{unread > 0 && <span className="sr-only">, {unread} unread</span>}</button>
+            <a href={card.url} target="_blank" rel="noreferrer" aria-label={`Open ${label} in a browser tab`}><ArrowUpRight size={15} /></a>
+            <button onClick={() => setClosing(card.id)} aria-label={`Close ${label}`}><X size={15} /></button>
           </div>
           <div className="deck-page">
             <LivePage card={card} interactive={visible && deck.mode !== "overview" && (selected || slot === "left" || slot === "right")} register={(id, frame) => { if (frame) frames.current.set(id, frame); else frames.current.delete(id); }} />
-            {(deck.mode === "overview" || !selected && deck.mode !== "compare") && <button className="deck-card-cover" aria-label={`Focus ${card.title}`} tabIndex={peeking ? -1 : undefined} onClick={() => focus(card.id)} />}
+            {(deck.mode === "overview" || !selected && deck.mode !== "compare") && <button className="deck-card-cover" aria-label={`Focus ${label}`} tabIndex={peeking ? -1 : undefined} onClick={() => focus(card.id)} />}
           </div>
         </section>;
       })}
     </main>
     <footer className="deck-dock" aria-label="Switch cards">
       <button aria-label="Previous card" disabled={activeIndex === 0} onClick={() => focus(deck.cards[activeIndex - 1]!.id)}><ChevronLeft size={17} /></button>
-      <div className="deck-tabs">{deck.cards.map((card, index) => <button key={card.id} aria-pressed={card.id === deck.active} onClick={() => focus(card.id)} title={card.title}><span>{index + 1}</span>{card.title.replace(/ · Valet$/, "")}</button>)}</div>
+      <div className="deck-tabs">{deck.cards.map((card, index) => {
+        const { label, unread } = cardLabel(card.title);
+        return <button key={card.id} aria-pressed={card.id === deck.active} onClick={() => focus(card.id)} title={label}>
+          <span className="deck-tab-index" aria-hidden>{index + 1}</span>
+          <span className="deck-label">{label}</span>
+          {unread > 0 && <span className="deck-unread" aria-label={`${unread} unread`} />}
+        </button>;
+      })}</div>
       <button aria-label="Next card" disabled={activeIndex === deck.cards.length - 1} onClick={() => focus(deck.cards[activeIndex + 1]!.id)}><ChevronRight size={17} /></button>
     </footer>
     <ConfirmDialog open={closing !== undefined} onOpenChange={(open) => { if (!open) setClosing(undefined); }} title="Close this card?"
