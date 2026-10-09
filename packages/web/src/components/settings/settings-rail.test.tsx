@@ -9,12 +9,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { render, screen, within } from "@testing-library/react";
 
+/** Each link's route pattern and params, as the typed `Link` receives them. */
+const linkProps: Array<{ to: string; params?: Record<string, string> }> = [];
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, to, ...rest }: { children: ReactNode; to: string; [key: string]: unknown }) => (
-    <a href={to} {...rest}>
-      {children}
-    </a>
-  ),
+  Link: ({ children, to, params, ...rest }: { children: ReactNode; to: string; params?: Record<string, string>; [key: string]: unknown }) => {
+    linkProps.push({ to, params });
+    return (
+      <a href={params ? to.replace(/\$(\w+)/g, (_, name: string) => params[name] ?? "") : to} {...rest}>
+        {children}
+      </a>
+    );
+  },
   useRouterState: () => pathname,
 }));
 
@@ -27,9 +32,11 @@ vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: { teams }, isLoading: false, error: null }),
 }));
 
+import { PinnedWorkspaceScope } from "~/lib/workspace-scope";
 import { SettingsRail, orgSectionFor } from "./settings-rail";
 
 beforeEach(() => {
+  linkProps.length = 0;
   pathname = "/settings/profile";
   orgData = { callerRole: "admin", features: { organizations: true } };
   teams = [
@@ -54,6 +61,26 @@ describe("SettingsRail", () => {
     const yourTeams = within(rail()).getByRole("group", { name: "Your teams" });
     expect(within(yourTeams).getAllByRole("link").map((a) => a.textContent)).toEqual(["platform", "team-tvc"]);
     expect(within(yourTeams).getByRole("link", { name: "team-tvc" }).getAttribute("href")).toBe("/settings/teams/t1");
+  });
+
+  it("links each team through its typed route and params", () => {
+    render(<SettingsRail />);
+    expect(linkProps).toContainEqual({ to: "/settings/teams/$teamId", params: { teamId: "t1" } });
+    expect(linkProps.some((link) => link.to.startsWith("/settings/teams/t"))).toBe(false);
+  });
+
+  it("does not change with the workspace switcher", () => {
+    const snapshot = () =>
+      within(rail()).getAllByRole("link").map((a) => [a.textContent, a.getAttribute("href"), a.getAttribute("aria-current")]);
+    const personal = render(<PinnedWorkspaceScope teamId={undefined}><SettingsRail /></PinnedWorkspaceScope>);
+    const onPersonal = snapshot();
+    personal.unmount();
+    render(<PinnedWorkspaceScope teamId="t1"><SettingsRail /></PinnedWorkspaceScope>);
+    expect(snapshot()).toEqual(onPersonal);
+    // Personal pages stay personal, and the team keeps its own item.
+    const personalGroup = within(rail()).getByRole("group", { name: "Personal workspace" });
+    expect(within(personalGroup).getByRole("link", { name: "API keys and proxy" }).getAttribute("href")).toBe("/settings/api-keys");
+    expect(within(rail()).getByRole("group", { name: "Your teams" })).toBeTruthy();
   });
 
   it("keeps API keys, Agent access, and Policies under Personal workspace", () => {

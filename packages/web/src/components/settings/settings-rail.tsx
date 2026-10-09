@@ -16,7 +16,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useOrg, useTeams } from "~/api/settings";
-import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "~/components/primitives";
+import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
@@ -47,7 +47,7 @@ export const ORG_TEAMS_PATH = "/settings/organization/teams";
 export const ORG_ONEPASSWORD_PATH = "/settings/organization/onepassword";
 
 export interface OrgRoute {
-  to: string;
+  to: AppPath;
   label: string;
 }
 
@@ -121,10 +121,17 @@ export function orgSectionFor(pathname: string) {
 }
 
 interface RailItem {
-  to: string;
+  to: AppPath;
+  /** Route params for a parameterized `to`: a team item's `teamId`. */
+  params?: { teamId: string };
   label: string;
   icon: LucideIcon;
   active: (pathname: string) => boolean;
+}
+
+/** A stable React key: team items share one route pattern. */
+function itemKey(item: RailItem): string {
+  return item.params ? `${item.to}:${item.params.teamId}` : item.to;
 }
 
 interface RailGroupSpec {
@@ -180,10 +187,13 @@ export function SettingsRail() {
   const teams = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations)
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name));
-  const teamItems: RailItem[] = teams.map((team) => {
-    const to = `/settings/teams/${team.id}`;
-    return { to, label: team.name, icon: Users, active: (p) => onRoute(p, to.toLowerCase()) };
-  });
+  const teamItems: RailItem[] = teams.map((team) => ({
+    to: "/settings/teams/$teamId",
+    params: { teamId: team.id },
+    label: team.name,
+    icon: Users,
+    active: (p) => onRoute(p, `/settings/teams/${team.id}`),
+  }));
 
   const groups: RailGroupSpec[] = [
     { label: "Account", items: ACCOUNT_ITEMS },
@@ -212,8 +222,8 @@ export function SettingsRail() {
                 {group.items.map((item) => {
                   const active = item.active(pathname);
                   return (
-                    <DropdownMenuItem key={item.to} asChild>
-                      <Link to={item.to} aria-current={active ? "page" : undefined} className={active ? "bg-ink-wash text-ink" : undefined}>
+                    <DropdownMenuItem key={itemKey(item)} asChild>
+                      <Link to={item.to} params={item.params} aria-current={active ? "page" : undefined} className={active ? "bg-ink-wash text-ink" : undefined}>
                         <item.icon className="h-4 w-4 shrink-0 text-muted" aria-hidden />
                         {item.label}
                       </Link>
@@ -240,9 +250,10 @@ function RailGroup({ label, items, pathname }: RailGroupSpec & { pathname: strin
         {items.map((item) => {
           const active = item.active(pathname);
           return (
-            <li key={item.to}>
+            <li key={itemKey(item)}>
               <Link
                 to={item.to}
+                params={item.params}
                 aria-current={active ? "page" : undefined}
                 className={cn(
                   "flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 transition-colors",

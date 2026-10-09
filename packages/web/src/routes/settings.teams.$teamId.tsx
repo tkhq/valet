@@ -1,6 +1,6 @@
 import { Link, Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
 import { useOrg, useTeams } from "~/api/settings";
-import { ErrorRow, LinkTabs, LoadingRow } from "~/components/primitives";
+import { ErrorRow, LinkTabs, LoadingRow, type AppPath, type LinkTab } from "~/components/primitives";
 import { ActiveTabLabel } from "~/components/settings/section";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { normalizeSettingsPath } from "~/components/settings/settings-rail";
@@ -34,13 +34,13 @@ export function TeamSettingsShell({ teamId }: { teamId: string }) {
     return <ErrorRow>You are not a member of this team. Choose a team under Your teams.</ErrorRow>;
   }
 
-  const tabs = [
+  const tabs: LinkTab[] = [
     { to: "/settings/teams/$teamId", label: "General", params: { teamId } },
     { to: "/settings/teams/$teamId/access", label: "API keys and proxy", params: { teamId } },
     { to: "/settings/teams/$teamId/policies", label: "Policies", params: { teamId } },
   ];
   const path = normalizeSettingsPath(pathname);
-  const activeTo: string = path.endsWith("/access")
+  const activeTo: AppPath = path.endsWith("/access")
     ? "/settings/teams/$teamId/access"
     : path.endsWith("/policies")
       ? "/settings/teams/$teamId/policies"

@@ -1,8 +1,14 @@
 import { Link } from "@tanstack/react-router";
 import { cn } from "~/lib/cn";
+import type { FileRouteTypes } from "~/routeTree.gen";
+
+/** A route pattern of this app, such as `/settings/teams/$teamId`, from the
+ * generated route tree. A typo or a built string (`/settings/teams/${id}`)
+ * fails the typecheck. */
+export type AppPath = FileRouteTypes["to"];
 
 export interface LinkTab {
-  to: string;
+  to: AppPath;
   label: string;
   /** Route params for a parameterized `to`, such as `/settings/teams/$teamId`. */
   params?: Record<string, string>;
@@ -13,7 +19,7 @@ export interface LinkTab {
  * navigates between pages, so each tab is a real link (back, forward, and
  * open in a new tab work). Same underline look as `TabBar`.
  */
-export function LinkTabs({ tabs, activeTo, label }: { tabs: readonly LinkTab[]; activeTo: string; label: string }) {
+export function LinkTabs({ tabs, activeTo, label }: { tabs: readonly LinkTab[]; activeTo: AppPath; label: string }) {
   return (
     <nav aria-label={label} className="flex min-w-0 max-w-full gap-1 overflow-x-auto border-b border-line">
       {tabs.map((tab) => {
