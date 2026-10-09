@@ -14,7 +14,8 @@ import {
   createRoute,
   createRouter,
 } from "@tanstack/react-router";
-import type { CredentialSummary, ListPluginsResponse, PluginServiceSummary } from "@valet/api/wire";
+import userEvent from "@testing-library/user-event";
+import type { CredentialSummary, ListPluginsResponse, PluginServiceSummary, TeamSummary } from "@valet/api/wire";
 
 vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog: [] } }) }));
 vi.mock("~/components/integrations/integration-limit-notice", () => ({ IntegrationLimitNotice: () => null }));
@@ -25,7 +26,7 @@ vi.mock("~/api/settings", () => ({
   useOrg: () => ({ data: { features: { organizations: true } } }),
   useOrgDirectory: () => ({ data: { users: [] }, isLoading: false, error: null }),
 }));
-const team = {
+const team: TeamSummary = {
   id: "t1", name: "Platform", callerRole: "member", orgId: "o1", origin: "local",
   externalId: null, createdAt: 1, memberCount: 2, defaultModel: null,
 };
@@ -62,7 +63,8 @@ vi.mock("~/api/queries", async (importOriginal) => {
   };
 });
 
-import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
+import { WorkspaceScopeProvider, useWorkspaceScope } from "~/lib/workspace-scope";
+import { WorkspaceSwitcher, workspaceOptions } from "~/components/layout/workspace-switcher";
 import { Route as IntegrationsRoute } from "./integrations";
 
 function service(name: string, extra: Partial<PluginServiceSummary> = {}): PluginServiceSummary {
@@ -73,19 +75,29 @@ function plugin(name: string, services: PluginServiceSummary[], description = ""
   return { name, version: "1", actionCount: 3, description, services };
 }
 
-/** The real route's component and search schema under a memory history. */
+/** The workspace switcher as the top nav wires it, off `/chat`. */
+function Switcher() {
+  const scope = useWorkspaceScope();
+  return <WorkspaceSwitcher options={workspaceOptions([team])} activeKey={scope.key} onSelect={scope.setKey} navigateOnSelect={false} />;
+}
+
+/** The real route's component and search schema under a memory history.
+ * `/elsewhere` is the page the reader came from, one entry back. */
 function mount(initial = "/integrations") {
   // The real scope provider in the root route, as in `__root.tsx`, so it
   // reads `?workspace=` through the page route's own search schema.
-  const root = createRootRoute({ component: () => <WorkspaceScopeProvider><Outlet /></WorkspaceScopeProvider> });
+  const root = createRootRoute({
+    component: () => <WorkspaceScopeProvider><Switcher /><Outlet /></WorkspaceScopeProvider>,
+  });
   const page = createRoute({
     getParentRoute: () => root,
     path: "integrations",
     component: IntegrationsRoute.options.component,
     validateSearch: IntegrationsRoute.options.validateSearch,
   });
-  const history = createMemoryHistory({ initialEntries: [initial] });
-  const router = createRouter({ routeTree: root.addChildren([page]), history });
+  const elsewhere = createRoute({ getParentRoute: () => root, path: "elsewhere", component: () => <p>Elsewhere page</p> });
+  const history = createMemoryHistory({ initialEntries: ["/elsewhere", initial], initialIndex: 1 });
+  const router = createRouter({ routeTree: root.addChildren([page, elsewhere]), history });
   render(<RouterProvider router={router} />);
   return router;
 }
@@ -218,5 +230,19 @@ describe("other saved credentials", () => {
     mount();
     await screen.findByRole("link", { name: /Notion/ });
     expect(screen.queryByRole("list", { name: "Other saved credentials" })).toBeNull();
+  });
+});
+
+describe("the switcher on a link that names the workspace", () => {
+  it("changes the page to the team chosen after ?workspace=user", async () => {
+    window.sessionStorage.setItem("valet:workspace", "t1");
+    const user = userEvent.setup();
+    const router = mount("/integrations?workspace=user");
+    expect(await screen.findByRole("link", { name: /Notion/ })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Workspace: Personal. Change workspace" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Platform" }));
+    expect(await screen.findByText("Platform workspace")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Workspace: Platform. Change workspace" })).toBeTruthy();
+    expect(router.state.location.pathname).toBe("/integrations");
   });
 });
