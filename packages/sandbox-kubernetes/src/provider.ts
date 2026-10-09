@@ -1411,7 +1411,13 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       console.debug(`k8s sandbox ${id}: setEvictionProtection(${enabled}) skipped, no backing pod`);
       return { changed: false };
     }
-    const { items } = await this.deps.podsApi.listNamespacedPod({ namespace: this.cfg.namespace });
+    // The session label narrows the read to this sandbox's pods. The
+    // watcher calls this per leased sandbox every tick, so an unfiltered
+    // list would read every pod in the namespace each time.
+    const { items } = await this.deps.podsApi.listNamespacedPod({
+      namespace: this.cfg.namespace,
+      labelSelector: `${SESSION_LABEL_KEY}=${id}`,
+    });
     const pod = items.find((item) => item.name === podName);
     const hasAnnotation = pod?.annotations?.[EVICTION_PROTECT_ANNOTATION] === "false";
     const hasLabel = pod?.labels?.[LEASED_LABEL] === "true";
