@@ -57,6 +57,8 @@ import type {
 } from "../wire/types.js";
 import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { cancelAllWorkAsHuman, listBackgroundWork } from "../engine/wakeups-admin.js";
+import { canCancelSessionWakeup } from "./wakeups.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { answersGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
@@ -320,6 +322,8 @@ async function loadEngineSession(
   c: Context<AppEnv>,
   id = c.req.param("id"),
   decisionAccess?: { threadId?: string },
+  /** The key of the thread the request targets. A startup warning of this build goes there (fix wave 2, M13). */
+  warningThreadKey?: string,
 ): Promise<
   | {
       session: typeof agentSessions.$inferSelect;
@@ -337,7 +341,8 @@ async function loadEngineSession(
   // carries them. The first call to actually build the session (create or
   // restore) wires `prepareSandbox`; later calls are no-op reads once cached
   // (`sessionFor` returns early without touching `meta`).
-  const meta = await loadSessionMeta(db, session);
+  const loaded = await loadSessionMeta(db, session);
+  const meta = warningThreadKey !== undefined ? { ...loaded, warningThreadKey } : loaded;
   const engineSession = await engineHost.sessionFor(session.id, meta);
   return { session, engineSession, meta };
 }
@@ -681,6 +686,29 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
         );
       }
       for (const gate of pending) await engineSession.withdrawDecision(gate.id, "cancel");
+    }
+
+    // The same reasoning covers background work (fix wave 2, H7): a process
+    // or a hold on a hidden thread keeps the sandbox awake for nobody, and
+    // its signals would start turns nobody reads. Archive cancels the
+    // thread's wakeups and holds as a human cancel with no signal: the
+    // thread is hidden, and the main thread can belong to other people.
+    const { engineStore } = c.var.providers;
+    const work = await listBackgroundWork(engineStore, sessionId);
+    const threadWork =
+      work.wakeups.some((w) => w.threadId === thread.id) ||
+      work.leases.some((l) => l.ownerKind === "hold" && l.threadId === thread.id);
+    if (threadWork) {
+      if (!(await canCancelSessionWakeup(db, session, c.var.principal))) {
+        return c.json(
+          { error: "This thread has background work running. Ask a session admin to cancel it, then archive the thread." },
+          409,
+        );
+      }
+      await cancelAllWorkAsHuman(engineStore, engineSession, sessionId, { threadId: thread.id }, {
+        actorUserId: c.var.user.id,
+        signal: "suppress",
+      });
     }
   }
 
@@ -1091,10 +1119,28 @@ export async function submitSessionPrompt(
 
 messagesRouter.post("/:id/messages", (c) => sendPrompt(c, c.req.param("id")));
 
+/**
+ * The key of the thread a prompt targets: the route's thread, else the
+ * body's `threadId`. Undefined for the default thread, an unknown thread,
+ * or an unreadable body; `sendPrompt` reports a bad body itself. Hono
+ * caches the parsed body, so the second read in `sendPrompt` is free.
+ */
+async function promptThreadKey(c: Context<AppEnv>, sessionId: string, threadId: string | undefined): Promise<string | undefined> {
+  let id = threadId;
+  if (id === undefined) {
+    const parsed: unknown = await c.req.json().catch(() => undefined);
+    if (typeof parsed === "object" && parsed !== null && "threadId" in parsed && typeof parsed.threadId === "string") {
+      id = parsed.threadId;
+    }
+  }
+  if (!id) return undefined;
+  return (await c.var.providers.engineStore.getThread(sessionId, id))?.key;
+}
+
 export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId?: string) {
   const row = await loadOwnedSession(c, sessionId);
   if (!row) return c.json({ error: "session not found" }, 404);
-  const loadedPrompt = await loadEngineSession(c, sessionId);
+  const loadedPrompt = await loadEngineSession(c, sessionId, undefined, await promptThreadKey(c, sessionId, threadId));
   if ("error" in loadedPrompt) return loadedPrompt.error;
 
   let body: SendPromptRequest;
