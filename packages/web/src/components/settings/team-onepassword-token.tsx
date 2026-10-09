@@ -31,18 +31,20 @@ export function TeamOnePasswordToken({ teamId, teamName, canMutate }: {
     });
   }
 
+  const loadError = "Could not load the connection. Reload the page to try again.";
   return <IntegrationCard>
     <CardHeading
       compact
       title="1Password"
       slug="onepassword"
       description={status.isError
-        ? "Could not load the connection. Reload the page to try again."
+        ? loadError
         : "A service account for this team. Valet finds credentials in the vaults it can access."}
       state={status.isSuccess
-        // The long fallback badge gives way on a phone so the row stays one line.
+        // The long fallback badge moves under the row on a phone, so the row stays one line.
         ? <span className={connected ? undefined : "max-sm:hidden"}><Badge variant={connected ? "success" : "neutral"}>{connected ? "Connected" : "Uses the organization token"}</Badge></span>
         : undefined}
+      phoneNote={status.isError ? loadError : status.isSuccess && !connected ? "Uses the organization token" : undefined}
       right={canMutate && status.isSuccess ? <div className="flex items-center gap-1">
         {connected && <Button size="sm" variant="ghost" disabled={mutation.isPending}
           onClick={() => { setFailed(false); setDisconnecting(true); }}>Disconnect</Button>}

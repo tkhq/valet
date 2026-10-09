@@ -51,10 +51,15 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
           {children}
           {available.map((service) => {
             const blocked = service.connect === "unconfigured" && service.connectBlockedBy !== "org";
+            const reason = blocked ? "Ask an organization admin to configure OAuth for this service." : canManage ? undefined : "Team admin required";
+            const label = blocked ? "Set up" : "Connect";
+            const name = displayName(service.service);
             return <IntegrationCard key={service.service}>
-              <CardHeading compact title={displayName(service.service)} slug={service.iconSlug ?? service.service}
-                description={blocked ? "Ask an organization admin to configure OAuth for this service." : canManage ? undefined : "Team admin required"}
-                right={<Button size="sm" variant="secondary" disabled={blocked || !canConnect} aria-label={`Connect ${displayName(service.service)}`} title={blocked ? "Ask an organization admin to configure OAuth for this service." : undefined} onClick={() => setSelected(service)}>{blocked ? "Set up" : "Connect"}</Button>} />
+              {/* The accessible name starts with the visible label (WCAG
+                  2.5.3), and the reason stays on screen at every width. */}
+              <CardHeading compact title={name} slug={service.iconSlug ?? service.service}
+                description={reason} phoneNote={reason}
+                right={<Button size="sm" variant="secondary" disabled={blocked || !canConnect} aria-label={`${label} ${name}`} title={reason} onClick={() => setSelected(service)}>{label}</Button>} />
             </IntegrationCard>;
           })}
         </IntegrationList>

@@ -64,6 +64,18 @@ const PERSONAL_PLUGINS: ListPluginsResponse = { plugins: [{
 const A: CredentialSummary = { service: "linear", type: "oauth2", connectedAt: "2026-09-10", delegatedFrom: "u1" };
 const B: CredentialSummary = { service: "sentry", type: "api_key", connectedAt: "2026-09-10" };
 
+/** True when one of `elements` has no ancestor that Tailwind hides below
+ * `sm`. jsdom applies no CSS, so the classes are the only evidence. */
+function shownOnPhones(elements: HTMLElement[]): boolean {
+  return elements.some((element) => {
+    for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+      const classes = node.className.split(" ");
+      if (classes.includes("hidden") || classes.includes("max-sm:hidden")) return false;
+    }
+    return true;
+  });
+}
+
 function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
   if (realWorkspace) {
@@ -349,6 +361,34 @@ describe("Team account connection", () => {
     expect(api.listCredentials).not.toHaveBeenCalledWith("team", expect.anything());
   });
 
+  it("names a blocked team service's visible label and states the reason at every width", async () => {
+    teamId = "a";
+    vi.mocked(api.listPlugins).mockResolvedValue({ plugins: [{ name: "gmail", version: "1", actionCount: 0,
+      services: [{ service: "gmail", type: "oauth2", configKeys: ["accessToken"], connected: false, connect: "unconfigured", connectBlockedBy: "deployment", actions: [] }],
+    }] });
+    mount();
+    // WCAG 2.5.3: the accessible name starts with the label a reader sees.
+    const button = await screen.findByRole("button", { name: "Set up Gmail" });
+    expect(button.textContent).toBe("Set up");
+    expect(button.hasAttribute("disabled")).toBe(true);
+    expect(shownOnPhones(screen.getAllByText("Ask an organization admin to configure OAuth for this service."))).toBe(true);
+  });
+
+  it("tells a plain member on a phone why Connect is disabled", async () => {
+    teamId = "a";
+    teams = [team("a", "Team A", "member")];
+    mount();
+    expect((await screen.findByRole("button", { name: "Connect Typefully" })).hasAttribute("disabled")).toBe(true);
+    expect(shownOnPhones(screen.getAllByText("Team admin required"))).toBe(true);
+  });
+
+  it("shows the team 1Password fallback status on phones", async () => {
+    teamId = "a";
+    vi.spyOn(api, "getTeamOnePasswordStatus").mockResolvedValue({ tokenConnected: false });
+    mount();
+    expect(shownOnPhones(await screen.findAllByText("Uses the organization token"))).toBe(true);
+  });
+
   it("keeps Slack organization-managed while blocking missing OAuth configuration", async () => {
     teamId = "a";
     vi.mocked(api.listPlugins).mockResolvedValue({ plugins: [{ name: "demo", version: "1", actionCount: 0,
@@ -359,8 +399,8 @@ describe("Team account connection", () => {
       ],
     }] });
     mount();
-    expect((await screen.findByRole("button", { name: "Connect Gmail" })).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByText("Ask an organization admin to configure OAuth for this service.")).toBeTruthy();
+    expect((await screen.findByRole("button", { name: "Set up Gmail" })).hasAttribute("disabled")).toBe(true);
+    expect(screen.getAllByText("Ask an organization admin to configure OAuth for this service.").length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Connect Slack" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
   });
