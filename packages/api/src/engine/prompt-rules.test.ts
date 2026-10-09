@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ACTION_RULES,
+  BACKGROUND_WORK_RULES,
   CODING_CRAFT_RULES,
   CODING_PERSISTENCE_RULES,
   CODING_SYSTEM_PROMPT,
@@ -97,6 +98,17 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     expect(withCli).toContain("valet-secrets find <name>");
     expect(withCli).toContain("only after find has come back with nothing");
     expect(codingSystemPrompt({ secretsCli: false })).not.toContain("valet-secrets find");
+  });
+
+  // Background work (spec 2026-10-08): the model must be told to use the
+  // background-work tools instead of blocking a turn or polling.
+  it("tells the model to background long commands and use wake_at instead of sleep", () => {
+    expect(flat(CODING_SYSTEM_PROMPT)).toContain(flat(BACKGROUND_WORK_RULES));
+    expect(CODING_SYSTEM_PROMPT).toContain("background: true");
+    expect(CODING_SYSTEM_PROMPT).toContain("deadline_hours");
+    expect(CODING_SYSTEM_PROMPT).toContain("do not poll it");
+    expect(CODING_SYSTEM_PROMPT).toContain("Use `wake_at` to pause instead of `sleep`");
+    expect(CODING_SYSTEM_PROMPT).toContain("/scratch` is wiped when the sandbox stops");
   });
 
   it("composes the secrets paragraph from whether prep installs the CLI", () => {

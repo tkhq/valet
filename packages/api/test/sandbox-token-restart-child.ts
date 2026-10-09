@@ -40,6 +40,7 @@ async function main() {
   const provider = new RecordingProvider();
   const host = new EngineHost({
     scratchCaps: {},
+    wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
     engineStore: new PgSessionStore(pgdb),
     eventStream: new PgEventStream(pgdb),
     sandboxProvider: provider,

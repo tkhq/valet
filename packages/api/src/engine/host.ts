@@ -39,8 +39,11 @@ import {
   type ResolvedModel,
   type PolicyResolver,
   type PluginStore,
+  type WakeupLimits,
+  type WakeupsSeam,
 } from "@valet/engine";
 import type { CredentialUse, ValetPlugin } from "@valet/engine";
+import { buildWakeupsSeam, type WakeupsSeamSession } from "./wakeups-seam.js";
 import type { ScratchCaps } from "@valet/shared";
 import { canBorrowCredential } from "../services/credential-borrow.js";
 import { membersSharing, withSharerName } from "../services/credential-shares.js";
@@ -282,6 +285,12 @@ export interface EngineHostOpts {
    * over the cap is dropped, never clamped.
    */
   scratchCaps: ScratchCaps;
+  /**
+   * Wakeup/lease limits (`resolveWakeupLimits(process.env)` at boot),
+   * passed to every session's `wakeups` seam as `WakeupsSeam.limits`
+   * (spec 2026-10-08).
+   */
+  wakeupLimits: WakeupLimits;
   /** Anthropic API key required for prompts. Without it, prompts fail. */
   anthropicApiKey?: string;
   /** pi-ai model id or tier token; defaults to tier "s" when unset. */
@@ -1268,6 +1277,7 @@ export class EngineHost {
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
             ...this.browserOptions(sessionId),
             extractDocument: extractDocumentText,
+            ...this.wakeupsOptions(sessionId, () => builtSession),
             ...this.threadAccessOptions(),
             ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
@@ -1300,6 +1310,7 @@ export class EngineHost {
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
           ...this.browserOptions(sessionId),
           extractDocument: extractDocumentText,
+          ...this.wakeupsOptions(sessionId, () => builtSession),
           ...this.threadAccessOptions(),
           ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
@@ -2482,6 +2493,26 @@ export class EngineHost {
   }
 
   /**
+   * Builds the `{ wakeups }` session option every builder spreads in
+   * alongside `extractDocument` (spec 2026-10-08, Task 15). `getSession`
+   * is the same lazy `() => builtSession` accessor each builder already
+   * threads to `buildCommandOptions`/`buildRepoInstructionsProvider`.
+   * It resolves only once the engine has built the session.
+   */
+  private wakeupsOptions(
+    sessionId: string,
+    getSession: () => WakeupsSeamSession | undefined,
+  ): { wakeups: WakeupsSeam } {
+    return {
+      wakeups: buildWakeupsSeam(
+        { engineStore: this.opts.engineStore, limits: this.opts.wakeupLimits },
+        sessionId,
+        getSession,
+      ),
+    };
+  }
+
+  /**
    * Mints a short-lived service JWT (`{ sub: userId, sid: sessionId }`) for
    * `POST /api/sessions/:id/sandbox-jwt` (Task 8, auth-v2 plan) — the same
    * master/derivation the sandbox's own `VALET_SANDBOX_JWT_SECRET` uses, so
@@ -2890,6 +2921,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
+      ...this.wakeupsOptions(sessionId, () => builtSession),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
@@ -4044,6 +4076,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(childSessionId),
       extractDocument: extractDocumentText,
+      ...this.wakeupsOptions(childSessionId, () => builtSession),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
@@ -4231,6 +4264,10 @@ export class EngineHost {
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const resolveOutboundSender = this.outboundSenderResolver(opts.orgId, opts.owner, opts.assistantId);
+    // `builtSession` is assigned below, after the engine builds the
+    // session. The wakeups seam resolves it lazily, same as every other
+    // builder's `wakeupsOptions` accessor.
+    let builtSession: Session | undefined;
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
@@ -4244,6 +4281,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
+      ...this.wakeupsOptions(sessionId, () => builtSession),
       ...this.threadAccessOptions(),
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId) } : {}),
       ...(resolveOutboundSender ? { resolveOutboundSender } : {}),
@@ -4298,6 +4336,7 @@ export class EngineHost {
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     extras.bindSession(session);
+    builtSession = session;
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);

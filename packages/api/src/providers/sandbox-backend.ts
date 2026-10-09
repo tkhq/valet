@@ -20,7 +20,7 @@
 import * as k8s from "@kubernetes/client-node";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { SandboxProvider, SandboxResources } from "@valet/engine";
+import type { SandboxProvider, SandboxResources, WakeupLimits } from "@valet/engine";
 import { isValidSandboxCpu, sandboxCpuRange, type ScratchCaps } from "@valet/shared";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
@@ -455,6 +455,41 @@ export function resolveScratchCaps(env: NodeJS.ProcessEnv): ScratchCaps {
   return {
     ...(max !== undefined ? { max } : {}),
     ...(agentMax !== undefined ? { agentMax } : {}),
+  };
+}
+
+/**
+ * Shared parse for the wakeup/lease limit knobs below: unset or empty →
+ * the default; anything else must parse as a positive integer or the boot
+ * THROWS naming the env var and the corrective action.
+ */
+function positiveIntEnv(name: string, raw: string | undefined, defaultValue: number): number {
+  const trimmed = raw?.trim();
+  if (trimmed === undefined || trimmed === "") return defaultValue;
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`${name}="${raw}" must be a positive integer. Set it to a whole number greater than 0.`);
+  }
+  return n;
+}
+
+/**
+ * Resolves the wakeups/leases limits (spec 2026-10-08) from env:
+ * `VALET_LEASE_MAX_HOURS` (default 72), `VALET_TIMER_MAX_HOURS` (default
+ * 720), `VALET_WAKEUPS_PER_SESSION` (default 20), and
+ * `VALET_WATCH_MAX_EVENTS_PER_HOUR` (default 120). Called unconditionally
+ * at boot so a misconfigured deploy fails loud before serving a session.
+ */
+export function resolveWakeupLimits(env: NodeJS.ProcessEnv): WakeupLimits {
+  return {
+    leaseMaxHours: positiveIntEnv("VALET_LEASE_MAX_HOURS", env.VALET_LEASE_MAX_HOURS, 72),
+    timerMaxHours: positiveIntEnv("VALET_TIMER_MAX_HOURS", env.VALET_TIMER_MAX_HOURS, 720),
+    perSession: positiveIntEnv("VALET_WAKEUPS_PER_SESSION", env.VALET_WAKEUPS_PER_SESSION, 20),
+    watchMaxEventsPerHour: positiveIntEnv(
+      "VALET_WATCH_MAX_EVENTS_PER_HOUR",
+      env.VALET_WATCH_MAX_EVENTS_PER_HOUR,
+      120,
+    ),
   };
 }
 

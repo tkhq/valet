@@ -38,6 +38,7 @@ import {
   resolveScratchCaps,
   resolveSandboxWorkspaceStorage,
   resolveSandboxWorkspaceStorageMax,
+  resolveWakeupLimits,
 } from "./sandbox-backend.js";
 
 function fakeKubeConfig(): k8s.KubeConfig {
@@ -530,6 +531,39 @@ describe("resolveScratchCaps", () => {
 
   it('"0" disables the deploy cap entirely', () => {
     expect(resolveScratchCaps({ VALET_SANDBOX_SCRATCH_MAX: "0" })).toEqual({ agentMax: "100Gi" });
+  });
+});
+
+describe("resolveWakeupLimits", () => {
+  it("defaults to the documented limits when unset", () => {
+    expect(resolveWakeupLimits({})).toEqual({
+      leaseMaxHours: 72,
+      timerMaxHours: 720,
+      perSession: 20,
+      watchMaxEventsPerHour: 120,
+    });
+  });
+
+  it("passes explicit positive integers through", () => {
+    expect(
+      resolveWakeupLimits({
+        VALET_LEASE_MAX_HOURS: "24",
+        VALET_TIMER_MAX_HOURS: "48",
+        VALET_WAKEUPS_PER_SESSION: "5",
+        VALET_WATCH_MAX_EVENTS_PER_HOUR: "10",
+      }),
+    ).toEqual({ leaseMaxHours: 24, timerMaxHours: 48, perSession: 5, watchMaxEventsPerHour: 10 });
+  });
+
+  it("throws naming the knob when a value is zero, negative, or not an integer", () => {
+    expect(() => resolveWakeupLimits({ VALET_LEASE_MAX_HOURS: "0" })).toThrow(
+      'VALET_LEASE_MAX_HOURS="0" must be a positive integer. Set it to a whole number greater than 0.',
+    );
+    expect(() => resolveWakeupLimits({ VALET_TIMER_MAX_HOURS: "-1" })).toThrow("VALET_TIMER_MAX_HOURS");
+    expect(() => resolveWakeupLimits({ VALET_WAKEUPS_PER_SESSION: "1.5" })).toThrow("VALET_WAKEUPS_PER_SESSION");
+    expect(() => resolveWakeupLimits({ VALET_WATCH_MAX_EVENTS_PER_HOUR: "abc" })).toThrow(
+      "VALET_WATCH_MAX_EVENTS_PER_HOUR",
+    );
   });
 });
 

@@ -112,6 +112,7 @@ describe("EngineHost cross-restart hibernation clear", () => {
     // touching durable state, exactly like a process shutdown.
     const hostA = new EngineHost({
       scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore,
       sandboxProvider: provider,
       eventStream: new InMemoryEventStream(),
@@ -143,6 +144,7 @@ describe("EngineHost cross-restart hibernation clear", () => {
     // `detached` (never `suspended` in this instance's lifetime).
     const hostB = new EngineHost({
       scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore,
       sandboxProvider: provider,
       eventStream: new InMemoryEventStream(),
