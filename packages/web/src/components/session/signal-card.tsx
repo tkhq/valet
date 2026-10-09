@@ -175,11 +175,26 @@ export function formatDurationSeconds(raw: string | undefined): string | undefin
   return h % 24 ? `${d}d ${h % 24}h` : `${d}d`;
 }
 
+const CHANNEL_LABEL: Record<string, string> = {
+  slack: "Slack",
+  telegram: "Telegram",
+  github: "GitHub",
+  web: "the web app",
+};
+
+/** Pure: "from Slack" for a signal that carries its channel origin, else null. */
+export function originLabel(signal: MessageSignal): string | null {
+  const type = signal.origin?.channelType;
+  if (!type) return null;
+  return `from ${CHANNEL_LABEL[type] ?? type}`;
+}
+
 /** Background work: the reason as the title, the outcome, and the log as plain text. */
 function WakeupCard({ message, signal }: { message: Message; signal: MessageSignal }) {
   const attrs = signal.attributes ?? {};
   const outcome = wakeupOutcome(attrs);
   const duration = formatDurationSeconds(attrs.durationSeconds);
+  const origin = originLabel(signal);
   return (
     <CardShell>
       <div className="flex flex-wrap items-center gap-2">
@@ -187,8 +202,95 @@ function WakeupCard({ message, signal }: { message: Message; signal: MessageSign
         <Badge variant="neutral">{signal.signalType}</Badge>
         {outcome && <Badge variant={outcome.failed ? "danger" : "success"}>{outcome.label}</Badge>}
         {duration && <span className="text-xs text-muted">ran {duration}</span>}
+        {origin && <span className="text-xs text-muted">{origin}</span>}
       </div>
       {message.content && <LogBody content={message.content} />}
+    </CardShell>
+  );
+}
+
+/** One row of a transcript after watch events are grouped. */
+export type TranscriptItem =
+  | { kind: "message"; message: Message }
+  | { kind: "watch"; events: Message[] };
+
+function watchId(message: Message): string | undefined {
+  const signal = message.signal;
+  if (!signal || signal.signalType !== "watch.event" || !isWakeupSignal(signal)) return undefined;
+  return signal.attributes?.wakeupId;
+}
+
+/** A turn that showed nothing: an assistant message with no text and no parts. */
+function isQuietTurn(message: Message): boolean {
+  return message.role === "assistant" && message.content.trim() === "" && message.parts.length === 0 && !message.signal;
+}
+
+/**
+ * Pure: groups consecutive `watch.event` signals of one watch into one item
+ * (spec Part G, fix wave 3). A quiet turn between two events of the same
+ * watch joins the group, because it rendered nothing. A single event stays
+ * a plain message. Any other message ends the group.
+ */
+export function groupWatchEvents(messages: readonly Message[]): TranscriptItem[] {
+  const out: TranscriptItem[] = [];
+  let group: WatchGroup | null = null;
+  for (const message of messages) {
+    const id = watchId(message);
+    if (group !== null && id !== undefined && group.id === id) {
+      group.events.push(message);
+      group.quiet = [];
+      continue;
+    }
+    if (group !== null && isQuietTurn(message)) {
+      group.quiet.push(message);
+      continue;
+    }
+    flushGroup(out, group);
+    group = null;
+    if (id !== undefined) group = { id, events: [message], quiet: [] };
+    else out.push({ kind: "message", message });
+  }
+  flushGroup(out, group);
+  return out;
+}
+
+interface WatchGroup {
+  id: string;
+  events: Message[];
+  /** Quiet turns after the last event, kept unless another event follows. */
+  quiet: Message[];
+}
+
+function flushGroup(out: TranscriptItem[], group: WatchGroup | null): void {
+  if (group === null) return;
+  if (group.events.length > 1) out.push({ kind: "watch", events: group.events });
+  else for (const message of group.events) out.push({ kind: "message", message });
+  for (const message of group.quiet) out.push({ kind: "message", message });
+}
+
+/** Several events of one watch as one card: the latest event, and the rest on demand. */
+export function WatchEventsCard({ events }: { events: Message[] }) {
+  const [open, setOpen] = useState(false);
+  const latest = events[events.length - 1];
+  if (!latest?.signal) return null;
+  const reason = latest.signal.attributes?.reason || "watch";
+  const origin = originLabel(latest.signal);
+  return (
+    <CardShell>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="min-w-0 truncate text-sm font-medium text-ink">{reason}</span>
+        <Badge variant="neutral">watch.event</Badge>
+        <span className="text-xs text-muted">{events.length} events</span>
+        {origin && <span className="text-xs text-muted">{origin}</span>}
+      </div>
+      {open ? (
+        events.map((event) => event.content && <LogBody key={event.id} content={event.content} />)
+      ) : (
+        latest.content && <LogBody content={latest.content} />
+      )}
+      <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="mt-1 text-xs text-muted hover:text-ink">
+        {open ? "Show latest only" : `Show all ${events.length} events`}
+      </button>
     </CardShell>
   );
 }

@@ -1203,6 +1203,12 @@ export interface MessageSignal {
   signalType: string;
   attributes?: Record<string, string>;
   senderSessionId?: string;
+  /**
+   * The channel the signal came from, such as the Slack thread that asked
+   * for a wakeup. Only the channel type ships; the thread key stays on the
+   * server.
+   */
+  origin?: { channelType: string };
 }
 
 /**
