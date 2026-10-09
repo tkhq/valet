@@ -356,9 +356,14 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   scopes this lookup to the parent session in both store implementations.
   The channel host polls up to 20 due intents per pass. A conditional lease
   prevents concurrent workers from claiming the same intent during that lease.
-  The dispatcher bypasses the live dropped-reply feedback path. While the
-  parent turn runs, the dispatcher checks the intent every two seconds and
-  records no failure. The engine settles every submission, so this wait ends.
+  The dispatcher bypasses the live dropped-reply feedback path. A waiting
+  intent records no failure. The dispatcher checks it after a tenth of the
+  time it has waited, from two seconds up to one minute. It reads no
+  transcript before the parent turn starts, and then reads only that turn's
+  entries through the queue item index. The engine settles every
+  submission, so a wait after admission ends. A wait has no time limit, but
+  a wait longer than one hour is logged once per process and counted in
+  `valet.channels.child_reply.over_age_waits`. The intent stays open.
   The watcher owns admission. It retries a failed admission, including on
   the next boot, and marks its watch settled only after it admits. So an
   intent with no admitted parent update waits, with no time limit, while

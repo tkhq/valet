@@ -1096,6 +1096,58 @@ describe("ChannelHost outbound delivery", () => {
     }
   });
 
+  it("bounds the work of a waiting reply and reports one that waits too long", async () => {
+    const { timed, clock } = await failingChildReply("reply-anchor-wait", "absent:99");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const getEntries = vi.spyOn(engineStore, "getEntries");
+    try {
+      // Only the intent under test is open, so every store read is its own.
+      await testDb.appDb.update(childReplyDeliveries).set({ completedAt: 0 }).where(eq(childReplyDeliveries.id, "reply-anchor-wait"));
+      const start = clock.now;
+      const waiting = await unadmittedChildReply(clock, "child-wait", { queueItemId: "qi-child-wait", settled: false });
+      const now = Date.now();
+      await engineStore.admitSubmission(waiting.session.id, waiting.threadId, {
+        id: "qi-parent-wait", threadId: waiting.threadId, dispatchId: waiting.replyId, content: "child settled", status: "queued",
+        attemptCount: 0, maxAttempts: 10, timeoutAt: now + 3_600_000, createdAt: now, updatedAt: now,
+      });
+      const delay = async () => (await waiting.intent()).nextAttemptAt - clock.now;
+
+      // The parent update is admitted but has not started: no transcript read.
+      getEntries.mockClear();
+      await timed.retryChildReplies();
+      expect(getEntries).not.toHaveBeenCalled();
+      expect(await delay()).toBe(2_000);
+
+      // The wait backs off as it grows, up to one minute between checks.
+      clock.now = start + 30 * 60_000;
+      await timed.retryChildReplies();
+      expect(await delay()).toBe(60_000);
+      expect(error.mock.calls.some(([message]) => String(message).includes(waiting.replyId))).toBe(false);
+
+      // Past one hour, the wait is reported once and the intent stays open.
+      clock.now = start + 61 * 60_000;
+      await timed.retryChildReplies();
+      clock.now += 60_000;
+      await timed.retryChildReplies();
+      const reports = error.mock.calls.filter(([message]) => String(message).includes(waiting.replyId));
+      expect(reports).toHaveLength(1);
+      expect(String(reports[0]?.[0])).toContain("waiting");
+      expect(await waiting.intent()).toMatchObject({ attempts: 0, failedAt: null, completedAt: null });
+
+      // Once the parent turn has started, the dispatcher reads only that turn's entries.
+      await engineStore.settleUnclaimed(waiting.session.id, waiting.threadId, "qi-parent-wait", { outcome: "completed" });
+      getEntries.mockClear();
+      clock.now += 60_000;
+      await timed.retryChildReplies();
+      expect(getEntries.mock.calls.length).toBeGreaterThan(0);
+      for (const [, , opts] of getEntries.mock.calls) expect(opts).toEqual({ queueItemId: "qi-parent-wait" });
+    } finally {
+      getEntries.mockRestore();
+      error.mockRestore();
+      await timed.stop();
+    }
+  });
+
   it("ends an unadmitted reply whose watch moved on, and fails one whose watch settled without it", async () => {
     const { timed, clock } = await failingChildReply("reply-anchor-ended", "absent:99");
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);

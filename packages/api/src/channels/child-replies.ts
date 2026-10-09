@@ -1,7 +1,7 @@
 import { and, asc, eq, isNotNull, isNull, lt, lte, or } from "drizzle-orm";
 import type { SessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { recordChildReplyFailure } from "../observability/child-reply-metrics.js";
+import { recordChildReplyFailure, recordChildReplyOverAgeWait } from "../observability/child-reply-metrics.js";
 import { childReplyDeliveries, childWatches, eventDropLog } from "../schema/index.js";
 
 type ChildReplyRow = typeof childReplyDeliveries.$inferSelect;
@@ -21,8 +21,11 @@ export type ChildReplyOutcome =
 export const CHILD_REPLY_MAX_ATTEMPTS = 10;
 const RETRY_BASE_MS = 1_000;
 const RETRY_CAP_MS = 5 * 60_000;
-/** Poll interval while the parent turn runs. The engine settles every submission, so this wait is bounded. */
+/** First check interval while the parent update is admitted or runs. */
 const WAITING_POLL_MS = 2_000;
+const WAITING_POLL_CAP_MS = 60_000;
+/** A wait longer than this is reported once per process. The intent stays open. */
+export const CHILD_REPLY_WAIT_REPORT_MS = 60 * 60_000;
 const LEASE_MS = 60_000;
 const PRUNE_EVERY_MS = 60 * 60_000;
 const COMPLETED_RETENTION_MS = 7 * 24 * 60 * 60_000;
@@ -33,11 +36,18 @@ export function childReplyRetryDelayMs(attempts: number): number {
   return Math.min(RETRY_CAP_MS, RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1));
 }
 
+/** Check interval for a waiting intent: a tenth of the time it has waited, from two seconds to one minute. */
+export function childReplyWaitDelayMs(waitedMs: number): number {
+  return Math.min(WAITING_POLL_CAP_MS, Math.max(WAITING_POLL_MS, Math.floor(waitedMs / 10)));
+}
+
 /** Durable retry queue for parent responses to delegated channel work. */
 export class ChildReplyDispatcher {
   private timer: ReturnType<typeof setInterval> | undefined;
   private running: Promise<void> | undefined;
   private lastPruneAt: number | undefined;
+  /** Intents this process already reported as waiting too long. */
+  private readonly reportedWaits = new Set<string>();
 
   constructor(private readonly deps: {
     db: AppDb;
@@ -102,14 +112,31 @@ export class ChildReplyDispatcher {
       } catch (error) {
         outcome = { kind: "undeliverable", reason: error instanceof Error ? error.message : String(error) };
       }
+      if (outcome.kind !== "waiting") this.reportedWaits.delete(row.id);
       if (outcome.kind === "done") {
         await db.update(childReplyDeliveries).set({ completedAt: this.deps.now(), lastError: null }).where(leased);
       } else if (outcome.kind === "waiting") {
-        await db.update(childReplyDeliveries).set({ nextAttemptAt: this.deps.now() + WAITING_POLL_MS }).where(leased);
+        const waitedMs = this.deps.now() - (row.createdAt ?? this.deps.now());
+        this.reportLongWait(row, waitedMs);
+        await db.update(childReplyDeliveries).set({ nextAttemptAt: this.deps.now() + childReplyWaitDelayMs(waitedMs) }).where(leased);
       } else {
         await this.recordFailure(row, leased, outcome.reason);
       }
     }
+  }
+
+  /**
+   * A wait has no time limit, because only the watcher or the parent turn
+   * can end it. A long wait means one of them is stuck, so report it once
+   * and leave the intent open for a human to look at.
+   */
+  private reportLongWait(row: ChildReplyRow, waitedMs: number): void {
+    if (waitedMs <= CHILD_REPLY_WAIT_REPORT_MS || this.reportedWaits.has(row.id)) return;
+    this.reportedWaits.add(row.id);
+    recordChildReplyOverAgeWait();
+    const minutes = Math.floor(waitedMs / 60_000);
+    const stage = row.queueItemId ? `parent submission ${row.queueItemId} to finish` : "the child watcher to admit the parent update";
+    console.error(`[channels] child reply ${row.id} has been waiting ${minutes} minutes for ${stage}. Check session ${row.sessionId}.`);
   }
 
   /**

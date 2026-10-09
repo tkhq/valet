@@ -835,7 +835,16 @@ export class ChannelHost {
   ): Promise<ChildReplyOutcome> {
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
     if (!thread) return undeliverable(`Parent thread ${threadId} no longer exists.`);
-    const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
+    // The durable dispatcher polls while it waits, so it reads no transcript
+    // before the parent turn starts, and then only that turn's entries.
+    const durableItemId = trigger.durableChildReply ? trigger.queueItemId : undefined;
+    const durableItem = durableItemId === undefined
+      ? undefined
+      : await this.deps.engineStore.getQueueItem(sessionId, durableItemId);
+    if (durableItem?.status === "queued" || durableItem?.status === "collecting") return WAITING;
+    const entries = await this.deps.engineStore.getEntries(
+      sessionId, threadId, durableItemId === undefined ? undefined : { queueItemId: durableItemId },
+    );
     const triggerEntry = trigger.messageId === undefined
       ? undefined
       : entries.find(
@@ -853,7 +862,7 @@ export class ChannelHost {
       if (trigger.reason === "abort") this.markDelivered(dedupeKey);
       return DONE;
     }
-    const queueItem = await this.deps.engineStore.getQueueItem(sessionId, queueItemId);
+    const queueItem = durableItem !== undefined ? durableItem : await this.deps.engineStore.getQueueItem(sessionId, queueItemId);
     if (queueItem?.abortRequestedAt !== undefined || queueItem?.outcome?.outcome === "aborted") {
       this.markDelivered(dedupeKey);
       return DONE;
