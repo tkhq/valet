@@ -119,6 +119,18 @@ export interface WakeupLimits {
 /** Default `WakeupLimits.watchMinIntervalMs`: one signal per two minutes. */
 export const DEFAULT_WATCH_MIN_INTERVAL_MS = 120_000;
 
+/**
+ * The start of the line a provider appends to a detached job's log when
+ * the log cap drops output: `[valet: log capped at <n> bytes; later output
+ * dropped]` (fix wave 3, k8s M-B). Readers look for this prefix.
+ */
+export const JOB_LOG_CAPPED_MARKER = "[valet: log capped at ";
+
+/** The full marker line for a cap of `bytes`, newline-terminated. */
+export function jobLogCappedLine(bytes: number): string {
+  return `${JOB_LOG_CAPPED_MARKER}${bytes} bytes; later output dropped]\n`;
+}
+
 export type WakeupCreateInput = (
   | { kind: "process"; command: string; reason: string; deadlineHours: number }
   | { kind: "watch"; command: string; reason: string; maxHours: number }

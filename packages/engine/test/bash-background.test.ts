@@ -10,6 +10,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   bashTool,
   JOB_POLL_INTERVAL_MS,
+  timeoutHint,
 } from "../src/builtin-tools/index.js";
 import type {
   Credential,
@@ -106,8 +107,10 @@ describe("bash tool: background mode", () => {
       deadlineHours: 48,
     });
     expect(r.text).toBe(
-      "started sandbox process wk_p (deadline 2023-11-14T22:13:20.000Z). " +
-        'You will receive a process.exited signal. Read its log with process_read; process_read { id: "wk_p", tail: true } shows the latest output.',
+      "started sandbox process wk_p (deadline 2023-11-14T22:13:20.000Z; it is killed then). " +
+        "You will receive a process.exited signal when it ends. " +
+        "End your turn now with a one-line status; the process.exited signal starts your next turn. " +
+        'To check progress when someone asks, call process_read { id: "wk_p", tail: true }.',
     );
   });
 
@@ -126,7 +129,7 @@ describe("bash tool: sleep refusal", () => {
   it("foreground sleep over 300s is refused", async () => {
     const exec = vi.fn();
     const r = await bashTool.execute({ command: "sleep 3600" }, makeCtx({ id: "sb", exec }));
-    expect(r.text).toBe("[bash_sleep] Use wake_at to pause for more than 5 minutes.");
+    expect(r.text).toBe("[bash_sleep] Do not block a turn on sleep for more than 5 minutes. Call wake_at to start a new turn later, then end your turn.");
     expect(exec).not.toHaveBeenCalled();
   });
 });
@@ -163,5 +166,21 @@ describe("bash tool: timeout hint", () => {
     expect(r.text).toContain("partial");
     expect(r.text).toContain("[timed out after 30s] Rerun with a larger timeout (max 3600).");
     expect(r.text).not.toContain("background");
+  });
+});
+
+describe("bash text (fix wave 3, UX)", () => {
+  it("names the deadline kill, its bounds, and /scratch in the description (prompt 3, 12)", () => {
+    expect(bashTool.description).toContain("killed at the deadline");
+    expect(bashTool.description).toContain("cannot be extended");
+    expect(bashTool.description).toContain("`timeout` does not apply");
+    expect(bashTool.description).toContain("/scratch");
+  });
+
+  it("does not offer a larger timeout at the 3600s max (L5)", () => {
+    expect(timeoutHint(3_600_000)).toBe(
+      "[timed out after 3600s] This is the largest timeout. For work longer than an hour, rerun with background: true, deadline_hours, and reason.",
+    );
+    expect(timeoutHint(30_000)).toBe("[timed out after 30s] Rerun with a larger timeout (max 3600).");
   });
 });

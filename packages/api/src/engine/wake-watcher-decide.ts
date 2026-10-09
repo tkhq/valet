@@ -1,4 +1,4 @@
-import { DEFAULT_WATCH_MIN_INTERVAL_MS } from "@valet/engine";
+import { DEFAULT_WATCH_MIN_INTERVAL_MS, JOB_LOG_CAPPED_MARKER } from "@valet/engine";
 import type { LeaseReleaseCause, Wakeup, WakeupCause, WakeupLimits, WakeupPatch, WakeupStatus } from "@valet/engine";
 
 /**
@@ -68,9 +68,6 @@ export const PENDING_START_GRACE_MS = 45 * 60_000;
 /** Most bytes a watch buffers between emits; a fuller buffer goes out at once (fix wave 3, M1). */
 export const WATCH_BUFFER_BYTES = 64 * 1024;
 
-/** The marker a capped job log ends with (fix wave 3, k8s M-B). */
-export const LOG_CAPPED_MARKER = "[valet: log capped at ";
-
 /** What the agent should do after each way a process can end without an exit code (fix wave 3, UX). */
 const CAUSE_GUIDANCE: Partial<Record<WakeupCause, string>> = {
   pid_missing:
@@ -87,7 +84,7 @@ const CAPPED_GUIDANCE =
 /** The terminal body: the log tail, then a line that names the next step. */
 function terminalBody(logTail: string, cause: WakeupCause): string {
   const notes: string[] = [];
-  if (logTail.includes(LOG_CAPPED_MARKER)) notes.push(CAPPED_GUIDANCE);
+  if (logTail.includes(JOB_LOG_CAPPED_MARKER)) notes.push(CAPPED_GUIDANCE);
   const guidance = CAUSE_GUIDANCE[cause];
   if (guidance) notes.push(guidance);
   if (notes.length === 0) return logTail;
