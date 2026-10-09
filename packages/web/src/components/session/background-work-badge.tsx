@@ -48,13 +48,19 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
-/** Pure: a future time as "in 5m", "in 3h", or "in 2d". A past time reads "now". */
+/**
+ * Pure: a future time as "in 5m", "in 3h", or "in 2d", rounded to the
+ * nearest unit: 47h reads "in 2d" and 90m reads "in 2h". A time under a
+ * minute away, or past, reads "now".
+ */
 export function timeUntil(ts: number, now: number = Date.now()): string {
   const diff = ts - now;
   if (diff < MINUTE) return "now";
-  if (diff < HOUR) return `in ${Math.floor(diff / MINUTE)}m`;
-  if (diff < DAY) return `in ${Math.floor(diff / HOUR)}h`;
-  return `in ${Math.floor(diff / DAY)}d`;
+  const minutes = Math.round(diff / MINUTE);
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.round(diff / HOUR);
+  if (hours < 24) return `in ${hours}h`;
+  return `in ${Math.round(diff / DAY)}d`;
 }
 
 /** Pure: how long ago `ts` was, as "under 1m", "5m", "3h", or "2d". */
@@ -66,15 +72,19 @@ export function timeSince(ts: number, now: number = Date.now()): string {
   return `${Math.floor(diff / DAY)}d`;
 }
 
-/** Pure: the badge text, such as "2 background · next deadline in 3h". */
+/**
+ * Pure: the badge text, such as "2 background · next deadline in 3h". It
+ * names the soonest event of any kind: a deadline, or a timer that fires
+ * ("next wakeup").
+ */
 export function badgeLabel(items: BackgroundItem[], now: number = Date.now()): string {
-  const deadlines = items.flatMap((i) => (i.deadlineAt !== undefined ? [i.deadlineAt] : []));
-  if (deadlines.length > 0) {
-    return `${items.length} background · next deadline ${timeUntil(Math.min(...deadlines), now)}`;
-  }
-  const fires = items.flatMap((i) => (i.fireAt !== undefined ? [i.fireAt] : []));
-  if (fires.length > 0) return `${items.length} background · next wakeup ${timeUntil(Math.min(...fires), now)}`;
-  return `${items.length} background`;
+  const events = items.flatMap((i) => [
+    ...(i.deadlineAt !== undefined ? [{ at: i.deadlineAt, word: "deadline" }] : []),
+    ...(i.fireAt !== undefined ? [{ at: i.fireAt, word: "wakeup" }] : []),
+  ]);
+  if (events.length === 0) return `${items.length} background`;
+  const next = events.reduce((a, b) => (b.at < a.at ? b : a));
+  return `${items.length} background · next ${next.word} ${timeUntil(next.at, now)}`;
 }
 
 const KIND_LABEL: Record<BackgroundItem["kind"], string> = {

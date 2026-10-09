@@ -30,9 +30,11 @@ import { BackgroundWorkList } from "./background-work-confirm";
  *
  * A move stops every wakeup and hold of the session (fix wave 3, H2): a
  * signal turn would otherwise run as the new owner. The dialog lists that
- * work, and its confirm button sends `force`. A 409 for work the list did
- * not show yet switches the dialog to the same confirm. After a forced
- * move the dialog stays open to say how many items stopped.
+ * work from the polled list, which can be a minute old, so the first
+ * submit never sends `force` (fix wave 4, N9). The server's 409 then
+ * names the work as it is now and switches the button to the confirm,
+ * which sends `force`. After a forced move the dialog stays open to say
+ * how many items stopped.
  */
 export function MoveSessionDialog({
   sessionId,
@@ -66,7 +68,8 @@ export function MoveSessionDialog({
   // The server's refusal is newer than the polled list, so it wins.
   const work: BackgroundWorkItem[] = conflict ? conflict.work : backgroundItems(workQ.data);
   const blocked = conflict !== null && !conflict.forceAllowed;
-  const force = work.length > 0 || conflict !== null;
+  // Only a fresh refusal may be forced: it names the work the confirm stops.
+  const force = conflict !== null && conflict.forceAllowed;
 
   function submit() {
     if (unchanged) {
