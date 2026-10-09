@@ -69,6 +69,28 @@ describe("valet workflows", () => {
   });
 
   // The gate a cancel ends stays pending until the run settles, so the wait must not stop on it.
+  // A failed status read must not hide the id of a run that already started:
+  // a script that retries would start a second, side-effecting run.
+  it("names the new run on stderr before a status read can fail", async () => {
+    const { deps } = fake([]);
+    deps.client.getWorkflowRun = async () => { throw new Error("connection reset"); };
+    await expect(run(deps, ["run", "w1", "--wait", "30"])).rejects.toThrow("connection reset");
+    expect(stderr()).toContain("started r1");
+    expect(stderr()).toContain("valet workflows status r1");
+  });
+
+  it("refuses an explicitly empty --input instead of running with defaults", async () => {
+    const { deps, calls } = fake([detail("settled", "completed")]);
+    expect(await run(deps, ["run", "w1", "--input", ""])).toBe(ExitCode.Usage);
+    expect(calls).toEqual([]);
+  });
+
+  it("cancel does not exit 0 when the run completed before the cancel took effect", async () => {
+    const { deps } = fake([detail("settled", "completed")]);
+    expect(await run(deps, ["cancel", "r1"])).toBe(ExitCode.TurnError);
+    expect(stderr()).toContain("settled as completed before the cancel took effect");
+  });
+
   it("cancel waits past the pending gate for the run to settle, and exits 0 when cancelled", async () => {
     const { deps, calls } = fake([detail("terminalizing", undefined, [gate]), detail("settled", "cancelled")]);
     expect(await run(deps, ["cancel", "r1"])).toBe(ExitCode.OK);

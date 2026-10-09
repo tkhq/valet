@@ -365,10 +365,21 @@ export class InstanceClient {
     await this.request("DELETE", withQuery("/api/memory", ownerParams(workspace, { path: memoryPath })));
   }
 
+  /**
+   * Owner parameters for a listing that, unfiltered, returns everything the
+   * caller can reach. An explicit "user" filters to the personal workspace by
+   * the caller's own id; omitted, the listing stays unfiltered.
+   */
+  private async listOwnerParams(workspace: string | undefined, extra: Record<string, string> = {}): Promise<URLSearchParams> {
+    if (workspace !== "user") return ownerParams(workspace, extra);
+    const me = await this.me();
+    return new URLSearchParams({ ...extra, ownerType: "user", ownerId: me.id });
+  }
+
   // ── skills (`/api/skills`) ─────────────────────────────────────────────
 
-  listSkills(opts: { query?: string; workspace?: string; limit?: number }): Promise<ListSkillsResponse> {
-    return this.request("GET", withQuery("/api/skills", ownerParams(opts.workspace, {
+  async listSkills(opts: { query?: string; workspace?: string; limit?: number }): Promise<ListSkillsResponse> {
+    return this.request("GET", withQuery("/api/skills", await this.listOwnerParams(opts.workspace, {
       ...(opts.query ? { q: opts.query } : {}), limit: String(opts.limit ?? 50),
     })));
   }
@@ -379,8 +390,8 @@ export class InstanceClient {
 
   // ── workflows (`/api/workflows`) ───────────────────────────────────────
 
-  listWorkflows(workspace?: string): Promise<ListWorkflowsResponse> {
-    return this.request("GET", withQuery("/api/workflows", ownerParams(workspace)));
+  async listWorkflows(workspace?: string): Promise<ListWorkflowsResponse> {
+    return this.request("GET", withQuery("/api/workflows", await this.listOwnerParams(workspace)));
   }
 
   startWorkflowRun(workflowId: string, input?: Record<string, unknown>): Promise<StartWorkflowRunResponse> {
@@ -405,8 +416,8 @@ export class InstanceClient {
 
   // ── artifacts (`/api/artifacts`) and the inbox ─────────────────────────
 
-  listArtifacts(workspace?: string): Promise<ListArtifactsResponse> {
-    return this.request("GET", withQuery("/api/artifacts", ownerParams(workspace)));
+  async listArtifacts(workspace?: string): Promise<ListArtifactsResponse> {
+    return this.request("GET", withQuery("/api/artifacts", await this.listOwnerParams(workspace)));
   }
 
   shareArtifact(body: ShareArtifactRequest, workspace?: string): Promise<ShareArtifactResponse> {

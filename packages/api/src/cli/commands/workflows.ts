@@ -9,14 +9,15 @@
  *   valet workflows cancel <run_id>
  *   valet workflows retry <run_id> [--wait <s>]
  *
- * --wait polls until the run settles or stops for approval. Exit codes:
- * 0 completed (or cancelled, for cancel), 3 still running or waiting for
- * approval, 4 failed or cancelled.
+ * --wait polls until the run settles or stops for approval. run and retry
+ * print the new run id on stderr before they wait. Exit codes: 0 completed
+ * (for cancel: cancelled), 3 still running or waiting for approval, 4 failed,
+ * cancelled, or (for cancel) settled some other way first.
  */
 import type { InstanceClient } from "../client.js";
 import { intFlag, parseJsonObject, readSource, runWithClient, strFlag, usage } from "../command-kit.js";
 import { ExitCode } from "../exit.js";
-import { printJson, printLine, renderTable, type ParsedFlags } from "../output.js";
+import { printErr, printJson, printLine, renderTable, type ParsedFlags } from "../output.js";
 import type { CliContext } from "../types.js";
 import type { GetWorkflowRunResponse } from "../../wire/types.js";
 
@@ -53,6 +54,21 @@ async function waitForRun(deps: WorkflowsDeps, runId: string, waitSeconds: numbe
   }
 }
 
+/**
+ * Waits on a run this command just created, and names it on stderr first.
+ * A failed status read must not hide the id: a script that retries would
+ * start a second, side-effecting run.
+ */
+async function followNewRun(deps: WorkflowsDeps, runId: string, waitSeconds: number): Promise<GetWorkflowRunResponse> {
+  printErr(`started ${runId}`);
+  try {
+    return await waitForRun(deps, runId, waitSeconds);
+  } catch (err) {
+    printErr(`${runId} started, but its status could not be read. Check it with \`valet workflows status ${runId}\` before you run it again.`);
+    throw err;
+  }
+}
+
 function report(detail: GetWorkflowRunResponse, json: boolean, cancelling = false): number {
   const { run } = detail;
   if (json) printJson(detail);
@@ -64,8 +80,13 @@ function report(detail: GetWorkflowRunResponse, json: boolean, cancelling = fals
     }
   }
   if (run.status !== "settled") return ExitCode.GatePending;
-  if (run.outcome === "completed" || (cancelling && run.outcome === "cancelled")) return ExitCode.OK;
-  return ExitCode.TurnError;
+  if (cancelling) {
+    // The run can settle on its own between the cancel and this read.
+    if (run.outcome === "cancelled") return ExitCode.OK;
+    if (!json) printErr(`${run.runId} settled as ${run.outcome ?? "unknown"} before the cancel took effect.`);
+    return ExitCode.TurnError;
+  }
+  return run.outcome === "completed" ? ExitCode.OK : ExitCode.TurnError;
 }
 
 export async function runWorkflows(deps: WorkflowsDeps, flags: ParsedFlags): Promise<number> {
@@ -90,10 +111,13 @@ export async function runWorkflows(deps: WorkflowsDeps, flags: ParsedFlags): Pro
       const file = strFlag(flags, "input-file");
       if (inline !== undefined && file !== undefined) return usage("Use --input or --input-file, not both.");
       const raw = inline ?? (file !== undefined ? await deps.readSource(file) : undefined);
-      const parsed = raw === undefined || raw.trim() === "" ? undefined : parseJsonObject(raw, inline !== undefined ? "input" : "input-file");
+      // An explicit but empty input usually means its producer failed. Refuse
+      // it rather than start the workflow with defaults.
+      if (raw !== undefined && raw.trim() === "") return usage("The input is empty. Pass a JSON object, or omit --input to run with no input.");
+      const parsed = raw === undefined ? undefined : parseJsonObject(raw, inline !== undefined ? "input" : "input-file");
       if (parsed && !parsed.ok) return usage(parsed.error);
       const started = await client.startWorkflowRun(id, parsed?.value);
-      return report(await waitForRun(deps, started.runId, wait ?? 0), flags.json);
+      return report(await followNewRun(deps, started.runId, wait ?? 0), flags.json);
     }
     case "status": {
       if (!id) return usage(USAGE);
@@ -108,7 +132,7 @@ export async function runWorkflows(deps: WorkflowsDeps, flags: ParsedFlags): Pro
     case "retry": {
       if (!id) return usage(USAGE);
       const retried = await client.retryWorkflowRun(id);
-      return report(await waitForRun(deps, retried.runId, wait ?? 0), flags.json);
+      return report(await followNewRun(deps, retried.runId, wait ?? 0), flags.json);
     }
   }
   return usage(USAGE);

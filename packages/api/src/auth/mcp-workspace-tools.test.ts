@@ -243,3 +243,41 @@ describe("MCP workspace tools", () => {
     expect((await tool(testApi.baseUrl, alice, "list_artifacts")).data.artifacts).toEqual([]);
   });
 });
+
+// Unfiltered, these listings return team content too. An explicit
+// workspace "user" must filter to the personal workspace.
+describe("workspace scoping of listings", () => {
+  it("filters an explicit user listing by the caller's id and leaves an omitted one unfiltered", async () => {
+    const { registerWorkspaceTools } = await import("./mcp-workspace-tools.js");
+    const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const paths: string[] = [];
+    const server = new McpServer({ name: "t", version: "0" });
+    registerWorkspaceTools(server, {
+      api: async (_method, path) => {
+        paths.push(path);
+        if (path === "/api/me") return { status: 200, body: { id: "u-1", email: "a@x.test" } };
+        return { status: 200, body: { workflows: [], artifacts: [], skills: [], nextCursor: null } };
+      },
+      engineStore: { getQueueItem: async () => null as never },
+      latestQueueItem: async () => undefined,
+      origin: "https://valet.test",
+    });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    const client = new Client({ name: "test", version: "0" });
+    await client.connect(clientSide);
+    await client.callTool({ name: "list_workflows", arguments: { workspace: "user" } });
+    await client.callTool({ name: "list_artifacts", arguments: { workspace: "user" } });
+    await client.callTool({ name: "list_skills", arguments: { workspace: "user" } });
+    await client.callTool({ name: "list_workflows", arguments: {} });
+    expect(paths).toEqual([
+      "/api/me", "/api/workflows?ownerType=user&ownerId=u-1",
+      "/api/me", "/api/artifacts?ownerType=user&ownerId=u-1",
+      "/api/me", "/api/skills?ownerType=user&ownerId=u-1&limit=50",
+      "/api/workflows",
+    ]);
+    await client.close();
+  });
+});

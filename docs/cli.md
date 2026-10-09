@@ -276,7 +276,7 @@ valet workflows cancel wfrun_456
 valet workflows retry wfrun_456
 ```
 
-`--wait <seconds>` polls until the run settles or stops for approval. The command exits `0` when the run completes, `3` while it runs or waits for approval, and `4` when it fails or is cancelled. `cancel` exits `0` when the run is cancelled. An agent credential cannot approve a run: a person approves it in Valet.
+`--wait <seconds>` polls until the run settles or stops for approval. `run` and `retry` print the new run id on stderr before they wait, so a failed status read never hides a started run. The command exits `0` when the run completes, `3` while it runs or waits for approval, and `4` when it fails or is cancelled. `cancel` exits `0` only when the run is cancelled, and `4` when it settled some other way first. An empty `--input` is refused. `--workspace user` lists only your personal workflows, artifacts, or skills. Without `--workspace`, a list shows everything you can access. An agent credential cannot approve a run: a person approves it in Valet.
 
 ### `valet artifacts list|publish|unpublish`
 
