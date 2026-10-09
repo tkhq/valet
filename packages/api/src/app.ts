@@ -30,6 +30,7 @@ import { VALET_VERSION } from "./version.js";
 import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
 import { evalsRouter, ratingsRouter } from "./routes/ratings.js";
+import { wakeupsRouter } from "./routes/wakeups.js";
 import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
 import { teamDeletionRequestsRouter } from "./routes/team-deletion-requests.js";
@@ -348,6 +349,7 @@ export function createApp(
   app.route("/api/sessions", browserRouter);
   app.route("/api/sessions", securityRouter);
   app.route("/api/sessions", ratingsRouter);
+  app.route("/api/sessions", wakeupsRouter);
   app.route("/api/evals", evalsRouter);
   app.route("/api/admin", adminRouter);
   // Before the teams router, so the legacy team runtime path is not read as a team route.

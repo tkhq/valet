@@ -809,6 +809,53 @@ export interface SecurityResolveNeedsResponse {
  * wake) resumes it and clears the status back to `"active"`. */
 export interface PauseSessionResponse {
   status: "hibernated";
+  /** Ids of the background work a `force=true` pause cancelled. Absent when it cancelled none. */
+  cancelledWork?: string[];
+}
+
+// ── REST: background work (wakeups and leases) ───────────────────────────
+
+export type WakeupKindWire = "process" | "watch" | "timer";
+export type WakeupStatusWire = "pending" | "running";
+
+/** One open wakeup of a session (spec 2026-10-08, B1). The command and the in-sandbox exec id are not shipped. */
+export interface WakeupSummary {
+  id: string;
+  /** The thread that receives the wakeup's signals. */
+  threadId: string;
+  kind: WakeupKindWire;
+  status: WakeupStatusWire;
+  /** Why the work runs. For a timer, the first 80 characters of its prompt. */
+  reason: string;
+  /** `process` and `watch`: when the WakeWatcher stops it (ms). */
+  deadlineAt?: number;
+  /** `timer`: when it fires (ms). */
+  fireAt?: number;
+  createdAt: number;
+}
+
+/** One active lease of a session (spec 2026-10-08, C1). */
+export interface LeaseSummary {
+  id: string;
+  /** The thread that asked for it. Absent on a lease written before leases had a thread. */
+  threadId?: string;
+  ownerKind: "process" | "watch" | "hold";
+  /** The wakeup that owns a process or watch lease. Absent for a hold. */
+  ownerId?: string;
+  reason: string;
+  deadlineAt: number;
+  createdAt: number;
+}
+
+/** GET /api/sessions/:id/wakeups: the session's open wakeups and active leases. */
+export interface ListSessionWakeupsResponse {
+  wakeups: WakeupSummary[];
+  leases: LeaseSummary[];
+}
+
+/** POST /api/sessions/:id/wakeups/:wakeupId/cancel: a person cancels one wakeup or hold. */
+export interface CancelSessionWakeupResponse {
+  cancelled: { id: string; kind: WakeupKindWire | "hold" };
 }
 
 // ── REST: workspace runtime ──────────────────────────────────────────────
@@ -1056,7 +1103,13 @@ export interface PatchSessionRequest {
   profile?: SandboxProfile;
 }
 
-export type PatchSessionResponse = SessionDetail;
+export type PatchSessionResponse = SessionDetail & {
+  /**
+   * An owner move only: how many open wakeups and active holds the move
+   * cancelled, so nothing the old owner started runs as the new owner.
+   */
+  cancelledWorkCount?: number;
+};
 
 // ── REST: messages ────────────────────────────────────────────────────────
 
