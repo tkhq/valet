@@ -27,7 +27,8 @@
       "nextOffset": 15
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": {
       "to": "done",
@@ -83,7 +84,8 @@
       "nextOffset": 10
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": {
       "to": "lost",
@@ -134,7 +136,8 @@
       "kind": "unavailable"
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": {
       "to": "lost",
@@ -188,7 +191,8 @@
       "nextOffset": 33
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": {
       "to": "expired",
@@ -243,14 +247,17 @@
       "nextOffset": 18
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": {
       "to": "running",
       "patch": {
         "logOffset": 18,
         "logTail": "line1\nline2\nline3\n",
-        "eventCount": 3
+        "eventCount": 1,
+        "windowStartAt": 1000,
+        "windowCount": 1
       },
       "signals": [
         {
@@ -261,15 +268,15 @@
             "kind": "watch",
             "reason": "tail logs",
             "lineCount": "3",
-            "eventCount": "3"
+            "eventCount": "1"
           },
-          "dispatchId": "wakeup:wk_005:event:3"
+          "dispatchId": "wakeup:wk_005:event:1"
         }
       ]
     }
   },
   {
-    "name": "watch_rate_exceeded",
+    "name": "watch_rate_exceeded_in_window",
     "now": 1000,
     "row": {
       "id": "wk_006",
@@ -284,9 +291,11 @@
       "deadlineAt": 999999,
       "logOffset": 0,
       "logTail": "",
-      "eventCount": 118,
+      "eventCount": 130,
       "createdAt": 0,
-      "updatedAt": 0
+      "updatedAt": 0,
+      "windowStartAt": 0,
+      "windowCount": 120
     },
     "probe": {
       "kind": "poll",
@@ -295,7 +304,8 @@
       "nextOffset": 10
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": {
       "to": "expired",
@@ -305,13 +315,12 @@
         "cause": "rate",
         "endedAt": 1000,
         "logOffset": 10,
-        "logTail": "a\nb\nc\nd\ne\n",
-        "eventCount": 123
+        "logTail": "a\nb\nc\nd\ne\n"
       },
       "signals": [
         {
           "signalType": "watch.exited",
-          "body": "watch rate limit exceeded: 123 events this hour (limit 120/hour)",
+          "body": "a\nb\nc\nd\ne\n\n[watch stopped: it emitted more than 120 watch.event signals in one hour (sandbox.watchMaxEventsPerHour). Print fewer lines, or poll less often.]",
           "attributes": {
             "wakeupId": "wk_006",
             "kind": "watch",
@@ -348,7 +357,8 @@
       "kind": "none"
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": {
       "to": "done",
@@ -395,7 +405,8 @@
       "kind": "none"
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": null
   },
@@ -417,7 +428,9 @@
       "logTail": "",
       "eventCount": 10,
       "createdAt": 0,
-      "updatedAt": 0
+      "updatedAt": 0,
+      "windowStartAt": 0,
+      "windowCount": 10
     },
     "probe": {
       "kind": "poll",
@@ -426,14 +439,17 @@
       "nextOffset": 139
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": {
       "to": "running",
       "patch": {
         "logOffset": 126,
         "logTail": "complete one\ncomplete two\n",
-        "eventCount": 12
+        "eventCount": 11,
+        "windowStartAt": 0,
+        "windowCount": 11
       },
       "signals": [
         {
@@ -444,9 +460,9 @@
             "kind": "watch",
             "reason": "stream build",
             "lineCount": "2",
-            "eventCount": "12"
+            "eventCount": "11"
           },
-          "dispatchId": "wakeup:wk_009:event:12"
+          "dispatchId": "wakeup:wk_009:event:11"
         }
       ]
     }
@@ -478,7 +494,8 @@
       "nextOffset": 60
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": {
       "to": "running",
@@ -516,14 +533,17 @@
       "nextOffset": 897
     },
     "limits": {
-      "watchMaxEventsPerHour": 1000
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": {
       "to": "running",
       "patch": {
         "logOffset": 892,
         "logTail": "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\nl15\nl16\nl17\nl18\nl19\nl20\nl21\nl22\nl23\nl24\nl25\nl26\nl27\nl28\nl29\nl30\nl31\nl32\nl33\nl34\nl35\nl36\nl37\nl38\nl39\nl40\nl41\nl42\nl43\nl44\nl45\nl46\nl47\nl48\nl49\nl50\nl51\nl52\nl53\nl54\nl55\nl56\nl57\nl58\nl59\nl60\nl61\nl62\nl63\nl64\nl65\nl66\nl67\nl68\nl69\nl70\nl71\nl72\nl73\nl74\nl75\nl76\nl77\nl78\nl79\nl80\nl81\nl82\nl83\nl84\nl85\nl86\nl87\nl88\nl89\nl90\nl91\nl92\nl93\nl94\nl95\nl96\nl97\nl98\nl99\nl100\nl101\nl102\nl103\nl104\nl105\nl106\nl107\nl108\nl109\nl110\nl111\nl112\nl113\nl114\nl115\nl116\nl117\nl118\nl119\nl120\nl121\nl122\nl123\nl124\nl125\nl126\nl127\nl128\nl129\nl130\nl131\nl132\nl133\nl134\nl135\nl136\nl137\nl138\nl139\nl140\nl141\nl142\nl143\nl144\nl145\nl146\nl147\nl148\nl149\nl150\nl151\nl152\nl153\nl154\nl155\nl156\nl157\nl158\nl159\nl160\nl161\nl162\nl163\nl164\nl165\nl166\nl167\nl168\nl169\nl170\nl171\nl172\nl173\nl174\nl175\nl176\nl177\nl178\nl179\nl180\nl181\nl182\nl183\nl184\nl185\nl186\nl187\nl188\nl189\nl190\nl191\nl192\nl193\nl194\nl195\nl196\nl197\nl198\nl199\nl200\n",
-        "eventCount": 200
+        "eventCount": 1,
+        "windowStartAt": 1000,
+        "windowCount": 1
       },
       "signals": [
         {
@@ -534,9 +554,9 @@
             "kind": "watch",
             "reason": "noisy stream",
             "lineCount": "200",
-            "eventCount": "200"
+            "eventCount": "1"
           },
-          "dispatchId": "wakeup:wk_012:event:200"
+          "dispatchId": "wakeup:wk_012:event:1"
         }
       ]
     }
@@ -569,7 +589,8 @@
       "nextOffset": 9
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": {
       "to": "done",
@@ -622,7 +643,8 @@
       "kind": "error"
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": null
   },
@@ -650,7 +672,8 @@
       "kind": "error"
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": {
       "to": "expired",
@@ -702,7 +725,8 @@
       "kind": "error"
     },
     "limits": {
-      "watchMaxEventsPerHour": 120
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
     },
     "expected": {
       "to": "expired",
@@ -728,6 +752,423 @@
         }
       ],
       "releaseLease": "deadline"
+    }
+  },
+  {
+    "name": "watch_rate_window_resets_after_an_hour",
+    "now": 3600000,
+    "row": {
+      "id": "wk_020",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "watch",
+      "status": "running",
+      "reason": "follow",
+      "command": "tail -f x",
+      "execId": "exec20",
+      "leaseId": "ls_20",
+      "deadlineAt": 99999999,
+      "logOffset": 0,
+      "logTail": "",
+      "eventCount": 500,
+      "createdAt": 0,
+      "updatedAt": 0,
+      "windowStartAt": 0,
+      "windowCount": 120
+    },
+    "probe": {
+      "kind": "poll",
+      "status": "running",
+      "output": "x\n",
+      "nextOffset": 2
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
+    },
+    "expected": {
+      "to": "running",
+      "patch": {
+        "logOffset": 2,
+        "logTail": "x\n",
+        "eventCount": 501,
+        "windowStartAt": 3600000,
+        "windowCount": 1
+      },
+      "signals": [
+        {
+          "signalType": "watch.event",
+          "body": "x",
+          "attributes": {
+            "wakeupId": "wk_020",
+            "kind": "watch",
+            "reason": "follow",
+            "lineCount": "1",
+            "eventCount": "501"
+          },
+          "dispatchId": "wakeup:wk_020:event:501"
+        }
+      ]
+    }
+  },
+  {
+    "name": "watch_done_emits_final_lines_then_exited",
+    "now": 5000,
+    "row": {
+      "id": "wk_021",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "watch",
+      "status": "running",
+      "reason": "follow",
+      "command": "tail -f x",
+      "execId": "exec21",
+      "leaseId": "ls_21",
+      "deadlineAt": 99999999,
+      "logOffset": 0,
+      "logTail": "earlier\n",
+      "eventCount": 2,
+      "createdAt": 0,
+      "updatedAt": 0,
+      "windowStartAt": 0,
+      "windowCount": 2
+    },
+    "probe": {
+      "kind": "poll",
+      "status": "done",
+      "exitCode": 0,
+      "output": "last one\nno newline",
+      "nextOffset": 19
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
+    },
+    "expected": {
+      "to": "done",
+      "cause": "exit",
+      "patch": {
+        "eventCount": 3,
+        "cause": "exit",
+        "exitCode": 0,
+        "endedAt": 5000
+      },
+      "signals": [
+        {
+          "signalType": "watch.event",
+          "body": "last one\nno newline",
+          "attributes": {
+            "wakeupId": "wk_021",
+            "kind": "watch",
+            "reason": "follow",
+            "lineCount": "2",
+            "eventCount": "3"
+          },
+          "dispatchId": "wakeup:wk_021:event:3"
+        },
+        {
+          "signalType": "watch.exited",
+          "body": "earlier\nlast one\nno newline",
+          "attributes": {
+            "wakeupId": "wk_021",
+            "kind": "watch",
+            "reason": "follow",
+            "cause": "exit",
+            "durationSeconds": "5",
+            "logPath": "/tmp/valet-jobs/exec21.out",
+            "exitCode": "0"
+          },
+          "dispatchId": "wakeup:wk_021:terminal"
+        }
+      ],
+      "releaseLease": "owner_ended"
+    }
+  },
+  {
+    "name": "watch_nul_bytes_are_replaced",
+    "now": 1000,
+    "row": {
+      "id": "wk_022",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "watch",
+      "status": "running",
+      "reason": "follow",
+      "command": "tail -f x",
+      "execId": "exec22",
+      "leaseId": "ls_22",
+      "deadlineAt": 99999999,
+      "logOffset": 0,
+      "logTail": "",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": {
+      "kind": "poll",
+      "status": "running",
+      "output": "a\u0000b\n",
+      "nextOffset": 4
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
+    },
+    "expected": {
+      "to": "running",
+      "patch": {
+        "logOffset": 4,
+        "logTail": "a�b\n",
+        "eventCount": 1,
+        "windowStartAt": 1000,
+        "windowCount": 1
+      },
+      "signals": [
+        {
+          "signalType": "watch.event",
+          "body": "a�b",
+          "attributes": {
+            "wakeupId": "wk_022",
+            "kind": "watch",
+            "reason": "follow",
+            "lineCount": "1",
+            "eventCount": "1"
+          },
+          "dispatchId": "wakeup:wk_022:event:1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "process_nul_in_tail_is_replaced",
+    "now": 2000,
+    "row": {
+      "id": "wk_023",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "process",
+      "status": "running",
+      "reason": "build",
+      "command": "make build",
+      "execId": "exec23",
+      "leaseId": "ls_23",
+      "deadlineAt": 100000,
+      "logOffset": 0,
+      "logTail": "",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": {
+      "kind": "poll",
+      "status": "running",
+      "output": "x\u0000y",
+      "nextOffset": 3
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
+    },
+    "expected": {
+      "to": "running",
+      "patch": {
+        "logOffset": 3,
+        "logTail": "x�y"
+      },
+      "signals": []
+    }
+  },
+  {
+    "name": "watch_offset_counts_provider_bytes",
+    "now": 1000,
+    "row": {
+      "id": "wk_024",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "watch",
+      "status": "running",
+      "reason": "follow",
+      "command": "tail -f x",
+      "execId": "exec24",
+      "leaseId": "ls_24",
+      "deadlineAt": 99999999,
+      "logOffset": 0,
+      "logTail": "",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": {
+      "kind": "poll",
+      "status": "running",
+      "output": "�a\nb",
+      "nextOffset": 4
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
+    },
+    "expected": {
+      "to": "running",
+      "patch": {
+        "logOffset": 3,
+        "logTail": "�a\n",
+        "eventCount": 1,
+        "windowStartAt": 1000,
+        "windowCount": 1
+      },
+      "signals": [
+        {
+          "signalType": "watch.event",
+          "body": "�a",
+          "attributes": {
+            "wakeupId": "wk_024",
+            "kind": "watch",
+            "reason": "follow",
+            "lineCount": "1",
+            "eventCount": "1"
+          },
+          "dispatchId": "wakeup:wk_024:event:1"
+        }
+      ]
+    }
+  },
+  {
+    "name": "pending_process_inside_start_grace",
+    "now": 899999,
+    "row": {
+      "id": "wk_025",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "process",
+      "status": "pending",
+      "reason": "build",
+      "command": "make build",
+      "execId": "job-a-12345678",
+      "leaseId": "ls_25",
+      "deadlineAt": 100000,
+      "logOffset": 0,
+      "logTail": "",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": {
+      "kind": "none"
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
+    },
+    "expected": null
+  },
+  {
+    "name": "pending_process_past_start_grace",
+    "now": 900000,
+    "row": {
+      "id": "wk_025",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "process",
+      "status": "pending",
+      "reason": "build",
+      "command": "make build",
+      "execId": "job-a-12345678",
+      "leaseId": "ls_25",
+      "deadlineAt": 100000,
+      "logOffset": 0,
+      "logTail": "",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": {
+      "kind": "none"
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120,
+      "logDir": "/tmp/valet-jobs"
+    },
+    "expected": {
+      "to": "lost",
+      "cause": "pid_missing",
+      "kill": true,
+      "patch": {
+        "cause": "pid_missing",
+        "endedAt": 900000
+      },
+      "signals": [
+        {
+          "signalType": "process.exited",
+          "body": "This background process never finished starting, so its result is unknown. Check whether it ran before you start it again.",
+          "attributes": {
+            "wakeupId": "wk_025",
+            "kind": "process",
+            "reason": "build",
+            "cause": "pid_missing",
+            "durationSeconds": "900",
+            "logPath": "/tmp/valet-jobs/job-a-12345678.out"
+          },
+          "dispatchId": "wakeup:wk_025:terminal"
+        }
+      ],
+      "releaseLease": "owner_ended"
+    }
+  },
+  {
+    "name": "process_done_exit_without_log_files",
+    "now": 1000,
+    "row": {
+      "id": "wk_001",
+      "sessionId": "s1",
+      "threadId": "t1",
+      "kind": "process",
+      "status": "running",
+      "reason": "build",
+      "command": "make build",
+      "execId": "exec1",
+      "leaseId": "ls_1",
+      "deadlineAt": 100000,
+      "logOffset": 0,
+      "logTail": "",
+      "eventCount": 0,
+      "createdAt": 0,
+      "updatedAt": 0
+    },
+    "probe": {
+      "kind": "poll",
+      "status": "done",
+      "exitCode": 0,
+      "output": "build complete\n",
+      "nextOffset": 15
+    },
+    "limits": {
+      "watchMaxEventsPerHour": 120
+    },
+    "expected": {
+      "to": "done",
+      "cause": "exit",
+      "patch": {
+        "cause": "exit",
+        "exitCode": 0,
+        "endedAt": 1000
+      },
+      "signals": [
+        {
+          "signalType": "process.exited",
+          "body": "build complete\n",
+          "attributes": {
+            "wakeupId": "wk_001",
+            "kind": "process",
+            "reason": "build",
+            "cause": "exit",
+            "exitCode": "0",
+            "durationSeconds": "1"
+          },
+          "dispatchId": "wakeup:wk_001:terminal"
+        }
+      ],
+      "releaseLease": "owner_ended"
     }
   }
 ]

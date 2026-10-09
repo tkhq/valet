@@ -735,7 +735,9 @@ async function close(): Promise<void> {
     console.error("idleHibernationSweep.stop failed:", err);
   }
   try {
-    providers.wakeWatcher.stop();
+    // Awaited: a pass in flight can sit between a wakeup's CAS and its
+    // signal delivery, and evictAll below must not run under it.
+    await providers.wakeWatcher.stop();
   } catch (err) {
     console.error("wakeWatcher.stop failed:", err);
   }
