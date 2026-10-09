@@ -47,8 +47,8 @@ let githubAppData: GetGithubAppResponse | undefined;
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
-  Link: ({ to, children, className }: { to: string; children: ReactNode; className?: string }) => (
-    <a href={to} className={className}>{children}</a>
+  Link: ({ to, search, children, className }: { to: string; search?: Record<string, string>; children: ReactNode; className?: string }) => (
+    <a href={search ? `${to}?${new URLSearchParams(search)}` : to} className={className}>{children}</a>
   ),
 }));
 
@@ -492,9 +492,11 @@ describe("ConnectedAccountsPage", () => {
     });
   });
 
-  it("sends service connections to Integrations instead of listing them", () => {
+  it("sends service connections to personal Integrations instead of listing them", () => {
     renderCredentials([linearCred, notionCred]);
-    expect(screen.getByRole("link", { name: "Open Integrations" }).getAttribute("href")).toBe("/integrations");
+    // Account settings are yours, so the link opens your own Integrations
+    // whatever the switcher holds.
+    expect(screen.getByRole("link", { name: "Open Integrations" }).getAttribute("href")).toBe("/integrations?workspace=user");
     expect(screen.queryByText("Other credentials")).toBeNull();
     expect(screen.queryByRole("button", { name: /Revoke/ })).toBeNull();
   });

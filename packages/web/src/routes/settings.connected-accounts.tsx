@@ -14,6 +14,7 @@ import { displayName } from "~/components/integrations/display-name";
 import { useOnePasswordSettings } from "~/api/onepassword";
 import { OnePasswordTokenRow } from "~/components/integrations/onepassword-setup";
 import { IdentityLinkBlock } from "~/components/integrations/identity-link-block";
+import { PERSONAL } from "~/lib/workspace-scope";
 
 /**
  * `/settings/connected-accounts` — Account · Connected accounts: the chat
@@ -115,7 +116,9 @@ export function ConnectedAccountsPage() {
       <GithubRow />
       <OnePasswordRow />
       <FieldRow label="Other services" hint="Connect services for your assistant on the Integrations page.">
-        <Link to="/integrations" className="text-sm text-moss underline underline-offset-2">
+        {/* Account settings are yours, so this opens your own Integrations
+            whatever the switcher holds. */}
+        <Link to="/integrations" search={{ workspace: PERSONAL }} className="text-sm text-moss underline underline-offset-2">
           Open Integrations
         </Link>
       </FieldRow>

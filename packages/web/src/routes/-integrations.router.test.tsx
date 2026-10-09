@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import {
+  Outlet,
   RouterProvider,
   createMemoryHistory,
   createRootRoute,
@@ -19,10 +20,15 @@ vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog:
 vi.mock("~/components/integrations/integration-limit-notice", () => ({ IntegrationLimitNotice: () => null }));
 vi.mock("~/lib/use-list-owner", () => ({ useListOwner: () => undefined }));
 vi.mock("~/api/settings", () => ({
-  useMe: () => ({ data: { id: "u1", orgRole: "member" } }),
-  useTeams: () => ({ data: { teams: [] } }),
-  useOrg: () => ({ data: undefined }),
+  useMe: () => ({ data: { id: "u1", orgRole: "member" }, isLoading: false, error: null }),
+  useTeams: () => ({ data: { teams: [team] }, isLoading: false, error: null }),
+  useOrg: () => ({ data: { features: { organizations: true } } }),
+  useOrgDirectory: () => ({ data: { users: [] }, isLoading: false, error: null }),
 }));
+const team = {
+  id: "t1", name: "Platform", callerRole: "member", orgId: "o1", origin: "local",
+  externalId: null, createdAt: 1, memberCount: 2, defaultModel: null,
+};
 vi.mock("~/api/repos", () => ({
   useConnectGithub: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
   useGithubOrgStatus: () => ({ data: undefined }),
@@ -38,6 +44,8 @@ vi.mock("~/api/integrations", () => ({
   useRevokeDelegation: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
 }));
 vi.mock("~/api/onepassword", () => ({
+  useTeamOnePasswordStatus: () => ({ data: { tokenConnected: false }, isSuccess: true, isError: false }),
+  useTeamOnePasswordToken: () => ({ mutate: vi.fn(), isPending: false, reset: vi.fn() }),
   useOnePasswordSettings: () => ({ data: undefined, isLoading: false, error: null }),
   usePutOnePasswordSettings: () => ({ mutate: vi.fn(), isPending: false, error: null }),
 }));
@@ -54,6 +62,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
   };
 });
 
+import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
 import { Route as IntegrationsRoute } from "./integrations";
 
 function service(name: string, extra: Partial<PluginServiceSummary> = {}): PluginServiceSummary {
@@ -66,7 +75,9 @@ function plugin(name: string, services: PluginServiceSummary[], description = ""
 
 /** The real route's component and search schema under a memory history. */
 function mount(initial = "/integrations") {
-  const root = createRootRoute();
+  // The real scope provider in the root route, as in `__root.tsx`, so it
+  // reads `?workspace=` through the page route's own search schema.
+  const root = createRootRoute({ component: () => <WorkspaceScopeProvider><Outlet /></WorkspaceScopeProvider> });
   const page = createRoute({
     getParentRoute: () => root,
     path: "integrations",
@@ -80,6 +91,7 @@ function mount(initial = "/integrations") {
 }
 
 beforeEach(() => {
+  window.sessionStorage.clear();
   credentials = [];
   plugins = { plugins: [plugin("notion", [service("notion", { connected: true })], "Notes and docs")] };
 });
@@ -132,5 +144,22 @@ describe("integration rows", () => {
     // width to the badge and chevron instead of pushing them off screen.
     expect(name.className.split(" ")).toEqual(expect.arrayContaining(["min-w-0", "shrink", "truncate"]));
     expect(name.className.split(" ")).not.toContain("shrink-0");
+  });
+});
+
+describe("the workspace a link names", () => {
+  it("opens personal Integrations from ?workspace=user while the switcher holds a team", async () => {
+    window.sessionStorage.setItem("valet:workspace", "t1");
+    const router = mount("/integrations?workspace=user");
+    expect(await screen.findByRole("link", { name: /Notion/ })).toBeTruthy();
+    expect(screen.queryByText("Platform workspace")).toBeNull();
+    // The route's own schema keeps the parameter, so a typed link can send it.
+    expect(router.state.matches.at(-1)?.search).toMatchObject({ workspace: "user" });
+  });
+
+  it("shows the switcher's team without the parameter", async () => {
+    window.sessionStorage.setItem("valet:workspace", "t1");
+    mount("/integrations");
+    expect(await screen.findByText("Platform workspace")).toBeTruthy();
   });
 });

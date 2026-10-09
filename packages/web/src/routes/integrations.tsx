@@ -37,13 +37,17 @@ interface IntegrationsSearch {
   q?: string;
   /** The plugin whose detail panel is open. */
   service?: string;
+  /** The workspace to show, as on `/chat`: `"user"` or a team id. The
+   * scope provider reads it, so a link from a personal settings page opens
+   * your own Integrations whatever the switcher holds. */
+  workspace?: string;
 }
 
 /** Reads the search params, keeping only strings. The OAuth round trip's
  * `?connected=`/`?error=` stay off this schema: `useConnectResult` reads
  * and clears them from `window.location` on mount. */
 function readIntegrationsSearch(raw: unknown): IntegrationsSearch {
-  return { q: textParam(raw, "q"), service: textParam(raw, "service") };
+  return { q: textParam(raw, "q"), service: textParam(raw, "service"), workspace: textParam(raw, "workspace") };
 }
 
 export const Route = createFileRoute("/integrations")({
