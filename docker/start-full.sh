@@ -20,9 +20,20 @@ if [ -d /scratch ]; then
   ln -sfn /scratch/valet-jobs /tmp/valet-jobs
   # A container restart killed every job, but /scratch kept its files. Mark
   # each job with no exit code dead, so a poll does not trust a reused pid.
-  for pidfile in /scratch/valet-jobs/*.pid; do
-    [ -e "$pidfile" ] || continue
-    [ -e "${pidfile%.pid}.exit" ] || [ -L "${pidfile%.pid}.dead" ] || : > "${pidfile%.pid}.dead"
+  # Only jobs older than this start: a kickoff that races the loop keeps
+  # its pid. A marker that already exists, or that root cannot write, is
+  # left alone, so a planted entry never stops the start.
+  stamp=$(mktemp 2>/dev/null) || stamp=
+  if [ -n "$stamp" ]; then
+    pids=$(find /scratch/valet-jobs -maxdepth 1 -name '*.pid' ! -newer "$stamp")
+    rm -f "$stamp"
+  else
+    pids=$(find /scratch/valet-jobs -maxdepth 1 -name '*.pid')
+  fi
+  printf '%s\n' "$pids" | while IFS= read -r pidfile; do
+    [ -n "$pidfile" ] || continue
+    dead="${pidfile%.pid}.dead"
+    [ -e "${pidfile%.pid}.exit" ] || [ -e "$dead" ] || [ -L "$dead" ] || : > "$dead" 2>/dev/null || :
   done
 fi
 # Root services use a root-only temp dir. The workload user keeps

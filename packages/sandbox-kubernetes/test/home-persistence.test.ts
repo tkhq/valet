@@ -209,6 +209,21 @@ describe("scratch bootstrap on every container start (fix wave 3, M-A, L-1, H-1)
     expect(await readFile(target, "utf8")).toBe("keep");
   });
 
+  it("a planted .dead entry never stops the start, and a pid newer than the start is not stamped (fix wave 4)", async () => {
+    const { scratchStartScript } = await import("../src/home-persistence.js");
+    const { scratch, link } = await scratchFixture();
+    const jobs = join(scratch, "valet-jobs");
+    await mkdir(jobs);
+    await writeFile(join(jobs, "job-a.pid"), "41");
+    await writeFile(join(jobs, "job-d.pid"), "44");
+    await mkdir(join(jobs, "job-d.dead"));
+    // The prefix runs under `set -eu`; a failed stamp must not exit it.
+    run(`set -eu\n${scratchStartScript(scratch, link)}echo reached-exec`);
+
+    expect((await lstat(join(jobs, "job-a.dead"))).isFile()).toBe(true);
+    expect((await lstat(join(jobs, "job-d.dead"))).isDirectory()).toBe(true);
+  });
+
   it("replaces a planted symlink in place of a scratch dir instead of following it", async () => {
     const { scratchStartScript } = await import("../src/home-persistence.js");
     const { root, scratch, link } = await scratchFixture();
