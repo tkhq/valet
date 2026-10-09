@@ -84,6 +84,31 @@ describe("PgSessionStore (PGlite)", () => {
     }
   });
 
+  it("getWakeup and the count read skip and count an unreadable row (fix wave 3, data L4)", async () => {
+    const store = await factory();
+    const base = {
+      sessionId: "s", threadId: "t", status: "running" as const, reason: "r", command: "c", execId: "job-1",
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1,
+    };
+    await store.createWakeup({ ...base, id: "wk_good", kind: "process" });
+    await store.createWakeup({ ...base, id: "wk_bad", kind: "process" });
+    await store.createWakeup({ ...base, id: "wk_badstatus", kind: "process" });
+    await db.query(`UPDATE engine_wakeups SET cause = 'bogus' WHERE id = 'wk_bad'`);
+    await db.query(`UPDATE engine_wakeups SET status = 'paused' WHERE id = 'wk_badstatus'`);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await store.getWakeup("wk_bad")).toBeNull();
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("wk_bad"), expect.anything());
+      errors.mockClear();
+      expect(await store.countWakeupsByKindAndStatus(["pending", "running"])).toEqual([
+        { kind: "process", status: "running", count: 2 },
+      ]);
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("paused"));
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it("bounds recent history in the database after excluding compactions", async () => {
     const store = await factory();
     await store.saveSession({ id: "bounded", userId: "u1", orgId: "o1", owner: { type: "user", id: "u1" }, workspace: "/", purpose: "interactive", status: "running", createdAt: 1, updatedAt: 1 });

@@ -15,8 +15,8 @@ import type {
   WakeupStatus,
 } from "./wakeups/types.js";
 
-// Wakeup and lease contracts (spec 2026-10-08). Type-only re-export: no
-// runtime code, so the engine barrel stays browser-safe.
+// Wakeup and lease contracts (spec 2026-10-08). Types and plain constants
+// only, with no node imports, so the engine barrel stays browser-safe.
 export * from "./wakeups/types.js";
 
 // ── Identity / authoring ──────────────────────────────────────────

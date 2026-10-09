@@ -735,6 +735,8 @@ export interface WakeupRow {
   origin_json: string | null;
   window_start_at: number | null;
   window_count: number | null;
+  watch_buffer: string | null;
+  last_emit_at: number | null;
 }
 
 /**
@@ -785,6 +787,8 @@ export function rawToWakeupRow(raw: Record<string, unknown>): WakeupRow {
     origin_json: asStringOrNull(raw.origin_json, "origin_json"),
     window_start_at: toNumOrNull(raw.window_start_at, "window_start_at"),
     window_count: toNumOrNull(raw.window_count, "window_count"),
+    watch_buffer: asStringOrNull(raw.watch_buffer, "watch_buffer"),
+    last_emit_at: toNumOrNull(raw.last_emit_at, "last_emit_at"),
   };
 }
 
@@ -830,6 +834,8 @@ export function rowToWakeup(row: WakeupRow): Wakeup {
     ...withOrigin(row.origin_json),
     ...(row.window_start_at !== null ? { windowStartAt: row.window_start_at } : {}),
     ...(row.window_count !== null ? { windowCount: row.window_count } : {}),
+    ...(row.watch_buffer !== null ? { watchBuffer: row.watch_buffer } : {}),
+    ...(row.last_emit_at !== null ? { lastEmitAt: row.last_emit_at } : {}),
   };
 }
 

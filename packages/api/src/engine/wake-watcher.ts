@@ -5,6 +5,7 @@ import {
   recordLeasesActive,
   recordLeasesOverDeadline,
   recordLeasesUnannotated,
+  recordWakeupBadRow,
   recordWakeupEnded,
   recordWakeupSignalLost,
   recordWakeupsActive,
@@ -36,9 +37,11 @@ import { loadSessionMeta } from "./session-meta.js";
 import {
   decideWakeup,
   LOG_TAIL_BYTES,
+  PENDING_START_GRACE_MS,
   WATCH_READ_BYTES,
   type DecideOptions,
   type SignalDraft,
+  type WakeupDecision,
   type WakeupProbe,
 } from "./wake-watcher-decide.js";
 import { isSandboxGone } from "./wakeups-admin.js";
@@ -66,16 +69,21 @@ export interface WakeWatcherHost {
   liveSession(sessionId: string): WakeWatcherSession | null;
 }
 
+/** Why the watcher released a process or watch lease outside the row's own transition. */
+type OrphanReleaseReason = Parameters<typeof recordLeaseOrphanReleased>[1];
+
 /** The counters the watcher records. Tests inject spies. */
 export interface WakeWatcherMetrics {
   wakeupEnded(kind: WakeupKind, cause: WakeupCause): void;
   signalLost(kind: WakeupKind | "hold"): void;
   leasesUnannotated(count: number): void;
-  orphanReleased(ownerKind: LeaseOwnerKind): void;
+  orphanReleased(ownerKind: LeaseOwnerKind, reason: OrphanReleaseReason): void;
   nodeSeconds(ownerKind: LeaseOwnerKind, seconds: number): void;
   wakeupsActive(kind: WakeupKind, count: number): void;
   sweepOk(unixSeconds: number): void;
   sweepFailed(): void;
+  leasesOverDeadline(count: number): void;
+  badRow(table: "engine_wakeups" | "engine_leases"): void;
 }
 
 const DEFAULT_METRICS: WakeWatcherMetrics = {
@@ -87,6 +95,8 @@ const DEFAULT_METRICS: WakeWatcherMetrics = {
   wakeupsActive: recordWakeupsActive,
   sweepOk: recordWakeupSweepOk,
   sweepFailed: recordWakeupSweepFailed,
+  leasesOverDeadline: recordLeasesOverDeadline,
+  badRow: recordWakeupBadRow,
 };
 
 interface WakeWatcherBaseDeps {
@@ -148,6 +158,8 @@ export class WakeWatcher {
   private readonly decideOptions: DecideOptions;
   /** When the previous pass's lease accounting ran, for `node_seconds`. */
   private lastPassAt: number | undefined;
+  /** Set by `stop()`. A pass checks it before each row and stops there. */
+  private stopping = false;
 
   constructor(private readonly deps: WakeWatcherDeps) {
     this.intervalMs = deps.sweepIntervalMs ?? WAKE_WATCHER_INTERVAL_MS;
@@ -156,6 +168,7 @@ export class WakeWatcher {
     this.clock = deps.now ?? Date.now;
     this.decideOptions = {
       watchMaxEventsPerHour: deps.limits.watchMaxEventsPerHour,
+      ...(deps.limits.watchMinIntervalMs !== undefined ? { watchMinIntervalMs: deps.limits.watchMinIntervalMs } : {}),
       ...(deps.jobLogDir !== undefined ? { logDir: deps.jobLogDir } : {}),
     };
     if (deps.loadSession) {
@@ -168,15 +181,21 @@ export class WakeWatcher {
 
   start(): void {
     if (this.timer || this.intervalMs <= 0) return;
+    this.stopping = false;
+    // The liveness series exists from the start, so a watcher that never
+    // finishes a pass still trips the staleness alert (fix wave 3, data L3).
+    this.metrics.sweepOk(Math.floor(this.clock() / 1000));
     this.timer = startSweepTimer("WakeWatcher", this.intervalMs, () => this.sweep());
   }
 
   /**
-   * Stops the timer and resolves when the pass in flight ends, so a
-   * shutdown never cuts a pass between its CAS and its delivery (fix wave
-   * 2, M3).
+   * Stops the timer and resolves when the pass in flight ends. The pass
+   * stops before its next row, so a shutdown waits for one row at most and
+   * never cuts a row between its CAS and its delivery (fix wave 2, M3; fix
+   * wave 3, concurrency M6).
    */
   async stop(): Promise<void> {
+    this.stopping = true;
     const timer = this.timer;
     this.timer = null;
     await timer?.stop();
@@ -194,12 +213,19 @@ export class WakeWatcher {
   }
 
   private async pass(now: number): Promise<void> {
+    // INV-6 is measured before this pass ends or repairs anything, so the
+    // repair cannot hide the violation it repairs (fix wave 3, M2).
+    const stale = now - 2 * this.intervalMs;
+    const atStart = await this.deps.engineStore.listAllActiveLeases();
+    this.metrics.leasesOverDeadline(atStart.filter((l) => l.deadlineAt < stale).length);
+
     // Page through every due row. A single fixed batch let old always-due
     // process rows starve newer timers once more than one batch was due.
     let after: WakeupCursor | undefined;
     for (;;) {
       const rows = await this.deps.engineStore.listDueWakeups(now, this.batchSize, after);
       for (const row of rows) {
+        if (this.stopping) return;
         const progress = { pastCas: false };
         try {
           await this.processRow(now, row, progress);
@@ -215,6 +241,7 @@ export class WakeWatcher {
       if (rows.length < this.batchSize || !last) break;
       after = { createdAt: last.createdAt, id: last.id };
     }
+    if (this.stopping) return;
     // Every pending or running row, not just the due ones: a pending timer
     // is not due until it fires (fix wave 2, M11).
     const counts = await this.deps.engineStore.countWakeupsByKindAndStatus(["pending", "running"]);
@@ -228,8 +255,9 @@ export class WakeWatcher {
   private async processRow(now: number, row: Wakeup, progress: { pastCas: boolean }): Promise<void> {
     let sandbox: Sandbox | null = null;
     let probe: WakeupProbe;
-    if (row.kind === "timer" || row.status === "pending") {
-      // A pending process or watch is decided by its age alone.
+    if (row.kind === "timer" || (row.status === "pending" && now - row.createdAt < PENDING_START_GRACE_MS)) {
+      // A pending process or watch inside its start grace is not probed:
+      // the seam may still be starting it.
       probe = { kind: "none" };
     } else if (row.execId === undefined) {
       console.error(`WakeWatcher: ${row.kind} wakeup ${row.id} has no execId; it expires at its deadline.`);
@@ -269,13 +297,36 @@ export class WakeWatcher {
 
     const decision = decideWakeup(now, row, probe, this.decideOptions);
     if (!decision) return;
+    if (decision.badRow) {
+      this.metrics.badRow("engine_wakeups");
+      console.error(`WakeWatcher: ${row.kind} wakeup ${row.id} cannot be acted on as stored; it ends as ${decision.to}.`);
+    }
+    await this.applyDecision(row, decision, sandbox, progress);
+  }
 
+  /**
+   * Applies one decision: the CAS with its lease release, the kill, the
+   * signals, and the end metric. Returns the updated row, or null when
+   * another writer won the CAS.
+   */
+  private async applyDecision(
+    row: Wakeup,
+    decision: WakeupDecision,
+    probed: Sandbox | null,
+    progress: { pastCas: boolean },
+  ): Promise<Wakeup | null> {
+    let sandbox = probed;
     // The kill runs after the CAS (spec B5). Find its target first, while
     // the lease that names the sandbox is still active.
     if (decision.kill && !sandbox && row.execId !== undefined) {
       sandbox = await this.killTarget(row);
     }
 
+    // Stamp the transition with the clock now, not the pass start: a pass
+    // can run for minutes, and the ChildWatcher compares endedAt with
+    // admission times (fix wave 3, concurrency M1).
+    const at = this.clock();
+    const patch = decision.patch.endedAt !== undefined ? { ...decision.patch, endedAt: at } : decision.patch;
     // The CAS and the lease release are one store write (fix wave 2, B2).
     // Null means another sweep or wakeup_cancel won the CAS (INV-5).
     const updated =
@@ -284,12 +335,12 @@ export class WakeWatcher {
             row.id,
             [row.status],
             decision.to,
-            decision.patch,
-            now,
+            patch,
+            at,
             decision.releaseLease,
           )
-        : await this.deps.engineStore.transitionWakeup(row.id, [row.status], decision.to, decision.patch, now);
-    if (!updated) return;
+        : await this.deps.engineStore.transitionWakeup(row.id, [row.status], decision.to, patch, at);
+    if (!updated) return null;
     progress.pastCas = true;
 
     // A lost CAS never reaches this kill, so a process that a cancel or
@@ -316,6 +367,7 @@ export class WakeWatcher {
     if (TERMINAL.includes(decision.to) && decision.cause) {
       this.metrics.wakeupEnded(updated.kind, decision.cause);
     }
+    return updated;
   }
 
   /** The sandbox to kill a row's job in, or null when none can be reached. */
@@ -402,40 +454,66 @@ export class WakeWatcher {
    *
    * - A hold at its deadline, with a `lease.expired` signal to the thread
    *   that asked for it (fix wave 2, M17).
-   * - A process or watch lease whose owner row is missing or terminal, or
-   *   that is two ticks past its deadline. This repair exists on purpose
-   *   (CLAUDE.md, "Invariants: alert, don't auto-repair"): crash windows
-   *   happen in normal operation. Rows written before the single-statement
-   *   writes, a deploy mid-pass, or a failed store write can each leave such
-   *   a lease, and nothing else would ever release it.
-   *   `valet.leases.orphan_released` counts each release, so a broken lease
-   *   writer still pages.
+   * - A process or watch lease whose owner row is missing, unreadable, or
+   *   terminal. This repair exists on purpose (CLAUDE.md, "Invariants:
+   *   alert, don't auto-repair"): crash windows happen in normal operation.
+   *   Rows written before the single-statement writes, a deploy mid-pass,
+   *   or a failed store write can each leave such a lease, and nothing else
+   *   would ever release it. Counted as `missing_owner` or `terminal_owner`.
+   * - A process or watch lease two ticks past its deadline whose owner is
+   *   still open. That is not a crash window: the row's own transition
+   *   failed. The owner ends as `expired/deadline` with a kill and its
+   *   signal, so the agent hears the true cause. Counted as `deadline`,
+   *   which pages, and `valet.leases.over_deadline` already showed it at
+   *   the start of the pass (fix wave 3, M2 and concurrency L5).
    */
   private async expireLeases(now: number): Promise<void> {
     const leases = await this.deps.engineStore.listAllActiveLeases();
     for (const lease of leases) {
+      if (this.stopping) return;
       if (lease.ownerKind === "hold") {
         if (lease.deadlineAt > now) continue;
         await this.expireHold(now, lease);
         continue;
       }
       try {
+        // An unreadable owner row reads as null (the store counts it), so it
+        // never blocks this repair (fix wave 3, data L4).
         const owner = lease.ownerId === undefined ? null : await this.deps.engineStore.getWakeup(lease.ownerId);
-        const ownerEnded = !owner || TERMINAL.includes(owner.status);
+        const ownerOpen = owner !== null && !TERMINAL.includes(owner.status);
         const pastDeadline = lease.deadlineAt + 2 * this.intervalMs <= now;
-        if (!ownerEnded && !pastDeadline) continue;
+        if (ownerOpen && !pastDeadline) continue;
+        if (ownerOpen && owner && (await this.endOverdueOwner(now, owner))) {
+          this.metrics.orphanReleased(lease.ownerKind, "deadline");
+          console.error(
+            `WakeWatcher: ${lease.ownerKind} wakeup ${owner.id} of session ${lease.sessionId} was still ${owner.status} two ticks past its deadline; ended it as expired.`,
+          );
+          continue;
+        }
+        const reason: OrphanReleaseReason = owner === null ? "missing_owner" : ownerOpen ? "deadline" : "terminal_owner";
         const released = await this.deps.engineStore.releaseLease(lease.id, "deadline", now);
         if (!released) continue;
-        this.metrics.orphanReleased(lease.ownerKind);
+        this.metrics.orphanReleased(lease.ownerKind, reason);
         console.warn(
           `WakeWatcher: released orphan ${lease.ownerKind} lease ${lease.id} of session ${lease.sessionId}: ` +
-            (ownerEnded ? `its wakeup ${lease.ownerId ?? "(none)"} is ${owner ? owner.status : "missing"}` : "it is past its deadline") +
-            ".",
+            `its wakeup ${lease.ownerId ?? "(none)"} is ${owner ? owner.status : "missing or unreadable"} (${reason}).`,
         );
       } catch (err) {
         console.error(`WakeWatcher: orphan check of lease ${lease.id} failed; it stays due for the next tick:`, err);
       }
     }
+  }
+
+  /**
+   * Ends an open owner whose lease is past its deadline, the way a failed
+   * probe past the deadline does: `expired/deadline`, kill, and signal.
+   * True when this call's CAS ended it.
+   */
+  private async endOverdueOwner(now: number, owner: Wakeup): Promise<boolean> {
+    const decision = decideWakeup(now, owner, { kind: "error" }, this.decideOptions);
+    if (!decision || !TERMINAL.includes(decision.to)) return false;
+    const updated = await this.applyDecision(owner, decision, null, { pastCas: false });
+    return updated !== null;
   }
 
   private async expireHold(now: number, lease: Lease): Promise<void> {
@@ -465,15 +543,16 @@ export class WakeWatcher {
       recordLeasesActive(kind, leases.filter((l) => l.ownerKind === kind).length);
     }
     // Real time held since the previous pass, not the nominal interval: a
-    // slow pass skips ticks (fix wave 2, M11).
-    const since = this.lastPassAt;
+    // slow pass skips ticks (fix wave 2, M11). The first pass after a start
+    // counts one interval at most: the previous process counted the rest
+    // (fix wave 3, data L1).
+    const since = this.lastPassAt ?? now - this.intervalMs;
     for (const lease of leases) {
-      const from = Math.max(lease.createdAt, since ?? lease.createdAt);
+      const from = Math.max(lease.createdAt, since);
       const seconds = Math.max(0, now - from) / 1000;
       if (seconds > 0) this.metrics.nodeSeconds(lease.ownerKind, seconds);
     }
     this.lastPassAt = now;
-    recordLeasesOverDeadline(leases.filter((l) => l.deadlineAt < stale).length);
 
     const { setEvictionProtection, listEvictionProtected } = this.deps.provider;
     if (!setEvictionProtection) {

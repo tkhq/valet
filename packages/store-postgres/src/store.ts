@@ -1426,17 +1426,27 @@ export class PgSessionStore implements SessionStore {
   }
 
   async countWakeupsByKindAndStatus(statuses: readonly WakeupStatus[]): Promise<WakeupCount[]> {
+    // Rows with an unknown kind or status match no other read (listDueWakeups
+    // filters both), so this read selects them too and counts them in
+    // `valet.wakeups.bad_rows` (fix wave 3, data L4).
     const r = await this.db.query(
-      `SELECT kind, status, count(*)::int AS n FROM engine_wakeups WHERE status = ANY($1::text[]) GROUP BY kind, status`,
-      [[...statuses]],
+      `SELECT kind, status, count(*)::int AS n FROM engine_wakeups
+       WHERE status = ANY($1::text[]) OR kind <> ALL($2::text[]) OR status <> ALL($3::text[])
+       GROUP BY kind, status`,
+      [[...statuses], [...WAKEUP_KINDS], [...WAKEUP_STATUSES]],
     );
     const out: WakeupCount[] = [];
     for (const raw of r.rows) {
       const kind = asString(raw.kind, "kind");
       const status = asString(raw.status, "status");
-      // An unknown kind or status is a bad row; listDueWakeups counts it.
-      if (!isWakeupKind(kind) || !isWakeupStatus(status)) continue;
-      out.push({ kind, status, count: toNum(raw.n, "n") });
+      const n = toNum(raw.n, "n");
+      if (!isWakeupKind(kind) || !isWakeupStatus(status)) {
+        for (let i = 0; i < n; i++) recordWakeupBadRow("engine_wakeups");
+        console.error(`store-postgres: ${n} engine_wakeups row(s) have kind "${kind}" and status "${status}", which no read can act on.`);
+        continue;
+      }
+      if (!statuses.includes(status)) continue;
+      out.push({ kind, status, count: n });
     }
     return out;
   }
@@ -1453,7 +1463,7 @@ export class PgSessionStore implements SessionStore {
     // crash cannot leave a terminal row with an active lease (fix wave 2, B2).
     const r = await this.db.query(
       `WITH t AS (${TRANSITION_SQL} RETURNING *),
-       r AS (UPDATE engine_leases SET released_at = $4, release_cause = $15
+       r AS (UPDATE engine_leases SET released_at = $4, release_cause = $17
              WHERE id = (SELECT lease_id FROM t) AND released_at IS NULL RETURNING id)
        SELECT * FROM t`,
       [...transitionParams(id, from, to, patch, updatedAt), releaseCause],
@@ -1472,7 +1482,9 @@ export class PgSessionStore implements SessionStore {
 
   async getWakeup(id: string): Promise<Wakeup | null> {
     const r = await this.db.query("SELECT * FROM engine_wakeups WHERE id = $1", [id]);
-    return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
+    // An unreadable row reads as missing and is counted, like every list
+    // read (fix wave 3, data L4).
+    return mapGoodRows(r.rows, "engine_wakeups", (raw) => rowToWakeup(rawToWakeupRow(raw)))[0] ?? null;
   }
 
   async listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]> {
@@ -1587,7 +1599,7 @@ export class PgSessionStore implements SessionStore {
       const kind = asString(raw.kind, "kind");
       const status = asString(raw.status, "status");
       if (isWakeupKind(kind) && (status === "pending" || status === "running")) {
-        recordWakeupEnded(kind, "sandbox_unavailable");
+        recordWakeupEnded(kind, "session_deleted");
       }
     }
   }
@@ -1602,7 +1614,8 @@ const TRANSITION_SQL = `UPDATE engine_wakeups SET status = $3, updated_at = $4,
          cause = COALESCE($5, cause), exit_code = COALESCE($6, exit_code), ended_at = COALESCE($7, ended_at),
          log_offset = COALESCE($8, log_offset), log_tail = COALESCE($9, log_tail), event_count = COALESCE($10, event_count),
          exec_id = COALESCE($11, exec_id), lease_id = COALESCE($12, lease_id),
-         window_start_at = COALESCE($13, window_start_at), window_count = COALESCE($14, window_count)
+         window_start_at = COALESCE($13, window_start_at), window_count = COALESCE($14, window_count),
+         watch_buffer = COALESCE($15, watch_buffer), last_emit_at = COALESCE($16, last_emit_at)
        WHERE id = $1 AND status = ANY($2::text[])`;
 
 function transitionParams(
@@ -1627,6 +1640,8 @@ function transitionParams(
     patch.leaseId ?? null,
     patch.windowStartAt ?? null,
     patch.windowCount ?? null,
+    patch.watchBuffer ?? null,
+    patch.lastEmitAt ?? null,
   ];
 }
 
@@ -1634,8 +1649,8 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
   await db.query(
     `INSERT INTO engine_wakeups (id, session_id, thread_id, kind, status, reason, command, prompt, exec_id, lease_id,
        fire_at, deadline_at, exit_code, cause, log_offset, log_tail, event_count, created_at, updated_at, ended_at,
-       origin_json, window_start_at, window_count)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
+       origin_json, window_start_at, window_count, watch_buffer, last_emit_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
     [
       w.id,
       w.sessionId,
@@ -1660,6 +1675,8 @@ async function insertWakeup(db: PgQueryable, w: Wakeup): Promise<void> {
       jsonOrNull(w.origin),
       w.windowStartAt ?? null,
       w.windowCount ?? null,
+      w.watchBuffer ?? null,
+      w.lastEmitAt ?? null,
     ],
   );
 }
@@ -1705,12 +1722,15 @@ function mapGoodRows<T>(rows: Record<string, unknown>[], table: "engine_wakeups"
   return out;
 }
 
+const WAKEUP_KINDS: readonly WakeupKind[] = ["process", "watch", "timer"];
+const WAKEUP_STATUSES: readonly WakeupStatus[] = ["pending", "running", "done", "cancelled", "expired", "lost"];
+
 function isWakeupKind(v: string): v is WakeupKind {
-  return v === "process" || v === "watch" || v === "timer";
+  return WAKEUP_KINDS.some((k) => k === v);
 }
 
 function isWakeupStatus(v: string): v is WakeupStatus {
-  return v === "pending" || v === "running" || v === "done" || v === "cancelled" || v === "expired" || v === "lost";
+  return WAKEUP_STATUSES.some((s) => s === v);
 }
 
 function rowToSession(r: SessionRow): SessionData {

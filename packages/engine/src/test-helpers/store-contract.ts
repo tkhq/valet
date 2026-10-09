@@ -851,6 +851,17 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         await store.createWakeup(wakeup({ id: "wk_d", status: "done" }));
         expect((await store.listWakeups("sess-1", [])).map((w) => w.id).sort()).toEqual(["wk_a", "wk_d"]);
       });
+
+      // ── fix wave 3 (M1: coalesced watch emits) ──
+
+      it("round-trips the watch buffer and last emit time, and a patch can empty the buffer", async () => {
+        const w = wakeup({ kind: "watch", watchBuffer: "held ✓\n", lastEmitAt: 42 });
+        await store.createWakeup(w);
+        expect(await store.getWakeup("wk_a")).toEqual(w);
+        const emptied = await store.transitionWakeup("wk_a", ["running"], "running", { watchBuffer: "", lastEmitAt: 90 }, 90);
+        expect(emptied).toMatchObject({ watchBuffer: "", lastEmitAt: 90 });
+        expect(await store.getWakeup("wk_a")).toMatchObject({ watchBuffer: "", lastEmitAt: 90 });
+      });
     });
 
     it("getQueueItemByDispatchId finds an admitted item by its exact dispatch id", async () => {
