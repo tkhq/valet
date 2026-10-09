@@ -52,6 +52,19 @@ describe("sandbox-backed image preview", () => {
     expect(screen.getByText("/workspace/generated-images/fox.png")).toBeTruthy();
   });
 
+  it.each(["generate_image", "edit_image"])("a pinned %s action keeps its preview visible", (action) => {
+    setToolCardDefault("always-collapsed");
+    const pinned = message(action, "completed");
+    const part = pinned.parts[0];
+    if (part.kind !== "tool_call") throw new Error("missing tool call");
+    part.toolName = `openai__${action}`;
+    part.args = { prompt: "a red fox" };
+    render(tree(pinned));
+    expect(screen.getByRole("img", { name: "a red fox" })).toBeTruthy();
+    expect(screen.getByText("/workspace/generated-images/fox.png")).toBeTruthy();
+    expect(screen.getByRole("button", { name: new RegExp(`openai ${action.replaceAll("_", " ")}`, "i") }).getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("smart policy auto-collapse does not hide the finished image", () => {
     const view = render(tree(message("generate_image", "running", false)));
     view.rerender(tree(message("generate_image", "completed")));

@@ -98,7 +98,7 @@ Every error names the corrective action:
 One `openai-media` renderer in
 `packages/web/src/components/session/tool-renderers/`, registered before the
 fallback. It matches `call_tool` invocations whose `tool_id` starts with
-`openai.`:
+`openai.`, and pinned `openai__*` tools:
 
 - image actions → inline `<img>` from persisted base64, with the saved path underneath;
 - `transcribe_audio` → transcript text;

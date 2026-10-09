@@ -1,8 +1,8 @@
 /**
  * Chat renderer for the plugin-openai media actions. They reach the LLM
  * through the plugin catalog, so on the wire they are `call_tool`
- * invocations with `args.tool_id = "openai.*"` — this renderer claims that
- * subset via the args-aware `matches` form (same pattern as workflow.tsx).
+ * invocations with `args.tool_id = "openai.*"`, or pinned `openai__*` tools.
+ * Both paths use the same action result contract.
  *
  * The persisted tool result is pi-agent-core's AgentToolResult plus the
  * engine's flattened `text` (thread.ts `tool_execution_end`): the image
@@ -20,19 +20,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function isOpenaiCallTool(toolName: string, args?: unknown): boolean {
+  if (toolName.startsWith("openai__")) return true;
   if (toolName !== "call_tool") return false;
   const toolId = isRecord(args) ? args.tool_id : undefined;
   return typeof toolId === "string" && toolId.startsWith(OPENAI_TOOL_PREFIX);
 }
 
 /** The `openai.<action>` id of this call, "" when args are still streaming. */
-export function openaiActionId(args: unknown): string {
+export function openaiActionId(args: unknown, toolName = "call_tool"): string {
+  if (toolName.startsWith("openai__")) return toolName.replace("__", ".");
   const toolId = isRecord(args) ? args.tool_id : undefined;
   return typeof toolId === "string" ? toolId : "";
 }
 
-/** The action's own parameters, nested under call_tool's `params`. */
-export function openaiParams(args: unknown): Record<string, unknown> {
+/** Parameters are nested for call_tool and direct for pinned tools. */
+export function openaiParams(args: unknown, toolName = "call_tool"): Record<string, unknown> {
+  if (toolName.startsWith("openai__")) return isRecord(args) ? args : {};
   const params = isRecord(args) ? args.params : undefined;
   return isRecord(params) ? params : {};
 }
@@ -62,9 +65,9 @@ export function openaiResultData(result: unknown): Record<string, unknown> {
   return isRecord(parsed) ? parsed : {};
 }
 
-function formatTarget(args: unknown): string | undefined {
-  const action = openaiActionId(args);
-  const params = openaiParams(args);
+function formatTarget(args: unknown, toolName: string): string | undefined {
+  const action = openaiActionId(args, toolName);
+  const params = openaiParams(args, toolName);
   const short = (value: unknown): string | undefined =>
     typeof value === "string" && value.length > 0
       ? value.length > 64
@@ -84,23 +87,23 @@ function formatTarget(args: unknown): string | undefined {
   }
 }
 
-function formatSummary(args: unknown, result: unknown): string | undefined {
+function formatSummary(args: unknown, result: unknown, _status: ToolRendererProps["status"], toolName: string): string | undefined {
   const data = openaiResultData(result);
-  if (openaiActionId(args) === "openai.transcribe_audio") {
+  if (openaiActionId(args, toolName) === "openai.transcribe_audio") {
     const text = data.text;
     return typeof text === "string" && text.length > 0 ? `${text.length} chars` : undefined;
   }
   return typeof data.path === "string" ? data.path.split("/").pop() : undefined;
 }
 
-function Preview({ args, result, status, error }: ToolRendererProps) {
+function Preview({ args, result, status, error, toolName }: ToolRendererProps) {
   if (status !== "completed" || error) return null;
-  const action = openaiActionId(args);
+  const action = openaiActionId(args, toolName);
   if (action !== "openai.generate_image" && action !== "openai.edit_image") return null;
   const imageUrl = imageDataUrl(result);
   if (!imageUrl) return null;
   const data = openaiResultData(result);
-  const prompt = openaiParams(args).prompt;
+  const prompt = openaiParams(args, toolName).prompt;
   return (
     <figure className="space-y-2">
       <img
@@ -115,13 +118,13 @@ function Preview({ args, result, status, error }: ToolRendererProps) {
   );
 }
 
-function Body({ args, result, status, error }: ToolRendererProps) {
+function Body({ args, result, status, error, toolName }: ToolRendererProps) {
   if (status === "running" || status === "streaming") {
     return <ToolBody>Working…</ToolBody>;
   }
   const text = error ?? resultText(result);
   const data = openaiResultData(result);
-  const action = openaiActionId(args);
+  const action = openaiActionId(args, toolName);
   const imageUrl = imageDataUrl(result);
   const transcript = action === "openai.transcribe_audio" && typeof data.text === "string" ? data.text : undefined;
 
