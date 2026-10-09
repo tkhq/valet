@@ -243,7 +243,10 @@ CREATE TABLE "engine_wakeups" (
 	"event_count" integer NOT NULL DEFAULT 0,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL,
-	"ended_at" bigint
+	"ended_at" bigint,
+	"origin_json" text,
+	"window_start_at" bigint,
+	"window_count" integer
 );
 --> statement-breakpoint
 CREATE INDEX "engine_wakeups_session" ON "engine_wakeups" ("session_id","status");
@@ -260,7 +263,9 @@ CREATE TABLE "engine_leases" (
 	"created_at" bigint NOT NULL,
 	"deadline_at" bigint NOT NULL,
 	"released_at" bigint,
-	"release_cause" text
+	"release_cause" text,
+	"thread_id" text,
+	"origin_json" text
 );
 --> statement-breakpoint
 CREATE INDEX "engine_leases_active" ON "engine_leases" ("session_id") WHERE "released_at" IS NULL;

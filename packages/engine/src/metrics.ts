@@ -55,6 +55,7 @@ const leasesActiveState = new Map<string, GaugeEntry>();
 const leasesOverDeadlineState = new Map<string, GaugeEntry>();
 const leasesUnannotatedState = new Map<string, GaugeEntry>();
 const scratchRequestedState = new Map<string, GaugeEntry>();
+const wakeupSweepOkState = new Map<string, GaugeEntry>();
 
 interface Instruments {
   turns: Counter;
@@ -84,6 +85,11 @@ interface Instruments {
   leasesUnannotated: ObservableGauge;
   scratchRequestedBytes: ObservableGauge;
   scratchRefused: Counter;
+  leasesOrphanReleased: Counter;
+  wakeupBadRows: Counter;
+  wakeupSweepOkAt: ObservableGauge;
+  wakeupSweepFailed: Counter;
+  leasesSettleOverDeadline: Counter;
 }
 
 let instruments: Instruments | null = null;
@@ -167,7 +173,27 @@ function inst(): Instruments {
     }),
     wakeupsActive: meter.createObservableGauge("valet.wakeups.active", {
       description:
-        "Wakeups currently pending or running, by kind. Reported by the host's WakeWatcher sweep; a count that only grows means wakeups are not reaching a terminal status.",
+        "Wakeups currently pending or running, by kind, from a store count each WakeWatcher pass. A count that only grows means wakeups are not reaching a terminal status.",
+    }),
+    leasesOrphanReleased: meter.createCounter("valet.leases.orphan_released", {
+      description:
+        "Process or watch leases the WakeWatcher released because their wakeup row was missing or terminal, or their deadline passed, by owner_kind. A crash between two writes can cause one; a sustained rate means a lease writer is broken.",
+    }),
+    wakeupBadRows: meter.createCounter("valet.wakeups.bad_rows", {
+      description:
+        "engine_wakeups or engine_leases rows a store read skipped because a field held an unknown value, by table. Any count needs a human: the row is never probed or released.",
+    }),
+    wakeupSweepOkAt: meter.createObservableGauge("valet.wakeups.sweep_ok_at", {
+      unit: "s",
+      description:
+        "Unix time of the last WakeWatcher pass that finished. Alert when it falls behind now by more than a few intervals: the other wakeup and lease gauges then hold stale values.",
+    }),
+    wakeupSweepFailed: meter.createCounter("valet.wakeups.sweep_failed", {
+      description: "WakeWatcher passes that threw before they finished. A sustained rate means no wakeup moves and no hold expires.",
+    }),
+    leasesSettleOverDeadline: meter.createCounter("valet.leases.settle_over_deadline", {
+      description:
+        "Child settles that stopped waiting because a lease stayed active past its deadline plus one poll. The child settled; the lease owner failed to release it.",
     }),
     leasesActive: meter.createObservableGauge("valet.leases.active", {
       description:
@@ -179,7 +205,7 @@ function inst(): Instruments {
     }),
     leasesOverDeadline: meter.createObservableGauge("valet.leases.over_deadline", {
       description:
-        "A lease active past its deadline means the WakeWatcher failed to release it. This is the alert signal for the alert-don't-auto-repair rule; nothing else releases it.",
+        "A lease active past its deadline for two ticks means the WakeWatcher failed to release it. This is the alert signal for the alert-don't-auto-repair rule. The only repair is the crash-window release, which valet.leases.orphan_released counts.",
     }),
     leasesUnannotated: meter.createObservableGauge("valet.leases.unannotated", {
       description:
@@ -199,6 +225,7 @@ function inst(): Instruments {
   observeGauge(instruments.leasesOverDeadline, leasesOverDeadlineState);
   observeGauge(instruments.leasesUnannotated, leasesUnannotatedState);
   observeGauge(instruments.scratchRequestedBytes, scratchRequestedState);
+  observeGauge(instruments.wakeupSweepOkAt, wakeupSweepOkState);
   return instruments;
 }
 
@@ -332,8 +359,8 @@ export function recordWakeupSignalLost(kind: WakeupKind | "hold"): void {
 }
 
 /** Wakeups currently pending or running, by kind. The caller (the host's
- * WakeWatcher sweep) owns re-setting this every pass. A stale value just
- * means the sweep stopped running, which has its own liveness check. */
+ * WakeWatcher sweep) owns re-setting this every pass from a store count. A
+ * stale value means the sweep stopped; `valet.wakeups.sweep_ok_at` shows it. */
 export function recordWakeupsActive(kind: WakeupKind, count: number): void {
   inst(); // ensure the gauge and its callback exist before the first set
   setGauge(wakeupsActiveState, { kind }, count);
@@ -343,14 +370,40 @@ export function recordWakeupsActive(kind: WakeupKind, count: number): void {
  * sweep alongside `recordWakeupsActive`. */
 export function recordLeasesActive(ownerKind: LeaseOwnerKind, count: number): void {
   inst();
-  setGauge(leasesActiveState, { ownerKind }, count);
+  setGauge(leasesActiveState, { owner_kind: ownerKind }, count);
 }
 
-/** Node-seconds a lease held a sandbox open, by owner kind. Record on
- * release (or periodically for a long-lived lease) so the total tracks
- * actual capacity consumed, not just lease count. */
+/** Node-seconds a lease held a sandbox open, by owner kind. The WakeWatcher
+ * records the real time since its previous pass for each active lease. */
 export function recordLeaseNodeSeconds(ownerKind: LeaseOwnerKind, seconds: number): void {
-  inst().leaseNodeSeconds.add(seconds, { ownerKind });
+  inst().leaseNodeSeconds.add(seconds, { owner_kind: ownerKind });
+}
+
+/** A process or watch lease released by the WakeWatcher's crash-window
+ * repair: its owner row was missing or terminal, or its deadline passed. */
+export function recordLeaseOrphanReleased(ownerKind: LeaseOwnerKind): void {
+  inst().leasesOrphanReleased.add(1, { owner_kind: ownerKind });
+}
+
+/** A wakeup or lease row a store read skipped because it did not narrow. */
+export function recordWakeupBadRow(table: "engine_wakeups" | "engine_leases"): void {
+  inst().wakeupBadRows.add(1, { table });
+}
+
+/** The WakeWatcher finished a pass at `unixSeconds`. */
+export function recordWakeupSweepOk(unixSeconds: number): void {
+  inst();
+  setGauge(wakeupSweepOkState, {}, unixSeconds);
+}
+
+/** A WakeWatcher pass threw before it finished. */
+export function recordWakeupSweepFailed(): void {
+  inst().wakeupSweepFailed.add(1);
+}
+
+/** The ChildWatcher stopped waiting on a lease past its deadline and settled the child. */
+export function recordChildSettleOverDeadline(): void {
+  inst().leasesSettleOverDeadline.add(1);
 }
 
 /** Leases active past their deadline. The WakeWatcher is the only releaser;
@@ -371,7 +424,7 @@ export function recordLeasesUnannotated(count: number): void {
 /** Most recently requested `/scratch` volume size, by session class. */
 export function recordScratchRequested(sessionClass: string, bytes: number): void {
   inst();
-  setGauge(scratchRequestedState, { sessionClass }, bytes);
+  setGauge(scratchRequestedState, { session_class: sessionClass }, bytes);
 }
 
 /** A scratch volume request the host refused, by source (the caller that

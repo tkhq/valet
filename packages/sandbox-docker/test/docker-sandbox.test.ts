@@ -3,8 +3,9 @@ import { spawnSync } from "node:child_process";
 import { access, mkdtemp, readdir, rm, readFile, writeFile, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { omittedMarker } from "@valet/engine";
+import { omittedMarker, SandboxGoneError } from "@valet/engine";
 import { DockerSandboxProvider, type DockerSandboxCreateOpts, createSandboxWorkspace } from "../src/index.js";
+import { jobOutputLimit, sliceUtf8 } from "../src/sandbox.js";
 import { buildFullProfileTestImage } from "./full-profile-test-image.js";
 
 /** Skip the whole suite when Docker isn't available locally. */
@@ -218,6 +219,81 @@ describeDocker("DockerSandbox", () => {
     } finally {
       await provider.destroy(sb.id);
     }
+  });
+
+  it("job-mode: exec ids are unique per job and a requested id is used as given (fix wave 2, B1)", async () => {
+    const sb = await makeSandbox();
+    try {
+      const a = await sb.execJob("true");
+      const b = await sb.execJob("true");
+      expect(a.execId).toMatch(/^job-[0-9a-z]+-[0-9a-z]{8}$/);
+      expect(a.execId).not.toBe(b.execId);
+      await expect(sb.execJob("true", { execId: "job-abc-12345678" })).resolves.toEqual({ execId: "job-abc-12345678" });
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  async function pollUntilDone(sb: { pollJob(id: string, o: number, opts?: { maxBytes?: number; tail?: boolean }): Promise<{ status: string }> }, execId: string, opts: { maxBytes?: number; tail?: boolean }) {
+    let poll = await sb.pollJob(execId, 0, opts);
+    for (let i = 0; i < 100 && poll.status === "running"; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      poll = await sb.pollJob(execId, 0, opts);
+    }
+    return poll;
+  }
+
+  it("job-mode: a terminal poll of a detached job keeps its state for later reads (fix wave 2, H1)", async () => {
+    const sb = await makeSandbox();
+    try {
+      const { execId } = await sb.execJob("printf 'line one\\nline two\\n'; exit 3", { detached: true });
+      // The watcher's tail read sees the exit first.
+      const watcherRead = await pollUntilDone(sb, execId, { maxBytes: 4096, tail: true });
+      expect(watcherRead).toMatchObject({ status: "done", exitCode: 3 });
+      // A later process_read still gets the whole log and the exit.
+      const agentRead = await sb.pollJob(execId, 0, { maxBytes: 4096 });
+      expect(agentRead).toMatchObject({ status: "done", exitCode: 3, output: "line one\nline two\n" });
+      // And the watcher's next poll does not turn the clean exit into a lost job.
+      expect(await sb.pollJob(execId, 0, { maxBytes: 4096, tail: true })).toMatchObject({ status: "done", exitCode: 3 });
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  it("job-mode: bounds a detached job's in-memory output (fix wave 2, H2)", async () => {
+    const sb = await makeSandbox();
+    try {
+      const { execId } = await sb.execJob("head -c 20000 /dev/zero | tr '\\0' 'a'", { detached: true, maxOutputBytes: 1000 });
+      const poll = await pollUntilDone(sb, execId, { maxBytes: 100_000 });
+      expect(poll).toMatchObject({ status: "done", truncated: true });
+      const full = await sb.pollJob(execId, 0, { maxBytes: 100_000 });
+      expect(Buffer.byteLength(full.output)).toBeLessThan(2000);
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  it("job-mode: offsets count UTF-8 bytes, like the kubernetes provider (fix wave 2, L4)", async () => {
+    const sb = await makeSandbox();
+    try {
+      const { execId } = await sb.execJob("printf '\\303\\251\\342\\234\\223\\nx\\n'", { detached: true });
+      await pollUntilDone(sb, execId, { maxBytes: 4096, tail: true });
+      // "é" is 2 bytes and "✓" is 3. A 4-byte read stops before the split "✓".
+      const first = await sb.pollJob(execId, 0, { maxBytes: 4 });
+      expect(first).toMatchObject({ status: "running", output: "é", nextOffset: 2 });
+      const rest = await sb.pollJob(execId, 2, { maxBytes: 4096 });
+      expect(rest).toMatchObject({ status: "done", output: "✓\nx\n", nextOffset: 8 });
+      const tail = await sb.pollJob(execId, 0, { maxBytes: 4, tail: true });
+      expect(tail).toMatchObject({ output: "\nx\n", nextOffset: 8 });
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  it("restore of a released sandbox throws SandboxGoneError (fix wave 2, M2)", async () => {
+    const sb = await makeSandbox();
+    await provider.destroy(sb.id);
+    await expect(provider.restore(sb.id)).rejects.toBeInstanceOf(SandboxGoneError);
   });
 
   it("job-mode: pollJob bounds a forward read and a tail read (spec B4)", async () => {
@@ -552,5 +628,23 @@ describeDocker("DockerSandbox", () => {
 
   it("capabilities() reports credsMount: true", () => {
     expect(provider.capabilities().credsMount).toBe(true);
+  });
+});
+
+describe("docker job output helpers (fix wave 2)", () => {
+  it("slices by UTF-8 bytes and never splits a codepoint (L4)", () => {
+    const buf = Buffer.from("é✓\nx\n", "utf8");
+    expect(sliceUtf8(buf, 0, { maxBytes: 4 })).toEqual({ text: "é", nextOffset: 2, more: true });
+    expect(sliceUtf8(buf, 2, { maxBytes: 4096 })).toEqual({ text: "✓\nx\n", nextOffset: 8, more: false });
+    expect(sliceUtf8(buf, 0, { maxBytes: 4, tail: true })).toEqual({ text: "\nx\n", nextOffset: 8, more: false });
+    expect(sliceUtf8(buf, 2, { maxBytes: 1 })).toEqual({ text: "✓", nextOffset: 5, more: true });
+  });
+
+  it("caps a detached job at the docker maximum, and leaves a foreground cap alone (H2)", () => {
+    expect(jobOutputLimit({ detached: true })).toBe(64 * 1024 * 1024);
+    expect(jobOutputLimit({ detached: true, maxOutputBytes: 2 * 1024 ** 3 })).toBe(64 * 1024 * 1024);
+    expect(jobOutputLimit({ detached: true, maxOutputBytes: 1000 })).toBe(1000);
+    expect(jobOutputLimit({ maxOutputBytes: 5 })).toBe(5);
+    expect(jobOutputLimit()).toBeUndefined();
   });
 });

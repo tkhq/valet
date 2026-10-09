@@ -46,6 +46,23 @@ describe("applyEngineMigrations", () => {
     }
   });
 
+  it("creates the fix wave 2 wakeup and lease columns, all nullable", async () => {
+    const result = await db.query(
+      `SELECT table_name, column_name, is_nullable FROM information_schema.columns
+       WHERE table_schema = current_schema() AND table_name IN ('engine_wakeups','engine_leases')
+         AND column_name IN ('origin_json','window_start_at','window_count','thread_id')`,
+    );
+    const got = result.rows.map((r) => `${String(r.table_name)}.${String(r.column_name)}:${String(r.is_nullable)}`).sort();
+    expect(got).toEqual([
+      "engine_leases.origin_json:YES",
+      "engine_leases.thread_id:YES",
+      "engine_wakeups.origin_json:YES",
+      "engine_wakeups.thread_id:NO",
+      "engine_wakeups.window_count:YES",
+      "engine_wakeups.window_start_at:YES",
+    ]);
+  });
+
   it("creates the partial created_at index cost attribution scans", async () => {
     const result = await db.query(
       "SELECT indexdef FROM pg_indexes WHERE tablename = 'engine_entries' AND indexname = $1",

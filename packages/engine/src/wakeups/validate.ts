@@ -12,10 +12,11 @@ export const BACKGROUND_REFUSAL = (max: number) =>
 
 export const SLEEP_REFUSAL = "[bash_sleep] Use wake_at to pause for more than 5 minutes.";
 
-export const WAKEUPS_UNAVAILABLE = "[wakeups_unavailable] this session cannot schedule wakeups.";
+export const WAKEUPS_UNAVAILABLE = "[wakeups_unavailable] this session cannot schedule wakeups. Run the work in the foreground.";
 
+/** The cap counts per thread (fix wave 2, M14): one thread cannot use up another's. */
 export function wakeupsLimitRefusal(n: number, cap: number): string {
-  return `[wakeups_limit] This session already has ${n} active wakeups and leases (limit ${cap}, sandbox.wakeupsPerSession). Cancel one with wakeup_cancel.`;
+  return `[wakeups_limit] This thread already has ${n} active wakeups and holds (limit ${cap}, sandbox.wakeupsPerSession). Cancel one of them with wakeup_cancel.`;
 }
 
 function trimmedOrEmpty(value: string | undefined): string {

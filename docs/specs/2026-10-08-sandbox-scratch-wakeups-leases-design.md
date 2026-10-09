@@ -849,3 +849,118 @@ Implementation gaps become errata to this file in the same PR.
   stops the api at boot with a message that names the variable and the range.
 - **B: C5, pod read.** `setEvictionProtection` reads only the pods that
   carry the sandbox's `valet.dev/session-id` label.
+
+Fix wave 2, group A (durability core). Where an entry below conflicts
+with an earlier entry, the entry below wins.
+
+- **B4, exec ids.** An exec id is `job-<base36 epoch ms>-<8 random
+  base36>` (`newExecId` in `@valet/engine/wakeups-ids`). Job files live as
+  long as the pod, and a per-handle counter let a later handle reuse a
+  live job's files after an api restart. `EXEC_ID_PATTERN` accepts
+  `[a-z0-9]` runs joined by single dashes, so a legacy `job-3` still
+  passes. `ExecOpts.execId` lets a caller ask for an id it already stored.
+- **B4, kickoff refusal.** The kubernetes kickoff exits 17 when any of
+  `<id>.out`, `.pid`, `.exit`, or `.dead` exists, before it truncates
+  anything. `execJobInPod` turns that exit into an error that names the
+  id. `cancelJob` skips the kill when `.exit` or `.dead` exists, because
+  the recorded pid may now belong to another group.
+- **C2, atomic writes.** The store gains `createWakeupWithLease` (one
+  transaction) and `transitionWakeupAndReleaseLease` (one statement: the
+  CAS and the release of the row's `lease_id`). A lost CAS releases
+  nothing. This supersedes the "B5, lease release failure" entry: a CAS
+  and its release now commit together.
+- **B5, start order.** The seam writes the wakeup as `pending` with a
+  pre-generated exec id, and its lease, before it starts the job. It then
+  moves the row to `running`. A failed start ends the row `lost` with
+  `cause=pid_missing` and kills the requested id. `listDueWakeups` also
+  returns `pending` process and watch rows. The WakeWatcher ends one that
+  is older than 15 minutes as `lost`, `cause=pid_missing`, kills the
+  requested id, and sends `process.exited` or `watch.exited`. The grace
+  covers a start that includes a cold sandbox provision, so it is longer
+  than one tick. If that happens first, the seam stops the started job and
+  refuses with a text that tells the agent to run the command again.
+- **B5, kill after CAS.** The watcher and `wakeup_cancel` kill a process
+  group only after their CAS succeeds. A lost CAS kills nothing. This
+  supersedes the "B5, kill before CAS" entry.
+- **C6, crash-window lease release.** Each tick, the WakeWatcher releases
+  a process or watch lease whose wakeup row is missing or terminal, or
+  that is two ticks past its deadline, with `release_cause=deadline`.
+  Crash windows occur in normal operation, so CLAUDE.md permits this
+  repair. `valet.leases.orphan_released{owner_kind}` counts each release.
+  C6 and INV-6 therefore name a third release path inside the WakeWatcher.
+- **C4, settle on facts.** `ChildWatcher` waits while a lease is active,
+  bounded at the latest lease deadline plus one poll. Past the bound it
+  logs, records `valet.leases.settle_over_deadline`, and settles. It also
+  waits while a timer is pending and fires inside the retention window
+  (24 hours when no window is set). Then it awaits the terminal signal
+  turn (`wakeup:<id>:terminal`) of each wakeup that ended after the
+  watched submission was admitted, whether or not a lease was ever seen.
+  It waits at most `leaseSettleGraceMs` after the wakeup ended for that
+  turn to be admitted. An agent cancel sends no signal and owes no turn.
+  This supersedes the "C4, child settle grace" entry.
+- **B5, watch rate.** The limit counts `watch.event` signals. A tick emits
+  at most one, whatever its line count. `window_start_at` and `window_count` on the row
+  hold the count. The window starts at the first signal after the
+  previous window ends, so it is an hour long but not a sliding hour.
+  `event_count` and the `eventCount` attribute count signals. The
+  rate-expiry body keeps the log tail and then names the limit.
+- **B5, last lines.** When a watch exits, its final lines become one last
+  `watch.event` before `watch.exited`.
+- **B4, log cap.** The provider caps a detached job's log, which replaces
+  the "not capped" bullet in B4. `VALET_JOB_LOG_MAX_BYTES` (a byte count or a quantity such as `2Gi`,
+  default 2 GiB) reaches the provider through `ExecOpts.maxOutputBytes`.
+  Kubernetes caps `.out` with `head -c`. Docker keeps at most 64 MiB in
+  api memory per detached job. Only the first 16 MiB streams live, so a
+  docker watch sees no new lines past that point until the job exits.
+- **B4, docker offsets and job state.** Docker offsets and `maxBytes` now
+  count UTF-8 bytes, the same as kubernetes. A read never splits a
+  codepoint. A terminal poll of a detached job keeps its state, so the
+  watcher and `process_read` do not consume each other's reads. The state
+  goes 5 minutes after the first terminal poll, 60 minutes after exit when
+  nobody polls it, or at `cancelJob`. This supersedes the "B4, docker read
+  bounds" entry.
+- **B4, offsets past invalid bytes.** The decision kernel advances a watch
+  offset by `nextOffset` minus the bytes it held back, in the provider's
+  units. A replacement character for one invalid byte no longer moves the
+  offset past unread bytes. NUL in a log becomes U+FFFD before any store
+  write or signal, because Postgres `text` rejects NUL.
+- **B5, sandbox gone.** `SandboxEvictedError` and the new
+  `SandboxGoneError` (docker `restore` throws it for an unavailable,
+  missing, or stopped container) count as a gone sandbox. This extends
+  the "B5, probe failures" entry.
+- **B5, shutdown.** `WakeWatcher.stop()` resolves when the pass in flight
+  ends, and `main.ts` awaits it before it evicts the session cache.
+- **B6, origin and threads.** `engine_wakeups` and `engine_leases` gain a
+  nullable `origin_json`, and `engine_leases` gains a nullable
+  `thread_id`. Every signal carries the stored origin with
+  `reply: "manual"`. `lease.expired` goes to the lease's thread. Its
+  attributes are `leaseId`, `reason`, `ownerKind`, and `expiredAt`; it has
+  no `wakeupId` or `kind`.
+- **B6, logPath.** `process.exited` and `watch.exited` carry `logPath`
+  only when the WakeWatcher has `jobLogDir`, which the host sets for a
+  provider that writes job log files. Docker writes none.
+- **B3, tools.** The per-session cap counts per thread: the thread's
+  pending and running wakeups and its holds. `wakeup_list` shows the
+  thread's rows and one line that counts the other threads' rows.
+  `process_read` gains `tail`. It reads through the raw sandbox handle or
+  a restored one, never the policy sandbox, so it never wakes compute. A
+  stopped sandbox gives `[process_read] the sandbox is not running; the
+  log is gone with it.` `hold_sandbox` refuses when the session has no
+  sandbox. The start texts name `process_read { id, tail: true }`.
+- **B3, texts.** `[wakeups_unavailable]` ends with `Run the work in the
+  foreground.` A foreground timeout suggests a larger timeout. After 60
+  seconds or more it also names background mode with `deadline_hours`
+  and `reason`.
+- **C2, session delete.** `deleteSession` deletes the session's wakeup
+  and lease rows in its transaction, after it counts each open wakeup in
+  `valet.wakeups.total{cause="sandbox_unavailable"}`. The rows held the
+  command, the prompt, and a log tail.
+- **Part G, metrics.** Label keys are `owner_kind` and `session_class`.
+  `valet.wakeups.active` comes from a store count over `pending` and
+  `running`, so a timer that is not due counts. `node_seconds` uses the
+  real time since the previous pass. New: `valet.wakeups.sweep_ok_at`
+  (unix seconds of the last finished pass), `valet.wakeups.sweep_failed`,
+  `valet.wakeups.bad_rows{table}` (a row that does not parse is skipped
+  and counted, never thrown), `valet.leases.orphan_released{owner_kind}`,
+  and `valet.leases.settle_over_deadline`. A lease with no sandbox to
+  protect no longer counts toward `valet_leases_unannotated`.

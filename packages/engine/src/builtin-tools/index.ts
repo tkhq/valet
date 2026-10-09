@@ -118,6 +118,20 @@ function abortErrorFrom(signal: AbortSignal): Error {
 }
 
 /**
+ * The foreground timeout text (fix wave 2, M16). A short command usually
+ * needs a larger timeout, not background mode, so the background advice
+ * appears only after a command ran a minute or more. It names every field
+ * background mode requires, so the retry does not fail validation.
+ */
+function timeoutHint(timeoutMs: number): string {
+  const seconds = Math.round(timeoutMs / 1000);
+  const base = `[timed out after ${seconds}s] Rerun with a larger timeout (max 3600).`;
+  return seconds >= 60
+    ? `${base} For work longer than an hour, rerun with background: true, deadline_hours, and reason.`
+    : base;
+}
+
+/**
  * Best-effort job cancellation: the sandbox may already be gone
  * (SandboxUnavailableError) or the exec superseded (SandboxSupersededError)
  * by the time we try to cancel it. Either way, cancellation failing must
@@ -161,11 +175,7 @@ async function pollJobToCompletion(
     if (Date.now() >= deadline) {
       await bestEffortCancel(cancelJob, execId);
       const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
-      return {
-        text:
-          `${output}${truncNote}\n[timed out after ${Math.round(timeoutMs / 1000)}s] ` +
-          "For work longer than an hour, rerun with background: true and a deadline_hours.",
-      };
+      return { text: `${output}${truncNote}\n${timeoutHint(timeoutMs)}` };
     }
 
     const poll = await pollJob(execId, offset);
@@ -380,10 +390,7 @@ export const bashTool = defineTool({
 
     const result = await ctx.sandbox.exec(args.command, { signal: ctx.signal, timeout: timeoutMs });
     const truncNote = result.truncated ? BASH_TRUNCATION_NOTE : "";
-    const timeoutNote = result.timedOut
-      ? `\n[timed out after ${Math.round(timeoutMs / 1000)}s] ` +
-        "For work longer than an hour, rerun with background: true and a deadline_hours."
-      : "";
+    const timeoutNote = result.timedOut ? `\n${timeoutHint(timeoutMs)}` : "";
     const exitNote = !result.timedOut && result.exitCode !== 0 ? `\n[exit ${result.exitCode}]` : "";
     const outcome = terminalOutcome(args.command, result.stdout, result.exitCode);
     return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}${timeoutNote}`, ...(outcome ? { outcome } : {}) };

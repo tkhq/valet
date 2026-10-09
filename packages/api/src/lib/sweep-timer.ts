@@ -10,24 +10,30 @@
  *     (post-incident backlogs make slow passes the norm, not the edge).
  */
 export interface SweepTimer {
-  stop(): void;
+  /**
+   * Stops the interval. The returned promise settles when the pass in
+   * flight, if any, ends. A caller that closes the store after `stop` must
+   * await it, or the pass loses its database mid-write (fix wave 2, M3).
+   */
+  stop(): Promise<void>;
 }
 
 export function startSweepTimer(name: string, intervalMs: number, pass: () => Promise<unknown>): SweepTimer {
-  let running = false;
+  let inFlight: Promise<void> | null = null;
   const timer = setInterval(() => {
-    if (running) return;
-    running = true;
-    void pass()
+    if (inFlight) return;
+    inFlight = pass()
+      .then(() => undefined)
       .catch((err) => console.error(`${name}: sweep failed:`, err))
       .finally(() => {
-        running = false;
+        inFlight = null;
       });
   }, intervalMs);
   timer.unref();
   return {
-    stop() {
+    async stop() {
       clearInterval(timer);
+      await inFlight;
     },
   };
 }

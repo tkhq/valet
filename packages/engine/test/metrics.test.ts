@@ -50,7 +50,12 @@ vi.mock("@opentelemetry/api", () => ({
 }));
 
 import {
+  recordChildSettleOverDeadline,
   recordCompactionCoverageGap,
+  recordLeaseOrphanReleased,
+  recordWakeupBadRow,
+  recordWakeupSweepFailed,
+  recordWakeupSweepOk,
   recordLeaseNodeSeconds,
   recordLeasesActive,
   recordLeasesOverDeadline,
@@ -143,7 +148,7 @@ describe("lease metrics", () => {
     expect(metricState.points).toContainEqual({
       name: "valet.leases.active",
       value: 2,
-      attributes: { ownerKind: "hold" },
+      attributes: { owner_kind: "hold" },
     });
   });
 
@@ -155,11 +160,11 @@ describe("lease metrics", () => {
     metricState.collect();
     const added = metricState.points.slice(before);
     const holdPoints = added.filter(
-      (point) => point.name === "valet.leases.active" && point.attributes?.ownerKind === "hold",
+      (point) => point.name === "valet.leases.active" && point.attributes?.owner_kind === "hold",
     );
 
     expect(holdPoints).toEqual([
-      { name: "valet.leases.active", value: 1, attributes: { ownerKind: "hold" } },
+      { name: "valet.leases.active", value: 1, attributes: { owner_kind: "hold" } },
     ]);
   });
 
@@ -169,7 +174,7 @@ describe("lease metrics", () => {
     expect(metricState.points).toContainEqual({
       name: "valet.leases.node_seconds",
       value: 45,
-      attributes: { ownerKind: "process" },
+      attributes: { owner_kind: "process" },
     });
   });
 
@@ -214,6 +219,40 @@ describe("lease metrics", () => {
   });
 });
 
+describe("fix wave 2 wakeup and lease metrics", () => {
+  it("counts an orphan lease release by owner kind (B2)", () => {
+    recordLeaseOrphanReleased("process");
+    expect(metricState.descriptions.get("valet.leases.orphan_released")).toContain("crash");
+    expect(metricState.points).toContainEqual({
+      name: "valet.leases.orphan_released",
+      value: 1,
+      attributes: { owner_kind: "process" },
+    });
+  });
+
+  it("counts a skipped bad row by table (M5)", () => {
+    recordWakeupBadRow("engine_leases");
+    expect(metricState.points).toContainEqual({
+      name: "valet.wakeups.bad_rows",
+      value: 1,
+      attributes: { table: "engine_leases" },
+    });
+  });
+
+  it("reports the last successful sweep time and counts failed sweeps (M5)", () => {
+    recordWakeupSweepOk(1_700_000_000);
+    recordWakeupSweepFailed();
+    metricState.collect();
+    expect(metricState.points).toContainEqual({ name: "valet.wakeups.sweep_ok_at", value: 1_700_000_000, attributes: {} });
+    expect(metricState.points).toContainEqual({ name: "valet.wakeups.sweep_failed", value: 1, attributes: undefined });
+  });
+
+  it("counts a child settled past its leases' deadline (B2)", () => {
+    recordChildSettleOverDeadline();
+    expect(metricState.points).toContainEqual({ name: "valet.leases.settle_over_deadline", value: 1, attributes: undefined });
+  });
+});
+
 describe("scratch volume metrics", () => {
   it("reports the requested scratch size gauge by session class", () => {
     recordScratchRequested("default", 1024);
@@ -222,7 +261,7 @@ describe("scratch volume metrics", () => {
     expect(metricState.points).toContainEqual({
       name: "valet.sandbox.scratch.requested_bytes",
       value: 1024,
-      attributes: { sessionClass: "default" },
+      attributes: { session_class: "default" },
     });
   });
 

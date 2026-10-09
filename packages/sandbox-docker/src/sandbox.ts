@@ -20,6 +20,7 @@ import type {
   SandboxCommandChannel,
   SandboxCommandChannelOptions,
 } from "@valet/engine";
+import { EXEC_ID_PATTERN, newExecId } from "@valet/engine/wakeups-ids";
 import { openDockerCommandChannel } from './command-channel.js';
 import { DockerInventory, dockerOwnerLabels, parseDockerInspection, validateDockerOwner, validateDockerBrowserOwner, type DockerContainerOwner, type DockerInventoryRecord } from "./inventory.js";
 import { buildBrowserCompanionArgs } from "./browser-companion.js";
@@ -28,6 +29,7 @@ import {
   CappedOutputBuffer,
   CONTAINER_DEATH_PATTERN,
   parseResourceQuantity,
+  SandboxGoneError,
 } from "@valet/engine";
 
 /** 5-minute backstop eviction for job entries nobody polls to completion
@@ -35,10 +37,30 @@ import {
  * status; this timer is just a leak guard. */
 const JOB_EVICTION_BACKSTOP_MS = 5 * 60 * 1000;
 
+/**
+ * A detached job's state outlives its first terminal poll: the WakeWatcher
+ * and `process_read` both read it, so neither may consume it (fix wave 2,
+ * H1). It goes `JOB_EVICTION_BACKSTOP_MS` after the first terminal poll, or
+ * this long after exit when nobody polls it.
+ */
+const DETACHED_UNPOLLED_BACKSTOP_MS = 60 * 60 * 1000;
+
+/**
+ * Most bytes of a detached job's output the api keeps in memory (fix wave
+ * 2, H2). Docker writes no log file, so an uncapped buffer let a chatty
+ * job exhaust the api heap. The first quarter streams live; the rest keeps
+ * the tail, which joins at exit (see `CappedOutputBuffer`).
+ */
+const DETACHED_OUTPUT_MAX_BYTES = 64 * 1024 * 1024;
+
 interface DockerJobState {
   status: "running" | "done" | "failed";
   exitCode?: number;
+  /** Kept for `pollJob` by UTF-8 byte offset, not by string index (fix wave 2, L4). */
   output: string;
+  detached: boolean;
+  /** Set on the first terminal poll of a detached job. */
+  terminalPolled?: boolean;
   /** Set when the maxOutputBytes cap dropped bytes — pollJob reports it. */
   truncated?: boolean;
   child: ChildProcess;
@@ -48,6 +70,41 @@ interface DockerJobState {
   transportError?: Error;
   closed: Promise<void>;
   evictTimer?: NodeJS.Timeout;
+}
+
+/** The in-memory output cap for a job: a detached job never exceeds `DETACHED_OUTPUT_MAX_BYTES`. */
+export function jobOutputLimit(opts?: ExecOpts): number | undefined {
+  if (!opts?.detached) return opts?.maxOutputBytes;
+  return Math.min(opts.maxOutputBytes ?? DETACHED_OUTPUT_MAX_BYTES, DETACHED_OUTPUT_MAX_BYTES);
+}
+
+/**
+ * One bounded read of a job's output by UTF-8 byte offset (spec B4, fix
+ * wave 2 L4). A read never splits a codepoint: a tail read starts past a
+ * cut codepoint, and a forward read stops before one, which the next read
+ * returns.
+ */
+export function sliceUtf8(buf: Buffer, offset: number, opts?: JobPollOpts): { text: string; nextOffset: number; more: boolean } {
+  const end = buf.length;
+  const isContinuation = (i: number) => ((buf[i] ?? 0) & 0xc0) === 0x80;
+  let start = Math.min(Math.max(0, offset), end);
+  let stop = end;
+  if (opts?.maxBytes !== undefined) {
+    const max = Math.max(0, Math.floor(opts.maxBytes));
+    if (opts.tail) start = Math.max(start, end - max);
+    else stop = Math.min(end, start + max);
+  }
+  if (opts?.tail) while (start < stop && isContinuation(start)) start++;
+  if (stop < end) {
+    const asked = stop;
+    while (stop > start && isContinuation(stop)) stop--;
+    // A bound smaller than one codepoint still returns that codepoint.
+    if (stop === start && asked > start) {
+      stop = asked;
+      while (stop < end && isContinuation(stop)) stop++;
+    }
+  }
+  return { text: buf.subarray(start, stop).toString("utf8"), nextOffset: stop, more: stop < end };
 }
 
 /**
@@ -492,7 +549,6 @@ export class DockerSandbox implements Sandbox {
   private readonly browserWorkload: boolean;
   private readonly onDestroy?: () => Promise<void>;
   private jobs = new Map<string, DockerJobState>();
-  private nextJobId = 1;
 
   constructor(id: string, opts: DockerSandboxOptions) {
     this.id = id;
@@ -738,8 +794,14 @@ export class DockerSandbox implements Sandbox {
    */
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
     const containerId = this.execContainer(opts);
-    const execId = `job-${this.nextJobId++}`;
-    const limit = opts?.maxOutputBytes;
+    // Unique per job, not per handle: a later handle on the same container
+    // must never reuse a live job's id (fix wave 2, B1).
+    const execId = opts?.execId ?? newExecId();
+    if (!EXEC_ID_PATTERN.test(execId) || this.jobs.has(execId)) {
+      throw new Error(`execJob refused: job id ${JSON.stringify(execId)} is invalid or already in use. Retry the command; a retry gets a new job id.`);
+    }
+    const detached = opts?.detached === true;
+    const limit = jobOutputLimit(opts);
 
     const child = spawn("docker", this.execArgs(command, opts), {
       stdio: ["pipe", "pipe", "pipe"],
@@ -749,7 +811,7 @@ export class DockerSandbox implements Sandbox {
     const closed = new Promise<void>((res) => {
       resolveClosed = res;
     });
-    const state: DockerJobState = { status: "running", output: "", child, closed };
+    const state: DockerJobState = { status: "running", output: "", detached, child, closed };
     this.jobs.set(execId, state);
 
     child.stdout?.setEncoding("utf8");
@@ -790,10 +852,8 @@ export class DockerSandbox implements Sandbox {
     child.stdin?.end();
 
     const scheduleEviction = () => {
-      const t = setTimeout(() => this.jobs.delete(execId), JOB_EVICTION_BACKSTOP_MS);
-      const unrefable = t as { unref?: () => void };
-      if (typeof unrefable.unref === "function") unrefable.unref();
-      state.evictTimer = t;
+      if (state.terminalPolled) return;
+      this.scheduleJobEviction(execId, state, detached ? DETACHED_UNPOLLED_BACKSTOP_MS : JOB_EVICTION_BACKSTOP_MS);
     };
 
     child.on("error", (err) => {
@@ -863,26 +923,27 @@ export class DockerSandbox implements Sandbox {
       throw state.transportError;
     }
 
-    // Docker offsets count UTF-16 code units of the in-memory buffer, not
-    // bytes. `maxBytes` bounds the same units (spec Deviations, B4).
-    const end = state.output.length;
-    let start = offset;
-    let stop = end;
-    if (opts?.maxBytes !== undefined) {
-      if (opts.tail) start = Math.max(offset, end - opts.maxBytes);
-      else stop = Math.min(end, offset + opts.maxBytes);
-    }
+    // Offsets and `maxBytes` count UTF-8 bytes, the same unit as the
+    // kubernetes provider, so the watcher's offset arithmetic holds on both
+    // (fix wave 2, L4).
+    const slice = sliceUtf8(Buffer.from(state.output, "utf8"), offset, opts);
     // Output left past the cap keeps the job "running" for this caller, so
     // it polls again and the job state is not evicted early.
-    const more = stop < end;
-    const status = more ? "running" : state.status;
-    const result: JobPoll = { status, output: state.output.slice(start, stop), nextOffset: stop };
+    const status = slice.more ? "running" : state.status;
+    const result: JobPoll = { status, output: slice.text, nextOffset: slice.nextOffset };
     if (status === "done") result.exitCode = state.exitCode;
     if (state.truncated) result.truncated = true;
 
     if (status !== "running") {
-      if (state.evictTimer) clearTimeout(state.evictTimer);
-      this.jobs.delete(execId);
+      if (!state.detached) {
+        if (state.evictTimer) clearTimeout(state.evictTimer);
+        this.jobs.delete(execId);
+      } else if (!state.terminalPolled) {
+        // A detached job serves the watcher and process_read alike, so a
+        // terminal poll starts the backstop instead of evicting (H1).
+        state.terminalPolled = true;
+        this.scheduleJobEviction(execId, state, JOB_EVICTION_BACKSTOP_MS);
+      }
     }
     return result;
   }
@@ -892,6 +953,20 @@ export class DockerSandbox implements Sandbox {
     if (!state) return;
     state.child.kill("SIGKILL");
     await state.closed;
+    if (state.detached) {
+      if (state.evictTimer) clearTimeout(state.evictTimer);
+      this.jobs.delete(execId);
+    }
+  }
+
+  private scheduleJobEviction(execId: string, state: DockerJobState, ms: number): void {
+    if (state.evictTimer) clearTimeout(state.evictTimer);
+    const t = setTimeout(() => {
+      if (this.jobs.get(execId) === state) this.jobs.delete(execId);
+    }, ms);
+    const unrefable = t as { unref?: () => void };
+    if (typeof unrefable.unref === "function") unrefable.unref();
+    state.evictTimer = t;
   }
 
   /**
@@ -1400,14 +1475,14 @@ export class DockerSandboxProvider implements SandboxProvider {
 
   async restore(id: string): Promise<DockerSandbox> {
     const value = await this.saved(id);
-    if (!value || value.state === "released") throw new Error(`Docker sandbox ${id} is unavailable. Restore the retained execution environment before retrying.`);
+    if (!value || value.state === "released") throw new SandboxGoneError(`Docker sandbox ${id} is unavailable. Restore the retained execution environment before retrying.`);
     if (value.browserCompanion && value.state === "creating") throw new Error("Docker browser creation is pending. Inspect and release the pending runtime before retrying.");
     if (value.browser?.enabled && value.docker && !value.browserCompanion) throw new Error("This Docker runtime has no isolated browser companion. Release it before creating a replacement with retained state.");
     if (value.providerId !== await this.providerId()) throw new Error("Docker daemon differs from the saved owner. Select the original Docker context before restoring this sandbox.");
     await fs.access(value.runtimeStateDir).catch(() => { throw new Error("Private Docker session state is missing. Restore its directory before adopting this sandbox."); });
     const owner = await this.inspectOwner(value);
-    if (!owner) throw new Error("The recorded Docker container is missing. Inspect its inventory before replacing it.");
-    if (!owner.running) throw new Error("The recorded Docker container is stopped. Release it before starting a replacement with the retained state.");
+    if (!owner) throw new SandboxGoneError("The recorded Docker container is missing. Inspect its inventory before replacing it.");
+    if (!owner.running) throw new SandboxGoneError("The recorded Docker container is stopped. Release it before starting a replacement with the retained state.");
     const browserOwner = value.browserCompanion ? await this.inspectOwner(value, true) : undefined;
     if (value.browserCompanion && !browserOwner) throw new Error("The recorded Docker browser companion is missing. Release the runtime before creating a replacement.");
     if (browserOwner && !browserOwner.running) throw new Error("The recorded Docker browser companion is stopped. Release the runtime before creating a replacement.");

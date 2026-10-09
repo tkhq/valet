@@ -20,11 +20,13 @@ import type {
   SuspendedTurnState,
   ThreadData,
   Wakeup,
+  WakeupCount,
   WakeupPatch,
   WakeupCursor,
   WakeupStatus,
   WriteFence,
 } from "../../types.js";
+import { recordWakeupEnded } from "../../metrics.js";
 
 const DEFAULT_LEASE_MS = 30_000;
 
@@ -278,22 +280,62 @@ export class InMemorySessionStore implements SessionStore {
   async deleteSession(id: string): Promise<void> {
     this.rows.delete(id);
     // A deleted session has no sandbox left to probe, so its open wakeups
-    // and leases end here (spec C2). Otherwise they stay due forever.
-    const now = Date.now();
-    for (const w of this.wakeups.values()) {
-      if (w.sessionId !== id || (w.status !== "pending" && w.status !== "running")) continue;
-      this.wakeups.set(w.id, { ...w, status: "lost", cause: "sandbox_unavailable", endedAt: now, updatedAt: now });
+    // end here (spec C2), and its rows go with the rest of the session
+    // (fix wave 2, M12). The watcher reads a missing row as a lost CAS.
+    for (const w of [...this.wakeups.values()]) {
+      if (w.sessionId !== id) continue;
+      if (w.status === "pending" || w.status === "running") recordWakeupEnded(w.kind, "sandbox_unavailable");
+      this.wakeups.delete(w.id);
     }
-    for (const l of this.leases.values()) {
-      if (l.sessionId !== id || l.releasedAt !== undefined) continue;
-      this.leases.set(l.id, { ...l, releasedAt: now, releaseCause: "owner_ended" });
+    for (const l of [...this.leases.values()]) {
+      if (l.sessionId === id) this.leases.delete(l.id);
     }
   }
 
   // ── wakeups and leases ──────────────────────────────────────────
 
   async createWakeup(wakeup: Wakeup): Promise<void> {
+    if (this.wakeups.has(wakeup.id)) throw new ConflictError(`wakeup ${wakeup.id} already exists`);
     this.wakeups.set(wakeup.id, { ...wakeup });
+  }
+
+  async createWakeupWithLease(wakeup: Wakeup, lease: Lease): Promise<void> {
+    // Check both before writing either, so a refusal writes nothing.
+    if (this.wakeups.has(wakeup.id)) throw new ConflictError(`wakeup ${wakeup.id} already exists`);
+    if (this.leases.has(lease.id)) throw new ConflictError(`lease ${lease.id} already exists`);
+    this.leases.set(lease.id, { ...lease });
+    this.wakeups.set(wakeup.id, { ...wakeup });
+  }
+
+  async countWakeupsByKindAndStatus(statuses: readonly WakeupStatus[]): Promise<WakeupCount[]> {
+    const groups = new Map<string, WakeupCount>();
+    for (const w of this.wakeups.values()) {
+      if (!statuses.includes(w.status)) continue;
+      const key = `${w.kind}:${w.status}`;
+      const g = groups.get(key) ?? { kind: w.kind, status: w.status, count: 0 };
+      g.count++;
+      groups.set(key, g);
+    }
+    return [...groups.values()];
+  }
+
+  async transitionWakeupAndReleaseLease(
+    id: string,
+    from: readonly WakeupStatus[],
+    to: WakeupStatus,
+    patch: WakeupPatch,
+    updatedAt: number,
+    releaseCause: LeaseReleaseCause,
+  ): Promise<Wakeup | null> {
+    // Both writes happen here, with no await between them, so they land
+    // together like the Postgres single statement.
+    const w = this.wakeups.get(id);
+    if (!w || !from.includes(w.status)) return null;
+    const next: Wakeup = { ...w, ...patch, status: to, updatedAt };
+    this.wakeups.set(id, next);
+    const l = next.leaseId === undefined ? undefined : this.leases.get(next.leaseId);
+    if (l && l.releasedAt === undefined) this.leases.set(l.id, { ...l, releasedAt: updatedAt, releaseCause });
+    return { ...next };
   }
 
   async getWakeup(id: string): Promise<Wakeup | null> {
@@ -303,7 +345,8 @@ export class InMemorySessionStore implements SessionStore {
 
   async listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]> {
     return [...this.wakeups.values()]
-      .filter((w) => w.sessionId === sessionId && (!statuses || statuses.includes(w.status)))
+      .filter((w) => w.sessionId === sessionId && (!statuses || statuses.length === 0 || statuses.includes(w.status)))
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .map((w) => ({ ...w }));
   }
 
@@ -311,7 +354,7 @@ export class InMemorySessionStore implements SessionStore {
     return [...this.wakeups.values()]
       .filter(
         (w) =>
-          (w.status === "running" && (w.kind === "process" || w.kind === "watch")) ||
+          ((w.status === "running" || w.status === "pending") && (w.kind === "process" || w.kind === "watch")) ||
           (w.status === "pending" && w.kind === "timer" && w.fireAt !== undefined && w.fireAt <= now),
       )
       .filter((w) => !after || w.createdAt > after.createdAt || (w.createdAt === after.createdAt && w.id > after.id))
@@ -335,6 +378,7 @@ export class InMemorySessionStore implements SessionStore {
   }
 
   async createLease(lease: Lease): Promise<void> {
+    if (this.leases.has(lease.id)) throw new ConflictError(`lease ${lease.id} already exists`);
     this.leases.set(lease.id, { ...lease });
   }
 
@@ -610,6 +654,13 @@ export class InMemorySessionStore implements SessionStore {
   async getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null> {
     const r = this.row(sessionId);
     const item = r.queueItems.get(itemId);
+    return item ? { ...item } : null;
+  }
+
+  async getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null> {
+    const r = this.rows.get(sessionId);
+    const itemId = r?.dispatchIndex.get(dispatchId);
+    const item = itemId === undefined ? undefined : r?.queueItems.get(itemId);
     return item ? { ...item } : null;
   }
 
