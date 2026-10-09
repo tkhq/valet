@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import type { PgDb } from "@valet/store-postgres";
+import { usageAnalyticsPublishSql } from "./usage-analytics-migration.js";
+import { usageHourlyPublishSql } from "./usage-hourly-migration.js";
 
 /**
  * Deployed databases receive the Thread-step billing rule
@@ -13,16 +15,40 @@ import type { PgDb } from "@valet/store-postgres";
  * hourly and daily totals move with it and nothing is counted twice.
  */
 const migration = readFileSync(new URL("../../migrations/pg/0000_app.sql", import.meta.url), "utf8");
-const functionsSql = migration.split("-- usage step attribution begin\n")[1]?.split("-- usage step attribution end")[0];
-if (!functionsSql) throw new Error("Usage step attribution migration missing. Restore 0000_app.sql from the release.");
+function between(start: string, end: string): string {
+  const content = migration.split(start)[1]?.split(end)[0];
+  if (!content) throw new Error("Usage step attribution migration missing. Restore 0000_app.sql from the release.");
+  return content;
+}
+const functionsSql = between("-- usage step attribution begin\n", "-- usage step attribution end");
 
-export const USAGE_STEP_ATTRIBUTION_PUBLISH_SQL =
-  "CREATE OR REPLACE VIEW usage_step_attribution_ready AS SELECT 1 AS version WHERE false";
+/**
+ * `workflow_runs.org_id` and the trigger that copies it from the workflow
+ * when a run starts. The backfill gives each existing run its workflow's
+ * org. A run whose workflow is already gone keeps no org: its spend was
+ * already out of the org's totals, and its Thread-step turns stay on the
+ * assistant (see `valet_usage_billing_session`).
+ */
+export const WORKFLOW_RUN_ORG_SQL =
+  `DO $run_org$ BEGIN ${between("-- workflow run org begin\n", "-- workflow run org end")} END $run_org$`;
+export const WORKFLOW_RUN_ORG_BACKFILL = `UPDATE workflow_runs r SET org_id = d.org_id
+  FROM workflow_definitions d WHERE d.id = r.workflow_id AND r.org_id IS NULL RETURNING r.id`;
+
+// The usage views read the org from the run; a deployed database gets them here.
+const dailyEntriesViewSql = "CREATE OR REPLACE VIEW usage_daily_entries AS"
+  + between("CREATE OR REPLACE VIEW usage_daily_entries AS", "CREATE OR REPLACE VIEW usage_daily_ready");
+
+export const USAGE_STEP_ATTRIBUTION_PUBLISH_SQL = `DO $publish$ BEGIN
+  ${dailyEntriesViewSql}
+  CREATE OR REPLACE VIEW usage_step_attribution_ready AS SELECT 1 AS version WHERE false;
+END $publish$`;
 
 export async function prepareUsageStepAttribution(db: PgDb): Promise<void> {
   await db.transaction(async (tx) => {
     await tx.query("SET LOCAL lock_timeout = '5s'");
     await tx.query(`DO $install$ BEGIN ${functionsSql} END $install$`);
+    await tx.query(usageAnalyticsPublishSql);
+    await tx.query(usageHourlyPublishSql);
   });
   // Page by Thread-step queue item. Each batch commits on its own, so a
   // restart resumes; the moved facts no longer match and are skipped.

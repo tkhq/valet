@@ -10,10 +10,11 @@
  * The hourly rollup and `cost_entries` then attribute both to the workflow,
  * and the repair moves Thread-step turns that predate the rule.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { PGlite } from "@electric-sql/pglite";
 import type { Usage } from "@earendil-works/pi-ai/compat";
-import type { PgDb } from "@valet/store-postgres";
-import type { AppDb } from "../lib/drizzle.js";
+import { pgDbFromPglite, type PgDb } from "@valet/store-postgres";
+import { applyAppMigrations, missingSchemaRepairs, type AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { prepareUsageStepAttribution } from "../lib/usage-step-attribution.js";
 import { recordLlmStepUsage, stepUsageEntry } from "../workflows/step-usage.js";
@@ -107,12 +108,105 @@ describe("usage workflow step attribution", () => {
     expect(cost).toEqual([{ session_id: "wf:run-1:summarize:3", use_case: "workflow", workflow_run_id: "run-1", cost_total: 0.01, total_tokens: 500 }]);
     expect(await hourlyCost(db, "wf:run-1:summarize:3")).toBeCloseTo(0.01);
   });
+
+  it("keeps a deleted workflow's step spend in the org's totals", async () => {
+    await queueItem(db, "q-thread", "workflow:run-1:think");
+    await assistantTurn(db, "e-thread", "q-thread");
+    await recordLlmStepUsage(appDb, { runId: "run-1", nodeId: "summarize", iteration: 0, model: "claude", usage: piUsage(500, 0.01), now: NOW });
+    const before = await orgTotals(db);
+    expect(before.ledger).toBeCloseTo(0.013);
+
+    // Deleting a workflow removes its definition and keeps its runs.
+    await db.query("DELETE FROM workflow_definitions WHERE id = 'wf-user'");
+
+    expect(await orgTotals(db)).toEqual(before);
+    const owner = (await db.query("SELECT org_id, user_id, workflow_id FROM cost_entries WHERE entry_id = 'e-thread'")).rows[0];
+    expect(owner).toEqual({ org_id: "org-a", user_id: "u-alice", workflow_id: "wf-user" });
+  });
+
+  it("leaves a turn on the assistant when its run resolves no org, so the repair keeps totals", async () => {
+    await queueItem(db, "q-thread", "workflow:run-1:think");
+    await assistantTurn(db, "e-thread", "q-thread");
+    // A run whose workflow was deleted before the run kept its org.
+    await db.query("UPDATE usage_entry_facts SET session_id = $1, workflow_run_id = NULL WHERE entry_id = 'e-thread'", [ASSISTANT]);
+    await db.query("DELETE FROM workflow_definitions WHERE id = 'wf-user'");
+    await db.query("UPDATE workflow_runs SET org_id = NULL WHERE id = 'run-1'");
+    const before = await orgTotals(db);
+    expect(before.ledger).toBeCloseTo(0.003);
+
+    await prepareUsageStepAttribution(db);
+
+    expect(await factFor(db, "e-thread")).toEqual({ session_id: ASSISTANT, workflow_run_id: null });
+    expect(await orgTotals(db)).toEqual(before);
+  });
 });
+
+/** The org's spend in every ledger Usage reads: per entry, per hour, per day. */
+async function orgTotals(db: PgDb): Promise<{ ledger: number; hourly: number; daily: number }> {
+  const sum = async (query: string) => Number((await db.query(query)).rows[0]?.cost ?? 0);
+  return {
+    ledger: await sum("SELECT COALESCE(SUM(cost_total), 0)::float8 AS cost FROM cost_entries WHERE org_id = 'org-a'"),
+    hourly: await sum("SELECT COALESCE(SUM(cost_total), 0)::float8 AS cost FROM usage_hourly_entries WHERE scope_org_id = 'org-a'"),
+    daily: await sum("SELECT COALESCE(SUM(cost_total), 0)::float8 AS cost FROM usage_daily_entries WHERE scope_org_id = 'org-a'"),
+  };
+}
 
 describe("stepUsageEntry", () => {
   it("follows the engine's rule: no tokens means no entry, no price means unpriced", () => {
     expect(stepUsageEntry(piUsage(0, 0))).toBeNull();
     expect(stepUsageEntry(piUsage(10, 0))).toEqual({ usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, total: 10 } });
     expect(stepUsageEntry(piUsage(10, 0.5))?.cost?.total).toBe(0.5);
+  });
+});
+
+describe("upgrading a database that has runs of deleted workflows", () => {
+  let db: PgDb | undefined;
+  afterEach(async () => { await db?.close(); db = undefined; });
+
+  it("gives runs their org and moves Thread-step turns without changing any total", async () => {
+    db = pgDbFromPglite(new PGlite());
+    await applyAppMigrations(db);
+    await db.query("INSERT INTO orgs (id, name, created_at) VALUES ('org-a', 'Org A', $1)", [NOW]);
+    await db.query(`INSERT INTO agent_sessions (id, user_id, org_id, workspace, status, owner_type, owner_id, created_at, updated_at)
+      VALUES ($1, 'u-alice', 'org-a', '/tmp/o', 'active', 'user', 'u-alice', $2, $2)`, [ASSISTANT, NOW]);
+    await db.query(`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at)
+      VALUES ('wf-kept', 'org-a', 'user', 'u-alice', 'Kept', '{}'::jsonb, $1, $1), ('wf-gone', 'org-a', 'user', 'u-alice', 'Gone', '{}'::jsonb, $1, $1)`, [NOW]);
+    await db.query(`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at)
+      VALUES ('run-kept', 'wf-kept', 'v1', '{}'::jsonb, '{}'::jsonb, 'user', 'u-alice', $1, $1),
+             ('run-gone', 'wf-gone', 'v1', '{}'::jsonb, '{}'::jsonb, 'user', 'u-alice', $1, $1)`, [NOW]);
+    for (const run of ["kept", "gone"]) {
+      await queueItem(db, `q-${run}`, `workflow:run-${run}:think`);
+      await assistantTurn(db, `e-${run}`, `q-${run}`);
+    }
+    await db.query(`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, model, usage, cost, created_at)
+      VALUES ('e-session-step', 'wf:run-kept:draft', 'th', 'message', 'assistant', 'claude', $1, $2, $3)`, [USAGE, COST, NOW]);
+
+    // The database as the previous release left it: Thread-step turns on the
+    // assistant, runs without an org, and one workflow already deleted.
+    await db.query("UPDATE usage_entry_facts SET session_id = $1, workflow_run_id = NULL WHERE entry_id IN ('e-kept', 'e-gone')", [ASSISTANT]);
+    await db.query("DELETE FROM workflow_definitions WHERE id = 'wf-gone'");
+    await db.query("DROP TRIGGER workflow_runs_org ON workflow_runs");
+    await db.query("DROP FUNCTION valet_workflow_run_org()");
+    await db.query("ALTER TABLE workflow_runs DROP COLUMN org_id CASCADE");
+    await db.query("DROP VIEW usage_step_attribution_ready");
+    // Both assistant turns and the kept run's session step counted. The
+    // deleted workflow's session step never had a definition to count under.
+    const before = 3 * 0.003;
+
+    await applyAppMigrations(db);
+
+    expect(await missingSchemaRepairs(db)).toEqual([]);
+    expect((await db.query("SELECT id, org_id FROM workflow_runs ORDER BY id")).rows).toEqual([
+      { id: "run-gone", org_id: null }, { id: "run-kept", org_id: "org-a" },
+    ]);
+    expect(await factFor(db, "e-kept")).toEqual({ session_id: "wf:run-kept:think", workflow_run_id: "run-kept" });
+    expect(await factFor(db, "e-gone")).toEqual({ session_id: ASSISTANT, workflow_run_id: null });
+    const after = await orgTotals(db);
+    expect(after.ledger).toBeCloseTo(before);
+    expect(after.hourly).toBeCloseTo(before);
+    expect(after.daily).toBeCloseTo(before);
+
+    await db.query("DELETE FROM workflow_definitions WHERE id = 'wf-kept'");
+    expect(await orgTotals(db)).toEqual(after);
   });
 });

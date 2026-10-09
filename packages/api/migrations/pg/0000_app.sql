@@ -763,6 +763,7 @@ CREATE TABLE "workflow_runs" (
 	"owner_id" text DEFAULT '' NOT NULL,
 	"actor_user_id" text,
 	"sandbox_reclaimed_at" bigint,
+	"org_id" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
@@ -770,6 +771,26 @@ CREATE TABLE "workflow_runs" (
 CREATE INDEX "workflow_runs_status_updated" ON "workflow_runs" ("status","updated_at");
 --> statement-breakpoint
 CREATE INDEX "workflow_runs_workflow" ON "workflow_runs" ("workflow_id");
+--> statement-breakpoint
+DO $run_org$ BEGIN
+  -- workflow run org begin
+  -- The org a run belongs to, copied from its workflow when the run starts.
+  -- Deleting a workflow removes its definition and keeps its runs, so usage
+  -- reads the org from the run: the run's spend stays in the org's totals.
+  -- The trigger, not each caller, writes it, so every insert path (and an
+  -- older release during a rolling update) records it.
+  ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS org_id text;
+  CREATE OR REPLACE FUNCTION valet_workflow_run_org() RETURNS trigger LANGUAGE plpgsql AS $org$
+  BEGIN
+    IF NEW.org_id IS NULL THEN
+      SELECT d.org_id INTO NEW.org_id FROM workflow_definitions d WHERE d.id = NEW.workflow_id;
+    END IF;
+    RETURN NEW;
+  END $org$;
+  CREATE OR REPLACE TRIGGER workflow_runs_org BEFORE INSERT ON workflow_runs
+    FOR EACH ROW EXECUTE FUNCTION valet_workflow_run_org();
+  -- workflow run org end
+END $run_org$;
 --> statement-breakpoint
 CREATE TABLE "workflow_checkpoints" (
 	"run_id" text NOT NULL,
@@ -1562,13 +1583,16 @@ BEGIN
   -- (`workflow:{runId}:{nodeId}[:{iteration}][:repair]`), and the entry bills
   -- to that step's id (`wf:{runId}:{nodeId}[:{iteration}]`), the key a
   -- session step already uses. Every rollup then attributes the turn to the
-  -- workflow run and the step, not to the assistant.
+  -- workflow run and the step, not to the assistant. A run with no org (its
+  -- workflow was deleted before runs kept their org) cannot be scoped to a
+  -- tenant, so its turns stay on the assistant and keep counting there.
   CREATE OR REPLACE FUNCTION valet_usage_billing_session(e engine_entries) RETURNS text
   LANGUAGE sql STABLE AS $billing$
     SELECT COALESCE((SELECT 'wf:' || regexp_replace(substr(q.dispatch_id, 10), ':repair$', '')
-      FROM engine_queue_items q
+      FROM engine_queue_items q JOIN workflow_runs r ON r.id = split_part(q.dispatch_id, ':', 2)
       WHERE q.id = e.queue_item_id AND q.session_id = e.session_id
-        AND q.dispatch_id LIKE 'workflow:%' AND e.session_id NOT LIKE 'wf:%'), e.session_id)
+        AND q.dispatch_id LIKE 'workflow:%' AND e.session_id NOT LIKE 'wf:%'
+        AND r.org_id IS NOT NULL), e.session_id)
   $billing$;
 
   CREATE OR REPLACE FUNCTION valet_usage_fact(e engine_entries) RETURNS usage_entry_facts
@@ -1621,12 +1645,12 @@ BEGIN
     FROM usage_entry_facts f JOIN agent_sessions s ON s.id = f.session_id
     LEFT JOIN workflow_runs r ON r.id = f.workflow_run_id
     UNION ALL
+    -- The run carries its org, so a deleted workflow's spend still counts.
     SELECT f.entry_id, f.session_id, r.id, f.created_at, f.model, f.usage, f.cost,
-      f.tool_calls, f.pull_requests, f.reviews, d.org_id, CASE WHEN r.owner_type = 'user' THEN NULLIF(r.owner_id, '') END,
+      f.tool_calls, f.pull_requests, f.reviews, r.org_id, CASE WHEN r.owner_type = 'user' THEN NULLIF(r.owner_id, '') END,
       r.owner_type, NULLIF(r.owner_id, ''), r.workflow_id, 'workflow'::text
     FROM usage_entry_facts f JOIN workflow_runs r ON r.id = f.workflow_run_id
-    JOIN workflow_definitions d ON d.id = r.workflow_id
-    WHERE NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = f.session_id);
+    WHERE r.org_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = f.session_id);
 
   CREATE OR REPLACE VIEW cost_entries AS
     SELECT entry_id, session_id, created_at, model, org_id, user_id, owner_type, owner_id,
@@ -1955,11 +1979,10 @@ CREATE OR REPLACE VIEW usage_daily_entries AS
  LEFT JOIN workflow_runs r ON h.session_id LIKE 'wf:%' AND r.id=split_part(h.session_id,':',2)
  WHERE h.source_kind='engine'
  UNION ALL
- SELECT h.*,d.org_id,CASE WHEN r.owner_type='user' THEN NULLIF(r.owner_id,'') END,r.owner_type,NULLIF(r.owner_id,''),
+ SELECT h.*,r.org_id,CASE WHEN r.owner_type='user' THEN NULLIF(r.owner_id,'') END,r.owner_type,NULLIF(r.owner_id,''),
  r.id,r.workflow_id,'workflow'::text
  FROM usage_daily h JOIN workflow_runs r ON h.session_id LIKE 'wf:%' AND r.id=split_part(h.session_id,':',2)
- JOIN workflow_definitions d ON d.id=r.workflow_id
- WHERE h.source_kind='engine' AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
+ WHERE h.source_kind='engine' AND r.org_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
  UNION ALL
  SELECT h.*,h.org_id,h.user_id,CASE WHEN h.team_id IS NOT NULL THEN 'team' ELSE 'user' END,
  COALESCE(h.team_id,h.user_id),NULL,NULL,'proxy'
@@ -1981,11 +2004,10 @@ CREATE OR REPLACE VIEW usage_hourly_entries AS
  LEFT JOIN workflow_runs r ON h.session_id LIKE 'wf:%' AND r.id=split_part(h.session_id,':',2)
  WHERE h.source_kind='engine'
  UNION ALL
- SELECT h.*,d.org_id,CASE WHEN r.owner_type='user' THEN NULLIF(r.owner_id,'') END,r.owner_type,NULLIF(r.owner_id,''),
+ SELECT h.*,r.org_id,CASE WHEN r.owner_type='user' THEN NULLIF(r.owner_id,'') END,r.owner_type,NULLIF(r.owner_id,''),
  r.id,r.workflow_id,'workflow'::text
  FROM usage_hourly h JOIN workflow_runs r ON h.session_id LIKE 'wf:%' AND r.id=split_part(h.session_id,':',2)
- JOIN workflow_definitions d ON d.id=r.workflow_id
- WHERE h.source_kind='engine' AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
+ WHERE h.source_kind='engine' AND r.org_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
  UNION ALL
  SELECT h.*,h.org_id,h.user_id,CASE WHEN h.team_id IS NOT NULL THEN 'team' ELSE 'user' END,
  COALESCE(h.team_id,h.user_id),NULL,NULL,'proxy'

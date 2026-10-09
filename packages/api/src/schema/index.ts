@@ -1322,6 +1322,10 @@ export const workflowRuns = pgTable(
     // sandboxes (workflows/sandbox-reclaim.ts). NULL until the run settles
     // AND every session sandbox is gone — the sweep retries NULL rows.
     sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
+    // The workflow's org when the run started, written by the
+    // `workflow_runs_org` insert trigger. Usage reads it, so a run's spend
+    // keeps its org after the workflow is deleted.
+    orgId: text("org_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
