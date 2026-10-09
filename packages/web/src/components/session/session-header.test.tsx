@@ -419,7 +419,7 @@ describe("SessionHeader: background work refusal (fix wave 3, H3)", () => {
     return {
       error: 'This session has background work running: "full proof build" (process). Cancel it first, or retry with force=true to stop it and pause the session.',
       code: "background_work",
-      work: [{ id: "wk_1", kind: "process", reason: "full proof build", createdAt: Date.now() - 3 * HOUR - 60_000, deadlineAt: Date.now() + 49 * HOUR }],
+      work: [{ id: "wk_1", kind: "process", status: "running", reason: "full proof build", createdAt: Date.now() - 3 * HOUR - 60_000, deadlineAt: Date.now() + 49 * HOUR }],
       hiddenCount,
       forceAllowed,
     };
