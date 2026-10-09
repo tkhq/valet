@@ -15,10 +15,10 @@ function record(value: unknown): value is Record<string, unknown> {
 
 /** Only request-time image-tool access/availability errors qualify, not auth, quota, or stream errors. */
 function imageToolRejected(message: string): boolean {
-  return /\b(?:400|403|404|422)\b/.test(message)
+  return /^OpenAI API error \((?:400|403|404|422)\):/.test(message)
     && /image[_ -]generation|gpt-image-[\w.-]+/i.test(message)
-    && /not[_ ](?:supported|available|found)|unsupported|unavailable|does not (?:exist|support)|access|permission|model_not_found|must be verified/i.test(message)
-    && !/api[_ -]?key|authentication|quota|billing|rate[_ -]?limit/i.test(message);
+    && /not[_ ](?:supported|available|found)|unsupported|unavailable|does not (?:exist|support)|access|permission|scope|model_not_found|must (?:be verified|verify)/i.test(message)
+    && !/invalid[_ -]?(?:api[_ -]?key)|authentication[_ -]?error|insufficient[_ -]?quota|rate[_ -]?limit/i.test(message);
 }
 
 /** One thread owns this bridge. The engine stores its results through ordinary tool persistence. */

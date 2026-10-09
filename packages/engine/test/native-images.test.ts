@@ -183,6 +183,8 @@ it.each([
   [403, "Your organization does not have access to gpt-image-2.5-sunburst"],
   [403, "Your organization must be verified to use gpt-image-2.5-sunburst"],
   [404, "gpt-image-2.5-sunburst model not found"],
+  [403, "This API key does not have permission to use image_generation"],
+  [403, "gpt-image-2.5-sunburst is not available in your billing tier"],
 ] as const)("retries a %s image-tool rejection once without hosted tools", async (status, message) => {
   const fetchMock = vi.fn<typeof fetch>()
     .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message, type: "invalid_request_error", param: "tools" } }), { status, headers: { "content-type": "application/json" } }))
@@ -208,6 +210,7 @@ it.each([
   [429, "image_generation quota exceeded"],
   [404, "main chat model not found"],
   [503, "Service unavailable"],
+  [500, "image_generation unavailable for the image labelled 400"],
 ] as const)("does not retry unrelated request rejection %s: %s", async (status, message) => {
   const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ error: { message } }), { status, headers: { "content-type": "application/json" } }));
   vi.stubGlobal("fetch", fetchMock);
