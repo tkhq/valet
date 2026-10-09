@@ -292,7 +292,8 @@ const FLUSH_GRACE_MS = 50;
 /** Shell prefix for a root exec: use the root-only scratch temp dir when the
  * scratch bootstrap created it (`home-persistence.ts` makes it mode 0700).
  * Without scratch the test fails and `TMPDIR` stays as the container set it. */
-export const ROOT_TMPDIR_PREFIX = "[ -d /scratch/tmp-root ] && export TMPDIR=/scratch/tmp-root; ";
+export const ROOT_TMPDIR_PREFIX =
+  "[ -d /scratch/tmp-root ] && [ ! -L /scratch/tmp-root ] && [ -O /scratch/tmp-root ] && export TMPDIR=/scratch/tmp-root; ";
 
 export async function execInPod(
   deps: ExecDeps,
