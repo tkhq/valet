@@ -32,7 +32,7 @@ import { renderTemplate, type TemplateContext } from '../dag/expression.js';
 import type { SessionNode } from '../dag/nodes.js';
 import type { WorkflowPromptReceipt } from '../engine-deps.js';
 import { executeSubmissionNode, withOutputSchemaPrompt, type SubmissionDispatch } from './submission-node.js';
-import { iterationSuffix, resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
+import { iterationSuffix, resolveTemplateContext, workflowStepSessionId, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
 export interface SessionDispatchedResult {
   sessionId: string;
@@ -50,7 +50,7 @@ export async function executeSession(args: NodeExecutorArgs<SessionNode>): Promi
   const templateContext = resolveTemplateContext(args);
 
   const suffix = iterationSuffix(iteration);
-  const sessionId = `wf:${run.runId}:${node.id}${suffix}`;
+  const sessionId = workflowStepSessionId(run.runId, node.id, iteration);
   const dispatchId = `workflow:${run.runId}:${node.id}${suffix}`;
 
   return await executeSubmissionNode<SessionDispatchedResult, SessionSettledResult>(

@@ -26,6 +26,7 @@ import { prepareMemberActivity, MEMBER_ACTIVITY_PUBLISH_SQL } from "./usage-memb
 import { prepareAuxUsageRollups, AUX_USAGE_PUBLISH_SQL } from "./usage-aux-rollups.js";
 import { prepareUsageDaily, prepareUsageHourly, usageHourlyPublishSql } from "./usage-hourly-migration.js";
 import { prepareUsageAnalytics, usageAnalyticsPublishSql, projectedCostViewSql } from "./usage-analytics-migration.js";
+import { prepareUsageStepAttribution, USAGE_STEP_ATTRIBUTION_PUBLISH_SQL } from "./usage-step-attribution.js";
 import * as schema from "../schema/index.js";
 
 /** Application Drizzle handle. The engine's session store has its own
@@ -1763,6 +1764,8 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   { describe: "usage hourly summaries", probe: { kind: "column", table: "usage_hourly_ready", column: "version" }, prepare: prepareUsageHourly, sql: usageHourlyPublishSql },
   { describe: "usage action and skill summaries", probe: { kind: "column", table: "usage_aux_rollups_ready", column: "version" }, prepare: prepareAuxUsageRollups, sql: AUX_USAGE_PUBLISH_SQL },
   { describe: "usage member activity summaries", probe: { kind: "column", table: "usage_member_activity_ready", column: "version" }, prepare: prepareMemberActivity, sql: MEMBER_ACTIVITY_PUBLISH_SQL },
+  // After the rollups: the backfill moves facts, and their triggers move the hours.
+  { describe: "usage workflow step attribution", probe: { kind: "column", table: "usage_step_attribution_ready", column: "version" }, prepare: prepareUsageStepAttribution, sql: USAGE_STEP_ATTRIBUTION_PUBLISH_SQL },
   { describe: "usage_action_facts_window", probe: { kind: "index", index: "usage_action_facts_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_action_facts_window ON usage_action_facts(org_id, created_at);` },
   { describe: "usage_action_hourly_window", probe: { kind: "index", index: "usage_action_hourly_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_action_hourly_window ON usage_action_hourly(org_id, hour_ms);` },
   { describe: "usage_skill_facts_window", probe: { kind: "index", index: "usage_skill_facts_window" }, sql: `CREATE INDEX IF NOT EXISTS usage_skill_facts_window ON usage_skill_facts(created_at);` },

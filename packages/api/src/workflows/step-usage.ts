@@ -1,0 +1,53 @@
+/**
+ * Records an LLM step's model call as a usage entry, so Usage counts it.
+ *
+ * A session step runs in an engine session, and the engine writes each turn
+ * to `engine_entries` with its usage and cost. An LLM step calls the model
+ * directly and has no session, so before this record its spend reached no
+ * usage table. The record is one `engine_entries` row of type `usage` under
+ * the step's session id (`workflowStepSessionId`). The usage triggers then
+ * project it like any other turn: `usage_entry_facts`, the hourly and daily
+ * rollups, and `cost_entries` all attribute it to the run and the step. No
+ * engine session or thread exists for that id, so no conversation shows it.
+ */
+import { randomBytes } from "node:crypto";
+import { sql } from "drizzle-orm";
+import type { Usage } from "@earendil-works/pi-ai/compat";
+import { workflowStepSessionId } from "@valet/workflow";
+import type { AppDb } from "../lib/drizzle.js";
+
+interface EntryUsage { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }
+type EntryCost = EntryUsage;
+
+/**
+ * The usage and cost an engine turn would persist for this call, by the
+ * engine's own rule: no usage when the provider reported no tokens, and no
+ * cost (unpriced, never "$0") when it reported no price.
+ */
+export function stepUsageEntry(usage: Usage): { usage: EntryUsage; cost?: EntryCost } | null {
+  const total = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  if (total <= 0) return null;
+  const entry: EntryUsage = { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, total };
+  const c = usage.cost;
+  return c && c.total > 0
+    ? { usage: entry, cost: { input: c.input, output: c.output, cacheRead: c.cacheRead, cacheWrite: c.cacheWrite, total: c.total } }
+    : { usage: entry };
+}
+
+/** An id in the engine's entry shape (`e-<time>-<random>`), so entries keep
+ * their creation order when the usage backfill pages through them by id. */
+function entryId(now: number): string {
+  return `e-${now.toString(36)}-${randomBytes(6).toString("hex")}`;
+}
+
+export async function recordLlmStepUsage(db: AppDb, step: {
+  runId: string; nodeId: string; iteration: number; model: string; usage: Usage; now?: number;
+}): Promise<void> {
+  const entry = stepUsageEntry(step.usage);
+  if (!entry) return;
+  const now = step.now ?? Date.now();
+  const sessionId = workflowStepSessionId(step.runId, step.nodeId, step.iteration);
+  await db.execute(sql`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, model, usage, cost, created_at)
+    VALUES (${entryId(now)}, ${sessionId}, ${sessionId}, 'usage', ${step.model}, ${JSON.stringify(entry.usage)},
+      ${entry.cost ? JSON.stringify(entry.cost) : null}, ${now})`);
+}

@@ -23,6 +23,7 @@ import { WorkflowPreview } from "~/components/workflows/preview";
 import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { formatWhen } from "~/lib/format-when";
+import { formatStepUsd } from "~/lib/format-usage";
 
 /**
  * `/workflows/runs/$runId` — the settled run's result first, then
@@ -115,6 +116,7 @@ export function RunDetailBody({
   const [cancelOpen, setCancelOpen] = useState(false);
   const [diagramOpen, setDiagramOpen] = useState(false);
   const { run, checkpoints } = data;
+  const stepCosts = data.stepCosts ?? [];
   const pendingGates = data.pendingGates ?? [];
   const needsApproval = runNeedsApproval(run, pendingGates);
   const nonTerminal = run.status !== "settled";
@@ -232,10 +234,15 @@ export function RunDetailBody({
         )}
 
         <div>
-          <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">
+          <h2 className="mb-2 flex items-baseline justify-between gap-3 text-xs font-medium uppercase tracking-wide text-muted">
             Steps
+            {stepCosts.length > 0 && (
+              <span className="normal-case tracking-normal tabular-nums">
+                {formatStepUsd(stepCosts.reduce((sum, cost) => sum + cost.costUsd, 0))} model spend
+              </span>
+            )}
           </h2>
-          <CheckpointList checkpoints={checkpoints} promotedNodeId={result?.nodeId} nodeStatuses={nodeStatuses.status} nodeOrder={nodeOrder} />
+          <CheckpointList checkpoints={checkpoints} promotedNodeId={result?.nodeId} nodeStatuses={nodeStatuses.status} nodeOrder={nodeOrder} stepCosts={stepCosts} />
         </div>
         {definition && (
           <details onToggle={(event) => setDiagramOpen(event.currentTarget.open)}>

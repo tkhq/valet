@@ -10,6 +10,27 @@ import { render, screen } from "@testing-library/react";
 import { CheckpointList } from "./checkpoint-list";
 
 describe("CheckpointList", () => {
+  it("shows each step's model spend, marking a lower bound when some calls were unpriced", () => {
+    render(
+      <CheckpointList
+        checkpoints={[
+          { nodeId: "draft", iteration: 0, status: "completed" },
+          { nodeId: "each", iteration: 1, status: "completed" },
+          { nodeId: "notify", iteration: 0, status: "completed" },
+        ]}
+        stepCosts={[
+          { nodeId: "draft", iteration: 0, costUsd: 0.0421, turns: 2, unpricedTurns: 0, totalTokens: 1500, models: ["claude"] },
+          { nodeId: "each", iteration: 1, costUsd: 0.005, turns: 2, unpricedTurns: 1, totalTokens: 20, models: [] },
+        ]}
+      />,
+    );
+    const [draft, each, notify] = screen.getAllByRole("listitem");
+    expect(draft.textContent).toContain("$0.0421");
+    expect(draft.textContent).toContain("1.5k tokens over 2 calls · claude");
+    expect(each.textContent).toContain("$0.0050+");
+    expect(notify.textContent).not.toContain("$");
+  });
+
   it("shows a fallback line when there are no checkpoints", () => {
     render(<CheckpointList checkpoints={[]} />);
     expect(screen.getByText("No steps have started yet.")).toBeTruthy();

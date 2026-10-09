@@ -428,20 +428,37 @@ async function queryUsageDrillItems(
     }));
   }
   if (useCase === "workflow") {
+    // One row per workflow, then its steps. Every model call a workflow makes
+    // bills to `wf:{runId}:{nodeId}[:{iteration}]`, so the step is the third
+    // part of the session id; foreach iterations of one step add up.
     const whereCe = scopeWhere("ce.", period, scope);
-    interface Row { workflow_run_id: string | null; name: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
+    interface Row { workflow_id: string; name: string | null; node_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown; runs: unknown }
     const r = (await db.execute(sql`
-      SELECT ce.workflow_run_id, wd.name,
-             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COALESCE(SUM(ce.turns),0) AS turns
-      FROM ${usagePeriodRows(period)} ce
-      LEFT JOIN workflow_definitions wd ON wd.id = ce.workflow_id
-      WHERE ${whereCe} AND ce.use_case = 'workflow' AND ce.workflow_run_id IS NOT NULL
-      GROUP BY ce.workflow_run_id, wd.name
-      ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
-    return r.rows.map((x) => ({
-      id: x.workflow_run_id ?? "", label: x.name ?? `run ${x.workflow_run_id}`, useCase, isChild: false,
-      parentId: null, sessionId: null, costUsd: toNum(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
-    }));
+      WITH spend AS (
+        SELECT ce.workflow_id, split_part(ce.session_id, ':', 3) AS node_id, ce.workflow_run_id,
+               ce.cost_total, ce.total_tokens, ce.turns
+        FROM ${usagePeriodRows(period)} ce
+        WHERE ${whereCe} AND ce.use_case = 'workflow' AND ce.workflow_id IS NOT NULL
+      ), workflows AS (
+        SELECT workflow_id, SUM(cost_total) AS cost_usd FROM spend
+        GROUP BY workflow_id ORDER BY cost_usd DESC LIMIT 200
+      )
+      SELECT s.workflow_id, wd.name, CASE WHEN GROUPING(s.node_id) = 0 THEN s.node_id END AS node_id,
+             COALESCE(SUM(s.cost_total),0) AS cost_usd, COALESCE(SUM(s.total_tokens),0) AS total_tokens,
+             COALESCE(SUM(s.turns),0) AS turns, COUNT(DISTINCT s.workflow_run_id) AS runs
+      FROM spend s JOIN workflows w ON w.workflow_id = s.workflow_id
+      LEFT JOIN workflow_definitions wd ON wd.id = s.workflow_id
+      GROUP BY GROUPING SETS ((s.workflow_id, wd.name), (s.workflow_id, wd.name, s.node_id))
+      ORDER BY cost_usd DESC`)) as { rows: Row[] };
+    return r.rows.map((x) => {
+      const common = {
+        useCase, sessionId: null, workflowId: x.workflow_id, runs: toNum(x.runs),
+        costUsd: toNum(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
+      };
+      return x.node_id === null
+        ? { ...common, id: x.workflow_id, label: x.name ?? x.workflow_id, isChild: false, parentId: null }
+        : { ...common, id: `${x.workflow_id}/${x.node_id}`, label: x.node_id, isChild: true, parentId: x.workflow_id };
+    });
   }
   // Proxy hours retain harness identity; partial hours retain exact timestamps.
   const whereProxy = scope.scope === "team"

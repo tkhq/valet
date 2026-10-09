@@ -158,6 +158,8 @@ export async function executeLlm(args: NodeExecutorArgs<LlmNode>): Promise<NodeE
     try {
       completion = await engine.llmComplete({
         runId: run.runId,
+        nodeId: node.id,
+        iteration,
         model: node.model,
         system: systemText,
         prompt: promptText,
@@ -208,6 +210,8 @@ export async function executeLlm(args: NodeExecutorArgs<LlmNode>): Promise<NodeE
   try {
     repairCompletion = await engine.llmComplete({
       runId: run.runId,
+      nodeId: node.id,
+      iteration,
       model: node.model,
       system: systemText,
       prompt: repairPrompt,

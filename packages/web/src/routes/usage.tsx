@@ -153,7 +153,15 @@ function ItemList({
         // A workspace runtime has no session page; its threads open from chat.
         const isRuntimeId = /^(orchestrator|assistant):/.test(item.sessionId ?? "");
         const canLink = item.sessionId !== null && !isRuntimeId;
-        const labelEl = canLink ? (
+        const labelEl = item.workflowId !== undefined && !item.isChild ? (
+          <Link
+            to="/workflows/$workflowId"
+            params={{ workflowId: item.workflowId }}
+            className="block min-h-11 max-w-full break-words py-3 text-moss hover:underline underline-offset-2 sm:min-h-0 sm:py-0"
+          >
+            {item.label}
+          </Link>
+        ) : canLink ? (
           <Link
             to="/sessions/$sessionId"
             params={{ sessionId: item.sessionId! }}
@@ -173,6 +181,13 @@ function ItemList({
             }`}
           >
             <div className="basis-full min-w-0 sm:basis-auto sm:flex-1">{labelEl}</div>
+            {item.runs !== undefined && item.runs > 0 && (
+              <span className="tabular-nums text-muted shrink-0">
+                {item.isChild
+                  ? `${fmtUsd(item.costUsd / item.runs)} per run · ${item.runs} ${item.runs === 1 ? "run" : "runs"}`
+                  : `${item.runs} ${item.runs === 1 ? "run" : "runs"}`}
+              </span>
+            )}
             <span className="tabular-nums text-muted shrink-0">
               {fmtUsd(item.costUsd)}
             </span>

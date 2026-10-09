@@ -364,3 +364,18 @@ The client forwards caller cancellation through its request controller without r
 Disabling a mounted Usage query cancels its pending request when no other enabled observer needs it.
 Period changes cancel unused requests for the previous period. Leaving the page cancels requests without remaining observers.
 Cancellation preserves cached data and does not report a timeout. Rapid-switch tests exercise all six query families through mocked pending fetches.
+
+## Workflow cost by step (2026-10-09)
+
+A workflow author tunes a workflow one step at a time, so Usage and the run page show model spend per step. Every model call a workflow makes bills to its step's id, `wf:{runId}:{nodeId}`, plus `:{iteration}` inside a foreach body. A session step already ran in a session with that id. Two step kinds did not, and their spend was missing from workflow totals:
+
+- **LLM steps** call the model directly and had no session, so their spend reached no usage table. The API now writes each call as one `usage` entry in `engine_entries` under the step's id (`workflows/step-usage.ts`). The entry follows the engine's turn rule: no entry without tokens, and no cost when the provider reports no price. The usage triggers then project it like any other turn. No engine session or thread exists for the id, so no conversation shows the entry. A failed call that billed tokens is recorded too.
+- **Thread steps** prompt the workspace assistant, so their turns were billed to the assistant session. `valet_usage_billing_session` now bills a turn to the step when its queue item carries a workflow dispatch id (`workflow:{runId}:{nodeId}[:{iteration}][:repair]`). `usage_entry_facts.session_id` is the billing key. It equals the entry's own session except for these turns. The confirmed-outcomes query joins entries by entry id for that reason.
+
+Deployed databases receive the billing rule through the `usage workflow step attribution` repair (`lib/usage-step-attribution.ts`), probed by `usage_step_attribution_ready`. The repair installs the function, then moves existing Thread-step facts in committed batches of 200 queue items. Each fact update fires the hourly trigger, which moves the turn between buckets, so the hourly and daily totals stay consistent. A fresh database installs the rule with the projection and creates the ready view there.
+
+Usage → Breakdown → Workflows lists one row per workflow, linked to its page, with the number of runs that spent in the period. Its steps follow, by cost, each with the average cost per run. Foreach iterations of one step add up. A sub-workflow bills to its own workflow there.
+
+`GET /api/workflows/runs/:runId` returns `stepCosts`: cost, calls, unpriced calls, tokens, and models per step and iteration, read from `usage_entry_facts`. A `workflow` step includes the runs it started, up to five levels deep, found through the checkpoints' `childRunId`. The Steps list shows each step's cost and the run total. A `+` marks a step with unpriced calls, whose cost is a lower bound.
+
+Child sessions that a session step spawns keep their own ids and do not roll up into the step.

@@ -78,6 +78,7 @@ import type {
   WorkflowRunSummary,
 } from "../wire/types.js";
 import { definitionVersionId, sameWorkflowSteps } from "./definition-version.js";
+import { workflowRunStepCosts } from "./step-cost.js";
 
 export interface WorkflowServiceDeps {
   db: AppDb;
@@ -2240,6 +2241,7 @@ async function projectWorkflowRun(
       id: run.owner!.ownerId,
     },
     checkpoints: checkpoints.map(toRunCheckpoint),
+    stepCosts: await workflowRunStepCosts(deps.db, deps.workflowStore, run.runId, checkpoints),
     signals: signals.map((s) => ({
       signalId: s.signalId,
       signalType: s.signalType,

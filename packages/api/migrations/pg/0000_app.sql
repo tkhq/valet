@@ -1555,10 +1555,26 @@ BEGIN
   CREATE INDEX IF NOT EXISTS usage_entry_facts_tools_window ON usage_entry_facts(created_at, session_id) WHERE tool_calls > 0;
   CREATE INDEX IF NOT EXISTS usage_entry_facts_outcomes_window ON usage_entry_facts(created_at, session_id) WHERE pull_requests > 0 OR reviews > 0;
 
+  -- usage step attribution begin
+  -- The session id an entry bills to. A Thread workflow step prompts the
+  -- workspace assistant, so its turns are written to the assistant session.
+  -- The queue item carries the step's dispatch id
+  -- (`workflow:{runId}:{nodeId}[:{iteration}][:repair]`), and the entry bills
+  -- to that step's id (`wf:{runId}:{nodeId}[:{iteration}]`), the key a
+  -- session step already uses. Every rollup then attributes the turn to the
+  -- workflow run and the step, not to the assistant.
+  CREATE OR REPLACE FUNCTION valet_usage_billing_session(e engine_entries) RETURNS text
+  LANGUAGE sql STABLE AS $billing$
+    SELECT COALESCE((SELECT 'wf:' || regexp_replace(substr(q.dispatch_id, 10), ':repair$', '')
+      FROM engine_queue_items q
+      WHERE q.id = e.queue_item_id AND q.session_id = e.session_id
+        AND q.dispatch_id LIKE 'workflow:%' AND e.session_id NOT LIKE 'wf:%'), e.session_id)
+  $billing$;
+
   CREATE OR REPLACE FUNCTION valet_usage_fact(e engine_entries) RETURNS usage_entry_facts
-  LANGUAGE sql IMMUTABLE AS $fact$
-    SELECT e.id, e.session_id,
-      CASE WHEN e.session_id LIKE 'wf:%' THEN split_part(e.session_id, ':', 2) END,
+  LANGUAGE sql STABLE AS $fact$
+    SELECT e.id, valet_usage_billing_session(e),
+      CASE WHEN valet_usage_billing_session(e) LIKE 'wf:%' THEN split_part(valet_usage_billing_session(e), ':', 2) END,
       e.created_at, e.model, e.usage::jsonb, e.cost::jsonb,
       COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'status' IN ('completed', 'error')),
       COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'toolName' = 'bash'
@@ -1569,6 +1585,8 @@ BEGIN
       THEN COALESCE(replace(e.parts, chr(92) || 'u0000', chr(92) || 'uFFFD')::jsonb, '[]'::jsonb)
       ELSE '[]'::jsonb END) p
   $fact$;
+  -- usage step attribution end
+  CREATE OR REPLACE VIEW usage_step_attribution_ready AS SELECT 1 AS version WHERE false;
 
   DROP TRIGGER IF EXISTS engine_entries_usage_fact ON engine_entries;
   CREATE OR REPLACE FUNCTION valet_sync_usage_fact() RETURNS trigger LANGUAGE plpgsql AS $sync$

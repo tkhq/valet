@@ -3,6 +3,8 @@ import { StepLogs } from "./step-logs";
 import { Link } from "@tanstack/react-router";
 import { RUN_STATUS_GLYPH, type NodeRunStatus } from "./editor/flow-node";
 import { formatRunOutput } from "./run-detail-helpers";
+import type { WorkflowStepCost } from "@valet/api/wire";
+import { formatStepUsd, formatTokens } from "~/lib/format-usage";
 
 export interface CheckpointLike {
   nodeId: string;
@@ -58,8 +60,11 @@ export function CheckpointList({
   promotedNodeId,
   nodeStatuses,
   nodeOrder = [],
+  stepCosts = [],
 }: {
   checkpoints: CheckpointLike[];
+  /** Model spend per step; a step with no model calls has none. */
+  stepCosts?: WorkflowStepCost[];
   /** Keep output collapsed when the result panel already shows it. */
   promotedNodeId?: string;
   nodeStatuses?: Record<string, NodeRunStatus>;
@@ -69,6 +74,7 @@ export function CheckpointList({
     return <p className="text-sm text-muted">No steps have started yet.</p>;
   }
   const order = new Map(nodeOrder.map((id, index) => [id, index]));
+  const costs = new Map(stepCosts.map((cost) => [`${cost.nodeId}:${cost.iteration}`, cost]));
   return (
     <ol className="overflow-hidden rounded-lg border border-line divide-y divide-line">
       {[...checkpoints].sort((a, b) =>
@@ -78,6 +84,7 @@ export function CheckpointList({
         <CheckpointRow
           key={`${cp.nodeId}:${cp.iteration}`}
           checkpoint={cp}
+          cost={costs.get(`${cp.nodeId}:${cp.iteration}`)}
           number={(order.get(cp.nodeId) ?? index) + 1}
           promoted={cp.nodeId === promotedNodeId}
           waiting={cp.status === "intent" && nodeStatuses?.[cp.nodeId] === "waiting"}
@@ -87,8 +94,9 @@ export function CheckpointList({
   );
 }
 
-function CheckpointRow({ checkpoint, number, promoted, waiting }: {
+function CheckpointRow({ checkpoint, cost, number, promoted, waiting }: {
   checkpoint: CheckpointLike;
+  cost?: WorkflowStepCost;
   number: number;
   promoted: boolean;
   waiting: boolean;
@@ -108,6 +116,7 @@ function CheckpointRow({ checkpoint, number, promoted, waiting }: {
           <span className={`shrink-0 text-sm ${TEXT_COLOR[status]}`} aria-hidden>{RUN_STATUS_GLYPH[status]}</span>
           <span className="min-w-0 flex-1 break-words text-sm font-medium text-ink">{checkpoint.nodeId}</span>
           {checkpoint.iteration > 0 && <span className="shrink-0 text-xs text-muted">Iteration {checkpoint.iteration + 1}</span>}
+          {cost && <StepCost cost={cost} />}
           <span className={`shrink-0 text-xs ${TEXT_COLOR[status]}`}>{denied ? "Denied" : LABEL[status]}</span>
         </summary>
         <div className="min-w-0 space-y-3 border-t border-line px-4 py-3 sm:pl-16">
@@ -146,5 +155,19 @@ function CheckpointRow({ checkpoint, number, promoted, waiting }: {
       </details>
       {checkpoint.error != null && <p className="break-words px-4 pb-3 text-xs text-danger-500 sm:pl-16">{checkpoint.error}</p>}
     </li>
+  );
+}
+
+/** What the step's model calls cost. Unpriced calls make it a lower bound. */
+function StepCost({ cost }: { cost: WorkflowStepCost }) {
+  const unpriced = cost.unpricedTurns > 0;
+  const detail = `${formatTokens(cost.totalTokens)} tokens over ${cost.turns} ${cost.turns === 1 ? "call" : "calls"}`
+    + (cost.models.length ? ` · ${cost.models.join(", ")}` : "")
+    + (unpriced ? ` · ${cost.unpricedTurns} unpriced` : "");
+  return (
+    <span className="shrink-0 text-xs tabular-nums text-muted" title={detail}>
+      {formatStepUsd(cost.costUsd)}{unpriced ? "+" : ""}
+      <span className="sr-only"> model spend, {detail}</span>
+    </span>
   );
 }

@@ -2110,9 +2110,28 @@ export interface WorkflowRunConversation {
   nodeId?: string;
 }
 
+/**
+ * What one step of a run cost: every model call it made, summed over its
+ * attempts. A `workflow` step includes the runs it started. `unpricedTurns`
+ * counts calls the provider reported no price for; while it is above zero,
+ * `costUsd` is a lower bound.
+ */
+export interface WorkflowStepCost {
+  nodeId: string;
+  iteration: number;
+  costUsd: number;
+  turns: number;
+  unpricedTurns: number;
+  totalTokens: number;
+  models: string[];
+}
+
 export interface WorkflowRunDetail {
   /** Run-owned histories, excluding the human conversation that started the run. */
   conversations?: WorkflowRunConversation[];
+  /** Model spend per step, from the usage projection. Steps with no model
+   * calls are absent. */
+  stepCosts?: WorkflowStepCost[];
   run: WorkflowRunSummary & {
     waitingOn: unknown[];
     definition: unknown;
@@ -3749,6 +3768,11 @@ export interface UsageDrillItem {
   costUsd: number;
   totalTokens: number;
   turns: number;
+  /** Workflow rows and their step rows: the workflow, for its page link. */
+  workflowId?: string;
+  /** Workflow rows and their step rows: the runs that spent in the window.
+   * A step's average cost per run is `costUsd / runs`. */
+  runs?: number;
 }
 
 export interface UsageDrillResponse {

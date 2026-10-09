@@ -490,14 +490,17 @@ describe("GET /api/usage/sessions", () => {
 });
 
 describe("GET /api/usage/items — symmetric drill-down", () => {
-  it("drills workflow → runs and proxy → harness", async () => {
+  it("drills workflow → steps and proxy → harness", async () => {
     api = await bootTestApi();
     const now = Date.now();
     const db = api.providers.db;
-    // A workflow run owned by local-user.
+    // Two runs of one workflow owned by local-user.
     await db.execute(sql`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at) VALUES ('wf-x','local-org','user','local-user','Nightly review','{}'::jsonb,${now},${now})`);
-    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at) VALUES ('run-x','wf-x','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at) VALUES ('run-x','wf-x','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now}), ('run-y','wf-x','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now})`);
     await seedEngineEntry(api, "e-wfx", "wf:run-x:node-a", now);
+    // A foreach iteration of the same step adds to it.
+    await seedEngineEntry(api, "e-wfy", "wf:run-y:node-a:2", now);
+    await seedEngineEntry(api, "e-wfx-b", "wf:run-x:node-b", now);
     // A proxy row (codex harness).
     await db.insert(llmProxyRequests).values({
       id: "p-cx", createdAt: now, orgId: "local-org", userId: "local-user", apiKeyId: "k",
@@ -506,8 +509,15 @@ describe("GET /api/usage/items — symmetric drill-down", () => {
     });
 
     const wf = (await (await fetch(`${api.baseUrl}/api/usage/items?useCase=workflow`)).json()) as UsageDrillResponse;
-    expect(wf.items.map((i) => i.label)).toContain("Nightly review");
-    expect(wf.items[0].id).toBe("run-x");
+    const workflow = wf.items.find((i) => !i.isChild);
+    expect(workflow).toMatchObject({ id: "wf-x", label: "Nightly review", workflowId: "wf-x", runs: 2 });
+    const steps = wf.items.filter((i) => i.isChild);
+    expect(steps.map((i) => [i.label, i.parentId, i.runs, i.turns])).toEqual([
+      ["node-a", "wf-x", 2, 2],
+      ["node-b", "wf-x", 1, 1],
+    ]);
+    expect(steps[0].costUsd).toBeCloseTo(2 * steps[1].costUsd, 6);
+    expect(workflow?.costUsd).toBeCloseTo(steps[0].costUsd + steps[1].costUsd, 6);
 
     const px = (await (await fetch(`${api.baseUrl}/api/usage/items?useCase=proxy`)).json()) as UsageDrillResponse;
     expect(px.items.map((i) => i.label)).toContain("codex");

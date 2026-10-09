@@ -89,7 +89,7 @@ export async function listWorkspaceOutcomes(
     LEFT JOIN agent_sessions s ON s.id=f.session_id
     LEFT JOIN workflow_runs r ON r.id=f.workflow_run_id
     LEFT JOIN workflow_definitions d ON d.id=r.workflow_id
-    JOIN engine_entries e ON e.id=f.entry_id AND e.session_id=f.session_id
+    JOIN engine_entries e ON e.id=f.entry_id
     CROSS JOIN LATERAL jsonb_array_elements(replace(e.parts,chr(92)||'u0000',chr(92)||'uFFFD')::jsonb)
       WITH ORDINALITY AS p(part,ordinality)
     WHERE (f.pull_requests>0 OR f.reviews>0) AND ${owned} AND ${sharedRun}
