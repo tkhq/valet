@@ -34,6 +34,17 @@ describe("validateScratchRequest", () => {
     }
   });
 
+  it("accepts only whole bytes or a Ki, Mi, Gi, or Ti suffix (fix wave 3, L-3)", () => {
+    expect(validateScratchRequest("1073741824", "prebuild", caps)).toBe("1073741824");
+    expect(validateScratchRequest("2048Mi", "prebuild", caps)).toBe("2048Mi");
+    expect(validateScratchRequest("1Ti", "prebuild", caps)).toBe("1Ti");
+    for (const bad of ["2000000K", "200G", "2000000k", "1.5Ti", "1e12", "0.5Ti"]) {
+      expect(() => validateScratchRequest(bad, "prebuild", caps), bad).toThrow(
+        `scratch "${bad}" uses an unsupported form. Use whole bytes or a Ki, Mi, Gi, or Ti suffix, like "200Gi".`,
+      );
+    }
+  });
+
   it("refuses when scratch is disabled", () => {
     expect(() => validateScratchRequest("10Gi", "prebuild", {})).toThrow(
       "scratch is not enabled on this deployment. Set sandbox.scratchMax in the Valet chart (an admin task), or VALET_SANDBOX_SCRATCH_MAX in a dev stack.",
