@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import sharp from "sharp";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -5,11 +8,13 @@ import openaiPlugin from "@valet/plugin-openai/plugin";
 import type { CreateSessionResponse, ListMessagesResponse, WireEvent } from "../wire/types.js";
 import { bootTestApi, type TestApi } from "./_setup.js";
 
+let workspace: string | undefined;
 let api: TestApi | undefined;
 let unregister: (() => void) | undefined;
 afterEach(async () => {
   unregister?.();
   await api?.cleanup();
+  if (workspace) await rm(workspace, { recursive: true, force: true });
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
 });
@@ -20,12 +25,13 @@ it("an ordinary OpenAI chat turn generates and edits through Responses, retainin
   unregister = () => faux.unregister();
   api = await bootTestApi({ plugins: [openaiPlugin] });
   const testApi = api;
+  workspace = await mkdtemp(join(tmpdir(), "valet-openai-images-"));
   const response = await fetch(`${testApi.baseUrl}/api/sessions`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspace: "/workspace" }),
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspace }),
   });
   expect(response.status).toBe(201);
   const created = await response.json() as CreateSessionResponse;
-  const session = await testApi.providers.engineHost.sessionFor(created.id, { orgId: "local-org", userId: "local-user", workspace: "/workspace" });
+  const session = await testApi.providers.engineHost.sessionFor(created.id, { orgId: "local-org", userId: "local-user", workspace });
   session.options.resolveModel = async () => ({ model: faux.getModel(), apiKey: "fixture-openai-key" });
   await session.setModel("gpt-6.1-sol");
   const png = await sharp({ create: { width: 2, height: 2, channels: 3, background: "red" } }).png().toBuffer();

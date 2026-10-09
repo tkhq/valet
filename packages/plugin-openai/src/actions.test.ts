@@ -86,6 +86,7 @@ describe("openaiPlugin", () => {
   });
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.doUnmock("sharp");
   });
 
   function mockFetch(): typeof fetchMock {
@@ -365,6 +366,15 @@ describe("openaiPlugin", () => {
     const metadata = await sharp(attachment.data).metadata();
     expect(metadata.width).toBe(1024);
     expect(metadata.height).toBeLessThanOrEqual(1024);
+  });
+
+  it("fails before a paid request when the image decoder cannot load", async () => {
+    vi.stubGlobal("__VALET_SHARP__", undefined);
+    vi.doMock("sharp", () => { throw new Error("native binding missing"); });
+    const { ctx, files } = makeCtx({ credential: { accessToken: "sk-test" } });
+    await expect(getAction("openai.generate_image").execute({ prompt: "fox" }, ctx)).rejects.toThrow("Reinstall Valet");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(files.size).toBe(0);
   });
 
   it("uses the native binary's supplied Sharp runtime for validation", async () => {

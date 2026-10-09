@@ -85,12 +85,19 @@ function validateArgs(args: ImageArgs) {
   } };
 }
 
-async function validateImage(bytes: Uint8Array, expectedFormat?: string): Promise<string> {
+async function imageDecoder(): Promise<typeof sharpType> {
+  try {
+    return globalThis.__VALET_SHARP__ ?? (await import("sharp")).default;
+  } catch {
+    throw new Error("The image decoder cannot load. Reinstall Valet or rebuild its native assets before requesting an image.");
+  }
+}
+
+async function validateImage(bytes: Uint8Array, sharp: typeof sharpType, expectedFormat?: string): Promise<string> {
   if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) {
     throw new Error("The image is empty or exceeds 20 MB. Use a smaller image or request a smaller output.");
   }
   try {
-    const sharp = globalThis.__VALET_SHARP__ ?? (await import("sharp")).default;
     const image = sharp(bytes, { failOn: "warning", limitInputPixels: MAX_IMAGE_PIXELS });
     const metadata = await image.metadata();
     if (!metadata.format || !Object.hasOwn(FORMATS, metadata.format) || (expectedFormat && metadata.format !== expectedFormat) ||
@@ -104,9 +111,8 @@ async function validateImage(bytes: Uint8Array, expectedFormat?: string): Promis
 }
 
 /** Keep the original file, but bound the preview replayed to the session model. */
-async function imageAttachment(bytes: Uint8Array, format: "png" | "jpeg" | "webp"): Promise<Uint8Array> {
+async function imageAttachment(bytes: Uint8Array, format: "png" | "jpeg" | "webp", sharp: typeof sharpType): Promise<Uint8Array> {
   if (bytes.byteLength <= MAX_ATTACHMENT_BYTES) return bytes;
-  const sharp = globalThis.__VALET_SHARP__ ?? (await import("sharp")).default;
   const preview = new Uint8Array(await sharp(bytes, { failOn: "warning", limitInputPixels: MAX_IMAGE_PIXELS })
     .resize({ width: 1024, height: 1024, fit: "inside", withoutEnlargement: true })
     .toFormat(format).toBuffer());
@@ -153,6 +159,7 @@ function returnedImage(body: unknown, responses: boolean) {
 export async function executeImage(args: ImageArgs, ctx: PluginActionContext, key: string, apiUrl: string): Promise<PluginActionResult> {
   ctx.signal.throwIfAborted();
   const { model, format, path, options } = validateArgs(args);
+  const sharp = await imageDecoder();
   let source: Uint8Array | undefined;
   let sourceFormat: string | undefined;
   let sourcePath: string | undefined;
@@ -166,7 +173,7 @@ export async function executeImage(args: ImageArgs, ctx: PluginActionContext, ke
       ctx.signal.throwIfAborted();
       throw new Error(`Cannot read the image file at ${sourcePath}. Use an existing sandbox file smaller than 20 MB.`);
     }
-    sourceFormat = await validateImage(source);
+    sourceFormat = await validateImage(source, sharp);
   }
   ctx.signal.throwIfAborted();
   let body: string | FormData;
@@ -208,8 +215,8 @@ export async function executeImage(args: ImageArgs, ctx: PluginActionContext, ke
   if (outputFormat !== undefined && outputFormat !== null && outputFormat !== format) {
     throw new Error("OpenAI returned an unexpected output format. Retry with the requested PNG, JPEG, or WebP format.");
   }
-  await validateImage(bytes, format);
-  const attachment = await imageAttachment(bytes, format);
+  await validateImage(bytes, sharp, format);
+  const attachment = await imageAttachment(bytes, format, sharp);
   ctx.signal.throwIfAborted();
   try {
     await ctx.sandbox.mkdir(posix.dirname(path));

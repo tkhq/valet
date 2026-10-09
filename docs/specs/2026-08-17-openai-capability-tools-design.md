@@ -75,7 +75,8 @@ Both API paths validate one completed image result and decode canonical base64.
 Sharp checks the actual format and decodes pixels before the sandbox write. The original encoded bytes remain unchanged in the saved file.
 Attachments larger than 5 MB are resized to fit 1024 by 1024 pixels, preserving their format.
 The smaller attachment is the inline preview and model feedback; the sandbox file retains full resolution.
-The image validator loads Sharp lazily. Compiled binaries use the existing `__VALET_SHARP__` runtime from extracted assets.
+The image validator loads Sharp lazily before the provider request.
+If the decoder cannot load, the action asks the agent to repair the installation without making a paid request. Compiled binaries use the existing `__VALET_SHARP__` runtime from extracted assets.
 The file extension, detected format, and attachment MIME must agree. A result reports success only after the write completes.
 
 Image inputs and outputs are limited to 20 MB and 16,777,216 pixels. Animated images are not accepted.
