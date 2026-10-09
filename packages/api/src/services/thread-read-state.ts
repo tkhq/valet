@@ -1,7 +1,7 @@
 import type { Principal } from "@valet/engine";
 import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { threadPullRequests, threadReads } from "../schema/index.js";
+import { agentSessions, threadPullRequests, threadReads } from "../schema/index.js";
 import type { ThreadPullRequest, WaitingThread } from "../wire/types.js";
 export interface ThreadActivity {
   readAt?: number;
@@ -40,9 +40,23 @@ export async function listThreadActivity(
     const { question } = lastAgentAsk(row.tail ?? "");
     if (question) value.agentQuestion = question;
   }
+  // A delegating thread's copy names the child that opened the pull request,
+  // so the thread card can tell the child's work from the thread's own.
+  const openedElsewhere = (row: typeof pulls[number]) =>
+    row.openedSessionId && row.openedThreadId && (row.openedSessionId !== row.sessionId || row.openedThreadId !== row.threadId)
+      ? { sessionId: row.openedSessionId, threadId: row.openedThreadId } : undefined;
+  const childIds = [...new Set(pulls.flatMap(row => openedElsewhere(row)?.sessionId ?? []))];
+  const childTitles = new Map((childIds.length
+    ? await db.select({ id: agentSessions.id, title: agentSessions.title }).from(agentSessions).where(inArray(agentSessions.id, childIds))
+    : []).map(row => [row.id, row.title]));
   for (const row of pulls.sort((a, b) => a.createdAt - b.createdAt)) {
     const value = entry(row.threadId);
-    (value.pullRequests ??= []).push({ url: row.url, repo: row.repo, number: row.number, state: row.state });
+    const origin = openedElsewhere(row);
+    const title = origin ? childTitles.get(origin.sessionId) : undefined;
+    (value.pullRequests ??= []).push({
+      url: row.url, repo: row.repo, number: row.number, state: row.state,
+      ...(origin ? { delegatedFrom: { ...origin, ...(title ? { title } : {}) } } : {}),
+    });
   }
   return activity;
 }

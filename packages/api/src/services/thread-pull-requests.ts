@@ -36,18 +36,21 @@ const MAX_DELEGATION_DEPTH = 5;
  * thread that asked for it, and its comments route back to that thread.
  */
 export async function recordDelegatedPullRequest(db: AppDb, input: { sessionId: string; threadId: string; url: string }): Promise<void> {
-  let current: { sessionId: string; threadId: string } | undefined = { sessionId: input.sessionId, threadId: input.threadId };
+  const openedBy = { sessionId: input.sessionId, threadId: input.threadId };
+  let current: { sessionId: string; threadId: string } | undefined = openedBy;
   for (let depth = 0; current && depth <= MAX_DELEGATION_DEPTH; depth++) {
-    if (!(await recordThreadPullRequest(db, { ...current, url: input.url }))) return;
+    if (!(await recordThreadPullRequest(db, { ...current, url: input.url, openedBy }))) return;
     const [parent] = await db.select({ sessionId: childWatches.parentSessionId, threadId: childWatches.parentThreadId })
       .from(childWatches).where(eq(childWatches.childSessionId, current.sessionId)).limit(1);
     current = parent;
   }
 }
 
-/** Records a pull request the thread created. A repeat of the same URL is ignored. */
+/** Records a pull request on a thread. `openedBy` is the thread that opened
+ * it, which differs from the row's thread on a delegating thread's copy and
+ * defaults to the row's thread. A repeat of the same URL is ignored. */
 export async function recordThreadPullRequest(
-  db: AppDb, input: { sessionId: string; threadId: string; url: string }, at = Date.now(),
+  db: AppDb, input: { sessionId: string; threadId: string; url: string; openedBy?: { sessionId: string; threadId: string } }, at = Date.now(),
 ): Promise<boolean> {
   const parsed = parsePullRequestUrl(input.url);
   if (!parsed) return false;
@@ -55,6 +58,8 @@ export async function recordThreadPullRequest(
     sessionId: input.sessionId, threadId: input.threadId, url: input.url.trim(),
     repo: `${parsed.owner}/${parsed.repo}`, number: parsed.number, state: "open",
     createdAt: at, updatedAt: at, checkedAt: at,
+    openedSessionId: input.openedBy?.sessionId ?? input.sessionId,
+    openedThreadId: input.openedBy?.threadId ?? input.threadId,
   }).onConflictDoNothing();
   return true;
 }

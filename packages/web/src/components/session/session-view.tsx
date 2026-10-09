@@ -277,6 +277,7 @@ export function SessionView({
                   key={`${sessionId}:${effectiveThreadId}`}
                   owner={{ ownerType: session.data.owner.type, ownerId: session.data.owner.id }}
                   sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages} busy={agentBusy}
+                  pullRequests={helperThread?.pullRequests}
                   onCreate={() => {
                     const key = draftKey(sessionId, effectiveThreadId);
                     const store = useComposerDraftStore.getState();
