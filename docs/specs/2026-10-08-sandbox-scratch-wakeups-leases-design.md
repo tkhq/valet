@@ -551,7 +551,17 @@ otherwise, like the existing workspace default/max check.
 4. Alerts: `valet_leases_over_deadline > 0` for 5m;
    `valet_leases_unannotated > 0` for 5m; `increase(valet_wakeups_total{cause="rate"}[1h]) > 3`.
    The existing `SandboxPodUnschedulable` covers a scratch pod that no
-   node fits.
+   node fits. Fleet scratch: `valet_sandbox_scratch_live_bytes > 4Ti` for
+   10m. Size the threshold to the scratch pool's total local disk.
+5. Keep `scratchMax: "0"` until the scratch node pool exists. A small
+   scratch request otherwise lands on a node's 100Gi gp3 root volume. Heavy
+   writes there saturate the volume, which made a node NotReady through
+   PLEG on 2026-08-28. Set `sandbox.scratchPoolReady: true` when the pool
+   exists. Until then, the api logs a WARNING at boot when `scratchMax` is
+   above `0`.
+6. Keep `jobLogMaxBytes` below `scratchMax` and below the scratch a repo
+   declares. Job logs live on `/scratch` and count against its size. The
+   api fails at boot when `jobLogMaxBytes` exceeds a non-zero `scratchMax`.
 
 ## Part G: Observability
 
@@ -565,6 +575,7 @@ otherwise, like the existing workspace default/max check.
 | `valet_leases_unannotated` | gauge | pods with a lease and no `safe-to-evict` annotation at the last reconcile |
 | `valet_sandbox_scratch_requested_bytes` | gauge | `session_class` |
 | `valet_sandbox_scratch_refused_total` | counter | `source`, `reason` |
+| `valet_sandbox_scratch_live_bytes` | gauge | declared `/scratch` summed over running sandboxes, set by the reconcile sweep |
 | `valet_sandbox_volume_used_bytes`, `_size_bytes` | gauge | `volume`, `repo` |
 
 UI: a wakeups strip on the session page lists active wakeups and leases
@@ -1009,3 +1020,48 @@ with an earlier entry, the entry below wins.
   thread's key as `warningThreadKey`, so a scratch warning from that
   build lands on that thread. The create route targets the default
   thread, which is already the fallback.
+- **B3: A2, adopt records scratch.** The provider's override record and its
+  `valet.dev/resource-overrides` annotation now carry `scratch`. A
+  preserve-all adopt records the live emptyDir size. An annotation written
+  before this change lacks scratch, so the attachment takes scratch from
+  the applied file when the record has none. A pod replace always deletes
+  that file, so a scratch in it is current. A preserved scratch also goes
+  into the attachment's create options for a later re-create.
+- **B3: A3, applied-state loss on a container restart.** A container
+  restart deletes `/etc/valet/applied.json` and keeps the pod and
+  `/scratch`. When the read finds no file inside an epoch the attachment
+  already observed, it keeps the recorded resources and re-runs every
+  step. It logs the event, because a restart (an OOM kill) can happen in
+  normal operation. The file stays on the rootfs, so it still dies
+  with the pod.
+- **B3: B4, scratch setup on every start.** On each container start, the
+  start prefix of a scratch pod creates the scratch directories and
+  links `/tmp/valet-jobs`. It also writes `.dead` for each job with no exit
+  code. This works whatever the image. The init container cannot make the link,
+  because `/tmp` is on the workload container's rootfs. A scratch-less
+  pod keeps its old prefix byte for byte. The start-script code stays.
+- **B3: A2, sticky scratch root and root temp dir.** The init container,
+  the start prefix, and the start scripts set the `/scratch` root to
+  1777. They remove a symlink that stands in place of a scratch directory,
+  and they never write `.dead` through a symlink. A new
+  `/scratch/tmp-root` (0700) is the temp dir for root services. The start
+  scripts export `TMPDIR=/scratch/tmp-root` when root owns it. The
+  workload user keeps `/scratch/tmp`. Privileged api execs still get
+  `TMPDIR=/scratch/tmp` from the container env.
+- **B3: A4, scratch quantity form.** Valet accepts a scratch request only
+  as whole bytes or with a `Ki`, `Mi`, `Gi`, or `Ti` suffix. The value reaches the
+  emptyDir `sizeLimit` verbatim, and the CRD rejects some forms the parser
+  accepts.
+- **B3: A4, Pending text.** The terminal Pending text names the pod's real
+  Pending minutes. A scale-up deferral can push it to 30.
+- **B3: A6, fleet scratch gauge.** The reconcile sweep sets
+  `valet.sandbox.scratch.live_bytes` each pass from the kubernetes
+  listing (running CRs only). It is for an alert (Part F). Nothing caps
+  the fleet total, because a cap would refuse work the per-request caps
+  already allow.
+- **B3: Part D, boot-time job log cap.** The api resolves
+  `VALET_JOB_LOG_MAX_BYTES` once at boot and passes it to every wakeups
+  seam as `jobLogMaxBytes`. New knobs: `VALET_WATCH_MIN_INTERVAL_MS` (default
+  120000, in `WakeupLimits.watchMinIntervalMs`) and
+  `VALET_SANDBOX_SCRATCH_POOL_READY`. The host passes `scratchEnabled` to
+  the coding prompt builder.
