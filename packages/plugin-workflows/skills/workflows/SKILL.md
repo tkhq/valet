@@ -96,8 +96,9 @@ The host scopes directories by run, node, and iteration. Limits are 100 files, 1
 Inputs are ephemeral. The host removes them when the consuming step settles and removes the run directory on every settlement outcome.
 Use the default `until_idle` wait mode. `files` cannot use `wait.mode: "none"` because settlement would remove data before consumption.
 A bounded sweep removes crash leftovers older than 7 days. Cleanup failures are logged without failing the run.
-Shared legacy team sandboxes and unverifiable audiences cannot receive files. Use a session step or start a new private thread.
-Provisioning and transport failures retain normal retries. Before admission, retries replace incomplete inputs atomically. Staging cleanup removes only lower-attempt files.
+Shared legacy team sandboxes and unverifiable audiences cannot receive files. Use a session step.
+Provisioning, transport, and interrupted rename failures retain normal retries. Before admission, retries replace incomplete inputs atomically. Files stage in a reserved sibling tree on the same filesystem, outside user input paths.
+Staging cleanup recursively removes only lower-attempt directories. Node and run cleanup remove both trees.
 After admission, duplicate dispatch skips all file operations, even if the agent edited or deleted an input.
 Personal assistant roots never receive orchestrator files. Channel delivery can reach their shared sandbox even after sidebar archival.
 Use a session step instead. Team ownership is not sufficient if routing selects a legacy or shared runtime.
@@ -105,6 +106,9 @@ The error is: "Workflow input files cannot be delivered into a shared assistant 
 Known user-owned definitions receive the same error at save/patch time. Other routes must pass the runtime execution-scope check.
 Cleanup never wakes a sandbox. Skips emit a warning and `valet.workflow.inputs.cleanup_skipped`.
 Residual sweeps protect only live runs with the same org and owner. Foreign runs count as absent.
+Team executions can outlive a run, so residual sweeping remains. Only `wf:` sandboxes are reclaimed with their run.
+Sweeps cap listings at 64 KiB and marker reads at 32 bytes. They check a five-second budget before each candidate.
+The `valet.workflow.inputs.sweep_skipped` counter records listing, marker, and budget skips. Invalid metadata remains untouched.
 Sweeps apply a seven-day floor to absent or settled runs. Without another file write, residual inputs persist until sandbox destruction.
 `llm` and `tool` nodes do not accept `files`.
 

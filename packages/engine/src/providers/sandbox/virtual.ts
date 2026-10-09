@@ -262,9 +262,19 @@ async function runVirtualCommand(
     };
   }
 
-  const lsMatch = trimmed.match(/^ls(?:\s+(\S+))?$/);
+  const headMatch = trimmed.match(/^head -c (\d+) -- '([^']*)'$/);
+  if (headMatch) {
+    try {
+      const bytes = await sb.readBinary(headMatch[2]);
+      return ok(new TextDecoder().decode(bytes.subarray(0, Number(headMatch[1]))));
+    } catch (e) {
+      return { stdout: "", stderr: `head: ${e instanceof Error ? e.message : String(e)}\n`, exitCode: 1 };
+    }
+  }
+
+  const lsMatch = trimmed.match(/^ls(?: -1A)?(?:\s+(\S+))?$/);
   if (lsMatch) {
-    const target = lsMatch[1] ? resolveRel(cwd, lsMatch[1]) : cwd;
+    const target = lsMatch[1] ? resolveRel(cwd, lsMatch[1].replace(/^'|'$/g, "")) : cwd;
     try {
       const names = await sb.readdir(target);
       return ok(names.sort().join("\n") + (names.length ? "\n" : ""));

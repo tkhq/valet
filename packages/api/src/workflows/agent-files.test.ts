@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualSandboxProvider, WorkspaceProvisioningError, type Principal } from "@valet/engine";
+import { LocalSandbox } from "@valet/sandbox-local";
+import { mkdtemp, rm } from "node:fs/promises";
 import { fauxAssistantMessage, registerFauxProvider } from "@valet/engine/test-helpers";
 import { createDefaultNodeExecutors, driveUntilPark, MAX_AGENT_INPUT_FILE_BYTES, type WorkflowDefinition, type WorkflowNode, type RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -210,6 +212,97 @@ describe("workflow sandbox input dispatch", () => {
     await expect(session.attachment.current()?.stat(inputRoot("transient-run"))).rejects.toThrow("ENOENT");
   });
 
+  it.each([
+    { exitCode: 124, timedOut: true }, { exitCode: 124 }, { exitCode: 125 }, { exitCode: 126 }, { exitCode: 137 },
+  ])("retries interrupted rename result %j and recovers", async failure => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read", files: { "data.txt": "v1" } });
+    const attempt = await h.createRun("rename-retry");
+    const session = await ensureWorkflowSession(h.opts, "wf:rename-retry:build");
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    vi.spyOn(sandbox, "exec").mockResolvedValueOnce({ stdout: "", stderr: "", ...failure });
+    faux?.setResponses([fauxAssistantMessage("ok")]);
+    await expect(h.drive("rename-retry", attempt)).rejects.toThrow("Workflow input rename did not complete");
+    expect((await h.workflowStore.getCheckpoints("rename-retry")).find(cp => cp.nodeId === "build")?.status).toBe("intent");
+    expect(faux?.state.callCount).toBe(0);
+    expect((await h.drive("rename-retry", attempt)).status).toBe("parked");
+    await vi.waitFor(async () => expect((await h.drive("rename-retry", attempt)).outcome).toBe("completed"), { timeout: 15_000 });
+    expect(faux?.state.callCount).toBe(1);
+  });
+
+  it("settles a real rename command failure even without stderr", async () => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read", files: { "data.txt": "v1" } });
+    const attempt = await h.createRun("rename-failed");
+    const session = await ensureWorkflowSession(h.opts, "wf:rename-failed:build");
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    vi.spyOn(sandbox, "exec").mockResolvedValueOnce({ stdout: "", stderr: "", exitCode: 1 });
+    expect((await h.drive("rename-failed", attempt)).outcome).toBe("failed");
+    expect((await h.workflowStore.getCheckpoints("rename-failed")).find(cp => cp.nodeId === "build")?.error)
+      .toContain("Could not rename workflow input (exit 1): command failed without stderr");
+  });
+
+  it.each(["EISDIR", "ERR_FS_EISDIR"])("settles deterministic local directory error %s", async code => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read", files: { "data.txt": "v1" } });
+    const attempt = await h.createRun("directory-error");
+    const session = await ensureWorkflowSession(h.opts, "wf:directory-error:build");
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    vi.spyOn(sandbox, "writeBinary").mockRejectedValueOnce(Object.assign(new Error("Directory operation failed"), { code }));
+    expect((await h.drive("directory-error", attempt)).outcome).toBe("failed");
+    expect((await h.workflowStore.getCheckpoints("directory-error")).find(cp => cp.nodeId === "build")?.error)
+      .toContain("Check the sandbox permissions and disk space");
+  });
+
+  it("preserves staging-shaped user paths and bounds large marker reads on LocalSandbox", async () => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
+    await h.createRun("local-path");
+    const session = await ensureWorkflowSession(h.opts, "wf:local-path:build");
+    const workspace = await mkdtemp("/workspace/workflow-input-local-");
+    const sandbox = new LocalSandbox("input-local", workspace);
+    const ready = vi.spyOn(session.attachment, "ensureReady").mockResolvedValue({ sandbox, epoch: 0 });
+    try {
+      const files = [{ path: "out.tmp-a1-cafe/data.json", content: "input" }];
+      for (const inputAttempt of [1, 2]) await writeAgentInputFiles(session, workspace, "Read",
+        { dispatchId: "workflow:local-path:build", inputAttempt, files }, h.db);
+      expect(await sandbox.readFile(`${workspace}/.valet/workflow-inputs/local-path/build/0/out.tmp-a1-cafe/data.json`)).toBe("input");
+      const old = `${workspace}/.valet/workflow-inputs/old`;
+      await sandbox.mkdir(old);
+      await sandbox.writeFile(`${old}/.created-at`, "1".repeat(2 * 1024 * 1024));
+      const read = vi.spyOn(sandbox, "readFile");
+      const binary = vi.spyOn(sandbox, "readBinary");
+      const exec = vi.spyOn(sandbox, "exec");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await sweepAgentInputFiles(sandbox, workspace, "local-path", h.db,
+          { orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id });
+        expect(read).not.toHaveBeenCalled();
+        expect(binary).not.toHaveBeenCalled();
+        const markerCall = exec.mock.calls.find(([command]) => command.startsWith("head -c"));
+        expect(markerCall?.[1]?.maxOutputBytes).toBe(32);
+        const results = await Promise.all(exec.mock.results.map(result => result.value));
+        expect(results.find(result => result.stdout.startsWith("111"))?.stdout.length).toBe(32);
+        expect((await sandbox.stat(old)).isDirectory).toBe(true);
+      } finally { warn.mockRestore(); }
+    } finally {
+      ready.mockRestore();
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves a user directory that looks like old staging across attempts", async () => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
+    await h.createRun("user-path");
+    const session = await ensureWorkflowSession(h.opts, "wf:user-path:build");
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    const files = [{ path: "out.tmp-a1-cafe/data.json", content: "input" }];
+    await writeAgentInputFiles(session, "/workspace", "Read", { dispatchId: "workflow:user-path:build", inputAttempt: 1, files }, h.db);
+    await sandbox.writeFile(`${inputRoot("user-path")}/out.tmp-a1-cafe/keep.txt`, "keep");
+    await writeAgentInputFiles(session, "/workspace", "Read", { dispatchId: "workflow:user-path:build", inputAttempt: 2, files }, h.db);
+    expect(await sandbox.readFile(`${inputRoot("user-path")}/out.tmp-a1-cafe/data.json`)).toBe("input");
+    expect(await sandbox.readFile(`${inputRoot("user-path")}/out.tmp-a1-cafe/keep.txt`)).toBe("keep");
+    expect(await sandbox.readdir("/workspace/.valet/workflow-staging/user-path/build/0")).toEqual(["attempt-2"]);
+    await cleanupAgentInputFiles(session, "/workspace", { runId: "user-path" });
+    await expect(sandbox.stat("/workspace/.valet/workflow-staging/user-path")).rejects.toThrow("ENOENT");
+  });
+
   it("repairs a truncated transport write before admission on the next drive", async () => {
     const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read", files: { "data.txt": "0123456789" } });
     const attempt = await h.createRun("partial-run");
@@ -389,6 +482,58 @@ describe("workflow sandbox input dispatch", () => {
     } finally { warn.mockRestore(); }
   });
 
+  it("bounds marker reads without reading sandbox-controlled contents through readFile", async () => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
+    await h.createRun("bounded-sweep");
+    const session = await ensureWorkflowSession(h.opts, "wf:bounded-sweep:build");
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    const root = "/workspace/.valet/workflow-inputs/old";
+    await sandbox.mkdir(root);
+    await sandbox.writeFile(`${root}/.created-at`, "1".repeat(1024 * 1024));
+    const read = vi.spyOn(sandbox, "readFile");
+    const exec = vi.spyOn(sandbox, "exec");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db,
+        { orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id });
+      expect(read).not.toHaveBeenCalled();
+      expect(exec).toHaveBeenCalledWith(`head -c 32 -- '${root}/.created-at'`, { timeout: expect.any(Number), maxOutputBytes: 32 });
+      expect((await sandbox.stat(root)).isDirectory).toBe(true);
+    } finally { warn.mockRestore(); }
+  });
+
+  it("skips a truncated listing rather than scanning unbounded names", async () => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
+    await h.createRun("listing-limit");
+    const session = await ensureWorkflowSession(h.opts, "wf:listing-limit:build");
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    const exec = vi.spyOn(sandbox, "exec").mockResolvedValueOnce({ stdout: "old\n", stderr: "", exitCode: 0, truncated: true });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db,
+        { orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id });
+      expect(exec).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("sweep failed"), expect.any(Error));
+    } finally { warn.mockRestore(); }
+  });
+
+  it("stops marker work at the sweep budget and records the skip", async () => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
+    await h.createRun("budget-limit");
+    const session = await ensureWorkflowSession(h.opts, "wf:budget-limit:build");
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    const exec = vi.spyOn(sandbox, "exec").mockResolvedValueOnce({ stdout: "old\n", stderr: "", exitCode: 0 });
+    const skipped = vi.spyOn(inputMetrics, "recordWorkflowInputSweepSkipped");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const clock = vi.spyOn(Date, "now").mockReturnValueOnce(1).mockReturnValue(6_000);
+    try {
+      await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db,
+        { orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id }, 1);
+      expect(exec).toHaveBeenCalledTimes(1);
+      expect(skipped).toHaveBeenCalledWith("budget");
+    } finally { clock.mockRestore(); warn.mockRestore(); skipped.mockRestore(); }
+  });
+
   it("sweeps old sibling runs in bounded rotating batches and retains fresh/current inputs", async () => {
     const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
     await h.createRun("sweep-run");
@@ -410,7 +555,7 @@ describe("workflow sandbox input dispatch", () => {
     }
     const rm = vi.spyOn(sandbox, "rm");
     await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db, { orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id }, now);
-    expect(rm.mock.calls.length).toBeLessThanOrEqual(AGENT_INPUT_SWEEP_LIMIT);
+    expect(rm.mock.calls.length).toBeLessThanOrEqual(2 * AGENT_INPUT_SWEEP_LIMIT);
     expect((await sandbox.readdir(root)).filter(name => name.startsWith("old-"))).not.toHaveLength(0);
     await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db, { orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id }, now);
     expect((await sandbox.readdir(root)).sort()).toEqual(["current", "fresh", "live-old"]);
@@ -462,7 +607,7 @@ describe("workflow sandbox input dispatch", () => {
     const canRename = new Promise<void>(resolve => { release = resolve; });
     vi.spyOn(sandbox, "writeBinary").mockImplementation(async (path, bytes) => {
       await original(path, bytes);
-      if (path.includes(".created-at.build.0.tmp-a1-")) {
+      if (path.includes("/build/0/attempt-1/.created-at-")) {
         staged();
         await canRename;
       }
@@ -494,7 +639,7 @@ describe("workflow sandbox input dispatch", () => {
     const canRename = new Promise<void>(resolve => { release = resolve; });
     vi.spyOn(sandbox, "writeBinary").mockImplementation(async (path, bytes) => {
       await original(path, bytes);
-      if (path.includes(kind === "file" ? "data.txt.tmp-a2-" : ".created-at.build.0.tmp-a2-")) {
+      if (path.includes(kind === "file" ? "/attempt-2/data.txt-" : "/attempt-2/.created-at-")) {
         stagedPath = path;
         staged();
         await canRename;
@@ -514,23 +659,21 @@ describe("workflow sandbox input dispatch", () => {
     expect(await sandbox.readFile(`${inputRoot("attempt-race")}/data.txt`)).toBe("current");
   });
 
-  it("removes crashed file and marker staging bytes before the next admission", async () => {
+  it("removes crashed reserved file and marker staging bytes before the next admission", async () => {
     const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read", files: { "nested/data.txt": "complete" } });
     const attempt = await h.createRun("stale-temp");
     const session = await ensureWorkflowSession(h.opts, "wf:stale-temp:build");
     const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
     const directory = `${inputRoot("stale-temp")}/nested`;
-    const markerRoot = "/workspace/.valet/workflow-inputs/stale-temp";
-    const suffix = ".tmp-a0-12345678-1234-1234-1234-123456789abc";
+    const markerRoot = "/workspace/.valet/workflow-staging/stale-temp/build/0";
     await sandbox.mkdir(directory);
-    await sandbox.writeFile(`${directory}/data.txt${suffix}`, "partial");
-    await sandbox.writeFile(`${directory}/data.txt.tmp-a0-abcdef`, "partial");
-    await sandbox.writeFile(`${markerRoot}/.created-at.build.0${suffix}`, "1");
-    await sandbox.writeFile(`${markerRoot}/.created-at.build.0.tmp-a0-12345678-1234-1234-1234-123456789abc`, "1");
+    await sandbox.mkdir(`${markerRoot}/attempt-0`);
+    await sandbox.writeFile(`${markerRoot}/attempt-0/data.txt-crashed`, "partial");
+    await sandbox.writeFile(`${markerRoot}/attempt-0/.created-at-crashed`, "1");
     faux?.setResponses([async () => {
       expect(await sandbox.readdir(directory)).toEqual(["data.txt"]);
       expect(await sandbox.readFile(`${directory}/data.txt`)).toBe("complete");
-      expect((await sandbox.readdir(markerRoot)).some(name => name.includes(".tmp-"))).toBe(false);
+      expect(await sandbox.readdir(markerRoot)).toEqual([`attempt-${attempt}`]);
       return fauxAssistantMessage("ok");
     }]);
     await h.drive("stale-temp", attempt);

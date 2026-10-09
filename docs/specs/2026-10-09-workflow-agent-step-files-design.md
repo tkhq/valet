@@ -42,10 +42,10 @@ The host resolves the execution session through the existing owner and audience 
 The host calls `attachment.ensureReady` before prompt admission. This provisions a cold sandbox or wakes a suspended sandbox through the normal lifecycle.
 It creates parent directories and writes bytes through `Sandbox.writeBinary`, the same primitive used by file uploads.
 No shell command carries file contents as command text. Docker transports base64 bytes through stdin.
-The host stages each file and the age marker beside its destination, then uses atomic rename to replace it.
-File staging names include the run attempt and a random token. Age-marker staging names also include node and iteration.
-Before writing, the host removes staging files only from lower attempts. A stale driver cannot delete an equal or newer driver's staging files.
-Unidentified legacy staging files remain for node/run cleanup or residual sweeping. Cleanup never guesses their attempt.
+The host stages files and age markers in `.valet/workflow-staging/<run>/<node>/<iteration>/attempt-<n>/` on the same filesystem.
+A random token distinguishes each staged file. Atomic rename moves the staged file into its destination.
+Before writing, the host recursively removes only lower-attempt staging directories. It never scans user input paths for staging names.
+A stale driver cannot delete equal or newer staging. Node, run, and residual cleanup remove both input and staging trees.
 
 The input root is `<working-directory>/.valet/workflow-inputs/<runId>/<nodeId>/<iteration>/`.
 Iteration 0 is explicit, matching existing workflow working-directory conventions. Foreach checkpoint iterations and template indexes both start at 0.
@@ -67,7 +67,7 @@ A one-time provisioning failure must leave an intent checkpoint and complete on 
 
 The existing intent checkpoint precedes input writes and prompt admission.
 The engine store exposes dispatch-admission lookup through its portable contract.
-Before admission, each attempt freely replaces files through same-directory staging and atomic rename. This repairs partial transport writes.
+Before admission, each attempt freely replaces files through same-filesystem reserved staging and atomic rename. This repairs partial transport writes.
 After admission, replay performs no filesystem checks, writes, sweep, readiness calls, or timestamp updates.
 The host reconstructs the manifest in memory. Engine prompt admission remains the authority for prompt-content conflicts and returns the deduplicated receipt.
 Before attempting writes, the host reports the resolved session through an awaited `onInputTarget` callback.
@@ -81,6 +81,8 @@ After attention and origin reporting, the run-settled hook starts best-effort cl
 Cleanup uses only cached sessions with ready attachments. It never creates, restores, or wakes a sandbox.
 Run cleanup skips `wf:` sessions because the workflow sandbox reclaimer destroys them.
 Cleanup logs failures and never changes the node or run outcome.
+Timeout and signal-interrupted rename results retain normal drive retries. Real command failures settle the node with an actionable error.
+Local `EISDIR` and `ERR_FS_EISDIR` errors use the same deterministic failure classification.
 Skipped cleanup emits a warning and the `valet.workflow.inputs.cleanup_skipped` counter, labeled by node/run scope and attachment state.
 Cleanup does not wake residual sandboxes. Inputs persist until a later write-time sweep or sandbox destruction.
 If the sandbox never receives files again, no write-time sweep runs. Retention is not a seven-day deletion deadline.
@@ -90,7 +92,14 @@ The status lookup joins the run's definition and filters organization, owner typ
 A foreign run counts as absent, even when its ID matches a sandbox directory. Its existence or state never changes retention.
 Only absent or settled runs with markers older than `AGENT_INPUT_RETENTION_MS` (7 days) can be removed.
 Each pre-admission attempt refreshes the host-created `.created-at` marker atomically. Missing or unreadable markers are logged, never guessed.
-The sweep uses sandbox file primitives, not shell interpolation. Duplicate admission never triggers it.
+Team execution sandboxes are conversation-scoped, not run-owned. They can outlive a workflow, so residual sweeping remains necessary.
+The workflow reclaimer destroys only `wf:` sandboxes. It does not destroy team executions at run settlement.
+The sweep lists names through one exec with a 64 KiB output cap and a one-second timeout. Truncated listings are skipped.
+Each marker read uses `head -c 32` with a 32-byte output cap and a one-second timeout. Invalid markers are preserved.
+The sweep checks a five-second budget before each candidate. Already-started status lookups and removals can finish after that budget.
+At most 100 candidates, 100 marker reads, 100 status lookups, and 200 removals occur per sweep.
+Shell commands contain quoted paths only. No unbounded marker contents enter the API process. Duplicate admission never triggers sweeping.
+The `valet.workflow.inputs.sweep_skipped` counter records listing, marker, and budget skips. Warnings name the failed operation.
 This feature adds no reverse output-file interface.
 
 ## Audience isolation

@@ -23,10 +23,11 @@ describe("workflow input cleanup metrics", () => {
     // Other files can call the recorder against the no-op global provider.
     // Load a fresh module after this test installs its recordable provider.
     vi.resetModules();
-    const { recordWorkflowInputCleanupSkipped } = await import("./workflow-input-metrics.js");
+    const { recordWorkflowInputCleanupSkipped, recordWorkflowInputSweepSkipped } = await import("./workflow-input-metrics.js");
 
     recordWorkflowInputCleanupSkipped("node", "suspended");
     recordWorkflowInputCleanupSkipped("run", "uncached");
+    for (const reason of ["listing", "budget", "marker"] as const) recordWorkflowInputSweepSkipped(reason);
     await provider.forceFlush();
 
     const metric = exporter
@@ -41,6 +42,13 @@ describe("workflow input cleanup metrics", () => {
     ]);
     expect(metric.dataPoints.map(point => point.value)).toEqual([1, 1]);
 
+    const sweep = exporter.getMetrics().flatMap(resource => resource.scopeMetrics).flatMap(scope => scope.metrics)
+      .find(candidate => candidate.descriptor.name === "valet.workflow.inputs.sweep_skipped");
+    if (!sweep || sweep.dataPointType !== DataPointType.SUM) throw new Error("expected a sweep counter");
+    expect(sweep.dataPoints.map(point => point.attributes)).toEqual([
+      { reason: "listing" }, { reason: "budget" }, { reason: "marker" },
+    ]);
+    expect(sweep.dataPoints.map(point => point.value)).toEqual([1, 1, 1]);
     await provider.shutdown();
   });
 });

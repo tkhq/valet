@@ -3,7 +3,7 @@ import { AgentInputFileError, validateRenderedAgentFiles, type RenderedAgentFile
 import { randomUUID } from "node:crypto";
 import type { AppDb } from "../lib/drizzle.js";
 import { scopedInputRunStatus, type InputSandboxScope } from "./input-scope.js";
-import { recordWorkflowInputCleanupSkipped } from "../observability/workflow-input-metrics.js";
+import { recordWorkflowInputCleanupSkipped, recordWorkflowInputSweepSkipped } from "../observability/workflow-input-metrics.js";
 import { posix } from "node:path";
 
 export const SHARED_ASSISTANT_INPUT_ERROR = "Workflow input files cannot be delivered into a shared assistant sandbox. Use a session step for agent work that needs input files.";
@@ -13,6 +13,8 @@ export const AGENT_INPUT_RETENTION_MS = 7 * 24 * 60 * 60_000;
 export const AGENT_INPUT_SWEEP_LIMIT = 100;
 const sweepOffsets = new WeakMap<Sandbox, number>();
 const INPUT_ROOT = ".valet/workflow-inputs";
+const STAGING_ROOT = ".valet/workflow-staging";
+const SWEEP_BUDGET_MS = 5_000;
 const AGE_MARKER = ".created-at";
 
 interface InputFileOptions {
@@ -21,7 +23,7 @@ interface InputFileOptions {
   inputAttempt?: number;
 }
 
-function inputDirectory(workspace: string, dispatchId: string): string {
+function inputDirectory(workspace: string, dispatchId: string, root = INPUT_ROOT): string {
   const parts = dispatchId.split(":");
   const [kind, runId, nodeId, iteration = "0"] = parts;
   if (kind !== "workflow" || parts.length > 4 || !runId || !nodeId ||
@@ -29,7 +31,7 @@ function inputDirectory(workspace: string, dispatchId: string): string {
       !/^(0|[1-9][0-9]*)$/.test(iteration)) {
     throw new AgentInputFileError("Workflow input dispatch ID is invalid. Use workflow:{runId}:{nodeId}[:{iteration}].");
   }
-  return posix.resolve(workspace, INPUT_ROOT, runId, nodeId, iteration);
+  return posix.resolve(workspace, root, runId, nodeId, iteration);
 }
 
 function prepareInputs(workspace: string, opts: InputFileOptions): Array<{ path: string; bytes: Uint8Array }> {
@@ -62,15 +64,22 @@ function hasCode(err: unknown, code: string): boolean {
   return err !== null && typeof err === "object" && "code" in err && err.code === code;
 }
 
-/** A stale driver must never remove the current driver's staging files. */
-async function cleanupStaleTemps(sandbox: Sandbox, directory: string, attempt: number, markerPrefix?: string): Promise<void> {
+function stagingDirectory(workspace: string, dispatchId: string): string {
+  return inputDirectory(workspace, dispatchId, STAGING_ROOT);
+}
+
+/** Only reserved attempt directories qualify. User paths are never staging. */
+async function cleanupStaleTemps(sandbox: Sandbox, directory: string, attempt: number): Promise<void> {
   for (const name of await sandbox.readdir(directory)) {
-    if (markerPrefix && !name.startsWith(markerPrefix)) continue;
-    const stagedAttempt = /\.tmp-a(0|[1-9][0-9]*)-[0-9a-f-]+$/.exec(name)?.[1];
+    const stagedAttempt = /^attempt-(0|[1-9][0-9]*)$/.exec(name)?.[1];
     if (stagedAttempt !== undefined && Number(stagedAttempt) < attempt) {
-      await sandbox.rm(posix.join(directory, name));
+      await sandbox.rm(posix.join(directory, name), { recursive: true });
     }
   }
+}
+
+function quote(value: string): string {
+  return `'${value.replace(/'/g, "'\"'\"'")}'`;
 }
 
 export function logInputCleanupSkipped(sessionId: string, scope: "node" | "run", reason: string): void {
@@ -79,13 +88,18 @@ export function logInputCleanupSkipped(sessionId: string, scope: "node" | "run",
 }
 
 /** Only paths enter the rename command. Contents go through writeBinary/stdin. */
-async function atomicWrite(sandbox: Sandbox, path: string, bytes: Uint8Array, attempt: number, temporaryPrefix = path): Promise<void> {
-  const temporary = `${temporaryPrefix}.tmp-a${attempt}-${randomUUID()}`;
+async function atomicWrite(sandbox: Sandbox, path: string, bytes: Uint8Array, staging: string): Promise<void> {
+  const temporary = posix.join(staging, `${posix.basename(path)}-${randomUUID()}`);
   try {
     await sandbox.writeBinary(temporary, bytes);
-    const quote = (value: string) => `'${value.replace(/'/g, "'\"'\"'")}'`;
     const result = await sandbox.exec(`mv -f -- ${quote(temporary)} ${quote(path)}`);
-    if (result.exitCode !== 0) throw new AgentInputFileError(`Could not rename workflow input: ${result.stderr}. Check sandbox permissions and retry the run.`);
+    // Providers reject dead-container/socket failures. Timeouts and signal
+    // interruption can instead resolve as results (including k8s abort 124).
+    // Docker CLI setup failures use 125/126, not a live mv command's exit.
+    if (result.timedOut || (result.exitCode >= 124 && result.exitCode <= 126) || result.exitCode >= 128 || result.exitCode < 0) {
+      throw new Error(`Workflow input rename did not complete (exit ${result.exitCode}${result.timedOut ? ", timed out" : ", interrupted"}). Retry the run.`);
+    }
+    if (result.exitCode !== 0) throw new AgentInputFileError(`Could not rename workflow input (exit ${result.exitCode}): ${result.stderr.trim() || "command failed without stderr"}. Check sandbox permissions and retry the run.`);
   } finally {
     try { await sandbox.rm(temporary); }
     catch (err) { console.warn(`workflow input temporary cleanup failed for ${temporary}:`, err); }
@@ -104,29 +118,25 @@ export async function writeAgentInputFiles(
   try {
     const runRoot = posix.dirname(posix.dirname(inputDirectory(workspace, opts.dispatchId)));
     await sandbox.mkdir(runRoot);
-    const [, , nodeId, iteration = "0"] = opts.dispatchId.split(":");
-    const markerPrefix = `${AGE_MARKER}.${nodeId}.${iteration}`;
-    // Node, iteration, and attempt isolate marker staging from other drivers.
-    await cleanupStaleTemps(sandbox, runRoot, attempt, `${markerPrefix}.tmp-`);
-    await atomicWrite(sandbox, posix.join(runRoot, AGE_MARKER), new TextEncoder().encode(String(Date.now())),
-      attempt, posix.join(runRoot, markerPrefix));
+    const stagingRoot = stagingDirectory(workspace, opts.dispatchId);
+    await sandbox.mkdir(stagingRoot);
+    await cleanupStaleTemps(sandbox, stagingRoot, attempt);
+    const staging = posix.join(stagingRoot, `attempt-${attempt}`);
+    await sandbox.mkdir(staging);
+    await atomicWrite(sandbox, posix.join(runRoot, AGE_MARKER), new TextEncoder().encode(String(Date.now())), staging);
     const data = await session.toData();
     await sweepAgentInputFiles(sandbox, workspace, opts.dispatchId.split(":")[1], db,
       { orgId: data.orgId, ownerType: data.owner.type, ownerId: data.owner.id });
-    for (const directory of new Set([inputDirectory(workspace, opts.dispatchId), ...inputs.map(input => posix.dirname(input.path))])) {
-      await sandbox.mkdir(directory);
-      await cleanupStaleTemps(sandbox, directory, attempt);
-    }
     // Before admission no turn can read these files. Replace any incomplete
     // prior attempt instead of treating transport truncation as a conflict.
     for (const input of inputs) {
       await sandbox.mkdir(posix.dirname(input.path));
-      await atomicWrite(sandbox, input.path, input.bytes, attempt);
+      await atomicWrite(sandbox, input.path, input.bytes, staging);
     }
   } catch (err) {
     // Only deterministic filesystem failures settle the node. Provider/transport
     // errors without these codes propagate, just as ordinary admission does.
-    const deterministic = ["EACCES", "EPERM", "ENOSPC", "EROFS", "ENOTDIR", "EISDIR", "ENAMETOOLONG"].some(code => hasCode(err, code)) ||
+    const deterministic = ["EACCES", "EPERM", "ENOSPC", "EROFS", "ENOTDIR", "EISDIR", "ERR_FS_EISDIR", "ENAMETOOLONG"].some(code => hasCode(err, code)) ||
       (err instanceof Error && /Permission denied|No space left on device|Read-only file system|Not a directory|Is a directory|File name too long/.test(err.message));
     if (!deterministic) throw err;
     throw new AgentInputFileError(`Could not write workflow input files: ${err instanceof Error ? err.message : String(err)}. Check the sandbox permissions and disk space, then retry the run.`);
@@ -138,18 +148,39 @@ export async function writeAgentInputFiles(
 export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, currentRun: string, db: AppDb, scope: InputSandboxScope, now = Date.now()): Promise<void> {
   const root = posix.resolve(workspace, INPUT_ROOT);
   try {
-    const names = (await sandbox.readdir(root)).filter(name => /^[A-Za-z0-9_-]+$/.test(name) && name !== currentRun).sort();
+    const deadline = Date.now() + SWEEP_BUDGET_MS;
+    const listing = await sandbox.exec(`ls -1A ${quote(root)}`, { timeout: 1_000, maxOutputBytes: 64 * 1024 });
+    if (listing.exitCode !== 0 || listing.timedOut || listing.truncated) {
+      recordWorkflowInputSweepSkipped("listing");
+      throw new Error("Workflow input sweep listing failed or exceeded its limit");
+    }
+    const names = listing.stdout.split("\n").filter(name => /^[A-Za-z0-9_-]+$/.test(name) && name !== currentRun).sort();
     if (!names.length) return;
     const offset = (sweepOffsets.get(sandbox) ?? 0) % names.length;
     const count = Math.min(names.length, AGENT_INPUT_SWEEP_LIMIT);
     sweepOffsets.set(sandbox, offset + count);
     for (let i = 0; i < count; i++) {
+      if (Date.now() >= deadline) {
+        recordWorkflowInputSweepSkipped("budget");
+        console.warn("workflow input sweep stopped at its time budget");
+        break;
+      }
       const directory = posix.join(root, names[(offset + i) % names.length]);
       try {
-        const createdAt = Number(await sandbox.readFile(posix.join(directory, AGE_MARKER)));
+        // Never buffer sandbox-controlled marker contents in the API.
+        const marker = await sandbox.exec(`head -c 32 -- ${quote(posix.join(directory, AGE_MARKER))}`,
+          { timeout: Math.min(1_000, Math.max(1, deadline - Date.now())), maxOutputBytes: 32 });
+        if (marker.exitCode !== 0 || marker.timedOut || marker.truncated || !/^[0-9]{1,16}$/.test(marker.stdout)) {
+          recordWorkflowInputSweepSkipped("marker");
+          throw new Error("Workflow input age marker is unreadable or invalid");
+        }
+        const createdAt = Number(marker.stdout);
         if (Number.isFinite(createdAt) && createdAt > 0 && createdAt < now - AGENT_INPUT_RETENTION_MS) {
           const status = await scopedInputRunStatus(db, scope, names[(offset + i) % names.length]);
-          if (!status || status === "settled") await sandbox.rm(directory, { recursive: true });
+          if (!status || status === "settled") {
+            await sandbox.rm(directory, { recursive: true });
+            await sandbox.rm(posix.resolve(workspace, STAGING_ROOT, names[(offset + i) % names.length]), { recursive: true });
+          }
         }
       } catch (err) {
         console.warn(`workflow input sweep failed for ${directory}:`, err);
@@ -171,7 +202,12 @@ export async function cleanupAgentInputFiles(session: Session, workspace: string
       logInputCleanupSkipped(session.id, "dispatchId" in scope ? "node" : "run", "unattached");
       return;
     }
-    await sandbox.rm(directory, { recursive: true });
+    const staging = "dispatchId" in scope ? stagingDirectory(workspace, scope.dispatchId)
+      : posix.resolve(workspace, STAGING_ROOT, scope.runId);
+    for (const root of [directory, staging]) {
+      try { await sandbox.rm(root, { recursive: true }); }
+      catch (err) { if (!hasCode(err, "ENOENT")) throw err; }
+    }
   } catch (err) {
     if (!hasCode(err, "ENOENT")) console.warn(`workflow input cleanup failed for ${session.id}:`, err);
   }
