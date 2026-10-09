@@ -3,7 +3,8 @@
  * from a channel turn settles, the ChildWatcher admits `child.settled` to the
  * parent, the parent runs a real (faux-model) turn, and the ChannelHost posts
  * the parent's update to the origin thread. The child stays paused, so its
- * submissions settle only by hand.
+ * submissions settle only by hand. The child-reply dispatcher runs only when a
+ * test calls `retryChildReplies`, so no timer decides when a reply posts.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
@@ -11,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { namespaceInternalDispatchId } from "@valet/engine";
 import type {
   ChannelOrigin,
   ChannelTransport,
@@ -101,6 +103,10 @@ async function bootDelegation(childId: string) {
   const { engineHost, engineStore, engineCredentials, channelHost, db } = api.providers;
   await engineCredentials.save({ type: "org", id: ORG_ID }, "fake", { type: "bot_token", accessToken: "fake-bot-token" });
   await channelHost.start();
+  // Stop the dispatcher's timer, then let the boot pass finish. From here on,
+  // only an explicit `retryChildReplies` call delivers a reply.
+  channelHost.stopOutbound();
+  await channelHost.retryChildReplies();
 
   const parentId = `parent-${childId}`;
   const parent = await engineHost.sessionFor(parentId, { userId: USER_ID, orgId: ORG_ID, workspace: "/tmp" });
@@ -129,7 +135,25 @@ async function bootDelegation(childId: string) {
   };
   const watcher = new ChildWatcher(deps);
   watcher.arm({ childSessionId: childId, queueItemId, parentSessionId: parentId, parentThreadId: parentThread.id, actorUserId: USER_ID, orgId: ORG_ID, origin: ORIGIN });
-  return { deps, watcher, transport, parentId, parentThreadId: parentThread.id, childThreadId: childThread.id, queueItemId };
+  return { deps, watcher, transport, parentId, parentThread, childThreadId: childThread.id, queueItemId };
+}
+
+/**
+ * Waits until the watcher admits the parent's update for one child
+ * submission, then until the parent's turn for that update settles.
+ */
+async function parentUpdateSettled(
+  run: Awaited<ReturnType<typeof bootDelegation>>,
+  childId: string,
+  childItemId: string,
+): Promise<void> {
+  const replyId = namespaceInternalDispatchId(childId, `settled:${childId}:${childItemId}`);
+  const parentItemId = await vi.waitFor(async () => {
+    const [intent] = await api!.providers.db.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, replyId));
+    if (!intent?.queueItemId) throw new Error(`The parent update for ${childItemId} is not admitted yet`);
+    return intent.queueItemId;
+  }, { timeout: 30_000, interval: 20 });
+  await run.parentThread.awaitResult(parentItemId);
 }
 
 describe("delegated child completion over a channel", () => {
@@ -138,8 +162,10 @@ describe("delegated child completion over a channel", () => {
     const { engineStore } = api!.providers;
 
     await engineStore.settleUnclaimed("child-auto", run.childThreadId, run.queueItemId, { outcome: "completed" });
+    await parentUpdateSettled(run, "child-auto", run.queueItemId);
 
-    await vi.waitFor(() => expect(run.transport.sent).toHaveLength(1), { timeout: 30_000, interval: 50 });
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
     expect(run.transport.sent[0]).toMatchObject({ conversationKey: "fake:dm:C1" });
     expect(run.transport.sent[0]?.message.markdown).toMatch(/^Parent update \d+$/);
     const [intent] = await api!.providers.db.select().from(childReplyDeliveries);
@@ -153,7 +179,9 @@ describe("delegated child completion over a channel", () => {
     const run = await bootDelegation("child-resume");
     const { engineStore } = api!.providers;
     await engineStore.settleUnclaimed("child-resume", run.childThreadId, run.queueItemId, { outcome: "completed" });
-    await vi.waitFor(() => expect(run.transport.sent).toHaveLength(1), { timeout: 30_000, interval: 50 });
+    await parentUpdateSettled(run, "child-resume", run.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
 
     // The parent sends follow-up work from another thread. The new result
     // still belongs to the channel turn that delegated the task.
@@ -164,8 +192,10 @@ describe("delegated child completion over a channel", () => {
     );
     if (!resumed) throw new Error("child_send did not admit the follow-up");
     await engineStore.settleUnclaimed("child-resume", run.childThreadId, resumed.queueItemId, { outcome: "completed" });
+    await parentUpdateSettled(run, "child-resume", resumed.queueItemId);
 
-    await vi.waitFor(() => expect(run.transport.sent).toHaveLength(2), { timeout: 30_000, interval: 50 });
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(2);
     expect(run.transport.sent.every((sent) => sent.conversationKey === "fake:dm:C1")).toBe(true);
     const signals = await childSettledSignals(run.parentId);
     expect(signals.map((signal) => signal.content.origin)).toEqual([ORIGIN, ORIGIN]);
