@@ -277,9 +277,10 @@ export class InstanceClient {
     return this.request("GET", `/api/threads/${encodeURIComponent(id)}`);
   }
 
-  /** `POST /api/threads/:id/abort`. The route stops only the named turn. */
-  async abortThread(id: string, targetItemId: string): Promise<void> {
-    await this.request("POST", `/api/threads/${encodeURIComponent(id)}/abort`, { targetItemId });
+  /** `POST /api/threads/:id/abort`. The route stops only the named turn; `stopped` is false when it had already finished. */
+  async abortThread(id: string, targetItemId: string): Promise<{ stopped: boolean }> {
+    const res = await this.request<{ stopped?: boolean }>("POST", `/api/threads/${encodeURIComponent(id)}/abort`, { targetItemId });
+    return { stopped: res?.stopped === true };
   }
 
   listWorkspaceThreads(workspace?: string): Promise<ListThreadsResponse> {

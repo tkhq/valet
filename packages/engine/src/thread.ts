@@ -1297,10 +1297,11 @@ export class Thread {
   }
 
   /** Interrupt one active submission and preserve queued work on this thread. */
-  async interrupt(targetItemId: string): Promise<void> {
+  /** Stops the named turn. Returns false when it was no longer active, e.g. it finished first. */
+  async interrupt(targetItemId: string): Promise<boolean> {
     if (this.runningItem?.id === targetItemId) {
       await this.abortSubmission(targetItemId);
-      return;
+      return true;
     }
     // The durable claim can precede this.runningItem during claim and restore.
     // Match the gesture target atomically so a successor cannot inherit a retry.
@@ -1311,9 +1312,10 @@ export class Thread {
     );
     if (active) {
       await this.abortSubmission(active.id);
-      return;
+      return true;
     }
     void this.kick();
+    return false;
   }
 
   /** Cancel one submission without aborting other work on this thread. */

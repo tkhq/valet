@@ -261,7 +261,7 @@ valet memory mv notes/release.md projects/release.md
 valet memory rm notes/stale.md
 ```
 
-`write --file -` reads the content from stdin and replaces the file. `patch` replaces one exact passage and refuses text that matches more than once. An empty `--new` deletes the passage. `read /` shows the root index.
+`write --file -` reads the content from stdin and replaces the file. `patch` replaces one exact passage and refuses text that matches more than once. `--new ""` deletes the passage. For text that starts with `--`, use `--new=<text>`. `read /` shows the root index.
 
 ### `valet skills list|show`
 
@@ -286,7 +286,7 @@ valet artifacts list weekly
 valet artifacts unpublish <artifact-id>
 ```
 
-`publish` keys the page by `--key`, or by the file name without its extension, and infers `html` from a `.html` file. Publishing the same key again adds a version at the same link. Every member of the organization can open the page. An agent credential can unpublish only artifacts its user published.
+`publish` keys the page by `--key`, or by the file name without its extension, and infers `html` from a `.html` file. A team publish (`--workspace <team-id>`) needs `--key`, so a default name cannot replace a teammate's page. Publishing the same key again adds a version at the same link. Every member of the organization can open the page. An agent credential can unpublish only artifacts its user published.
 
 ### `valet inbox`, `valet whoami`, `valet workspaces`
 

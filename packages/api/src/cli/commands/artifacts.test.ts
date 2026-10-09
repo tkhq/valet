@@ -27,8 +27,17 @@ describe("valet artifacts publish", () => {
 
   it("keys the page by the file name and infers html from the extension", async () => {
     const { deps, shared } = fake();
-    expect(await runArtifacts(deps, parseGlobalFlags(["publish", "out/weekly-report.html", "--workspace", "team-1"]))).toBe(ExitCode.OK);
-    expect(shared).toEqual([{ body: { key: "weekly-report", content: "# Report", format: "html" }, workspace: "team-1" }]);
+    expect(await runArtifacts(deps, parseGlobalFlags(["publish", "out/weekly-report.html"]))).toBe(ExitCode.OK);
+    expect(shared).toEqual([{ body: { key: "weekly-report", content: "# Report", format: "html" }, workspace: undefined }]);
+  });
+
+  // Two teammates' svc-a/README.md and svc-b/README.md would both default to "README".
+  it("needs --key for a team publish", async () => {
+    const { deps, shared } = fake();
+    expect(await runArtifacts(deps, parseGlobalFlags(["publish", "svc-b/README.md", "--workspace", "team-1"]))).toBe(ExitCode.Usage);
+    expect(shared).toEqual([]);
+    expect(await runArtifacts(deps, parseGlobalFlags(["publish", "svc-b/README.md", "--workspace", "team-1", "--key", "svc-b/readme"]))).toBe(ExitCode.OK);
+    expect(shared[0]?.body.key).toBe("svc-b/readme");
   });
 
   it("needs --key from stdin and refuses an unknown --format", async () => {
@@ -38,7 +47,7 @@ describe("valet artifacts publish", () => {
 });
 
 describe("valet memory", () => {
-  it("patch with an empty --new deletes the passage, and write refuses empty content", async () => {
+  it("patch deletes only with an explicit empty --new, and write refuses empty content", async () => {
     const patches: Array<{ oldString: string; newString: string }> = [];
     const client: MemoryClient = {
       searchMemory: async () => ({ results: [] }),
@@ -48,8 +57,12 @@ describe("valet memory", () => {
       moveMemory: async () => undefined,
       deleteMemory: async () => undefined,
     };
-    expect(await runMemory({ client, readSource: async () => "" }, parseGlobalFlags(["patch", "a.md", "--old", "draft", "--new"]))).toBe(ExitCode.OK);
+    expect(await runMemory({ client, readSource: async () => "" }, parseGlobalFlags(["patch", "a.md", "--old", "draft", "--new", ""]))).toBe(ExitCode.OK);
     expect(patches).toEqual([{ path: "a.md", oldString: "draft", newString: "" }]);
+    // A bare --new (here, because its value starts with "--") must not delete the passage.
+    expect(await runMemory({ client, readSource: async () => "" }, parseGlobalFlags(["patch", "a.md", "--old", "make build", "--new", "--dry-run make build"]))).toBe(ExitCode.Usage);
+    expect(await runMemory({ client, readSource: async () => "" }, parseGlobalFlags(["patch", "a.md", "--old", "make build", "--new=--dry-run make build"]))).toBe(ExitCode.OK);
+    expect(patches.at(-1)).toEqual({ path: "a.md", oldString: "make build", newString: "--dry-run make build" });
     expect(await runMemory({ client, readSource: async () => "  " }, parseGlobalFlags(["write", "a.md", "--file", "x.md"]))).toBe(ExitCode.Usage);
   });
 });

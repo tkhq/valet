@@ -7,7 +7,7 @@
  *   valet memory search <query> [--limit <n>]
  *   valet memory read <path>               ("" or "/" reads the root index)
  *   valet memory write <path> --file <path|-> [--description <d>] [--tags a,b]
- *   valet memory patch <path> --old <text> --new <text>
+ *   valet memory patch <path> --old <text> --new <text>   (--new "" deletes; --new=<text> for "--" text)
  *   valet memory mv <from> <to>
  *   valet memory rm <path>
  *
@@ -76,8 +76,13 @@ export async function runMemory(deps: MemoryDeps, flags: ParsedFlags): Promise<n
     }
     case "patch": {
       const memoryPath = args[0];
+      // A value that starts with "--" parses as a bare flag. Refuse it rather
+      // than read a bare --new as "delete the passage".
+      if (flags.flags.old === true || flags.flags.new === true) {
+        return usage('Pass a value to --old and --new. For text that starts with "--", use --new=<text>. To delete the passage, use --new "".');
+      }
       const oldString = strFlag(flags, "old");
-      const newString = flags.flags.new === true ? "" : strFlag(flags, "new");
+      const newString = strFlag(flags, "new");
       if (!memoryPath || !oldString || newString === undefined) return usage(USAGE);
       const res = await client.patchMemory({ path: memoryPath, oldString, newString }, workspace);
       if (flags.json) printJson(res);

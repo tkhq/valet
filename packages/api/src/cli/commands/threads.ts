@@ -36,8 +36,9 @@ export async function runThreads(client: ThreadsClient, flags: ParsedFlags): Pro
         if (flags.json) printJson({ thread_id: id, stopped: false }); else printLine("nothing to stop: the thread has no running turn");
         return ExitCode.OK;
       }
-      await client.abortThread(id, thread.activeItemId);
-      if (flags.json) printJson({ thread_id: id, stopped: true, message_id: thread.activeItemId }); else printLine(`stopped ${thread.activeItemId}`);
+      const { stopped } = await client.abortThread(id, thread.activeItemId);
+      if (flags.json) printJson({ thread_id: id, stopped, message_id: thread.activeItemId });
+      else printLine(stopped ? `stopped ${thread.activeItemId}` : `nothing stopped: ${thread.activeItemId} finished first. Run \`valet threads stop ${id}\` again to stop a newer turn.`);
       return ExitCode.OK;
     }
   }

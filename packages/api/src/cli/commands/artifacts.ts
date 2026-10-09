@@ -9,6 +9,7 @@
  *   valet artifacts unpublish <artifact_id>
  *
  * publish keys the page by --key, or by the file name without its extension.
+ * A team publish needs --key, so a default name cannot replace a teammate's page.
  * Publishing again with the same key adds a version at the same link.
  */
 import { basename, extname } from "node:path";
@@ -64,6 +65,11 @@ export async function runArtifacts(deps: ArtifactsDeps, flags: ParsedFlags): Pro
       if (!file) return usage(USAGE);
       const format = formatFor(file, strFlag(flags, "format"));
       if (typeof format === "object") return usage(format.error);
+      // A team shares one key space, so a default like "README" would replace a
+      // teammate's page at its link. Personal keys are the publisher's own.
+      if (workspace && workspace !== "user" && strFlag(flags, "key") === undefined) {
+        return usage("Set --key when you publish to a team workspace, so you do not replace a teammate's page.");
+      }
       const key = strFlag(flags, "key") ?? (file === "-" ? undefined : basename(file, extname(file)));
       if (!key) return usage("Set --key when you publish from stdin.");
       const content = await deps.readSource(file);

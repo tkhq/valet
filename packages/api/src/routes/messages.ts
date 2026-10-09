@@ -1278,8 +1278,10 @@ export async function abortThread(c: Context<AppEnv>, sessionId: string, threadI
     return c.json({ error: "targetItemId is required. Send the active queue item as targetItemId." }, 400);
   }
 
-  await thread.interrupt(body.targetItemId);
-  return c.json({ ok: true });
+  // `stopped: false` means the turn was no longer active (it finished
+  // first). A client must not report a stop it did not make.
+  const stopped = await thread.interrupt(body.targetItemId);
+  return c.json({ ok: true, stopped });
 }
 
 // A queue can be busy without an active Stop target while paused or between

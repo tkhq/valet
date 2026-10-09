@@ -15,7 +15,12 @@ export type InboxClient = Pick<InstanceClient, "listInboxDecisions" | "listWorkf
 export async function runInbox(client: InboxClient, flags: ParsedFlags): Promise<number> {
   const [decisions, workflows] = await Promise.all([client.listInboxDecisions(), client.listWorkflowActionRequired()]);
   if (flags.json) {
-    printJson({ thread_decisions: decisions.items, workflow_approvals: workflows.items });
+    printJson({
+      thread_decisions: decisions.items,
+      workflow_approvals: workflows.items,
+      // The route returns at most 100 thread decisions; a script must see that more exist.
+      ...(decisions.nextCursor ? { more: true, next_cursor: decisions.nextCursor } : {}),
+    });
     return ExitCode.OK;
   }
   if (decisions.items.length === 0 && workflows.items.length === 0) {
