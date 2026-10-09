@@ -138,12 +138,17 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   await reportRetiredAssistantSettings(db);
 }
 
+/** The `__valet_app_migrations` row the upgrade to the workspace runtime
+ * writes once. Its `applied_at` is when this database was upgraded
+ * (`assistants/legacy-profile.ts` reads it). */
+export const LEGACY_RUNTIME_MARKER = "legacy-runtime-continuity-v1";
+
 /** Snapshot existing runtime relationships once, before any runtime is restored. */
 export async function classifyLegacyRuntimes(db: PgDb): Promise<void> {
   await db.transaction(async tx => {
     // Serialize concurrent API boots; the marker and snapshots commit together.
     await tx.query("LOCK TABLE __valet_app_migrations IN EXCLUSIVE MODE");
-    const marker = "legacy-runtime-continuity-v1";
+    const marker = LEGACY_RUNTIME_MARKER;
     if ((await tx.query("SELECT 1 FROM __valet_app_migrations WHERE filename = $1", [marker])).rows.length) return;
     await tx.query(`INSERT INTO legacy_assistant_runtimes (session_id, org_id, assistant_id, owner_type, owner_id)
       SELECT a.session_id, a.org_id, a.id, a.owner_type, a.owner_id FROM assistants a
@@ -471,6 +476,10 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   PRIMARY KEY ("session_id", "thread_id", "url")
 )` },
   { describe: "thread_pull_requests_url", probe: { kind: "index", index: "thread_pull_requests_url" }, sql: 'CREATE INDEX IF NOT EXISTS "thread_pull_requests_url" ON "thread_pull_requests" ("url")' },
+  // The thread that opened the pull request. A delegating thread's copy names
+  // its child here; rows recorded before this column stay null.
+  { describe: "thread_pull_requests.opened_session_id column", probe: { kind: "column", table: "thread_pull_requests", column: "opened_session_id" }, sql: 'ALTER TABLE "thread_pull_requests" ADD COLUMN IF NOT EXISTS "opened_session_id" text' },
+  { describe: "thread_pull_requests.opened_thread_id column", probe: { kind: "column", table: "thread_pull_requests", column: "opened_thread_id" }, sql: 'ALTER TABLE "thread_pull_requests" ADD COLUMN IF NOT EXISTS "opened_thread_id" text' },
   { describe: "channel messages", probe: { kind: "table", table: "channel_messages" }, sql: `CREATE TABLE IF NOT EXISTS "channel_messages" (
   "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "session_id" text NOT NULL, "thread_id" text NOT NULL,
   "channel_key" text NOT NULL, "conversation_key" text NOT NULL, "provider_message_id" text NOT NULL,

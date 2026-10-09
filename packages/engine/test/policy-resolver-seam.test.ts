@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import {
   DecisionGateExpiredError,
   pluginCatalogTools,
+  toolApprovalGateContext,
   type ActionPlugin,
   type Credential,
   type CredentialProvider,
@@ -17,6 +18,7 @@ import {
   type SessionEntry,
   type ToolContext,
 } from "../src/index.js";
+import { askApprovalTool } from "../src/builtin-tools/index.js";
 
 // ── Fixtures ───────────────────────────────────────────────────────
 
@@ -277,6 +279,8 @@ describe("policyResolver seam: require_approval gate", () => {
       baseMode: "require_approval",
       source: "risk_high",
     });
+    // Plain "approve" allows this one call: the gate says so for bulk answers.
+    expect((gateReq?.context as Record<string, unknown>)?.oneShot).toBe(true);
     // Default approve/deny plus the extra. `approves` rides along so the
     // gate row can classify host actions for denial stickiness.
     expect(gateReq?.actions).toEqual([
@@ -398,6 +402,22 @@ describe("policyResolver seam: another member's shared account", () => {
     expect(gateReq?.body).toContain("including actions requested by other teammates");
     expect(gateReq?.actions?.map((a) => a.id)).toEqual(["approve", "deny"]);
     expect((gateReq?.context as Record<string, unknown>)?.approver).toEqual({ userId: "bea", name: "Bea" });
+    // Allowing a borrow also covers later calls, so it is not one-shot.
+    expect((gateReq?.context as Record<string, unknown>)?.oneShot).toBeUndefined();
+  });
+});
+
+describe("no policy resolver: risk-derived approval gate", () => {
+  it("marks the gate one-shot, and the typed reader exposes it", async () => {
+    let gateReq: DecisionGateRequest | undefined;
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction({ riskLevel: "high" }))] });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ requestDecision: async (req) => { gateReq = req; return { actionId: "deny", resolvedBy: "u1", resolvedAt: Date.now() }; } }),
+    );
+    expect(gateReq?.type).toBe("approval");
+    expect(toolApprovalGateContext(gateReq?.context)?.oneShot).toBe(true);
+    expect(toolApprovalGateContext({ tool_id: "github.get_issue" })?.oneShot).toBe(false);
   });
 });
 
@@ -751,5 +771,17 @@ describe("policyResolver seam: reserved extraGateActions ids", () => {
     // through the tool/command path, never an opened gate.
     expect(result.text).toMatch(/reserved/i);
     expect(result.text).toContain("policy misconfiguration");
+  });
+});
+
+describe("ask_approval gate", () => {
+  it("is not one-shot: the model describes what the approval covers", async () => {
+    let gateReq: DecisionGateRequest | undefined;
+    await askApprovalTool.execute(
+      { title: "Delete the staging database?" },
+      makeCtx({ requestDecision: async (req) => { gateReq = req; return { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() }; } }),
+    );
+    expect(gateReq?.type).toBe("approval");
+    expect(toolApprovalGateContext(gateReq?.context)?.oneShot ?? false).toBe(false);
   });
 });

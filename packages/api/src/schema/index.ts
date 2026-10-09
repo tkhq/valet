@@ -2815,6 +2815,10 @@ export const threadPullRequests = pgTable("thread_pull_requests", {
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   checkedAt: bigint("checked_at", { mode: "number" }).notNull(),
+  /** The thread that opened the pull request. On a delegating thread's copy
+   * it names the child; null on rows recorded before it was kept. */
+  openedSessionId: text("opened_session_id"),
+  openedThreadId: text("opened_thread_id"),
 }, t => [
   primaryKey({ columns: [t.sessionId, t.threadId, t.url] }),
   index("thread_pull_requests_url").on(t.url),

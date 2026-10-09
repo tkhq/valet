@@ -74,6 +74,37 @@ describe("OnePasswordTokenRow", () => {
     expect(dialog.getByText(/op:\/\/Vault\/Item\/field/)).toBeTruthy();
   });
 
+  // Step 2 can be refused: creating a service account needs a 1Password
+  // account permission, and 1Password tells a reader without it to contact
+  // their administrator. Valet cannot see that permission, so the steps name
+  // the condition, the permission to ask for, and the alternative. Both
+  // scopes can be refused: an organization admin in Valet is not necessarily
+  // an administrator in 1Password.
+  it.each([
+    ["personal", "Personal token"],
+    ["org", "Organization token"],
+  ] as const)("the %s dialog says what to ask an admin for when 1Password refuses", async (scope, label) => {
+    const user = userEvent.setup();
+    render(
+      <OnePasswordTokenRow
+        scope={scope}
+        connected={false}
+        label={label}
+        hint="A 1Password service account token."
+        removeNote="Remove note."
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Connect 1Password" }));
+    const note = within(screen.getByRole("dialog")).getByText(/contact your administrator/i);
+    expect(note.textContent).toMatch(/permission to create and manage service accounts/i);
+    expect(note.textContent).toMatch(/a service account with read-only access to that vault alone/i);
+    expect(note.textContent).toMatch(/ask a 1Password owner or administrator/i);
+    expect(note.textContent).toMatch(/no Valet setting changes that/i);
+    expect(note.textContent).toMatch(/send the token to you with a 1Password share link, not in Slack or a chat/i);
+    expect(note.textContent).toMatch(/keep the token outside every vault the service account can read/i);
+    expect(note.textContent).toMatch(/an agent can read its own token/i);
+  });
+
   it("a personal token saves with no scope field", async () => {
     const user = userEvent.setup();
     personalRow();

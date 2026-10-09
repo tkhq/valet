@@ -1,14 +1,11 @@
 /**
- * PUBLIC Slack ingress: `POST /api/channels/slack/webhook`.
+ * Durable inbox for Slack deliveries, and the consumers that process it.
  *
- * Slack delivers everything an app receives to one app-level URL: Events
- * API envelopes as JSON, and interactivity payloads as a form-encoded
- * `payload=` field. This route is mounted before the generic
- * `/api/channels/:channelType/webhook` so the more specific path wins, and
- * before the auth middleware because the caller is Slack, not a signed-in
- * Valet user. The signing-secret HMAC is the whole authentication.
- *
- * It verifies once and fans each update out to both consumers:
+ * The Slack plugin's `events` route (`@valet/plugin-slack/http`) verifies
+ * each delivery and then calls `admitSlackDelivery` through a host
+ * capability (`plugins/http-slack.ts`). Admission saves the encrypted request
+ * before the route acknowledges Slack. The dispatcher drains the inbox after
+ * the response and fans each update out to three consumers:
  *
  * - channel: `transport.parseUpdate` then `channelHost.handleUpdate` — the
  *   agent surface (`app_home_opened` on the Messages tab, `message.im`,
@@ -16,28 +13,18 @@
  * - events: the Slack `TriggerDef`s then `ingestEvent` — workflow
  *   subscriptions. Ingest is match-gated: an event that matches no
  *   subscription is dropped and never lands in the events table.
+ * - follow: `handleFollowedMessage` for threads bound to an assistant.
  *
- * ── Ack policy ───────────────────────────────────────────────────────────
- * Slack expects a response inside three seconds and redelivers up to three
- * times when it does not get one. A turn of agent work takes far longer
- * than that, so the fan-out runs after the response is returned. One
- * credential read stays on the path to the 200, because the signing secret
- * lives on it and nothing can be verified without it. An encrypted inbox
- * insert must also complete before 200. The dispatcher resumes saved requests
- * after a crash; diagnostic receipts alone do not establish acceptance.
- *
- * A redelivery is processed like any other delivery, and logged as well
- * because a burst of them is the signal that this ack path became slow.
- * Processing is safe because both consumers dedupe durably: the engine
- * holds a unique index on `(session_id, dispatch_id)`, and ingest holds an
+ * ── Durability and redelivery ────────────────────────────────────────────
+ * The encrypted inbox insert completes before the 200. The dispatcher
+ * resumes saved requests after a crash; diagnostic receipts alone do not
+ * establish acceptance. The inbox key is a hash of the organization and the
+ * request bytes, so a byte-identical redelivery adds no second row. A
+ * redelivery that differs is processed like any other delivery. Processing
+ * is safe because both consumers dedupe durably: the engine holds a unique
+ * index on `(session_id, dispatch_id)`, and ingest holds an
  * `ON CONFLICT DO NOTHING` on `(service, dedupe_key)`. Slack repeats
  * `event_id` across retries, so both keys are stable.
- *
- * Dropping redeliveries instead would be strictly worse. Slack does not
- * redeliver to save us duplicate work; it redelivers because the first
- * attempt produced no 2xx. A dropped redelivery therefore turns every
- * transient failure on this route — a database blip, a deploy that lands
- * mid-request — into a message the user typed and Valet silently lost.
  *
  * ── Which credential, and which workspace ────────────────────────────────
  * The org's Slack credential holds the signing secret and the workspace id,
@@ -59,7 +46,7 @@
  *
  * Org resolution is the single-org assumption this deployment makes
  * everywhere else (`lib/org.ts`). A multi-org deployment needs a real
- * workspace-to-org lookup here.
+ * workspace-to-org lookup in `plugins/http-slack.ts`.
  */
 import { createHash } from "node:crypto";
 import { and, eq, inArray, lte, asc, isNull, sql } from "drizzle-orm";
@@ -67,41 +54,21 @@ import { slackWebhookInbox, eventDropLog } from "../schema/index.js";
 import { encryptSecret, decryptSecret, deriveSecretKey } from "../lib/secret-crypto.js";
 import type { Providers } from "../providers/types.js";
 import { createEventReceipt, appendReceiptStage } from "../events/receipts.js";
-import { Hono } from "hono";
 import { credentialSecret } from "@valet/engine";
 import type { ChannelTransport, RawChannelUpdate, TriggerDef, ValetPlugin } from "@valet/engine";
-import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { resolveOrgId } from "../lib/org.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { ingestEvent, logSlackBotIdentityMissing, logSlackMessageBotNearMiss } from "../events/ingest.js";
-import type { ChannelHost } from "../channels/host.js";
+import type { ChannelHost } from "./host.js";
 import type { EngineHost } from "../engine/host.js";
-import { handleFollowedMessage } from "../channels/follow-router.js";
+import { handleFollowedMessage } from "./follow-router.js";
 import { channelMessageNormalizer } from "../events/channel-origin.js";
 import { channelThreadWindowFetcher } from "../events/channel-thread-context.js";
-import { maybeNotifyUnlinkedSlackSender } from "../channels/slack-link-notice.js";
+import { maybeNotifyUnlinkedSlackSender } from "./slack-link-notice.js";
 import { resolveSlackBotIdentity } from "../services/slack-bot-identity.js";
 import type { SlackWorkspaceIdentity } from "../services/slack-connect.js";
 
-/**
- * Slack updates are small JSON; files arrive by reference, never inline. The
- * cap rejects an oversized body before it is parsed or verified.
- *
- * It is not a memory bound. `content-length` is advisory and a chunked body
- * carries none, so the bytes are already buffered when the second check
- * runs. Every public webhook route in this api reads its body the same way
- * (`event-webhooks.ts`, `channels.ts`, `github-app.ts`); a real bound
- * belongs in one shared place, in front of all four.
- */
-const MAX_BODY_BYTES = 1024 * 1024;
-
-/** The handshake echo is answered before the signature is checked, so it is
- * an unauthenticated reflection. Slack's own challenge is a short random
- * string; a longer one is not Slack. */
-const MAX_CHALLENGE_CHARS = 512;
-
-/** Same rationale as `ChannelHost.maybeLogVerifyFailed`: this route is
+/** Same rationale as `ChannelHost.maybeLogVerifyFailed`: the Slack events route is
  * public and unauthenticated, so a burst of bad or half-configured posts
  * must not flood `event_drop_log`. The throttle covers the write, never the
  * response — every bad request still gets its real status. */
@@ -121,7 +88,7 @@ async function safeWriteDropLog(db: AppDb, args: Parameters<typeof writeDropLog>
   catch { console.warn("[slack-webhook] problem diagnostic write unavailable"); }
 }
 
-async function throttledDropLog(db: AppDb, args: { orgId: string; reason: string; detail: string }): Promise<void> {
+export async function throttledDropLog(db: AppDb, args: { orgId: string; reason: string; detail: string }): Promise<void> {
   const now = Date.now();
   const last = droplogLoggedAt.get(args.reason);
   if (last !== undefined && now - last < DROPLOG_COOLDOWN_MS) return;
@@ -346,132 +313,38 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate, receiptId: 
   if (failed) throw new Error("Slack consumers did not all finish. The durable inbox will retry.");
 }
 
-export const slackWebhookRouter = new Hono<AppEnv>();
+/** The verified request and the connection it was verified against. */
+export interface SlackAdmission {
+  orgId: string;
+  /** Lowercase provider headers. The host removed its own credentials. */
+  headers: Record<string, string>;
+  rawBody: Uint8Array;
+  webhookSecret: string;
+  credentialTeamId: string;
+  updates: RawChannelUpdate[];
+  retryNum: string | undefined;
+  retryReason: string;
+}
 
-slackWebhookRouter.post("/webhook", async (c) => {
-  const { db, engineCredentials, channelHost, eventDispatcher } = c.var.providers;
-
-  // Reject on the declared length before reading the body, then again on
-  // the bytes actually read — the header can be absent or lying.
-  const contentLength = c.req.header("content-length");
-  if (contentLength !== undefined && Number(contentLength) > MAX_BODY_BYTES) {
-    return c.json({ error: "payload too large" }, 413);
-  }
-  const rawBody = new Uint8Array(await c.req.arrayBuffer());
-  if (rawBody.byteLength > MAX_BODY_BYTES) return c.json({ error: "payload too large" }, 413);
-
-  const headers: Record<string, string> = {};
-  c.req.raw.headers.forEach((v, k) => {
-    headers[k.toLowerCase()] = v;
-  });
-
-  // The handshake comes before the signature check: it is how Slack enables
-  // the endpoint in the first place, and at that moment the org credential
-  // that holds the signing secret may not exist yet. Interactivity bodies
-  // are form-encoded, so they are never parsed as handshake JSON.
-  const bodyText = new TextDecoder().decode(rawBody);
-  if (!bodyText.startsWith("payload=")) {
-    try {
-      const peek: unknown = JSON.parse(bodyText);
-      if (isRecord(peek) && peek.type === "url_verification" && typeof peek.challenge === "string") {
-        if (peek.challenge.length > MAX_CHALLENGE_CHARS) return c.json({ error: "challenge too long" }, 400);
-        return c.json({ challenge: peek.challenge });
-      }
-    } catch {
-      // Not JSON. `verifyWebhook` below rejects an unparseable body.
-    }
-  }
-
-  // A redelivery means the previous delivery did not get a fast 2xx. It is
-  // recorded, then processed like any other delivery — see the ack policy
-  // above for why it must not be dropped. The log is throttled and runs
-  // after the response, because this path exists precisely for the case
-  // where this endpoint is already too slow.
-  const retryHeader = headers["x-slack-retry-num"];
-  const retryNum = retryHeader === undefined ? undefined : /^\d{1,6}$/.test(retryHeader) ? retryHeader : "unknown";
-  const retryReasonHeader = headers["x-slack-retry-reason"];
-  const retryReason = retryReasonHeader && ["http_timeout", "http_error", "connection_failed", "ssl_error", "too_many_redirects", "unknown_error"].includes(retryReasonHeader) ? retryReasonHeader : "unknown";
-  if (retryNum !== undefined) {
-    void (async () => {
-      try {
-        const retryOrgId = await resolveOrgId(db);
-        await throttledDropLog(db, {
-          orgId: retryOrgId,
-          reason: "slack_retry",
-          detail:
-            `slack redelivered an update (attempt ${retryNum}, reason ${retryReason}). ` +
-            "Check the api response time on this route and the last non-2xx it returned.",
-        });
-      } catch (err) {
-        console.error("[slack-webhook] retry drop-log failed", err);
-      }
-    })();
-  }
-
-  const orgId = await resolveOrgId(db);
-  const credential = await engineCredentials.get({ type: "org", id: orgId }, "slack");
-  const webhookSecret = typeof credential?.metadata?.webhookSecret === "string" ? credential.metadata.webhookSecret : undefined;
-  const credentialTeamId = typeof credential?.metadata?.teamId === "string" ? credential.metadata.teamId : undefined;
-  if (!credential || !webhookSecret || !credentialTeamId) {
-    // Ack rather than 401: a half-configured org must not put Slack into a
-    // retry loop against an endpoint that will keep failing.
-    await throttledDropLog(db, {
-      orgId,
-      reason: "unknown_org",
-      detail:
-        "slack webhook received with no usable org credential. " +
-        "Connect Slack in Settings to record the signing secret and the workspace id.",
-    });
-    return c.body(null, 200);
-  }
-
-  const transport = channelHost.transportFor("slack");
-  if (!transport) {
-    // No verified durable admission exists yet. Slack must retry after startup.
-    await throttledDropLog(db, {
-      orgId,
-      reason: "transport_unavailable",
-      detail:
-        "slack webhook received but the slack transport is not running. " +
-        "Read the api startup log for the slack transport error.",
-    });
-    c.header("Retry-After", "5");
-    return c.json({ error: "Slack is starting. Retry this delivery shortly." }, 503);
-  }
-
-  // `verifyWebhook` is wrapped defensively: a crafted signature header must
-  // never surface as an unauthenticated 500. Any throw is a rejection.
-  let raws: RawChannelUpdate[] | null;
-  try {
-    raws = transport.verifyWebhook({ headers, rawBody }, { webhookSecret });
-  } catch {
-    raws = null;
-  }
-  if (raws === null) {
-    await throttledDropLog(db, {
-      orgId,
-      reason: "bad_signature",
-      detail:
-        "slack webhook signature verification failed. " +
-        "Compare the stored signing secret with Basic Information in your Slack app settings.",
-    });
-    return c.json({ error: "signature verification failed" }, 401);
-  }
-
-  // Persist the verified request before acknowledging it. A diagnostic receipt
-  // cannot replay the consumers after a crash, so it is not an acceptance record.
+/**
+ * Persists a verified request before the acknowledgement. A diagnostic
+ * receipt cannot replay the consumers after a crash, so it is not an
+ * acceptance record. Throws when the insert fails, so Slack retries.
+ */
+export async function admitSlackDelivery(providers: Providers, admission: SlackAdmission): Promise<void> {
+  const { db } = providers;
   const now = Date.now();
-  const payload = JSON.stringify({ raws, headers, rawBody: Buffer.from(rawBody).toString("base64"),
-    webhookSecret, credentialTeamId, verifiedReceivedAt: now, retryNum, retryReason });
-  const id = createHash("sha256").update(`${orgId}:`).update(rawBody).digest("hex");
-  await db.insert(slackWebhookInbox).values({ id, orgId,
-    payload: encryptSecret(payload, deriveSecretKey(`slack-inbox:${c.var.providers.encryptionKey}`)),
+  const payload = JSON.stringify({ raws: admission.updates, headers: admission.headers,
+    rawBody: Buffer.from(admission.rawBody).toString("base64"), webhookSecret: admission.webhookSecret,
+    credentialTeamId: admission.credentialTeamId, verifiedReceivedAt: now,
+    retryNum: admission.retryNum, retryReason: admission.retryReason });
+  const id = createHash("sha256").update(`${admission.orgId}:`).update(admission.rawBody).digest("hex");
+  await db.insert(slackWebhookInbox).values({ id, orgId: admission.orgId,
+    payload: encryptSecret(payload, deriveSecretKey(`slack-inbox:${providers.encryptionKey}`)),
     createdAt: now, nextAttemptAt: now }).onConflictDoNothing();
-  configureSlackIngress(c.var.providers);
-  eventDispatcher.nudge();
-
-  return c.body(null, 200);
-});
+  configureSlackIngress(providers);
+  providers.eventDispatcher.nudge();
+}
 
 /** Use the dispatcher's existing lifecycle for crash recovery, including before new webhooks arrive. */
 export function configureSlackIngress(providers: Providers): void {

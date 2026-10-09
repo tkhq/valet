@@ -402,3 +402,27 @@ place). Run `make dev-clean` and restart the stack.
    written.
 
 The notification decision inbox scans at most 100 pending gates per page. An indexed creation-time/ID cursor advances past hidden gates. Cursors are encrypted and bound to the caller and organization. Authorization and private-thread checks still apply. The bell offers Next approvals and First approvals; a plus sign marks a partial count.
+
+## Bulk answers in the bell
+
+Added 2026-10-09. The bell's "Needs action" heading has **Approve all** and **Deny all**. The buttons show only when at least one listed item is eligible. A bulk answer covers only the items listed in the bell now. When the decision inbox has more pages, the buttons read "Approve N listed" and "Deny N listed", and the dialog says that other pages are not included. A bulk answer never loads or answers an item the user has not seen.
+
+Eligible items (`planBulkAnswers` in `packages/web/src/components/layout/bulk-answers.ts`):
+
+| Item | Eligible when | Approve sends | Deny sends |
+| ---- | ------------- | ------------- | ---------- |
+| Thread decision gate | `type` is `approval`, `status` is `pending`, `oneShot` is true, no `approver`, `provenance.source` is not `resolver_error` or `risk_default`, `riskLevel` is not `high` or `critical`, and `actions` include both `approve` and `deny` | `{ actionId: "approve" }` | `{ actionId: "deny" }` |
+| Workflow approval node | No `approver` | `{ approved: true, iteration }` | `{ approved: false, iteration }` |
+| Workflow policy gate | No `approver`, `provenance` is not `resolver_error`, and `riskLevel` is not `high` or `critical` | `{ approved: true, scope: "once", iteration }` | `{ approved: false, iteration }` |
+
+`approve` and `deny` are the engine's built-in gate actions. Other approval gates use the same ids, so the bell does not infer one-shot behavior from them. The server sets `oneShot` only on a tool approval gate whose approval allows exactly that one call (`docs/specs/2026-07-16-action-policies-audit-design.md`). `ask_approval` and `sec_start` gates do not carry it. A bulk approval never sends `approve_session`, `always_allow`, or a `run` or `workflow` scope, because each of those writes a lasting grant. A gate that names an approver lends a member's shared account, and its approval also covers later calls in the thread or run. The bell skips it: "Waits on another member" when the approver is someone else, and "Lends your shared account" when the approver is the caller. A failed policy check or a high-risk action needs the warning, risk badge, tool id, and arguments that only the per-item card shows. A `risk_default` gate opened because its risk is high or critical. For these reasons the bell skips such gates with the reason "Policy check failed" or "High-risk action". Questions and credential requests are never eligible, because they need a typed answer or a credential.
+
+The bell opens a confirmation dialog before it sends anything. The dialog lists each covered item and each skipped item with its reason. On confirm, the web client sends each answer through the same endpoint as the per-item button, so the server applies the same authorization.
+
+At most four answers are in flight at one time. One failure does not stop the others. A `404` or `409` means the item is no longer waiting for this caller: another answer or a timeout settled it, or the caller lost access. The summary reports it as "no longer waiting", never as answered.
+
+A bulk answer to a thread gate invalidates only that session's gates, not the notification inbox. The inbox scan is expensive, so a batch fetches it once, at the end. A single answer from a gate card still refreshes the inbox. After the last answer, the bell refetches the lists it covered. An item that the refetched lists still show is reported as "still waiting", whatever its response said. If the refetch fails, the bell keeps the response-based summary. A status line shows progress ("Approving 3 of 12…") and then the summary ("Approved 10. 1 was no longer waiting. 1 failed: title: error").
+
+The dialog says what an approval does. A tool action runs once, and Valet saves no rule. A workflow approval node lets its run continue to the next steps. After a confirmed run, focus moves to the status line. After Cancel, focus returns to the button that opened the dialog. When the bell closes after a run has settled, the summary clears.
+
+`NotificationsBell` owns the run state, not the popover content. If the user closes the bell during a run, the run continues. When the bell opens again, it shows the progress or the summary, and both buttons stay disabled until the run settles. A second run cannot start while one is in flight.

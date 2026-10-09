@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 import { slackPlugin } from "./actions/actions.js";
+import { slackHttpRoutes } from "./http.js";
 import { slackFilterOptionResolvers } from "./transport/filter-options.js";
 import { slackTransportFactory } from "./transport/transport.js";
 import { slackTriggerDefs } from "./triggers.js";
@@ -18,6 +19,7 @@ const plugin: ValetPlugin = {
   description: "Slack integration for messages, channels, and users",
   actions: [slackPlugin],
   triggers: slackTriggerDefs,
+  httpRoutes: slackHttpRoutes,
   transports: [slackTransportFactory],
   filterOptionResolvers: slackFilterOptionResolvers,
   skills: [loadSkillFromMarkdown(skillMd, "plugin", "slack-tools")],

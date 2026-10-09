@@ -1065,6 +1065,10 @@ export interface ThreadPullRequest {
   repo: string;
   number: number;
   state: "open" | "merged" | "closed";
+  /** Present when delegated work opened the pull request: the child session
+   * and thread that opened it. Absent when this thread opened it, and on rows
+   * recorded before the opening thread was kept. */
+  delegatedFrom?: { sessionId: string; threadId: string; title?: string };
 }
 
 /** `POST /api/sessions/:id/threads/read` — mark threads read for the caller. */
@@ -1459,6 +1463,12 @@ export interface DecisionGate {
   /** The one member who may answer: the gate asks to use their shared
    * account. Anyone else sees the gate as waiting on them. */
   approver?: { userId: string; name?: string };
+  /** Present only on a tool approval gate whose "approve" allows exactly
+   * this one call and writes no grant. A bulk answer covers only these.
+   * Absent on `ask_approval`, `sec_start`, and shared-account gates. */
+  oneShot?: true;
+  /** The gated tool action's risk level, on tool approval gates only. */
+  riskLevel?: "low" | "medium" | "high" | "critical";
 }
 
 export interface DecisionResolution {
@@ -5200,7 +5210,8 @@ export interface DeleteGrantResponse {
 //
 // The manifest targets Slack's agent messaging experience: the feature key
 // is `agent_view`, and the app subscribes `app_home_opened` /
-// `app_context_changed` / `message.im`. See `services/slack-app.ts`.
+// `app_context_changed` / `message.im`. The Slack plugin builds it
+// (`packages/plugin-slack/src/app-manifest.ts`, `http.ts`).
 
 /** Slack's app-manifest schema — only the fields this flow sets.
  * https://docs.slack.dev/reference/app-manifest/ */

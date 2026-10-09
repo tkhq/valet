@@ -14,8 +14,13 @@ vi.mock("~/api/queries", () => ({
   useNotificationDecisions: (cursor?: string) => { state.cursor(cursor); return { data: { items: cursor ? state.pageItems ?? state.items : state.items, nextCursor: cursor ? null : state.nextCursor }, refetch: vi.fn() }; },
   useMarkNotificationRead: () => ({ mutateAsync: vi.fn() }),
   useMarkAllNotificationsRead: () => ({ mutate: vi.fn() }),
+  useResolveDecisions: () => ({ mutateAsync: vi.fn() }),
 }));
-vi.mock("~/api/workflows", () => ({ useWorkflowActionRequired: () => ({ data: { count: 0, items: [] }, refetch: vi.fn() }) }));
+vi.mock("~/api/workflows", () => ({
+  useWorkflowActionRequired: () => ({ data: { count: 0, items: [] }, refetch: vi.fn() }),
+  useResolveWorkflowApprovals: () => ({ mutateAsync: vi.fn() }),
+}));
+vi.mock("~/api/settings", () => ({ useMe: () => ({ data: { id: "me" } }) }));
 vi.mock("~/components/session/decision-gate-card", () => ({ DecisionGateCard: () => <button>Allow account use</button> }));
 
 it("keeps approval controls but omits navigation into a private thread", async () => {

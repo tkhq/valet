@@ -42,6 +42,7 @@ import {
 } from "@valet/engine";
 import {
   buildContentBlocks,
+  hasTableBlock,
   needsContentBlocks,
   SLACK_BUTTON_LABEL_LIMIT,
   SLACK_HEADER_LIMIT,
@@ -56,7 +57,7 @@ import { DirectoryCache } from "./directory-cache.js";
 import { fetchThreadTranscript } from "./thread-context.js";
 import { enrichSlackText } from "./text-enrich.js";
 import { escapeMrkdwn, markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
-import { verifySlackSignatureSync } from "./verify.js";
+import { verifySlackDelivery } from "./verify.js";
 
 const MAX_IMAGE_DOWNLOAD_BYTES = 10 * 1024 * 1024; // 10 MB (images prefer thumbnails anyway)
 const MAX_FILE_DOWNLOAD_BYTES = 25 * 1024 * 1024; // 25 MB (PDFs, documents)
@@ -321,7 +322,7 @@ export class SlackTransport implements ChannelTransport {
    * whose webhook the host registers with a secret it minted.
    *
    * `webhookSecret` is the key the rest of Valet uses for a provider-issued
-   * webhook secret: `routes/slack-webhook.ts` passes it, the Slack
+   * webhook secret: the host reads it for the `events` route, the Slack
    * `TriggerDef`s read it, and `routes/credentials.ts` stores it under that
    * name. `signingSecret` is accepted as well so a credential saved under
    * the older key still verifies.
@@ -334,19 +335,7 @@ export class SlackTransport implements ChannelTransport {
     if (secret === undefined || secret === "") return null;
     const headers: Record<string, string> = {};
     for (const [key, value] of Object.entries(req.headers)) headers[key.toLowerCase()] = value;
-    const bodyText = new TextDecoder().decode(req.rawBody);
-    if (!verifySlackSignatureSync(headers, bodyText, secret)) return null;
-    try {
-      if (bodyText.startsWith("payload=")) {
-        // Interactivity posts form-encoded with a single `payload` JSON param.
-        const payload = new URLSearchParams(bodyText).get("payload");
-        if (payload === null) return null;
-        return [JSON.parse(payload) as unknown];
-      }
-      return [JSON.parse(bodyText) as unknown];
-    } catch {
-      return null;
-    }
+    return verifySlackDelivery(headers, req.rawBody, secret);
   }
 
   parseUpdate(update: RawChannelUpdate): InboundChannelEvent | null {
@@ -814,25 +803,33 @@ export class SlackTransport implements ChannelTransport {
    * chat.postMessage, retried once without a rejected identity override.
    * Provider error responses are safe to retry because Slack rejected them.
    * Network errors and malformed success responses remain single-attempt.
+   *
+   * If Slack rejects a generated table block, `fallbackBlocks` (its Markdown
+   * rendering) is posted instead. Each attempt applies both retries, so the
+   * fallback also follows a retry without the identity, which can be the
+   * first request that reaches block validation.
    */
   private async postMessageAs(
     opts: Parameters<SlackApi["postMessage"]>[0],
+    fallbackBlocks?: Record<string, unknown>[],
   ): Promise<{ ts: string }> {
     try {
       return await this.api.postMessage(opts);
     } catch (err) {
+      if (!(err instanceof SlackApiError) || err.method !== "chat.postMessage") throw err;
+      if (fallbackBlocks && err.detail === "invalid_blocks") {
+        return this.postMessageAs({ ...opts, blocks: fallbackBlocks });
+      }
       const hadOverride = opts.username !== undefined || opts.iconUrl !== undefined;
       if (
         hadOverride &&
-        err instanceof SlackApiError &&
-        err.method === "chat.postMessage" &&
         err.providerRejected &&
         err.status !== undefined &&
         err.status >= 200 &&
         err.status < 300
       ) {
         const { username: _u, iconUrl: _i, ...rest } = opts;
-        return this.api.postMessage(rest);
+        return this.postMessageAs(rest, fallbackBlocks);
       }
       throw err;
     }
@@ -851,11 +848,15 @@ export class SlackTransport implements ChannelTransport {
     const formatted = markdownToSlackMrkdwn(message.markdown);
     let text = formatted;
     let blocks: Record<string, unknown>[] | undefined;
+    let fallbackBlocks: Record<string, unknown>[] | undefined;
     if (needsContentBlocks(message.markdown)) {
       // One API call with blocks — never several messages (chat.postMessage is
       // limited to 1/sec/channel; see message-chunking.ts).
       blocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS);
       text = formatted.slice(0, SLACK_TEXT_LIMIT); // notification fallback
+      if (hasTableBlock(blocks)) {
+        fallbackBlocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS, { nativeTables: false });
+      }
     }
     const res = await this.postMessageAs({
       channel: target.channelId,
@@ -863,7 +864,7 @@ export class SlackTransport implements ChannelTransport {
       threadTs,
       blocks,
       ...slackIdentityOverride(message.sender),
-    });
+    }, fallbackBlocks);
     return { conversationKey, messageId: res.ts };
   }
 

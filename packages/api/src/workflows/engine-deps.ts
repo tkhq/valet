@@ -191,6 +191,12 @@ interface RunContext {
   slackChannel?: string;
 }
 
+/** The assistant a run belongs to: the one whose runtime the upgrade kept
+ * for this workflow or run. Undefined for a workflow no assistant claims. */
+async function runAssistantId(opts: WorkflowEngineDepsOpts, ctx: RunContext): Promise<string | undefined> {
+  return ctx.legacyRuntimeId ? (await loadAssistantBySessionId(opts.db, ctx.legacyRuntimeId))?.id : undefined;
+}
+
 async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): Promise<RunContext> {
   const run = await opts.store.getRun(runId);
   if (!run) throw new Error(`workflow engine-deps: run not found: ${runId}`);
@@ -334,12 +340,14 @@ async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, ti
   }
   const workspace = workspaceFor(parts);
   await mkdir(workspace, { recursive: true });
+  const assistantId = await runAssistantId(opts, ctx);
   return opts.host.workflowSessionFor(sessionId, {
     actorUserId: ctx.actorUserId,
     orgId: ctx.orgId,
     owner: ctx.owner,
     workspace,
     title,
+    ...(assistantId ? { assistantId } : {}),
   });
 }
 
@@ -636,12 +644,14 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       const ctx = await resolveRunContext(opts, runId);
       // `workflowExecutionId: runId` scopes `appliesIn: "workflow"` policy
       // enforcement + exec-scoped grant matching (action-policies plan, T3).
+      const assistantId = await runAssistantId(opts, ctx);
       return invokeActionImpl(req, {
         userId: ctx.actorUserId,
         orgId: ctx.orgId,
         owner: ctx.owner,
         workflowExecutionId: runId,
         presence: ctx.presence,
+        ...(assistantId ? { assistantId } : {}),
       });
     },
 

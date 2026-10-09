@@ -1,8 +1,10 @@
 import type { Principal } from "@valet/engine";
 import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { threadPullRequests, threadReads } from "../schema/index.js";
+import type { RequestPrincipal } from "../lib/request-principal.js";
+import { agentSessions, threadPullRequests, threadReads } from "../schema/index.js";
 import type { ThreadPullRequest, WaitingThread } from "../wire/types.js";
+import { canViewSession } from "./session-access.js";
 export interface ThreadActivity {
   readAt?: number;
   lastAgentActivityAt?: number;
@@ -12,7 +14,7 @@ export interface ThreadActivity {
 
 /** Read state, the last agent message, and pull requests for the threads the viewer lists. */
 export async function listThreadActivity(
-  db: AppDb, userId: string, sessionId: string, threadIds: string[],
+  db: AppDb, userId: string, sessionId: string, threadIds: string[], viewer: RequestPrincipal,
 ): Promise<Map<string, ThreadActivity>> {
   const activity = new Map<string, ThreadActivity>();
   if (threadIds.length === 0) return activity;
@@ -40,9 +42,28 @@ export async function listThreadActivity(
     const { question } = lastAgentAsk(row.tail ?? "");
     if (question) value.agentQuestion = question;
   }
+  // A delegating thread's copy names the child that opened the pull request,
+  // so the thread card can tell the child's work from the thread's own. The
+  // child's title is shown only to a viewer who can open the child: a parent
+  // can move to a team while its child stays personal.
+  const openedElsewhere = (row: typeof pulls[number]) =>
+    row.openedSessionId && row.openedThreadId && (row.openedSessionId !== row.sessionId || row.openedThreadId !== row.threadId)
+      ? { sessionId: row.openedSessionId, threadId: row.openedThreadId } : undefined;
+  const childIds = [...new Set(pulls.flatMap(row => openedElsewhere(row)?.sessionId ?? []))];
+  const children = childIds.length
+    ? await db.select({ id: agentSessions.id, title: agentSessions.title, userId: agentSessions.userId, ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
+      .from(agentSessions).where(inArray(agentSessions.id, childIds))
+    : [];
+  const childTitles = new Map<string, string | null>();
+  for (const child of children) if (await canViewSession(db, child, viewer)) childTitles.set(child.id, child.title);
   for (const row of pulls.sort((a, b) => a.createdAt - b.createdAt)) {
     const value = entry(row.threadId);
-    (value.pullRequests ??= []).push({ url: row.url, repo: row.repo, number: row.number, state: row.state });
+    const origin = openedElsewhere(row);
+    const title = origin ? childTitles.get(origin.sessionId) : undefined;
+    (value.pullRequests ??= []).push({
+      url: row.url, repo: row.repo, number: row.number, state: row.state,
+      ...(origin ? { delegatedFrom: { ...origin, ...(title ? { title } : {}) } } : {}),
+    });
   }
   return activity;
 }

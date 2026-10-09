@@ -179,3 +179,5 @@ Remote draft updates change only in-memory state. They must not write back to br
 ### Artifacts navigation
 
 Artifacts is one desktop navigation link with an inline chevron. Clicking it opens Artifacts. Hover opens a list containing Artifacts and Memory. Arrow Down opens the same list for keyboard users. Mobile navigation keeps both destinations as separate menu entries.
+
+The thread summary's Outputs list what the thread produced: its files and sites, and the pull requests it opened. Delegated work produces outputs too. A pull request is recorded on the thread that opened it and on each thread that delegated that work (`thread_pull_requests`), and every copy keeps the opening session and thread (`opened_session_id`, `opened_thread_id`). A thread lists its own pull requests with its files and sites, and lists the copies a child opened in a separate "From delegated work" group, each named by the child's title. A child's inputs stay on the child. Sources list only files and links shared with this thread, so the links in a child's completion report (`child.*` signals) do not appear there. Rows recorded before the opening thread was kept read as the thread's own.

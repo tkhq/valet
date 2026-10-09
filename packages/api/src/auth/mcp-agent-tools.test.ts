@@ -87,10 +87,11 @@ describe("MCP agent tools", () => {
     const { result } = await rpc(testApi.baseUrl, token, "tools/list", {});
     const names = ((result?.tools as Array<{ name: string }>) ?? []).map((t) => t.name).sort();
     expect(names).toEqual([
-      "call_tool", "describe_tool", "get_skill", "get_thread", "get_workflow_run", "list_artifacts",
-      "list_decisions", "list_inbox", "list_sessions", "list_skills", "list_threads", "list_workflows",
-      "list_workspaces", "publish_artifact", "read_memory", "resolve_decision", "run_workflow",
-      "search_memory", "search_tools", "send_message", "start_thread", "whoami", "write_memory",
+      "call_tool", "cancel_workflow_run", "delete_memory", "describe_tool", "get_skill", "get_thread",
+      "get_workflow_run", "list_artifacts", "list_decisions", "list_inbox", "list_sessions", "list_skills",
+      "list_threads", "list_workflows", "list_workspaces", "move_memory", "patch_memory", "publish_artifact",
+      "read_memory", "resolve_decision", "retry_workflow_run", "run_workflow", "search_memory", "search_tools",
+      "send_message", "start_thread", "stop_thread", "unpublish_artifact", "whoami", "write_memory",
     ]);
   });
 
@@ -204,6 +205,99 @@ describe("MCP route allow-list", () => {
     expect(refused.status).toBe(403);
     // Without the attachment the same request is anonymous.
     expect((await app.fetch(new Request("http://x/api/me"))).status).toBe(401);
+  });
+
+  // Each new tool's route must pass both lists. Neighbours that change a
+  // definition, a grant, or an approval must still be refused.
+  it("lets the stop, run-control, memory-edit, and unpublish tools through and nothing next to them", async () => {
+    const { mcpRouteAllowed } = await import("./mcp-caller.js");
+    const { agentRefusedRoute } = await import("../middleware/auth.js");
+    const allowed: Array<[string, string]> = [
+      ["POST", "/api/threads/t1/abort"],
+      ["DELETE", "/api/memory"],
+      ["POST", "/api/memory/patch"],
+      ["POST", "/api/memory/move"],
+      ["POST", "/api/workflows/runs/r1/cancel"],
+      ["POST", "/api/workflows/runs/r1/retry"],
+      ["DELETE", "/api/artifacts/a1"],
+    ];
+    for (const [method, path] of allowed) {
+      expect(mcpRouteAllowed(method, path), `${method} ${path}`).toBe(true);
+      expect(agentRefusedRoute(method, path), `${method} ${path}`).toBe(false);
+    }
+    const refused: Array<[string, string]> = [
+      ["POST", "/api/workflows/runs/r1/approvals/n1"],
+      ["POST", "/api/workflows/runs/r1/dismiss"],
+      ["DELETE", "/api/workflows/w1"],
+      ["POST", "/api/threads/t1/decisions/g1/withdraw"],
+      ["POST", "/api/memory/import"],
+      ["PATCH", "/api/artifacts/a1"],
+      ["POST", "/api/artifacts/copy-to-team"],
+    ];
+    for (const [method, path] of refused) {
+      expect(mcpRouteAllowed(method, path), `${method} ${path}`).toBe(false);
+      expect(agentRefusedRoute(method, path), `${method} ${path}`).toBe(true);
+    }
+  });
+});
+
+describe("stop_thread", () => {
+  async function connect(deps: Parameters<typeof import("./mcp-tools.js")["registerAgentTools"]>[1]) {
+    const { registerAgentTools } = await import("./mcp-tools.js");
+    const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const server = new McpServer({ name: "t", version: "0" });
+    registerAgentTools(server, deps);
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    const client = new Client({ name: "test", version: "0" });
+    await client.connect(clientSide);
+    return client;
+  }
+
+  it("stops the newest turn by its queue item and reports it aborted", async () => {
+    const posted: Array<{ path: string; body: unknown }> = [];
+    let stopped = false;
+    const client = await connect({
+      api: async (method, path, body) => {
+        if (method === "POST") {
+          posted.push({ path, body });
+          stopped = true;
+          return { status: 200, body: { ok: true } };
+        }
+        if (path === "/api/threads/t") return { status: 200, body: { sessionId: "s" } };
+        if (path.endsWith("/decisions")) return { status: 200, body: { gates: [] } };
+        return { status: 200, body: { messages: [] } };
+      },
+      engineStore: { getQueueItem: async () => (stopped ? { status: "settled", outcome: { outcome: "aborted" } } : { status: "running" }) as never },
+      // A follow-up is queued behind the running turn; Stop must hit the running one.
+      latestQueueItem: async (_s, _t, status) => (status === "running" ? "q-live" : status === undefined ? "q-queued" : undefined),
+      origin: "https://valet.test",
+      sleep: async () => undefined,
+    });
+    const res = await client.callTool({ name: "stop_thread", arguments: { thread_id: "t" } });
+    // The route needs the turn's id, so a Stop can never hit a turn queued later.
+    expect(posted).toEqual([{ path: "/api/threads/t/abort", body: { targetItemId: "q-live" } }]);
+    expect(res.structuredContent).toMatchObject({ thread_id: "t", message_id: "q-live", status: "aborted" });
+    await client.close();
+  });
+
+  it("reports idle and posts nothing for a thread with no turns", async () => {
+    let posts = 0;
+    const client = await connect({
+      api: async (method) => {
+        if (method === "POST") posts += 1;
+        return { status: 200, body: { sessionId: "s" } };
+      },
+      engineStore: { getQueueItem: async () => null as never },
+      latestQueueItem: async () => undefined,
+      origin: "https://valet.test",
+    });
+    const res = await client.callTool({ name: "stop_thread", arguments: { thread_id: "t" } });
+    expect(res.structuredContent).toMatchObject({ status: "idle" });
+    expect(posts).toBe(0);
+    await client.close();
   });
 });
 

@@ -55,7 +55,20 @@ const SCOPE_COPY: Record<OnePasswordTokenScope, { title: string; reach: string; 
   },
 };
 
-/** The numbered setup steps. Rendered inside the dialog on both pages. */
+/**
+ * The numbered setup steps. Rendered inside the setup dialog below on both
+ * token pages, and inside the team dialog on Organization · Teams.
+ *
+ * Step 2 can be refused: creating a service account needs a 1Password
+ * account permission, and 1Password answers "contact your administrator"
+ * without it (its own docs say to ask for access). That refusal stranded a
+ * reader on 1Password's screen with nothing to act on, so the steps name the
+ * condition and both ways out.
+ *
+ * The note is not scoped to the personal dialog. Valet cannot see anyone's
+ * 1Password permissions, and holding the org-admin role here says nothing
+ * about holding one in 1Password, so either reader can be refused.
+ */
 export function OnePasswordInstructions() {
   return (
     <div className="space-y-3 text-sm text-muted">
@@ -75,6 +88,15 @@ export function OnePasswordInstructions() {
         </li>
         <li>Paste the token below. Valet encrypts it and never shows it again.</li>
       </ol>
+      <p>
+        If 1Password tells you to contact your administrator, your 1Password account cannot create
+        service accounts, and no Valet setting changes that. Ask a 1Password owner or administrator
+        for either of two things: permission to create and manage service accounts, or a service
+        account with read-only access to that vault alone. Have them send the token to you with a 1Password share
+        link, not in Slack or a chat. Keep the token outside every vault the service account can
+        read, for example in your own vault. If the token is in a vault it reads, an agent can read
+        its own token.
+      </p>
       <p>
         An item is addressed by a{" "}
         <a className={LINK} href={OP_SECRET_REFERENCE_URL} target="_blank" rel="noreferrer">

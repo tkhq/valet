@@ -1,5 +1,5 @@
 import { mergePresence, readPresence } from "@valet/shared";
-import { workspaceSenderIdentity } from "../services/workspace-sender.js";
+import { assistantSessionSender } from "../services/workspace-sender.js";
 /**
  * `ChannelHost` — inbound routing for channel transports (telegram etc,
  * Phase 7 / spec decisions 4-6, 10). `handleUpdate` is the single entry
@@ -1056,8 +1056,7 @@ export class ChannelHost {
     queueItemId?: string,
   ): Promise<{ displayName?: string; avatarUrl?: string } | undefined> {
     try {
-      const row = await loadAssistantBySessionId(this.deps.db, sessionId);
-      const base = row ? await workspaceSenderIdentity(this.deps.db, row.orgId, { type: row.ownerType, id: row.ownerId }) : undefined;
+      const base = await assistantSessionSender(this.deps.db, sessionId);
       const item = queueItemId ? await this.deps.engineStore.getQueueItem(sessionId, queueItemId) : undefined;
       return mergePresence(base, readPresence(item?.metadata?.presence));
     } catch (err) {

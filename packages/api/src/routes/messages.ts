@@ -481,7 +481,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   for (const group of groups) {
     const groupSummaries = body.threads.filter(t => t.sessionId === group.session.id);
     if (!groupSummaries.length) continue;
-    const activity = await listThreadActivity(db, c.var.user.id, group.session.id, groupSummaries.map(t => t.id));
+    const activity = await listThreadActivity(db, c.var.user.id, group.session.id, groupSummaries.map(t => t.id), c.var.principal);
     for (const summary of groupSummaries) {
       Object.assign(summary, activity.get(summary.id));
       const channel = threadChannel(summary.key, summary.pullRequests);

@@ -12,7 +12,7 @@ import { and, eq, sql } from "drizzle-orm";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { slackWebhookInbox, eventDeliveries, eventDropLog, eventReceipts, events, eventSubscriptions, teams, orgMembers, teamMembers, userIdentityLinks } from "../schema/index.js";
-import { drainSlackIngress, configureSlackIngress, __resetSlackWebhookThrottle } from "./slack-webhook.js";
+import { drainSlackIngress, configureSlackIngress, __resetSlackWebhookThrottle } from "./slack-inbox.js";
 import { __resetIngestDropThrottle } from "../events/ingest.js";
 import * as ingestModule from "../events/ingest.js";
 import * as followRouter from "../channels/follow-router.js";

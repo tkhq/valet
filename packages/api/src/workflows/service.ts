@@ -1752,8 +1752,21 @@ function approverFromEffects(effects: unknown): { userId: string; name?: string;
 }
 
 /** The members this parked run waits on to lend their accounts. */
+/**
+ * A parked run's signal waits are open gates. A claimed (`running`) run keeps
+ * the `waitingOn` of its last park, and a gate in it stays open until the
+ * interpreter consumes its signal: answering one gate wakes the run, and a
+ * second gate of the same run must still accept its answer. The interpreter
+ * reloads unconsumed signals on every pass, and the lost-wake sweep wakes a
+ * re-parked run that has a matching signal, so the answer is not lost. The
+ * signal's unique key still selects one resolution per gate.
+ */
+function gatesOpen(run: { status: string }): boolean {
+  return run.status === "parked" || run.status === "running";
+}
+
 async function pendingApprovers(deps: WorkflowServiceDeps, run: { runId: string; status: string; waitingOn: RunWaitCondition[] }): Promise<Map<string, { userId: string; name?: string; shareGeneration?: string }>> {
-  const waits = run.status === "parked" ? run.waitingOn.filter((w) => w.kind === "signal" && w.signalType.startsWith("approval:")) : [];
+  const waits = gatesOpen(run) ? run.waitingOn.filter((w) => w.kind === "signal" && w.signalType.startsWith("approval:")) : [];
   if (waits.length === 0) return new Map();
   const found = new Map<string, { userId: string; name?: string; shareGeneration?: string }>();
   for (const cp of await deps.workflowStore.getCheckpoints(run.runId)) {
@@ -1969,7 +1982,7 @@ export async function resolveWorkflowApproval(
   const suffix = iter > 0 ? `:${iter}` : "";
   const signalType = `approval:${input.nodeId}${suffix}`;
 
-  const wait = run.status === "parked"
+  const wait = gatesOpen(run)
     ? run.waitingOn.find((w) => w.kind === "signal" && w.signalType === signalType)
     : undefined;
   if (!wait || wait.kind !== "signal") return "not_parked";
@@ -2116,8 +2129,11 @@ async function projectWorkflowRun(
 
   // Build pendingGates from run.waitingOn entries that are approval signals.
   const pendingGates: WorkflowPendingGate[] = [];
+  // An answered gate waits only for the run to read its answer. It is not
+  // pending: listing it again would invite a second answer that 409s.
+  const answered = new Set(signals.map((sig) => sig.signalType));
   for (const w of run.waitingOn) {
-    if (w.kind !== "signal" || !w.signalType.startsWith("approval:")) continue;
+    if (w.kind !== "signal" || !w.signalType.startsWith("approval:") || answered.has(w.signalType)) continue;
 
     // signalType format: `approval:{nodeId}` (top-level) or `approval:{nodeId}:{iteration}`.
     const afterPrefix = w.signalType.slice("approval:".length);

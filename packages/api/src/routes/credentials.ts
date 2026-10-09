@@ -351,7 +351,12 @@ credentialsRouter.put("/:service", async (c) => {
   // rejected — the token could never power a working integration. Org-scope
   // saves stay open (an admin's org save IS the configuration step), and
   // services with no declaration stay accepted per the note above.
-  if (scope === "user") {
+  //
+  // A personal 1Password token is exempt. It reads the member's own vaults
+  // for the member's own sessions, and the org token reads other vaults, so
+  // an org token is never a substitute. The exemption is explicit so that a
+  // plugin which later declares `onepassword` cannot gate it by accident.
+  if (scope === "user" && service !== ONEPASSWORD_SERVICE) {
     const declared = findCredentialDeclaration(plugins, service);
     if (declared) {
       const mode = await connectModeFor({

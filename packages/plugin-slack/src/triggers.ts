@@ -386,7 +386,7 @@ export const slackTriggerDefs: TriggerDef[] = triggerSpecs.map((spec) => ({
 
 /**
  * Every Slack Events API `event.type` the trigger defs above match. The Slack
- * app manifest (`SLACK_BOT_EVENTS`, packages/api/src/services/slack-app.ts)
+ * app manifest (`SLACK_BOT_EVENTS`, packages/plugin-slack/src/app-manifest.ts)
  * MUST subscribe to each of these, or Slack never delivers the event and the
  * trigger silently never fires. One caveat: the `message` type is delivered
  * as one bot event per channel type (`message.channels`, `message.im`, …), so

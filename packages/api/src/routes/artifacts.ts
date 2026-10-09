@@ -33,7 +33,7 @@ import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-curso
 import { resolveOrgId } from "../lib/org.js";
 import { agentSessions, users } from "../schema/index.js";
 import { requireActingUser, requirePrincipal, requireUser, resolveOptionalIdentity, type AuthUser, type RequestIdentity } from "../middleware/auth.js";
-import { userPrincipal } from "../lib/request-principal.js";
+import { isAgentCaller, userPrincipal } from "../lib/request-principal.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { isOrgAdmin } from "../services/org.js";
@@ -842,6 +842,12 @@ artifactsRouter.delete("/:id", async (c) => {
 
   const loaded = await loadManagedArtifact(c, user);
   if ("error" in loaded) return loaded.error;
+  // A revoke cannot be undone. An org admin may revoke anyone's artifact in
+  // the browser, but an agent acting for that admin may revoke only the
+  // admin's own: a prompt-injected agent must not take down other members' pages.
+  if (c.var.authVia && isAgentCaller(c.var.authVia) && loaded.row.actorUserId !== user.id) {
+    return c.json({ error: "An agent can unpublish only artifacts you published. To unpublish another member's artifact, use Valet in the browser." }, 403);
+  }
 
   const { db } = c.var.providers;
   await revokeArtifactById(db, loaded.row.id);
