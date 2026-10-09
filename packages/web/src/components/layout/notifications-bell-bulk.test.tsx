@@ -161,3 +161,21 @@ it("covers only the listed page when more approvals exist", async () => {
   await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Approved 1."));
   expect(state.resolveDecision.mock.calls.map(c => c[0].gateId)).toEqual(["a"]);
 });
+
+it("keeps a run, its progress, and its summary when the bell closes and reopens", async () => {
+  state.decisions = [decision("a"), decision("b")];
+  const settle: Array<() => void> = [];
+  state.resolveDecision.mockImplementation(() => new Promise(resolve => settle.push(() => resolve({ ok: true }))));
+  await openBell();
+  await userEvent.click(screen.getByRole("button", { name: "Approve all 2 requests" }));
+  await userEvent.click(screen.getByRole("button", { name: "Approve 2" }));
+  await waitFor(() => expect(settle).toHaveLength(2));
+  await userEvent.click(screen.getByRole("button", { name: "Close notifications" }));
+  await userEvent.click(screen.getByRole("button", { name: /^Notifications/ }));
+  expect(screen.getByRole("status").textContent).toBe("Approving 1 of 2…");
+  expect(screen.getByRole("button", { name: "Approve all 2 requests" })).toHaveProperty("disabled", true);
+  expect(screen.getByRole("button", { name: "Deny all 2 requests" })).toHaveProperty("disabled", true);
+  settle.forEach(done => done());
+  await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Approved 2."));
+  expect(state.resolveDecision.mock.calls.map(c => c[0].gateId)).toEqual(["a", "b"]);
+});

@@ -7,7 +7,7 @@ import { Badge, Button, Popover, PopoverContent, PopoverTrigger, StatusDot } fro
 import { WorkflowApprovalItem } from "~/components/workflows/workflow-approval-item";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { relativeTime } from "~/lib/relative-time";
-import { NeedsActionHeader } from "./needs-action-header";
+import { NeedsActionHeader, useBulkAnswerRun } from "./needs-action-header";
 
 /** Unread updates, newest first, one row per title: a workflow that fails
  * every few minutes is one row with a count, not a list. Read updates leave
@@ -44,9 +44,11 @@ export function NotificationsBell() {
   const unread = updates.length;
   const loading = workflows.isLoading || decisions.isLoading;
   const failed = workflows.isError || decisions.isError;
+  // Each answered decision invalidates every inbox page; refetch after failures too.
+  const bulkRun = useBulkAnswerRun(() => { void workflows.refetch(); void summary.refetch(); });
   function changeOpen(value: boolean) {
     setOpen(value);
-    if (!value) setDecisionCursor(undefined);
+    if (!value) { setDecisionCursor(undefined); bulkRun.dismiss(); }
     if (value) { void notifications.refetch(); void workflows.refetch(); void decisions.refetch(); }
   }
   async function openUpdate({ latest, ids }: { latest: NotificationSummary; ids: string[] }) {
@@ -69,8 +71,7 @@ export function NotificationsBell() {
         </div>
         <section aria-label="Needs action" className="space-y-3 p-4">
           <NeedsActionHeader pendingCount={pendingCount} partialCount={partialCount} workflows={workflows.data?.items ?? []}
-            decisions={decisions.data?.items ?? []} partial={!!moreDecisions || !!decisionCursor}
-            onSettled={() => { void workflows.refetch(); void decisions.refetch(); }} />
+            decisions={decisions.data?.items ?? []} partial={!!moreDecisions || !!decisionCursor} run={bulkRun} />
           {loading && <p className="text-sm text-muted">Loading approvals…</p>}
           {failed && <div role="alert" className="text-sm text-danger-500">Could not load all approvals. <button className="underline" onClick={() => { void workflows.refetch(); void decisions.refetch(); }}>Retry</button></div>}
           {!loading && !failed && pendingCount === 0 && !moreDecisions && !decisionCursor && <p className="text-sm text-muted">You're all caught up. No decisions are waiting.</p>}

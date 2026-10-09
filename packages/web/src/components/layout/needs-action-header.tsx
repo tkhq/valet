@@ -18,33 +18,25 @@ function requests(n: number) {
   return n === 1 ? "request" : "requests";
 }
 
-/** The bell's "Needs action" heading with "Approve all" and "Deny all". A
- * bulk answer covers only the items listed now (`partial` when the bell
- * shows one page of several), and the dialog names each one before it runs. */
-export function NeedsActionHeader({ pendingCount, partialCount, workflows, decisions, partial, onSettled }: {
-  pendingCount: number;
-  /** The first decision page is not the whole inbox: the badge shows "+". */
-  partialCount: boolean;
-  workflows: readonly WorkflowActionRequiredItem[];
-  decisions: ListNotificationDecisionsResponse["items"];
-  /** The bell lists one decision page of several, so a bulk answer covers
-   * only the listed items. */
-  partial: boolean;
-  onSettled: () => void;
-}) {
-  const me = useMe();
+export interface BulkAnswerRun {
+  progress: { decision: BulkDecision; settled: number; total: number } | null;
+  summary: string;
+  start: (decision: BulkDecision, targets: readonly BulkTarget[]) => Promise<void>;
+  /** Clears a settled summary. A run in flight keeps its progress. */
+  dismiss: () => void;
+}
+
+/** Run state for bulk answers. `NotificationsBell` owns it, not the popover
+ * content: closing the bell unmounts the content, and a run must keep its
+ * progress and summary, and block a second run, until it settles. */
+export function useBulkAnswerRun(onSettled: () => void): BulkAnswerRun {
   const resolveDecision = useResolveDecisions();
   const resolveWorkflow = useResolveWorkflowApprovals();
-  const [pending, setPending] = useState<{ decision: BulkDecision; targets: BulkTarget[]; skipped: SkippedItem[] } | null>(null);
-  const [progress, setProgress] = useState<{ decision: BulkDecision; settled: number; total: number } | null>(null);
+  const [progress, setProgress] = useState<BulkAnswerRun["progress"]>(null);
   const [summary, setSummary] = useState("");
-  const status = useRef<HTMLParagraphElement>(null);
-  /** Set on confirm: the dialog then hands focus to the status line. */
-  const started = useRef(false);
   /** True from confirm until the last answer settles. A ref, so a second
    * click before the next render cannot start a second run. */
   const inFlight = useRef(false);
-  const live = planBulkAnswers(workflows, decisions, me.data?.id);
 
   function answer(target: BulkTarget, decision: BulkDecision) {
     return target.kind === "decision"
@@ -52,12 +44,9 @@ export function NeedsActionHeader({ pendingCount, partialCount, workflows, decis
       : resolveWorkflow.mutateAsync({ runId: target.runId, nodeId: target.nodeId, body: workflowRequest(target, decision) });
   }
 
-  async function run() {
-    if (!pending || inFlight.current) return;
-    const { decision, targets } = pending;
-    started.current = true;
+  async function start(decision: BulkDecision, targets: readonly BulkTarget[]) {
+    if (inFlight.current) return;
     inFlight.current = true;
-    setPending(null);
     setSummary("");
     setProgress({ decision, settled: 0, total: targets.length });
     const outcome = await answerAll(targets, target => answer(target, decision),
@@ -66,6 +55,38 @@ export function NeedsActionHeader({ pendingCount, partialCount, workflows, decis
     setProgress(null);
     setSummary(summarizeBulkAnswers(decision, outcome));
     onSettled();
+  }
+
+  return { progress, summary, start, dismiss: () => { if (!inFlight.current) setSummary(""); } };
+}
+
+/** The bell's "Needs action" heading with "Approve all" and "Deny all". A
+ * bulk answer covers only the items listed now (`partial` when the bell
+ * shows one page of several), and the dialog names each one before it runs. */
+export function NeedsActionHeader({ pendingCount, partialCount, workflows, decisions, partial, run }: {
+  pendingCount: number;
+  /** The first decision page is not the whole inbox: the badge shows "+". */
+  partialCount: boolean;
+  workflows: readonly WorkflowActionRequiredItem[];
+  decisions: ListNotificationDecisionsResponse["items"];
+  /** The bell lists one decision page of several, so a bulk answer covers
+   * only the listed items. */
+  partial: boolean;
+  run: BulkAnswerRun;
+}) {
+  const me = useMe();
+  const [pending, setPending] = useState<{ decision: BulkDecision; targets: BulkTarget[]; skipped: SkippedItem[] } | null>(null);
+  const status = useRef<HTMLParagraphElement>(null);
+  /** Set on confirm: the dialog then hands focus to the status line. */
+  const started = useRef(false);
+  const live = planBulkAnswers(workflows, decisions, me.data?.id);
+  const { progress, summary } = run;
+
+  function confirm() {
+    if (!pending) return;
+    started.current = true;
+    setPending(null);
+    void run.start(pending.decision, pending.targets);
   }
 
   const running = progress !== null;
@@ -108,7 +129,7 @@ export function NeedsActionHeader({ pendingCount, partialCount, workflows, decis
         title={`${verb.label} ${pending?.targets.length ?? 0} ${requests(pending?.targets.length ?? 0)}?`}
         description={description}
         confirmLabel={`${verb.label} ${pending?.targets.length ?? 0}`}
-        onConfirm={() => void run()}
+        onConfirm={confirm}
         confirmVariant={pending?.decision === "approve" ? "primary" : "danger"}
         onCloseAutoFocus={event => {
           // After a confirmed run, focus the progress line: the buttons are
