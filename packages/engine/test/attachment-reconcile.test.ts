@@ -1287,3 +1287,90 @@ describe("SandboxAttachment wake folding", () => {
     expect(att.state).toBe("ready");
   });
 });
+
+describe("SandboxAttachment keeps /scratch across a record gap (fix wave 3)", () => {
+  it("H-A: a preserve-all adopt whose provider record lacks scratch keeps the applied scratch, and a matching YAML does not replace", async () => {
+    const adopted = new VirtualSandbox("sb-existing");
+    await adopted.writeFile("/etc/valet/applied.json", JSON.stringify({
+      image: "img:v1", specHash: "h1", steps: {}, resources: { cpu: 2, scratch: "800Gi" },
+    }));
+    // An annotation written before scratch was recorded carries cpu/memory only.
+    const provider = new RecordingProvider({ adopt: adopted, resourceOverrides: { cpu: 2 } });
+    const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: [] });
+
+    const att = await reachReady(provider, fake);
+    expect((await readAppliedState(adopted))?.resources).toEqual({ cpu: 2, scratch: "800Gi" });
+
+    fake.spec = { image: "img:v1", specHash: "h2", resources: { cpu: 2, scratch: "800Gi" }, steps: [] };
+    await att.reconcile();
+
+    expect(att.current()).toBe(adopted);
+    expect(provider.createImages).toHaveLength(1);
+    await att.destroy();
+  });
+
+  it("H-A: a preserved scratch is kept in the create options for a later re-create", async () => {
+    const adopted = new VirtualSandbox("sb-existing");
+    const provider = new RecordingProvider({ adopt: adopted, resourceOverrides: { scratch: "800Gi" } });
+    const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: [] });
+
+    const att = await reachReady(provider, fake, { resources: { cpu: 1 } });
+    att.reportFailure(att.currentEpoch(), new Error("pod gone"));
+    await att.ensureReady({ timeoutMs: 5000 });
+
+    expect(provider.createResources[1]?.scratch).toBe("800Gi");
+    await att.destroy();
+  });
+
+  it("H-B: a container restart that lost applied.json re-runs steps in place and keeps the pod", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new RecordingProvider();
+      let stepCalls = 0;
+      const fake = new FakeSpecProvider({
+        image: "img:v1", specHash: "h1", resources: { scratch: "100Gi" },
+        steps: [step("s1", "sh1", async () => { stepCalls++; })],
+      });
+      const att = await reachReady(provider, fake);
+      const sb = provider.sandboxes[0];
+      if (!sb || att.current() !== sb) throw new Error("expected the first sandbox ready");
+      expect(stepCalls).toBe(1);
+
+      // The restart wiped the container rootfs. The pod and /scratch stay.
+      await sb.rm("/etc/valet/applied.json");
+      await vi.advanceTimersByTimeAsync(OBSERVE_TTL_MS + 1);
+      await att.reconcile();
+
+      expect(att.current()).toBe(sb);
+      expect(provider.createImages).toHaveLength(1);
+      expect(provider.destroyCalls).toEqual([]);
+      expect(stepCalls).toBe(2);
+      expect((await readAppliedState(sb))?.resources).toEqual({ scratch: "100Gi" });
+      await att.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("H-B: after the restart, a real scratch change still replaces the pod", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new RecordingProvider();
+      const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", resources: { scratch: "100Gi" }, steps: [] });
+      const att = await reachReady(provider, fake);
+      const sb = provider.sandboxes[0];
+      if (!sb) throw new Error("expected a virtual sandbox");
+      await sb.rm("/etc/valet/applied.json");
+      await vi.advanceTimersByTimeAsync(OBSERVE_TTL_MS + 1);
+      fake.spec = { image: "img:v1", specHash: "h2", resources: { scratch: "200Gi" }, steps: [] };
+
+      await att.reconcile();
+
+      expect(provider.createImages).toHaveLength(2);
+      expect(provider.createResources[1]?.scratch).toBe("200Gi");
+      await att.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

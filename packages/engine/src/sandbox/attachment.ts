@@ -75,6 +75,26 @@ function effectiveResources(
   return result;
 }
 
+/** True when the preserve mask names every drift field, in any order. */
+function preservesEveryField(fields: readonly SandboxResourceField[] | undefined): boolean {
+  return fields !== undefined && DRIFT_FIELDS.every((field) => fields.includes(field));
+}
+
+/**
+ * The provider's override record, with scratch taken from the applied file
+ * when the record has none. A record written before scratch was recorded
+ * lacks it, while the applied file knows the scratch the pod booted with.
+ * A pod replace always deletes the file, so a scratch in it is current.
+ */
+function withAppliedScratch(
+  record: Sandbox["resourceOverrides"],
+  applied: AppliedState | null,
+): Sandbox["resourceOverrides"] {
+  if (record === undefined || record === null || record.scratch !== undefined) return record;
+  const scratch = applied?.resources?.scratch;
+  return scratch === undefined ? record : { ...record, scratch };
+}
+
 function createResourceOpinion(resources: SandboxCreateOpts["resources"]): AppliedState["resources"] {
   if (!resources) return undefined;
   const result: NonNullable<AppliedState["resources"]> = {};
@@ -675,6 +695,13 @@ export class SandboxAttachment {
     this.createOpts = { ...this.createOpts, resources: next };
   }
 
+  private persistScratch(scratch: string | undefined): void {
+    const next = { ...this.createOpts.resources };
+    delete next.scratch;
+    if (scratch !== undefined) next.scratch = scratch;
+    this.createOpts = { ...this.createOpts, resources: next };
+  }
+
   private persistReplacementSpec(desired: DesiredSandboxSpec, applied: AppliedState): void {
     this.createOpts = {
       ...this.createOpts,
@@ -689,6 +716,19 @@ export class SandboxAttachment {
       return cache.applied;
     }
     const read = await readAppliedState(sandbox);
+    // A container restart (an OOM kill, for one) deletes the rootfs file
+    // but keeps the pod and its /scratch. The epoch is unchanged, so the
+    // pod still runs the resources this attachment recorded. Keep them, so
+    // the restart does not read as resource drift and replace the pod.
+    // Steps are not kept: the rootfs lost them, so they run again. This
+    // carry is expected in normal operation, hence a log, not an alert.
+    const carried = read === null && cache?.epoch === epoch ? cache.applied.resources : undefined;
+    if (carried !== undefined) {
+      console.warn(
+        `SandboxAttachment: sandbox ${sandbox.id} lost its applied-state file within one epoch (container restart?); ` +
+          "keeping the recorded resources and re-running preparation steps",
+      );
+    }
     // Use the file's image when non-empty (it may know better than createOpts
     // after an api restart, which rebuilds createOpts from the host default).
     // Fall back to createOpts.image when the file is absent or has an empty
@@ -696,7 +736,7 @@ export class SandboxAttachment {
     const resolvedImage = (read?.image || undefined) ?? this.createOpts.image ?? "";
     const applied: AppliedState = read
       ? { ...read, image: resolvedImage }
-      : { image: resolvedImage, specHash: "", steps: {} };
+      : { image: resolvedImage, specHash: "", steps: {}, ...(carried !== undefined ? { resources: carried } : {}) };
     this.observation = { applied, at: Date.now(), epoch };
     return applied;
   }
@@ -1107,7 +1147,7 @@ export class SandboxAttachment {
           // restart. Null forbids a fallback to stale rebuilt create options.
           const fallbackResources = sandbox.resourceOverrides === null
             ? undefined
-            : sandbox.resourceOverrides ?? applied?.resources ??
+            : withAppliedScratch(sandbox.resourceOverrides, applied) ?? applied?.resources ??
               (sandbox.adopted ? undefined : createResourceOpinion(this.createOpts.resources));
           let resources = effectiveResources(desired, fallbackResources);
           if (resources === undefined && applied === null && sandbox.resourceOverrides !== null) {
@@ -1116,10 +1156,15 @@ export class SandboxAttachment {
               resources = { ...(cpu !== undefined ? { cpu } : {}), ...(memory !== undefined ? { memory } : {}) };
             }
           }
-          if (sandbox.resourceOverrides === null && preserveResourceFieldsOnAdopt?.length === 3) {
+          if (sandbox.resourceOverrides === null && preservesEveryField(preserveResourceFieldsOnAdopt)) {
             // Discard rejected options now so a later no-opinion replacement
             // cannot revive them. Keep any recovered applied opinion instead.
             this.persistResources(resources ?? {});
+          }
+          if (preserveResourceFieldsOnAdopt?.includes("scratch")) {
+            // Keep the live scratch for a later re-create, so a recovery
+            // does not drop /scratch and then replace again to restore it.
+            this.persistScratch(resources?.scratch);
           }
           if (leased && sandbox.adopted) {
             // The kept pod runs its live resources. Record those, not the

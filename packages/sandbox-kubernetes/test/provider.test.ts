@@ -767,6 +767,19 @@ describe("create() resource adoption and pod rollout", () => {
     expect(objectsApi.calls.slice(0, 4)).toEqual(["get", "create", "get", "replace"]);
   });
 
+  it("an authoritative create records scratch in the override annotation (fix wave 3, H-A)", async () => {
+    const { provider, objectsApi } = setup(prior);
+
+    const sandbox = await provider.create({
+      workspace: "/ws/resources", resources: { cpu: 2, memory: "4Gi", scratch: "100Gi" },
+      preserveResourceFieldsOnAdopt: [],
+    });
+
+    const recorded: unknown = JSON.parse(objectsApi.cr.metadata.annotations?.["valet.dev/resource-overrides"] ?? "null");
+    expect(recorded).toEqual({ cpu: 2, memory: "4Gi", scratch: "100Gi" });
+    expect(sandbox.resourceOverrides).toEqual({ cpu: 2, memory: "4Gi", scratch: "100Gi" });
+  });
+
   it("partial authority applies CPU and preserves live memory on adoption", async () => {
     const { provider, objectsApi, deletedPods } = setup(prior, { cpu: 1, memory: "2Gi" });
 

@@ -110,7 +110,7 @@ import {
   deleteSandbox,
   EVICTION_PROTECT_ANNOTATION,
   getSandbox,
-  readResourceOverridesAnnotation,
+  resourceOverridesWithLiveScratch,
   imageFingerprint,
   LEASED_LABEL,
   listSandboxMetadata,
@@ -993,7 +993,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       await this.waitReady(name);
       const kept = this.sandboxFromCr(name, previous);
       kept.adopted = true;
-      kept.resourceOverrides = readResourceOverridesAnnotation(previous);
+      kept.resourceOverrides = resourceOverridesWithLiveScratch(previous);
       return kept;
     }
 
@@ -1002,13 +1002,17 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     // An adopted CR can hold prior work and stays for those failures.
     // Post-grace capacity failures are different: the provider retained the
     // CR across earlier attempts, and no attempt returned a sandbox handle.
-    const { cpu, memory } = opts.resources ?? {};
+    const { cpu, memory, scratch } = opts.resources ?? {};
     let applyResult: Awaited<ReturnType<typeof applySandbox>>;
     try {
       applyResult = await applySandbox(this.deps.objectsApi, this.cfg, manifest, {
         preserveResourcesOnAdopt: opts.preserveResourcesOnAdopt,
         preserveResourceFieldsOnAdopt: opts.preserveResourceFieldsOnAdopt,
-        resourceOverrides: { ...(cpu !== undefined ? { cpu } : {}), ...(memory !== undefined ? { memory } : {}) },
+        resourceOverrides: {
+          ...(cpu !== undefined ? { cpu } : {}),
+          ...(memory !== undefined ? { memory } : {}),
+          ...(scratch !== undefined ? { scratch } : {}),
+        },
         readResourceOverrides: opts.readResourceOverrides
           ? async () => {
             const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name);
