@@ -1,7 +1,8 @@
 // Helpers the wakeups seam and the WakeWatcher share (spec 2026-10-08,
-// fix wave 2): which errors mean the sandbox is gone, and the detached job
-// log cap. Also the human surface over background work (fix wave 2, group
-// C): the listing the routes show, and the human cancel of spec B6.
+// fix wave 2): which errors mean the sandbox is gone. The detached job log
+// cap lives in providers/sandbox-backend.ts. Also the human surface over
+// background work (fix wave 2, group C): the listing the routes show, and
+// the human cancel of spec B6.
 
 import {
   recordWakeupSignalLost,
@@ -10,6 +11,7 @@ import {
   SandboxSupersededError,
   SandboxUnavailableError,
 } from "@valet/engine";
+import { tail, WATCH_BUFFER_BYTES } from "./wake-watcher-decide.js";
 import type {
   Lease,
   PromptContent,
@@ -261,10 +263,16 @@ function wakeupCancelledSignal(row: Wakeup, opts: HumanCancelOptions, nowMs: num
   }
   attributes.durationSeconds = String(Math.round((nowMs - row.createdAt) / 1000));
   const lastOutput = row.logTail ? `\n\nLast output:\n${row.logTail}` : "";
+  // A watch's buffered lines reached no watch.event. Up to 64 KiB of them
+  // follow the last output (fix wave 4, data N2).
+  const unsent =
+    row.kind === "watch" && row.watchBuffer
+      ? `\n\nLines the watch read but did not send yet:\n${tail(row.watchBuffer, WATCH_BUFFER_BYTES)}`
+      : "";
   return {
     kind: "signal",
     signalType: `${row.kind}.exited`,
-    body: `A person stopped this ${row.kind} at ${at}. ${opts.note ?? DEFAULT_CANCEL_NOTE}${lastOutput}`,
+    body: `A person stopped this ${row.kind} at ${at}. ${opts.note ?? DEFAULT_CANCEL_NOTE}${lastOutput}${unsent}`,
     attributes,
     tagName: "wakeup",
   };
