@@ -206,3 +206,21 @@ Verified deliveries also update installation rows, content sources, and pull req
 The shared App client stays in `packages/api/src/services/github-app.ts`. Token resolution, the installation sweep, and boot webhook sync use its JWT minting, installation discovery, and webhook URL sync.
 Installation rows stay in `github_installations`, and App credentials stay in `credentials`. TKAI-378 decides plugin-owned storage.
 The single-App caveat remains. If two organizations store an App in one deployment, webhook deliveries go to the first credential row.
+
+## Linear connection binding
+
+The Linear plugin declares GET, PUT, and DELETE `/connection` as organization-admin routes.
+The canonical URL is `/api/plugins/linear/http/connection`.
+PUT accepts at most 1 MiB. GET and DELETE accept no body.
+
+The plugin exports a handler factory and the `LinearConnectionCapability` type.
+The factory receives only a capability and endpoint configuration: the public URL and the Linear API origin.
+The capability has `status`, `save`, `legacyWebhooks`, and `disconnect`. No method takes an organization or user ID.
+
+`packages/api/src/plugins/http-linear-connection.ts` binds the three route IDs through the host bindings described above.
+After the mount checks identity, membership, administration, and the body limit, the binding calls `createLinearConnectionCapability`.
+That capability binds the existing tables to the caller's organization and user. The binding then runs the factory's handler for the route ID.
+The plugin's declared handlers never receive the capability. They answer 501 on a host without the bindings.
+
+`save` keeps the organization row lock, the one-workspace conflict check, and the shared connection ID on both credential rows.
+`disconnect` deletes the app configuration first, then the installation, then the token.

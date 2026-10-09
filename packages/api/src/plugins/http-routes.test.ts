@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 import type { AppEnv } from '../env.js';
 import { eq } from 'drizzle-orm';
-import type { PluginHttpRequest, PluginHttpCaller, ValetPlugin } from '@valet/engine';
+import type { PluginHttpRequest, PluginHttpCaller, PluginHttpRoute, ValetPlugin } from '@valet/engine';
 import { bootTestApi, type TestApi } from '../integration/_setup.js';
 import type { CreateTeamResponse, CreateTeamApiKeyResponse } from '../wire/types.js';
 import { orgMembers } from '../schema/index.js';
@@ -47,12 +47,9 @@ describe('plugin route mounting', () => {
 
   it('does not treat inherited object properties as legacy route aliases', async () => {
     const app = new Hono<AppEnv>();
-    mountPluginHttpRoutes(app, [{ name: 'linear', version: '1', httpRoutes: [{
+    mountPluginHttpRoutes(app, [{ ...linearPlugin, httpRoutes: [...(linearPlugin.httpRoutes ?? []), {
       id: 'constructor', method: 'GET', path: '/status', auth: 'public', maxBodyBytes: 0,
       handle: () => new Response('ok'),
-    }, {
-      id: 'events', method: 'POST', path: '/events', auth: 'signature', maxBodyBytes: 64, acknowledgementStatus: 200,
-      installationKey: () => null, verify: () => ({ accepted: true, events: [] }),
     }] }], 'public');
     expect(await (await app.request('/plugins/linear/http/status')).text()).toBe('ok');
     expect((await app.request('/webhooks/events/linear')).status).toBe(404);
@@ -157,6 +154,33 @@ describe('plugin route mounting', () => {
     await api.providers.db.delete(orgMembers).where(eq(orgMembers.userId, 'local-user'));
     expect((await fetch(`${url}/items/one`, request)).status).toBe(403);
     expect(handle).not.toHaveBeenCalled();
+  });
+});
+
+describe('host-bound routes', () => {
+  const declared = { id: 'connection-save', method: 'PUT', path: '/connection', auth: 'org-admin', maxBodyBytes: 0 } as const;
+
+  it('refuses a bound route ID with a different method, path, or authentication', () => {
+    const changed: PluginHttpRoute[] = [
+      { ...declared, method: 'POST', handle: () => new Response() },
+      { ...declared, path: '/other', handle: () => new Response() },
+      { ...declared, auth: 'user', handle: () => new Response() },
+    ];
+    for (const route of changed) {
+      expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'linear', version: '1', httpRoutes: [route] }], 'authenticated'))
+        .toThrow('Declare linear route connection-save as PUT /connection with org-admin authentication.');
+    }
+  });
+
+  it('serves bound routes from the host and never calls the declared handler', async () => {
+    const declaredHandler = vi.fn(() => new Response('plugin'));
+    // Every bound route ID stays declared, so the mount accepts the plugin.
+    const httpRoutes = linearPlugin.httpRoutes?.map((route) => (route.auth === 'signature' ? route : { ...route, handle: declaredHandler }));
+    api = await bootTestApi({ plugins: [{ ...linearPlugin, httpRoutes }] });
+    const response = await fetch(`${api.baseUrl}/api/plugins/linear/http/connection`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ configured: false, connected: false, ready: false });
+    expect(declaredHandler).not.toHaveBeenCalled();
   });
 });
 

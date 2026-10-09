@@ -53,39 +53,59 @@ export interface LinearClientConfig {
   clientSecret: string;
 }
 
+async function linearGraphql(
+  apiUrl: string, accessToken: string, label: string, query: string, variables?: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  let res: Response;
+  try {
+    res = await fetch(`${apiUrl}/graphql`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+  } catch (err) {
+    throw new Error(`Linear ${label}: request failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!res.ok) throw new Error(`Linear ${label}: API returned ${res.status}`);
+
+  let payload: unknown;
+  try {
+    payload = await res.json();
+  } catch {
+    throw new Error(`Linear ${label}: malformed (non-JSON) response`);
+  }
+  if (!isRecord(payload)) throw new Error(`Linear ${label}: response has no data`);
+  const result = payload;
+  if (Array.isArray(result.errors) && result.errors.length > 0) {
+    throw new Error(`Linear ${label}: GraphQL errors: ${JSON.stringify(result.errors)}`);
+  }
+  if (!isRecord(result.data)) throw new Error(`Linear ${label}: response has no data`);
+  return result.data;
+}
+
+/** Removes a webhook that an older connection created with `webhookCreate`.
+ * It needs only the organization token, not the app's client secret. */
+export async function deleteLinearWebhook(
+  accessToken: string, webhookId: string, env: LinearClientEnvironment = {},
+): Promise<void> {
+  const data = await linearGraphql(
+    resolveLinearApiUrl(env),
+    accessToken,
+    "webhookDelete",
+    "mutation($id: String!) { webhookDelete(id: $id) { success } }",
+    { id: webhookId },
+  );
+  const result = data.webhookDelete;
+  if (!isRecord(result) || result.success !== true) {
+    throw new Error(`Linear webhookDelete: mutation did not succeed: ${JSON.stringify(data)}`);
+  }
+}
+
 export function createLinearService(config: LinearClientConfig, env: LinearClientEnvironment = {}): LinearService {
   const apiUrl = resolveLinearApiUrl(env);
-
-  async function graphql(accessToken: string, label: string, query: string, variables?: Record<string, unknown>): Promise<Record<string, unknown>> {
-    let res: Response;
-    try {
-      res = await fetch(`${apiUrl}/graphql`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({ query, variables }),
-      });
-    } catch (err) {
-      throw new Error(`Linear ${label}: request failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    if (!res.ok) throw new Error(`Linear ${label}: API returned ${res.status}`);
-
-    let payload: unknown;
-    try {
-      payload = await res.json();
-    } catch {
-      throw new Error(`Linear ${label}: malformed (non-JSON) response`);
-    }
-    if (!isRecord(payload)) throw new Error(`Linear ${label}: response has no data`);
-    const result = payload;
-    if (Array.isArray(result.errors) && result.errors.length > 0) {
-      throw new Error(`Linear ${label}: GraphQL errors: ${JSON.stringify(result.errors)}`);
-    }
-    if (!isRecord(result.data)) throw new Error(`Linear ${label}: response has no data`);
-    return result.data;
-  }
 
   async function token(label: string, fields: Record<string, string>): Promise<Record<string, unknown>> {
     const form = new URLSearchParams({ ...fields, client_id: config.clientId, client_secret: config.clientSecret });
@@ -125,7 +145,7 @@ export function createLinearService(config: LinearClientConfig, env: LinearClien
     },
 
     async fetchWorkspace(accessToken) {
-      const data = await graphql(accessToken, "fetchWorkspace", "{ organization { id name } viewer { id } }");
+      const data = await linearGraphql(apiUrl, accessToken, "fetchWorkspace", "{ organization { id name } viewer { id } }");
       const organization = data.organization;
       if (!isRecord(organization) || typeof organization.id !== "string" || typeof organization.name !== "string") {
         throw new Error("Linear fetchWorkspace: malformed organization in response");
@@ -134,16 +154,7 @@ export function createLinearService(config: LinearClientConfig, env: LinearClien
     },
 
     async deleteWebhook(accessToken, webhookId) {
-      const data = await graphql(
-        accessToken,
-        "webhookDelete",
-        "mutation($id: String!) { webhookDelete(id: $id) { success } }",
-        { id: webhookId },
-      );
-      const result = data.webhookDelete;
-      if (!isRecord(result) || result.success !== true) {
-        throw new Error(`Linear webhookDelete: mutation did not succeed: ${JSON.stringify(data)}`);
-      }
+      await deleteLinearWebhook(accessToken, webhookId, env);
     },
   };
 }

@@ -89,6 +89,20 @@ describe("loadNodeModulesPlugins", () => {
     }]);
   });
 
+  it("quarantines a replacement that widens the authentication of a host-bound route", async () => {
+    await writePackage(root, "linear-replacement", {
+      entryContent: `export default { name: "linear", version: "1", httpRoutes: [{
+        id: "connection-save", method: "PUT", path: "/connection", auth: "user", maxBodyBytes: 1024,
+        handle: () => new Response("plugin"),
+      }] };`,
+    });
+    const result = await loadNodeModulesPlugins({ searchPaths: [root] });
+    expect(result.plugins).toEqual([]);
+    expect(result.quarantined).toEqual([{
+      pkg: "linear-replacement", reason: "Declare linear route connection-save as PUT /connection with org-admin authentication.",
+    }]);
+  });
+
   it("skips a denylisted package even though it is otherwise valid", async () => {
     await writePackage(root, "good-plugin", {
       entryContent: `export default { name: "good-plugin", version: "1.0.0" };\n`,

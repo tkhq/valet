@@ -1,6 +1,7 @@
 import type { PluginHttpCaller, PluginHttpRequest, PluginHttpRoute } from '@valet/engine';
 import type { Providers } from '../providers/types.js';
 import { githubHttpBindings } from './http-github.js';
+import { linearHttpBindings } from './http-linear-connection.js';
 import { slackHttpBindings } from './http-slack.js';
 
 export interface PluginHttpBindingContext {
@@ -30,6 +31,7 @@ export interface PluginHttpBinding {
 /** Host-owned bindings by plugin name, then route ID. Only bundled plugins appear here. */
 export const httpRouteBindings: Readonly<Record<string, Readonly<Record<string, PluginHttpBinding>>>> = {
   github: githubHttpBindings,
+  linear: linearHttpBindings,
   slack: slackHttpBindings,
 };
 

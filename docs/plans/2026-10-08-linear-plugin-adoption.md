@@ -41,9 +41,9 @@ Files: create `packages/plugin-linear/src/service.ts`; export it from `packages/
 
 ## Task 2: Bind a narrow connection adapter
 
-Files: create `packages/plugin-linear/src/connection.ts` and `packages/api/src/plugins/http-linear-connection.ts`; update `packages/api/src/plugins/http-routes.ts`.
+Files: create `packages/plugin-linear/src/connection.ts` and `packages/api/src/plugins/http-linear-connection.ts`; update `packages/api/src/plugins/http-bindings.ts`.
 
-The route-binding seam still needs implementation review before Task 2. The plugin exports the connection capability types and a route factory. The capability contains these methods, with no caller IDs in their arguments:
+The plugin exports the connection capability types and a route factory. The capability contains these methods, with no caller IDs in their arguments:
 
 ```ts
 interface LinearConnectionCapability {
@@ -57,13 +57,13 @@ interface LinearConnectionCapability {
 `LinearConnectionStatus` contains the existing configured, clientId, connected, webhookConfigured, ready, workspaceName, and reason fields.
 `LinearConnectionSave` contains clientId, clientSecret, webhookSecret, accessToken, expiresAt, workspaceId, and workspaceName.
 
-- [ ] Add canonical-route tests alongside each existing legacy connection test.
-- [ ] Add a request with `orgId: "foreign"`; assert the installation and both credentials belong to the authenticated organization.
-- [ ] Implement `save` with the existing organization row lock, workspace conflict check, credential replacement, shared connection ID, and installation upsert.
-- [ ] Implement `disconnect` with the existing app-config-first ordering, installation removal, and token deletion.
-- [ ] Bind the adapter only after the generic route mount completes identity, membership, admin, and request-size checks.
-- [ ] Use a host-owned binder for the three bundled Linear route IDs. The plugin route factory receives only the scoped capability and endpoint configuration.
-- [ ] Add a binding test that verifies unauthorized requests cannot invoke the adapter.
+- [x] Add canonical-route tests alongside each existing legacy connection test.
+- [x] Add a request with `orgId: "foreign"`; assert the installation and both credentials belong to the authenticated organization.
+- [x] Implement `save` with the existing organization row lock, workspace conflict check, credential replacement, shared connection ID, and installation upsert.
+- [x] Implement `disconnect` with the existing app-config-first ordering, installation removal, and token deletion.
+- [x] Bind the adapter only after the generic route mount completes identity, membership, admin, and request-size checks.
+- [x] Register the three bundled Linear route IDs in the host binding table that Slack and GitHub use. Each binding pins the declared method, path, and authentication. The plugin route factory receives only the scoped capability and endpoint configuration.
+- [x] Add a binding test that verifies unauthorized requests cannot invoke the adapter.
 
 ## Task 3: Move connection behavior and remove manual mounting
 
