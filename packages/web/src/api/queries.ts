@@ -9,6 +9,7 @@ import { isAppAssistantThread } from "~/lib/thread-default";
 import {
   useInfiniteQuery,
   isCancelledError,
+  skipToken,
   type InfiniteData,
   useMutation,
   useQuery,
@@ -40,6 +41,8 @@ import type {
   PatchThreadResponse,
   ThreadShareMode,
   PauseSessionResponse,
+  ListSessionWakeupsResponse,
+  CancelSessionWakeupResponse,
   PutRatingResponse,
   RatingValue,
   ResolveDecisionRequest,
@@ -68,6 +71,7 @@ export const qk = {
       : (["sessions", id, "messages"] as const),
   decisions: (id: string) => ["sessions", id, "decisions"] as const,
   ratings: (id: string) => ["sessions", id, "ratings"] as const,
+  wakeups: (id: string) => ["sessions", id, "wakeups"] as const,
   notifications: () => ["notifications"] as const,
   notificationPreferences: () => ["notifications", "preferences"] as const,
   identityLinks: () => ["identityLinks"] as const,
@@ -259,6 +263,49 @@ export function useReplaceSandbox(sessionId: string) {
     mutationFn: () => api.replaceSandbox(sessionId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+    },
+  });
+}
+
+/** GET /:id/wakeups: the session's open background work (wakeups and
+ * leases). Nothing pushes changes over the stream, so the header badge
+ * polls once a minute while it is mounted. */
+export function useSessionWakeups(sessionId: string | undefined) {
+  return useQuery<ListSessionWakeupsResponse>({
+    queryKey: qk.wakeups(sessionId ?? ""),
+    queryFn: sessionId ? () => api.listSessionWakeups(sessionId) : skipToken,
+    refetchInterval: 60_000,
+  });
+}
+
+/** POST /:id/wakeups/:wakeupId/cancel: a person stops one wakeup or hold.
+ * Optimistic: the row leaves the list at once and comes back on error. */
+export function useCancelSessionWakeup(sessionId: string) {
+  const qc = useQueryClient();
+  const key = qk.wakeups(sessionId);
+  return useMutation<
+    CancelSessionWakeupResponse,
+    Error,
+    string,
+    { previous?: ListSessionWakeupsResponse }
+  >({
+    mutationFn: (wakeupId) => api.cancelSessionWakeup(sessionId, wakeupId),
+    onMutate: async (wakeupId) => {
+      await qc.cancelQueries({ queryKey: key });
+      const previous = qc.getQueryData<ListSessionWakeupsResponse>(key);
+      if (previous) {
+        qc.setQueryData<ListSessionWakeupsResponse>(key, {
+          wakeups: previous.wakeups.filter((w) => w.id !== wakeupId),
+          leases: previous.leases.filter((l) => l.id !== wakeupId && l.ownerId !== wakeupId),
+        });
+      }
+      return { previous };
+    },
+    onError: (_err, _wakeupId, context) => {
+      if (context?.previous) qc.setQueryData(key, context.previous);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: key });
     },
   });
 }
