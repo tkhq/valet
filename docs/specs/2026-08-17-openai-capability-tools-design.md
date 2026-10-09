@@ -80,7 +80,7 @@ The plugin has no `responses_model` parameter or Responses code path.
 
 Native generation uses the existing provider's host-side auth. It does not resolve another credential or start another model.
 Untrusted external-sender turns do not receive the native hosted tool.
-Requests preserve existing sampling, timeout, and abort settings.
+Requests preserve existing sampling, timeout, and abort settings. The bridge preserves final results from providers that end without terminal events.
 A request-time 400, 403, 404, or 422 error naming image-tool access or availability triggers one request without the hosted tool.
 That turn uses plugin generation, including catalog and pinned tools. Authentication, quota, unrelated model errors, and stream errors do not trigger this fallback.
 The next turn can try native generation again.

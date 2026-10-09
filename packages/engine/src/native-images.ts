@@ -220,7 +220,11 @@ export class NativeImageBridge {
               } else deliver(message, event.type === "error");
             } else output.push(event);
           }
-          if (!retryWithoutImages) break;
+          if (!retryWithoutImages) {
+            // Some providers end with a final result without emitting a terminal event.
+            output.end(await current.upstream.result());
+            break;
+          }
           native = false;
           current = request(false);
         }

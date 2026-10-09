@@ -1,3 +1,5 @@
+import { createAssistantMessageEventStream, getApiProvider, registerApiProvider, unregisterApiProviders } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
 import { randomBytes } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import sharp from "sharp";
@@ -318,4 +320,25 @@ it("propagates a replay-tool abort instead of treating it as a preview failure",
     await expect(new NativeImageBridge().tool().execute({ path, image_id: "img_saved" }, { sandbox, signal: controller.signal } as ToolContext)).rejects.toMatchObject({ name: "AbortError" });
     expect(Buffer.from(await sandbox.readBinary(path)).equals(png)).toBe(true);
   } finally { preview.mockRestore(); }
+});
+
+it("preserves a provider final result without a terminal stream event", async () => {
+  const original = getApiProvider("anthropic-messages");
+  const final = fauxAssistantMessage("workflow completed");
+  const stream = () => {
+    const events = createAssistantMessageEventStream();
+    events.end(final);
+    return events;
+  };
+  registerApiProvider({ api: "anthropic-messages", stream, streamSimple: stream }, "image-end-result-test");
+  try {
+    const chatModel = bundledModel("anthropic", "claude-haiku-4-5");
+    if (!chatModel) throw new Error("missing chat model");
+    const wrapped = new NativeImageBridge().stream(chatModel, { messages: [] }, {}, new VirtualSandbox("end-result"));
+    for await (const event of wrapped) expect(event).toBeUndefined();
+    expect(await wrapped.result()).toEqual(final);
+  } finally {
+    unregisterApiProviders("image-end-result-test");
+    if (original) registerApiProvider(original);
+  }
 });
