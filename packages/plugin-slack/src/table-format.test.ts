@@ -25,6 +25,20 @@ describe('tablesToLabeledRows', () => {
     expect(tablesToLabeledRows(text, 150_000).text).toBe(text);
   });
 
+  it('does not start a table from a blockquote, list, or heading line', () => {
+    for (const text of ['> a | b\n|---|---|\n| 1 | 2 |', '- a | b\n|-|-|\n| 1 | 2 |', '# a | b\n|-|-|\n| 1 | 2 |']) {
+      expect(tablesToLabeledRows(text, 150_000).text).toBe(text);
+    }
+  });
+
+  it.each([
+    ['a list item', '- owner\n| a | b |\n|-|-|\n| 1 | 2 |', '- owner\n**a**: 1\n**b**: 2\n'],
+    ['a blockquote', '> note\n| a | b |\n|-|-|\n| 1 | 2 |', '> note\n**a**: 1\n**b**: 2\n'],
+  ])('converts a table that continues %s', (_name, text, expected) => {
+    // mrkdwn sections render no pipe tables, so every table becomes rows.
+    expect(tablesToLabeledRows(text, 150_000).text).toBe(expected);
+  });
+
   it('keeps headings and quotes after a table outside its rows', () => {
     const text = '| a | b |\n|-|-|\n| 1 | 2 |\n# Next | section\n> quoted | text';
     expect(tablesToLabeledRows(text, 150_000).text).toBe('**a**: 1\n**b**: 2\n\n# Next | section\n> quoted | text');

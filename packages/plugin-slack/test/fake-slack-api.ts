@@ -17,6 +17,10 @@ export interface FakeSlackApi {
   setFileInfo(fileId: string, file: Record<string, unknown>): void;
   /** Make the next call to `method` return `{ ok: false, error }` once. */
   failNext(method: string, error?: string, status?: 200 | 500): void;
+  /** Make every call to `method` return `{ ok: false, error }` when `rule`
+   * returns an error for its body, the way Slack validates each request.
+   * Pass no rule to remove it. */
+  rejectWhen(method: string, rule?: (body: Record<string, unknown>) => string | undefined): void;
   /** Streams the fake has seen, keyed by ts. Models Slack's own state machine
    * so a test can prove the transport never appends to a closed stream. */
   streams: Map<string, FakeStream>;
@@ -43,6 +47,7 @@ export async function startFakeSlackApi(): Promise<FakeSlackApi> {
   const files = new Map<string, Uint8Array>();
   const fileInfos = new Map<string, Record<string, unknown>>();
   const pendingFailures = new Map<string, { error: string; status: 200 | 500 }>();
+  const rules = new Map<string, (body: Record<string, unknown>) => string | undefined>();
   const streams = new Map<string, FakeStream>();
   let members: Array<Record<string, unknown>> = [];
   let channels: Array<Record<string, unknown>> = [];
@@ -87,6 +92,8 @@ export async function startFakeSlackApi(): Promise<FakeSlackApi> {
       pendingFailures.delete(method);
       return c.json({ ok: false, error: failure.error }, failure.status);
     }
+    const rejected = rules.get(method)?.(body);
+    if (rejected !== undefined) return c.json({ ok: false, error: rejected });
 
     switch (method) {
       case "chat.postMessage":
@@ -188,6 +195,10 @@ export async function startFakeSlackApi(): Promise<FakeSlackApi> {
     setFileInfo: (fileId, file) => fileInfos.set(fileId, file),
     failNext: (method, error = "simulated_failure", status = 200) =>
       pendingFailures.set(method, { error, status }),
+    rejectWhen: (method, rule) => {
+      if (rule) rules.set(method, rule);
+      else rules.delete(method);
+    },
     streams,
     stopStreamAsUser: (ts) => {
       const stream = streams.get(ts);
