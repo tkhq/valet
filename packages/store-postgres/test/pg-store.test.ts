@@ -62,6 +62,28 @@ describe("PgSessionStore (PGlite)", () => {
   runSessionStoreContract("PgSessionStore (PGlite)", { factory });
   runSubmissionLifecycleContract("PgSessionStore (PGlite)", { factory });
 
+  it("skips an unreadable wakeup or lease row instead of failing the whole read (fix wave 2, M5)", async () => {
+    const store = await factory();
+    const base = {
+      sessionId: "s", threadId: "t", status: "running" as const, reason: "r", command: "c", execId: "job-1",
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1,
+    };
+    await store.createWakeup({ ...base, id: "wk_good", kind: "process" });
+    await store.createWakeup({ ...base, id: "wk_bad", kind: "process", createdAt: 0 });
+    await db.query(`UPDATE engine_wakeups SET cause = 'bogus' WHERE id = 'wk_bad'`);
+    await store.createLease({ id: "ls_good", sessionId: "s", ownerKind: "hold", reason: "r", createdAt: 1, deadlineAt: 9 });
+    await store.createLease({ id: "ls_bad", sessionId: "s", ownerKind: "hold", reason: "r", createdAt: 0, deadlineAt: 9 });
+    await db.query(`UPDATE engine_leases SET owner_kind = 'bogus' WHERE id = 'ls_bad'`);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect((await store.listDueWakeups(10, 10)).map((w) => w.id)).toEqual(["wk_good"]);
+      expect((await store.listAllActiveLeases()).map((l) => l.id)).toEqual(["ls_good"]);
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("wk_bad"), expect.anything());
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it("bounds recent history in the database after excluding compactions", async () => {
     const store = await factory();
     await store.saveSession({ id: "bounded", userId: "u1", orgId: "o1", owner: { type: "user", id: "u1" }, workspace: "/", purpose: "interactive", status: "running", createdAt: 1, updatedAt: 1 });
