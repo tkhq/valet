@@ -287,6 +287,30 @@ describe("workflow sandbox input dispatch", () => {
     }
   });
 
+  it("removes LocalSandbox contents and staging before the age marker", async () => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
+    const workspace = await mkdtemp(`${process.cwd()}/workflow-sweep-local-`);
+    const sandbox = new LocalSandbox("sweep-local", workspace);
+    const old = `${workspace}/.valet/workflow-inputs/old`;
+    const staging = `${workspace}/.valet/workflow-staging/old`;
+    try {
+      await sandbox.mkdir(`${old}/nested`);
+      await sandbox.mkdir(staging);
+      await sandbox.writeFile(`${old}/.created-at`, "1");
+      await sandbox.writeFile(`${old}/nested/data.txt`, "input");
+      await sandbox.writeFile(`${old}/.hidden`, "hidden input");
+      await sandbox.writeFile(`${staging}/partial.txt`, "partial");
+      const exec = vi.spyOn(sandbox, "exec");
+      await sweepAgentInputFiles(sandbox, workspace, "current", h.db,
+        { orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id });
+      await expect(sandbox.stat(old)).rejects.toThrow("ENOENT");
+      await expect(sandbox.stat(staging)).rejects.toThrow("ENOENT");
+      const removal = exec.mock.calls.find(([command]) => command.startsWith("find "));
+      expect(removal?.[1]).toEqual({ timeout: 1000, maxOutputBytes: 1024 });
+      expect(removal?.[0]).toContain(`&& rm -rf -- '${staging}' && rm -f -- '${old}/.created-at' && rmdir -- '${old}'`);
+    } finally { await rm(workspace, { recursive: true, force: true }); }
+  });
+
   it("preserves a user directory that looks like old staging across attempts", async () => {
     const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
     await h.createRun("user-path");
@@ -543,21 +567,78 @@ describe("workflow sandbox input dispatch", () => {
     await sandbox.mkdir(old);
     await sandbox.writeFile(`${old}/.created-at`, "1");
     const original = sandbox.exec.bind(sandbox);
-    const exec = vi.spyOn(sandbox, "exec").mockImplementation((command, opts) => command.startsWith("rm -rf")
+    const exec = vi.spyOn(sandbox, "exec").mockImplementation((command, opts) => command.startsWith("find ")
       ? Promise.resolve({ stdout: "", stderr: "", exitCode: 124, timedOut: true }) : original(command, opts));
     const skipped = vi.spyOn(inputMetrics, "recordWorkflowInputSweepSkipped");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       await writeAgentInputFiles(session, "/workspace", "Read", { dispatchId: "workflow:remove-timeout:build",
         files: [{ path: "data.txt", content: "input" }] }, h.db);
-      expect(exec).toHaveBeenCalledWith(expect.stringContaining("rm -rf --"), { timeout: expect.any(Number), maxOutputBytes: 1024 });
+      expect(exec).toHaveBeenCalledWith(expect.stringContaining("rm -rf --"), { timeout: 1000, maxOutputBytes: 1024 });
       expect(skipped).toHaveBeenCalledWith("removal");
       expect(await sandbox.readFile(`${inputRoot("remove-timeout")}/data.txt`)).toBe("input");
       expect((await sandbox.stat(old)).isDirectory).toBe(true);
     } finally { skipped.mockRestore(); warn.mockRestore(); }
   });
 
-  it("rotates past invalid markers when the budget stops a small batch early", async () => {
+  it("does not start removal after a status lookup crosses the budget", async () => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
+    await h.createRun("status-budget");
+    const session = await ensureWorkflowSession(h.opts, "wf:status-budget:build");
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    const old = "/workspace/.valet/workflow-inputs/old";
+    await sandbox.mkdir(old);
+    await sandbox.writeFile(`${old}/.created-at`, "1");
+    const exec = vi.spyOn(sandbox, "exec");
+    // deadline, loop guard, marker timeout, then post-lookup removal guard.
+    const clock = vi.spyOn(Date, "now").mockReturnValueOnce(1).mockReturnValueOnce(2).mockReturnValueOnce(3).mockReturnValue(6_000);
+    const skipped = vi.spyOn(inputMetrics, "recordWorkflowInputSweepSkipped");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db,
+        { orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id }, AGENT_INPUT_RETENTION_MS + 10_000);
+      expect(exec.mock.calls.some(([command]) => command.startsWith("find "))).toBe(false);
+      expect(skipped).toHaveBeenCalledWith("budget");
+      expect(await sandbox.readFile(`${old}/.created-at`)).toBe("1");
+    } finally { clock.mockRestore(); skipped.mockRestore(); warn.mockRestore(); }
+  });
+
+  it("keeps the marker after interrupted content removal and completes on retry", async () => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
+    await h.createRun("marker-last");
+    const session = await ensureWorkflowSession(h.opts, "wf:marker-last:build");
+    const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
+    const old = "/workspace/.valet/workflow-inputs/old";
+    const staging = "/workspace/.valet/workflow-staging/old";
+    await sandbox.mkdir(old);
+    await sandbox.mkdir(staging);
+    await sandbox.writeFile(`${old}/.created-at`, "1");
+    await sandbox.writeFile(`${old}/a.txt`, "a");
+    await sandbox.writeFile(`${old}/b.txt`, "b");
+    const original = sandbox.exec.bind(sandbox);
+    let interrupted = false;
+    const exec = vi.spyOn(sandbox, "exec").mockImplementation(async (command, opts) => {
+      if (command.startsWith("find ") && !interrupted) {
+        interrupted = true;
+        await sandbox.rm(`${old}/a.txt`);
+        return { stdout: "", stderr: "", exitCode: 124, timedOut: true };
+      }
+      return original(command, opts);
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const scope = { orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id };
+      await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db, scope);
+      expect(await sandbox.readFile(`${old}/.created-at`)).toBe("1");
+      expect(await sandbox.readFile(`${old}/b.txt`)).toBe("b");
+      await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db, scope);
+      await expect(sandbox.stat(old)).rejects.toThrow("ENOENT");
+      await expect(sandbox.stat(staging)).rejects.toThrow("ENOENT");
+      expect(exec).toHaveBeenCalledWith(expect.stringContaining("find "), { timeout: 1000, maxOutputBytes: 1024 });
+    } finally { warn.mockRestore(); }
+  });
+
+  it("random starts eventually reach expired inputs with a fresh handle on every sweep", async () => {
     const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
     await h.createRun("rotate-budget");
     const session = await ensureWorkflowSession(h.opts, "wf:rotate-budget:build");
@@ -576,14 +657,19 @@ describe("workflow sandbox input dispatch", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const scope = { orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id };
-      await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db, scope, AGENT_INPUT_RETENTION_MS + 10_000);
-      expect((await sandbox.stat(`${root}/z-old`)).isDirectory).toBe(true);
-      await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db, scope, AGENT_INPUT_RETENTION_MS + 10_000);
+      const starts = [0, 0.2, 0.99];
+      for (const start of starts) {
+        // New object identity shares the same backing filesystem, like adoption.
+        const freshHandle = new Proxy(sandbox, {});
+        await sweepAgentInputFiles(freshHandle, "/workspace", "current", h.db, scope,
+          AGENT_INPUT_RETENTION_MS + 10_000, () => start);
+        if (start !== 0.99) expect((await sandbox.stat(`${root}/z-old`)).isDirectory).toBe(true);
+      }
       await expect(sandbox.stat(`${root}/z-old`)).rejects.toThrow("ENOENT");
     } finally { now.mockRestore(); warn.mockRestore(); }
   });
 
-  it("sweeps old sibling runs in bounded rotating batches and retains fresh/current inputs", async () => {
+  it("sweeps old sibling runs in bounded random-start batches and retains fresh/current inputs", async () => {
     const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
     await h.createRun("sweep-run");
     const session = await ensureWorkflowSession(h.opts, "wf:sweep-run:build");
@@ -604,7 +690,7 @@ describe("workflow sandbox input dispatch", () => {
     }
     const rm = vi.spyOn(sandbox, "rm");
     await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db, { orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id }, now);
-    expect(rm.mock.calls.length).toBeLessThanOrEqual(2 * AGENT_INPUT_SWEEP_LIMIT);
+    expect(rm.mock.calls.length).toBeLessThanOrEqual(3 * AGENT_INPUT_SWEEP_LIMIT);
     expect((await sandbox.readdir(root)).filter(name => name.startsWith("old-"))).not.toHaveLength(0);
     await sweepAgentInputFiles(sandbox, "/workspace", "current", h.db, { orgId: LOCAL_ORG.id, ownerType: "user", ownerId: LOCAL_USER.id }, now);
     expect((await sandbox.readdir(root)).sort()).toEqual(["current", "fresh", "live-old"]);

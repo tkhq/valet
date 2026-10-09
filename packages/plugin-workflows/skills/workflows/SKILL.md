@@ -109,7 +109,10 @@ Known user-owned definitions receive the shared-sandbox error at save/patch time
 Cleanup never wakes a sandbox. Skips emit a warning and `valet.workflow.inputs.cleanup_skipped`.
 Residual sweeps protect only live runs with the same org and owner. Foreign runs count as absent.
 Team executions can outlive a run, so residual sweeping remains. Only `wf:` sandboxes are reclaimed with their run.
-Sweeps cap listings at 64 KiB and marker reads at 32 bytes. They check a five-second budget before each candidate. Removal execs have a timeout of at most one second.
+Sweeps cap listings at 64 KiB and marker reads at 32 bytes. They check a five-second budget before each candidate. If the budget expires during a status lookup, removal does not start. Started removals have a fixed one-second timeout.
+Removal deletes contents and staging before the age marker. Interrupted cleanup remains sweepable.
+Each sweep starts at a random candidate and wraps around. Repeated sweeps eventually cover all candidates, with no fixed coverage deadline.
+The sweep stores no cursor, so handle recreation and API restarts cannot reset progress.
 The `valet.workflow.inputs.sweep_skipped` counter records listing, marker, budget, and removal skips, including removal timeouts. Invalid metadata remains untouched.
 Sweeps apply a seven-day floor to absent or settled runs. Without another file write, residual inputs persist until sandbox destruction.
 `llm` and `tool` nodes do not accept `files`.

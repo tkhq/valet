@@ -13,7 +13,6 @@ export const UNVERIFIED_INPUT_AUDIENCE_ERROR = "Workflow input audience could no
 /** Crash windows can miss settlement cleanup. Bound that residual retention. */
 export const AGENT_INPUT_RETENTION_MS = 7 * 24 * 60 * 60_000;
 export const AGENT_INPUT_SWEEP_LIMIT = 100;
-const sweepOffsets = new WeakMap<Sandbox, number>();
 const INPUT_ROOT = ".valet/workflow-inputs";
 const STAGING_ROOT = ".valet/workflow-staging";
 const SWEEP_BUDGET_MS = 5_000;
@@ -147,8 +146,8 @@ export async function writeAgentInputFiles(
   return withManifest(prompt, inputs);
 }
 
-/** Bounded, rotating scan. Crash leftovers are expected; failures remain visible. */
-export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, currentRun: string, db: AppDb, scope: InputSandboxScope, now = Date.now()): Promise<void> {
+/** Bounded scan with a stateless random start. Crash leftovers are expected; failures remain visible. */
+export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, currentRun: string, db: AppDb, scope: InputSandboxScope, now = Date.now(), random = Math.random): Promise<void> {
   const root = posix.resolve(workspace, INPUT_ROOT);
   try {
     const deadline = Date.now() + SWEEP_BUDGET_MS;
@@ -159,7 +158,7 @@ export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, 
     }
     const names = listing.stdout.split("\n").filter(name => /^[A-Za-z0-9_-]+$/.test(name) && name !== currentRun).sort();
     if (!names.length) return;
-    const offset = (sweepOffsets.get(sandbox) ?? 0) % names.length;
+    const offset = Math.floor(random() * names.length);
     const count = Math.min(names.length, AGENT_INPUT_SWEEP_LIMIT);
     for (let i = 0; i < count; i++) {
       if (Date.now() >= deadline) {
@@ -167,9 +166,6 @@ export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, 
         console.warn("workflow input sweep stopped at its time budget");
         break;
       }
-      // Advance only for visited candidates. A budget stop must rotate even
-      // when the candidate count is smaller than the batch limit.
-      sweepOffsets.set(sandbox, offset + i + 1);
       const directory = posix.join(root, names[(offset + i) % names.length]);
       try {
         // Never buffer sandbox-controlled marker contents in the API.
@@ -183,9 +179,17 @@ export async function sweepAgentInputFiles(sandbox: Sandbox, workspace: string, 
         if (Number.isFinite(createdAt) && createdAt > 0 && createdAt < now - AGENT_INPUT_RETENTION_MS) {
           const status = await scopedInputRunStatus(db, scope, names[(offset + i) % names.length]);
           if (!status || status === "settled") {
+            if (Date.now() >= deadline) {
+              recordWorkflowInputSweepSkipped("budget");
+              console.warn("workflow input sweep stopped before removal at its time budget");
+              break;
+            }
             const staging = posix.resolve(workspace, STAGING_ROOT, names[(offset + i) % names.length]);
-            const removed = await sandbox.exec(`rm -rf -- ${quote(directory)} ${quote(staging)}`,
-              { timeout: Math.min(1_000, Math.max(1, deadline - Date.now())), maxOutputBytes: 1024 });
+            // Keep the marker until all contents and staging are removed, so
+            // an interrupted cleanup remains eligible on the next sweep.
+            const command = `find ${quote(directory)} -mindepth 1 -maxdepth 1 ! -name '${AGE_MARKER}' -exec rm -rf -- {} +` +
+              ` && rm -rf -- ${quote(staging)} && rm -f -- ${quote(posix.join(directory, AGE_MARKER))} && rmdir -- ${quote(directory)}`;
+            const removed = await sandbox.exec(command, { timeout: 1_000, maxOutputBytes: 1024 });
             if (removed.timedOut || removed.exitCode !== 0) {
               recordWorkflowInputSweepSkipped("removal");
               throw new Error(`Workflow input sweep removal failed (exit ${removed.exitCode}${removed.timedOut ? ", timed out" : ""})`);

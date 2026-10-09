@@ -262,10 +262,23 @@ async function runVirtualCommand(
     };
   }
 
-  const remove = trimmed.match(/^rm -rf -- '([^']*)' '([^']*)'$/);
+  const findRemove = trimmed.match(/^find '([^']*)' -mindepth 1 -maxdepth 1 ! -name '([^']*)' -exec rm -rf -- \{\} \+$/);
+  if (findRemove) {
+    for (const name of await sb.readdir(findRemove[1])) {
+      if (name !== findRemove[2]) await sb.rm(`${findRemove[1]}/${name}`, { recursive: true });
+    }
+    return ok("");
+  }
+
+  const remove = trimmed.match(/^rm -(rf|f) -- '([^']*)'$/);
   if (remove) {
-    await sb.rm(remove[1], { recursive: true });
-    await sb.rm(remove[2], { recursive: true });
+    await sb.rm(remove[2], { recursive: remove[1] === "rf" });
+    return ok("");
+  }
+  const removeDirectory = trimmed.match(/^rmdir -- '([^']*)'$/);
+  if (removeDirectory) {
+    if ((await sb.readdir(removeDirectory[1])).length) return { stdout: "", stderr: "Directory not empty", exitCode: 1 };
+    await sb.rm(removeDirectory[1]);
     return ok("");
   }
 

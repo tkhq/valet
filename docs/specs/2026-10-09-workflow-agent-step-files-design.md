@@ -89,7 +89,9 @@ Skipped cleanup emits a warning and the `valet.workflow.inputs.cleanup_skipped` 
 Cleanup does not wake residual sandboxes. Inputs persist until a later write-time sweep or sandbox destruction.
 If the sandbox never receives files again, no write-time sweep runs. Retention is not a seven-day deletion deadline.
 Crash windows can miss cleanup. Each new input write scans up to `AGENT_INPUT_SWEEP_LIMIT` (100) sibling run directories.
-The scan rotates across siblings. Its cursor advances only for visited candidates, including when the budget stops a small batch. It excludes the current run and preserves live siblings in the sandbox's organization and owner scope.
+Each sweep chooses a random start in the sorted candidate list and wraps around. It stores no cursor state.
+Repeated sweeps eventually cover all candidates probabilistically, even after handle recreation, restart, or replica changes. There is no fixed coverage deadline.
+The scan excludes the current run and preserves live siblings in the sandbox's organization and owner scope.
 The status lookup joins the run's definition and filters organization, owner type, and owner ID in the database.
 A foreign run counts as absent, even when its ID matches a sandbox directory. Its existence or state never changes retention.
 Only absent or settled runs with markers older than `AGENT_INPUT_RETENTION_MS` (7 days) can be removed.
@@ -99,7 +101,10 @@ The workflow reclaimer destroys only `wf:` sandboxes. It does not destroy team e
 The sweep lists names through one exec with a 64 KiB output cap and a one-second timeout. Truncated listings are skipped.
 Each marker read uses `head -c 32` with a 32-byte output cap and a one-second timeout. Invalid markers are preserved.
 The sweep checks a five-second budget before each candidate. Already-started status lookups can finish after that budget.
-Each candidate removal uses one capped `rm -rf` exec for its input and staging trees, with a timeout of at most one second.
+If a status lookup finishes after the budget, the sweep stops without starting removal.
+Each started removal has a fixed one-second exec timeout, not the remaining sweep budget.
+Removal deletes run contents and staging first. It deletes `.created-at` last, then removes the empty run directory.
+An interrupted content or staging removal preserves the marker for a later sweep.
 At most 100 candidates, 100 marker reads, 100 status lookups, and 100 removal execs occur per sweep.
 Shell commands contain quoted paths only. No unbounded marker contents enter the API process. Duplicate admission never triggers sweeping.
 The `valet.workflow.inputs.sweep_skipped` counter records listing, marker, budget, and removal skips, including removal timeouts. Warnings name the failed operation.
