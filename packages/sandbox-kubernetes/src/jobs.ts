@@ -104,11 +104,16 @@ function jobFifoPath(execId: string): string {
   return `${JOBS_DIR}/${execId}.fifo`;
 }
 
+/** Kickoff exit status when the exec id already has job files. */
+const KICKOFF_ID_IN_USE_EXIT = 17;
+
 /**
  * Builds the kickoff script. Structure (see module docblock for why the
  * grouping matters):
  *
- *   mkdir -p JOBS_DIR && : > OUT &&
+ *   mkdir -p JOBS_DIR || exit 1
+ *   if OUT, PID, EXIT, or DEAD exists; then exit 17; fi
+ *   : > OUT || exit 1
  *   ( setsid sh -c 'echo $$ > PID; exec sh -c '"<inner, quoted>"'' \
  *       > OUT 2>&1 < /dev/null
  *     echo $? > EXIT
@@ -240,8 +245,17 @@ export function jobKickoffCommand(execId: string, innerCommand: string, maxOutpu
   // command longer than 60s. dockerd (local Rancher/moby) does NOT wait for the
   // drain, which is why this stayed invisible in dev. Nulling the group's stdio
   // lets the kickoff return as soon as `echo started` prints.
+  // Job files live as long as the pod. Refuse an id that already has any of
+  // them, before `: > OUT` can truncate a live job's log (fix wave 2, B1).
+  const existing = [outFile, pidFile, exitFile, jobDeadPath(execId)].map((f) => `[ -e ${shQuote(f)} ]`).join(" || ");
+  const refuse =
+    `if ${existing}; then echo ${shQuote(`job id ${execId} already has files in ${JOBS_DIR}`)} >&2; ` +
+    `exit ${KICKOFF_ID_IN_USE_EXIT}; fi; `;
+  // Each setup step is its own statement. In `a && b && ( job ) &`, the `&`
+  // backgrounds the whole and-list, so the refusal's `exit` would end only
+  // that background shell and the kickoff would report success.
   return (
-    `mkdir -p ${shQuote(JOBS_DIR)} && : > ${shQuote(outFile)} && ` +
+    `mkdir -p ${shQuote(JOBS_DIR)} || exit 1; ${refuse}: > ${shQuote(outFile)} || exit 1; ` +
     `( ${wrapped} ) </dev/null >/dev/null 2>&1 & ` +
     `${waitForPid}; ` +
     `echo started`
@@ -332,8 +346,11 @@ export function pollCommand(execId: string, offset: number, opts: JobPollOpts = 
 export function cancelCommand(execId: string): string {
   const pidFile = jobPidPath(execId);
   const exitFile = jobExitPath(execId);
+  const deadFile = jobDeadPath(execId);
+  // A job with `.exit` or `.dead` already ended, and its pid may now belong
+  // to an unrelated group. Skip the kill then (fix wave 2, L9).
   return (
-    `if [ -f ${shQuote(pidFile)} ]; then ` +
+    `if [ -f ${shQuote(pidFile)} ] && [ ! -f ${shQuote(exitFile)} ] && [ ! -f ${shQuote(deadFile)} ]; then ` +
     `pid=$(cat ${shQuote(pidFile)}); ` +
     `kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true; ` +
     `fi; ` +
@@ -359,6 +376,11 @@ export async function execJobInPod(
   // the whole kickoff (and thus the detached job) as the dockerd workload
   // user unless the caller asked for root.
   const result = await execInPod(deps, podName, kickoff, opts?.privileged ? { privileged: true } : undefined);
+  if (result.exitCode === KICKOFF_ID_IN_USE_EXIT) {
+    throw new Error(
+      `execJob kickoff refused: job id ${execId} already has files in ${JOBS_DIR}, so it did not start. Retry the command; a retry gets a new job id.`,
+    );
+  }
   if (result.exitCode !== 0) {
     throw new Error(`execJob kickoff failed (exit ${result.exitCode}): ${result.stderr.trim() || "no diagnostic output"}. Check the sandbox pod status before retrying.`);
   }

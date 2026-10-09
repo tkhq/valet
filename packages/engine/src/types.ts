@@ -1226,8 +1226,14 @@ export interface ExecOpts {
    * effect — every exec keeps the container's default user.
    */
   privileged?: boolean;
-  /** Uncapped output, not tracked as a pending job; the caller owns its lifetime. */
+  /** Not tracked as a pending job; the caller owns its lifetime. */
   detached?: boolean;
+  /**
+   * `execJob` only: the exec id to use, from `newExecId()`. The wakeups seam
+   * writes its rows with this id before the job starts. A provider that
+   * gets none generates its own.
+   */
+  execId?: string;
 }
 
 export interface ExecResult {

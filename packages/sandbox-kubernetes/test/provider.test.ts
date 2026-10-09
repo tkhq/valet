@@ -6,6 +6,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Engine, InMemoryEventStream, InMemorySessionStore, SandboxAttachment, SandboxStartupError, VirtualSandboxProvider } from "@valet/engine";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
+import { newExecId } from "@valet/engine/wakeups-ids";
 import { assertSafeExecId, looksSignalKilled, KubernetesSandbox, KubernetesSandboxProvider } from "../src/provider.js";
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { HOME_LAYOUT_VERSION } from "../src/home-persistence.js";
@@ -68,6 +69,11 @@ describe("assertSafeExecId", () => {
     expect(() => assertSafeExecId("job-1")).not.toThrow();
     expect(() => assertSafeExecId("job-42")).not.toThrow();
     expect(() => assertSafeExecId("job-999999")).not.toThrow();
+    // Fix wave 2, B1: ids are unique per job, not a per-handle counter.
+    expect(() => assertSafeExecId("job-lq3x8k2a-a1b2c3d4")).not.toThrow();
+    expect(() => assertSafeExecId(newExecId())).not.toThrow();
+    expect(() => assertSafeExecId("job-Lq3x-a1")).toThrow();
+    expect(() => assertSafeExecId("job-a--b")).toThrow();
   });
 
   it("rejects ids containing a path separator (no /tmp traversal)", () => {
@@ -2061,6 +2067,18 @@ describe("job pod identity", () => {
     replace();
     await expect(sandbox.pollJob(execId, 0)).rejects.toThrow("the job's backing pod was recreated or removed");
     expect(exec).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives two handles on one pod distinct exec ids, and honors a requested id (fix wave 2, B1)", async () => {
+    const first = setup(false).sandbox;
+    const second = setup(false).sandbox;
+    const a = await first.execJob("one");
+    const b = await second.execJob("two");
+    expect(a.execId).not.toBe(b.execId);
+    expect(a.execId).toMatch(/^job-[0-9a-z]+-[0-9a-z]{8}$/);
+    const requested = newExecId();
+    await expect(setup(false).sandbox.execJob("three", { execId: requested })).resolves.toEqual({ execId: requested });
+    await expect(setup(false).sandbox.execJob("four", { execId: "../etc" })).rejects.toThrow("invalid execId");
   });
 
   it("releases the kickoff identity after a terminal poll", async () => {

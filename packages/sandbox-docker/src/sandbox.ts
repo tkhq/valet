@@ -20,6 +20,7 @@ import type {
   SandboxCommandChannel,
   SandboxCommandChannelOptions,
 } from "@valet/engine";
+import { EXEC_ID_PATTERN, newExecId } from "@valet/engine/wakeups-ids";
 import { openDockerCommandChannel } from './command-channel.js';
 import { DockerInventory, dockerOwnerLabels, parseDockerInspection, validateDockerOwner, validateDockerBrowserOwner, type DockerContainerOwner, type DockerInventoryRecord } from "./inventory.js";
 import { buildBrowserCompanionArgs } from "./browser-companion.js";
@@ -492,7 +493,6 @@ export class DockerSandbox implements Sandbox {
   private readonly browserWorkload: boolean;
   private readonly onDestroy?: () => Promise<void>;
   private jobs = new Map<string, DockerJobState>();
-  private nextJobId = 1;
 
   constructor(id: string, opts: DockerSandboxOptions) {
     this.id = id;
@@ -738,7 +738,12 @@ export class DockerSandbox implements Sandbox {
    */
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
     const containerId = this.execContainer(opts);
-    const execId = `job-${this.nextJobId++}`;
+    // Unique per job, not per handle: a later handle on the same container
+    // must never reuse a live job's id (fix wave 2, B1).
+    const execId = opts?.execId ?? newExecId();
+    if (!EXEC_ID_PATTERN.test(execId) || this.jobs.has(execId)) {
+      throw new Error(`execJob refused: job id ${JSON.stringify(execId)} is invalid or already in use. Retry the command; a retry gets a new job id.`);
+    }
     const limit = opts?.maxOutputBytes;
 
     const child = spawn("docker", this.execArgs(command, opts), {
