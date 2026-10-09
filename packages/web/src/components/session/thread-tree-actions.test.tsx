@@ -338,7 +338,7 @@ describe("ThreadTree: background work blocks archive and replace (fix wave 3, H1
   const conflict: BackgroundWorkConflict = {
     error: 'This thread has background work running: "full proof build" (process).',
     code: "background_work",
-    work: [{ id: "wk_1", kind: "process", reason: "full proof build", threadId: "thread-1", createdAt: Date.now() }],
+    work: [{ id: "wk_1", kind: "process", status: "running", reason: "full proof build", threadId: "thread-1", createdAt: Date.now() }],
     hiddenCount: 0,
     forceAllowed: true,
   };
