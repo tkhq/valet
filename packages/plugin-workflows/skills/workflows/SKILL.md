@@ -88,7 +88,8 @@ Tell the agent to read those files. Do not ask it to retype the data.
 
 Keys are literal, normalized relative paths. Use `/` between segments of letters, digits, dots, underscores, and hyphens.
 Do not use templates, dot segments, empty segments, absolute paths, or backslashes in keys.
-Do not define a file and its child path (`a` and `a/b`).
+Each segment can contain at most 255 bytes. The whole relative path can contain at most 1,024 bytes.
+Do not define case-insensitive duplicates (`Data.json` and `data.json`) or case-folded file/child collisions (`Data` and `data/a`).
 Values are template strings. A single expression preserves its type: strings are UTF-8 text; other values become pretty-printed JSON.
 Missing paths follow `policy.onUnresolvedPath`: `empty` uses the existing empty/null rendering; `fail` stops the node before dispatch.
 A foreach body can use `item` and `index` in values. Each iteration has its own directory.

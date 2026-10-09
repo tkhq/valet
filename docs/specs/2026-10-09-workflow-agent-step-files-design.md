@@ -25,7 +25,10 @@ Use `session` steps for agent work that needs input files. Each step has its own
 
 Keys are literal normalized relative paths. Each slash-separated segment contains only ASCII letters, digits, dots, underscores, or hyphens.
 Absolute paths, dot segments, empty segments, backslashes, NUL, and templated keys fail validation.
-Accepted keys are already normalized, so alternative normalized spellings cannot collide. Runtime dispatch also rejects duplicate paths. A file key cannot be a slash-segment prefix of another key (`a` and `a/b`).
+Each segment is at most 255 bytes. The whole relative path is at most 1,024 bytes, leaving room for the host's input-directory prefix.
+Save-time, render-time, and rendered-dispatch validation enforce these limits with path-specific errors.
+Accepted keys are already normalized, so alternative normalized spellings cannot collide. Runtime dispatch also rejects duplicate paths.
+Collision checks fold ASCII case, rejecting `Data.json` and `data.json`, including case-folded file/directory prefixes (`Data` and `data/a`).
 The map accepts at most 100 files. Other node types reject `files`.
 
 Values must be template strings. The existing template engine preserves single-expression types and uses the node's normal context.
@@ -43,7 +46,7 @@ The host calls `attachment.ensureReady` before prompt admission. This provisions
 It creates parent directories and writes bytes through `Sandbox.writeBinary`, the same primitive used by file uploads.
 No shell command carries file contents as command text. Docker transports base64 bytes through stdin.
 The host stages files and age markers in `.valet/workflow-staging/<run>/<node>/<iteration>/attempt-<n>/` on the same filesystem.
-A random token distinguishes each staged file. Atomic rename moves the staged file into its destination.
+Each staging filename is a fixed-length UUID followed by `.tmp`. It never includes the user basename. Atomic rename moves the staged file into its destination.
 Before writing, the host recursively removes only lower-attempt staging directories. It never scans user input paths for staging names.
 A stale driver cannot delete equal or newer staging. Node, run, and residual cleanup remove both input and staging trees.
 

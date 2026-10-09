@@ -33,6 +33,42 @@ describe('agent input files', () => {
     expect(validateAgentFiles({ 'a': '', 'ab/c': '' })).toEqual([]);
   });
 
+  it('accepts 255-byte segments and rejects 256 bytes at save, render, and dispatch', () => {
+    const accepted = 'a'.repeat(255);
+    const rejected = 'a'.repeat(256);
+    expect(validateWorkflowDefinition(definition({ ...session, files: { [accepted]: 'data' } }))).toEqual({ ok: true });
+    expect(renderAgentFiles({ [accepted]: 'data' }, {}, {})).toEqual([{ path: accepted, content: 'data' }]);
+    expect(() => validateRenderedAgentFiles([{ path: accepted, content: 'data' }])).not.toThrow();
+    expect(validateWorkflowDefinition(definition({ ...session, files: { [rejected]: 'data' } })))
+      .toMatchObject({ ok: false, errors: [expect.stringContaining('255-byte cap')] });
+    expect(() => renderAgentFiles({ [rejected]: 'data' }, {}, {})).toThrow('Shorten the segment');
+    expect(() => validateRenderedAgentFiles([{ path: rejected, content: 'data' }])).toThrow('255-byte cap');
+  });
+
+  it('caps whole relative paths at 1024 bytes at every boundary', () => {
+    const accepted = [...Array<string>(4).fill('a'.repeat(200)), 'b'.repeat(220)].join('/');
+    const rejected = `${accepted}b`;
+    expect(accepted.length).toBe(1024);
+    expect(validateAgentFiles({ [accepted]: 'data' })).toEqual([]);
+    expect(() => renderAgentFiles({ [accepted]: 'data' }, {}, {})).not.toThrow();
+    expect(() => validateRenderedAgentFiles([{ path: accepted, content: 'data' }])).not.toThrow();
+    expect(validateWorkflowDefinition(definition({ ...session, files: { [rejected]: 'data' } })))
+      .toMatchObject({ ok: false, errors: [expect.stringContaining('1024-byte relative path cap')] });
+    expect(() => renderAgentFiles({ [rejected]: 'data' }, {}, {})).toThrow('Shorten the path');
+    expect(() => validateRenderedAgentFiles([{ path: rejected, content: 'data' }])).toThrow('1024-byte');
+  });
+
+  it.each([
+    ['Data.json', 'data.json'], ['Folder/Data.json', 'folder/data.json'],
+    ['Data', 'data/nested.json'], ['data/nested.json', 'Data'],
+  ])('rejects case-folded collisions between %s and %s', (first, second) => {
+    const files = { [first]: 'a', [second]: 'b' };
+    expect(validateWorkflowDefinition(definition({ ...session, files }))).toMatchObject({ ok: false, errors: [expect.stringContaining('collide')] });
+    expect(() => renderAgentFiles(files, {}, {})).toThrow('collide');
+    expect(() => validateRenderedAgentFiles(Object.entries(files).map(([path, content]) => ({ path, content })))).toThrow('collide');
+    expect(validateAgentFiles({ 'Data': '', 'database/file.json': '' })).toEqual([]);
+  });
+
   it('rejects dispatch-only input files because settlement removes ephemeral inputs', () => {
     expect(validateWorkflowDefinition(definition({ ...session, wait: { mode: 'none' } }))).toMatchObject({ ok: false, errors: [expect.stringContaining('until_idle')] });
   });

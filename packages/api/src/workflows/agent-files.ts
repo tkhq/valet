@@ -90,7 +90,7 @@ export function logInputCleanupSkipped(sessionId: string, scope: "node" | "run",
 
 /** Only paths enter the rename command. Contents go through writeBinary/stdin. */
 async function atomicWrite(sandbox: Sandbox, path: string, bytes: Uint8Array, staging: string): Promise<void> {
-  const temporary = posix.join(staging, `${posix.basename(path)}-${randomUUID()}`);
+  const temporary = posix.join(staging, `${randomUUID()}.tmp`);
   try {
     await sandbox.writeBinary(temporary, bytes);
     const result = await sandbox.exec(`mv -f -- ${quote(temporary)} ${quote(path)}`);

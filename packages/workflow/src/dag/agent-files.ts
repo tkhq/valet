@@ -19,14 +19,29 @@ export interface RenderedAgentFile {
   content: string;
 }
 
-function validPath(path: string): boolean {
-  return path.split('/').every((segment) =>
-    /^[A-Za-z0-9._-]+$/.test(segment) && segment !== '.' && segment !== '..');
+function pathError(path: string): string | undefined {
+  const segments = path.split('/');
+  if (!segments.every(segment => /^[A-Za-z0-9._-]+$/.test(segment) && segment !== '.' && segment !== '..')) {
+    return `files path ${JSON.stringify(path)} is invalid. Use normalized relative paths with letters, digits, dots, underscores, and hyphens; omit dot segments.`;
+  }
+  const encoder = new TextEncoder();
+  if (segments.some(segment => encoder.encode(segment).byteLength > 255)) {
+    return `files path ${JSON.stringify(path)} has a segment over the 255-byte cap. Shorten the segment.`;
+  }
+  if (encoder.encode(path).byteLength > 1024) {
+    return `files path ${JSON.stringify(path)} exceeds the 1024-byte relative path cap. Shorten the path.`;
+  }
+  return undefined;
 }
 
 function pathCollision(path: string, paths: Iterable<string>): string | undefined {
+  const folded = path.toLowerCase();
   for (const other of paths) {
-    if (path.startsWith(`${other}/`) || other.startsWith(`${path}/`)) {
+    const otherFolded = other.toLowerCase();
+    if (folded === otherFolded) {
+      return `files paths ${JSON.stringify(path)} and ${JSON.stringify(other)} collide case-insensitively. Rename one file.`;
+    }
+    if (folded.startsWith(`${otherFolded}/`) || otherFolded.startsWith(`${folded}/`)) {
       return `files paths ${JSON.stringify(path)} and ${JSON.stringify(other)} collide as file and directory. Rename one file.`;
     }
   }
@@ -48,9 +63,8 @@ export function validateAgentFiles(files: unknown): string[] {
     const collision = pathCollision(path, paths);
     if (collision) errors.push(collision);
     paths.add(path);
-    if (!validPath(path)) {
-      errors.push(`files path ${JSON.stringify(path)} is invalid. Use normalized relative paths with letters, digits, dots, underscores, and hyphens; omit dot segments.`);
-    }
+    const invalid = pathError(path);
+    if (invalid) errors.push(invalid);
     if (typeof source !== 'string') {
       errors.push(`files[${JSON.stringify(path)}] must be a template string. Use a single expression to pass structured data.`);
     }
@@ -69,7 +83,9 @@ export function validateRenderedAgentFiles(files: RenderedAgentFile[]): void {
 }
 
 function checkRenderedFile(file: RenderedAgentFile, paths: Set<string>, total: number): number {
-  if (!validPath(file.path) || paths.has(file.path)) {
+  const invalid = pathError(file.path);
+  if (invalid) throw new AgentInputFileError(invalid);
+  if (paths.has(file.path)) {
     throw new AgentInputFileError(`files path ${JSON.stringify(file.path)} is invalid or duplicated. Use unique normalized relative paths.`);
   }
   const collision = pathCollision(file.path, paths);

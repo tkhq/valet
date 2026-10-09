@@ -251,6 +251,27 @@ describe("workflow sandbox input dispatch", () => {
       .toContain("Check the sandbox permissions and disk space");
   });
 
+  it("delivers a 255-byte filename on LocalSandbox with fixed-length staging names", async () => {
+    const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
+    await h.createRun("long-name");
+    const session = await ensureWorkflowSession(h.opts, "wf:long-name:build");
+    const workspace = await mkdtemp(`${process.cwd()}/workflow-long-name-`);
+    const sandbox = new LocalSandbox("long-name", workspace);
+    const ready = vi.spyOn(session.attachment, "ensureReady").mockResolvedValue({ sandbox, epoch: 0 });
+    const write = vi.spyOn(sandbox, "writeBinary");
+    try {
+      const filename = "a".repeat(255);
+      await writeAgentInputFiles(session, workspace, "Read", { dispatchId: "workflow:long-name:build",
+        files: [{ path: filename, content: "input" }] }, h.db);
+      expect(await sandbox.readFile(`${workspace}/.valet/workflow-inputs/long-name/build/0/${filename}`)).toBe("input");
+      for (const [path] of write.mock.calls) expect(path.split("/").at(-1)).toMatch(/^[0-9a-f-]{36}\.tmp$/);
+      write.mockClear();
+      await expect(writeAgentInputFiles(session, workspace, "Read", { dispatchId: "workflow:long-name:build",
+        files: [{ path: `${filename}a`, content: "input" }] }, h.db)).rejects.toThrow("255-byte cap");
+      expect(write).not.toHaveBeenCalled();
+    } finally { ready.mockRestore(); await rm(workspace, { recursive: true, force: true }); }
+  });
+
   it("preserves staging-shaped user paths and bounds large marker reads on LocalSandbox", async () => {
     const h = await setup({ id: "build", type: "session", mode: "start", prompt: "Read" });
     await h.createRun("local-path");
@@ -335,7 +356,7 @@ describe("workflow sandbox input dispatch", () => {
     const original = sandbox.writeBinary.bind(sandbox);
     let truncated = false;
     vi.spyOn(sandbox, "writeBinary").mockImplementation(async (path, bytes) => {
-      if (path.includes("data.txt") && !truncated) {
+      if (new TextDecoder().decode(bytes) === "0123456789" && !truncated) {
         truncated = true;
         await original(path, bytes.slice(0, 4));
         throw new Error("transport lost after four bytes");
@@ -362,7 +383,7 @@ describe("workflow sandbox input dispatch", () => {
     const { sandbox } = await session.attachment.ensureReady({ timeoutMs: 5_000 });
     const original = sandbox.writeBinary.bind(sandbox);
     vi.spyOn(sandbox, "writeBinary").mockImplementation(async (path, bytes) => {
-      if (path.includes("two.txt")) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      if (new TextDecoder().decode(bytes) === "two") throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
       await original(path, bytes);
     });
     expect((await h.drive("partial-failure", attempt)).outcome).toBe("failed");
@@ -742,7 +763,7 @@ describe("workflow sandbox input dispatch", () => {
     const canRename = new Promise<void>(resolve => { release = resolve; });
     vi.spyOn(sandbox, "writeBinary").mockImplementation(async (path, bytes) => {
       await original(path, bytes);
-      if (path.includes("/build/0/attempt-1/.created-at-")) {
+      if (path.includes("/build/0/attempt-1/") && /^\d+$/.test(new TextDecoder().decode(bytes))) {
         staged();
         await canRename;
       }
@@ -774,7 +795,7 @@ describe("workflow sandbox input dispatch", () => {
     const canRename = new Promise<void>(resolve => { release = resolve; });
     vi.spyOn(sandbox, "writeBinary").mockImplementation(async (path, bytes) => {
       await original(path, bytes);
-      if (path.includes(kind === "file" ? "/attempt-2/data.txt-" : "/attempt-2/.created-at-")) {
+      if (path.includes("/attempt-2/") && (kind === "file" ? new TextDecoder().decode(bytes) === "current" : /^\d+$/.test(new TextDecoder().decode(bytes)))) {
         stagedPath = path;
         staged();
         await canRename;
