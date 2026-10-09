@@ -8,11 +8,13 @@
  * the step's session id (`workflowStepSessionId`). The usage triggers then
  * project it like any other turn: `usage_entry_facts`, the hourly and daily
  * rollups, and `cost_entries` all attribute it to the run and the step. No
- * engine session or thread exists for that id, so no conversation shows it.
+ * engine session or thread exists for that id, so no conversation shows it,
+ * and the store's entry readers skip the type (`USAGE_ENTRY_TYPE`).
  */
 import { randomBytes } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type { Usage } from "@earendil-works/pi-ai/compat";
+import { USAGE_ENTRY_TYPE } from "@valet/store-postgres";
 import { workflowStepSessionId } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 
@@ -48,6 +50,6 @@ export async function recordLlmStepUsage(db: AppDb, step: {
   const now = step.now ?? Date.now();
   const sessionId = workflowStepSessionId(step.runId, step.nodeId, step.iteration);
   await db.execute(sql`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, model, usage, cost, created_at)
-    VALUES (${entryId(now)}, ${sessionId}, ${sessionId}, 'usage', ${step.model}, ${JSON.stringify(entry.usage)},
+    VALUES (${entryId(now)}, ${sessionId}, ${sessionId}, ${USAGE_ENTRY_TYPE}, ${step.model}, ${JSON.stringify(entry.usage)},
       ${entry.cost ? JSON.stringify(entry.cost) : null}, ${now})`);
 }
