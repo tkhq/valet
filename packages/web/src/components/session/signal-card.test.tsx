@@ -9,7 +9,15 @@ import { describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { Message } from "@valet/api/wire";
-import { SignalCard, childCardTitle, isLongBody, truncateBody } from "./signal-card";
+import {
+  SignalCard,
+  childCardTitle,
+  formatDurationSeconds,
+  isLongBody,
+  isWakeupSignal,
+  truncateBody,
+  wakeupOutcome,
+} from "./signal-card";
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, to, params }: { children: ReactNode; to: string; params: Record<string, string> }) =>
@@ -156,5 +164,66 @@ describe("workflow operations", () => {
     expect(container.querySelector("details")?.open).toBe(false);
     expect(screen.getByText("Workflow request")).toBeTruthy();
     expect(screen.queryByRole("link")).toBeNull();
+  });
+});
+
+describe("SignalCard: wakeup signals (fix wave 2, H5)", () => {
+  function wakeupMessage(attributes: Record<string, string>, content: string, signalType = "process.exited"): Message {
+    return baseMessage({ content, parts: [{ kind: "text", text: content }], signal: { signalType, attributes } });
+  }
+
+  it("titles the card with the reason and shows a success badge for exit 0", () => {
+    render(
+      <SignalCard
+        message={wakeupMessage(
+          { wakeupId: "wk_1", kind: "process", reason: "full proof build", cause: "exit", exitCode: "0", durationSeconds: "3840" },
+          "Build completed.",
+        )}
+      />,
+    );
+    expect(screen.getByText("full proof build")).toBeTruthy();
+    const badge = screen.getByText("exit 0");
+    expect(badge.className).toContain("success");
+    expect(screen.getByText("ran 1h 4m")).toBeTruthy();
+  });
+
+  it("shows a danger badge for a non-zero exit and for a cause other than exit", () => {
+    const { unmount } = render(
+      <SignalCard message={wakeupMessage({ wakeupId: "wk_2", reason: "tests", cause: "exit", exitCode: "137" }, "Killed")} />,
+    );
+    expect(screen.getByText("exit 137").className).toContain("danger");
+    unmount();
+    render(<SignalCard message={wakeupMessage({ wakeupId: "wk_3", reason: "proof", cause: "deadline" }, "tail")} />);
+    expect(screen.getByText("deadline").className).toContain("danger");
+  });
+
+  it("renders the log in a pre block, not as Markdown", () => {
+    const log = "# not a heading\n***\n_not italic_";
+    const { container } = render(
+      <SignalCard message={wakeupMessage({ wakeupId: "wk_4", reason: "lean build", cause: "exit", exitCode: "1" }, log)} />,
+    );
+    const pre = container.querySelector("pre");
+    expect(pre?.textContent).toBe(log);
+    expect(container.querySelector("h1")).toBeNull();
+    expect(container.querySelector("hr")).toBeNull();
+    expect(container.querySelector("em")).toBeNull();
+  });
+
+  it("keeps a non-wakeup signal on the generic envelope", () => {
+    render(<SignalCard message={baseMessage({ signal: { signalType: "slack.message", attributes: { reason: "x" } } })} />);
+    expect(screen.getByText("slack.message")).toBeTruthy();
+  });
+
+  it("classifies signals and outcomes", () => {
+    expect(isWakeupSignal({ signalType: "timer.fired", attributes: { wakeupId: "wk_1" } })).toBe(true);
+    expect(isWakeupSignal({ signalType: "lease.expired", attributes: { leaseId: "ls_1" } })).toBe(true);
+    expect(isWakeupSignal({ signalType: "process.exited" })).toBe(false);
+    expect(isWakeupSignal({ signalType: "github.push", attributes: { wakeupId: "wk_1" } })).toBe(false);
+    expect(wakeupOutcome({})).toBeNull();
+    expect(wakeupOutcome({ cause: "cancelled" })).toEqual({ label: "cancelled", failed: true });
+    expect(wakeupOutcome({ cause: "exit", exitCode: "0" })).toEqual({ label: "exit 0", failed: false });
+    expect(formatDurationSeconds("45")).toBe("45s");
+    expect(formatDurationSeconds("90000")).toBe("1d 1h");
+    expect(formatDurationSeconds("x")).toBeUndefined();
   });
 });
