@@ -191,10 +191,12 @@ function ItemList({
             <span className="tabular-nums text-muted shrink-0">
               {fmtUsd(item.costUsd)}
             </span>
-            <span className="tabular-nums text-muted shrink-0 sm:w-20 sm:text-right">
+            {/* A workflow row leads with cost per run; on a phone that and the
+                total are the whole row. */}
+            <span className={`tabular-nums text-muted shrink-0 sm:w-20 sm:text-right ${item.runs !== undefined ? "max-sm:hidden" : ""}`}>
               {fmt(item.totalTokens)} tok
             </span>
-            <span className="tabular-nums text-muted shrink-0 sm:w-14 sm:text-right">
+            <span className={`tabular-nums text-muted shrink-0 sm:w-14 sm:text-right ${item.runs !== undefined ? "max-sm:hidden" : ""}`}>
               {item.turns} turns
             </span>
           </div>

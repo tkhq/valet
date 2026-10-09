@@ -115,9 +115,10 @@ function CheckpointRow({ checkpoint, cost, number, promoted, waiting }: {
           <span className="w-5 shrink-0 text-xs text-muted tabular-nums" aria-hidden>{number}</span>
           <span className={`shrink-0 text-sm ${TEXT_COLOR[status]}`} aria-hidden>{RUN_STATUS_GLYPH[status]}</span>
           <span className="min-w-0 flex-1 break-words text-sm font-medium text-ink">{checkpoint.nodeId}</span>
-          {checkpoint.iteration > 0 && <span className="shrink-0 text-xs text-muted">Iteration {checkpoint.iteration + 1}</span>}
+          {checkpoint.iteration > 0 && <span className="shrink-0 text-xs text-muted"><span className="sm:hidden" aria-hidden>#{checkpoint.iteration + 1}</span><span className="max-sm:sr-only">Iteration {checkpoint.iteration + 1}</span></span>}
           {cost && <StepCost cost={cost} />}
-          <span className={`shrink-0 text-xs ${TEXT_COLOR[status]}`}>{denied ? "Denied" : LABEL[status]}</span>
+          {/* On a phone the glyph carries the status, so the name keeps the room. */}
+          <span className={`sr-only text-xs sm:not-sr-only sm:shrink-0 ${TEXT_COLOR[status]}`}>{denied ? "Denied" : LABEL[status]}</span>
         </summary>
         <div className="min-w-0 space-y-3 border-t border-line px-4 py-3 sm:pl-16">
           {(checkpoint.threadId || checkpoint.sessionId || checkpoint.childRunId) && (
