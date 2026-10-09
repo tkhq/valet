@@ -18,6 +18,7 @@ import {
   type SessionEntry,
   type ToolContext,
 } from "../src/index.js";
+import { askApprovalTool } from "../src/builtin-tools/index.js";
 
 // ── Fixtures ───────────────────────────────────────────────────────
 
@@ -770,5 +771,17 @@ describe("policyResolver seam: reserved extraGateActions ids", () => {
     // through the tool/command path, never an opened gate.
     expect(result.text).toMatch(/reserved/i);
     expect(result.text).toContain("policy misconfiguration");
+  });
+});
+
+describe("ask_approval gate", () => {
+  it("is not one-shot: the model describes what the approval covers", async () => {
+    let gateReq: DecisionGateRequest | undefined;
+    await askApprovalTool.execute(
+      { title: "Delete the staging database?" },
+      makeCtx({ requestDecision: async (req) => { gateReq = req; return { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() }; } }),
+    );
+    expect(gateReq?.type).toBe("approval");
+    expect(toolApprovalGateContext(gateReq?.context)?.oneShot ?? false).toBe(false);
   });
 });

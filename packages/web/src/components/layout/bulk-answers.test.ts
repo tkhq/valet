@@ -1,7 +1,7 @@
 import type { DecisionGate, ListNotificationDecisionsResponse, WorkflowActionRequiredItem, WorkflowPendingGate } from "@valet/api/wire";
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "~/api/client";
-import { answerAll, decisionRequest, planBulkAnswers, summarizeBulkAnswers, workflowRequest, type BulkTarget, type WorkflowTarget } from "./bulk-answers";
+import { answerAll, decisionRequest, planBulkAnswers, SKIP_REASON_TEXT, summarizeBulkAnswers, workflowRequest, type BulkTarget, type WorkflowTarget } from "./bulk-answers";
 
 type DecisionItem = ListNotificationDecisionsResponse["items"][number];
 
@@ -80,6 +80,24 @@ describe("planBulkAnswers", () => {
       { kind: "workflow", key: "workflow:policy", title: "Workflow policy: github.create_issue", runId: "run-policy", nodeId: "node-policy", iteration: undefined, policy: true },
     ]);
     expect(plan.skipped.map(s => [s.key, s.reason])).toEqual([["workflow:borrow", "shares_your_account"], ["workflow:lent", "waiting_on_other"]]);
+  });
+});
+
+describe("planBulkAnswers warnings", () => {
+  it("skips policy gates whose policy check failed or whose action is high risk", () => {
+    const plan = planBulkAnswers([
+      workflow("failed", { kind: "policy_gate", service: "github", action: "merge", provenance: "resolver_error" }),
+      workflow("high", { kind: "policy_gate", service: "github", action: "merge", riskLevel: "high" }),
+      workflow("critical", { kind: "policy_gate", service: "github", action: "delete_repo", riskLevel: "critical" }),
+      workflow("medium", { kind: "policy_gate", service: "github", action: "comment", riskLevel: "medium" }),
+    ], [decision("thread-failed", { provenance: { baseMode: "allow", source: "resolver_error" } })], "me");
+    expect(plan.targets.map(t => t.key)).toEqual(["workflow:medium"]);
+    expect(plan.skipped.map(s => [s.key, s.reason])).toEqual([
+      ["workflow:failed", "policy_check_failed"], ["workflow:high", "high_risk"], ["workflow:critical", "high_risk"],
+      ["decision:thread-failed", "policy_check_failed"],
+    ]);
+    expect(SKIP_REASON_TEXT.policy_check_failed).toBe("Policy check failed. Answer it on its own.");
+    expect(SKIP_REASON_TEXT.high_risk).toBe("High-risk action. Answer it on its own.");
   });
 });
 

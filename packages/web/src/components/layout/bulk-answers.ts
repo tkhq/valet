@@ -34,7 +34,7 @@ export interface DecisionTarget { kind: "decision"; key: string; title: string; 
 export interface WorkflowTarget { kind: "workflow"; key: string; title: string; context?: string; runId: string; nodeId: string; iteration?: number; policy: boolean }
 export type BulkTarget = DecisionTarget | WorkflowTarget;
 
-export type SkipReason = "needs_answer" | "needs_credential" | "waiting_on_other" | "shares_your_account" | "not_one_shot" | "not_pending";
+export type SkipReason = "needs_answer" | "needs_credential" | "waiting_on_other" | "shares_your_account" | "not_one_shot" | "policy_check_failed" | "high_risk" | "not_pending";
 
 export interface SkippedItem { key: string; title: string; reason: SkipReason }
 
@@ -44,6 +44,8 @@ export const SKIP_REASON_TEXT: Record<SkipReason, string> = {
   waiting_on_other: "Waits on another member.",
   shares_your_account: "Lends your shared account. Answer it on its own.",
   not_one_shot: "Its approval can cover more than this one call. Answer it on its own.",
+  policy_check_failed: "Policy check failed. Answer it on its own.",
+  high_risk: "High-risk action. Answer it on its own.",
   not_pending: "Is no longer pending.",
 };
 
@@ -60,8 +62,19 @@ function decisionSkipReason({ gate }: DecisionItem, meId: string | undefined): S
   if (gate.type !== "approval") return gate.type === "credential_request" ? "needs_credential" : "needs_answer";
   const approver = approverReason(gate.approver, meId);
   if (approver) return approver;
+  // The per-item card warns that the policy may have denied this action.
+  if (gate.provenance?.source === "resolver_error") return "policy_check_failed";
   const ids = new Set(gate.actions.map(a => a.id));
   if (gate.oneShot !== true || !ids.has(ONE_TIME_APPROVE) || !ids.has(DENY)) return "not_one_shot";
+  return undefined;
+}
+
+/** The per-item policy card shows a failed policy check and the risk level.
+ * The bulk dialog lists titles only, so it leaves these gates to that card. */
+function policyWarning(gate: WorkflowActionRequiredItem["gate"]): SkipReason | undefined {
+  if (gate.kind !== "policy_gate") return undefined;
+  if (gate.provenance === "resolver_error") return "policy_check_failed";
+  if (gate.riskLevel === "high" || gate.riskLevel === "critical") return "high_risk";
   return undefined;
 }
 
@@ -83,7 +96,7 @@ export function planBulkAnswers(
   for (const item of workflows) {
     const key = `workflow:${item.id}`;
     const title = workflowTitle(item);
-    const reason = approverReason(item.gate.approver, meId);
+    const reason = approverReason(item.gate.approver, meId) ?? policyWarning(item.gate);
     if (reason) { skipped.push({ key, title, reason }); continue; }
     targets.push({ kind: "workflow", key, title, runId: item.runId, nodeId: item.gate.nodeId, iteration: item.gate.iteration, policy: item.gate.kind === "policy_gate" });
   }
