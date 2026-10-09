@@ -69,8 +69,7 @@ export async function prepareUsageStepAttribution(db: PgDb): Promise<void> {
       FROM items i JOIN engine_entries e ON e.queue_item_id = i.id AND e.session_id = i.session_id
       CROSS JOIN LATERAL valet_usage_fact(e) n
       WHERE f.entry_id = e.id AND f.session_id IS DISTINCT FROM n.session_id
-      RETURNING f.entry_id
-    ) SELECT MAX(id) AS cursor, (SELECT COUNT(*)::int FROM moved) AS moved FROM items`, [cursor]);
+    ) SELECT MAX(id) AS cursor FROM items`, [cursor]);
     const next = result.rows[0]?.cursor;
     if (typeof next !== "string") break;
     cursor = next;

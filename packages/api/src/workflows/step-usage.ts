@@ -14,26 +14,20 @@
 import { randomBytes } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type { Usage } from "@earendil-works/pi-ai/compat";
+import { modelCallUsage, type MessageCost, type MessageUsage } from "@valet/engine";
 import { USAGE_ENTRY_TYPE } from "@valet/store-postgres";
 import { workflowStepSessionId } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 
-interface EntryUsage { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }
-type EntryCost = EntryUsage;
-
 /**
  * The usage and cost an engine turn would persist for this call, by the
- * engine's own rule: no usage when the provider reported no tokens, and no
- * cost (unpriced, never "$0") when it reported no price.
+ * engine's own rule (`modelCallUsage`): no usage when the provider reported
+ * no tokens, and no cost (unpriced, never "$0") when it reported no price.
  */
-export function stepUsageEntry(usage: Usage): { usage: EntryUsage; cost?: EntryCost } | null {
-  const total = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-  if (total <= 0) return null;
-  const entry: EntryUsage = { input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, total };
-  const c = usage.cost;
-  return c && c.total > 0
-    ? { usage: entry, cost: { input: c.input, output: c.output, cacheRead: c.cacheRead, cacheWrite: c.cacheWrite, total: c.total } }
-    : { usage: entry };
+export function stepUsageEntry(usage: Usage): { usage: MessageUsage; cost?: MessageCost } | null {
+  const call = modelCallUsage(usage);
+  if (!call.usage) return null;
+  return call.cost ? { usage: call.usage, cost: call.cost } : { usage: call.usage };
 }
 
 /** An id in the engine's entry shape (`e-<time>-<random>`), so entries keep
