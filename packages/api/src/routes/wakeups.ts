@@ -22,9 +22,19 @@ import type { RequestPrincipal } from "../lib/request-principal.js";
 import { agentSessions } from "../schema/index.js";
 import { canAdministerSession, canViewSession, type SessionOwnerLike } from "../services/session-access.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { cancelWorkAsHuman, listBackgroundWork } from "../engine/wakeups-admin.js";
+import {
+  backgroundWorkRefusal,
+  cancelWorkAsHuman,
+  listBackgroundWork,
+  selectWork,
+  type BackgroundWorkAction,
+  type BackgroundWorkFilter,
+  type BlockingWork,
+} from "../engine/wakeups-admin.js";
 import { keepVisibleThreads, spawnedFromVisibleThread } from "./_thread-access.js";
 import type {
+  BackgroundWorkConflict,
+  BackgroundWorkItem,
   CancelSessionWakeupResponse,
   LeaseSummary,
   ListSessionWakeupsResponse,
@@ -47,6 +57,66 @@ export async function canViewSessionWakeups(db: AppDb, session: SessionOwnerLike
  */
 export async function canCancelSessionWakeup(db: AppDb, session: SessionOwnerLike, caller: RequestPrincipal): Promise<boolean> {
   return canAdministerSession(db, session, caller);
+}
+
+/** The outcome of `gateBackgroundWork`. */
+export type BackgroundWorkGate =
+  /** No work blocks the action. */
+  | { kind: "clear" }
+  /** The route returns `response` (409 or 403) and changes nothing. */
+  | { kind: "refused"; response: Response }
+  /** The caller forced the action. Cancel exactly `ids`, then act. */
+  | { kind: "force"; ids: ReadonlySet<string> };
+
+function toWorkItem(w: BlockingWork): BackgroundWorkItem {
+  return {
+    id: w.id,
+    kind: w.kind,
+    reason: w.reason,
+    ...(w.threadId !== undefined ? { threadId: w.threadId } : {}),
+    ...(w.deadlineAt !== undefined ? { deadlineAt: w.deadlineAt } : {}),
+    ...(w.fireAt !== undefined ? { fireAt: w.fireAt } : {}),
+    createdAt: w.createdAt,
+  };
+}
+
+/**
+ * The one rule for an action that would stop background work (fix wave 3,
+ * group C): pause, replace, a profile change, an owner move, and a thread
+ * archive. Work that `filter` selects blocks the action with a 409
+ * `BackgroundWorkConflict`. `force` lets the caller stop the work first,
+ * when the caller passes `canCancelSessionWakeup` (else 403) and can see
+ * every item (else 409). On a team session the text and the work list name
+ * only work on threads the caller can see, and count the rest: a forced
+ * stop of work the caller cannot see would act on a private thread.
+ */
+export async function gateBackgroundWork(
+  c: Context<AppEnv>,
+  row: SessionOwnerLike & { id: string; ownerType: string },
+  action: BackgroundWorkAction,
+  filter: BackgroundWorkFilter,
+  force: boolean,
+): Promise<BackgroundWorkGate> {
+  const { db, engineStore } = c.var.providers;
+  const items = selectWork(await listBackgroundWork(engineStore, row.id), filter);
+  if (items.length === 0) return { kind: "clear" };
+  const visible = await keepVisibleThreads(
+    c,
+    { type: row.ownerType },
+    items.map((w) => ({ ...w, sessionId: row.id })),
+  );
+  const hiddenCount = items.length - visible.length;
+  const mayCancel = await canCancelSessionWakeup(db, row, c.var.principal);
+  const forceAllowed = mayCancel && hiddenCount === 0;
+  if (force && forceAllowed) return { kind: "force", ids: new Set(visible.map((w) => w.id)) };
+  const body: BackgroundWorkConflict = {
+    error: backgroundWorkRefusal(action, visible, hiddenCount, forceAllowed),
+    code: "background_work",
+    work: visible.map(toWorkItem),
+    hiddenCount,
+    forceAllowed,
+  };
+  return { kind: "refused", response: c.json(body, force && !mayCancel ? 403 : 409) };
 }
 
 function wakeupToSummary(w: Wakeup): WakeupSummary {

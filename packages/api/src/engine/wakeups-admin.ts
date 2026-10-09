@@ -84,20 +84,111 @@ export async function listBackgroundWork(engineStore: SessionStore, sessionId: s
   return { wakeups, leases };
 }
 
+/** One piece of open background work, as a refusal names it and a cancel targets it. */
+export interface BlockingWork {
+  /** `wk_` for a wakeup, `ls_` for a hold. A process or watch lease shows as its wakeup. */
+  id: string;
+  kind: WakeupKind | "hold";
+  reason: string;
+  threadId?: string;
+  deadlineAt?: number;
+  fireAt?: number;
+  createdAt: number;
+}
+
+/** Which background work a route stops or a refusal names. */
+export interface BackgroundWorkFilter {
+  /** Only the work of this thread. A hold with no thread belongs to no single thread and stays. */
+  threadId?: string;
+  /** Only work that holds a lease: process, watch, and hold. Timers keep their schedule. */
+  leasedOnly?: boolean;
+  /** Only these ids. A route passes the work the caller can see. */
+  ids?: ReadonlySet<string>;
+}
+
 /**
- * The 409 text of a route that would stop the sandbox under active leases
- * (pause and replace, fix wave 2 B8). Null when the session holds no lease.
- * A process or watch lease shows its wakeup id, which is the id a person or
- * the agent cancels.
+ * The work in `work` that `filter` selects: open wakeups (a process or watch
+ * stands for its lease) and active holds.
  */
-export async function activeLeaseRefusal(engineStore: SessionStore, sessionId: string): Promise<string | null> {
-  if ((await engineStore.countActiveLeases(sessionId)) === 0) return null;
-  const leases = await engineStore.listActiveLeases(sessionId);
-  if (leases.length === 0) return null;
-  const items = leases
-    .map((l) => `${l.ownerId ?? l.id} "${l.reason}" (deadline ${new Date(l.deadlineAt).toISOString()})`)
-    .join("; ");
-  return `This session has active background work: ${items}. Ask the agent to cancel it, or send force=true to stop it.`;
+export function selectWork(work: BackgroundWork, filter: BackgroundWorkFilter): BlockingWork[] {
+  const inThread = (threadId: string | undefined) => filter.threadId === undefined || threadId === filter.threadId;
+  const picked = (id: string) => filter.ids === undefined || filter.ids.has(id);
+  const wakeups: BlockingWork[] = work.wakeups
+    .filter((w) => inThread(w.threadId) && !(filter.leasedOnly && w.kind === "timer") && picked(w.id))
+    .map((w) => ({
+      id: w.id,
+      kind: w.kind,
+      reason: w.reason,
+      threadId: w.threadId,
+      ...(w.deadlineAt !== undefined ? { deadlineAt: w.deadlineAt } : {}),
+      ...(w.fireAt !== undefined ? { fireAt: w.fireAt } : {}),
+      createdAt: w.createdAt,
+    }));
+  const holds: BlockingWork[] = work.leases
+    .filter((l) => l.ownerKind === "hold" && inThread(l.threadId) && picked(l.id))
+    .map((l) => ({
+      id: l.id,
+      kind: "hold",
+      reason: l.reason,
+      ...(l.threadId !== undefined ? { threadId: l.threadId } : {}),
+      deadlineAt: l.deadlineAt,
+      createdAt: l.createdAt,
+    }));
+  return [...wakeups, ...holds];
+}
+
+/** An action that stops background work, and the words its refusal uses. */
+export type BackgroundWorkAction = "pause" | "replace" | "profile" | "move" | "archive";
+
+const ACTION_WORDS: Record<BackgroundWorkAction, { scope: "session" | "thread"; verb: string }> = {
+  pause: { scope: "session", verb: "pause the session" },
+  replace: { scope: "session", verb: "replace the sandbox" },
+  profile: { scope: "session", verb: "change the profile" },
+  move: { scope: "session", verb: "move the session" },
+  archive: { scope: "thread", verb: "archive the thread" },
+};
+
+function describeWork(w: BlockingWork): string {
+  if (w.kind === "timer" && w.fireAt !== undefined) {
+    return `"${w.reason}" (timer, fires ${new Date(w.fireAt).toISOString()})`;
+  }
+  const deadline = w.deadlineAt !== undefined ? `, deadline ${new Date(w.deadlineAt).toISOString()}` : "";
+  return `"${w.reason}" (${w.kind}${deadline})`;
+}
+
+/**
+ * The 409 text of an action that would stop background work (fix wave 3,
+ * group C). It names only the work the caller can see and counts the rest.
+ * `forceAllowed` false means a retry with force cannot help, so the text
+ * says what to do instead.
+ */
+export function backgroundWorkRefusal(
+  action: BackgroundWorkAction,
+  visible: readonly BlockingWork[],
+  hiddenCount: number,
+  forceAllowed: boolean,
+): string {
+  const { scope, verb } = ACTION_WORDS[action];
+  const parts: string[] = [];
+  if (visible.length > 0) {
+    parts.push(`This ${scope} has background work running: ${visible.map(describeWork).join("; ")}.`);
+  }
+  if (hiddenCount > 0) {
+    const items = hiddenCount === 1 ? "1 item runs" : `${hiddenCount} items run`;
+    parts.push(
+      visible.length > 0
+        ? `${items} on threads you cannot see.`
+        : `This ${scope} has background work running: ${items} on threads you cannot see.`,
+    );
+  }
+  if (hiddenCount > 0) {
+    parts.push(`Ask the people in those threads to cancel it, then ${verb}.`);
+  } else if (forceAllowed) {
+    parts.push(`Cancel it first, or retry with force=true to stop it and ${verb}.`);
+  } else {
+    parts.push(`Ask a session admin to cancel it, then ${verb}.`);
+  }
+  return parts.join(" ");
 }
 
 type SignalContent = Extract<PromptContent, { kind: "signal" }>;
@@ -124,6 +215,12 @@ export interface HumanCancelOptions {
   signal: "deliver" | "suppress" | "defer";
   /** One sentence the signal body adds, such as why the person stopped the work. */
   note?: string;
+  /**
+   * Where the signal goes. `work-thread` (the default) is the thread that
+   * started the work. `main` is the session's main thread: a forced archive
+   * uses it, because the work's own thread is about to be hidden.
+   */
+  deliverTo?: "work-thread" | "main";
   now?: () => number;
   /** Counts a signal that failed to submit. Tests inject a spy. */
   signalLost?: (kind: WakeupKind | "hold") => void;
@@ -137,20 +234,27 @@ export interface CancelledWork {
   threadId?: string;
 }
 
+/**
+ * A deferred signal send. It submits into `target` when given, else into
+ * the session the cancel ran on. A route that rebuilt the engine session
+ * between the cancel and the send passes the new one. Never rejects.
+ */
+export type DeferredSignal = (target?: HumanCancelSession) => Promise<void>;
+
 export type HumanCancelResult =
   | {
       kind: "cancelled";
       work: CancelledWork;
-      /** With `signal: "defer"`: sends the terminal signal. Never rejects. */
-      sendSignal?: () => Promise<void>;
+      /** With `signal: "defer"`: sends the terminal signal. */
+      sendSignal?: DeferredSignal;
     }
   | { kind: "not_found" };
 
 /** Sends now, returns the send for `defer`, or does nothing for `suppress`. */
 async function routeSignal(
   opts: HumanCancelOptions,
-  send: () => Promise<void>,
-): Promise<{ sendSignal?: () => Promise<void> }> {
+  send: DeferredSignal,
+): Promise<{ sendSignal?: DeferredSignal }> {
   if (opts.signal === "deliver") await send();
   return opts.signal === "defer" ? { sendSignal: send } : {};
 }
@@ -215,7 +319,8 @@ async function deliverCancelSignal(
   content: SignalContent,
   opts: HumanCancelOptions,
 ): Promise<void> {
-  const { threadId, origin, dispatchId, kind } = target;
+  const { origin, dispatchId, kind } = target;
+  const threadId = opts.deliverTo === "main" ? undefined : target.threadId;
   const signal: SignalContent = origin !== undefined ? { ...content, origin: { ...origin, reply: "manual" } } : content;
   const base: PromptOptions = { dispatchId, queueMode: "followup" };
   try {
@@ -258,9 +363,9 @@ export async function cancelWorkAsHuman(
     const outcome = await seam.cancel(id);
     if (outcome?.kind !== "lease") return { kind: "not_found" };
     const signal = holdReleasedSignal(lease, opts, now());
-    const routed = await routeSignal(opts, () =>
+    const routed = await routeSignal(opts, (target) =>
       deliverCancelSignal(
-        session,
+        target ?? session,
         { threadId: lease.threadId, origin: lease.origin, dispatchId: `lease:${lease.id}:released`, kind: "hold" },
         signal,
         opts,
@@ -281,9 +386,9 @@ export async function cancelWorkAsHuman(
   // A lost CAS means the WakeWatcher ended the row first. Its own signal stands.
   if (outcome?.kind !== "wakeup") return { kind: "not_found" };
   const signal = wakeupCancelledSignal(row, opts, now());
-  const routed = await routeSignal(opts, () =>
+  const routed = await routeSignal(opts, (target) =>
     deliverCancelSignal(
-      session,
+      target ?? session,
       { threadId: row.threadId, origin: row.origin, dispatchId: `wakeup:${row.id}:terminal`, kind: row.kind },
       signal,
       opts,
@@ -292,19 +397,14 @@ export async function cancelWorkAsHuman(
   return { kind: "cancelled", work: { id, kind: row.kind, reason: row.reason, threadId: row.threadId }, ...routed };
 }
 
-/** Which background work `cancelAllWorkAsHuman` cancels. */
-export interface BackgroundWorkFilter {
-  /** Only the work of this thread. A hold with no thread belongs to no single thread and stays. */
-  threadId?: string;
-  /** Only work that holds a lease: process, watch, and hold. Timers keep their schedule. */
-  leasedOnly?: boolean;
-}
-
 /** What `cancelAllWorkAsHuman` cancelled, and with `defer`, the signal sends. */
 export interface CancelAllResult {
   cancelled: CancelledWork[];
-  /** Sends every deferred signal. A no-op unless `signal` was `defer`. Never rejects. */
-  sendSignals(): Promise<void>;
+  /**
+   * Sends every deferred signal, into `target` when given. A no-op unless
+   * `signal` was `defer`. Never rejects.
+   */
+  sendSignals(target?: HumanCancelSession): Promise<void>;
 }
 
 /**
@@ -319,14 +419,9 @@ export async function cancelAllWorkAsHuman(
   filter: BackgroundWorkFilter,
   opts: HumanCancelOptions,
 ): Promise<CancelAllResult> {
-  const { wakeups, leases } = await listBackgroundWork(engineStore, sessionId);
-  const inThread = (threadId: string | undefined) => filter.threadId === undefined || threadId === filter.threadId;
-  const ids = [
-    ...wakeups.filter((w) => inThread(w.threadId) && !(filter.leasedOnly && w.kind === "timer")).map((w) => w.id),
-    ...leases.filter((l) => l.ownerKind === "hold" && inThread(l.threadId)).map((l) => l.id),
-  ];
+  const ids = selectWork(await listBackgroundWork(engineStore, sessionId), filter).map((w) => w.id);
   const cancelled: CancelledWork[] = [];
-  const sends: Array<() => Promise<void>> = [];
+  const sends: DeferredSignal[] = [];
   for (const id of ids) {
     const result = await cancelWorkAsHuman(engineStore, session, sessionId, id, opts);
     if (result.kind !== "cancelled") continue;
@@ -335,8 +430,8 @@ export async function cancelAllWorkAsHuman(
   }
   return {
     cancelled,
-    async sendSignals() {
-      for (const send of sends) await send();
+    async sendSignals(target) {
+      for (const send of sends) await send(target);
     },
   };
 }
