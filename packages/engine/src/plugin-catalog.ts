@@ -978,7 +978,13 @@ function makeListTool(
     .map((item) => `${item.service} (${item.state})`)
     .sort();
   const serviceLine = [
-    availableServices.length > 0 ? ` Available services: ${availableServices.join(", ")}.` : "",
+    // "Installed", not "connected": this line is built once per session from
+    // deployment and org state. A person's own connection is probed only when
+    // list_tools runs, so the line must not read as a connection report.
+    availableServices.length > 0
+      ? ` Installed services: ${availableServices.join(", ")}. This list does not show whether the person connected each one;` +
+        " call list_tools before you say a service is connected or reachable."
+      : "",
     configurableServices.length > 0
       ? ` Configurable but not connected: ${configurableServices.join(", ")}.`
       : "",
