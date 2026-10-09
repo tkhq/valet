@@ -1,6 +1,7 @@
 import { Link, Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
 import { useOrg, useTeams } from "~/api/settings";
 import { ErrorRow, LinkTabs, LoadingRow } from "~/components/primitives";
+import { ActiveTabLabel } from "~/components/settings/section";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { normalizeSettingsPath } from "~/components/settings/settings-rail";
 import { PinnedWorkspaceScope } from "~/lib/workspace-scope";
@@ -39,7 +40,7 @@ export function TeamSettingsShell({ teamId }: { teamId: string }) {
     { to: "/settings/teams/$teamId/policies", label: "Policies", params: { teamId } },
   ];
   const path = normalizeSettingsPath(pathname);
-  const activeTo = path.endsWith("/access")
+  const activeTo: string = path.endsWith("/access")
     ? "/settings/teams/$teamId/access"
     : path.endsWith("/policies")
       ? "/settings/teams/$teamId/policies"
@@ -55,8 +56,10 @@ export function TeamSettingsShell({ teamId }: { teamId: string }) {
       </div>
       <LinkTabs tabs={tabs} activeTo={activeTo} label={`${team.name} settings`} />
       <PinnedWorkspaceScope teamId={teamId}>
-        {/* Drop drafts and open dialogs when the team changes. */}
-        <Outlet key={teamId} />
+        <ActiveTabLabel.Provider value={tabs.find((tab) => tab.to === activeTo)?.label}>
+          {/* Drop drafts and open dialogs when the team changes. */}
+          <Outlet key={teamId} />
+        </ActiveTabLabel.Provider>
       </PinnedWorkspaceScope>
     </div>
   );

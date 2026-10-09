@@ -16,5 +16,5 @@ function TeamGeneralTab() {
   if (directory.error != null || !directory.data) {
     return <ErrorRow>Failed to load the member directory. Reload the page to try again.</ErrorRow>;
   }
-  return <TeamsPanel orgMembers={directory.data.users} teamId={teamId} showAssistantLink />;
+  return <TeamsPanel orgMembers={directory.data.users} teamId={teamId} page />;
 }

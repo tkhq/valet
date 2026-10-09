@@ -1,7 +1,7 @@
 import { AutomationWizard } from "~/components/events/automation-wizard";
 import { Link } from "@tanstack/react-router";
 import type { OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
-import { Bot, ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
+import { ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { ApiError } from "~/api/client";
 import {
@@ -89,13 +89,15 @@ const DELETE_TEAM_NOTE =
 export function TeamsPanel({
   orgMembers,
   teamId,
-  showAssistantLink = false,
+  page = false,
 }: {
   orgMembers: OrgDirectoryUserWire[];
   /** Pin the panel to the selected workspace, without team creation. */
   teamId?: string;
-  /** Show the assistant link only when this panel has the active team scope. */
-  showAssistantLink?: boolean;
+  /** The team's own settings page (`/settings/teams/$teamId`), which already
+   * names the team and links its threads: the row drops its collapsible
+   * header and stays open. */
+  page?: boolean;
 }) {
   const teamsQ = useTeams();
   const meQ = useMe();
@@ -122,15 +124,15 @@ export function TeamsPanel({
       )}
 
       {ready && teamsQ.data && teams.length > 0 && (
-        <div className="divide-y divide-line border-t border-line">
+        <div className={page ? undefined : "divide-y divide-line border-t border-line"}>
           {teams.map((team) => (
             <TeamRow
               key={team.id}
               team={team}
               orgMembers={orgMembers}
               canMutate={orgAdmin || team.callerRole === "admin"}
-              showAssistantLink={showAssistantLink}
-              open={expanded === team.id}
+              page={page}
+              open={page || expanded === team.id}
               onToggle={() => setExpanded((cur) => (cur === team.id ? null : team.id))}
             />
           ))}
@@ -193,14 +195,14 @@ function TeamRow({
   team,
   orgMembers,
   canMutate,
-  showAssistantLink,
+  page,
   open,
   onToggle,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
-  showAssistantLink: boolean;
+  page: boolean;
   open: boolean;
   onToggle: () => void;
 }) {
@@ -211,8 +213,15 @@ function TeamRow({
   const declared = team.origin === "config";
 
   return (
-    <div className="py-3">
+    <div className={page ? undefined : "py-3"}>
       <div className="flex flex-wrap items-center gap-3">
+        {page ? (
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            {idpBacked && <Badge variant="neutral">Identity provider</Badge>}
+            {declared && <Badge variant="neutral" title={CONFIG_MANAGED_NOTE}>Declared in valet.yaml</Badge>}
+            <span className="text-xs text-muted">Created {formatDate(team.createdAt)}</span>
+          </div>
+        ) : (
         <button
           type="button"
           onClick={onToggle}
@@ -241,16 +250,11 @@ function TeamRow({
             {team.memberCount} {team.memberCount === 1 ? "member" : "members"}
           </span>
         </button>
-        <span className="hidden shrink-0 text-xs text-muted sm:block">
-          Created {formatDate(team.createdAt)}
-        </span>
-        {showAssistantLink && (
-          <Button asChild variant="ghost" size="sm" className="shrink-0 gap-1.5">
-            <Link to="/chat" search={{ workspace: team.id }}>
-              <Bot className="h-3.5 w-3.5" aria-hidden />
-              Threads
-            </Link>
-          </Button>
+        )}
+        {!page && (
+          <span className="hidden shrink-0 text-xs text-muted sm:block">
+            Created {formatDate(team.createdAt)}
+          </span>
         )}
         {/* Two gates, both required. `canMutate` is authorization; origin is
             provenance — the API refuses a delete on a mirrored team and on a
@@ -292,7 +296,7 @@ function TeamRow({
       </div>
 
       {open && (
-        <div className="ml-6 mt-3 space-y-8 border-l border-line pl-4">
+        <div className={page ? "mt-6 space-y-10" : "ml-6 mt-3 space-y-8 border-l border-line pl-4"}>
           <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} />
           <TeamDefaults team={team} canMutate={canMutate} />
           <TeamSlack key={team.id} team={team} canMutate={canMutate} />

@@ -1,4 +1,12 @@
-import type { ReactNode } from "react";
+import { createContext, useContext, type ReactNode } from "react";
+
+/**
+ * The label of the route tab a page sits under, when it sits under one
+ * (`LinkTabs` in the team and organization layouts). A section titled the
+ * same as that tab keeps its heading for screen readers only, so the page
+ * does not print the tab's name twice.
+ */
+export const ActiveTabLabel = createContext<string | undefined>(undefined);
 
 /**
  * A settings section: a heading, an optional one-line description, and its
@@ -15,10 +23,11 @@ export function Section({
   description?: string;
   children: ReactNode;
 }) {
+  const tab = useContext(ActiveTabLabel);
   return (
     <section className="space-y-3">
       <div className="space-y-1">
-        <h2 className="text-lg font-medium text-ink">{title}</h2>
+        <h2 className={tab !== undefined && title === tab ? "sr-only" : "text-lg font-medium text-ink"}>{title}</h2>
         {description && <p className="text-sm text-muted">{description}</p>}
       </div>
       {/* The group pads its own top and bottom, so a child with no padding

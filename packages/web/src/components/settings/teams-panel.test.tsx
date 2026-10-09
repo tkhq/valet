@@ -808,21 +808,12 @@ describe("TeamsPanel — removing a team credential", () => {
   });
 });
 
-describe("TeamsPanel — team assistant link", () => {
-  beforeEach(() => {
-    callerRole = "member";
-    orgRole = "member";
-  });
-
-  it("shows the Assistant link to a plain member in the active team", () => {
-    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" showAssistantLink />);
-    expect(screen.getByRole("link", { name: /Threads/ })).toBeTruthy();
-  });
-
-  it("opens the active team's assistants list", () => {
-    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" showAssistantLink />);
-    const link = screen.getByRole("link", { name: /Threads/ });
-    expect(link.getAttribute("href")).toBe("/chat?workspace=team_1");
+describe("TeamsPanel — team settings page", () => {
+  it("drops the collapsible header the page already shows, and stays open", () => {
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    expect(screen.queryByRole("button", { name: /^(Collapse|Expand) / })).toBeNull();
+    expect(screen.getByRole("region", { name: "Deletion requests" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
   });
 });
 
