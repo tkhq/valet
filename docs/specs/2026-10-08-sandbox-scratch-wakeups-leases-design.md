@@ -1223,3 +1223,68 @@ with an earlier entry, the entry below wins.
 - **Wave 3, wakeup signals and `addressed`.** The envelope still renders
   `addressed="false"` for a `<wakeup>` signal. The orchestrator persona
   rule names the signal as the assistant's own work, which is enough.
+- **C4: forced archive keeps details off the main thread.** The human
+  cancel signal of a forced archive goes to the main thread with the
+  reason and the archiver's note. It has no `Last output` block and no
+  channel origin, because the main thread can have readers that the work's
+  thread does not have. The same rule holds for any signal that lands on a
+  thread other than the work's own. The archived thread gets a `system`
+  entry that names the stopped work and says a person archived the
+  thread.
+- **C4: refusal text for a member.** When the caller may not cancel the
+  work and no work is hidden, the 409 text says `Ask the agent in this
+  thread to cancel it (wakeup_cancel), or ask a team admin.` for archive.
+  Session actions say the same, without "in this thread". The web dialog
+  then has the title "Background work is running", no confirm, and a
+  description that does not repeat the list.
+- **C4: pause on a detached sandbox.** Pause checks the attachment before
+  the background-work gate. When no sandbox is attached, it returns 409
+  `The sandbox is not attached yet. Send a message in the session, then
+  pause again.`, with or without background work.
+- **C4: stale UI after a forced action.** Pause, replace, the profile
+  change, and the move refresh the background-work list on every outcome.
+  If a forced retry returns the 409 that says the work already stopped,
+  the web dialog marks each row "Stopped", shows the server text, and
+  offers no confirm.
+- **C4: move sends force only after a 409.** The move dialog shows the
+  polled list, but the first submit never sends `force`. The server's 409
+  names the work as it is now, and only the confirm after it sends
+  `force`.
+- **C4: work item status.** `BackgroundWorkItem` has `status`: `pending`
+  while a process or watch starts or a timer waits, else `running`. The
+  dialog shows "starting" for a pending process or watch.
+- **C4: timer cancel note.** A human cancel of a timer adds the route's
+  note to the `timer.cancelled` body, as it does for a process.
+- **C4: signal card words.** The wakeup card shows causes as words:
+  `pid_missing` is "process not found", `sandbox_unavailable` is "sandbox
+  stopped", `rate` is "too many events", and `deadline` is "deadline
+  reached". A `cancelled` badge uses the neutral style. When the signal
+  has `cancelledBy`, the card says "by a person". The wire has no name for
+  the person, so the card does not name one.
+- **C4: badge time.** The badge names the soonest event of any kind:
+  "next deadline" for a deadline, "next wakeup" for a timer. Times round
+  to the nearest unit, so 47 hours reads "in 2d" and 90 minutes reads
+  "in 2h".
+- **C4: bash card.** The background strip and summary show only when the
+  result starts with `started sandbox process`. A refused or failed start
+  renders as a plain result.
+- **C4: archive waits for a turn.** An archive without `force` returns
+  409 `A turn is running in this thread. Wait for it to finish, then
+  archive.` while the thread has an unsettled submission. Without this
+  check, a turn could start work after the gate on a thread that is then
+  hidden.
+- **C4: lease re-check before a stop.** Pause and replace read the leased
+  work again right before `suspend()` or `replace()`. If work started
+  after the gate, they send the deferred signals and return 409:
+  `background work started, so the request did not <action>.` The text
+  adds that the work already stopped when a forced cancel ran, and ends
+  with `Retry to see the new work.`
+- **C4: profile gate after a restart.** A profile change runs the
+  background-work gate whenever leased work exists. The gate no longer
+  depends on a live engine session. After an api restart the session
+  stays cold while its sandbox can still run leased work. The forced path
+  cancels the work. The next build replaces the sandbox, as before.
+- **C4: work with no thread.** A hold with no `threadId` is session-level
+  work. On a team session, a caller who passes `canCancelSessionWakeup`
+  sees it in the list, can cancel it, and can force past it. Other
+  callers do not see it, and it does not count as hidden work for them.
