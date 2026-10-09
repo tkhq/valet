@@ -155,4 +155,48 @@ describe("carried-over personality in the workspace prompt", () => {
     expect(bare.options.systemPrompt).not.toContain(COLUMN);
     expect(await assistantSessionSender(db, retained.sessionId)).toEqual({ displayName: "Retained" });
   });
+
+  it("keeps a retained assistant off the shared team personality file", async () => {
+    const { db, engineHost } = api.providers;
+    const meta = { orgId: ORG, actorUserId: "local-user" };
+    const owner: Principal = { type: "team", id: "retained-file-team" };
+    await db.insert(teams).values({ id: owner.id, orgId: ORG, name: "Retained files", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: owner.id, userId: "local-user", role: "admin" });
+    const retained = await ensureDefaultAssistantSession(api.providers, owner, meta);
+    await db.insert(legacyAssistantRuntimes).values({ assistantId: retained.assistant.id, sessionId: retained.sessionId,
+      orgId: ORG, ownerType: "team", ownerId: owner.id });
+    await db.update(assistants).set({ ownerId: `${owner.id}:retired:${retained.assistant.id}`, archivedAt: 123 })
+      .where(eq(assistants.id, retained.assistant.id));
+    engineHost.evictCache(retained.sessionId);
+    const survivor = await ensureDefaultAssistantSession(api.providers, owner, meta);
+    await db.execute(sql`UPDATE assistants SET name = 'Desk Helper', personality = ${COLUMN} WHERE id = ${survivor.assistant.id}`);
+    await db.execute(sql`UPDATE assistants SET name = 'Night Helper', personality = 'Reply in two lines.' WHERE id = ${retained.assistant.id}`);
+    const prompt = async (which: typeof retained) => {
+      engineHost.evictCache(which.sessionId);
+      const session = await engineHost.assistantSessionFor(which.assistant.id, meta, { sessionId: which.sessionId });
+      return session.options.systemPrompt ?? "";
+    };
+    const teamScope = { owner, actorUserId: "local-user" };
+
+    // A post-upgrade edit of the shared file changes only the live assistant.
+    await writeFile(db, teamScope, { path: "assistant/personality.md", content: "DESK-NEW-FILE" });
+    expect((await prompt(survivor)).slice(0, 36)).toBe("You are Desk Helper. DESK-NEW-FILE\n\n");
+    const night = await prompt(retained);
+    expect(night.slice(0, 43)).toBe("You are Night Helper. Reply in two lines.\n\n");
+    expect(night).not.toContain("DESK-NEW-FILE");
+
+    // Without its own column, the retained assistant keeps only its name.
+    await db.execute(sql`UPDATE assistants SET personality = NULL WHERE id = ${retained.assistant.id}`);
+    const named = await prompt(retained);
+    expect(named.startsWith("You are Night Helper.\n\n")).toBe(true);
+    expect(named).not.toContain("DESK-NEW-FILE");
+
+    // A whitespace reset of the shared file clears only the live assistant's personality.
+    await db.execute(sql`UPDATE assistants SET personality = 'Reply in two lines.' WHERE id = ${retained.assistant.id}`);
+    await writeFile(db, teamScope, { path: "assistant/personality.md", content: " " });
+    const desk = await prompt(survivor);
+    expect(desk.startsWith("You are Desk Helper.\n\n")).toBe(true);
+    expect(desk).not.toContain(COLUMN);
+    expect((await prompt(retained)).startsWith("You are Night Helper. Reply in two lines.\n\n")).toBe(true);
+  });
 });

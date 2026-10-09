@@ -25,6 +25,10 @@ export interface LegacyAssistantProfile {
   personality?: string;
   /** When this database was upgraded to the workspace runtime (epoch ms). */
   upgradedAt?: number;
+  /** The row is a migration-retained assistant: the singleton cutover moved
+   * it to a tombstone owner (`<owner>:retired:<id>`), but its runtime still
+   * runs. It is not the workspace's live assistant. */
+  retained?: true;
 }
 
 /**
@@ -84,10 +88,10 @@ export async function loadLegacyAssistantProfile(
           AND r.owner_id = l.owner_id || ':retired:' || r.id
           AND NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = l.session_id AND s.status = 'deleted'))`;
   const result = await db.execute(sql`SELECT p->>'name' AS name, p->>'avatar_url' AS avatar_url,
-      p->>'personality' AS personality,
+      p->>'personality' AS personality, right(p->>'owner_id', length(':retired:' || (p->>'id'))) = ':retired:' || (p->>'id') AS retained,
       (SELECT m.applied_at FROM __valet_app_migrations m WHERE m.filename = ${LEGACY_RUNTIME_MARKER}) AS upgraded_at
     FROM (SELECT to_jsonb(a) AS p FROM assistants a WHERE a.org_id = ${orgId} AND ${match} LIMIT 1) live`) as {
-    rows: Array<{ name: unknown; avatar_url: unknown; personality: unknown; upgraded_at: unknown }>;
+    rows: Array<{ name: unknown; avatar_url: unknown; personality: unknown; retained: unknown; upgraded_at: unknown }>;
   };
   const row = result.rows[0];
   if (!row) return undefined;
@@ -95,6 +99,7 @@ export async function loadLegacyAssistantProfile(
     ...(displayName(row.name) ? { name: displayName(row.name) } : {}),
     ...(avatarUrl(row.avatar_url) ? { avatarUrl: avatarUrl(row.avatar_url) } : {}),
     ...(typeof row.personality === "string" ? { personality: row.personality.trim() } : {}),
+    ...(row.retained === true ? { retained: true as const } : {}),
   };
   if (Object.keys(profile).length === 0) return undefined;
   const upgradedAt = Number(row.upgraded_at);
@@ -122,11 +127,17 @@ export async function loadLegacyAssistantProfile(
  * store keeps no tombstone that would show the file was a later edit. A
  * whitespace-only file clears the personality instead (legacy continuity
  * spec, "Limitation: no editor").
+ *
+ * A migration-retained assistant never takes the file. It shares the team's
+ * memory, so the file there is the live assistant's personality, and an
+ * edit or a whitespace reset of it is meant for that assistant. A retained
+ * assistant keeps its own column, or no personality.
  */
 export function effectivePersonality(
   file: { content: string; updatedAt: number } | null,
   legacy: LegacyAssistantProfile | undefined,
 ): string {
+  if (legacy?.retained) return legacy.personality ?? "";
   if (legacy?.personality === undefined) return file?.content ?? "";
   if (file && file.updatedAt > (legacy.upgradedAt ?? Number.POSITIVE_INFINITY)) return file.content;
   return legacy.personality;
