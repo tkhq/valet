@@ -43,9 +43,11 @@ The workspace runtime removed `assistants.name`, `avatar_url`, and `personality`
 
 The product has no control that changes or clears a carried-over name, avatar, or personality. This is deliberate. A renamed team keeps posting under its old assistant name. A personal workspace posts under its old assistant name, not the bot identity. Workflow, subscription, and action presence can still override the name and avatar for their own posts. An `assistant/personality.md` written after the upgrade overrides the carried-over personality.
 
+Removing that file brings the carried-over personality back. The memory store deletes a file without a tombstone or history, so nothing records that the removed file was a later edit, and recording it would need a schema change. To clear the personality without an operator, a user or the assistant writes `assistant/personality.md` with only whitespace. Its `updated_at` is after the upgrade, so it wins, and the prompt keeps only the name. An operator can instead set the column, as in step 3 below.
+
 To change a value, an operator edits the row in the database. The columns exist only on an upgraded database.
 
-1. Find the workspace's live row: `SELECT id, name, avatar_url, personality FROM assistants WHERE org_id = '<org id>' AND owner_type = '<user|team|org>' AND owner_id = '<owner id>' AND archived_at IS NULL;`
+1. Find the workspace's live row: `SELECT id, name, avatar_url, personality FROM assistants WHERE org_id = '<org id>' AND owner_type = '<user|team|org>' AND owner_id = '<owner id>' AND archived_at IS NULL;` A migration-retained assistant's row has `owner_id = '<owner id>:retired:<assistant id>'`.
 2. To clear the name, avatar, or both, set the column to NULL: `UPDATE assistants SET name = NULL, avatar_url = NULL WHERE id = '<assistant id>';`
 3. To let the memory file supply the personality, set `personality = NULL`. To keep a neutral persona, set `personality = ''`.
 

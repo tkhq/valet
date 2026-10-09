@@ -11,7 +11,7 @@ import { eq, sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureDefaultAssistantSession, resolveDefaultAssistant } from "../assistants/service.js";
-import { writeFile } from "../services/memory.js";
+import { removeFile, writeFile } from "../services/memory.js";
 import { assistantSessionSender } from "../services/workspace-sender.js";
 import { assistants, legacyAssistantRuntimes, teamMembers, teams } from "../schema/index.js";
 
@@ -91,6 +91,29 @@ describe("carried-over personality in the workspace prompt", () => {
   it("uses a file edited after the upgrade over an emptied column", async () => {
     const prompt = await promptFor("persona-neutral-new", { name: null, personality: "" }, { content: FILE, editedAfterUpgrade: true });
     expect(prompt.startsWith(`${FILE}\n\n`)).toBe(true);
+  });
+
+  // Documented limitation: memory files are hard-deleted with no history, so
+  // nothing records that a removed file was a post-upgrade edit.
+  it("returns to the column when a post-upgrade file is removed, and a blank file clears it", async () => {
+    const { db, engineHost } = api.providers;
+    const userId = "persona-removed";
+    const owner: Principal = { type: "user", id: userId };
+    const scope = { owner, actorUserId: userId };
+    const removed = await promptFor(userId, { name: "Desk Helper", personality: COLUMN }, { content: FILE, editedAfterUpgrade: true });
+    expect(removed.startsWith(`You are Desk Helper. ${FILE}\n\n`)).toBe(true);
+    const rebuild = async () => {
+      const row = await resolveDefaultAssistant(db, ORG, owner);
+      engineHost.evictCache(row.sessionId);
+      const { session } = await ensureDefaultAssistantSession({ db, engineHost }, owner, { actorUserId: userId, orgId: ORG });
+      return session.options.systemPrompt ?? "";
+    };
+    await removeFile(db, scope, "assistant/personality.md");
+    expect((await rebuild()).startsWith(`You are Desk Helper. ${COLUMN}\n\n`)).toBe(true);
+    await writeFile(db, scope, { path: "assistant/personality.md", content: " " });
+    const cleared = await rebuild();
+    expect(cleared.startsWith("You are Desk Helper.\n\n")).toBe(true);
+    expect(cleared).not.toContain(COLUMN);
   });
 
   it("gives a migration-retained assistant its own profile, never the surviving assistant's", async () => {

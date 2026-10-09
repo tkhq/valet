@@ -111,6 +111,11 @@ export async function loadLegacyAssistantProfile(
  * the upgrade is a newer edit, and it wins. The upgrade marker and the
  * file's `updated_at` both come from the API's clock. A database without
  * the marker cannot show a later edit, so the column wins there.
+ *
+ * A removed file reads as absent, so the column applies again: the memory
+ * store keeps no tombstone that would show the file was a later edit. A
+ * whitespace-only file clears the personality instead (legacy continuity
+ * spec, "Limitation: no editor").
  */
 export function effectivePersonality(
   file: { content: string; updatedAt: number } | null,
