@@ -134,25 +134,28 @@ describe("jobKickoffCommand", () => {
   it("with maxOutputBytes, the exit code is still captured from setsid's own $? AFTER it returns, not from inside the killed group — this is what makes cancelJob's EXIT write prompt (DEFECT 2 fix)", () => {
     const cmd = jobKickoffCommand("job-1", "exit 5", 1024);
     // Ordering: mkfifo -> background capping filter (captures $! as
-    // filterpid) -> setsid runs the job, writing to the fifo -> ONLY AFTER
-    // setsid returns is $? written to EXIT -> then (and only then) do we
-    // wait for the capping filter and clean up the fifo. Critically, the
-    // `echo $? > EXIT` write happens OUTSIDE setsid's own process group, so
-    // cancelJob's SIGKILL to that group can never prevent it from running.
+    // filterpid) -> setsid runs the job, writing to the fifo -> its $? is
+    // saved -> the filter is awaited so OUT is complete -> ONLY THEN is the
+    // saved status written to EXIT (PR review, finding 6) -> fifo cleanup.
+    // Critically, the EXIT write happens OUTSIDE setsid's own process
+    // group, so cancelJob's SIGKILL to that group can never prevent it.
     const mkfifoIdx = cmd.indexOf("mkfifo");
     const filterpidIdx = cmd.indexOf("filterpid=$!");
     const setsidIdx = cmd.indexOf("setsid sh -c");
-    const echoExitIdx = cmd.indexOf("echo $?");
+    const rcIdx = cmd.indexOf("rc=$?");
     const waitIdx = cmd.indexOf('wait "$filterpid"');
+    const echoExitIdx = cmd.indexOf('echo "$rc" >');
     expect(mkfifoIdx).toBeGreaterThan(-1);
     expect(filterpidIdx).toBeGreaterThan(-1);
     expect(setsidIdx).toBeGreaterThan(-1);
-    expect(echoExitIdx).toBeGreaterThan(-1);
+    expect(rcIdx).toBeGreaterThan(-1);
     expect(waitIdx).toBeGreaterThan(-1);
+    expect(echoExitIdx).toBeGreaterThan(-1);
     expect(mkfifoIdx).toBeLessThan(filterpidIdx);
     expect(filterpidIdx).toBeLessThan(setsidIdx);
-    expect(setsidIdx).toBeLessThan(echoExitIdx);
-    expect(echoExitIdx).toBeLessThan(waitIdx);
+    expect(setsidIdx).toBeLessThan(rcIdx);
+    expect(rcIdx).toBeLessThan(waitIdx);
+    expect(waitIdx).toBeLessThan(echoExitIdx);
   });
 
   it("appends the cap marker to .out once output passes the cap (fix wave 3, k8s M-B)", () => {

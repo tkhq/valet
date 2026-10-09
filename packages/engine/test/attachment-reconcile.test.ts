@@ -443,6 +443,21 @@ describe("SandboxAttachment.reconcile", () => {
     expect(provider.releaseCalls).toEqual(["sb-existing"]);
   });
 
+  it("a critical prep failure keeps a leased adopted pod running (PR review, finding 5)", async () => {
+    const adopted = new VirtualSandbox("sb-existing");
+    const provider = new RecordingProvider({ adopt: adopted, release: true });
+    const fake = new FakeSpecProvider({ specHash: "h1", steps: [step("s1", "sh1", async () => { throw new Error("prep failed"); })] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const att = new SandboxAttachment(provider, {}, fake.provider(), undefined, async () => true);
+
+    await expect(att.ensureReady({ timeoutMs: 1000 })).rejects.toBeInstanceOf(SandboxPreparationError);
+
+    expect(provider.destroyCalls).toEqual([]);
+    expect(provider.releaseCalls).toEqual([]);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("kept for its background work"))).toBe(true);
+    warn.mockRestore();
+  });
+
   it.each([
     { cpu: 4, memory: "4Gi" },
     { cpu: 2, memory: "8Gi" },

@@ -63,6 +63,27 @@ describe("watch reads bounded at WATCH_READ_BYTES", () => {
     expect(decision?.signals[0]?.body).toBe(line);
   });
 
+  it("sends every remaining line at exit, not only the first 200 (PR review, finding 4)", () => {
+    const row: Wakeup = {
+      id: "wk_exit", sessionId: "s1", threadId: "t1", kind: "watch", status: "running", reason: "final lines",
+      command: "emit", execId: "e1", leaseId: "ls_1", deadlineAt: 10_000_000, logOffset: 0, logTail: "",
+      eventCount: 0, createdAt: 0, updatedAt: 0,
+    };
+    const output = Array.from({ length: 300 }, (_, i) => `line ${i + 1}`).join("\n") + "\n";
+    const decision = decideWakeup(
+      1000,
+      row,
+      { kind: "poll", status: "done", exitCode: 0, output, nextOffset: Buffer.byteLength(output) },
+      { watchMaxEventsPerHour: 120 },
+    );
+    expect(decision?.to).toBe("done");
+    const events = decision?.signals.filter((s) => s.signalType === "watch.event") ?? [];
+    const sent = events.flatMap((s) => s.body.split("\n"));
+    expect(sent).toHaveLength(300);
+    expect(sent[299]).toBe("line 300");
+    expect(decision?.signals.at(-1)?.signalType).toBe("watch.exited");
+  });
+
   it("still holds back a short partial line", () => {
     const row: Wakeup = {
       id: "wk_short", sessionId: "s1", threadId: "t1", kind: "watch", status: "running", reason: "short",

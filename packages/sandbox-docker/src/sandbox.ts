@@ -841,7 +841,11 @@ export class DockerSandbox implements Sandbox {
     const limit = jobOutputLimit(opts);
     if (detached) this.capDetachedOutputs();
 
-    const child = spawn("docker", this.execArgs(command, opts), {
+    // Killing the host-side `docker exec` client leaves the command running
+    // in the container. The job records its own process group in a pid
+    // file so `cancelJob` can kill the group inside the container (PR
+    // review, finding 3). `setsid -w` keeps this exec attached for output.
+    const child = spawn("docker", this.execArgs(jobWithProcessGroup(execId, command), opts), {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -990,6 +994,11 @@ export class DockerSandbox implements Sandbox {
   async cancelJob(execId: string): Promise<void> {
     const state = this.jobs.get(execId);
     if (!state) return;
+    if (state.status === "running") {
+      // Kill the command's process group inside the container first; the
+      // exec client below only ends the host side (PR review, finding 3).
+      await this.exec(jobGroupKillCommand(execId), { timeout: 10_000 }).catch(() => {});
+    }
     state.child.kill("SIGKILL");
     await state.closed;
     if (state.detached) {
@@ -1217,6 +1226,32 @@ const CREDS_PROPAGATION_TIMEOUT_MS = 5000;
 const CREDS_PROPAGATION_POLL_MS = 100;
 
 /** Escape a string for a single-quoted POSIX shell context. */
+/** Where a docker job records its process group id inside the container. */
+function jobPidPath(execId: string): string {
+  return `/tmp/.valet-job-${execId}.pid`;
+}
+
+/**
+ * Wraps a job so its process group id lands in a pid file before the
+ * command runs. With `setsid` (util-linux) the job gets its own group and
+ * `-w` keeps the exec attached to it for output; without `setsid` the
+ * shell's own pid is recorded and the kill reaches it and its direct
+ * children. Exported for tests.
+ */
+export function jobWithProcessGroup(execId: string, command: string): string {
+  const pid = shQuote(jobPidPath(execId));
+  const inner = shQuote(`echo $$ > ${pid}; exec sh -c ${shQuote(command)}`);
+  // BusyBox `setsid` (alpine) has no `-w` and would return before the job
+  // ends, so only a `setsid` that documents `--wait` is used.
+  return `if setsid --help 2>&1 | grep -q -e --wait; then exec setsid -w sh -c ${inner}; else exec sh -c ${inner}; fi`;
+}
+
+/** Kills a job's process group from the pid file, then the leader, then removes the file. Exported for tests. */
+export function jobGroupKillCommand(execId: string): string {
+  const pid = shQuote(jobPidPath(execId));
+  return `p=$(cat ${pid} 2>/dev/null); if [ -n "$p" ]; then kill -9 -- -"$p" 2>/dev/null; kill -9 "$p" 2>/dev/null; fi; rm -f ${pid}; :`;
+}
+
 function shQuote(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }

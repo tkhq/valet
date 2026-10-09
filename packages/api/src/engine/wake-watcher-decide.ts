@@ -212,6 +212,7 @@ function splitWatchLines(
   output: string,
   readBytes: number,
   final: boolean,
+  maxLines = 200,
 ): { lines: string[]; consumedText: string; consumedBytes: number } {
   const parts = output.split("\n");
   // The last element is the trailing partial line (no terminating "\n"), or
@@ -229,9 +230,9 @@ function splitWatchLines(
   }
   let lines = parts;
   let rest = partial;
-  if (lines.length > 200) {
-    rest = lines.slice(200).join("\n") + "\n" + partial;
-    lines = lines.slice(0, 200);
+  if (lines.length > maxLines) {
+    rest = lines.slice(maxLines).join("\n") + "\n" + partial;
+    lines = lines.slice(0, maxLines);
   }
   const consumedText = lines.length === 0 ? "" : lines.join("\n") + (final && rest === "" && !output.endsWith("\n") ? "" : "\n");
   const consumedBytes = Math.max(0, readBytes - Buffer.byteLength(rest));
@@ -380,7 +381,9 @@ export function decideWakeup(now: number, row: Wakeup, probe: WakeupProbe, opts:
     const signals: SignalDraft[] = [];
     const patch: WakeupPatch = {};
     if (row.kind === "watch") {
-      const { lines } = splitWatchLines(probe.output, readBytes, true);
+      // No line cap at exit: the row ends here, so every remaining line
+      // must go out now; chunkLines bounds each event (PR review, finding 4).
+      const { lines } = splitWatchLines(probe.output, readBytes, true, Number.POSITIVE_INFINITY);
       const all = [...bufferedLines(buffered), ...lines];
       if (all.length > 0) {
         // Each event stays within WATCH_BUFFER_BYTES (fix wave 4, data N8).

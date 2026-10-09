@@ -1191,7 +1191,12 @@ export class SandboxAttachment {
         } catch (prepErr) {
           // Failed prep does not own adopted storage. Retain it, or release
           // compute non-terminally. An explicit session destroy still wins.
-          if (sandbox.adopted && !this.destroyed) {
+          // A leased pod keeps running: a release would stop its background
+          // process and drop node-local scratch (PR review, finding 5). The
+          // next attach retries the steps on the same pod.
+          if (leased && sandbox.adopted && !this.destroyed) {
+            console.warn(`sandbox ${sandbox.id}: prep failed while leased; the pod is kept for its background work`);
+          } else if (sandbox.adopted && !this.destroyed) {
             await provider.release?.(sandbox.id).catch(() => {});
           } else {
             await provider.destroy(sandbox.id).catch(() => {});
