@@ -2,6 +2,10 @@
  * Pure unit tests for jobs.ts's command builders and status parsing — no
  * cluster required.
  */
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   cancelCommand,
@@ -9,6 +13,7 @@ import {
   incompleteUtf8TailLength,
   jobKickoffCommand,
   parseJobStatus,
+  pruneOldJobFilesScript,
   pollCommand,
   utf8SequenceLength,
 } from "../src/jobs.js";
@@ -161,6 +166,40 @@ describe("jobKickoffCommand", () => {
     expect(cmd).toContain("-mmin +1440");
     expect(cmd).toContain("pruned=");
     expect(cmd.indexOf("-mmin +1440")).toBeLessThan(cmd.indexOf("already has files"));
+  });
+
+  it("prunes without word splitting, counts only jobs whose files are gone, and counts each job once (fix wave 4, security N6, k8s N-3)", () => {
+    const root = mkdtempSync(join(tmpdir(), "valet-prune-"));
+    const jobs = join(root, "jobs");
+    const cwd = join(root, "cwd");
+    mkdirSync(jobs);
+    mkdirSync(cwd);
+    const old = new Date(Date.now() - 2 * 24 * 3_600_000);
+    const touchOld = (name: string) => {
+      writeFileSync(join(jobs, name), "");
+      utimesSync(join(jobs, name), old, old);
+    };
+    // A name with a space and a glob: split words would glob in the cwd.
+    touchOld("a b*.exit");
+    writeFileSync(join(jobs, "a b*.out"), "log");
+    writeFileSync(join(cwd, "b-keep.txt"), "keep");
+    // One job with both stamps counts once.
+    touchOld("j1.exit");
+    touchOld("j1.dead");
+    writeFileSync(join(jobs, "j1.out"), "log");
+    // A stamp rm cannot delete (here a directory) is not counted.
+    mkdirSync(join(jobs, "stuck.dead"));
+    utimesSync(join(jobs, "stuck.dead"), old, old);
+    // A recent job stays.
+    writeFileSync(join(jobs, "fresh.exit"), "0");
+
+    const r = spawnSync("/bin/sh", ["-c", pruneOldJobFilesScript(jobs)], { cwd, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("pruned=2");
+    expect(readdirSync(jobs).sort()).toEqual(["fresh.exit", "stuck.dead"]);
+    expect(readdirSync(cwd)).toEqual(["b-keep.txt"]);
+    const again = spawnSync("/bin/sh", ["-c", pruneOldJobFilesScript(jobs)], { cwd, encoding: "utf8" });
+    expect(again.stdout.trim()).toBe("");
   });
 
   it("floors and clamps a fractional/negative maxOutputBytes to a safe non-negative integer", () => {
