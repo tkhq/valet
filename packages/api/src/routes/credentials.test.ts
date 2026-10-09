@@ -537,11 +537,13 @@ describe("PUT /api/credentials/onepassword — a personal token is never gated",
   it("a member removes their own personal token", async () => {
     api = await bootTestApi();
     api.providers.onePassword = new FakeOnePasswordService();
-    await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
+    const put = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
       method: "PUT",
       headers: MEMBER_HEADERS,
       body: JSON.stringify({ type: "service_account", apiKey: "ops_personal_token" }),
     });
+    // The removal below only proves something if the token was stored first.
+    expect(put.status).toBe(200);
 
     const del = await fetch(`${api.baseUrl}/api/credentials/onepassword`, {
       method: "DELETE",
