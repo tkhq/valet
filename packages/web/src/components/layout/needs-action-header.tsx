@@ -98,7 +98,7 @@ export function NeedsActionHeader({ pendingCount, partialCount, workflows, decis
   const live = planBulkAnswers(workflows, decisions, me.data?.id);
   const { progress, summary } = run;
 
-  function confirm() {
+  function startConfirmedRun() {
     if (!pending) return;
     started.current = true;
     setPending(null);
@@ -138,7 +138,7 @@ export function NeedsActionHeader({ pendingCount, partialCount, workflows, decis
         title={`${verb.label} ${pending?.targets.length ?? 0} ${requests(pending?.targets.length ?? 0)}?`}
         description={description}
         confirmLabel={`${verb.label} ${pending?.targets.length ?? 0}`}
-        onConfirm={confirm}
+        onConfirm={startConfirmedRun}
         confirmVariant={pending?.decision === "approve" ? "primary" : "danger"}
         onCloseAutoFocus={event => {
           // After a confirmed run, focus the progress line: the buttons are
