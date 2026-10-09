@@ -900,6 +900,66 @@ describe("applySandbox scratch preservation (fix wave 2, B3)", () => {
   });
 });
 
+describe("applySandbox records preserved scratch (fix wave 3, H-A)", () => {
+  const ALL_FIELDS = ["cpu", "memory", "scratch"] as const;
+  const scratchCfg: K8sProviderConfig = {
+    ...cfg, defaultResources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "30Gi" },
+  };
+
+  function seedWithOverrides(api: FakeCustomObjectsApi, name: string, overrides: string, scratch?: string): void {
+    const live = toCRRead(buildSandboxManifest(scratchCfg, name, scratch ? { resources: { scratch } } : {}));
+    live.metadata = { ...live.metadata, annotations: { ...live.metadata.annotations, "valet.dev/resource-overrides": overrides } };
+    api.seed(live);
+  }
+
+  it.each(['{"cpu":2}', "{}"])("a preserve-all adopt reports the live scratch when the annotation %s lacks it", async (overrides) => {
+    const api = new FakeCustomObjectsApi();
+    seedWithOverrides(api, "sess-ha", overrides, "800Gi");
+    const incoming = buildSandboxManifest(scratchCfg, "sess-ha", {});
+
+    const result = await applySandbox(api, scratchCfg, incoming, {
+      preserveResourceFieldsOnAdopt: ALL_FIELDS, resourceOverrides: {},
+    });
+
+    expect(result.resourceOverrides?.scratch).toBe("800Gi");
+    const stored = api.get("sess-ha");
+    expect(JSON.parse(stored?.metadata.annotations?.["valet.dev/resource-overrides"] ?? "{}")).toMatchObject({ scratch: "800Gi" });
+  });
+
+  it("an authoritative scratch replaces the recorded one", async () => {
+    const api = new FakeCustomObjectsApi();
+    seedWithOverrides(api, "sess-ha2", '{"scratch":"800Gi"}', "800Gi");
+    const incoming = buildSandboxManifest(scratchCfg, "sess-ha2", { resources: { scratch: "200Gi" } });
+
+    const result = await applySandbox(api, scratchCfg, incoming, {
+      preserveResourceFieldsOnAdopt: ["cpu", "memory"], resourceOverrides: { scratch: "200Gi" },
+    });
+
+    expect(result.resourceOverrides?.scratch).toBe("200Gi");
+  });
+
+  it("an authoritative removal drops the recorded scratch", async () => {
+    const api = new FakeCustomObjectsApi();
+    seedWithOverrides(api, "sess-ha3", '{"scratch":"800Gi"}', "800Gi");
+    const incoming = buildSandboxManifest(scratchCfg, "sess-ha3", {});
+
+    const result = await applySandbox(api, scratchCfg, incoming, {
+      preserveResourceFieldsOnAdopt: ["cpu", "memory"], resourceOverrides: {},
+    });
+
+    expect(result.resourceOverrides?.scratch).toBeUndefined();
+  });
+
+  it("the annotation reader parses scratch and rejects a non-string one", async () => {
+    const { readResourceOverridesAnnotation } = await import("../src/lifecycle.js");
+    const cr = toCRRead(buildSandboxManifest(scratchCfg, "sess-read", {}));
+    cr.metadata = { ...cr.metadata, annotations: { "valet.dev/resource-overrides": '{"cpu":2,"scratch":"100Gi"}' } };
+    expect(readResourceOverridesAnnotation(cr)).toEqual({ cpu: 2, scratch: "100Gi" });
+    cr.metadata = { ...cr.metadata, annotations: { "valet.dev/resource-overrides": '{"scratch":5}' } };
+    expect(readResourceOverridesAnnotation(cr)).toBeUndefined();
+  });
+});
+
 /** The sandbox container of a stored template, narrowed for assertions. */
 function parseContainer(template: unknown): { volumeMounts?: unknown; env?: unknown[]; resources?: unknown; command?: unknown } {
   if (typeof template !== "object" || template === null || !("spec" in template)) throw new Error("no spec");

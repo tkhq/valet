@@ -215,10 +215,23 @@ export function readResourceOverridesAnnotation(cr: SandboxCRRead): Sandbox["res
   if (!isRecord(value) || Array.isArray(value)) return undefined;
   if (value.cpu !== undefined && (typeof value.cpu !== "number" || !Number.isFinite(value.cpu) || value.cpu <= 0)) return undefined;
   if (value.memory !== undefined && (typeof value.memory !== "string" || value.memory.trim().length === 0)) return undefined;
+  if (value.scratch !== undefined && (typeof value.scratch !== "string" || value.scratch.trim().length === 0)) return undefined;
   return {
     ...(typeof value.cpu === "number" ? { cpu: value.cpu } : {}),
     ...(typeof value.memory === "string" ? { memory: value.memory } : {}),
+    ...(typeof value.scratch === "string" ? { scratch: value.scratch } : {}),
   };
+}
+
+/** The override record with scratch read from the live template: the
+ * emptyDir is the scratch the pod runs, and an annotation written before
+ * scratch was recorded lacks it. Undefined when the CR has no record. */
+export function resourceOverridesWithLiveScratch(cr: SandboxCRRead): Sandbox["resourceOverrides"] {
+  const recorded = readResourceOverridesAnnotation(cr);
+  if (recorded === undefined || recorded === null) return recorded;
+  const { scratch: _recorded, ...rest } = recorded;
+  const live = sandboxCpuMemoryResources(cr.spec.podTemplate).scratch;
+  return live === undefined ? rest : { ...rest, scratch: live };
 }
 
 function resourceOverridesMetadata(
@@ -750,7 +763,7 @@ export async function applySandbox(
       resourceOverrides = null;
     } else {
       resourceOverrides = { ...previousResourceOverrides };
-      for (const field of ["cpu", "memory"] as const) {
+      for (const field of ["cpu", "memory", "scratch"] as const) {
         if (preserveResourceFields.includes(field)) continue;
         delete resourceOverrides[field];
         if (field === "cpu" && opts.resourceOverrides?.cpu !== undefined) {
@@ -759,6 +772,18 @@ export async function applySandbox(
         if (field === "memory" && opts.resourceOverrides?.memory !== undefined) {
           resourceOverrides.memory = opts.resourceOverrides.memory;
         }
+        if (field === "scratch" && opts.resourceOverrides?.scratch !== undefined) {
+          resourceOverrides.scratch = opts.resourceOverrides.scratch;
+        }
+      }
+      // A preserved scratch is the live emptyDir, which the template keeps.
+      // Record it here too: an annotation written before scratch was
+      // recorded lacks it, and a record without it reads as drift at the
+      // next reconcile, which replaces the pod and wipes /scratch (H-A).
+      if (preserveResourceFields.includes("scratch")) {
+        delete resourceOverrides.scratch;
+        const liveScratch = sandboxCpuMemoryResources(existing.spec.podTemplate).scratch;
+        if (liveScratch !== undefined) resourceOverrides.scratch = liveScratch;
       }
     }
   }
