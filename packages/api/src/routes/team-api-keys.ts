@@ -36,7 +36,7 @@ const TEAM_KEY_AUTH_REQUIRED =
 export const TEAM_KEY_ADMIN_REQUIRED =
   "Only a team admin or an organization admin can create a key for this team. " +
   "Ask an admin of this team to create the key. " +
-  "To create your own key, set the workspace switcher to Personal.";
+  "To create your own key, open Personal workspace → API keys and proxy in Settings.";
 
 /**
  * The refusal body for that member. It carries the shared

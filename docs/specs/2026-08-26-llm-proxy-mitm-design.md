@@ -367,6 +367,8 @@ The blocked state on a team's API keys and proxy tab (`/settings/teams/$teamId/a
 2. Ask an admin of this team to create the key.
 3. To create your own key, open Personal workspace → API keys and proxy (`/settings/api-keys`). Team settings pin the team, so the workspace switcher cannot make that tab personal.
 
+The API refusal for the same member (`TEAM_KEY_ADMIN_REQUIRED`, code `team_admin_required`) states the same three things.
+
 In pass-through mode the third statement adds that the member must also supply a provider key, because a personal proxy key alone forwards no credential.
 
 The copy speaks about a team, so the panel shows it only in a team workspace. A caller that blocks creation in another scope gets no team instructions.
