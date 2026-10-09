@@ -20,14 +20,14 @@ Valet runs at {{VALET_URL}}. It holds the organization's integration credentials
 |---|---|---|
 | Call an integration (create an issue, read a channel, query a dashboard) | `search_tools`, `describe_tool`, `call_tool` | `valet tools search`, `describe`, `call` |
 | Hand off long, remote, or team work | `start_thread`, `send_message`, `get_thread` | `valet threads new`, `valet send --thread` |
-| Stop a delegated turn that went the wrong way | `stop_thread` | none |
-| Find what the team already knows | `search_memory`, `read_memory` | none |
-| Save a durable decision or convention | `write_memory`, or `patch_memory` to edit one passage | none |
-| Rename, reorganize, or remove a memory file | `move_memory`, `delete_memory` | none |
-| Follow the team's playbook for a task | `list_skills`, `get_skill` | none |
-| Run a saved automation | `list_workflows`, `run_workflow`, `get_workflow_run`, `cancel_workflow_run`, `retry_workflow_run` | none |
-| See what waits for the person | `list_inbox` | none (`valet gates list --thread <id>` for one thread) |
-| Share a report or page with the organization | `publish_artifact`, or `unpublish_artifact` to take one down | none |
+| Stop a delegated turn that went the wrong way | `stop_thread` | `valet threads stop` |
+| Find what the team already knows | `search_memory`, `read_memory` | `valet memory search`, `read` |
+| Save a durable decision or convention | `write_memory`, or `patch_memory` to edit one passage | `valet memory write`, `patch` |
+| Rename, reorganize, or remove a memory file | `move_memory`, `delete_memory` | `valet memory mv`, `rm` |
+| Follow the team's playbook for a task | `list_skills`, `get_skill` | `valet skills list`, `show` |
+| Run a saved automation | `list_workflows`, `run_workflow`, `get_workflow_run`, `cancel_workflow_run`, `retry_workflow_run` | `valet workflows list`, `run`, `status`, `cancel`, `retry` |
+| See what waits for the person | `list_inbox` | `valet inbox` |
+| Share a report or page with the organization | `publish_artifact`, or `unpublish_artifact` to take one down | `valet artifacts publish <file>`, `unpublish` |
 
 Use your own tools for local work: files, the shell, and the local repository. Use Valet for what needs the organization's accounts, shared context, or Valet's cloud sandboxes.
 
@@ -67,7 +67,16 @@ valet tools describe <tool_id>                 # schema and policy
 valet tools call <tool_id> --params '<json>' [--idempotency-key <k>]
 valet threads list | new --title "<t>"         # Valet assistant threads
 valet send --thread <id> "<prompt>"            # send and stream the reply
+valet threads stop <id>                        # stop the thread's running turn
 valet gates list --thread <id>                 # pending questions and approvals in a thread
+valet inbox                                    # everything waiting for the person
+valet memory search "<words>" | read <path>    # team and personal memory
+valet memory write <path> --file <path|->      # create or replace a memory file
+valet memory patch <path> --old "<t>" --new "<t>" | mv <from> <to> | rm <path>
+valet skills list | show <name>                # the team's playbooks
+valet workflows list | run <id> [--wait <s>] | status | cancel | retry <run_id>
+valet artifacts publish <file> | list | unpublish <artifact_id>
+valet whoami | workspaces                      # identity and --workspace ids
 ```
 
 Add `--json` for machine-readable output. Exit codes: `0` done, `2` usage error, `3` waiting on a decision or approval, `4` failed, `5` authentication failed (the person logs in again), `6` Valet not reachable.

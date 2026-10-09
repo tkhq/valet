@@ -86,7 +86,14 @@ threadsRouter.get("/:threadId", c => inThread(c, async (c, sessionId, threadId) 
   if (!thread) return c.json({ error: "Thread not found." }, 404);
   const [meta] = await c.var.providers.db.select().from(sessionThreads)
     .where(and(eq(sessionThreads.id, threadId), eq(sessionThreads.sessionId, sessionId))).limit(1);
-  return c.json({ id: threadId, sessionId, title: meta?.title ?? null, createdAt: thread.createdAt, archivedAt: meta?.archivedAt ?? null });
+  // The turn a Stop targets: running, else blocked on a decision. A client
+  // without the live socket (the CLI) sends it to /abort as targetItemId.
+  const unsettled = (await c.var.providers.engineStore.listUnsettledSubmissions(sessionId)).filter((item) => item.threadId === threadId);
+  const active = unsettled.find((item) => item.status === "running") ?? unsettled.find((item) => item.status === "blocked_on_decision_gate");
+  return c.json({
+    id: threadId, sessionId, title: meta?.title ?? null, createdAt: thread.createdAt, archivedAt: meta?.archivedAt ?? null,
+    ...(active ? { activeItemId: active.id } : {}),
+  });
 }, "metadata"));
 threadsRouter.patch("/:threadId", c => inThread(c, patchThread));
 threadsRouter.get("/:threadId/messages", c => inThread(c, listMessages));

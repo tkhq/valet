@@ -44,6 +44,13 @@ const COMMANDS: Record<string, CommandImporter> = {
   chat: () => import("./cli/commands/chat.js"),
   mcp: () => import("./cli/commands/mcp.js"),
   tools: () => import("./cli/commands/tools.js"),
+  memory: () => import("./cli/commands/memory.js"),
+  skills: () => import("./cli/commands/skills.js"),
+  workflows: () => import("./cli/commands/workflows.js"),
+  artifacts: () => import("./cli/commands/artifacts.js"),
+  inbox: () => import("./cli/commands/inbox.js"),
+  whoami: () => import("./cli/commands/whoami.js"),
+  workspaces: () => import("./cli/commands/workspaces.js"),
   reset: () => import("./cli/commands/reset.js"),
   prebuild: () => import("./cli/commands/prebuild.js"),
 };
@@ -55,7 +62,7 @@ const USAGE = `valet <command> [options]
 
 Commands:
   serve       Boot the Valet server (the full product)
-  threads     List, create, and inspect workspace threads
+  threads     List, create, inspect, and stop workspace threads
   sessions    Legacy runtime commands (compatible with existing scripts)
   send        Send a prompt to a thread
   upload      Upload files with --thread <id>
@@ -69,6 +76,13 @@ Commands:
   chat        Interactive chat with a thread
   mcp         MCP client operations
   tools       Search, describe, and call Valet-brokered tools
+  memory      Search, read, write, patch, move, and delete memory
+  skills      List and read the team's skills
+  workflows   List, run, cancel, and retry workflow runs
+  artifacts   List, publish, and unpublish artifact pages
+  inbox       Show questions and approvals waiting for you
+  whoami      Show who this CLI is signed in as
+  workspaces  List the workspaces you can use with --workspace
   reset       Reset local state
   prebuild    Test a repo's .valet/prebuild.yaml locally (plan / docker build)
 
