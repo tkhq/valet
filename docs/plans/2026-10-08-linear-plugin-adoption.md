@@ -82,7 +82,7 @@ Files: update `packages/plugin-linear/src/plugin.ts`, `packages/api/src/plugins/
 
 GitHub: personal connect, organization status, callback, disconnect; organization app status, manifest, setup, credential, refresh, disconnect; public app webhook. Preserve signed state, the callback user, installation ownership, and webhook deduplication.
 
-Slack: organization app status and the shared Events API/interactivity webhook. Preserve challenge responses, signature verification, durable inbox admission, retry ownership, channel consumers, and event fan-out.
+Slack: organization app status and the shared Events API/interactivity webhook. Preserve challenge responses, signature verification, durable inbox admission, retry ownership, channel consumers, and event fan-out. See [the Slack adoption plan](2026-10-09-slack-plugin-adoption.md).
 
 Security: the session-scoped Security routes in `packages/api/src/routes/security.ts`, including preview, execution, findings, coverage, exports, handoffs, issue publication, cancellation, and resume. Preserve session authorization and relational persistence through narrow domain capabilities.
 

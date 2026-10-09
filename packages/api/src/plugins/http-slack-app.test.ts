@@ -3,6 +3,7 @@
  * connection state of the org credential. Admin-gated.
  */
 import { afterEach, describe, expect, it } from "vitest";
+import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { GetSlackAppResponse } from "../wire/types.js";
 import { SLACK_OPTIONAL_BOT_SCOPES } from "../services/slack-app.js";
@@ -24,7 +25,7 @@ async function get(baseUrl: string, query = "", headers: Record<string, string> 
 describe("GET /api/org/slack", () => {
   it("reports socket mode when the deployment has no public URL", async () => {
     delete process.env.VALET_PUBLIC_URL;
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [slackPlugin] });
 
     const res = await get(api.baseUrl);
     expect(res.status).toBe(200);
@@ -38,7 +39,7 @@ describe("GET /api/org/slack", () => {
 
   it("points the manifest at this deployment's own webhook URL", async () => {
     process.env.VALET_PUBLIC_URL = "https://valet.example.com";
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [slackPlugin] });
 
     const body = (await (await get(api.baseUrl)).json()) as GetSlackAppResponse;
 
@@ -49,7 +50,7 @@ describe("GET /api/org/slack", () => {
   });
 
   it("names the app from the query so two deployments are distinguishable", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [slackPlugin] });
 
     const body = (await (await get(api.baseUrl, "?name=Valet%20Dev")).json()) as GetSlackAppResponse;
 
@@ -58,7 +59,7 @@ describe("GET /api/org/slack", () => {
   });
 
   it("reports the connected workspace and the scopes the install withheld", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [slackPlugin] });
     await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
       type: "bot_token",
       accessToken: "xoxb-test-token",
@@ -78,7 +79,7 @@ describe("GET /api/org/slack", () => {
   });
 
   it("reports nothing missing for a credential saved before scopes were recorded", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [slackPlugin] });
     await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "slack", {
       type: "bot_token",
       accessToken: "xoxb-test-token",
@@ -92,7 +93,7 @@ describe("GET /api/org/slack", () => {
   });
 
   it("403s a non-admin", async () => {
-    api = await bootTestApi();
+    api = await bootTestApi({ plugins: [slackPlugin] });
 
     const res = await get(api.baseUrl, "", { "x-valet-test-user-id": "test-member" });
 

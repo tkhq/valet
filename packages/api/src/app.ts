@@ -89,9 +89,6 @@ import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { registerProxyGateway } from "./routes/proxy-gateway.js";
 import { channelsRouter } from "./routes/channels.js";
-import { slackWebhookRouter } from "./routes/slack-webhook.js";
-import { slackAppRouter } from "./routes/slack-app.js";
-import { SLACK_WEBHOOK_MOUNT } from "./services/slack-app.js";
 import { mountPluginHttpRoutes } from "./plugins/http-routes.js";
 import { workflowHooksRouter } from "./routes/workflow-hooks.js";
 import { artifactsRouter, buildArtifactsPublicRouter } from "./routes/artifacts.js";
@@ -198,18 +195,18 @@ export function createApp(
       : async () => ({ valid: false, key: null }),
   });
 
+  // Public plugin routes include signed event ingress and host-owned
+  // compatibility URLs. They mount BEFORE `buildAuthMiddleware`, and before
+  // `channelsRouter`: Slack's compatibility URL `/api/channels/slack/webhook`
+  // must beat `channelsRouter`'s `/:channelType/webhook`. Authenticated
+  // plugin routes mount below the normal authentication middleware.
+  mountPluginHttpRoutes(app, providers.plugins, "public");
+
   // Public channel ingress (webhooks) — verification is transport-level
   // (`ChannelHost.handleWebhook` → `transport.verifyWebhook`), not the auth
   // gate below, since the caller is the provider (Telegram etc.), not a
   // logged-in Valet user. Mounting BEFORE `buildAuthMiddleware` is what
   // makes this route public — do not move it below that line.
-  //
-  // Slack gets its own ingress, mounted first so the more specific path
-  // beats `channelsRouter`'s `/:channelType/webhook`. Slack delivers Events
-  // API traffic and interactivity to one app-level URL; that route verifies
-  // the signing-secret HMAC once against the org credential's metadata and
-  // fans each update out to both the channel host and the event pipeline.
-  app.route(SLACK_WEBHOOK_MOUNT, slackWebhookRouter);
   app.route("/api/channels", channelsRouter);
 
   // PUBLIC GitHub App webhook ingress — same reasoning as `channelsRouter`
@@ -219,9 +216,6 @@ export function createApp(
   // for the same reason `channelsRouter` is.
   app.route("/webhooks/github-app", githubAppWebhookRouter);
 
-  // Public plugin routes include signed event ingress and host-owned legacy aliases.
-  // Authenticated plugin routes mount below the normal authentication middleware.
-  mountPluginHttpRoutes(app, providers.plugins, "public");
   app.post("/webhooks/events/:service", (c) => c.json({ error: "unknown service" }, 404));
 
   // PUBLIC arbitrary-URL workflow trigger ingress (overhaul design decision
@@ -416,7 +410,6 @@ export function createApp(
   app.route("/api/me/grants", meGrantsRouter);
   app.route("/api/org/github-app", githubAppRouter);
   app.route("/api/org/linear", linearConnectRouter);
-  app.route("/api/org/slack", slackAppRouter);
   app.route("/api/org/sources", sourcesRouter);
   app.route("/api/repos", reposRouter);
   app.route("/api/sandbox", sandboxGitCredentialRouter);

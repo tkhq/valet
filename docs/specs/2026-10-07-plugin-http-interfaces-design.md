@@ -107,7 +107,7 @@ Triggers from other services cannot participate in Linear verification.
 A temporary host adapter reads existing Linear installations and signing metadata without refreshing credentials.
 The installation's stored organization determines event ownership after verification. Request bodies cannot override it.
 
-This iteration does not move connection handlers, GitHub, Slack, or Security routes.
+This iteration does not move connection handlers, GitHub, or Security routes. The Slack section below describes the Slack adoption.
 It does not implement arbitrary callback state capabilities, plugin-owned storage, lifecycle hooks, or the complete event-emission interface.
 New signed plugins currently need an installation adapter. This restriction remains until plugin-owned installation storage is available.
 No database migration or existing-data rewrite is required.
@@ -128,3 +128,30 @@ The API compatibility module keeps host environment defaults and shares the plug
 Connection route mounting, persistence, and token renewal ownership remain in the API host.
 The next adoption step is described in [the Linear adoption plan](../plans/2026-10-08-linear-plugin-adoption.md).
 This preparation does not complete Linear connection route adoption or TKAI-377.
+
+## Slack adoption
+
+The Slack plugin declares two routes. `events` is a public POST route with a 1 MiB limit. `app` is an org-admin GET route.
+The host keeps POST `/api/channels/slack/webhook` and GET `/api/org/slack` as compatibility URLs.
+Each compatibility URL fixes its method and authentication. Public plugin routes mount before the generic channel webhook route, so the Slack URL still wins.
+
+The plugin owns the URL verification handshake, v0 signature verification over raw bytes, payload parsing, retry headers, response codes, and the app manifest.
+The host passes the manifest URLs and the Slack user scope bundle as endpoint configuration.
+
+Bundled routes that need host data use a host-owned binding map, keyed by plugin name and route ID.
+A binding declares its authentication, and mounting fails on a mismatch. The host runs the binding after its authentication and body-limit checks.
+Each binding gives the handler one request-scoped capability. No capability method accepts an organization or user ID.
+
+The ingress capability reads the single-org Slack connection, writes throttled diagnostics, and admits a verified request.
+Admission saves the encrypted request in `slack_webhook_inbox` before the 200 response. The host stores its own copy of the bytes and provider headers.
+The drain and its channel, subscription, and follow-router consumers are unchanged. Inbox and ingest deduplication are unchanged.
+
+Slack signed ingress does not use the generic `signature` route kind. That kind dispatches events before acknowledging.
+Slack needs a handshake before credentials exist, a 401 rejection, a 503 retry response, and durable admission before the acknowledgement.
+
+Stored inbox headers no longer include Cookie, Authorization, or Valet credential headers. Slack sends none of them, and the drain reads only Slack signature headers.
+If the Slack plugin is not loaded, the compatibility URLs are not mounted. The ingress URL then reaches the generic channel route, which returns 404.
+
+Org credential connect, user OAuth, and identity linking remain generic host routes. They serve several plugins and need TKAI-379 lifecycle hooks before they move.
+The inbox table remains an API table pending TKAI-378. New manifests still name the compatibility URL.
+The implementation record is [the Slack adoption plan](../plans/2026-10-09-slack-plugin-adoption.md).

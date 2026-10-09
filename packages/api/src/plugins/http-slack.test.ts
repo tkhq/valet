@@ -8,11 +8,11 @@ import { eq } from "drizzle-orm";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eventDropLog, slackWebhookInbox } from "../schema/index.js";
-import { __resetSlackWebhookThrottle } from "../routes/slack-webhook.js";
+import { __resetSlackWebhookThrottle } from "../channels/slack-inbox.js";
 import type { CreateTeamApiKeyResponse, CreateTeamResponse } from "../wire/types.js";
 
-const INGRESS_PATHS = ["/api/channels/slack/webhook"];
-const SETUP_PATHS = ["/api/org/slack"];
+const INGRESS_PATHS = ["/api/channels/slack/webhook", "/plugins/slack/http/events"];
+const SETUP_PATHS = ["/api/org/slack", "/api/plugins/slack/http/app"];
 const SECRET = "slack-signing-secret";
 const TEAM_ID = "T0001";
 
@@ -195,11 +195,13 @@ describe.each(SETUP_PATHS)("Slack setup at %s", (path) => {
     expect(JSON.stringify(body)).not.toContain("xoxb-test-token");
   });
 
-  it("refuses a member who is not an administrator", async () => {
+  it("refuses a member who is not an administrator before reading the credential", async () => {
     api = await bootTestApi({ plugins: [slackPlugin] });
+    const read = vi.spyOn(api.providers.engineCredentials, "get");
     const res = await fetch(`${api.baseUrl}${path}`, { headers: { "x-valet-test-user-id": "test-member" } });
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "org admin required" });
+    expect(read).not.toHaveBeenCalledWith(expect.anything(), "slack");
   });
 
   it("refuses anonymous callers and team API keys", async () => {
