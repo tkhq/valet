@@ -292,6 +292,34 @@ function makeProvider(secretsApi: SandboxSecretsApi, objectsApi?: FakeObjectsApi
   );
 }
 
+describe("KubernetesSandboxProvider.list scratch (fix wave 3, M1)", () => {
+  class ScratchListObjectsApi extends FakeObjectsApi {
+    override async listNamespacedCustomObject(_params: ListSandboxParams): Promise<unknown> {
+      const running = buildSandboxManifest(providerCfg, "ws-running", { resources: { scratch: "100Gi" } });
+      const suspended = buildSandboxManifest(providerCfg, "ws-suspended", { resources: { scratch: "1Ti" } });
+      const plain = buildSandboxManifest(providerCfg, "ws-plain", {});
+      return { items: [
+        { metadata: running.metadata, spec: running.spec },
+        { metadata: suspended.metadata, spec: { ...suspended.spec, operatingMode: "Suspended" } },
+        { metadata: plain.metadata, spec: plain.spec },
+      ] };
+    }
+  }
+
+  it("reports the scratch size of running sandboxes only", async () => {
+    const secretsApi: SandboxSecretsApi = { upsertSecret: vi.fn(), writeSecret: vi.fn(), deleteSecret: vi.fn(), patchOwnerReference: vi.fn() };
+    const provider = makeProvider(secretsApi, new ScratchListObjectsApi());
+
+    const rows = await provider.list();
+
+    expect(rows.map((row) => ["scratchBytes" in row ? row.scratchBytes : undefined, row.id])).toEqual([
+      [100 * 2 ** 30, "ws-running"],
+      [undefined, "ws-suspended"],
+      [undefined, "ws-plain"],
+    ]);
+  });
+});
+
 describe("KubernetesSandboxProvider creds Secret lifecycle", () => {
   it("create() with credsFiles upserts the Secret BEFORE applySandbox (order matters)", async () => {
     const secretsApi = new FakeSecretsApi();
