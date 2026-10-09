@@ -193,11 +193,9 @@ and `signal` records engine-routed admissions.
   the current workspace name. Team and organization runs use their owner's
   name. Personal runs use the bot identity. A workspace whose assistant had a
   custom name or avatar before the workspace runtime (2026-10-06) keeps it as
-  the workspace default, read from the legacy `assistants` columns that
-  upgraded databases still hold (`assistants/legacy-profile.ts`). The same
-  read restores that assistant's personality in the prompt when the
-  `assistant/personality.md` memory file is absent, and its name opens the
-  prompt ("You are <name>."). Nothing writes these columns. Workflows may set
+  the workspace default. The legacy continuity spec
+  (`2026-10-06-legacy-continuity-design.md`, "Carried-over assistant
+  profile") describes that read and its limits. Workflows may set
   `definition.presence: { displayName?, avatarUrl? }`; event subscriptions may
   set `target.presence` for either an assistant or workflow target. Fields
   inherit in order: workspace, workflow, subscription, explicit action arguments.

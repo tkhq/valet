@@ -49,15 +49,15 @@ describe("carried-over assistant profile", () => {
 
   it("posts as the customized name and avatar in place of the team name", async () => {
     await addLegacyColumns(db);
-    await setLegacy(db, TEAM, "Tavi", AVATAR, "Warm and brief.");
-    expect(await loadLegacyAssistantProfile(db, ORG, TEAM)).toEqual({ name: "Tavi", avatarUrl: AVATAR, personality: "Warm and brief." });
-    expect(await workspaceSenderIdentity(db, ORG, TEAM)).toEqual({ displayName: "Tavi", avatarUrl: AVATAR });
+    await setLegacy(db, TEAM, "Desk Helper", AVATAR, "Warm and brief.");
+    expect(await loadLegacyAssistantProfile(db, ORG, TEAM)).toEqual({ name: "Desk Helper", avatarUrl: AVATAR, personality: "Warm and brief.", upgradedAt: expect.any(Number) });
+    expect(await workspaceSenderIdentity(db, ORG, TEAM)).toEqual({ displayName: "Desk Helper", avatarUrl: AVATAR });
   });
 
   it("gives a customized personal assistant its name, where the bot identity was the default", async () => {
     await addLegacyColumns(db);
-    await setLegacy(db, USER, "Hestia", null, null);
-    expect(await workspaceSenderIdentity(db, ORG, USER)).toEqual({ displayName: "Hestia" });
+    await setLegacy(db, USER, "Home Helper", null, null);
+    expect(await workspaceSenderIdentity(db, ORG, USER)).toEqual({ displayName: "Home Helper" });
   });
 
   it("keeps the team name when the old profile set none, and ignores blank values", async () => {

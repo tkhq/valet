@@ -151,7 +151,7 @@ import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { limitPlugins, loadIntegrationLimit } from "../assistants/integration-limit.js";
-import { loadLegacyAssistantProfile } from "../assistants/legacy-profile.js";
+import { effectivePersonality, loadLegacyAssistantProfile } from "../assistants/legacy-profile.js";
 import { listSkillSourcesFor } from "../services/skills.js";
 import { skillTelemetrySink } from "../services/skill-telemetry.js";
 import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
@@ -2857,17 +2857,18 @@ export class EngineHost {
   }
 
   /**
-   * Use private persona text first, then the same team's explicitly shared
-   * persona, then the personality the workspace's assistant carried over
-   * from its profile (`legacy-profile.ts`). The memory file wins because the
-   * assistant and its owner keep editing it; the carried-over text never
-   * changes. A carried-over name opens the prefix.
+   * The memory file is private persona text first, then the same team's
+   * explicitly shared persona. `effectivePersonality` weighs it against the
+   * personality the workspace's assistant carried over from its profile
+   * (`legacy-profile.ts`): the carried-over value keeps its old precedence
+   * until someone edits the file after the upgrade. A carried-over name
+   * opens the prefix.
    */
   private async resolvePersonaPrefix(db: AppDb, orgId: string, scope: MemoryScope): Promise<string> {
     const row = await readOwnFile(db, scope, "assistant/personality.md")
       ?? (scope.owner.type === "team" && scope.namespace ? await readOwnFile(db, { ...scope, namespace: "" }, "assistant/personality.md") : null);
     const legacy = await loadLegacyAssistantProfile(db, orgId, scope.owner);
-    return personaPrefixText(row?.content ?? legacy?.personality ?? "", legacy?.name);
+    return personaPrefixText(effectivePersonality(row, legacy), legacy?.name);
   }
 
   /** The shared per-process EventStream. Engine sessions and WS handlers fan out through this one instance. */

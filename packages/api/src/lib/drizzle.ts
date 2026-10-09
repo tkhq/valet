@@ -138,12 +138,17 @@ export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<
   await reportRetiredAssistantSettings(db);
 }
 
+/** The `__valet_app_migrations` row the upgrade to the workspace runtime
+ * writes once. Its `applied_at` is when this database was upgraded
+ * (`assistants/legacy-profile.ts` reads it). */
+export const LEGACY_RUNTIME_MARKER = "legacy-runtime-continuity-v1";
+
 /** Snapshot existing runtime relationships once, before any runtime is restored. */
 export async function classifyLegacyRuntimes(db: PgDb): Promise<void> {
   await db.transaction(async tx => {
     // Serialize concurrent API boots; the marker and snapshots commit together.
     await tx.query("LOCK TABLE __valet_app_migrations IN EXCLUSIVE MODE");
-    const marker = "legacy-runtime-continuity-v1";
+    const marker = LEGACY_RUNTIME_MARKER;
     if ((await tx.query("SELECT 1 FROM __valet_app_migrations WHERE filename = $1", [marker])).rows.length) return;
     await tx.query(`INSERT INTO legacy_assistant_runtimes (session_id, org_id, assistant_id, owner_type, owner_id)
       SELECT a.session_id, a.org_id, a.id, a.owner_type, a.owner_id FROM assistants a

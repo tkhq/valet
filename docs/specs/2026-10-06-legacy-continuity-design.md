@@ -29,6 +29,14 @@ Where an execution mapping already exists from an earlier prerelease, preserve t
 - The new model must not introduce audience-based rejection for an existing supported workflow combination within its original ownership boundary.
 - Explicit user deletion, revocation and archival remain effective. Migration must not resurrect intentionally deleted work.
 
+## Carried-over assistant profile
+
+The workspace runtime removed `assistants.name`, `avatar_url`, and `personality` from the Drizzle schema and from a fresh database. An upgraded database still holds these columns. `assistants/legacy-profile.ts` reads them read-only through `to_jsonb`, so a database without the columns reads null and does not fail. Nothing writes them.
+
+- **Reply identity.** The name and avatar are the workspace's base channel identity (`services/workspace-sender.ts`). Workflow, subscription, and action presence still override each field. Without a carried-over name, team and organization posts use the owner's name and personal posts use the bot identity.
+- **Prompt name.** A carried-over name opens the persona prefix: "You are <name>."
+- **Personality precedence.** Before the upgrade, a set column won over the `assistant/personality.md` memory file, and `""` in the column was an explicitly neutral persona. The file could already exist then: `PATCH /api/orchestrator/info` wrote it on every personality save, and the assistant could write it with its memory tools. After the upgrade the file is the only personality that anyone can change. The prompt therefore uses the column while the file is absent or unchanged since the upgrade, and the file when someone wrote it after the upgrade. The upgrade time is the `applied_at` of the `legacy-runtime-continuity-v1` row in `__valet_app_migrations`, compared with the file's `updated_at`. A null column uses the file, as before. An OKF import keeps the bundle's timestamp, so an imported pre-upgrade file does not count as a later edit.
+
 ## Recovery and external actions
 
 Use the existing fenced queue, approval and checkpoint recovery protocols. Preserve completed tool results and dispatch IDs. Do not replay completed external actions to reconstruct state.

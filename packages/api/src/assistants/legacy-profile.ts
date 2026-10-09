@@ -14,12 +14,16 @@
  */
 import { sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
-import type { AppDb } from "../lib/drizzle.js";
+import { LEGACY_RUNTIME_MARKER, type AppDb } from "../lib/drizzle.js";
 
 export interface LegacyAssistantProfile {
   name?: string;
   avatarUrl?: string;
+  /** Trimmed. `""` is an explicitly neutral persona: the old editor stored
+   * it when someone cleared the personality. Absent means never set. */
   personality?: string;
+  /** When this database was upgraded to the workspace runtime (epoch ms). */
+  upgradedAt?: number;
 }
 
 function text(value: unknown): string | undefined {
@@ -33,17 +37,46 @@ export async function loadLegacyAssistantProfile(
   owner: Principal,
 ): Promise<LegacyAssistantProfile | undefined> {
   const result = await db.execute(sql`SELECT to_jsonb(a)->>'name' AS name,
-      to_jsonb(a)->>'avatar_url' AS avatar_url, to_jsonb(a)->>'personality' AS personality
+      to_jsonb(a)->>'avatar_url' AS avatar_url, to_jsonb(a)->>'personality' AS personality,
+      (SELECT m.applied_at FROM __valet_app_migrations m WHERE m.filename = ${LEGACY_RUNTIME_MARKER}) AS upgraded_at
     FROM assistants a WHERE a.org_id = ${orgId} AND a.owner_type = ${owner.type}
       AND a.owner_id = ${owner.id} AND a.archived_at IS NULL LIMIT 1`) as {
-    rows: Array<{ name: unknown; avatar_url: unknown; personality: unknown }>;
+    rows: Array<{ name: unknown; avatar_url: unknown; personality: unknown; upgraded_at: unknown }>;
   };
   const row = result.rows[0];
   if (!row) return undefined;
   const profile: LegacyAssistantProfile = {
     ...(text(row.name) ? { name: text(row.name) } : {}),
     ...(text(row.avatar_url) ? { avatarUrl: text(row.avatar_url) } : {}),
-    ...(text(row.personality) ? { personality: text(row.personality) } : {}),
+    ...(typeof row.personality === "string" ? { personality: row.personality.trim() } : {}),
   };
-  return Object.keys(profile).length > 0 ? profile : undefined;
+  if (Object.keys(profile).length === 0) return undefined;
+  const upgradedAt = Number(row.upgraded_at);
+  return row.upgraded_at !== null && Number.isFinite(upgradedAt) ? { ...profile, upgradedAt } : profile;
+}
+
+/**
+ * The personality text for the prompt, from the `assistant/personality.md`
+ * memory file and the carried-over column.
+ *
+ * Before the workspace runtime, a set column won over the file, and `""`
+ * in the column was an explicitly neutral persona. The file could already
+ * exist then: `PATCH /api/orchestrator/info` wrote it on every personality
+ * save, and the assistant could write it with its memory tools. After the
+ * upgrade the file is the only personality anyone can change, through the
+ * assistant's memory tools or the memory API.
+ *
+ * So the column keeps winning while the file is unchanged since the
+ * upgrade, which reproduces what the workspace had. A file written after
+ * the upgrade is a newer edit, and it wins. The upgrade marker and the
+ * file's `updated_at` both come from the API's clock. A database without
+ * the marker cannot show a later edit, so the column wins there.
+ */
+export function effectivePersonality(
+  file: { content: string; updatedAt: number } | null,
+  legacy: LegacyAssistantProfile | undefined,
+): string {
+  if (legacy?.personality === undefined) return file?.content ?? "";
+  if (file && file.updatedAt > (legacy.upgradedAt ?? Number.POSITIVE_INFINITY)) return file.content;
+  return legacy.personality;
 }
