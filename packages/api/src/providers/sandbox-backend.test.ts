@@ -557,12 +557,38 @@ describe("resolveWakeupLimits", () => {
 
   it("throws naming the knob when a value is zero, negative, or not an integer", () => {
     expect(() => resolveWakeupLimits({ VALET_LEASE_MAX_HOURS: "0" })).toThrow(
-      'VALET_LEASE_MAX_HOURS="0" must be a positive integer. Set it to a whole number greater than 0.',
+      'VALET_LEASE_MAX_HOURS="0" is not a whole number from 1 to 8760. Set it to a value in that range.',
     );
     expect(() => resolveWakeupLimits({ VALET_TIMER_MAX_HOURS: "-1" })).toThrow("VALET_TIMER_MAX_HOURS");
     expect(() => resolveWakeupLimits({ VALET_WAKEUPS_PER_SESSION: "1.5" })).toThrow("VALET_WAKEUPS_PER_SESSION");
     expect(() => resolveWakeupLimits({ VALET_WATCH_MAX_EVENTS_PER_HOUR: "abc" })).toThrow(
       "VALET_WATCH_MAX_EVENTS_PER_HOUR",
+    );
+  });
+
+  it.each(["1e3", "0x10", "12.0", "+5", " 1 2 "])("refuses the non-decimal form %j (data L4)", (raw) => {
+    expect(() => resolveWakeupLimits({ VALET_WAKEUPS_PER_SESSION: raw })).toThrow(
+      `VALET_WAKEUPS_PER_SESSION="${raw}" is not a whole number from 1 to 1000. Set it to a value in that range.`,
+    );
+  });
+
+  it("accepts surrounding whitespace and the upper bounds", () => {
+    expect(resolveWakeupLimits({
+      VALET_LEASE_MAX_HOURS: " 8760 ",
+      VALET_TIMER_MAX_HOURS: "8760",
+      VALET_WAKEUPS_PER_SESSION: "1000",
+      VALET_WATCH_MAX_EVENTS_PER_HOUR: "100000",
+    })).toEqual({ leaseMaxHours: 8760, timerMaxHours: 8760, perSession: 1000, watchMaxEventsPerHour: 100000 });
+  });
+
+  it.each([
+    ["VALET_LEASE_MAX_HOURS", "8761", 8760],
+    ["VALET_TIMER_MAX_HOURS", "10000000000000", 8760],
+    ["VALET_WAKEUPS_PER_SESSION", "1001", 1000],
+    ["VALET_WATCH_MAX_EVENTS_PER_HOUR", "100001", 100000],
+  ])("refuses %s above its bound", (name, raw, max) => {
+    expect(() => resolveWakeupLimits({ [name]: raw })).toThrow(
+      `${name}="${raw}" is not a whole number from 1 to ${max}. Set it to a value in that range.`,
     );
   });
 });

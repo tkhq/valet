@@ -460,18 +460,26 @@ export function resolveScratchCaps(env: NodeJS.ProcessEnv): ScratchCaps {
 
 /**
  * Shared parse for the wakeup/lease limit knobs below: unset or empty →
- * the default; anything else must parse as a positive integer or the boot
- * THROWS naming the env var and the corrective action.
+ * the default. Anything else must be plain decimal digits (no `1e3`, `0x10`,
+ * `12.0`, or sign) from 1 to `max`, or the boot THROWS naming the env var
+ * and the valid range. The bound keeps a value like `VALET_TIMER_MAX_HOURS`
+ * from overflowing the `bigint` deadline columns.
  */
-function positiveIntEnv(name: string, raw: string | undefined, defaultValue: number): number {
+function positiveIntEnv(name: string, raw: string | undefined, defaultValue: number, max: number): number {
   const trimmed = raw?.trim();
   if (trimmed === undefined || trimmed === "") return defaultValue;
-  const n = Number(trimmed);
-  if (!Number.isInteger(n) || n <= 0) {
-    throw new Error(`${name}="${raw}" must be a positive integer. Set it to a whole number greater than 0.`);
+  const n = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
+  if (!Number.isSafeInteger(n) || n < 1 || n > max) {
+    throw new Error(`${name}="${raw}" is not a whole number from 1 to ${max}. Set it to a value in that range.`);
   }
   return n;
 }
+
+/** Upper bounds for the wakeup/lease knobs: one year of hours, and counts
+ * far above any sane deploy that still fit every column. */
+const MAX_LIMIT_HOURS = 8760;
+const MAX_WAKEUPS_PER_SESSION = 1000;
+const MAX_WATCH_EVENTS_PER_HOUR = 100_000;
 
 /**
  * Resolves the wakeups/leases limits (spec 2026-10-08) from env:
@@ -482,13 +490,14 @@ function positiveIntEnv(name: string, raw: string | undefined, defaultValue: num
  */
 export function resolveWakeupLimits(env: NodeJS.ProcessEnv): WakeupLimits {
   return {
-    leaseMaxHours: positiveIntEnv("VALET_LEASE_MAX_HOURS", env.VALET_LEASE_MAX_HOURS, 72),
-    timerMaxHours: positiveIntEnv("VALET_TIMER_MAX_HOURS", env.VALET_TIMER_MAX_HOURS, 720),
-    perSession: positiveIntEnv("VALET_WAKEUPS_PER_SESSION", env.VALET_WAKEUPS_PER_SESSION, 20),
+    leaseMaxHours: positiveIntEnv("VALET_LEASE_MAX_HOURS", env.VALET_LEASE_MAX_HOURS, 72, MAX_LIMIT_HOURS),
+    timerMaxHours: positiveIntEnv("VALET_TIMER_MAX_HOURS", env.VALET_TIMER_MAX_HOURS, 720, MAX_LIMIT_HOURS),
+    perSession: positiveIntEnv("VALET_WAKEUPS_PER_SESSION", env.VALET_WAKEUPS_PER_SESSION, 20, MAX_WAKEUPS_PER_SESSION),
     watchMaxEventsPerHour: positiveIntEnv(
       "VALET_WATCH_MAX_EVENTS_PER_HOUR",
       env.VALET_WATCH_MAX_EVENTS_PER_HOUR,
       120,
+      MAX_WATCH_EVENTS_PER_HOUR,
     ),
   };
 }

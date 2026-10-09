@@ -233,16 +233,16 @@ by hand as each user signs in. No wipe and no re-import is needed.
 | `VALET_SANDBOX_IMAGE` | Sandbox image ref (required for kubernetes; docker defaults to `node:20-bookworm`) |
 | `VALET_SANDBOX_CPU` | Optional Kubernetes sandbox CPU default. Use a value greater than 0 and at most 64, such as `4` or `0.5`. Empty leaves it unset. |
 | `VALET_SANDBOX_MEMORY` | Optional Kubernetes sandbox memory default. Use a positive quantity, such as `8Gi` or `500Mi`. Empty leaves it unset. |
-| `VALET_SANDBOX_SCRATCH_MAX` | Deploy-wide cap for the per-sandbox `/scratch` volume. Unset (the default) or `0` disables scratch for the whole deployment. Use a positive quantity, such as `1Ti`. |
+| `VALET_SANDBOX_SCRATCH_MAX` | Deploy-wide cap for the per-sandbox `/scratch` volume. Unset (the default) or `0` disables scratch for the whole deployment. Use a positive quantity, such as `1Ti`. The chart sets it from `sandbox.scratchMax`. A refused request tells the user to ask an admin to change that value. |
 | `VALET_SANDBOX_SCRATCH_AGENT_MAX` | Cap on a `/scratch` size the `task` tool can request for a child session (default `100Gi`). `0` removes the agent cap; a repository or saved default can still request up to `VALET_SANDBOX_SCRATCH_MAX`. Must not exceed `VALET_SANDBOX_SCRATCH_MAX`, or API startup fails and names both variables. |
 | `VALET_SANDBOX_IDLE_MINUTES` | Idle-hibernation window (default `30`, `0` disables). Only effective on backends with hibernation (kubernetes) |
 | `VALET_SANDBOX_NAMESPACE` | Kubernetes namespace for Sandbox CRs |
 | `VALET_SANDBOX_IMAGE_PULL_SECRET` | Image pull secret name (kubernetes) |
 | `VALET_KUBE_CONTEXT` | kubectl context (required when running out-of-cluster) |
 | `VALET_SANDBOX_API_URL` | URL sandboxes use to call back into the API (defaults to the auth base URL) |
-| `VALET_LEASE_MAX_HOURS` | Max hours a lease (a background process, a watch, or `hold_sandbox`) keeps a sandbox alive (default `72`). Must be a positive integer. |
-| `VALET_TIMER_MAX_HOURS` | Max hours ahead a `wake_at` timer may fire (default `720`). Must be a positive integer. |
-| `VALET_WAKEUPS_PER_SESSION` | Max active wakeups and leases one session may hold at once (default `20`). Must be a positive integer. |
+| `VALET_LEASE_MAX_HOURS` | Max hours a lease (a background process, a watch, or `hold_sandbox`) keeps a sandbox alive (default `72`). Use plain digits from 1 to 8760, or API startup fails. |
+| `VALET_TIMER_MAX_HOURS` | Max hours ahead a `wake_at` timer may fire (default `720`). Use plain digits from 1 to 8760, or API startup fails. |
+| `VALET_WAKEUPS_PER_SESSION` | Max active wakeups and leases one session may hold at once (default `20`). Use plain digits from 1 to 1000, or API startup fails. |
 | `VALET_WATCH_MAX_EVENTS_PER_HOUR` | Max `watch.event` signals one `watch` wakeup may emit per hour (default `120`). Must be a positive integer. |
 
 The Helm chart maps `sandbox.resources.cpu` and `sandbox.resources.memory` to
