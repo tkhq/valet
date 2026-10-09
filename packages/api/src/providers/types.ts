@@ -8,6 +8,7 @@ import type {
   SessionStore,
   ValetPlugin,
 } from "@valet/engine";
+import type { ScratchCaps } from "@valet/shared";
 import type { RunHost, WorkflowStore } from "@valet/workflow";
 import type { ImageBuilder } from "../prebuilds/builder.js";
 import type { SourceService } from "../bakes/source-service.js";
@@ -119,4 +120,10 @@ export interface Providers {
   /** TTL-cached resolved tool counts for connected dynamic services
    * (`/api/plugins`'s `toolCount` field — see `plugins/dynamic-tool-count.ts`). */
   dynamicToolCounts: DynamicToolCounts;
+
+  /** Deploy and agent caps for the node-local `/scratch` volume
+   * (`resolveScratchCaps(process.env)` at boot). Threaded into
+   * `ChildrenDeps.scratchCaps` and read directly by the sources route's
+   * saved-default PATCH validation. */
+  scratchCaps: ScratchCaps;
 }

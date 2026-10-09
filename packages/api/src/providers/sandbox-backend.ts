@@ -21,7 +21,7 @@ import * as k8s from "@kubernetes/client-node";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SandboxProvider, SandboxResources } from "@valet/engine";
-import { isValidSandboxCpu, sandboxCpuRange } from "@valet/shared";
+import { isValidSandboxCpu, sandboxCpuRange, type ScratchCaps } from "@valet/shared";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
 import {
@@ -401,6 +401,63 @@ export function resolveSandboxWorkspaceStorageMax(env: NodeJS.ProcessEnv): strin
   return quantityEnv("VALET_SANDBOX_WORKSPACE_MAX", env.VALET_SANDBOX_WORKSPACE_MAX, "20Gi");
 }
 
+/**
+ * Deploy-wide hard cap for the node-local `/scratch` volume
+ * (`VALET_SANDBOX_SCRATCH_MAX`). Unlike the workspace knobs above, the
+ * default is UNSET: scratch is disabled deployment-wide until an operator
+ * opts in by setting this. `"0"` keeps it disabled explicitly.
+ */
+export function resolveSandboxScratchMax(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = env.VALET_SANDBOX_SCRATCH_MAX;
+  const trimmed = raw?.trim();
+  if (trimmed === undefined || trimmed === "") return undefined;
+  const bytes = parseStorageQuantity(trimmed);
+  if (bytes === 0) return undefined;
+  if (bytes === null || bytes < 0) {
+    throw new Error(
+      `VALET_SANDBOX_SCRATCH_MAX="${raw}" is not a positive Kubernetes quantity. Use a form like "1Ti", or "0" to disable.`,
+    );
+  }
+  return trimmed;
+}
+
+/**
+ * Per-child-agent cap on a `task`-requested `/scratch` volume
+ * (`VALET_SANDBOX_SCRATCH_AGENT_MAX`, default "100Gi"). Only the `task`
+ * source is bound by this cap (`validateScratchRequest`'s `source` param).
+ * A repository's `.valet/prebuild.yaml` or a saved default can still request
+ * up to the deploy cap. `"0"` removes the agent cap entirely.
+ */
+export function resolveSandboxScratchAgentMax(env: NodeJS.ProcessEnv): string | undefined {
+  return quantityEnv("VALET_SANDBOX_SCRATCH_AGENT_MAX", env.VALET_SANDBOX_SCRATCH_AGENT_MAX, "100Gi");
+}
+
+/**
+ * Resolves both scratch caps together and throws at boot when the agent cap
+ * exceeds the deploy cap (a `task` request the agent cap would allow could
+ * never actually provision). Called unconditionally regardless of
+ * `VALET_SANDBOX_BACKEND` so the check always runs, not only under
+ * kubernetes.
+ */
+export function resolveScratchCaps(env: NodeJS.ProcessEnv): ScratchCaps {
+  const max = resolveSandboxScratchMax(env);
+  const agentMax = resolveSandboxScratchAgentMax(env);
+  if (max !== undefined && agentMax !== undefined) {
+    const maxBytes = parseStorageQuantity(max);
+    const agentBytes = parseStorageQuantity(agentMax);
+    if (maxBytes !== null && agentBytes !== null && agentBytes > maxBytes) {
+      throw new Error(
+        `VALET_SANDBOX_SCRATCH_AGENT_MAX (effective "${agentMax}") exceeds VALET_SANDBOX_SCRATCH_MAX (effective "${max}"). ` +
+          "Lower the agent cap or raise the deploy cap.",
+      );
+    }
+  }
+  return {
+    ...(max !== undefined ? { max } : {}),
+    ...(agentMax !== undefined ? { agentMax } : {}),
+  };
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a
@@ -422,6 +479,9 @@ export function buildSandboxProvider(
   deps: BuildSandboxProviderDeps = {},
 ): SandboxProvider {
   const backend = parseSandboxBackend(env.VALET_SANDBOX_BACKEND);
+  // Boot check only, every backend: a contradictory deploy config (agent cap
+  // above the deploy cap) must fail loud here, not only under kubernetes.
+  resolveScratchCaps(env);
   switch (backend) {
     case "docker":
       return new DockerSandboxProvider({

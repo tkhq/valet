@@ -33,6 +33,9 @@ import {
   resolveSandboxEphemeralStorageRequest,
   resolveSandboxMemory,
   resolveSandboxResources,
+  resolveSandboxScratchAgentMax,
+  resolveSandboxScratchMax,
+  resolveScratchCaps,
   resolveSandboxWorkspaceStorage,
   resolveSandboxWorkspaceStorageMax,
 } from "./sandbox-backend.js";
@@ -482,6 +485,51 @@ describe("resolveSandboxWorkspaceStorageMax", () => {
 
   it('treats "0" as unset so the provider\'s own default cap applies', () => {
     expect(resolveSandboxWorkspaceStorageMax({ VALET_SANDBOX_WORKSPACE_MAX: "0" })).toBeUndefined();
+  });
+});
+
+describe("resolveSandboxScratchMax / resolveSandboxScratchAgentMax", () => {
+  it("defaults scratch max to unset (scratch disabled) and agent max to 100Gi", () => {
+    expect(resolveSandboxScratchMax({})).toBeUndefined();
+    expect(resolveSandboxScratchAgentMax({})).toBe("100Gi");
+  });
+
+  it("passes an explicit scratch max through verbatim", () => {
+    expect(resolveSandboxScratchMax({ VALET_SANDBOX_SCRATCH_MAX: "1Ti" })).toBe("1Ti");
+  });
+
+  it('treats "0" as disabled for both knobs', () => {
+    expect(resolveSandboxScratchMax({ VALET_SANDBOX_SCRATCH_MAX: "0" })).toBeUndefined();
+    expect(resolveSandboxScratchAgentMax({ VALET_SANDBOX_SCRATCH_AGENT_MAX: "0" })).toBeUndefined();
+  });
+});
+
+describe("resolveScratchCaps", () => {
+  it("defaults to no deploy cap and a 100Gi agent cap", () => {
+    expect(resolveScratchCaps({})).toEqual({ agentMax: "100Gi" });
+  });
+
+  it("carries an explicit deploy cap alongside the default agent cap", () => {
+    expect(resolveScratchCaps({ VALET_SANDBOX_SCRATCH_MAX: "1Ti" })).toEqual({
+      max: "1Ti",
+      agentMax: "100Gi",
+    });
+  });
+
+  it("throws at boot when the agent cap exceeds the deploy cap", () => {
+    expect(() =>
+      resolveScratchCaps({
+        VALET_SANDBOX_SCRATCH_MAX: "50Gi",
+        VALET_SANDBOX_SCRATCH_AGENT_MAX: "100Gi",
+      }),
+    ).toThrow(
+      'VALET_SANDBOX_SCRATCH_AGENT_MAX (effective "100Gi") exceeds VALET_SANDBOX_SCRATCH_MAX (effective "50Gi"). ' +
+        "Lower the agent cap or raise the deploy cap.",
+    );
+  });
+
+  it('"0" disables the deploy cap entirely', () => {
+    expect(resolveScratchCaps({ VALET_SANDBOX_SCRATCH_MAX: "0" })).toEqual({ agentMax: "100Gi" });
   });
 });
 

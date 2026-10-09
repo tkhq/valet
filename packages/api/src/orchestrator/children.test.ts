@@ -41,6 +41,7 @@ import {
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
 import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos, teams, teamMembers } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
+import { isScratchRequestError } from "@valet/shared";
 import { SignalEdgeDeniedError } from "./signals.js";
 import { shareCredential } from "../services/credential-shares.js";
 import { eventsActionPlugin } from "../events/actions.js";
@@ -62,6 +63,7 @@ function childrenDeps(a: TestApi, overrides: Partial<ChildrenDeps> = {}): Childr
     engineStore: a.providers.engineStore,
     prebuildService: a.providers.prebuildService,
     workspaceRoot: mkdtempSync(join(tmpdir(), "valet-children-test-")),
+    scratchCaps: {},
     ...overrides,
   };
 }
@@ -421,6 +423,58 @@ describe("buildChildSpawner", () => {
       .from(agentSessions)
       .where(eq(agentSessions.id, inherited.childSessionId));
     expect(inheritedRow?.resources).toBeNull();
+  });
+
+  it("rejects a task scratch request over the agent cap and inserts no agent_sessions row", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api, { scratchCaps: { max: "1Ti", agentMax: "100Gi" } });
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const parent = await api.providers.engineHost.sessionFor("parent-scratch-refused", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const ctx = {
+      parentSessionId: "parent-scratch-refused",
+      parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user",
+      owner: { type: "user" as const, id: "local-user" },
+    };
+
+    let err: unknown;
+    try {
+      await spawner({ sessionId: "child-scratch-refused", prompt: "work", resources: { scratch: "200Gi" } }, ctx);
+    } catch (e) {
+      err = e;
+    }
+    expect(isScratchRequestError(err)).toBe(true);
+    expect(
+      await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, "child-scratch-refused")),
+    ).toHaveLength(0);
+  });
+
+  it("persists a task scratch request inside both caps", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api, { scratchCaps: { max: "1Ti", agentMax: "100Gi" } });
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const parent = await api.providers.engineHost.sessionFor("parent-scratch-ok", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const ctx = {
+      parentSessionId: "parent-scratch-ok",
+      parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user",
+      owner: { type: "user" as const, id: "local-user" },
+    };
+
+    const spawned = await spawner({ prompt: "work", resources: { scratch: "50Gi" } }, ctx);
+    const [row] = await api.providers.db
+      .select({ resources: agentSessions.sandboxResourceOverrides })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, spawned.childSessionId));
+    expect(row?.resources).toEqual({ scratch: "50Gi" });
   });
 
   it("removes the authoritative row, repo binding, and directory when the first build fails", async () => {

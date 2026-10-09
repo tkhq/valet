@@ -4369,7 +4369,7 @@ export interface SourceSummary {
   repoFullName: string | null;
   cloneUrl: string | null;
   /** Saved repository defaults. Optional while older API servers remain deployed. */
-  sandboxResources?: { cpu?: number; memory?: string } | null;
+  sandboxResources?: { cpu?: number; memory?: string; scratch?: string } | null;
   schedule: "nightly" | "off";
   enabled: boolean;
   lastBoundAt: number | null;

@@ -37,6 +37,7 @@ import {
   type SubmissionResult,
   walkTranscriptDag,
 } from "@valet/engine";
+import { validateScratchRequest, type ScratchCaps } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches, sessionRepos, type ChildWatchRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
@@ -95,6 +96,14 @@ export interface ChildrenDeps {
   retentionMs?: number;
   /** Override for the retention sweep cadence. Tests only. */
   retentionSweepIntervalMs?: number;
+  /**
+   * Deploy and agent caps for a `task`-requested `/scratch` volume
+   * (`resolveScratchCaps(process.env)` at real boot). `buildChildSpawner`
+   * validates `req.resources.scratch` against these before the child's
+   * `agent_sessions` row is ever inserted. The `task` tool renders a
+   * refusal as `[task_resources] <message>`, never a partial spawn.
+   */
+  scratchCaps: ScratchCaps;
 }
 
 /** Thrown when a spawn would exceed a decision-21 limit. Message is what the `task` tool surfaces verbatim as error text. */
@@ -291,6 +300,18 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       throw new Error(
         `unrecognized repo '${req.repo}'. Pass owner/repo or a GitHub clone URL.`,
       );
+    }
+
+    // Same "validate before anything is created" rule as `req.repo` above.
+    // A `ScratchRequestError` here (refused, never clamped) must throw
+    // BEFORE the `agent_sessions` insert, so a bad request never leaves a
+    // partial child behind. The `task` tool renders the thrown message
+    // verbatim as `[task_resources] <message>`.
+    if (req.resources?.scratch !== undefined) {
+      req = {
+        ...req,
+        resources: { ...req.resources, scratch: validateScratchRequest(req.resources.scratch, "task", deps.scratchCaps) },
+      };
     }
 
     await enforceLimits(deps.db, ctx.parentSessionId, orgId, deps.orgSessionCeiling);

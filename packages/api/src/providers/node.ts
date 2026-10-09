@@ -87,6 +87,7 @@ import {
   resolveIdleMinutes,
   resolveOrgSandboxCeiling,
   resolveSandboxCapacityWaitMs,
+  resolveScratchCaps,
 } from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
@@ -338,6 +339,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // so a long-lived dev stack would wedge every new create at the
   // ceiling — and those backends have no bounded pod budget to protect.
   const gateHostRef: { current: EngineHost | null } = { current: null };
+  // Called unconditionally regardless of `VALET_SANDBOX_BACKEND`. The
+  // contradictory-config boot check must fire on every backend, not only
+  // kubernetes.
+  const scratchCaps = resolveScratchCaps(process.env);
   const rawSandboxProvider = buildSandboxProvider(process.env);
   const sandboxProvider = rawSandboxProvider.capabilities().hibernation
     ? withSandboxCapacityGate(rawSandboxProvider, {
@@ -542,6 +547,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     prebuildService,
     retentionMs: resolveChildRetentionMs(process.env),
     orgSessionCeiling: resolveOrgSessionCeiling(process.env),
+    scratchCaps,
   };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
@@ -902,5 +908,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
     prebuildService,
+    scratchCaps,
   };
 }

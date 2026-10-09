@@ -416,6 +416,39 @@ describe("PATCH /api/org/sources/:id", () => {
     expect((await patch(source.id, { cpu: 2 })).status).toBe(404);
   });
 
+  it("saves and rejects scratch against the deploy cap", async () => {
+    // Scratch is disabled deployment-wide unless VALET_SANDBOX_SCRATCH_MAX is
+    // set. The test app must opt in, same as a real deploy.
+    const prevScratchMax = process.env.VALET_SANDBOX_SCRATCH_MAX;
+    process.env.VALET_SANDBOX_SCRATCH_MAX = "1Ti";
+    try {
+      api = await bootTestApi();
+      const source = await seedRepoSource(api);
+      const patch = (body: Record<string, unknown>) => fetch(`${api!.baseUrl}/api/org/sources/${source.id}`, {
+        method: "PATCH", headers: HEADERS, body: JSON.stringify(body),
+      });
+
+      const saved = await patch({ sandboxResources: { scratch: "200Gi" } });
+      expect(saved.status).toBe(200);
+      expect(await saved.json()).toMatchObject({ source: { sandboxResources: { scratch: "200Gi" } } });
+
+      const overCap = await patch({ sandboxResources: { scratch: "2Ti" } });
+      expect(overCap.status).toBe(400);
+      expect(await overCap.json()).toMatchObject({
+        error: 'scratch 2Ti exceeds the 1Ti deploy cap (sandbox.scratchMax). Request at most 1Ti, or ask an admin to raise the cap.',
+      });
+
+      const invalid = await patch({ sandboxResources: { scratch: "x" } });
+      expect(invalid.status).toBe(400);
+      expect(await invalid.json()).toMatchObject({
+        error: 'scratch "x" is not a Kubernetes quantity of at least 1Gi. Use a form like "200Gi".',
+      });
+    } finally {
+      if (prevScratchMax === undefined) delete process.env.VALET_SANDBOX_SCRATCH_MAX;
+      else process.env.VALET_SANDBOX_SCRATCH_MAX = prevScratchMax;
+    }
+  });
+
   it("403s for a non-admin org member", async () => {
     api = await bootTestApi();
     const source = await createExternal(api.baseUrl);
