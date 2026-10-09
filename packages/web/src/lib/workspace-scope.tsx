@@ -149,6 +149,22 @@ export function useWorkspaceScope(): WorkspaceScope {
 }
 
 /**
+ * A fixed scope for one subtree. Settings names its scope in the URL (a
+ * personal workspace page, or `/settings/teams/$teamId`), so its sections
+ * must not follow the switcher. They keep reading `useWorkspaceScope()`, and
+ * this answers it for them. The switcher itself does not change:
+ * `available` and `setKey` still act on the outer scope.
+ */
+export function PinnedWorkspaceScope({ teamId, children }: { teamId: string | undefined; children: ReactNode }) {
+  const outer = useWorkspaceScope();
+  const value = useMemo<WorkspaceScope>(
+    () => ({ key: teamId ?? PERSONAL, teamId, available: outer.available, setKey: outer.setKey }),
+    [teamId, outer.available, outer.setKey],
+  );
+  return <WorkspaceScopeContext.Provider value={value}>{children}</WorkspaceScopeContext.Provider>;
+}
+
+/**
  * Adopt a resource's workspace when you land on its page — from a
  * notification, a shared link, or a bookmark. The switcher then matches what
  * is on screen instead of leaving you in the workspace you came from, which
