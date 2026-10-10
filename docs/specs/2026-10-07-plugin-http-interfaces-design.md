@@ -1,6 +1,6 @@
 # Plugin HTTP interfaces
 
-Status: first iteration implemented for TKAI-377. Slack, GitHub, and Linear routes use the registry. Security adoption remains.
+Status: first iteration implemented for TKAI-377. Slack, GitHub, Linear, and Security issue filing routes use the registry. The other Security routes remain in the API.
 
 ## Intent and scope
 
@@ -13,7 +13,7 @@ Existing webhook URLs, OAuth callbacks, saved credentials, installation records 
 ## Current evidence
 
 - `packages/engine/src/valet-plugin.ts` has no HTTP route declaration.
-- `packages/api/src/app.ts` explicitly mounted Slack, GitHub, Linear and Security route families. Slack, GitHub, and the Linear connection now mount through the registry.
+- `packages/api/src/app.ts` explicitly mounted Slack, GitHub, Linear and Security route families. Slack, GitHub, the Linear connection, and Security issue filing now mount through the registry.
 - `packages/api/src/routes/event-webhooks.ts` resolves Linear installations and signing secrets in a service-name branch.
 - `packages/api/src/services/plugin-store.ts` already supports scoped documents and indexes.
 - Linear setup now uses client credentials. The ticket's older OAuth flow description must not replace the current connection behavior.
@@ -107,7 +107,7 @@ Triggers from other services cannot participate in Linear verification.
 A temporary host adapter reads existing Linear installations and signing metadata without refreshing credentials.
 The installation's stored organization determines event ownership after verification. Request bodies cannot override it.
 
-This iteration does not move Security routes. The Slack, GitHub, and Linear connection sections below describe the later moves.
+This iteration does not move connection handlers, GitHub, Slack, or Security routes. The adoption sections below describe the later moves.
 It does not implement arbitrary callback state capabilities, plugin-owned storage, lifecycle hooks, or the complete event-emission interface.
 New signed plugins currently need an installation adapter. This restriction remains until plugin-owned installation storage is available.
 No database migration or existing-data rewrite is required.
@@ -131,7 +131,13 @@ The manifest handlers answer 501, so a host without the binding fails closed. A 
 
 Compatibility URLs live in `LEGACY_ROUTES` in `packages/api/src/plugins/http-routes.ts`, keyed the same way.
 Each entry pins its method and authentication, so a plugin cannot widen access to an existing URL. It serves the same handler as the canonical URL.
+An authenticated compatibility URL must stay under `/api/`, where the host authentication middleware runs. It must use the path parameter names of the canonical route, because handlers and bindings read parameters by name.
+The mount refuses a compatibility URL that breaks either rule.
 The mount refuses to boot when a loaded plugin with HTTP routes does not declare a route ID that a binding or compatibility URL names. Without this check, a renamed route would leave its existing URL answering 404. The node_modules loader quarantines such a package instead.
+
+A binding can also declare refusal bodies for a team API key and the internal token.
+The mount answers 401 to any request without an acting user. A route with refusal bodies answers those two credentials with its own 403 body instead.
+Refusal bodies only refuse. They keep the bodies that an old router returned at a legacy URL.
 
 ## Linear client preparation
 
@@ -232,3 +238,19 @@ Both URLs share one handler, so status codes, bodies, and errors match.
 `app.ts` no longer mounts a Linear router. If the Linear plugin is not loaded, neither URL exists.
 The displayed redirect URI stays `/api/org/linear/callback`. It is metadata for Linear's app form, not a browser OAuth flow.
 No schema, credential, or installation data changes.
+
+## Security adoption
+
+The Security plugin declares two `user` routes: `finding-issue` and `issue-digest`. They file one issue for a finding, or one digest issue for many findings.
+Their canonical paths are under `/api/plugins/security/http/sessions/:id/`. The host keeps the legacy `/api/sessions/:id/security/...` URLs as aliases in `LEGACY_ROUTES`.
+The other 32 Security routes stay in `packages/api/src/routes/security.ts`. Each one admits the internal token, a team API key, or both.
+The generic mount refuses both credentials. A new authorization category for them would widen the mount, so this step does not add one.
+[The Security adoption plan](../plans/2026-10-09-security-plugin-adoption.md) lists every route, its ladder, and the reason it stays.
+
+`packages/api/src/plugins/http-security.ts` binds both routes through the host bindings described above.
+Each binding declares the existing team-key and internal-token refusal bodies. The team-key scope check admits team keys to the legacy session URLs, so the legacy refusal must stay.
+The binding loads the session in the path and checks `canViewSession` for the host-derived user. A missing session and a session the caller cannot view get the same 404.
+The binding then loads the session's engagement and calls the plugin's exported handler with a filing capability. The capability files only findings of that engagement, as that user.
+The existing tables, services, and action invoker do the work. Security storage stays relational pending TKAI-378.
+
+For these two routes, the mount adds three limits. A former organization member gets 403. A body above 16 KiB or 256 KiB gets 413. When the Security plugin is not loaded, both URLs answer 404.

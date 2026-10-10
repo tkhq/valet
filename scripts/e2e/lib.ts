@@ -122,6 +122,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/security-comments.test.ts",
   "src/integration/security-coverage.test.ts",
   "src/integration/security-finding-location.test.ts",
+  "src/integration/security-issue-routes.test.ts",
   "src/integration/security-report.test.ts",
   "src/integration/security-needs.test.ts",
   "src/integration/security-setup.test.ts",

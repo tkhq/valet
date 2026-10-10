@@ -280,6 +280,15 @@ describe("team API key reach", () => {
       body: JSON.stringify({ provider: "github" }),
     });
     expect(digest.status).toBe(403);
+    expect(((await digest.json()) as { error: string }).error).toMatch(/team API key cannot file/);
+    // The Security plugin's canonical URL is outside the team-key scope.
+    const canonical = await fetch(`${f.baseUrl}/api/plugins/security/http/sessions/${f.teamSessionId}/issues/digest`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ provider: "github" }),
+    });
+    expect(canonical.status).toBe(403);
+    expect(((await canonical.json()) as { error: string }).error).toMatch(/team API key can only create and read/);
   });
 
   it("cannot mint a sandbox credential: that binds one user, which a team key is not", async () => {
