@@ -4,6 +4,7 @@ export type * from "./capabilities.js";
 export {
   appCredential,
   appDisconnect,
+  appInstallationApproval,
   appManifest,
   appRefresh,
   appSetup,
@@ -42,6 +43,14 @@ export const githubHttpRoutes: PluginHttpRoute[] = [
   { id: "app-credential", method: "POST", path: "/app/credential", auth: "org-admin", maxBodyBytes: FORM_BODY_BYTES, handle: unbound },
   { id: "app-refresh", method: "POST", path: "/app/refresh", auth: "org-admin", maxBodyBytes: FORM_BODY_BYTES, handle: unbound },
   { id: "app-disconnect", method: "DELETE", path: "/app", auth: "org-admin", maxBodyBytes: 0, handle: unbound },
+  {
+    id: "app-installation-approve", method: "POST", path: "/app/installations/:installationId/approval",
+    auth: "org-admin", maxBodyBytes: 0, handle: unbound,
+  },
+  {
+    id: "app-installation-revoke", method: "DELETE", path: "/app/installations/:installationId/approval",
+    auth: "org-admin", maxBodyBytes: 0, handle: unbound,
+  },
   { id: "connect", method: "POST", path: "/connection/connect", auth: "user", maxBodyBytes: FORM_BODY_BYTES, handle: unbound },
   { id: "org-status", method: "GET", path: "/connection/org-status", auth: "user", maxBodyBytes: 0, handle: unbound },
   { id: "callback", method: "GET", path: "/connection/callback", auth: "user", maxBodyBytes: 0, handle: unbound },

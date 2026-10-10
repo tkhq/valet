@@ -396,6 +396,41 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  {
+    describe: "github_installations.account_id column",
+    probe: { kind: "column", table: "github_installations", column: "account_id" },
+    sql: 'ALTER TABLE "github_installations" ADD COLUMN IF NOT EXISTS "account_id" text',
+    // Before this release the credentials route stored any metadata, so a
+    // GitHub identity field written then proves nothing. Strip them once;
+    // the token-check backfill or a reconnect marks real connections again.
+    before:
+      `UPDATE "credentials" SET "metadata" = "metadata" - 'githubId' - 'githubHost' - 'source' ` +
+      `WHERE "owner_type" = 'user' AND "service" = 'github' AND "metadata" IS NOT NULL`,
+    // Bindings made before this column matched a credential's login, which a
+    // pasted token could forge, across organizations. Clear them; discovery
+    // binds again by verified account id.
+    backfill: 'UPDATE "github_installations" SET "linked_user_id" = NULL WHERE "account_id" IS NULL AND "linked_user_id" IS NOT NULL RETURNING "id"',
+  },
+  {
+    // Added with DEFAULT true so every organization installation that exists
+    // now stays approved, then the default flips to false (as in
+    // `0000_app.sql`): a row an older pod inserts later without the column
+    // serves nobody until an admin approves it.
+    describe: "github_installations.org_approved column",
+    probe: { kind: "column", table: "github_installations", column: "org_approved" },
+    sql: 'ALTER TABLE "github_installations" ADD COLUMN IF NOT EXISTS "org_approved" boolean DEFAULT true NOT NULL',
+    backfill: 'ALTER TABLE "github_installations" ALTER COLUMN "org_approved" SET DEFAULT false',
+  },
+  {
+    describe: "github_installations.app_owner column",
+    probe: { kind: "column", table: "github_installations", column: "app_owner" },
+    sql: 'ALTER TABLE "github_installations" ADD COLUMN IF NOT EXISTS "app_owner" boolean DEFAULT false NOT NULL',
+    // Before the App was public, GitHub installed it only on its owner's
+    // account, so a legacy personal row is the owner's (an App created on a
+    // personal account). Mark it, or it serves nobody until discovery reads
+    // the owner again. Boot discovery then corrects the flag from `GET /app`.
+    backfill: 'UPDATE "github_installations" SET "app_owner" = true WHERE "account_type" = \'User\' AND "account_id" IS NULL RETURNING "id"',
+  },
   { describe: "identity link codes bound to a DM recipient", probe: { kind: "column", table: "identity_link_codes", column: "external_id" }, sql: 'ALTER TABLE "identity_link_codes" ADD COLUMN "external_id" text' },
   { describe: "generated file reservations", probe: { kind: "table", table: "generated_files" }, sql: `CREATE TABLE "generated_files" (
   "id" text PRIMARY KEY, "org_id" text NOT NULL, "session_id" text NOT NULL,

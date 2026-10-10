@@ -39,6 +39,10 @@ export interface GithubFixtureHandlers {
    * GitHub refusing an app id that does not match the private key, which is
    * what `verifyAppCredential` exists to catch. */
   getApp?: () => GithubFixtureResponse;
+  /** `GET /apps/:slug`, the public App record. GitHub answers it without
+   * authentication only for a public App and returns 404 for a private one,
+   * so a 404 here plays a private App. */
+  getAppBySlug?: (slug: string) => GithubFixtureResponse;
   /** `GET /app/installations`. Receives the request's parsed query string so
    * multi-page fixtures can branch on `page`/`per_page`. */
   listInstallations?: (query: Record<string, string>) => GithubFixtureResponse;
@@ -50,8 +54,17 @@ export interface GithubFixtureHandlers {
   oauthAccessToken?: () => GithubFixtureResponse;
   /** `GET /user/repos` */
   listUserRepos?: () => GithubFixtureResponse;
-  /** `GET /installation/repositories` */
-  listInstallationRepositories?: () => GithubFixtureResponse;
+  /** `GET /installation/repositories`. Receives the `authorization` header,
+   * so a fixture with several installations can answer per installation
+   * token. */
+  listInstallationRepositories?: (authHeader: string | undefined) => GithubFixtureResponse;
+  /** `POST /applications/:clientId/token`: GitHub's token check, with the
+   * App's client id and secret as Basic auth. It answers 200 with the token's
+   * `user` only for a token that this App issued, and 404 for any other. */
+  checkToken?: (clientId: string, accessToken: string | undefined) => GithubFixtureResponse;
+  /** `GET /user/installations`, read with a user's OAuth token. GitHub
+   * wraps the array in `{ installations }`. */
+  listUserInstallations?: (authHeader: string | undefined, query: Record<string, string>) => GithubFixtureResponse;
   /** `POST /app-manifests/:code/conversions` */
   convertManifest?: (code: string) => GithubFixtureResponse;
   /** `GET /app/hook/config` — the App's OWN webhook config. */
@@ -105,11 +118,15 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
       client_id: "fixture-client-id",
       name: "Fixture App",
       html_url: "https://github.com/apps/fixture-app",
+      // The account that owns the App. An installation on this account
+      // serves every member without an admin's approval.
+      owner: { login: "acme", id: 1, type: "Organization" },
       permissions: {},
       events: [],
       installations_count: 0,
     },
   }),
+  getAppBySlug: (slug) => ({ body: { id: 1, slug, name: "Fixture App", html_url: `https://github.com/apps/${slug}` } }),
   listInstallations: () => ({ body: [] }),
   createInstallationToken: () => ({
     body: { token: "fixture-installation-token", expires_at: new Date(Date.now() + 3600_000).toISOString() },
@@ -118,6 +135,8 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   oauthAccessToken: () => ({ body: { access_token: "fixture-oauth-token", token_type: "bearer", scope: "" } }),
   listUserRepos: () => ({ body: [] }),
   listInstallationRepositories: () => ({ body: { total_count: 0, repositories: [] } }),
+  listUserInstallations: () => ({ body: { total_count: 0, installations: [] } }),
+  checkToken: () => ({ status: 404, body: { message: "Not Found" } }),
   convertManifest: () => ({
     body: {
       id: 1,
@@ -228,6 +247,13 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
     return c.json(body as object, status ?? 200);
   });
 
+  app.get("/apps/:slug", (c) => {
+    const slug = c.req.param("slug");
+    record(c, { slug });
+    const { status, body } = handlers.getAppBySlug(slug);
+    return c.json(body as object, status ?? 200);
+  });
+
   app.get("/app/installations", (c) => {
     const query = c.req.query();
     record(c, {});
@@ -295,7 +321,33 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
 
   app.get("/installation/repositories", (c) => {
     record(c, {});
-    const { status, body } = handlers.listInstallationRepositories();
+    const { status, body } = handlers.listInstallationRepositories(c.req.header("authorization"));
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.post("/applications/:clientId/token", async (c) => {
+    const clientId = c.req.param("clientId");
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      body = undefined;
+    }
+    record(c, { clientId }, body);
+    const token =
+      typeof body === "object" && body !== null && "access_token" in body && typeof body.access_token === "string"
+        ? body.access_token
+        : undefined;
+    const { status, body: respBody } = handlers.checkToken(clientId, token);
+    return c.json(respBody as object, status ?? 200);
+  });
+
+  app.get("/user/installations", (c) => {
+    record(c, {});
+    const { status, body, headers } = handlers.listUserInstallations(c.req.header("authorization"), c.req.query());
+    if (headers) {
+      for (const [name, value] of Object.entries(headers)) c.header(name, value);
+    }
     return c.json(body as object, status ?? 200);
   });
 

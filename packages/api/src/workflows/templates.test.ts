@@ -745,7 +745,8 @@ describe("listWorkflowTemplateSummaries in a team workspace", () => {
 
     await db.insert(githubInstallations).values({
       id: "app-list", orgId: OWNER.orgId, installationId: 1, accountLogin: "acme",
-      accountType: "Organization", repositorySelection: "selected", suspended: false,
+      accountType: "Organization",
+      orgApproved: true, repositorySelection: "selected", suspended: false,
       createdAt: 1000, updatedAt: 1000,
     });
     const list = await listWorkflowTemplateSummaries(deps([githubPlugin]), OWNER, {
@@ -1450,7 +1451,8 @@ describe("team GitHub template repository prerequisites", () => {
     });
     await db.insert(githubInstallations).values({
       id: "review-app", orgId: OWNER.orgId, installationId: 1, accountLogin: "acme",
-      accountType: "Organization", repositorySelection: "selected", suspended: false,
+      accountType: "Organization",
+      orgApproved: true, repositorySelection: "selected", suspended: false,
       createdAt: 1000, updatedAt: 1000,
     });
   }

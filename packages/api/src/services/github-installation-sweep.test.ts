@@ -175,8 +175,13 @@ describe("runInstallationSweepTick", () => {
   function stubFetch(failFor: string[] = []): typeof fetch {
     const impl = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : input.toString();
-      fetchCalls.push(url);
       const appId = appIdOf(init);
+      // Discovery also reads the App owner. The owner's account is the one
+      // installation each App has here.
+      if (new URL(url).pathname === "/app") {
+        return Response.json({ id: Number(appId), owner: { login: `acct-${appId}`, id: Number(appId), type: "Organization" } });
+      }
+      fetchCalls.push(url);
       if (failFor.includes(appId)) return new Response("bad credentials", { status: 401 });
       return new Response(
         JSON.stringify([

@@ -131,12 +131,14 @@ export async function connectCallback(
   }
   const login = isRecord(userPayload) && typeof userPayload.login === "string" ? userPayload.login : null;
   if (!login) return json({ error: "malformed response from GitHub" }, 502);
+  const githubId = isRecord(userPayload) && typeof userPayload.id === "number" ? String(userPayload.id) : undefined;
 
   await grant.saveConnection({
     accessToken: token.accessToken,
     refreshToken: token.refreshToken,
     expiresAt: token.expiresInMs !== undefined ? Date.now() + token.expiresInMs : undefined,
     login,
+    ...(githubId ? { githubId } : {}),
   });
 
   // The Integrations page reads `?connected=<service>`. The Settings

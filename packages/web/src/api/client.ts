@@ -1380,6 +1380,14 @@ export const api = {
   postGithubAppCredential: (body: PostGithubAppCredentialRequest) =>
     request<GetGithubAppResponse>("POST", "/org/github-app/credential", body),
   refreshGithubApp: () => request<GetGithubAppResponse>("POST", "/org/github-app/refresh"),
+  // Approves (POST) or revokes (DELETE) another GitHub organization's
+  // installation for every member. The route is new, so it has no
+  // `/org/github-app` alias.
+  setGithubInstallationApproval: (installationId: number, approved: boolean) =>
+    request<GetGithubAppResponse>(
+      approved ? "POST" : "DELETE",
+      `/plugins/github/http/app/installations/${installationId}/approval`,
+    ),
   deleteGithubApp: () => request<undefined>("DELETE", "/org/github-app"),
 
   // org Slack app setup — admin-gated. `name` renames the app in the

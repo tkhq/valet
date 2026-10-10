@@ -38,7 +38,8 @@ describe("checkRepoExistence", () => {
   it("checks the clone credential when a personal token cannot read the repository", async () => {
     await deps.db.insert(githubInstallations).values({
       id: "installation", orgId: "org", installationId: 123, accountLogin: "acme",
-      accountType: "Organization", repositorySelection: "all", suspended: false,
+      accountType: "Organization",
+      orgApproved: true, repositorySelection: "all", suspended: false,
       cachedToken: encryptSecret("app-token", deps.key), cachedTokenExpiresAt: Date.now() + 3_600_000,
       createdAt: Date.now(), updatedAt: Date.now(),
     });

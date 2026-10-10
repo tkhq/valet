@@ -1609,6 +1609,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 4242,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -1676,6 +1677,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 4343,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -1744,6 +1746,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 999,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -1785,6 +1788,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 444,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -1828,6 +1832,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 111,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -1936,6 +1941,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 222,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -1944,6 +1950,96 @@ describe("buildActionInvoker: github service resolution", () => {
       updatedAt: NOW,
     });
   }
+
+  /** Reads the installation tier, as `github.list_repos` with
+   * `scope: "installation"` does. */
+  function githubInstallationAction(): PluginAction {
+    return {
+      id: "github.installation_whoami",
+      name: "installation_whoami",
+      description: "installation whoami",
+      riskLevel: "low",
+      parameters: Type.Object({ owner: Type.String(), repo: Type.String() }),
+      execute: async (_args, ctx) => {
+        const cred = await ctx.credentials.get("github:installation");
+        return { success: true, data: { token: cred?.accessToken ?? null } };
+      },
+    };
+  }
+
+  /** The org installation on `acme` (222), the owner's personal installation
+   * (555), and another member's personal installation (556). */
+  async function seedPersonalInstallations(appDb: AppDb, credentials: PgCredentialStore) {
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    const base = { orgId, repositorySelection: "all", suspended: false, createdAt: NOW, updatedAt: NOW };
+    await appDb.insert(githubInstallations).values([
+      { ...base, id: "ghi_222", installationId: 222, accountLogin: "acme", accountType: "Organization", orgApproved: true },
+      { ...base, id: "ghi_555", installationId: 555, accountLogin: "owner-login", accountType: "User", accountId: "55", linkedUserId: userId },
+      { ...base, id: "ghi_556", installationId: 556, accountLogin: "actor-login", accountType: "User", accountId: "56", linkedUserId: "actor-user" },
+    ]);
+    // Both members verified their accounts. `identityOnly` keeps the
+    // credentials out of token resolution, so installations answer.
+    for (const [id, githubId] of [[userId, "55"], ["actor-user", "56"]] as const) {
+      await credentials.save({ type: "user", id }, "github", {
+        type: "oauth2", accessToken: `${id}-tok`, metadata: { source: "github-app-oauth", login: id, githubId, identityOnly: true },
+      });
+    }
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() } }),
+    });
+    return buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: actionPluginByServiceOf("github", {
+        service: "github",
+        actions: [githubRepoAction(), githubInstallationAction()],
+      }),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+  }
+
+  it("the installation tier reaches a user-owned run's own personal installation, and never a team's", async () => {
+    const { appDb, credentials } = await harness();
+    const invoke = await seedPersonalInstallations(appDb, credentials);
+    const call = { service: "github", action: "installation_whoami", params: { owner: "owner-login", repo: "x" } };
+
+    const mine = await invoke({ ...call, invocationId: "workflow:r1:n1" }, { userId, orgId, owner: { type: "user", id: userId } });
+    expect(mine).toEqual({ ok: true, result: { token: "inst-555" } });
+
+    // A team run gets the org installation, never a member's personal one,
+    // also when that member is the one who started the run.
+    const team = await invoke({ ...call, invocationId: "workflow:r2:n1" }, teamOwner);
+    expect(team).toEqual({ ok: true, result: { token: "inst-222" } });
+    const startedByMember = await invoke({ ...call, invocationId: "workflow:r3:n1" }, { ...teamOwner, userId });
+    expect(startedByMember).toEqual({ ok: true, result: { token: "inst-222" } });
+  });
+
+  it("a user-owned run started by another member resolves as the owner, not the actor", async () => {
+    const { appDb, credentials } = await harness();
+    const invoke = await seedPersonalInstallations(appDb, credentials);
+    const ctx = { userId: "actor-user", orgId, owner: { type: "user" as const, id: userId } };
+
+    // `app` resolves the installation of the repository's owner.
+    const own = await invoke(
+      {
+        service: "github", action: "create_comment", params: { owner: "owner-login", repo: "x" },
+        invocationId: "workflow:r3:n1", credential: "app",
+      },
+      ctx,
+    );
+    expect(own).toEqual({ ok: true, result: { token: "inst-555" } });
+
+    // The actor's own personal installation is not the run owner's.
+    const actors = await invoke(
+      {
+        service: "github", action: "create_comment", params: { owner: "actor-login", repo: "x" },
+        invocationId: "workflow:r4:n1", credential: "app",
+      },
+      ctx,
+    );
+    expect(actors.ok).toBe(false);
+    expect(fixture?.calls.some((c) => c.path === "/app/installations/556/access_tokens")).toBe(false);
+  });
 
   it('credential "app": resolves the installation for the params owner, ignoring a healthy user credential', async () => {
     const { appDb, credentials } = await harness();
@@ -2067,6 +2163,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 333,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,

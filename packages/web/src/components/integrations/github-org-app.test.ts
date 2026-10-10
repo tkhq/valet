@@ -16,7 +16,13 @@
  */
 import { describe, expect, it } from "vitest";
 import type { GetGithubOrgStatusResponse } from "@valet/api/wire";
-import { githubOrgApp, githubOrgAppState, githubOrgReachLines } from "./github-org-app";
+import {
+  githubOrgApp,
+  githubOrgAppState,
+  githubOrgReachLines,
+  githubPersonalInstallationsLine,
+  githubPersonalInstallNote,
+} from "./github-org-app";
 
 function status(overrides: Partial<GetGithubOrgStatusResponse> = {}): GetGithubOrgStatusResponse {
   return { configured: true, installationCount: 1, suspendedCount: 0, ...overrides };
@@ -114,5 +120,63 @@ describe("githubOrgReachLines", () => {
     expect(githubOrgReachLines("github", status()).join(" ")).toContain(
       "Valet can reach a repository through either one",
     );
+  });
+});
+
+describe("githubPersonalInstallNote", () => {
+  it("says nothing when the org does not offer personal installations", () => {
+    expect(githubPersonalInstallNote(status())).toBeNull();
+  });
+
+  it("says that a personal installation serves only the member", () => {
+    const note = githubPersonalInstallNote(
+      status({ personalInstallUrl: "https://github.example/apps/valet/installations/new" }),
+    );
+    expect(note).toBe("Only you can use the repositories you add to your personal installation.");
+  });
+
+  it("warns when the server could not confirm that the App is public", () => {
+    const note = githubPersonalInstallNote(
+      status({ personalInstallUrl: "https://ghes.example/apps/valet/installations/new", personalInstallUnverified: true }),
+    );
+    expect(note).toContain("Valet could not check whether the App is public");
+    expect(note).toContain("Only you can use the repositories you add to your personal installation.");
+  });
+
+  it("explains a private App, names who can change it, and names the path that works now", () => {
+    // GitHub's install page for a private App lists only the owner, so a
+    // link there strands the member.
+    const note = githubPersonalInstallNote(status({ personalInstallBlocked: "app_private" }));
+    expect(note).toContain("GitHub installs a private App only on the account that owns it");
+    expect(note).toContain("Ask the App's owner to make the App public on GitHub");
+    expect(note).toContain("connect GitHub with a personal access token");
+  });
+
+  it("asks the member to connect GitHub before installing", () => {
+    expect(githubPersonalInstallNote(status({ personalInstallBlocked: "github_not_connected" }))).toBe(
+      "To install the App on your personal account, connect GitHub first.",
+    );
+  });
+
+  it("says the check failed and how to retry", () => {
+    const note = githubPersonalInstallNote(status({ personalInstallBlocked: "app_visibility_unknown" }));
+    expect(note).toContain("could not check");
+    expect(note).toContain("Reload the page");
+  });
+});
+
+describe("githubPersonalInstallationsLine", () => {
+  it("lists the member's own installations, and nothing when there are none", () => {
+    expect(githubPersonalInstallationsLine(status())).toBeNull();
+    expect(
+      githubPersonalInstallationsLine(
+        status({
+          personalInstallations: [
+            { accountLogin: "octouser", repositorySelection: "selected", suspended: false },
+            { accountLogin: "octo-alt", repositorySelection: "all", suspended: true },
+          ],
+        }),
+      ),
+    ).toBe("Installed on your personal account: octouser (selected repositories), octo-alt (suspended).");
   });
 });

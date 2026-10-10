@@ -12,6 +12,7 @@ import type { GetGithubAppResponse, PostGithubAppManifestResponse } from "@valet
 const createManifestMutateAsync = vi.fn();
 const saveCredentialMutateAsync = vi.fn();
 const refreshMutate = vi.fn();
+const approvalMutate = vi.fn();
 const deleteAppMutate = vi.fn();
 const patchOrgSettingsMutate = vi.fn();
 let orgData = { allowPersonalInstallations: true };
@@ -49,6 +50,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
       error: saveCredentialError,
     }),
     useRefreshGithubApp: () => ({ mutate: refreshMutate, isPending: false }),
+    useSetGithubInstallationApproval: () => ({ mutate: approvalMutate, isPending: false, error: null }),
     useDeleteGithubApp: () => ({
       mutate: deleteAppMutate,
       isPending: false,
@@ -343,7 +345,9 @@ describe("GithubAppSection", () => {
           accountType: "Organization",
           repositorySelection: "all",
           suspended: false,
-          linkedUserId: "user_1",
+          linkedUserId: null,
+          access: "organization",
+          appOwner: true,
         },
         {
           id: "inst_2",
@@ -352,7 +356,9 @@ describe("GithubAppSection", () => {
           accountType: "User",
           repositorySelection: "selected",
           suspended: true,
-          linkedUserId: null,
+          linkedUserId: "user_1",
+          access: "member",
+          appOwner: false,
         },
       ],
       webhook: { mode: "public" },
@@ -378,6 +384,65 @@ describe("GithubAppSection", () => {
     expect(screen.getByText("some-user")).toBeTruthy();
     expect(screen.getByText("Suspended")).toBeTruthy();
     expect(screen.getAllByText("Linked").length).toBeGreaterThan(0);
+  });
+
+  it("warns that an App owned by a personal account shares that account's installation", () => {
+    githubAppData = {
+      configured: true,
+      app: {
+        appId: "123",
+        appSlug: "valet-acme",
+        htmlUrl: "https://github.com/apps/valet-acme",
+        installUrl: "https://github.com/apps/valet-acme/installations/new",
+      },
+      installations: [
+        {
+          id: "inst_owner", installationId: 1, accountLogin: "admin-person", accountType: "User", repositorySelection: "all",
+          suspended: false, linkedUserId: null, access: "organization", appOwner: true,
+        },
+      ],
+      webhook: { mode: "public" },
+      installationsCheckedAt: null,
+    };
+    render(<GithubAppSection />);
+    expect(
+      screen.getByText(
+        "The personal account admin-person owns this App. Every member of your organisation can use the repositories that account's installation reaches.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("lets an admin approve or revoke another GitHub organization's installation", () => {
+    approvalMutate.mockClear();
+    const base = { repositorySelection: "all", suspended: false, linkedUserId: null, accountType: "Organization", appOwner: false };
+    githubAppData = {
+      configured: true,
+      app: {
+        appId: "123",
+        appSlug: "valet-acme",
+        htmlUrl: "https://github.com/apps/valet-acme",
+        installUrl: "https://github.com/apps/valet-acme/installations/new",
+      },
+      installations: [
+        { ...base, id: "inst_owner", installationId: 1, accountLogin: "acme-corp", access: "organization", appOwner: true },
+        { ...base, id: "inst_pending", installationId: 777, accountLogin: "stranger-org", access: "pending" },
+        { ...base, id: "inst_ok", installationId: 778, accountLogin: "partner-org", access: "organization" },
+      ],
+      webhook: { mode: "public" },
+      installationsCheckedAt: null,
+    };
+    render(<GithubAppSection />);
+
+    expect(screen.getByText("Awaiting approval")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(approvalMutate).toHaveBeenCalledWith({ installationId: 777, approved: true });
+
+    // Only the approved partner can be revoked. The App owner's account
+    // always serves the organization.
+    const revoke = screen.getAllByRole("button", { name: "Revoke" });
+    expect(revoke).toHaveLength(1);
+    fireEvent.click(revoke[0]);
+    expect(approvalMutate).toHaveBeenCalledWith({ installationId: 778, approved: false });
   });
 
   it("configured but uninstalled: shows the loud install banner with the install link", () => {

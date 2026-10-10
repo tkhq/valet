@@ -408,7 +408,8 @@ describe("teamServiceReadiness", () => {
     expect(result.blocked).toHaveLength(1);
     await db.insert(githubInstallations).values({
       id: "app-pin", orgId: ORG, installationId: 1, accountLogin: "acme",
-      accountType: "Organization", repositorySelection: "selected", suspended: false,
+      accountType: "Organization",
+      orgApproved: true, repositorySelection: "selected", suspended: false,
       createdAt: 1000, updatedAt: 1000,
     });
     const ready = await teamServiceReadiness(deps(), {
@@ -429,7 +430,8 @@ describe("teamServiceReadiness", () => {
     await saveAppConfig({ credentials }, ORG, appConfig);
     await db.insert(githubInstallations).values({
       id: "wrong-owner", orgId: ORG, installationId: 1, accountLogin: "other",
-      accountType: "Organization", repositorySelection: "all", suspended: false,
+      accountType: "Organization",
+      orgApproved: true, repositorySelection: "all", suspended: false,
       createdAt: 1000, updatedAt: 1000,
     });
     for (const node of definition.nodes) if (node.type === "tool") node.params = { owner: "acme", repo: "platform" };
@@ -463,6 +465,7 @@ describe("teamServiceReadiness", () => {
           installationId: i + 1,
           accountLogin,
           accountType: "Organization",
+          orgApproved: true,
           repositorySelection: "all",
           suspended: false,
           createdAt: 1_000,

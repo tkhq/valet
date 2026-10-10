@@ -32,24 +32,47 @@
  * `schema/index.ts`) and re-mints only once the cached token is within 5
  * minutes of expiring.
  *
- * ── `linkedUserId` matching (honest cheap path) ────────────────────────
- * `CredentialStore.get`/`list` are owner-scoped — there is no "find the
- * owner whose credential metadata matches X" method on the port. Rather
- * than invent one, `discoverInstallations` reads the `credentials` table
- * directly (`owner_type = 'user' AND service = 'github'`) via the shared
- * `AppQueryable` and matches `metadata.login` case-insensitively in JS.
- * `metadata` is unencrypted jsonb, so no decryption is needed. This is a
- * full table scan of user-owned `github` credential rows; fine at today's
- * scale (one query, small row count), and confined to this one function.
+ * ── Who may use an installation ────────────────────────────────────────
+ * The App is public, as the legacy stack made it, so any GitHub account can
+ * install it, and discovery files every installation under the org. Use is
+ * narrower, and `usableInstallation` is the one rule:
+ *
+ *   - An installation on the App owner's own account serves every member,
+ *     also when that account is a personal one (`app_owner`).
+ *   - An installation on another GitHub organization (any `accountType`
+ *     other than "User") serves every member only when it is approved
+ *     (`org_approved`): an org admin approved it, or a member with a
+ *     verified GitHub connection installed it (`sender.id` on
+ *     `installation.created`). A stranger's organization serves nobody.
+ *   - An installation on a personal GitHub account serves only the member
+ *     it is bound to (`linkedUserId`). A personal installation with no
+ *     binding, such as a stranger's, serves nobody.
+ *   - A caller with no user (a team, the org, an unattended run) gets the
+ *     organization installations only.
+ *
+ * ── Binding a personal installation (the legacy rule) ──────────────────
+ * The installation's GitHub account id must equal the GitHub account id
+ * that an org member proved through the App OAuth connect (`GET /user`, saved
+ * as the credential's `metadata.githubId`). A login match is not enough,
+ * because a PAT row or a renamed account can carry any login. When two
+ * members connected the same GitHub account, nobody is bound. Discovery,
+ * `relinkInstallations`, and `reconcileUserInstallations` all bind through
+ * `loadMemberGithubIds`.
+ *
+ * `CredentialStore.get`/`list` are owner-scoped, so `loadMemberGithubIds`
+ * reads the `credentials` table directly (`owner_type = 'user' AND service =
+ * 'github'`), joined to `org_members`. `metadata` is unencrypted jsonb, so no
+ * decryption is needed.
  */
 import { invalidateWorkflowSources } from "./content-sync/invalidation.js";
 import { createPrivateKey, randomUUID, sign } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
-import { credentials, githubInstallations, orgs, type GithubInstallationRow } from "../schema/index.js";
+import { credentials, githubInstallations, orgMembers, orgs, type GithubInstallationRow } from "../schema/index.js";
 import { decryptSecret, encryptSecret } from "../lib/secret-crypto.js";
-import { resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
+import { isOrgAdmin } from "./org.js";
+import { githubHostKey, resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
 import { GITHUB_APP_WEBHOOK_PATH, parsePrivateKeyPem } from "@valet/plugin-github/http";
 
 const GITHUB_APP_SERVICE = "github_app";
@@ -431,74 +454,494 @@ interface ParsedInstallation {
   installationId: number;
   accountLogin: string;
   accountType: string;
+  /** GitHub's numeric account id, as a string. */
+  accountId: string | null;
   repositorySelection: string | null;
   suspended: boolean;
 }
 
-function parseInstallationsResponse(payload: unknown): ParsedInstallation[] {
+function parseInstallationsResponse(payload: unknown, source = "GET /app/installations"): ParsedInstallation[] {
   if (!Array.isArray(payload)) {
-    throw new Error("GitHub API GET /app/installations: expected an array response");
+    throw new Error(`GitHub API ${source}: expected an array response`);
   }
   return payload.map((item, i) => {
     if (!isRecord(item)) throw new Error(`installations[${i}]: expected an object`);
     const { id, account, repository_selection: repositorySelection, suspended_at: suspendedAt } = item;
     if (typeof id !== "number") throw new Error(`installations[${i}].id: expected a number`);
     if (!isRecord(account)) throw new Error(`installations[${i}].account: expected an object`);
-    const { login, type } = account;
+    const { login, type, id: accountId } = account;
     if (typeof login !== "string") throw new Error(`installations[${i}].account.login: expected a string`);
     if (typeof type !== "string") throw new Error(`installations[${i}].account.type: expected a string`);
     return {
       installationId: id,
       accountLogin: login,
       accountType: type,
+      accountId: typeof accountId === "number" || typeof accountId === "string" ? String(accountId) : null,
       repositorySelection: typeof repositorySelection === "string" ? repositorySelection : null,
       suspended: suspendedAt !== null && suspendedAt !== undefined,
     };
   });
 }
 
-/** Direct `credentials` table scan for user-owned `github` rows — see the
- * module doc comment ("honest cheap path") for why this bypasses the
- * owner-scoped `CredentialStore` port. Returns a `login.toLowerCase() ->
- * userId` map. */
-async function loadLinkedUserLoginMap(db: AppQueryable): Promise<Map<string, string>> {
+/** The account type GitHub reports for a personal account. */
+const PERSONAL_ACCOUNT_TYPE = "User";
+
+/**
+ * The installations a caller may use, as a `WHERE` condition on
+ * `github_installations`. See "Who may use an installation" in the module
+ * comment. Suspension is a separate filter: callers that count installations
+ * still want suspended rows.
+ */
+export function usableInstallation(orgId: string, userId: string | undefined): SQL {
+  const orgWide = or(
+    eq(githubInstallations.appOwner, true),
+    and(ne(githubInstallations.accountType, PERSONAL_ACCOUNT_TYPE), eq(githubInstallations.orgApproved, true)),
+  );
+  // A binding counts only with a verified account id, and only when the
+  // bound member's own credential carries that verified id. Rows bound
+  // before the column existed were matched by login (see the `account_id`
+  // repair), and an older pod mid rolling deploy may still bind by login.
+  const visible = userId
+    ? or(
+        orgWide,
+        and(
+          eq(githubInstallations.accountType, PERSONAL_ACCOUNT_TYPE),
+          isNotNull(githubInstallations.accountId),
+          eq(githubInstallations.linkedUserId, userId),
+          sql`EXISTS (SELECT 1 FROM ${credentials} WHERE ${credentials.ownerType} = 'user'
+            AND ${credentials.ownerId} = ${githubInstallations.linkedUserId}
+            AND ${credentials.service} = 'github'
+            AND ${credentials.metadata}->>'githubId' = ${githubInstallations.accountId}
+            AND ${credentials.metadata}->>'source' = ${GITHUB_APP_OAUTH_SOURCE})`,
+        ),
+      )
+    : orgWide;
+  return and(eq(githubInstallations.orgId, orgId), visible) ?? sql`false`;
+}
+
+/** What a webhook delivery's installation gives the organization:
+ * `organization` (the App owner's account or an approved organization),
+ * `member` (a personal installation bound to one member), or `none` (a
+ * stranger's, an unbound, or an unknown installation). The webhook applies
+ * every event only for `organization` (see `GithubDeliveryEffects`). */
+export async function installationEventAccess(
+  deps: Pick<GithubAppDeps, "db">,
+  orgId: string,
+  installationId: number,
+): Promise<"organization" | "member" | "none"> {
+  const [row] = await deps.db
+    .select()
+    .from(githubInstallations)
+    .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId)))
+    .limit(1);
+  if (!row) return "none";
+  const access = installationAccess(row);
+  return access === "organization" || access === "member" ? access : "none";
+}
+
+/** What an installation row gives the organization, for display. */
+export type InstallationAccess = "organization" | "member" | "pending" | "none";
+
+export function installationAccess(
+  row: Pick<GithubInstallationRow, "accountType" | "accountId" | "linkedUserId" | "orgApproved" | "appOwner">,
+): InstallationAccess {
+  if (row.appOwner) return "organization";
+  if (row.accountType !== PERSONAL_ACCOUNT_TYPE) return row.orgApproved ? "organization" : "pending";
+  return row.accountId !== null && row.linkedUserId !== null ? "member" : "none";
+}
+
+/** The installations every member may use: the organization installations.
+ * The no-owner fallback ("the org's sole installation") counts only these,
+ * so a member's personal installation never makes it ambiguous. */
+export function orgWideInstallation(orgId: string): SQL {
+  return usableInstallation(orgId, undefined);
+}
+
+/**
+ * The member's verified GitHub account id, when it was verified on the
+ * GitHub host this instance talks to (`metadata.githubHost`). Null
+ * otherwise. The connect callback writes both fields.
+ */
+export function verifiedGithubId(metadata: unknown, apiUrl: string): string | null {
+  if (!isRecord(metadata)) return null;
+  const { githubId, githubHost, source } = metadata;
+  // Only the connect callback and the token-check backfill mark an id as
+  // verified. The member can write any other metadata, and the upgrade
+  // repair strips identity fields written before this release.
+  if (source !== GITHUB_APP_OAUTH_SOURCE) return null;
+  if (typeof githubId !== "string" || githubId.length === 0) return null;
+  if (typeof githubHost !== "string" || githubHostKey(githubHost) !== githubHostKey(apiUrl)) return null;
+  return githubId;
+}
+
+/** `githubId -> userId` for the members of `orgId` who connected GitHub
+ * through the App OAuth on this GitHub host. A GitHub id that two members
+ * connected maps to `null`: nobody is bound. See the module comment for why
+ * this reads the `credentials` table directly. */
+async function loadMemberGithubIds(
+  deps: Pick<GithubAppDeps, "db" | "apiUrl">,
+  orgId: string,
+): Promise<Map<string, string | null>> {
+  const db = deps.db;
   const rows = await db
     .select({ ownerId: credentials.ownerId, metadata: credentials.metadata })
     .from(credentials)
+    .innerJoin(orgMembers, and(eq(orgMembers.userId, credentials.ownerId), eq(orgMembers.orgId, orgId)))
     .where(and(eq(credentials.ownerType, "user"), eq(credentials.service, "github")));
-  const map = new Map<string, string>();
+  const map = new Map<string, string | null>();
+  const apiUrl = githubApiUrl(deps);
   for (const row of rows) {
-    if (!isRecord(row.metadata)) continue;
-    const login = row.metadata.login;
-    if (typeof login !== "string") continue;
-    map.set(login.toLowerCase(), row.ownerId);
+    const githubId = verifiedGithubId(row.metadata, apiUrl);
+    if (githubId === null) continue;
+    const prior = map.get(githubId);
+    map.set(githubId, prior === undefined || prior === row.ownerId ? row.ownerId : null);
   }
   return map;
 }
 
+/** Marks a credential that GitHub issued through this App's OAuth: the
+ * connect callback writes it, and so does `backfillMemberGithubIds` after
+ * GitHub's token check. `PUT /api/credentials/:service` rejects it. */
+export const GITHUB_APP_OAUTH_SOURCE = "github-app-oauth";
+
 /**
- * Cheap DB-only re-match of `github_installations.linkedUserId` for one org
- * — re-derives `loadLinkedUserLoginMap` and updates any row whose
- * `linkedUserId` disagrees with the fresh match. No GitHub API round trip
- * (unlike `discoverInstallations`, which re-fetches installations too);
- * this is what Task 6's user-connect callback calls after saving a new
- * user `github` credential, so a fresh `login` gets matched against
- * already-known installations without paying for a live App JWT + API
- * call on every connect. */
-export async function relinkInstallations(deps: Pick<GithubAppDeps, "db">, orgId: string): Promise<void> {
-  const [existingRows, linkedByLogin] = await Promise.all([
+ * Saves the verified GitHub account id of each org member who connected
+ * through the App OAuth before the connect callback saved one. Without it,
+ * the first discovery after the upgrade unbinds every personal
+ * installation until its owner reconnects.
+ *
+ * The proof is GitHub's token check (`POST /applications/{client_id}/token`
+ * with the App's client id and secret as Basic auth). It answers 200 with
+ * the token's `user` only for a token this App issued. A pasted token, even
+ * with a made-up refresh token, gets 404 and is left alone: a credential's
+ * own fields prove nothing. The update merges `githubId`, `githubHost`, and
+ * the `source` marker into `metadata` alone, so it never writes a token
+ * that a concurrent refresh may have rotated. Best effort: a failure is
+ * logged and retried at the next discovery.
+ */
+async function backfillMemberGithubIds(deps: GithubAppDeps, orgId: string, config: GithubAppConfig): Promise<void> {
+  const apiUrl = githubApiUrl(deps);
+  const rows = await deps.db
+    .select({ ownerId: credentials.ownerId, metadata: credentials.metadata, accessTokenEnc: credentials.accessTokenEnc })
+    .from(credentials)
+    .innerJoin(orgMembers, and(eq(orgMembers.userId, credentials.ownerId), eq(orgMembers.orgId, orgId)))
+    .where(and(eq(credentials.ownerType, "user"), eq(credentials.service, "github")));
+  const basic = Buffer.from(`${config.oauthClientId}:${config.oauthClientSecret}`).toString("base64");
+  for (const row of rows) {
+    if (verifiedGithubId(row.metadata, apiUrl) !== null) continue;
+    try {
+      if (row.accessTokenEnc === null) continue;
+      const cred = await deps.credentials.get({ type: "user", id: row.ownerId }, "github");
+      if (!cred?.accessToken) continue;
+      const res = await githubFetch(deps)(`${apiUrl}/applications/${encodeURIComponent(config.oauthClientId)}/token`, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${basic}`,
+          Accept: "application/vnd.github+json",
+          "Content-Type": "application/json",
+          "User-Agent": "Valet-App",
+        },
+        body: JSON.stringify({ access_token: cred.accessToken }),
+      });
+      if (!res.ok) continue;
+      const payload: unknown = await res.json();
+      const user = isRecord(payload) ? payload.user : undefined;
+      if (!isRecord(user) || typeof user.id !== "number") continue;
+      const patch = JSON.stringify({ githubId: String(user.id), githubHost: apiUrl, source: GITHUB_APP_OAUTH_SOURCE });
+      await deps.db
+        .update(credentials)
+        .set({ metadata: sql`coalesce(${credentials.metadata}, '{}'::jsonb) || ${patch}::jsonb` })
+        .where(
+          and(
+            eq(credentials.ownerType, "user"),
+            eq(credentials.ownerId, row.ownerId),
+            eq(credentials.service, "github"),
+            // Only the credential that was checked. A credential the member
+            // replaced during the check (new ciphertext) gets nothing.
+            eq(credentials.accessTokenEnc, row.accessTokenEnc),
+          ),
+        );
+    } catch (err) {
+      console.error(`github-app: verifying the GitHub account of user ${row.ownerId} failed:`, err);
+    }
+  }
+}
+
+/** The member a personal installation is bound to, or null. An organization
+ * installation is never bound: it serves every member. */
+function bindingFor(
+  install: { accountType: string; accountId: string | null },
+  memberGithubIds: Map<string, string | null>,
+): string | null {
+  if (install.accountType !== PERSONAL_ACCOUNT_TYPE || install.accountId === null) return null;
+  return memberGithubIds.get(install.accountId) ?? null;
+}
+
+/**
+ * DB-only re-binding of the org's installations. No GitHub API round trip
+ * (unlike `discoverInstallations`). The connect callback calls it after it
+ * saves a member's credential, so that member's personal installation is
+ * bound at once.
+ */
+export async function relinkInstallations(deps: Pick<GithubAppDeps, "db" | "apiUrl">, orgId: string): Promise<void> {
+  const [existingRows, memberGithubIds] = await Promise.all([
     deps.db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId)),
-    loadLinkedUserLoginMap(deps.db),
+    loadMemberGithubIds(deps, orgId),
   ]);
   const nowMs = Date.now();
   for (const row of existingRows) {
-    const linkedUserId = linkedByLogin.get(row.accountLogin.toLowerCase()) ?? null;
+    const linkedUserId = bindingFor(row, memberGithubIds);
     if (linkedUserId === row.linkedUserId) continue;
     await deps.db
       .update(githubInstallations)
       .set({ linkedUserId, updatedAt: nowMs })
       .where(eq(githubInstallations.id, row.id));
   }
+}
+
+/** The account that owns the App, from `GET /app` (App JWT auth). Null when
+ * GitHub does not answer: then no new row is treated as the owner's, and
+ * existing rows keep their flag. */
+interface AppOwner {
+  id: string | null;
+  login: string;
+}
+
+async function fetchAppOwner(deps: Pick<GithubAppDeps, "apiUrl" | "fetchImpl">, jwt: string): Promise<AppOwner | null> {
+  try {
+    const res = await githubFetch(deps)(`${githubApiUrl(deps)}/app`, { headers: appJwtHeaders(jwt) });
+    if (!res.ok) throw new Error(`GitHub API GET /app returned ${res.status}`);
+    const payload: unknown = await res.json();
+    const owner = isRecord(payload) ? payload.owner : undefined;
+    if (!isRecord(owner) || typeof owner.login !== "string") return null;
+    const id = typeof owner.id === "number" || typeof owner.id === "string" ? String(owner.id) : null;
+    return { id, login: owner.login };
+  } catch (err) {
+    console.error("github-app: reading the App owner failed:", err);
+    return null;
+  }
+}
+
+/** True when the installation is on the App owner's account. GitHub reports
+ * both at the same time, so a login match is safe when an id is missing.
+ * Null when the owner is unknown. */
+function isAppOwnerAccount(inst: ParsedInstallation, owner: AppOwner | null): boolean | null {
+  if (!owner) return null;
+  if (inst.accountId !== null && owner.id !== null) return inst.accountId === owner.id;
+  return inst.accountLogin.toLowerCase() === owner.login.toLowerCase();
+}
+
+/** Inserts or updates one installation row and binds it. Shared by discovery
+ * and by `reconcileUserInstallations`. This is the only writer of
+ * `github_installations` rows, so every new row gets an explicit
+ * `org_approved` (see the schema comment). An update never changes
+ * `org_approved`: that is an admin's decision, or the installer's. */
+async function upsertInstallation(
+  db: AppQueryable,
+  orgId: string,
+  inst: ParsedInstallation,
+  linkedUserId: string | null,
+  nowMs: number,
+  appOwner: boolean | null,
+  id: string = `ghi_${randomUUID()}`,
+): Promise<GithubInstallationRow> {
+  const [row] = await db
+    .insert(githubInstallations)
+    .values({
+      id,
+      orgId,
+      installationId: inst.installationId,
+      accountLogin: inst.accountLogin,
+      accountType: inst.accountType,
+      accountId: inst.accountId,
+      repositorySelection: inst.repositorySelection,
+      suspended: inst.suspended,
+      linkedUserId,
+      orgApproved: appOwner === true,
+      appOwner: appOwner === true,
+      createdAt: nowMs,
+      updatedAt: nowMs,
+    })
+    .onConflictDoUpdate({
+      target: [githubInstallations.orgId, githubInstallations.installationId],
+      set: {
+        accountLogin: inst.accountLogin,
+        accountType: inst.accountType,
+        accountId: inst.accountId,
+        repositorySelection: inst.repositorySelection,
+        suspended: inst.suspended,
+        linkedUserId,
+        ...(appOwner !== null ? { appOwner } : {}),
+        updatedAt: nowMs,
+      },
+    })
+    .returning();
+  return row;
+}
+
+/**
+ * Records a member's own personal installations at connect time, the way the
+ * legacy stack did after its OAuth link. `GET /user/installations` with the
+ * member's App OAuth token lists the installations of this App that the
+ * member can reach. Only an installation on the member's own GitHub account
+ * (`account.id === githubId`) is recorded. The binding then comes from
+ * `relinkInstallations`, so the same rule binds every row.
+ *
+ * Without this, a member who installs the App while the webhook is off
+ * waits for the next discovery sweep.
+ */
+export async function reconcileUserInstallations(
+  deps: Pick<GithubAppDeps, "db" | "apiUrl" | "fetchImpl" | "now">,
+  orgId: string,
+  member: { userId: string; githubId: string; accessToken: string },
+): Promise<void> {
+  // Paginated, as the legacy stack did: a member can reach more than 100
+  // installations of the App through the GitHub organizations they are in.
+  const own: ParsedInstallation[] = [];
+  let url: string | null = `${githubApiUrl(deps)}/user/installations?per_page=100`;
+  for (let pages = 0; url && pages < MAX_INSTALLATION_PAGES; pages++) {
+    const res: Response = await githubFetch(deps)(url, {
+      headers: {
+        Authorization: `Bearer ${member.accessToken}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "Valet-App",
+      },
+    });
+    if (!res.ok) throw new Error(`GitHub API GET /user/installations returned ${res.status}`);
+    const payload: unknown = await res.json();
+    const list = isRecord(payload) ? payload.installations : undefined;
+    own.push(
+      ...parseInstallationsResponse(list, "GET /user/installations").filter(
+        (inst) => inst.accountType === PERSONAL_ACCOUNT_TYPE && inst.accountId === member.githubId,
+      ),
+    );
+    url = parseNextLink(res.headers.get("link"));
+  }
+  const nowMs = (deps.now ?? Date.now)();
+  for (const inst of own) await upsertInstallation(deps.db, orgId, inst, null, nowMs, null);
+  await relinkInstallations(deps, orgId);
+}
+
+/**
+ * Records the one installation an `installation.created` delivery names,
+ * from the delivery's own `installation` object. Anybody can install the
+ * public App, so a delivery never re-reads every installation: a stranger's
+ * install costs one row. The row is bound like any other (see the module
+ * comment), and another organization's installation is approved when the
+ * GitHub user who installed it is an org member with a verified connection.
+ */
+export async function recordCreatedInstallation(
+  deps: GithubAppDeps,
+  orgId: string,
+  rawInstallation: unknown,
+  senderGithubId: string | null,
+): Promise<void> {
+  const [inst] = parseInstallationsResponse([rawInstallation], "installation.created delivery");
+  const config = await loadAppConfig(deps, orgId);
+  if (!config || !inst) return;
+  const owner = await fetchAppOwner(deps, mintAppJwt(config));
+  const memberGithubIds = await loadMemberGithubIds(deps, orgId);
+  await deps.db.transaction(async (tx) => {
+    await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
+    const row = await upsertInstallation(
+      tx, orgId, inst, bindingFor(inst, memberGithubIds), (deps.now ?? Date.now)(), isAppOwnerAccount(inst, owner),
+    );
+    if (installationAccess(row) === "organization") await invalidateWorkflowSources(tx, { orgId });
+  });
+  if (senderGithubId && inst.accountType !== PERSONAL_ACCOUNT_TYPE) {
+    await approveInstalledByMember(deps, orgId, inst.installationId, senderGithubId);
+  }
+}
+
+/** Most orgs a boot pass reads installations for. */
+const LEGACY_DISCOVERY_ORG_LIMIT = 25;
+
+/**
+ * Reads installations again for each org that still has a row without an
+ * account id: rows from before the upgrade. The upgrade repair keeps them
+ * working on the old assumption (a personal row is the owner's), and this
+ * pass replaces that with GitHub's answer: account ids, bindings, and the
+ * App owner. Boot calls it once, so no admin has to choose Refresh
+ * installations. Bounded to `LEGACY_DISCOVERY_ORG_LIMIT` orgs; the sweep
+ * covers the rest. Never throws. Returns the orgs it read.
+ */
+export async function discoverLegacyInstallations(deps: GithubAppDeps): Promise<string[]> {
+  let orgIds: string[];
+  try {
+    const rows = await deps.db
+      .selectDistinct({ orgId: githubInstallations.orgId })
+      .from(githubInstallations)
+      .where(isNull(githubInstallations.accountId))
+      .limit(LEGACY_DISCOVERY_ORG_LIMIT);
+    orgIds = rows.map((row) => row.orgId);
+  } catch (err) {
+    console.error("github-app: listing orgs with legacy installations failed:", err);
+    return [];
+  }
+  const read: string[] = [];
+  for (const orgId of orgIds) {
+    try {
+      await discoverInstallations(deps, orgId);
+      read.push(orgId);
+    } catch (err) {
+      console.error(`github-app: boot discovery for org ${orgId} failed:`, err);
+    }
+  }
+  return read;
+}
+
+export type InstallationApprovalResult = "ok" | "not_found" | "personal";
+
+/**
+ * An org admin approves (or revokes) another GitHub organization's
+ * installation for every member. A personal installation cannot be
+ * approved: it serves only the member who owns that GitHub account.
+ */
+export async function setInstallationApproval(
+  deps: Pick<GithubAppDeps, "db">,
+  orgId: string,
+  installationId: number,
+  approved: boolean,
+): Promise<InstallationApprovalResult> {
+  return deps.db.transaction(async (tx) => {
+    await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
+    const [row] = await tx
+      .select()
+      .from(githubInstallations)
+      .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId)))
+      .limit(1);
+    if (!row) return "not_found";
+    if (row.accountType === PERSONAL_ACCOUNT_TYPE) return "personal";
+    if (row.orgApproved !== approved) {
+      await tx
+        .update(githubInstallations)
+        .set({ orgApproved: approved, updatedAt: Date.now() })
+        .where(eq(githubInstallations.id, row.id));
+      await invalidateWorkflowSources(tx, { orgId });
+    }
+    return "ok";
+  });
+}
+
+/**
+ * Approves another GitHub organization's installation when the GitHub user
+ * who installed it (`sender.id` on `installation.created`) is an org ADMIN
+ * with a verified GitHub connection. Approval puts the organization's
+ * repositories in every member's picker and changes the sole-installation
+ * fallback, which is an admin's decision. An installation by any other
+ * member waits for an admin. True when the row is now approved.
+ */
+export async function approveInstalledByMember(
+  deps: Pick<GithubAppDeps, "db" | "apiUrl">,
+  orgId: string,
+  installationId: number,
+  senderGithubId: string,
+): Promise<boolean> {
+  const memberGithubIds = await loadMemberGithubIds(deps, orgId);
+  const installer = memberGithubIds.get(senderGithubId);
+  if (!installer || !(await isOrgAdmin(deps.db, orgId, installer))) return false;
+  const result = await setInstallationApproval(deps, orgId, installationId, true);
+  return result === "ok";
 }
 
 const MAX_INSTALLATION_PAGES = 10;
@@ -521,7 +964,10 @@ function parseNextLink(linkHeader: string | null): string | null {
  * like page-2+ installations were removed. Capped at
  * `MAX_INSTALLATION_PAGES` pages as a sanity bound against a misbehaving or
  * malicious upstream looping forever. */
-async function fetchAllInstallations(deps: GithubAppDeps, jwt: string): Promise<ParsedInstallation[]> {
+async function fetchAllInstallations(
+  deps: GithubAppDeps,
+  jwt: string,
+): Promise<{ installations: ParsedInstallation[]; complete: boolean }> {
   const installations: ParsedInstallation[] = [];
   let url: string | null = `${githubApiUrl(deps)}/app/installations?per_page=100`;
   let pages = 0;
@@ -542,14 +988,15 @@ async function fetchAllInstallations(deps: GithubAppDeps, jwt: string): Promise<
     url = parseNextLink(res.headers.get("link"));
   }
 
-  return installations;
+  // A `next` link left over means the cap cut the list off.
+  return { installations, complete: url === null };
 }
 
 /** Discovers the org's GitHub App installations via `GET /app/installations`
  * (App JWT auth, paginated — see `fetchAllInstallations`), upserts
  * `github_installations` by `(orgId, installationId)`, deletes rows absent
- * from the response, and sets `linkedUserId` for installations whose account
- * login matches a connected user's GitHub login. Returns the org's
+ * from the response, and binds each personal installation to the member who
+ * owns that GitHub account (see the module comment). Returns the org's
  * installation rows (post-sync). `[]` when no app is configured for the
  * org. */
 export async function discoverInstallations(deps: GithubAppDeps, orgId: string): Promise<GithubInstallationRow[]> {
@@ -557,9 +1004,17 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
   if (!config) return [];
 
   const jwt = mintAppJwt(config);
-  const installations = await fetchAllInstallations(deps, jwt);
+  const { installations, complete } = await fetchAllInstallations(deps, jwt);
+  if (!complete) {
+    // Anybody can install the public App, so strangers can push the list
+    // past the cap. A row missing from a cut-off list may be on a later
+    // page, so nothing is deleted.
+    console.warn(`github-app discovery for org ${orgId}: more than ${MAX_INSTALLATION_PAGES} pages of installations; deleting none`);
+  }
 
-  const linkedByLogin = await loadLinkedUserLoginMap(deps.db);
+  await backfillMemberGithubIds(deps, orgId, config);
+  const memberGithubIds = await loadMemberGithubIds(deps, orgId);
+  const owner = await fetchAppOwner(deps, jwt);
   return deps.db.transaction(async (tx) => {
     await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
     const existingRows = await tx.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
@@ -572,46 +1027,24 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
     for (const inst of installations) {
       seenIds.add(inst.installationId);
       const existing = existingByInstallationId.get(inst.installationId);
-      const id = existing?.id ?? `ghi_${randomUUID()}`;
-      const linkedUserId = linkedByLogin.get(inst.accountLogin.toLowerCase()) ?? null;
-
-      const [row] = await tx
-        .insert(githubInstallations)
-        .values({
-          id,
-          orgId,
-          installationId: inst.installationId,
-          accountLogin: inst.accountLogin,
-          accountType: inst.accountType,
-          repositorySelection: inst.repositorySelection,
-          suspended: inst.suspended,
-          linkedUserId,
-          createdAt: nowMs,
-          updatedAt: nowMs,
-        })
-        .onConflictDoUpdate({
-          target: [githubInstallations.orgId, githubInstallations.installationId],
-          set: {
-            accountLogin: inst.accountLogin,
-            accountType: inst.accountType,
-            repositorySelection: inst.repositorySelection,
-            suspended: inst.suspended,
-            linkedUserId,
-            updatedAt: nowMs,
-          },
-        })
-        .returning();
+      const row = await upsertInstallation(
+        tx, orgId, inst, bindingFor(inst, memberGithubIds), nowMs, isAppOwnerAccount(inst, owner), existing?.id,
+      );
       rows.push(row);
     }
 
     for (const row of existingRows) {
-      if (!seenIds.has(row.installationId)) {
+      if (complete && !seenIds.has(row.installationId)) {
         await tx.delete(githubInstallations).where(eq(githubInstallations.id, row.id));
       }
     }
 
-    const signature = (items: readonly { installationId: number; accountLogin: string; suspended: boolean }[]) =>
-      JSON.stringify(items.map((row) => [row.installationId, row.accountLogin.toLowerCase(), row.suspended])
+    // Team workflow sources resolve only organization installations, so only
+    // those count as a change. Anybody can install the public App, and a
+    // stranger's installation must not force org-wide re-syncs.
+    const signature = (items: readonly GithubInstallationRow[]) =>
+      JSON.stringify(items.filter((row) => installationAccess(row) === "organization")
+        .map((row) => [row.installationId, row.accountLogin.toLowerCase(), row.suspended])
         .sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
     if (signature(existingRows) !== signature(rows)) await invalidateWorkflowSources(tx, { orgId });
     return rows;
@@ -752,7 +1185,7 @@ export async function listOrgsWithAppCredential(db: AppQueryable): Promise<strin
 /**
  * Boot-time counterpart to `syncAppWebhookUrl`: syncs every org that owns a
  * `github_app` credential row. The scan reads the `credentials` table
- * directly for the same reason `loadLinkedUserLoginMap` does (see the module
+ * directly for the same reason `loadMemberGithubIds` does (see the module
  * doc comment) — the `CredentialStore` port is owner-scoped and cannot
  * answer "which owners hold this service". Only credential-row apps can pass
  * the `source === "org"` guard, so the scan already gives the exact
@@ -795,8 +1228,9 @@ function parseAccessTokenResponse(payload: unknown): ParsedAccessToken {
 }
 
 /** THE one cached installation-token minting path. Looks up the
- * non-suspended installation for `(orgId, accountLogin)` (case-insensitive);
- * returns `null` when there is none. Returns the cached token when it has
+ * non-suspended installation for `(orgId, accountLogin)` (case-insensitive)
+ * that `userId` may use (`usableInstallation`); returns `null` when there is
+ * none. Without `userId`, only organization installations qualify. Returns the cached token when it has
  * more than 5 minutes left before expiry; otherwise mints a fresh one via
  * `POST /app/installations/{id}/access_tokens`, caches it (encrypted) on
  * the row, and returns it. Never call the GitHub mint endpoint from
@@ -805,6 +1239,7 @@ export async function mintInstallationToken(
   deps: GithubAppDeps,
   orgId: string,
   accountLogin: string,
+  userId?: string,
 ): Promise<string | null> {
   const nowMs = (deps.now ?? Date.now)();
 
@@ -813,7 +1248,7 @@ export async function mintInstallationToken(
     .from(githubInstallations)
     .where(
       and(
-        eq(githubInstallations.orgId, orgId),
+        usableInstallation(orgId, userId),
         sql`lower(${githubInstallations.accountLogin}) = lower(${accountLogin})`,
         eq(githubInstallations.suspended, false),
       ),

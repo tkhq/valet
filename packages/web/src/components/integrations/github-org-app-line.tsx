@@ -3,7 +3,9 @@
  *
  * One line: a badge naming the App's state, the state in words, and either
  * a personal-install link, a link to the page that owns the App, or the
- * sentence for somebody who cannot open that page. `github-org-app.ts` holds the copy and the reason
+ * sentence for somebody who cannot open that page. The last sentences say
+ * who can use a personal install, or why the App offers none, and list the
+ * member's own personal installations. `github-org-app.ts` holds the copy and the reason
  * the two halves are described as separate connections.
  *
  * The line renders nothing until the status arrives. A card that guesses at
@@ -14,7 +16,7 @@
 import { useOrg } from "~/api/settings";
 import { useGithubOrgStatus } from "~/api/repos";
 import { Badge } from "~/components/primitives";
-import { githubOrgApp } from "./github-org-app";
+import { githubOrgApp, githubPersonalInstallationsLine, githubPersonalInstallNote } from "./github-org-app";
 
 export function GithubOrgAppLine() {
   const statusQ = useGithubOrgStatus();
@@ -22,6 +24,8 @@ export function GithubOrgAppLine() {
 
   if (!statusQ.data) return null;
   const summary = githubOrgApp(statusQ.data);
+  const personalNote = githubPersonalInstallNote(statusQ.data);
+  const ownInstallations = githubPersonalInstallationsLine(statusQ.data);
 
   // The same rule `SettingsRail` uses to show the Organization group.
   // Anybody else follows the link to "Organization settings are managed by
@@ -54,6 +58,8 @@ export function GithubOrgAppLine() {
       ) : (
         summary.memberAction
       )}
+      {personalNote && ` ${personalNote}`}
+      {ownInstallations && ` ${ownInstallations}`}
     </p>
   );
 }

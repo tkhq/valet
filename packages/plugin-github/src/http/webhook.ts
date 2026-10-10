@@ -68,9 +68,16 @@ function installationId(payload: unknown): number | null {
   return typeof payload.installation.id === "number" ? payload.installation.id : null;
 }
 
+/** The GitHub user who caused the delivery, as a string id. */
+function senderId(payload: unknown): string | null {
+  if (!isRecord(payload) || !isRecord(payload.sender)) return null;
+  return typeof payload.sender.id === "number" ? String(payload.sender.id) : null;
+}
+
 /**
- * `installation` event. `created` re-reads installations from GitHub, which
- * sets the linked user. `deleted`, `suspend`, and `unsuspend` change the row
+ * `installation` event. `created` records the installation, binds a
+ * personal one to its owner, and approves another organization's when an
+ * org member installed it. `deleted`, `suspend`, and `unsuspend` change the row
  * from the payload alone, because webhook delivery has a short timeout.
  * Other actions, such as `new_permissions_accepted`, do nothing.
  */
@@ -89,7 +96,7 @@ async function handleInstallationEvent(effects: GithubDeliveryEffects, payload: 
   }
   if (action === "created") {
     try {
-      await effects.discoverInstallations();
+      await effects.installationCreated({ installation: payload.installation, senderId: senderId(payload) });
     } catch (err) {
       console.error("github-app webhook: discovery after installation.created failed:", err);
     }
@@ -132,6 +139,31 @@ export async function receiveWebhook(
   if (!effects) return noContent();
 
   const event = request.headers["x-github-event"];
+  // Anybody can install the public App, and the App's webhook secret signs
+  // every installation's deliveries. Only installation lifecycle events
+  // apply to an installation that does not serve this organization. A
+  // member's personal installation also updates pull request state, which
+  // carries no content, but its events never enter the org event pipeline,
+  // where every member can read the payload.
+  const lifecycle = event === "installation" || event === "installation_repositories" || event === "ping";
+  if (event && !lifecycle && effects.eventAccess !== "organization") {
+    const id = installationId(payload) ?? "none";
+    if (effects.eventAccess === "member" && event === "pull_request") {
+      const pr = pullRequestWebhookState(payload);
+      if (pr) {
+        await effects.pullRequestChanged(pr).catch((err) => {
+          console.error(`thread pull request state (${pr.url}):`, err);
+        });
+      }
+    }
+    await effects.recordUndeliverable({
+      deliveryId: request.headers["x-github-delivery"],
+      detail: effects.eventAccess === "member"
+        ? `github event ${event} from installation ${id}: a member's personal installation sends no events to the organization`
+        : `github event ${event} from installation ${id}: the installation does not serve this organization`,
+    });
+    return noContent();
+  }
   // A verified push marks every matching enabled source due. The sync runs
   // later under each source's own credential, so a push storm collapses into
   // one sync per source per tick.

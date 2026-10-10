@@ -117,7 +117,11 @@ export async function appManifest(
     redirect_url: `${apiBase}${GITHUB_APP_SETUP_PATH}`,
     callback_urls: [`${apiBase}${GITHUB_CONNECT_CALLBACK_PATH}`],
     ...(webhookOn ? { hook_attributes: { url: `${apiBase}${GITHUB_APP_WEBHOOK_PATH}` } } : {}),
-    public: false,
+    // Public, as the legacy stack made it, so members can install the App on
+    // their personal accounts. A private App installs only on its owner. The
+    // host lets a personal installation serve only the member it is bound to
+    // (`services/github-app.ts`, "Who may use an installation").
+    public: true,
     // GitHub delivers `installation` and `installation_repositories` to
     // every App, and rejects a manifest that lists them.
     default_events: webhookOn ? (eventsOverride ?? triggerEvents) : [],
@@ -303,4 +307,33 @@ export async function appRefresh(app: GithubAppCapability): Promise<Response> {
 export async function appDisconnect(app: GithubAppCapability): Promise<Response> {
   await app.disconnect();
   return noContent();
+}
+
+/**
+ * Approves (`approved: true`) or revokes another GitHub organization's
+ * installation for every member. The App is public, so any organization
+ * can install it, and such an installation serves nobody until an org admin
+ * approves it. Answers with the App status, as refresh does.
+ */
+export async function appInstallationApproval(
+  request: PluginHttpRequest,
+  app: GithubAppCapability,
+  approved: boolean,
+): Promise<Response> {
+  const raw = request.params.installationId ?? "";
+  if (!/^[0-9]{1,18}$/.test(raw)) {
+    return json({ error: "The installation id must be a number. Copy it from the installations list." }, 400);
+  }
+  const installationId = Number(raw);
+  const result = await app.setInstallationApproval(installationId, approved);
+  if (result === "not_found") {
+    return json({ error: `No installation ${installationId}. Choose Refresh installations, then try again.` }, 404);
+  }
+  if (result === "personal") {
+    return json(
+      { error: "A personal installation serves only the member who owns that GitHub account. It cannot serve the whole organization." },
+      400,
+    );
+  }
+  return json(await app.status());
 }

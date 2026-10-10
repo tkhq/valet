@@ -66,6 +66,7 @@ async function seedInstallationRow(overrides: Partial<typeof githubInstallations
     installationId: 999,
     accountLogin: "acme",
     accountType: "Organization",
+    orgApproved: true,
     repositorySelection: "all",
     suspended: false,
     createdAt: now,
@@ -174,6 +175,84 @@ describe("GET /api/repos", () => {
 
     const two = body.repos.find((r) => r.fullName === "bob/two");
     expect(two?.installed).toBeUndefined();
+  });
+
+  it("lists a personal installation's repositories only to the member it is bound to", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const repoByToken: Record<string, string> = {
+      "Bearer tok-601": "acme/shared",
+      "Bearer tok-602": "member-a/private",
+      "Bearer tok-603": "stranger/bait",
+      "Bearer tok-604": "stranger-org/bait",
+    };
+    useFixture({
+      listInstallations: () => ({ body: [] }),
+      convertManifest: () => ({
+        body: {
+          id: 42,
+          slug: "valet-acme",
+          name: "Valet Acme",
+          client_id: "Iv1.client",
+          client_secret: "oauth-client-secret",
+          webhook_secret: "the-webhook-secret",
+          pem: TEST_PEM,
+          html_url: "https://github.com/apps/valet-acme",
+        },
+      }),
+      createInstallationToken: (id) => ({
+        body: { token: `tok-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
+      }),
+      listInstallationRepositories: (auth) => {
+        const fullName = repoByToken[auth ?? ""];
+        return { body: { total_count: 1, repositories: fullName ? [rawRepo({ full_name: fullName })] : [] } };
+      },
+    });
+    await configureOrgApp(api.baseUrl);
+    await seedInstallationRow({ id: "ghi_org", installationId: 601, accountLogin: "acme" });
+    await seedInstallationRow({
+      id: "ghi_a", installationId: 602, accountLogin: "member-a", accountType: "User", accountId: "9001", linkedUserId: "local-user",
+    });
+    // local-user verified account 9001. `identityOnly` keeps the credential
+    // out of the personal repo listing.
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+      type: "oauth2", accessToken: "a", metadata: { source: "github-app-oauth", login: "member-a", githubId: "9001", identityOnly: true },
+    });
+    await seedInstallationRow({
+      id: "ghi_s", installationId: 603, accountLogin: "stranger", accountType: "User", linkedUserId: null,
+    });
+    // A stranger's GitHub organization that no admin approved.
+    await seedInstallationRow({ id: "ghi_so", installationId: 604, accountLogin: "stranger-org", orgApproved: false });
+
+    async function listAs(headers: Record<string, string>): Promise<string[]> {
+      const res = await fetch(`${api!.baseUrl}/api/repos`, { headers });
+      expect(res.status).toBe(200);
+      return ((await res.json()) as GetReposResponse).repos.map((r) => r.fullName).sort();
+    }
+
+    expect(await listAs(HEADERS)).toEqual(["acme/shared", "member-a/private"]);
+    expect(await listAs({ ...HEADERS, "x-valet-test-user-id": "test-member" })).toEqual(["acme/shared"]);
+    expect(fixture?.calls.some((c) => c.path === "/app/installations/603/access_tokens")).toBe(false);
+    expect(fixture?.calls.some((c) => c.path === "/app/installations/604/access_tokens")).toBe(false);
+  });
+
+  it("reports installed only for an installation the caller can use", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    useFixture({ listInstallations: () => ({ body: [] }) });
+    await seedInstallationRow({
+      id: "ghi_a", installationId: 602, accountLogin: "member-a", accountType: "User", accountId: "9001", linkedUserId: "local-user",
+    });
+    // local-user verified account 9001. `identityOnly` keeps the credential
+    // out of the personal repo listing.
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+      type: "oauth2", accessToken: "a", metadata: { source: "github-app-oauth", login: "member-a", githubId: "9001", identityOnly: true },
+    });
+    await seedInstallationRow({ id: "ghi_so", installationId: 604, accountLogin: "stranger-org", orgApproved: false });
+    const installed = async (headers: Record<string, string>) =>
+      ((await (await fetch(`${api!.baseUrl}/api/repos`, { headers })).json()) as GetReposResponse).installed;
+    expect(await installed(HEADERS)).toBe(true);
+    // Another member's personal installation and an unapproved organization
+    // serve this member nothing.
+    expect(await installed({ ...HEADERS, "x-valet-test-user-id": "test-member" })).toBe(false);
   });
 
   it("soft-degrades when the installation-repositories call fails: still 200, partial results", async () => {

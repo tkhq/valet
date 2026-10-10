@@ -153,6 +153,7 @@ describe("resolveContentSourceCredential", () => {
       installationId: 999,
       accountLogin: "tkhq",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,

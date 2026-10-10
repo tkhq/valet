@@ -1800,9 +1800,28 @@ export const githubInstallations = pgTable(
     installationId: bigint("installation_id", { mode: "number" }).notNull(),
     accountLogin: text("account_login").notNull(),
     accountType: text("account_type").notNull(),
+    /** GitHub's numeric id for the installation account, as a string. Null on
+     * rows that discovery has not read since the column was added. */
+    accountId: text("account_id"),
     repositorySelection: text("repository_selection"),
     suspended: boolean("suspended").notNull().default(false),
+    /** For an installation on a personal GitHub account (`accountType`
+     * "User"): the org member whose connected GitHub account has
+     * `accountId`. Only that member may use the installation. Null on an
+     * organization installation, and on a personal installation that no
+     * member owns (see `services/github-app.ts`). */
     linkedUserId: text("linked_user_id"),
+    /** For an installation on a GitHub organization: whether it serves every
+     * member. The App is public, so any organization can install it. It is
+     * true for the App owner's account, for an installation an org admin
+     * made, and after an org admin approves it. The default is false, so a
+     * row written without it (an older pod during a rolling deploy) serves
+     * nobody. The repair that added the column approved the rows that
+     * existed then. Ignored on a personal installation. */
+    orgApproved: boolean("org_approved").notNull().default(false),
+    /** The installation is on the account that owns the App. It serves
+     * every member, also when that account is a personal one. */
+    appOwner: boolean("app_owner").notNull().default(false),
     cachedToken: text("cached_token"),
     cachedTokenExpiresAt: bigint("cached_token_expires_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),

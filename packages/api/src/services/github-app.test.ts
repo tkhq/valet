@@ -15,7 +15,7 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { decryptSecret, deriveSecretKey } from "../lib/secret-crypto.js";
-import { orgs, users, githubInstallations } from "../schema/index.js";
+import { orgMembers, orgs, users, githubInstallations } from "../schema/index.js";
 import {
   buildAppConfig,
   discoverInstallations,
@@ -24,6 +24,11 @@ import {
   mintAppJwt,
   mintInstallationToken,
   parsePrivateKeyPem,
+  approveInstalledByMember,
+  discoverLegacyInstallations,
+  reconcileUserInstallations,
+  relinkInstallations,
+  setInstallationApproval,
   resolveGithubAppEnvConfig,
   saveAppConfig,
   syncAllAppWebhookUrls,
@@ -373,6 +378,7 @@ describe("github-app service", () => {
         orgId,
         accountLogin: "acme",
         accountType: "Organization",
+        orgApproved: true,
         repositorySelection: "all",
         suspended: false,
         linkedUserId: null,
@@ -384,8 +390,10 @@ describe("github-app service", () => {
         suspended: true,
       });
 
-      expect(fixture.calls).toHaveLength(1);
-      const call = fixture.calls[0];
+      // Discovery also reads the App owner (`GET /app`).
+      const listCalls = fixture.calls.filter((c) => c.path === "/app/installations");
+      expect(listCalls).toHaveLength(1);
+      const call = listCalls[0];
       expect(call.path).toBe("/app/installations");
       expect(call.authHeader).toMatch(/^Bearer /);
       // App-JWT auth, not an installation token — decode and check `iss`.
@@ -404,6 +412,7 @@ describe("github-app service", () => {
         installationId: 333,
         accountLogin: "stale",
         accountType: "Organization",
+        orgApproved: true,
         repositorySelection: "all",
         suspended: false,
         createdAt: Date.now(),
@@ -441,9 +450,34 @@ describe("github-app service", () => {
       const remainingIds = allRows.map((r) => r.installationId).sort();
       expect(remainingIds).toEqual([111, 222]); // 333 (genuinely absent) is deleted, 111/222 survive
 
-      expect(fixture.calls).toHaveLength(2);
-      expect(fixture.calls[0].query.page).toBeUndefined();
-      expect(fixture.calls[1].query.page).toBe("2");
+      const pageCalls = fixture.calls.filter((c) => c.path === "/app/installations");
+      expect(pageCalls).toHaveLength(2);
+      expect(pageCalls[0].query.page).toBeUndefined();
+      expect(pageCalls[1].query.page).toBe("2");
+    });
+
+    it("deletes nothing when the installation list is cut off at the page cap", async () => {
+      // Anybody can install the public App, so strangers can push the list
+      // past the cap. A row missing from a cut-off list may only be on a
+      // later page.
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      await db.insert(githubInstallations).values({
+        id: "ghi_late", orgId, installationId: 1, accountLogin: "acme", accountType: "Organization", orgApproved: true,
+        repositorySelection: "all", suspended: false, createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      fixture = startGithubFixture({
+        listInstallations: (query) => {
+          const page = Number(query.page ?? "1");
+          return {
+            body: [{ id: 1000 + page, account: { login: `stranger-${page}`, id: 5000 + page, type: "User" }, repository_selection: "all", suspended_at: null }],
+            headers: { link: `<${fixture?.url}/app/installations?per_page=100&page=${page + 1}>; rel="next"` },
+          };
+        },
+      });
+      await discoverInstallations(deps(), orgId);
+      const ids = (await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId))).map((r) => r.installationId);
+      expect(ids).toContain(1);
+      expect(ids).toHaveLength(11);
     });
 
     it("removes rows whose installation is absent from a later response", async () => {
@@ -467,22 +501,369 @@ describe("github-app service", () => {
       expect(allRows[0].installationId).toBe(111);
     });
 
-    it("sets linkedUserId when a connected user's github login case-insensitively matches the account login", async () => {
+  });
+
+  // The App is public, so any GitHub organization can install it. Such an
+  // installation serves every member only when it is on the App owner's own
+  // account, when an org admin approved it, or when a member with a verified
+  // GitHub connection installed it.
+  describe("organization installation approval", () => {
+    const owner = { login: "acme", id: 1, type: "Organization" };
+    const acme = { id: 111, account: { login: "acme", id: 1, type: "Organization" }, repository_selection: "all", suspended_at: null };
+    const strangerOrg = {
+      id: 777, account: { login: "stranger-org", id: 77, type: "Organization" }, repository_selection: "all", suspended_at: null,
+    };
+
+    beforeEach(async () => {
       await saveAppConfig({ credentials }, orgId, baseConfig);
-      await db.insert(users).values({ id: "user1", name: "User One", email: "u1@example.com" });
-      await credentials.save(
-        { type: "user", id: "user1" },
-        "github",
-        { type: "oauth2", accessToken: "user-token", metadata: { login: "Acme" } },
-      );
+      fixture = startGithubFixture({
+        getApp: () => ({ body: { id: 123456, slug: "valet-app", owner } }),
+        listInstallations: () => ({ body: [acme, strangerOrg] }),
+      });
+    });
+
+    it("serves every member from the App owner's account, and from another organization only after approval", async () => {
+      await discoverInstallations(deps(), orgId);
+      expect(await mintInstallationToken(deps(), orgId, "acme")).toBe("fixture-installation-token");
+      expect(await mintInstallationToken(deps(), orgId, "stranger-org")).toBeNull();
+      expect(await mintInstallationToken(deps(), orgId, "stranger-org", "member-a")).toBeNull();
+
+      expect(await setInstallationApproval(deps(), orgId, 777, true)).toBe("ok");
+      // A later discovery keeps the admin's decision.
+      await discoverInstallations(deps(), orgId);
+      expect(await mintInstallationToken(deps(), orgId, "stranger-org")).toBe("fixture-installation-token");
+
+      expect(await setInstallationApproval(deps(), orgId, 777, false)).toBe("ok");
+      expect(await mintInstallationToken(deps(), orgId, "stranger-org")).toBeNull();
+      expect(await setInstallationApproval(deps(), orgId, 999, true)).toBe("not_found");
+    });
+
+    it("approves an organization installation only when an org admin with a verified GitHub connection installed it", async () => {
+      await discoverInstallations(deps(), orgId);
+      for (const [id, role, githubId] of [["member-a", "member", "4242"], ["admin-a", "admin", "4343"]] as const) {
+        await db.insert(users).values({ id, name: id, email: `${id}@example.com` });
+        await db.insert(orgMembers).values({ orgId, userId: id, role, createdAt: Date.now() });
+        await credentials.save({ type: "user", id }, "github", {
+          type: "oauth2", accessToken: "t", metadata: { source: "github-app-oauth", login: id, githubId, githubHost: fixture?.url },
+        });
+      }
+      expect(await approveInstalledByMember(deps(), orgId, 777, "9999")).toBe(false);
+      // A member who is not an org admin installed it on their own GitHub
+      // organization: it waits for an admin, so it cannot enter every
+      // member's picker or make the sole-installation fallback ambiguous.
+      expect(await approveInstalledByMember(deps(), orgId, 777, "4242")).toBe(false);
+      expect(await mintInstallationToken(deps(), orgId, "stranger-org")).toBeNull();
+      expect(await approveInstalledByMember(deps(), orgId, 777, "4343")).toBe(true);
+      expect(await mintInstallationToken(deps(), orgId, "stranger-org")).toBe("fixture-installation-token");
+    });
+
+    it("never approves a personal installation for the whole organization", async () => {
+      await db.insert(githubInstallations).values({
+        id: "ghi_p", orgId, installationId: 888, accountLogin: "someone", accountType: "User", accountId: "5",
+        createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      expect(await setInstallationApproval(deps(), orgId, 888, true)).toBe("personal");
+      expect(await mintInstallationToken(deps(), orgId, "someone")).toBeNull();
+    });
+
+    it("keeps the App owner's installation serving the org when GitHub does not answer GET /app", async () => {
+      await discoverInstallations(deps(), orgId);
+      await fixture?.close();
+      fixture = startGithubFixture({
+        getApp: () => ({ status: 500, body: { message: "boom" } }),
+        listInstallations: () => ({ body: [acme] }),
+      });
+      await discoverInstallations(deps(), orgId);
+      const [row] = await db.select().from(githubInstallations).where(eq(githubInstallations.installationId, 111));
+      expect(row.appOwner).toBe(true);
+      expect(await mintInstallationToken(deps(), orgId, "acme")).toBe("fixture-installation-token");
+    });
+
+    it("leaves a new organization installation unapproved when GitHub does not name the App owner", async () => {
+      await fixture?.close();
+      fixture = startGithubFixture({
+        getApp: () => ({ status: 500, body: { message: "boom" } }),
+        listInstallations: () => ({ body: [acme] }),
+      });
+      await discoverInstallations(deps(), orgId);
+      expect(await mintInstallationToken(deps(), orgId, "acme")).toBeNull();
+    });
+  });
+
+  // The upgrade repair leaves legacy rows without an account id. Boot reads
+  // installations again for each org that still has one, so bindings and
+  // owner flags are current without an admin's click.
+  describe("discoverLegacyInstallations", () => {
+    it("discovers only the orgs whose installations predate account ids", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      await db.insert(orgs).values({ id: "org-current", name: "Current", createdAt: Date.now() });
+      await saveAppConfig({ credentials }, "org-current", baseConfig);
+      const base = { accountType: "Organization", orgApproved: true, suspended: false, createdAt: Date.now(), updatedAt: Date.now() };
+      await db.insert(githubInstallations).values([
+        { ...base, id: "ghi_legacy", orgId, installationId: 111, accountLogin: "acme" },
+        { ...base, id: "ghi_current", orgId: "org-current", installationId: 222, accountLogin: "acme", accountId: "1" },
+      ]);
       fixture = startGithubFixture({
         listInstallations: () => ({
-          body: [{ id: 111, account: { login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
+          body: [{ id: 111, account: { login: "acme", id: 1, type: "Organization" }, repository_selection: "all", suspended_at: null }],
         }),
+      });
+      expect(await discoverLegacyInstallations(deps())).toEqual([orgId]);
+      const [legacy] = await db.select().from(githubInstallations).where(eq(githubInstallations.id, "ghi_legacy"));
+      expect(legacy.accountId).toBe("1");
+      expect(await discoverLegacyInstallations(deps())).toEqual([]);
+    });
+  });
+
+  // A personal installation is bound to the org member whose connected
+  // GitHub account id (from the App OAuth `GET /user`) equals the
+  // installation's account id. The legacy stack used the same rule.
+  describe("personal installation binding", () => {
+    const installs = [
+      { id: 111, account: { login: "acme", id: 1, type: "Organization" }, repository_selection: "all", suspended_at: null },
+      { id: 222, account: { login: "member-a", id: 9001, type: "User" }, repository_selection: "selected", suspended_at: null },
+      { id: 333, account: { login: "stranger", id: 9002, type: "User" }, repository_selection: "all", suspended_at: null },
+      { id: 444, account: { login: "outsider", id: 9003, type: "User" }, repository_selection: "all", suspended_at: null },
+      { id: 555, account: { login: "lookalike", id: 9005, type: "User" }, repository_selection: "all", suspended_at: null },
+    ];
+
+    /** An org member. A `githubId` in `metadata` is marked as written by the
+     * App OAuth connect, unless `fromConnect` is false: then it is only what
+     * the member wrote. */
+    async function member(
+      id: string, org: string, metadata: Record<string, unknown> | null, fromConnect = true,
+    ): Promise<void> {
+      await db.insert(users).values({ id, name: id, email: `${id}@example.com` });
+      await db.insert(orgMembers).values({ orgId: org, userId: id, role: "member", createdAt: Date.now() });
+      if (metadata) {
+        const marked = fromConnect && "githubId" in metadata ? { ...metadata, source: "github-app-oauth" } : metadata;
+        await credentials.save({ type: "user", id }, "github", { type: "oauth2", accessToken: `${id}-token`, metadata: marked });
+      }
+    }
+
+    beforeEach(async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      await db.insert(orgs).values({ id: "org2", name: "Other org", createdAt: Date.now() });
+      fixture = startGithubFixture({ listInstallations: () => ({ body: installs }) });
+      const githubHost = fixture.url;
+      await member("member-a", orgId, { login: "member-a", githubId: "9001", githubHost });
+      await member("member-b", orgId, { login: "lookalike" });
+      await member("outsider", "org2", { login: "outsider", githubId: "9003", githubHost });
+    });
+
+    function linkedByInstallation(rows: { installationId: number; linkedUserId: string | null }[]) {
+      return Object.fromEntries(rows.map((r) => [r.installationId, r.linkedUserId]));
+    }
+
+    it("binds a personal installation to the member who owns that GitHub account, and nothing else", async () => {
+      const rows = await discoverInstallations(deps(), orgId);
+      expect(linkedByInstallation(rows)).toEqual({
+        111: null, // an organization installation serves every member
+        222: "member-a",
+        333: null, // a stranger installed the public App
+        444: null, // that GitHub account belongs to a member of another org
+        555: null, // a login match is not proof: the binding needs the verified account id
+      });
+      expect(rows.find((r) => r.installationId === 222)?.accountId).toBe("9001");
+    });
+
+    it("binds nobody when two members connected the same GitHub account", async () => {
+      await member("member-c", orgId, { login: "member-a", githubId: "9001", githubHost: fixture?.url });
+      const rows = await discoverInstallations(deps(), orgId);
+      expect(linkedByInstallation(rows)[222]).toBeNull();
+    });
+
+    // A credential's metadata is the member's to write. Only the App OAuth
+    // connect and the token-check backfill mark a GitHub id as verified
+    // (`source: "github-app-oauth"`), and the upgrade repair strips every
+    // identity field written before this release.
+    it("never binds or serves a personal installation on identity metadata the connect did not write", async () => {
+      await member("attacker", orgId, { login: "attacker", githubId: "9002", githubHost: fixture?.url }, false);
+      const rows = await discoverInstallations(deps(), orgId);
+      expect(linkedByInstallation(rows)[333]).toBeNull();
+      // Not even with a binding written some other way.
+      await db.update(githubInstallations).set({ linkedUserId: "attacker" }).where(eq(githubInstallations.installationId, 333));
+      expect(await mintInstallationToken(deps(), orgId, "stranger", "attacker")).toBeNull();
+    });
+
+    // The member replaced the token while GitHub's token check was in flight.
+    // The check proved the old token's account, not the new one's.
+    it("discards a token check whose credential changed before the answer", async () => {
+      await member("member-r", orgId, null);
+      await credentials.save({ type: "user", id: "member-r" }, "github", {
+        type: "oauth2", accessToken: "app-oauth-token", refreshToken: "r", metadata: { login: "stranger" },
+      });
+      await fixture?.close();
+      fixture = startGithubFixture({
+        listInstallations: () => ({ body: installs }),
+        checkToken: (_clientId, token) =>
+          token === "app-oauth-token"
+            ? { body: { user: { login: "stranger", id: 9002 } } }
+            : { status: 404, body: { message: "Not Found" } },
+      });
+      const racingFetch: typeof fetch = async (input, init) => {
+        if (String(input).includes("/applications/") && String(init?.body).includes("app-oauth-token")) {
+          await credentials.save({ type: "user", id: "member-r" }, "github", {
+            type: "oauth2", accessToken: "replacement-pat", metadata: { login: "someone-else" },
+          });
+        }
+        return fetch(input, init);
+      };
+      const rows = await discoverInstallations(deps({ fetchImpl: racingFetch }), orgId);
+      expect(linkedByInstallation(rows)[333]).toBeNull();
+      expect((await credentials.get({ type: "user", id: "member-r" }, "github"))?.metadata).toEqual({ login: "someone-else" });
+      expect(await mintInstallationToken(deps(), orgId, "stranger", "member-r")).toBeNull();
+    });
+
+    it("binds by account id only on the GitHub host the member connected through", async () => {
+      // A numeric account id names one account on one GitHub host. The same
+      // id on a GitHub Enterprise Server is somebody else.
+      await member("member-e", orgId, { login: "member-e", githubId: "9002", githubHost: "https://ghes.example.com/api/v3" });
+      const rows = await discoverInstallations(deps(), orgId);
+      expect(linkedByInstallation(rows)[333]).toBeNull();
+      expect(linkedByInstallation(rows)[222]).toBe("member-a");
+    });
+
+    it("verifies the account of a member who connected before account ids were saved", async () => {
+      // Credentials saved before this release carry a login only. Discovery
+      // asks GitHub's token check whether this App issued each stored token
+      // and to whom, so an owner keeps their personal installation without
+      // reconnecting.
+      const now = Date.now();
+      await member("member-d", orgId, null);
+      await credentials.save({ type: "user", id: "member-d" }, "github", {
+        type: "oauth2", accessToken: "app-oauth-token", refreshToken: "r", expiresAt: now + 3_600_000,
+        metadata: { login: "stranger" },
+      });
+      // A pasted token proves nothing about the account it names, even with
+      // a refresh token the caller made up: this App did not issue it.
+      await member("member-f", orgId, null);
+      await credentials.save({ type: "user", id: "member-f" }, "github", {
+        type: "oauth2", accessToken: "pasted-token", refreshToken: "made-up", metadata: { login: "lookalike" },
+      });
+      await fixture?.close();
+      fixture = startGithubFixture({
+        listInstallations: () => ({ body: installs }),
+        // GET /user would answer for any token. The binding must not use it.
+        getUser: () => ({ body: { login: "lookalike", id: 9005 } }),
+        checkToken: (_clientId, token) =>
+          token === "app-oauth-token"
+            ? { body: { token: "app-oauth-token", user: { login: "stranger", id: 9002 } } }
+            : { status: 404, body: { message: "Not Found" } },
       });
 
       const rows = await discoverInstallations(deps(), orgId);
-      expect(rows[0].linkedUserId).toBe("user1");
+      expect(linkedByInstallation(rows)[333]).toBe("member-d");
+      expect(linkedByInstallation(rows)[555]).toBeNull();
+      const checks = fixture.calls.filter((c) => c.path === `/applications/${baseConfig.oauthClientId}/token`);
+      const basic = `Basic ${Buffer.from(`${baseConfig.oauthClientId}:${baseConfig.oauthClientSecret}`).toString("base64")}`;
+      // Every unverified member's token is checked, always with the App's own client.
+      expect(checks.length).toBeGreaterThanOrEqual(2);
+      expect(new Set(checks.map((c) => c.authHeader))).toEqual(new Set([basic]));
+      const stored = await credentials.get({ type: "user", id: "member-d" }, "github");
+      expect(stored?.metadata).toMatchObject({
+        login: "stranger", githubId: "9002", githubHost: fixture.url, source: "github-app-oauth",
+      });
+      expect((await credentials.get({ type: "user", id: "member-f" }, "github"))?.metadata).toEqual({ login: "lookalike" });
+      // The token itself is untouched.
+      expect(stored).toMatchObject({ accessToken: "app-oauth-token", refreshToken: "r" });
+    });
+
+    it("finds the member's installation past the first page of their installations", async () => {
+      // A member can reach more than 100 installations of the App, through
+      // GitHub organizations they belong to.
+      await fixture?.close();
+      fixture = startGithubFixture({
+        listUserInstallations: (_auth, query) => {
+          if (query.page === "2") {
+            return {
+              body: {
+                total_count: 101,
+                installations: [
+                  { id: 9999, account: { login: "member-a", id: 9001, type: "User" }, repository_selection: "all", suspended_at: null },
+                ],
+              },
+            };
+          }
+          return {
+            body: {
+              total_count: 101,
+              installations: Array.from({ length: 100 }, (_, i) => ({
+                id: 7000 + i, account: { login: `org-${i}`, id: 70000 + i, type: "Organization" }, repository_selection: "all", suspended_at: null,
+              })),
+            },
+            headers: { link: `<${fixture?.url}/user/installations?per_page=100&page=2>; rel="next"` },
+          };
+        },
+      });
+      await credentials.save({ type: "user", id: "member-a" }, "github", {
+        type: "oauth2", accessToken: "member-a-token", metadata: { source: "github-app-oauth", login: "member-a", githubId: "9001", githubHost: fixture.url },
+      });
+      await reconcileUserInstallations(deps(), orgId, { userId: "member-a", githubId: "9001", accessToken: "member-a-token" });
+      const rows = await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
+      expect(rows.map((r) => [r.installationId, r.linkedUserId])).toEqual([[9999, "member-a"]]);
+    });
+
+    it("serves every member from an App owner's personal account", async () => {
+      // An App created on a personal account installs only there, and that
+      // installation is the organization's.
+      await fixture?.close();
+      fixture = startGithubFixture({
+        getApp: () => ({ body: { id: 123456, slug: "valet-app", owner: { login: "solo-dev", id: 7, type: "User" } } }),
+        listInstallations: () => ({
+          body: [{ id: 999, account: { login: "solo-dev", id: 7, type: "User" }, repository_selection: "all", suspended_at: null }],
+        }),
+      });
+      await discoverInstallations(deps(), orgId);
+      expect(await mintInstallationToken(deps(), orgId, "solo-dev")).toBe("fixture-installation-token");
+      expect(await mintInstallationToken(deps(), orgId, "solo-dev", "member-b")).toBe("fixture-installation-token");
+    });
+
+    it("mints a personal installation only for its bound member", async () => {
+      await discoverInstallations(deps(), orgId);
+      expect(await mintInstallationToken(deps(), orgId, "member-a", "member-a")).toBe("fixture-installation-token");
+      expect(await mintInstallationToken(deps(), orgId, "member-a", "member-b")).toBeNull();
+      expect(await mintInstallationToken(deps(), orgId, "member-a")).toBeNull();
+      expect(await mintInstallationToken(deps(), orgId, "stranger", "member-a")).toBeNull();
+      expect(await mintInstallationToken(deps(), orgId, "acme", "member-b")).toBe("fixture-installation-token");
+      expect(await mintInstallationToken(deps(), orgId, "acme")).toBe("fixture-installation-token");
+    });
+
+    it("rebinds when a member connects later", async () => {
+      await discoverInstallations(deps(), orgId);
+      await credentials.save({ type: "user", id: "member-b" }, "github", {
+        type: "oauth2",
+        accessToken: "b-token",
+        metadata: { source: "github-app-oauth", login: "stranger", githubId: "9002", githubHost: fixture?.url },
+      });
+      await relinkInstallations(deps(), orgId);
+      const rows = await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
+      expect(linkedByInstallation(rows)[333]).toBe("member-b");
+    });
+
+    it("records the member's own installations from GitHub at connect time", async () => {
+      await fixture?.close();
+      fixture = startGithubFixture({
+        listUserInstallations: () => ({
+          body: {
+            total_count: 3,
+            installations: [
+              { id: 777, account: { login: "member-a", id: 9001, type: "User" }, repository_selection: "selected", suspended_at: null },
+              { id: 778, account: { login: "acme", id: 1, type: "Organization" }, repository_selection: "all", suspended_at: null },
+              { id: 779, account: { login: "someone", id: 9999, type: "User" }, repository_selection: "all", suspended_at: null },
+            ],
+          },
+        }),
+      });
+      // The new fixture is a new GitHub host, so connect member-a there.
+      await credentials.save({ type: "user", id: "member-a" }, "github", {
+        type: "oauth2", accessToken: "member-a-token", metadata: { source: "github-app-oauth", login: "member-a", githubId: "9001", githubHost: fixture.url },
+      });
+      await reconcileUserInstallations(deps(), orgId, { userId: "member-a", githubId: "9001", accessToken: "member-a-token" });
+      const rows = await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
+      expect(rows.map((r) => [r.installationId, r.accountLogin, r.linkedUserId])).toEqual([[777, "member-a", "member-a"]]);
+      const call = fixture.calls.find((c) => c.path === "/user/installations");
+      expect(call?.authHeader).toBe("Bearer member-a-token");
     });
   });
 
@@ -606,6 +987,7 @@ describe("github-app service", () => {
         installationId: 999,
         accountLogin: "acme",
         accountType: "Organization",
+        orgApproved: true,
         repositorySelection: "all",
         suspended: false,
         cachedToken: null,

@@ -64,7 +64,13 @@ import { and, eq } from "drizzle-orm";
 import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import { githubInstallations, orgs } from "../schema/index.js";
 import { resolveGithubUrl } from "./github-env.js";
-import { discoverInstallations, loadAppConfig, mintInstallationToken, type GithubAppDeps } from "./github-app.js";
+import {
+  discoverInstallations,
+  loadAppConfig,
+  mintInstallationToken,
+  orgWideInstallation,
+  type GithubAppDeps,
+} from "./github-app.js";
 
 export const GITHUB_CREDENTIAL_SERVICE = "github";
 /**
@@ -444,26 +450,32 @@ export async function resolveOrgPatApiToken(deps: GitHubTokenDeps, orgId: string
  * malformed `github_app` row. The wrapped message names the failure class
  * and carries the underlying message (which itself never includes secret or
  * response-body material — only a status code at most). */
-async function mintInstallation(deps: GitHubTokenDeps, orgId: string, accountLogin: string): Promise<string | null> {
+async function mintInstallation(
+  deps: GitHubTokenDeps,
+  orgId: string,
+  accountLogin: string,
+  userId: string | undefined,
+): Promise<string | null> {
   try {
-    return await mintInstallationToken(deps, orgId, accountLogin);
+    return await mintInstallationToken(deps, orgId, accountLogin, userId);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     throw new GitHubAuthError(`installation token minting failed for ${accountLogin}: ${detail}`);
   }
 }
 
-/** The org's SOLE non-suspended installation token, when exactly one
- * installation exists. `null` when there are zero or more than one — the
+/** The org's SOLE non-suspended organization installation token, when
+ * exactly one exists. `null` when there are zero or more than one — the
  * anonymous org-token path only auto-applies when the choice is
- * unambiguous. */
+ * unambiguous. Personal installations never count: they serve only their
+ * bound member, and only for a repository that member's account owns. */
 async function resolveSoleInstallationToken(deps: GitHubTokenDeps, orgId: string): Promise<string | null> {
   const rows = await deps.db
     .select()
     .from(githubInstallations)
-    .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.suspended, false)));
+    .where(and(orgWideInstallation(orgId), eq(githubInstallations.suspended, false)));
   if (rows.length !== 1) return null;
-  return mintInstallation(deps, orgId, rows[0].accountLogin);
+  return mintInstallation(deps, orgId, rows[0].accountLogin, undefined);
 }
 
 /**
@@ -474,15 +486,20 @@ async function resolveSoleInstallationToken(deps: GitHubTokenDeps, orgId: string
  * non-suspended installation. `null` when neither resolves — the caller
  * (the plugin action) names the corrective step; a minting failure still
  * throws `GitHubAuthError` via `mintInstallation`.
+ *
+ * `userId` is the member the request acts as. Only that member's own
+ * personal installation can answer; without it, only organization
+ * installations can.
  */
 export async function resolveInstallationApiToken(
   deps: GitHubTokenDeps,
   orgId: string,
   repoOwner?: string,
+  userId?: string,
 ): Promise<string | null> {
   await ensureInstallationsSynced(deps, orgId);
   if (repoOwner) {
-    const token = await mintInstallation(deps, orgId, repoOwner);
+    const token = await mintInstallation(deps, orgId, repoOwner, userId);
     // `null` alone means "no installation for this owner" — the one case
     // the sole-installation fallback is for. Any other value, even an
     // empty string, is a mint result and must surface, not be masked by
@@ -524,10 +541,12 @@ export async function installationResolvesFor(
   options: { strictOwner?: boolean; dynamicOwner?: boolean } = {},
 ): Promise<InstallationResolution> {
   if (!(await loadAppConfig(deps, orgId))) return { ok: false, gap: "no_app" };
+  // A team or org caller: organization installations only, the same set
+  // `resolveInstallationApiToken` reaches without a member.
   const rows = await deps.db
     .select({ accountLogin: githubInstallations.accountLogin })
     .from(githubInstallations)
-    .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.suspended, false)));
+    .where(and(orgWideInstallation(orgId), eq(githubInstallations.suspended, false)));
   if (rows.length === 0) return { ok: false, gap: "no_installations" };
   if (options.dynamicOwner && !repoOwner) return { ok: true };
   // Same case-insensitive match as `mintInstallationToken`.
@@ -579,7 +598,7 @@ export async function resolveGitHubToken(
   // ── Explicit selections are strict — no fallback across them. ──
   if (auth === "app") {
     if (req.repo) {
-      const token = await mintInstallation(deps, req.orgId, req.repo.owner);
+      const token = await mintInstallation(deps, req.orgId, req.repo.owner, req.userId);
       if (!token) {
         throw new GitHubAuthError(
           `the GitHub App is not installed on ${req.repo.owner} — open Settings → Organization → GitHub and install it on ${req.repo.owner}`,
@@ -608,7 +627,7 @@ export async function resolveGitHubToken(
   if (req.purpose === "git") {
     // installation(owner) → user → org PAT → tokenless.
     if (req.repo) {
-      const installation = await mintInstallation(deps, req.orgId, req.repo.owner);
+      const installation = await mintInstallation(deps, req.orgId, req.repo.owner, req.userId);
       if (installation) return { token: installation, source: "installation" };
     }
     const user = await resolveUserCredential(deps, req.orgId, req.userId);
@@ -623,7 +642,7 @@ export async function resolveGitHubToken(
   if (user.ok) return { token: user.token, source: user.source, login: user.login };
 
   if (req.repo) {
-    const installation = await mintInstallation(deps, req.orgId, req.repo.owner);
+    const installation = await mintInstallation(deps, req.orgId, req.repo.owner, req.userId);
     if (installation) return { token: installation, source: "installation" };
   }
 

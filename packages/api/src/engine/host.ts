@@ -1888,6 +1888,8 @@ export class EngineHost {
           },
           orgId,
           binding?.repo.owner,
+          // A member's own personal installation answers only for that member.
+          owner.type === "user" ? owner.id : undefined,
         );
         return token === null ? null : { type: "app_install", accessToken: token };
       }

@@ -21,7 +21,7 @@ import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { eventDeliveries, events, linearInstallations, workflowRuns } from "../schema/index.js";
+import { eventDeliveries, events, githubInstallations, linearInstallations, workflowRuns } from "../schema/index.js";
 import type {
   CreateEventSubscriptionResponse,
   CreateWorkflowResponse,
@@ -331,6 +331,9 @@ function prOpenedBody(repoFullName: string, prNumber: number): string {
   return JSON.stringify({
     action: "opened",
     number: prNumber,
+    // GitHub names the installation on every App delivery. The webhook drops
+    // a delivery from an installation that does not serve the organization.
+    installation: { id: 4040 },
     pull_request: {
       number: prNumber,
       title: "Add the thing",
@@ -360,6 +363,11 @@ describe("event system e2e: signed GitHub webhook → subscription match → wor
   it("starts a workflow run from a pull_request delivery; a filtered-out repo starts nothing", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     await configureGithubApp(api.baseUrl);
+    const now = Date.now();
+    await api.providers.db.insert(githubInstallations).values({
+      id: "ghi_e2e", orgId: "local-org", installationId: 4040, accountLogin: "acme", accountType: "Organization", orgApproved: true,
+      suspended: false, createdAt: now, updatedAt: now,
+    });
 
     // ── Workflow definition via the API ─────────────────────────────────
     const wfRes = await fetch(`${api.baseUrl}/api/workflows`, {

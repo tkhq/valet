@@ -8,6 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
+import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
@@ -19,6 +20,7 @@ import {
   GitHubAuthError,
   installationResolvesFor,
   resolveGitHubToken,
+  resolveInstallationApiToken,
   type GitHubTokenDeps,
 } from "./github-tokens.js";
 
@@ -82,6 +84,7 @@ describe("resolveGitHubToken", () => {
       installationId: 999,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -592,6 +595,157 @@ describe("resolveGitHubToken", () => {
   // installation would answer, without minting a token. Mirrors
   // `resolveInstallationApiToken`: the owner's installation first, then the
   // org's sole non-suspended one.
+  // A personal installation is bound to the member whose connected GitHub
+  // account it is on (`linkedUserId`). Only that member may use it. An
+  // installation on a GitHub organization serves every member. A personal
+  // installation with no binding (a stranger installed the public App)
+  // serves nobody.
+  describe("personal installations", () => {
+    const memberB = "user2";
+    const personalRepo = { owner: "member-a", name: "private" };
+
+    beforeEach(async () => {
+      await db.insert(users).values({ id: memberB, name: "User Two", email: "u2@example.com" });
+      // The bound member verified account 9001. `identityOnly` keeps the
+      // credential out of token resolution, so the installation answers.
+      await credentials.save({ type: "user", id: userId }, "github", {
+        type: "oauth2", accessToken: "a", metadata: { source: "github-app-oauth", login: "member-a", githubId: "9001", identityOnly: true },
+      });
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      fixture = startGithubFixture();
+      await seedInstallation();
+      await seedInstallation({
+        id: "ghi_a", installationId: 501, accountLogin: "member-a", accountType: "User", accountId: "9001", linkedUserId: userId,
+      });
+      await seedInstallation({ id: "ghi_s", installationId: 502, accountLogin: "stranger", accountType: "User", linkedUserId: null });
+    });
+
+    function mintedInstallations(): string[] {
+      return (fixture?.calls ?? []).filter((c) => c.path.endsWith("/access_tokens")).map((c) => c.params.id);
+    }
+
+    it("mints a personal installation for the member it is bound to", async () => {
+      const a = await resolveGitHubToken(deps(), { orgId, userId, purpose: "git", repo: personalRepo });
+      expect(a.source).toBe("installation");
+      expect(mintedInstallations()).toEqual(["501"]);
+    });
+
+    it("never mints another member's personal installation", async () => {
+      expect(await resolveGitHubToken(deps(), { orgId, userId: memberB, purpose: "git", repo: personalRepo })).toEqual({
+        token: null,
+        source: "none",
+      });
+      await expect(
+        resolveGitHubToken(deps(), { orgId, userId: memberB, purpose: "api", auth: "app", repo: personalRepo }),
+      ).rejects.toThrow(GitHubAuthError);
+      expect(await resolveInstallationApiToken(deps(), orgId, "member-a", memberB)).not.toBe(null);
+      expect(mintedInstallations()).not.toContain("501");
+    });
+
+    it("never mints a stranger's installation, for any member", async () => {
+      for (const who of [userId, memberB]) {
+        expect(
+          await resolveGitHubToken(deps(), { orgId, userId: who, purpose: "git", repo: { owner: "stranger", name: "x" } }),
+        ).toEqual({ token: null, source: "none" });
+      }
+      expect(mintedInstallations()).toEqual([]);
+    });
+
+    it("keeps the organization installation for every member, and as the sole installation", async () => {
+      for (const who of [userId, memberB]) {
+        const org = await resolveGitHubToken(deps(), { orgId, userId: who, purpose: "git", repo: { owner: "acme", name: "x" } });
+        expect(org.source).toBe("installation");
+        // No repository names an owner: personal installations do not make
+        // the organization installation ambiguous.
+        const sole = await resolveGitHubToken(deps(), { orgId, userId: who, purpose: "api" });
+        expect(sole.source).toBe("installation");
+      }
+      expect(new Set(mintedInstallations())).toEqual(new Set(["999"]));
+    });
+
+    it("does not trust a binding whose member never verified that account", async () => {
+      // An older pod, mid rolling deploy, still binds by login. The binding
+      // counts only when the bound member's verified GitHub id is the
+      // installation's account id.
+      await credentials.save({ type: "user", id: memberB }, "github", {
+        type: "oauth2", accessToken: "b", metadata: { login: "lookalike", githubId: "1234" },
+      });
+      await seedInstallation({
+        id: "ghi_old", installationId: 504, accountLogin: "lookalike", accountType: "User", accountId: "9009", linkedUserId: memberB,
+      });
+      expect(
+        await resolveGitHubToken(deps(), { orgId, userId: memberB, purpose: "git", repo: { owner: "lookalike", name: "x" } }),
+      ).toMatchObject({ source: "pat" });
+      expect(mintedInstallations()).not.toContain("504");
+    });
+
+    it("does not trust a binding that has no verified account id", async () => {
+      // Rows bound before account ids existed were matched by login, which a
+      // pasted token could forge, and across organizations.
+      await seedInstallation({
+        id: "ghi_legacy", installationId: 503, accountLogin: "legacy-login", accountType: "User", accountId: null, linkedUserId: userId,
+      });
+      expect(
+        await resolveGitHubToken(deps(), { orgId, userId, purpose: "git", repo: { owner: "legacy-login", name: "x" } }),
+      ).toEqual({ token: null, source: "none" });
+      expect(mintedInstallations()).toEqual([]);
+    });
+
+    it("never uses an organization installation that no admin approved", async () => {
+      // A stranger installed the public App on their own GitHub organization.
+      await seedInstallation({ id: "ghi_o", installationId: 777, accountLogin: "stranger-org", orgApproved: false });
+      // Not for its own repositories, for any caller.
+      for (const who of [userId, memberB, undefined]) {
+        expect(
+          await resolveGitHubToken(deps(), { orgId, userId: who, purpose: "git", repo: { owner: "stranger-org", name: "x" } }),
+        ).toEqual({ token: null, source: "none" });
+      }
+      // And it does not make the organization's own installation ambiguous.
+      expect((await resolveGitHubToken(deps(), { orgId, userId: memberB, purpose: "api" })).source).toBe("installation");
+      expect(mintedInstallations()).not.toContain("777");
+    });
+
+    it("gives a team no installation when the org has only personal and unapproved ones", async () => {
+      await db.delete(githubInstallations).where(eq(githubInstallations.installationId, 999));
+      await seedInstallation({ id: "ghi_o", installationId: 777, accountLogin: "stranger-org", orgApproved: false });
+      expect(await resolveInstallationApiToken(deps(), orgId)).toBeNull();
+      await expect(resolveGitHubToken(deps(), { orgId, purpose: "api", auth: "app" })).rejects.toThrow(GitHubAuthError);
+      expect(mintedInstallations()).toEqual([]);
+    });
+
+    it("gives a team or unattended caller no personal installation", async () => {
+      expect(await resolveInstallationApiToken(deps(), orgId, "member-a")).not.toBe(null);
+      expect(mintedInstallations()).toEqual(["999"]);
+      expect(await installationResolvesFor(deps(), orgId, "member-a", { strictOwner: true })).toEqual({
+        ok: false,
+        gap: "no_installation_for_owner",
+        owner: "member-a",
+      });
+    });
+  });
+
+  // An App created on a personal account was private, so its only
+  // installation is the admin's own personal one. After the upgrade repair
+  // that row has no account id but is marked as the App owner's, and it must
+  // keep serving members, teams, and readiness before discovery runs again.
+  describe("after the upgrade, before discovery", () => {
+    beforeEach(async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      fixture = startGithubFixture();
+      await seedInstallation({
+        id: "ghi_up", installationId: 1234, accountLogin: "admin-person", accountType: "User", accountId: null, appOwner: true,
+      });
+    });
+
+    it("serves members, teams, and readiness from the owner's personal installation", async () => {
+      const repo = { owner: "admin-person", name: "r" };
+      expect((await resolveGitHubToken(deps(), { orgId, userId, purpose: "git", repo })).source).toBe("installation");
+      expect((await resolveGitHubToken(deps(), { orgId, purpose: "api", auth: "app", repo })).source).toBe("installation");
+      expect((await resolveGitHubToken(deps(), { orgId, purpose: "api", auth: "app" })).source).toBe("installation");
+      expect(await installationResolvesFor(deps(), orgId, "admin-person", { strictOwner: true })).toEqual({ ok: true });
+    });
+  });
+
   describe("installationResolvesFor", () => {
     it("is no_app when the org has no App configured", async () => {
       await seedInstallation();

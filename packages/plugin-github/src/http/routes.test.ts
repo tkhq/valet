@@ -18,7 +18,7 @@ function refuse(): never {
 function app(overrides: Partial<GithubAppCapability> = {}): GithubAppCapability {
   return {
     status: refuse, orgName: refuse, signSetupState: refuse, checkCredential: refuse,
-    saveApp: refuse, refreshInstallations: refuse, disconnect: refuse, ...overrides,
+    saveApp: refuse, refreshInstallations: refuse, disconnect: refuse, setInstallationApproval: refuse, ...overrides,
   };
 }
 
@@ -61,7 +61,7 @@ describe("GitHub App setup", () => {
         url: "http://127.0.0.1:9",
         redirect_url: "http://127.0.0.1:9/api/org/github-app/setup",
         callback_urls: ["http://127.0.0.1:9/api/me/github/callback"],
-        public: false,
+        public: true,
         default_events: [],
         default_permissions: {
           contents: "write", metadata: "read", pull_requests: "write", issues: "write",

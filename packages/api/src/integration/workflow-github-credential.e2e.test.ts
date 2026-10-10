@@ -139,6 +139,7 @@ async function installAppOn(a: TestApi, accountLogin: string, installationId: nu
     installationId,
     accountLogin,
     accountType: "Organization",
+    orgApproved: true,
     repositorySelection: "all",
     suspended: false,
     cachedToken: null,

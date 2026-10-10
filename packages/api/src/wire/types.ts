@@ -4170,6 +4170,14 @@ export interface GithubAppInstallationSummary {
   repositorySelection: string | null;
   suspended: boolean;
   linkedUserId: string | null;
+  /** What the installation gives the organization. `organization`: every
+   * member can use it (the App owner's account, or an approved
+   * organization). `member`: only the member who owns that personal GitHub
+   * account. `pending`: another GitHub organization that no admin approved;
+   * nobody can use it. `none`: a personal installation that no member owns. */
+  access: "organization" | "member" | "pending" | "none";
+  /** The installation is on the account that owns the App. */
+  appOwner: boolean;
 }
 
 export interface GithubAppInfo {
@@ -4299,8 +4307,9 @@ export interface GetGithubOrgStatusResponse {
    * deployment-wide `GITHUB_APP_*` fallback. This is the same read
    * `POST /api/me/github/connect` makes, so `false` means that call 409s. */
   configured: boolean;
-  /** GitHub accounts the App is installed on. Counts the same rows the
-   * admin page tables, so the two surfaces never disagree. Zero with
+  /** Organization GitHub accounts the App is installed on. Personal
+   * installations do not count: the caller's own are in
+   * `personalInstallations`, and nobody else's are shown. Zero with
    * `configured: true` is the created-but-never-installed state. */
   installationCount: number;
   /** How many of `installationCount` GitHub suspended. A suspended
@@ -4308,8 +4317,31 @@ export interface GetGithubOrgStatusResponse {
    * `installationCount` means the App reaches nothing. */
   suspendedCount: number;
   /** Full GitHub installation URL. Present only when this org allows
-   * personal installations. */
+   * personal installations and GitHub confirms the App is public. */
   personalInstallUrl?: string;
+  /** Why a member gets no personal install link although the org allows
+   * personal installations. `app_private`: GitHub installs a private App
+   * only on its owner account. `app_visibility_unknown`: GitHub did not
+   * answer the visibility check. `github_not_connected`: the member has not
+   * connected GitHub through the App, so Valet cannot bind an installation
+   * to them. */
+  personalInstallBlocked?: GithubPersonalInstallBlocked;
+  /** Present with `personalInstallUrl` when the server requires sign-in for
+   * the visibility check (a private-mode GitHub Enterprise Server), so Valet
+   * could not confirm that the App is public. */
+  personalInstallUnverified?: boolean;
+  /** The caller's own personal installations, bound to them. Absent when
+   * there are none. */
+  personalInstallations?: GithubPersonalInstallation[];
+}
+
+export type GithubPersonalInstallBlocked = "app_private" | "app_visibility_unknown" | "github_not_connected";
+
+export interface GithubPersonalInstallation {
+  accountLogin: string;
+  /** `all` or `selected`, as GitHub reports it. */
+  repositorySelection: string | null;
+  suspended: boolean;
 }
 
 // ── REST: repo listing (GitHub/repo integration plan, Task 7)

@@ -33,6 +33,7 @@ import type { PluginHttpCaller, PluginHttpRequest } from "@valet/engine";
 import {
   appCredential,
   appDisconnect,
+  appInstallationApproval,
   appManifest,
   appRefresh,
   appSetup,
@@ -61,12 +62,21 @@ import { publicUrlFromEnv } from "../channels/host.js";
 import { resolveReturnOrigin } from "../routes/credential-connect.js";
 import { credentials, githubInstallations, orgs } from "../schema/index.js";
 import { githubAppInstallUrl, resolveGithubApiUrl, resolveGithubUrl } from "../services/github-env.js";
+import { personalInstallFields } from "../services/github-app-visibility.js";
 import {
   buildAppConfig,
   discoverInstallations,
   loadAppConfig,
   loadAppConfigWithSource,
+  installationAccess,
+  installationEventAccess,
+  reconcileUserInstallations,
+  recordCreatedInstallation,
+  setInstallationApproval,
+  verifiedGithubId,
+  GITHUB_APP_OAUTH_SOURCE,
   relinkInstallations,
+  usableInstallation,
   resolveGithubAppEnvConfig,
   saveAppConfig,
   syncAppWebhookUrl,
@@ -135,6 +145,14 @@ export const githubHttpBindings: Readonly<Record<string, PluginHttpBinding>> = {
     method: "DELETE", path: "/app", auth: "org-admin",
     bind: (context) => appDisconnect(app(context)),
   },
+  "app-installation-approve": {
+    method: "POST", path: "/app/installations/:installationId/approval", auth: "org-admin",
+    bind: (context) => appInstallationApproval(context.request, app(context), true),
+  },
+  "app-installation-revoke": {
+    method: "DELETE", path: "/app/installations/:installationId/approval", auth: "org-admin",
+    bind: (context) => appInstallationApproval(context.request, app(context), false),
+  },
   connect: {
     method: "POST", path: "/connection/connect", auth: "user",
     bind: (context) => connectStart(context.request, connection(context), endpoints()),
@@ -180,6 +198,8 @@ function toInstallationSummary(row: typeof githubInstallations.$inferSelect): Gi
     repositorySelection: row.repositorySelection,
     suspended: row.suspended,
     linkedUserId: row.linkedUserId,
+    access: installationAccess(row),
+    appOwner: row.appOwner,
   };
 }
 
@@ -254,6 +274,8 @@ function appCapability(providers: Providers, caller: PluginHttpCaller, request: 
         return false;
       }
     },
+    setInstallationApproval: (installationId, approved) =>
+      setInstallationApproval(appDeps(providers), orgId, installationId, approved),
     disconnect: async () => {
       const { db, engineCredentials } = providers;
       // Removes the credential row and installation rows only. A
@@ -356,23 +378,51 @@ function connectionCapability(
       );
     },
     orgStatus: async () => {
-      const { db } = providers;
+      const { db, engineCredentials } = providers;
       const config = await loadAppConfig(appDeps(providers), orgId);
+      // The installations this member can use: the organization's, plus the
+      // member's own personal ones. Another member's or a stranger's
+      // personal installation is never read. The counts describe the
+      // organization's half, so they leave the member's own out.
       const rows = await db
-        .select({ suspended: githubInstallations.suspended })
+        .select({
+          suspended: githubInstallations.suspended,
+          accountType: githubInstallations.accountType,
+          appOwner: githubInstallations.appOwner,
+          accountLogin: githubInstallations.accountLogin,
+          repositorySelection: githubInstallations.repositorySelection,
+        })
         .from(githubInstallations)
-        .where(eq(githubInstallations.orgId, orgId));
+        .where(usableInstallation(orgId, userId));
       const [org] = await db
         .select({ allowPersonalInstallations: orgs.allowPersonalInstallations })
         .from(orgs)
         .where(eq(orgs.id, orgId))
         .limit(1);
+      // `usableInstallation` returns a personal row only when it is bound to
+      // this member. The App owner's account serves every member, so it
+      // counts as the organization's.
+      const own = rows.filter((row) => row.accountType === "User" && !row.appOwner);
+      const orgWide = rows.filter((row) => row.accountType !== "User" || row.appOwner);
+      let personal = {};
+      if (config !== null && org?.allowPersonalInstallations === true) {
+        const stored = await engineCredentials.get({ type: "user", id: userId }, GITHUB_CREDENTIAL_SERVICE);
+        const connected = verifiedGithubId(stored?.metadata, resolveGithubApiUrl(process.env)) !== null;
+        personal = await personalInstallFields(config.appSlug, process.env, connected);
+      }
       const status: GetGithubOrgStatusResponse = {
         configured: config !== null,
-        installationCount: rows.length,
-        suspendedCount: rows.filter((row) => row.suspended).length,
-        ...(config !== null && org?.allowPersonalInstallations === true
-          ? { personalInstallUrl: githubAppInstallUrl(process.env, config.appSlug) }
+        installationCount: orgWide.length,
+        suspendedCount: orgWide.filter((row) => row.suspended).length,
+        ...personal,
+        ...(own.length > 0
+          ? {
+              personalInstallations: own.map((row) => ({
+                accountLogin: row.accountLogin,
+                repositorySelection: row.repositorySelection,
+                suspended: row.suspended,
+              })),
+            }
           : {}),
       };
       const projected: GithubOrgStatus = status;
@@ -399,14 +449,32 @@ function connectionCapability(
               accessToken: connection.accessToken,
               refreshToken: connection.refreshToken,
               expiresAt: connection.expiresAt,
-              metadata: { login: connection.login },
+              metadata: {
+                login: connection.login,
+                // Verified by GitHub in this flow. Binds the member's personal
+                // App installations (`services/github-app.ts`). An account id
+                // is unique on one GitHub host only, so the host goes with it.
+                ...(connection.githubId
+                  ? { githubId: connection.githubId, githubHost: resolveGithubApiUrl(process.env) }
+                  : {}),
+                // GitHub issued this token through the App's own OAuth.
+                source: GITHUB_APP_OAUTH_SOURCE,
+              },
             });
             await refreshCredentialReadiness(providers, { type: "user", id: userId }, GITHUB_CREDENTIAL_SERVICE);
             // Best-effort: the next discovery run catches up.
             try {
-              await relinkInstallations(appDeps(providers), verified.orgId);
+              if (connection.githubId) {
+                await reconcileUserInstallations(appDeps(providers), verified.orgId, {
+                  userId,
+                  githubId: connection.githubId,
+                  accessToken: connection.accessToken,
+                });
+              } else {
+                await relinkInstallations(appDeps(providers), verified.orgId);
+              }
             } catch (err) {
-              console.error("github connect callback: post-save relink failed:", err);
+              console.error("github connect callback: post-save installation binding failed:", err);
             }
           },
         },
@@ -468,14 +536,20 @@ function webhookCapability(providers: Providers): GithubWebhookCapability {
         webhookSecret: config.webhookSecret,
         bind: async ({ installationId }) => {
           const orgId = ownerOrgId ?? (await resolveEnvFallbackOrgId(db, installationId));
-          return orgId ? deliveryEffects(providers, orgId) : null;
+          if (!orgId) return null;
+          const eventAccess = installationId === null ? "none" : await installationEventAccess({ db }, orgId, installationId);
+          return deliveryEffects(providers, orgId, eventAccess);
         },
       };
     },
   };
 }
 
-function deliveryEffects(providers: Providers, orgId: string): GithubDeliveryEffects {
+function deliveryEffects(
+  providers: Providers,
+  orgId: string,
+  eventAccess: GithubDeliveryEffects["eventAccess"],
+): GithubDeliveryEffects {
   const { db } = providers;
   /** Changes one installation row under the organization row lock. */
   const changeInstallation = async (installationId: number, suspended: boolean | null): Promise<void> => {
@@ -483,15 +557,21 @@ function deliveryEffects(providers: Providers, orgId: string): GithubDeliveryEff
       await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
       const scope = and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId));
       const changed = suspended === null
-        ? await tx.delete(githubInstallations).where(scope).returning({ id: githubInstallations.id })
+        ? await tx.delete(githubInstallations).where(scope).returning()
         : await tx.update(githubInstallations)
           .set({ suspended, updatedAt: Date.now() })
           .where(and(scope, eq(githubInstallations.suspended, !suspended)))
-          .returning({ id: githubInstallations.id });
-      if (changed.length > 0) await invalidateWorkflowSources(tx, { orgId });
+          .returning();
+      // Team workflow sources resolve only organization installations.
+      // Anybody can install the public App, so a stranger's lifecycle must
+      // not force org-wide re-syncs.
+      if (changed.some((row) => installationAccess(row) === "organization")) {
+        await invalidateWorkflowSources(tx, { orgId });
+      }
     });
   };
   return {
+    eventAccess,
     contentPushed: async (push) => {
       await providers.contentSync.onPush(orgId, push.repoFullName, push.gitRef, push.defaultBranch);
     },
@@ -504,8 +584,8 @@ function deliveryEffects(providers: Providers, orgId: string): GithubDeliveryEff
         .set({ updatedAt: Date.now(), ...(repositorySelection !== undefined ? { repositorySelection } : {}) })
         .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId)));
     },
-    discoverInstallations: async () => {
-      await discoverInstallations(appDeps(providers), orgId);
+    installationCreated: async ({ installation, senderId }) => {
+      await recordCreatedInstallation(appDeps(providers), orgId, installation, senderId);
     },
     emit: async (event) => {
       await ingestEvent(

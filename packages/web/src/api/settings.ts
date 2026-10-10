@@ -638,6 +638,17 @@ export function useRefreshGithubApp() {
   });
 }
 
+export function useSetGithubInstallationApproval() {
+  const qc = useQueryClient();
+  return useMutation<GetGithubAppResponse, Error, { installationId: number; approved: boolean }>({
+    mutationFn: ({ installationId, approved }) => api.setGithubInstallationApproval(installationId, approved),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.githubApp() });
+      qc.invalidateQueries({ queryKey: qkRepos.githubOrgStatus() });
+    },
+  });
+}
+
 export function useDeleteGithubApp() {
   const qc = useQueryClient();
   return useMutation<undefined, Error, void>({

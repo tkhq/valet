@@ -25,6 +25,14 @@ export interface GithubAppInstallationSummary {
   repositorySelection: string | null;
   suspended: boolean;
   linkedUserId: string | null;
+  /** What the installation gives the organization. `organization`: every
+   * member can use it (the App owner's account, or an approved
+   * organization). `member`: only the member who owns that personal GitHub
+   * account. `pending`: another GitHub organization that no admin approved;
+   * nobody can use it. `none`: a personal installation that no member owns. */
+  access: "organization" | "member" | "pending" | "none";
+  /** The installation is on the account that owns the App. */
+  appOwner: boolean;
 }
 
 /** Host-owned storage view of the organization's App. */
@@ -43,6 +51,9 @@ export interface GithubOrgStatus {
   installationCount: number;
   suspendedCount: number;
   personalInstallUrl?: string;
+  personalInstallBlocked?: "app_private" | "app_visibility_unknown" | "github_not_connected";
+  personalInstallUnverified?: boolean;
+  personalInstallations?: Array<{ accountLogin: string; repositorySelection: string | null; suspended: boolean }>;
 }
 
 /** Parts of an App credential. The host fills the page URL and empty secrets. */
@@ -74,6 +85,9 @@ export interface GithubAppCapability {
   refreshInstallations(): Promise<boolean>;
   /** Removes the stored App and its installation rows. */
   disconnect(): Promise<void>;
+  /** Approves or revokes another GitHub organization's installation for
+   * every member. `personal` refuses a personal installation. */
+  setInstallationApproval(installationId: number, approved: boolean): Promise<"ok" | "not_found" | "personal">;
 }
 
 export interface GithubSetupCapability {
@@ -119,7 +133,8 @@ export interface GithubCallbackGrant {
   postAuthDestination?: GithubPostAuthDestination;
   /** The App OAuth client of the organization the state names. Null when no App exists. */
   oauthClient(): Promise<{ clientId: string; clientSecret: string } | null>;
-  /** Saves the caller's credential, refreshes readiness, and relinks installations. */
+  /** Saves the caller's credential, refreshes readiness, records the caller's
+   * own personal installations, and relinks installations. */
   saveConnection(connection: GithubUserConnection): Promise<void>;
 }
 
@@ -128,6 +143,9 @@ export interface GithubUserConnection {
   refreshToken?: string;
   expiresAt?: number;
   login: string;
+  /** GitHub's numeric account id from `GET /user`, as a string. The host
+   * binds personal App installations to the member by this id. */
+  githubId?: string;
 }
 
 export interface GithubWebhookCapability {
@@ -155,14 +173,25 @@ export interface GithubPushRef {
 }
 
 export interface GithubDeliveryEffects {
+  /** What the delivery's installation gives the organization.
+   * `organization`: the App owner's account or an approved organization;
+   * every event applies. `member`: a personal installation bound to one
+   * member; only the installation lifecycle and the pull request state that
+   * thread icons follow apply, because the org event pipeline shows payloads
+   * to every member. `none`: a stranger's or unknown installation; only the
+   * installation lifecycle applies. Anybody can install the public App. */
+  eventAccess: "organization" | "member" | "none";
   /** Marks matching content sources due. */
   contentPushed(push: GithubPushRef): Promise<void>;
   pullRequestChanged(change: { url: string; state: GithubPullRequestState }): Promise<void>;
   installationRemoved(installationId: number): Promise<void>;
   installationSuspended(installationId: number, suspended: boolean): Promise<void>;
   repositorySelectionChanged(installationId: number, repositorySelection: string | undefined): Promise<void>;
-  /** Re-reads installations from GitHub. */
-  discoverInstallations(): Promise<void>;
+  /** Records the one installation a `created` delivery names (its
+   * `installation` object, unparsed). `senderId` is the GitHub user who
+   * installed it. The host never re-reads every installation here, because
+   * anybody can install the public App. */
+  installationCreated(created: { installation: unknown; senderId: string | null }): Promise<void>;
   /** Persists the event and starts subscription dispatch. */
   emit(event: NormalizedEvent): Promise<void>;
   /** Records a verified delivery that no trigger can ingest. */

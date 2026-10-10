@@ -757,9 +757,12 @@ describe("pg app schema + migrations", () => {
         installationId: 12345,
         accountLogin: "acme",
         accountType: "Organization",
+        accountId: null,
         repositorySelection: "selected",
         suspended: false,
         linkedUserId: null,
+        orgApproved: false,
+        appOwner: false,
         cachedToken: "enc:abc",
         cachedTokenExpiresAt: now + 3600_000,
         createdAt: now,
@@ -977,6 +980,90 @@ describe("pg app schema + migrations", () => {
         );
       await mirrored("wf_c");
       await expect(mirrored("wf_d")).rejects.toThrow();
+    });
+
+    // Before `account_id`, discovery bound an installation to any user whose
+    // credential carried a matching login, from any org, and a pasted token
+    // could carry any login. The repair that adds the column clears those
+    // bindings, so each one is proved again by account id.
+    it("clears login-based installation bindings in the repair that adds account_id", async () => {
+      await db.query('ALTER TABLE "github_installations" DROP COLUMN "account_id"');
+      await db.query(
+        `INSERT INTO "github_installations" (id, org_id, installation_id, account_login, account_type, linked_user_id, created_at, updated_at)
+         VALUES ('ghi_legacy', 'org1', 7, 'someone', 'User', 'u1', 1, 1)`,
+      );
+      await applyAppMigrations(db);
+      const rows = await db.query(`SELECT linked_user_id, account_id FROM "github_installations" WHERE id = 'ghi_legacy'`);
+      expect(rows.rows).toEqual([{ linked_user_id: null, account_id: null }]);
+    });
+
+    // Before the App was public, GitHub installed it only on its owner's
+    // account. An App created on a personal account (the manifest default)
+    // therefore has one installation, of type User, on the admin's own
+    // account. The upgrade must keep that installation serving every member
+    // until discovery reads the owner again, or teams and workflows stop.
+    it("keeps a formerly private App's installations serving the org across the upgrade repair", async () => {
+      for (const column of ["account_id", "org_approved", "app_owner"]) {
+        await db.query(`ALTER TABLE "github_installations" DROP COLUMN "${column}"`);
+      }
+      await db.query(
+        `INSERT INTO "github_installations" (id, org_id, installation_id, account_login, account_type, linked_user_id, created_at, updated_at)
+         VALUES ('ghi_admin', 'org1', 8, 'admin-person', 'User', 'u1', 1, 1),
+                ('ghi_org', 'org1', 9, 'acme', 'Organization', NULL, 1, 1)`,
+      );
+      await applyAppMigrations(db);
+      const rows = await db.query(
+        `SELECT id, app_owner, org_approved, linked_user_id FROM "github_installations" WHERE id IN ('ghi_admin', 'ghi_org') ORDER BY id`,
+      );
+      expect(rows.rows).toEqual([
+        { id: "ghi_admin", app_owner: true, org_approved: true, linked_user_id: null },
+        { id: "ghi_org", app_owner: false, org_approved: true, linked_user_id: null },
+      ]);
+    });
+
+    // The repair approves the organization installations that exist when it
+    // runs, then flips the default. A row inserted later without the column,
+    // as an older pod does during a rolling deploy, stays unapproved.
+    it("approves existing organization installations, then defaults org_approved to false", async () => {
+      await db.query('ALTER TABLE "github_installations" DROP COLUMN "org_approved"');
+      await db.query(
+        `INSERT INTO "github_installations" (id, org_id, installation_id, account_login, account_type, created_at, updated_at)
+         VALUES ('ghi_before', 'org1', 21, 'acme', 'Organization', 1, 1)`,
+      );
+      await applyAppMigrations(db);
+      await db.query(
+        `INSERT INTO "github_installations" (id, org_id, installation_id, account_login, account_type, created_at, updated_at)
+         VALUES ('ghi_after', 'org1', 22, 'stranger-org', 'Organization', 1, 1)`,
+      );
+      const rows = await db.query(
+        `SELECT id, org_approved FROM "github_installations" WHERE id IN ('ghi_before', 'ghi_after') ORDER BY id`,
+      );
+      expect(rows.rows).toEqual([
+        { id: "ghi_after", org_approved: false },
+        { id: "ghi_before", org_approved: true },
+      ]);
+    });
+
+    // Before this release, the credentials route stored any metadata. The
+    // repair that adds `account_id` strips every GitHub identity field, so a
+    // value written then can never pass as the connect's verification.
+    it("strips GitHub identity fields from credential metadata in the account_id repair", async () => {
+      await db.query('ALTER TABLE "github_installations" DROP COLUMN "account_id"');
+      await db.query(
+        `INSERT INTO "credentials" (owner_type, owner_id, service, type, metadata, created_at, updated_at)
+         VALUES ('user', 'u-forged', 'github', 'oauth2', $1::jsonb, 1, 1),
+                ('user', 'u-other', 'linear', 'oauth2', $2::jsonb, 1, 1)`,
+        [
+          JSON.stringify({ login: "attacker", githubId: "9002", githubHost: "https://api.github.com", source: "github-app-oauth" }),
+          JSON.stringify({ githubId: "kept", source: "github-app-oauth" }),
+        ],
+      );
+      await applyAppMigrations(db);
+      const rows = await db.query(`SELECT owner_id, metadata FROM "credentials" WHERE owner_id IN ('u-forged', 'u-other') ORDER BY owner_id`);
+      expect(rows.rows).toEqual([
+        { owner_id: "u-forged", metadata: { login: "attacker" } },
+        { owner_id: "u-other", metadata: { githubId: "kept", source: "github-app-oauth" } },
+      ]);
     });
 
     it("re-adds columns that predate an already-applied 0000_app.sql", async () => {

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import githubPlugin from "@valet/plugin-github/plugin";
+import { resetGithubAppVisibilityCache } from "../services/github-app-visibility.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { credentials, githubInstallations, orgs } from "../schema/index.js";
 import { createTeam } from "../services/teams.js";
@@ -31,6 +32,7 @@ afterEach(async () => {
   api = undefined;
   await fixture?.close();
   fixture = undefined;
+  resetGithubAppVisibilityCache();
   if (prevGithubApiUrl === undefined) delete process.env.GITHUB_API_URL;
   else process.env.GITHUB_API_URL = prevGithubApiUrl;
   if (prevGithubUrl === undefined) delete process.env.GITHUB_URL;
@@ -120,7 +122,9 @@ describe("GET /api/me/github/org-status", () => {
       configured: true,
       installationCount: 0,
       suspendedCount: 0,
-      personalInstallUrl: `${fixture?.url}/apps/fixture-app/installations/new`,
+      // The legacy stack offered the install only after the member connected
+      // GitHub, which is how Valet binds the installation to them.
+      personalInstallBlocked: "github_not_connected",
     });
   });
 
@@ -134,6 +138,7 @@ describe("GET /api/me/github/org-status", () => {
         installationId: 601,
         accountLogin: "octo-org",
         accountType: "Organization",
+        orgApproved: true,
         repositorySelection: "all",
         suspended: false,
         linkedUserId: null,
@@ -144,10 +149,24 @@ describe("GET /api/me/github/org-status", () => {
         id: "ghi_status2",
         orgId: "local-org",
         installationId: 602,
+        accountLogin: "octo-org-2",
+        accountType: "Organization",
+        orgApproved: true,
+        repositorySelection: "selected",
+        suspended: true,
+        linkedUserId: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        // Another person's personal installation: never counted or shown.
+        id: "ghi_status3",
+        orgId: "local-org",
+        installationId: 603,
         accountLogin: "octouser",
         accountType: "User",
         repositorySelection: "selected",
-        suspended: true,
+        suspended: false,
         linkedUserId: null,
         createdAt: now,
         updatedAt: now,
@@ -157,6 +176,7 @@ describe("GET /api/me/github/org-status", () => {
     const body = await readStatus(api.baseUrl);
     expect(body.installationCount).toBe(2);
     expect(body.suspendedCount).toBe(1);
+    expect(body.personalInstallations).toBeUndefined();
   });
 
   it("answers a member, where the detail read is admin-only", async () => {
@@ -176,6 +196,11 @@ describe("GET /api/me/github/org-status", () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture();
     await configureOrgApp(api.baseUrl);
+    await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2",
+      accessToken: "member-token",
+      metadata: { source: "github-app-oauth", login: "member", githubId: "4242", githubHost: fixture?.url },
+    });
 
     const res = await fetch(`${api.baseUrl}/api/me/github/org-status`, { headers: MEMBER_HEADERS });
     const body: unknown = await res.json();
@@ -374,7 +399,7 @@ describe("GET /api/me/github/callback", () => {
     expect(stored?.metadata?.identityOnly).toBeUndefined();
   });
 
-  it("re-links a matching installation's linkedUserId after connect", async () => {
+  it("binds the member's own personal installation by GitHub account id after connect", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({
       oauthAccessToken: () => ({ body: { access_token: "connect-access-token", token_type: "bearer" } }),
@@ -383,18 +408,12 @@ describe("GET /api/me/github/callback", () => {
     await configureOrgApp(api.baseUrl);
 
     const now = Date.now();
-    await api.providers.db.insert(githubInstallations).values({
-      id: "ghi_test1",
-      orgId: "local-org",
-      installationId: 555,
-      accountLogin: "octouser",
-      accountType: "User",
-      repositorySelection: "all",
-      suspended: false,
-      linkedUserId: null,
-      createdAt: now,
-      updatedAt: now,
-    });
+    const personal = { accountType: "User", repositorySelection: "all", suspended: false, linkedUserId: null, createdAt: now, updatedAt: now };
+    await api.providers.db.insert(githubInstallations).values([
+      { ...personal, id: "ghi_test1", orgId: "local-org", installationId: 555, accountLogin: "octouser", accountId: "99" },
+      // Same login, another GitHub account: a login match is not proof.
+      { ...personal, id: "ghi_test3", orgId: "local-org", installationId: 557, accountLogin: "OctoUser", accountId: "12345" },
+    ]);
 
     const connectRes = await fetch(`${api.baseUrl}/api/me/github/connect`, { method: "POST", headers: HEADERS });
     const { url } = (await connectRes.json()) as PostGithubConnectResponse;
@@ -409,6 +428,54 @@ describe("GET /api/me/github/callback", () => {
       .from(githubInstallations)
       .where(eq(githubInstallations.installationId, 555));
     expect(row?.linkedUserId).toBe("local-user");
+    const [other] = await api.providers.db
+      .select()
+      .from(githubInstallations)
+      .where(eq(githubInstallations.installationId, 557));
+    expect(other?.linkedUserId).toBeNull();
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
+    // The id names an account on one GitHub host, so the host is kept with it.
+    expect(stored?.metadata).toMatchObject({ login: "octouser", githubId: "99", githubHost: fixture?.url, source: "github-app-oauth" });
+  });
+
+  it("records and binds a personal installation that Valet has not seen yet when the member connects", async () => {
+    // The member installed the App from the personal-install link, and no
+    // webhook reached Valet. The connect reads the member's installations
+    // with the member's own token, as the legacy stack did.
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const f = useFixture({
+      oauthAccessToken: () => ({ body: { access_token: "connect-access-token", token_type: "bearer" } }),
+      getUser: () => ({ body: { login: "octouser", id: 99 } }),
+      listUserInstallations: () => ({
+        body: {
+          total_count: 2,
+          installations: [
+            { id: 4401, account: { login: "octouser", id: 99, type: "User" }, repository_selection: "selected", suspended_at: null },
+            { id: 4402, account: { login: "other-person", id: 100, type: "User" }, repository_selection: "all", suspended_at: null },
+          ],
+        },
+      }),
+    });
+    await configureOrgApp(api.baseUrl);
+
+    const connectRes = await fetch(`${api.baseUrl}/api/me/github/connect`, { method: "POST", headers: HEADERS });
+    const { url } = (await connectRes.json()) as PostGithubConnectResponse;
+    const state = new URL(url).searchParams.get("state");
+    await fetch(`${api.baseUrl}/api/me/github/callback?code=abc&state=${encodeURIComponent(state ?? "")}`, {
+      headers: HEADERS,
+      redirect: "manual",
+    });
+
+    const rows = await api.providers.db.select().from(githubInstallations);
+    expect(rows.map((r) => [r.installationId, r.linkedUserId])).toEqual([[4401, "local-user"]]);
+    expect(f.calls.find((c) => c.path === "/user/installations")?.authHeader).toBe("Bearer connect-access-token");
+
+    // The member sees their own installation. Another member does not.
+    const mine = (await (await fetch(`${api.baseUrl}/api/me/github/org-status`, { headers: HEADERS })).json()) as GetGithubOrgStatusResponse;
+    expect(mine.personalInstallations).toEqual([{ accountLogin: "octouser", repositorySelection: "selected", suspended: false }]);
+    expect(mine.installationCount).toBe(0);
+    const theirs = (await (await fetch(`${api.baseUrl}/api/me/github/org-status`, { headers: MEMBER_HEADERS })).json()) as GetGithubOrgStatusResponse;
+    expect(theirs.personalInstallations).toBeUndefined();
   });
 });
 
