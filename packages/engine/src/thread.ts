@@ -5114,6 +5114,8 @@ export class Thread {
           samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
         }, this.session.sandbox, {
           permitted: () => this.nativeImageGenerationPermitted(options?.signal),
+          // Never start or wait for a sandbox on a text turn (orchestrators are sandbox-less by default).
+          sandboxReady: () => this.session.attachment.state === "ready",
           saved: async (receipt) => {
             await this.checkpointNativeImage(receipt);
             this.recordNativeImage({ path: receipt.path, image_id: receipt.image_id });

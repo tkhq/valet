@@ -66,6 +66,12 @@ export interface HostedImageHooks {
   /** The turn's policy check. False or a throw withholds the hosted tool for the turn. */
   permitted: () => Promise<boolean>;
   /**
+   * Whether the session sandbox is running now. The hosted tool is offered only
+   * then: a text turn must not start or wait for a sandbox. Until the sandbox is
+   * ready the plugin action stays visible and starts it on first use.
+   */
+  sandboxReady?: () => boolean;
+  /**
    * Called once per saved original, right after its write and before the
    * stream continues. `callId` is the receipt tool call the message will carry,
    * so the thread can persist a checkpoint that survives a crash before the
@@ -79,8 +85,8 @@ export class NativeImageBridge {
   private saved = new Map<string, ToolResult>();
   private unavailable = false;
   private withheld = false;
-  /** The turn's policy-and-sandbox check, made once. */
-  private ready: boolean | undefined;
+  /** The turn's policy decision, made once. */
+  private permitted: boolean | undefined;
   savedInRequest = false;
   /** True while the most recent request offered the hosted tool, so duplicate plugin actions hide only then. */
   offered = false;
@@ -89,7 +95,7 @@ export class NativeImageBridge {
     this.savedInRequest = false;
     this.unavailable = false;
     this.withheld = false;
-    this.ready = undefined;
+    this.permitted = undefined;
     this.offered = false;
   }
 
@@ -98,16 +104,18 @@ export class NativeImageBridge {
     return !this.unavailable && !this.withheld && supportsNativeImageGeneration(model);
   }
 
-  /** Policy first, then the sandbox. A cold sandbox must be ready before a paid request, as the fallback's directory prep is. */
-  private async prepare(hosted: boolean | HostedImageHooks, sandbox: Sandbox): Promise<boolean> {
-    const permitted = typeof hosted === "boolean" ? hosted : await hosted.permitted().catch(() => false);
-    if (!permitted) return false;
-    try {
-      await sandbox.mkdir("generated-images");
-      return true;
-    } catch {
-      return false;
-    }
+  /**
+   * Storage must be writable before a paid request, as the fallback's directory
+   * prep is. The check is per request and never starts a sandbox: a sandbox that
+   * is not running withholds the hosted tool for this request only. The turn's
+   * abort signal ends the wait.
+   */
+  private async storageReady(hosted: boolean | HostedImageHooks, sandbox: Sandbox, signal: AbortSignal | undefined): Promise<boolean> {
+    if (typeof hosted !== "boolean" && hosted.sandboxReady && !hosted.sandboxReady()) return false;
+    if (signal?.aborted) return false;
+    const prepared = sandbox.mkdir("generated-images").then(() => true, () => false);
+    if (!signal) return prepared;
+    return Promise.race([prepared, new Promise<boolean>((resolve) => signal.addEventListener("abort", () => resolve(false), { once: true }))]);
   }
 
   tool(): ToolDef {
@@ -354,8 +362,9 @@ export class NativeImageBridge {
       try {
         let native = this.enabled(model);
         if (native) {
-          this.ready ??= await this.prepare(hosted, sandbox);
-          if (!this.ready) { this.withheld = true; native = false; }
+          this.permitted ??= typeof hosted === "boolean" ? hosted : await hosted.permitted().catch(() => false);
+          if (!this.permitted) { this.withheld = true; native = false; }
+          else if (!(await this.storageReady(hosted, sandbox, options.signal))) native = false;
         }
         let current = request(native);
         for (;;) {

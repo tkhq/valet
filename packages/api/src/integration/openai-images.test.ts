@@ -55,6 +55,8 @@ it("the selected OpenAI model generates and edits natively with sandbox files, l
   if (!model) throw new Error("missing capable model");
   session.options.resolveModel = async () => ({ model, apiKey: "fixture-openai-key", canonicalId: `openai/${model.id}` });
   await session.setModel(`openai/${model.id}`);
+  // The hosted tool is offered only while the session sandbox is running.
+  await session.sandbox.mkdir("generated-images");
   const png = await sharp({ create: { width: 2, height: 2, channels: 3, background: "red" } }).png().toBuffer();
   const b64 = png.toString("base64");
   const nativeFetch = globalThis.fetch;

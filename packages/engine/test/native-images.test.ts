@@ -41,6 +41,10 @@ const openaiPlugin: ActionPlugin = { service: "openai", actions: ["generate_imag
   id: `openai.${name}`, name, description: name, riskLevel: "low" as const, parameters: Type.Object({}), execute: async () => ({ success: true }),
 })) };
 const openaiCatalog = () => buildPluginCatalog([openaiPlugin]);
+/** The hosted tool is offered only once the session sandbox is running; tests touch it first. */
+async function warm(session: { sandbox: { mkdir(path: string): Promise<void> } }): Promise<void> {
+  await session.sandbox.mkdir("generated-images");
+}
 function requestTools(fetchMock: ReturnType<typeof vi.fn<typeof fetch>>, index = 0): string {
   const [, init] = fetchMock.mock.calls[index];
   return JSON.stringify(JSON.parse(String(init?.body)).tools ?? []);
@@ -312,6 +316,7 @@ it.each([false, true])("retries a later plain request without regenerating the s
   let settled = false;
   events.subscribe({ sessionId: session.id }, ({ event }) => { if (event.type === "submission_settled") settled = true; });
   try {
+    await warm(session);
     const receipt = await session.prompt("Draw a square");
     await expect.poll(() => settled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(earlierRetry ? 4 : 3);
@@ -341,6 +346,7 @@ it("allows provider fallback for a later plain request after image receipts", as
   let settled = false;
   events.subscribe({ sessionId: session.id }, ({ event }) => { if (event.type === "submission_settled") settled = true; });
   try {
+    await warm(session);
     const receipt = await session.prompt("Draw a square");
     await expect.poll(() => settled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -568,15 +574,49 @@ it("checks policy once per turn, prepares the sandbox before the paid request, a
   expect(requestTools(fetchMock, 1)).toContain("image_generation");
 });
 
-it("withholds the hosted tool when the sandbox is not ready, before any paid request", async () => {
+it("withholds the hosted tool for a request whose storage is not writable, before any paid request", async () => {
   const fetchMock = mockProvider([item()]);
   const sandbox = new VirtualSandbox("cold");
-  vi.spyOn(sandbox, "mkdir").mockRejectedValue(new Error("sandbox not ready"));
+  const mkdir = vi.spyOn(sandbox, "mkdir").mockRejectedValueOnce(new Error("disk full"));
   const bridge = new NativeImageBridge();
   await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox, { permitted: async () => true }).result();
   expect(requestTools(fetchMock)).not.toContain("image_generation");
   expect(bridge.offered).toBe(false);
-  expect(bridge.enabled(model)).toBe(false);
+  // Request-scoped: the next request checks again and offers the tool once storage works.
+  expect(bridge.enabled(model)).toBe(true);
+  mkdir.mockRestore();
+  await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox, { permitted: async () => true }).result();
+  expect(requestTools(fetchMock, 1)).toContain("image_generation");
+});
+
+it("never starts or waits for a sandbox that is not running", async () => {
+  const fetchMock = mockProvider([]);
+  const sandbox = new VirtualSandbox("sleeping");
+  const mkdir = vi.spyOn(sandbox, "mkdir");
+  const bridge = new NativeImageBridge();
+  let running = false;
+  const hooks = { permitted: async () => true, sandboxReady: () => running };
+  await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox, hooks).result();
+  expect(mkdir).not.toHaveBeenCalled();
+  expect(requestTools(fetchMock)).not.toContain("image_generation");
+  expect(bridge.offered).toBe(false);
+  expect(bridge.enabled(model)).toBe(true);
+  running = true;
+  await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox, hooks).result();
+  expect(mkdir).toHaveBeenCalledTimes(1);
+  expect(requestTools(fetchMock, 1)).toContain("image_generation");
+});
+
+it("stops waiting for storage when the turn aborts", async () => {
+  mockProvider([]);
+  const sandbox = new VirtualSandbox("hung");
+  vi.spyOn(sandbox, "mkdir").mockImplementation(() => new Promise(() => {}));
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 50);
+  const started = Date.now();
+  const final = await new NativeImageBridge().stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0, signal: controller.signal }, sandbox, { permitted: async () => true }).result();
+  expect(Date.now() - started).toBeLessThan(2_000);
+  expect(final.stopReason).toBe("aborted");
 });
 
 async function promptWithPolicy(options: { pluginCatalog?: ReturnType<typeof openaiCatalog>; policyResolver?: PolicyResolver }, items: unknown[] = []) {
@@ -591,6 +631,7 @@ async function promptWithPolicy(options: { pluginCatalog?: ReturnType<typeof ope
   let settled = false;
   events.subscribe({ sessionId: session.id }, ({ event }) => { if (event.type === "submission_settled") settled = true; });
   try {
+    await warm(session);
     await session.prompt("Draw a square");
     await expect.poll(() => settled).toBe(true);
   } finally { await session.destroy(); }
@@ -653,6 +694,7 @@ it("checkpoints a saved image as an assistant entry before the stream ends, then
   let settled = false;
   events.subscribe({ sessionId: session.id }, ({ event }) => { if (event.type === "submission_settled") settled = true; });
   try {
+    await warm(session);
     const receipt = await session.prompt("Draw a square");
     const checkpoint = await expect.poll(async () => {
       const entries = await store.getEntries(session.id, receipt.threadId);
@@ -689,6 +731,7 @@ it("keeps earlier turns in the transcript DAG after a checkpointed image message
   let settledCount = 0;
   events.subscribe({ sessionId: session.id }, ({ event }) => { if (event.type === "submission_settled") settledCount++; });
   try {
+    await warm(session);
     const first = await session.prompt("U1");
     await expect.poll(() => settledCount).toBe(1);
     await session.prompt("U2 draw two squares");
