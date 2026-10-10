@@ -260,6 +260,11 @@ function parseOriginJson(raw: string | null): ChannelOrigin | undefined {
   return undefined;
 }
 
+/** The reply intent id of one child submission's settlement: the namespaced dispatch id. */
+function settledReplyId(childSessionId: string, childItemId: string): string {
+  return namespaceInternalDispatchId(childSessionId, `settled:${childSessionId}:${childItemId}`);
+}
+
 /**
  * Submission metadata that marks child work the parent delegated, by spawn
  * or `child_send`. The engine stores it at admission and copies it when a
@@ -806,7 +811,12 @@ export class ChildWatcher {
       .where(eq(childWatches.childSessionId, watch.childSessionId))
       .limit(1);
     const row = rows[0];
-    if (!row || row.settled || row.queueItemId !== watch.queueItemId) return;
+    if (!row || row.queueItemId !== watch.queueItemId) {
+      // The watch moved to later work, so no new attempt admits this one.
+      await this.resolveOrphanIntent(settledReplyId(watch.childSessionId, watch.queueItemId), watch.orgId);
+      return;
+    }
+    if (row.settled) return;
 
     // A superseded settlement is never reported — it is not a result. The
     // steer that superseded this item stamped its replacement on the queue
@@ -904,11 +914,31 @@ export class ChildWatcher {
     });
 
     if (automaticReply) {
-      await this.deps.db.update(childReplyDeliveries).set({ queueItemId: receipt.queueItemId })
-        .where(and(eq(childReplyDeliveries.id, replyId), eq(childReplyDeliveries.orgId, watch.orgId)));
+      // A landed admission always re-opens a reply that was never sent, even
+      // one ended while this admission was in flight.
+      await this.deps.db.update(childReplyDeliveries).set({
+        queueItemId: receipt.queueItemId, completedAt: null, failedAt: null, attempts: 0, lastError: null, nextAttemptAt: Date.now(),
+      }).where(and(eq(childReplyDeliveries.id, replyId), eq(childReplyDeliveries.orgId, watch.orgId), isNull(childReplyDeliveries.queueItemId)));
     }
     await this.markSettled(watch.childSessionId, watch.queueItemId);
     await this.parkChildSandbox(watch.childSessionId);
+  }
+
+  /**
+   * Ends the open reply intent of child work whose watch moved on and that
+   * no attempt in this process is admitting. A landed admission completes
+   * it with its receipt. Otherwise it is abandoned: the parent hears about
+   * the later work instead. An admission that still lands re-opens it.
+   */
+  private async resolveOrphanIntent(replyId: string, orgId: string): Promise<void> {
+    const open = and(eq(childReplyDeliveries.id, replyId), eq(childReplyDeliveries.orgId, orgId),
+      isNull(childReplyDeliveries.queueItemId), isNull(childReplyDeliveries.completedAt), isNull(childReplyDeliveries.failedAt));
+    const [intent] = await this.deps.db.select({ sessionId: childReplyDeliveries.sessionId }).from(childReplyDeliveries).where(open).limit(1);
+    if (!intent) return;
+    const admitted = await this.deps.engineStore.getQueueItemByDispatchId(intent.sessionId, replyId);
+    await this.deps.db.update(childReplyDeliveries).set(admitted
+      ? { queueItemId: admitted.id }
+      : { completedAt: Date.now(), lastError: "The child watch moved to later work before this update was admitted." }).where(open);
   }
 
   /**
@@ -1137,6 +1167,18 @@ export class ChildWatcher {
    * resolves immediately once re-armed.
    */
   async rearm(): Promise<void> {
+    // After a restart no admission is in flight. An open reply intent whose
+    // watch moved to later work has no watcher left to admit it.
+    const orphans = await this.deps.db.select().from(childReplyDeliveries).where(and(
+      isNull(childReplyDeliveries.queueItemId), isNull(childReplyDeliveries.completedAt), isNull(childReplyDeliveries.failedAt),
+      isNotNull(childReplyDeliveries.childSessionId), isNotNull(childReplyDeliveries.childQueueItemId)));
+    for (const intent of orphans) {
+      if (!intent.childSessionId) continue;
+      const [watch] = await this.deps.db.select({ queueItemId: childWatches.queueItemId }).from(childWatches)
+        .where(eq(childWatches.childSessionId, intent.childSessionId)).limit(1);
+      if (watch?.queueItemId === intent.childQueueItemId) continue;
+      await this.resolveOrphanIntent(intent.id, intent.orgId);
+    }
     const rows = await this.deps.db.select().from(childWatches).where(eq(childWatches.settled, false));
     for (const row of rows) this.arm(watchRowToArgs(row));
   }

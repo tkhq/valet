@@ -2632,6 +2632,32 @@ describe("buildChildSender", () => {
     },
   );
 
+  it("ends reply intents for moved watches on rearm, using a landed admission when there is one", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const { engineStore, db } = api.providers;
+    const { parentThread } = await seedChild(api, { childId: "child-orphan", parentId: "parent-orphan", settled: false, queueItemId: "qi-later" });
+    const intent = (childItemId: string) => ({
+      id: `child-orphan:settled:child-orphan:${childItemId}`, orgId: "local-org", sessionId: "parent-orphan",
+      threadId: parentThread.id, childSessionId: "child-orphan", childQueueItemId: childItemId, nextAttemptAt: 0, createdAt: 0,
+    });
+    // Two earlier child submissions wrote intents, then the process stopped
+    // and the watch moved to later work. One admission had landed.
+    await db.insert(childReplyDeliveries).values([intent("qi-lost"), intent("qi-landed")]);
+    const now = Date.now();
+    await engineStore.admitSubmission("parent-orphan", parentThread.id, {
+      id: "qi-parent-landed", threadId: parentThread.id, dispatchId: intent("qi-landed").id, content: "child settled",
+      status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 3_600_000, createdAt: now, updatedAt: now,
+    });
+
+    await new ChildWatcher(deps).rearm();
+    const rows = await db.select().from(childReplyDeliveries);
+    const byItem = new Map(rows.map((row) => [row.childQueueItemId, row]));
+    expect(byItem.get("qi-landed")).toMatchObject({ queueItemId: "qi-parent-landed", completedAt: null });
+    expect(byItem.get("qi-lost")).toMatchObject({ queueItemId: null, failedAt: null });
+    expect(byItem.get("qi-lost")?.completedAt).not.toBeNull();
+  });
+
   it("re-opens a failed reply intent when it admits the parent update", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);

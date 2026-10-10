@@ -1149,18 +1149,19 @@ describe("ChannelHost outbound delivery", () => {
     }
   });
 
-  it("ends an unadmitted reply whose watch moved on, and fails one whose watch settled without it", async () => {
+  it("keeps waiting on an unadmitted reply whose watch moved on, and fails one whose watch settled without it", async () => {
     const { timed, clock } = await failingChildReply("reply-anchor-ended", "absent:99");
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       // A later child submission replaced this one before its settlement
-      // was admitted. The parent hears about the later one instead.
+      // was admitted. That admission can still land, and only the watcher
+      // knows whether one is in flight, so the dispatcher keeps waiting.
       const moved = await unadmittedChildReply(clock, "child-moved", { queueItemId: "qi-child-moved-later", settled: false });
       // A settled watch with no admitted update breaks the watcher's rule
       // (admit, then settle), so it counts as a failed attempt.
       const stuck = await unadmittedChildReply(clock, "child-stuck", { queueItemId: "qi-child-stuck", settled: true });
       await timed.retryChildReplies();
-      expect(await moved.intent()).toMatchObject({ attempts: 0, failedAt: null, completedAt: clock.now });
+      expect(await moved.intent()).toMatchObject({ attempts: 0, failedAt: null, completedAt: null });
       const failed = await stuck.intent();
       expect(failed).toMatchObject({ attempts: 1, completedAt: null });
       expect(failed.lastError).toContain("settled without admitting");

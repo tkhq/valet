@@ -396,12 +396,15 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   `valet.channels.child_reply.over_age_waits`. The intent stays open.
   The watcher owns admission. It retries a failed admission, including on
   the next boot, and marks its watch settled only after it admits. So an
-  intent with no admitted parent update waits, with no time limit, while
-  its watch is open and still reports the same child submission. The
-  intent stores that child submission to make this check. If the watch
-  moved to a later child submission, the dispatcher completes the intent
-  without a send, because the parent hears about the later one. A settled
-  watch with no admitted update is a failed attempt. Before each admission
+  intent with no admitted parent update waits, with no time limit. The
+  intent stores its child submission. A settled watch with no admitted
+  update is a failed attempt. A watch that moved to later work is not proof
+  that admission failed, because the admission can still be in flight. Only
+  the watcher ends such an intent: when an attempt for that work finds the
+  watch moved, and on `rearm()` after a restart, when no admission is in
+  flight. It records the landed receipt if there is one, and otherwise
+  completes the intent without a send. A landed admission re-opens an
+  intent that was never sent. Before each admission
   attempt, the watcher re-opens an intent that failed before any update
   was admitted, and deletes its problem row.
   A provider send error or a missing route (for example, a stopped channel)

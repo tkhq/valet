@@ -147,9 +147,11 @@ export class ChildReplyDispatcher {
    * An intent with no admitted parent update. The child watcher owns the
    * admission: it writes the intent, admits the update, and only then marks
    * its watch settled. It retries a failed admission, including on the next
-   * boot. So the intent waits, with no time limit, while its watch still
-   * reports this child submission and is open. A watch that moved to a later
-   * child submission ends the intent: the parent hears about the later one.
+   * boot. Only the watcher ends an intent whose admission can no longer
+   * land (`ChildWatcher.resolveOrphanIntent`), because only it knows whether
+   * an admission is still in flight. A watch that moved to later child work
+   * is not proof: the admission for this work can still land. So the intent
+   * waits, with no time limit, unless its watch settled without admitting.
    */
   private async unadmitted(row: ChildReplyRow): Promise<ChildReplyOutcome> {
     // Intents written before these columns existed cannot name their watch.
@@ -165,7 +167,7 @@ export class ChildReplyDispatcher {
     if (watch?.settled && watch.queueItemId === row.childQueueItemId) {
       return { kind: "undeliverable", reason: "The child watch settled without admitting the parent update." };
     }
-    return { kind: "done" };
+    return { kind: "waiting" };
   }
 
   /** Every failed attempt is recorded. The last one fails the intent and leaves an operator-visible problem. */

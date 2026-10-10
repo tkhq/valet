@@ -444,6 +444,48 @@ describe("delegated child completion over a channel", () => {
     expect(watch?.replyRoute).toBe("manual");
   });
 
+  it("posts a completion whose admission was still in flight when the parent sent more work", async () => {
+    const run = await bootDelegation("child-admit-race");
+    const { db, engineStore } = api!.providers;
+    // Hold the parent's admission of the child's completion.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const admit = engineStore.admitSubmission.bind(engineStore);
+    const spy = vi.spyOn(engineStore, "admitSubmission").mockImplementation(async (sessionId, threadId, item, opts) => {
+      if (sessionId === run.parentId) await held;
+      return admit(sessionId, threadId, item, opts);
+    });
+    try {
+      await engineStore.settleUnclaimed("child-admit-race", run.childThreadId, run.queueItemId, { outcome: "completed" });
+      const intent = async () => (await db.select().from(childReplyDeliveries))[0];
+      await vi.waitFor(async () => expect(await intent()).toBeDefined(), { timeout: 30_000, interval: 20 });
+
+      // The parent sends more work while the completion is being admitted.
+      const sender = buildChildSender(run.deps, run.watcher);
+      const resumed = await sender(
+        { childSessionId: "child-admit-race", message: "one more thing" },
+        { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID },
+      );
+      if (!resumed) throw new Error("child_send did not admit the follow-up");
+      // A dispatcher pass while the admission is in flight must not end the reply.
+      await api!.providers.channelHost.retryChildReplies();
+      expect(await intent()).toMatchObject({ completedAt: null, failedAt: null });
+    } finally {
+      release();
+    }
+    spy.mockRestore();
+
+    await parentUpdateSettled(run, "child-admit-race", run.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+
+    // Finish the later work too, so no watcher outlives this test.
+    const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-admit-race"));
+    if (!watch) throw new Error("child watch missing");
+    await engineStore.settleUnclaimed("child-admit-race", run.childThreadId, watch.queueItemId, { outcome: "completed" });
+    await parentUpdateSettled(run, "child-admit-race", watch.queueItemId);
+  });
+
   it("drops the origin thread when a person takes over the child", async () => {
     const run = await bootDelegation("child-takeover");
     const { db, engineStore } = api!.providers;
