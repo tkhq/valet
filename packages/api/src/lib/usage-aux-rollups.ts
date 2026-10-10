@@ -5,7 +5,11 @@ import type { PgDb } from '@valet/store-postgres';
 const migration = readFileSync(new URL('../../migrations/pg/0000_app.sql', import.meta.url), 'utf8');
 const install = migration.split('-- usage auxiliary install\n')[1]?.split('-- usage auxiliary end')[0];
 if (!install) throw new Error('Usage rollup migration missing. Restore 0000_app.sql from the release.');
-export const AUX_USAGE_ROLLUP_SQL = `DO $aux_install$ BEGIN ${install} END $aux_install$;`;
+// The action fact rule calls the step lookup. A database that installs the
+// auxiliary rollups before the step attribution repair needs it first.
+const stepSession = migration.split('-- usage step session begin\n')[1]?.split('-- usage step session end')[0];
+if (!stepSession) throw new Error('Usage rollup migration missing. Restore 0000_app.sql from the release.');
+export const AUX_USAGE_ROLLUP_SQL = `DO $aux_install$ BEGIN ${stepSession} ${install} END $aux_install$;`;
 export const AUX_USAGE_PUBLISH_SQL = `DO $publish$ BEGIN CREATE OR REPLACE VIEW usage_aux_rollups_ready AS SELECT 1 AS version
   FROM usage_action_facts, usage_action_hourly, usage_skill_facts, usage_skill_hourly,
     usage_skill_request_memberships, usage_skill_requests WHERE false; ANALYZE usage_action_facts; ANALYZE usage_action_hourly; ANALYZE usage_skill_facts; ANALYZE usage_skill_hourly; ANALYZE usage_skill_request_memberships; ANALYZE usage_skill_requests; END $publish$`;

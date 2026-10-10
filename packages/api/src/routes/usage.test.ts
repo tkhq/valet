@@ -6,7 +6,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { capAuditField } from "../policies/service.js";
+import { capAuditField, persistInvocationAudit } from "../policies/service.js";
 import { createUsageTurnExportStream, getUsageBreakdown } from "../services/usage.js";
 import {
   agentSessions,
@@ -467,6 +467,32 @@ describe("GET /api/usage/outcomes", () => {
     expect(orgResponse.status).toBe(200);
     const org = (await orgResponse.json()) as UsageOutcomesResponse;
     expect(org.byOutcome.find((row) => row.kind === "slack_dm_sent")?.count).toBe(1);
+  });
+});
+
+describe("a Thread step's action outcome", () => {
+  it("carries the step's model spend, like the turn that called the action", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const now = Date.now();
+    await db.insert(agentSessions).values({ id: "orchestrator:local-user", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now });
+    await db.execute(sql`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at)
+      VALUES ('wf-act','local-org','user','local-user','Act','{}'::jsonb,${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at)
+      VALUES ('run-act','wf-act','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now})`);
+    await db.execute(sql`INSERT INTO engine_queue_items (id, session_id, thread_id, dispatch_id, status, content, attempt_count, max_attempts, timeout_at, created_at, updated_at)
+      VALUES ('q-act', 'orchestrator:local-user', 'th', 'workflow:run-act:notify', 'settled', 'prompt', 1, 1, ${now}, ${now}, ${now})`);
+    await seedEngineEntry(api, "e-act", "orchestrator:local-user", now, "q-act");
+    // The assistant's model-directed Slack send during that turn, as the policy audit records it.
+    await persistInvocationAudit(db, {
+      invocationId: "act-slack", createdAt: now, service: "slack", actionId: "slack.send_message", status: "completed",
+      sessionId: "orchestrator:local-user", threadId: "th", queueItemId: "q-act", orgId: "local-org", userId: "local-user",
+      result: { success: true, data: { channel: "C123", ts: "1.2" } }, durationMs: 10,
+    });
+    const body = (await (await fetch(`${api.baseUrl}/api/usage/outcomes?window=7d`)).json()) as UsageOutcomesResponse;
+    expect(body.byOutcome.find((row) => row.kind === "slack_message_sent")).toMatchObject({
+      count: 1, estimatedCostUsd: 0.003, estimatedCostPerOutcomeUsd: 0.003,
+    });
   });
 });
 

@@ -1736,6 +1736,12 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
       `WHERE "owner_type" = 'team' AND "credential_owner_mode" IS NULL RETURNING "id"`,
   },
   {
+    // Before the usage repairs: the action fact rule reads it.
+    describe: "action_invocations.queue_item_id column",
+    probe: { kind: "column", table: "action_invocations", column: "queue_item_id" },
+    sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "queue_item_id" text',
+  },
+  {
     // Before the usage repairs: their views and the billing rule read it.
     describe: "workflow_runs.org_id column",
     probe: { kind: "column", table: "workflow_runs", column: "org_id" },

@@ -23,6 +23,9 @@ function between(start: string, end: string): string {
   return content;
 }
 const functionsSql = between("-- usage step attribution begin\n", "-- usage step attribution end");
+// The action fact rule bills a model-directed action with its turn. The
+// auxiliary rollups are installed before this repair, so it replaces the rule.
+const actionFactSql = between("-- usage action fact begin\n", "-- usage action fact end");
 
 /**
  * `workflow_runs.org_id` and the trigger that copies it from the workflow
@@ -53,7 +56,7 @@ export async function prepareUsageStepAttribution(db: PgDb): Promise<void> {
     // transactions replacing one function fail with "tuple concurrently
     // updated". Writers pause only for this short transaction.
     await tx.query("LOCK TABLE engine_entries IN SHARE ROW EXCLUSIVE MODE");
-    await tx.query(`DO $install$ BEGIN ${functionsSql} END $install$`);
+    await tx.query(`DO $install$ BEGIN ${functionsSql} ${actionFactSql} END $install$`);
     await tx.query(usageAnalyticsPublishSql);
     await tx.query(usageHourlyPublishSql);
   });

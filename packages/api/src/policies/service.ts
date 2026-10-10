@@ -468,6 +468,8 @@ export interface AuditInvocationRow {
   createdAt?: number;
   /** External caller label (`ActionInvocationContext.external.client`). */
   caller?: string | null;
+  /** The queue item whose turn made the call; usage bills the action with it. */
+  queueItemId?: string | null;
 }
 
 /**
@@ -513,6 +515,7 @@ export async function persistInvocationAudit(db: AppDb, row: AuditInvocationRow)
         durationMs: row.durationMs ?? null,
         startedAt: row.startedAt ?? null,
         caller: row.caller ?? null,
+        queueItemId: row.queueItemId ?? null,
       })
       .onConflictDoNothing();
   } catch (err) {
@@ -784,6 +787,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         status: record.status,
         sessionId: record.sessionId,
         threadId: record.threadId,
+        queueItemId: record.queueItemId ?? null,
         workflowExecutionId: null,
         userId: record.userId ?? null,
         orgId: record.orgId ?? null,

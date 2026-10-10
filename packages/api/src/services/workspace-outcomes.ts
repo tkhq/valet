@@ -68,12 +68,14 @@ export async function listWorkspaceOutcomes(
     -- A Slack send's channel record names its thread and the message's link. The
     -- row is titled by that thread, never by the message: every workspace member
     -- sees this feed, and the message may sit in a private channel.
-    LEFT JOIN channel_messages cm ON f.outcome_kind='slack_message_sent' AND cm.session_id=f.session_id
+    -- The audit's session is where the action ran; the fact's session is its
+    -- billing key, which is a Thread step's id for an action in its turn.
+    LEFT JOIN channel_messages cm ON f.outcome_kind='slack_message_sent' AND cm.session_id=a.session_id
       AND cm.direction='out' AND cm.provider_message_id=a.result->'data'->>'ts'
       -- A Slack message is its channel and its ts; two channels can share a ts.
       AND cm.channel_key='slack:' || (a.result->'data'->>'channel')
     LEFT JOIN session_threads st ON st.session_id=cm.session_id AND st.id=cm.thread_id
-    LEFT JOIN agent_sessions s ON s.id=f.session_id
+    LEFT JOIN agent_sessions s ON s.id=a.session_id
     LEFT JOIN workflow_runs r ON r.id=COALESCE(f.workflow_execution_id,
       CASE WHEN f.session_id LIKE 'wf:%' THEN split_part(f.session_id,':',2) END)
     WHERE f.org_id=${orgId}

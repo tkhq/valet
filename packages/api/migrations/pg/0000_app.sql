@@ -944,7 +944,8 @@ CREATE TABLE "action_invocations" (
 	"error" text,
 	"started_at" bigint,
 	"resolved_by" text,
-	"caller" text
+	"caller" text,
+	"queue_item_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "action_invocations_session" ON "action_invocations" ("session_id");
@@ -1586,17 +1587,18 @@ BEGIN
   -- workflow run and the step, not to the assistant. A run with no org (its
   -- workflow was deleted before runs kept their org) cannot be scoped to a
   -- tenant, so its turns stay on the assistant and keep counting there.
-  -- The step id of a Thread-step turn, or NULL. Indexed probes of the queue
+  -- The step id of a turn or action from a queue item, or NULL. Indexed probes of the queue
   -- item, its source, and the run. A queued prompt that send-now promoted is
   -- a new item without the dispatch id, which is unique per session; it
   -- names its source in `promotedFromItemId`, and the source carries the id.
-  CREATE OR REPLACE FUNCTION valet_usage_step_session(e engine_entries) RETURNS text
+  -- usage step session begin
+  CREATE OR REPLACE FUNCTION valet_usage_step_session(session_id text, queue_item_id text) RETURNS text
   LANGUAGE sql STABLE AS $step$
     -- `:repair` marks the repair turn only after a complete step id
     -- (`{run}:{node}[:{iteration}]`); a node may itself be named `repair`.
     SELECT 'wf:' || regexp_replace(substr(src.dispatch_id, 10), '^([^:]+:[^:]+(:[0-9]+)?):repair$', '\1')
     FROM engine_queue_items src JOIN workflow_runs r ON r.id = split_part(src.dispatch_id, ':', 2)
-    WHERE src.session_id = e.session_id AND src.dispatch_id LIKE 'workflow:%' AND r.org_id IS NOT NULL
+    WHERE src.session_id = valet_usage_step_session.session_id AND src.dispatch_id LIKE 'workflow:%' AND r.org_id IS NOT NULL
       -- A scalar source id keeps this a primary-key probe. The id is read
       -- from the metadata text, never through a jsonb cast: the metadata
       -- copies prompt arguments, and text jsonb rejects (a lone surrogate
@@ -1605,8 +1607,10 @@ BEGIN
       -- value is escaped (\") and does not match.
       AND src.id = (SELECT CASE WHEN q.dispatch_id IS NULL
           THEN substring(q.metadata FROM '"promotedFromItemId":"([^"\\]+)"') ELSE q.id END
-        FROM engine_queue_items q WHERE q.id = e.queue_item_id AND q.session_id = e.session_id)
+        FROM engine_queue_items q WHERE q.id = valet_usage_step_session.queue_item_id
+          AND q.session_id = valet_usage_step_session.session_id)
   $step$;
+  -- usage step session end
 
   -- The fact of an entry billed to `billing_session`.
   CREATE OR REPLACE FUNCTION valet_usage_fact_for(e engine_entries, billing_session text) RETURNS usage_entry_facts
@@ -1631,7 +1635,7 @@ BEGIN
   LANGUAGE sql STABLE AS $fact$
     SELECT valet_usage_fact_for(e, CASE WHEN e.queue_item_id IS NOT NULL AND e.entry_type = 'message'
         AND e.role = 'assistant' AND e.session_id NOT LIKE 'wf:%'
-      THEN COALESCE(valet_usage_step_session(e), e.session_id) ELSE e.session_id END)
+      THEN COALESCE(valet_usage_step_session(e.session_id, e.queue_item_id), e.session_id) ELSE e.session_id END)
   $fact$;
   -- usage step attribution end
 
@@ -2067,9 +2071,18 @@ CREATE TABLE IF NOT EXISTS usage_action_hourly (
   PRIMARY KEY (dimension_key, hour_ms)
 );
 CREATE INDEX IF NOT EXISTS usage_action_hourly_window ON usage_action_hourly(org_id, hour_ms);
+-- usage action fact begin
+-- `session_id` of an action fact is the session id the action bills to. A
+-- model-directed action from a Thread step's turn names its queue item and
+-- bills to the step, as the turn's model spend does, so cost per outcome
+-- pairs them. The audit row keeps the session that ran it.
 CREATE OR REPLACE FUNCTION valet_action_fact(a action_invocations)
-RETURNS usage_action_facts LANGUAGE sql IMMUTABLE AS $function$
-  SELECT a.invocation_id, COALESCE(a.started_at, a.created_at), a.org_id, a.session_id, a.workflow_execution_id,
+RETURNS usage_action_facts LANGUAGE sql STABLE AS $function$
+  SELECT a.invocation_id, COALESCE(a.started_at, a.created_at), a.org_id,
+    CASE WHEN a.queue_item_id IS NOT NULL AND a.session_id NOT LIKE 'wf:%'
+      THEN COALESCE(valet_usage_step_session(a.session_id, a.queue_item_id), a.session_id)
+      ELSE a.session_id END,
+    a.workflow_execution_id,
     CASE WHEN a.service IS NOT NULL AND a.action_id IS NOT NULL
       AND a.status IN ('completed', 'error') AND a.duration_ms IS NOT NULL THEN 1 ELSE 0 END::bigint,
     CASE WHEN a.status = 'completed' AND a.duration_ms IS NOT NULL
@@ -2084,6 +2097,7 @@ RETURNS usage_action_facts LANGUAGE sql IMMUTABLE AS $function$
         CASE WHEN a.result->'data'->>'channel' LIKE 'D%' THEN 'slack_dm_sent' ELSE 'slack_message_sent' END
     END END;
 $function$;
+-- usage action fact end
 CREATE TABLE IF NOT EXISTS usage_skill_facts (
   fact_key text PRIMARY KEY,
   invocation_id text NOT NULL REFERENCES skill_invocations(id) ON DELETE CASCADE,

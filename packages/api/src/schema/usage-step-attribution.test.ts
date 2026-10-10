@@ -10,6 +10,7 @@
  * The hourly rollup and `cost_entries` then attribute both to the workflow,
  * and the repair moves Thread-step turns that predate the rule.
  */
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import type { Usage } from "@earendil-works/pi-ai/compat";
@@ -343,6 +344,9 @@ describe("upgrading a database that has runs of deleted workflows", () => {
     await db.query("DROP FUNCTION valet_workflow_run_org()");
     await db.query("ALTER TABLE workflow_runs DROP COLUMN org_id CASCADE");
     await db.query("DROP VIEW usage_step_attribution_ready");
+    // The previous release's audit table and action rule: no queue item, no step billing.
+    await db.query(`DO $old$ BEGIN ${actionFactBefore()} END $old$`);
+    await db.query("ALTER TABLE action_invocations DROP COLUMN queue_item_id");
     // Both assistant turns and the kept run's session step counted. The
     // deleted workflow's session step never had a definition to count under.
     const before = 3 * 0.003;
@@ -362,5 +366,20 @@ describe("upgrading a database that has runs of deleted workflows", () => {
 
     await db.query("DELETE FROM workflow_definitions WHERE id = 'wf-kept'");
     expect(await orgTotals(db)).toEqual(after);
+
+    // The repaired rule bills a model-directed action with its Thread-step turn.
+    await db.query(`INSERT INTO action_invocations (invocation_id, created_at, org_id, session_id, queue_item_id, service, action_id, result, status, duration_ms)
+      VALUES ('act-kept', $1, 'org-a', $2, 'q-kept', 'slack', 'slack.send_message', '{"success":true,"data":{"channel":"C1"}}', 'completed', 5)`, [NOW, ASSISTANT]);
+    expect((await db.query("SELECT session_id, outcome_kind FROM usage_action_facts WHERE invocation_id = 'act-kept'")).rows)
+      .toEqual([{ session_id: "wf:run-kept:think", outcome_kind: "slack_message_sent" }]);
   });
 });
+
+/** The action fact rule as the previous release installed it. */
+function actionFactBefore(): string {
+  const migration = readFileSync(new URL("../../migrations/pg/0000_app.sql", import.meta.url), "utf8");
+  const current = migration.split("-- usage action fact begin\n")[1]?.split("-- usage action fact end")[0];
+  if (!current) throw new Error("Action fact rule missing from 0000_app.sql.");
+  const billing = current.slice(current.indexOf("    CASE WHEN a.queue_item_id"), current.indexOf("    a.workflow_execution_id,"));
+  return current.replace(billing, "    a.session_id,\n");
+}
