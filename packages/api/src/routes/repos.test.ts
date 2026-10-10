@@ -229,6 +229,21 @@ describe("GET /api/repos", () => {
     expect(fixture?.calls.some((c) => c.path === "/app/installations/604/access_tokens")).toBe(false);
   });
 
+  it("reports installed only for an installation the caller can use", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    useFixture({ listInstallations: () => ({ body: [] }) });
+    await seedInstallationRow({
+      id: "ghi_a", installationId: 602, accountLogin: "member-a", accountType: "User", accountId: "9001", linkedUserId: "local-user",
+    });
+    await seedInstallationRow({ id: "ghi_so", installationId: 604, accountLogin: "stranger-org", orgApproved: false });
+    const installed = async (headers: Record<string, string>) =>
+      ((await (await fetch(`${api!.baseUrl}/api/repos`, { headers })).json()) as GetReposResponse).installed;
+    expect(await installed(HEADERS)).toBe(true);
+    // Another member's personal installation and an unapproved organization
+    // serve this member nothing.
+    expect(await installed({ ...HEADERS, "x-valet-test-user-id": "test-member" })).toBe(false);
+  });
+
   it("soft-degrades when the installation-repositories call fails: still 200, partial results", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({

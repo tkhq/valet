@@ -192,6 +192,27 @@ describe("EngineHost session github credential resolution", () => {
     expect((await provider.get("github:installation"))?.accessToken).toBe("inst-211");
   });
 
+  it('"github:installation" reaches the session owner\'s own personal installation', async () => {
+    const { appDb, credentials } = await harness();
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    const base = { orgId, repositorySelection: "all", suspended: false, createdAt: NOW, updatedAt: NOW };
+    await appDb.insert(githubInstallations).values([
+      { ...base, id: "ghi_org", installationId: 211, accountLogin: "acme", accountType: "Organization" },
+      { ...base, id: "ghi_mine", installationId: 212, accountLogin: "me", accountType: "User", accountId: "21", linkedUserId: userId },
+    ]);
+    await appDb.insert(sessionRepos).values({
+      sessionId: "sess-personal", host: "github", fullName: "me/private",
+      cloneUrl: "https://github.com/me/private.git", auth: "auto", position: 0,
+    });
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() } }),
+    });
+    const h = makeHost(appDb, credentials, fixture.url);
+
+    const session = await h.sessionFor("sess-personal", { userId, orgId, workspace: "/tmp" });
+    expect((await session.credentialProvider().get("github:installation"))?.accessToken).toBe("inst-212");
+  });
+
   it('"github:installation" resolves null (not a user-token substitute) when no installation exists', async () => {
     const { appDb, credentials } = await harness();
     await credentials.save({ type: "user", id: userId }, "github", {

@@ -10,7 +10,7 @@ import { InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider } fro
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { githubInstallations } from "../schema/index.js";
+import { githubInstallations, sessionRepos } from "../schema/index.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
@@ -93,6 +93,30 @@ describe("EngineHost team-owned session credentials", () => {
   // A team session from before team-owner resolution shipped. The boot pass
   // stamps its row `actor`; the loader carries that onto the meta.
   const legacyTeamMeta = { ...teamMeta, credentialOwnerMode: "actor" as const };
+
+  it("never hands a team session its creator's personal installation", async () => {
+    // The session binds a repository on the creator's personal account. The
+    // installation tier must answer with the org installation, because the
+    // team, not the creator, owns the session.
+    const { appDb, credentials } = await harness();
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    const base = { orgId, repositorySelection: "all", suspended: false, createdAt: NOW, updatedAt: NOW };
+    await appDb.insert(githubInstallations).values([
+      { ...base, id: "ghi_org", installationId: 333, accountLogin: "acme", accountType: "Organization" },
+      { ...base, id: "ghi_mine", installationId: 444, accountLogin: "creator", accountType: "User", accountId: "44", linkedUserId: userId },
+    ]);
+    await appDb.insert(sessionRepos).values({
+      sessionId: "sess-team-personal", host: "github", fullName: "creator/private",
+      cloneUrl: "https://github.com/creator/private.git", auth: "auto", position: 0,
+    });
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() } }),
+    });
+    const h = makeHost(appDb, credentials, fixture.url);
+
+    const session = await h.sessionFor("sess-team-personal", teamMeta);
+    expect((await session.credentialProvider().get("github:installation"))?.accessToken).toBe("inst-333");
+  });
 
   it("resolves GitHub through the installation, not the prompting member", async () => {
     const { appDb, credentials } = await harness();

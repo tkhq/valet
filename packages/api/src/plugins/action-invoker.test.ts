@@ -1945,6 +1945,59 @@ describe("buildActionInvoker: github service resolution", () => {
     });
   }
 
+  /** Reads the installation tier, as `github.list_repos` with
+   * `scope: "installation"` does. */
+  function githubInstallationAction(): PluginAction {
+    return {
+      id: "github.installation_whoami",
+      name: "installation_whoami",
+      description: "installation whoami",
+      riskLevel: "low",
+      parameters: Type.Object({ owner: Type.String(), repo: Type.String() }),
+      execute: async (_args, ctx) => {
+        const cred = await ctx.credentials.get("github:installation");
+        return { success: true, data: { token: cred?.accessToken ?? null } };
+      },
+    };
+  }
+
+  /** The org installation on `acme` (222), the owner's personal installation
+   * (555), and another member's personal installation (556). */
+  async function seedPersonalInstallations(appDb: AppDb, credentials: PgCredentialStore) {
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    const base = { orgId, repositorySelection: "all", suspended: false, createdAt: NOW, updatedAt: NOW };
+    await appDb.insert(githubInstallations).values([
+      { ...base, id: "ghi_222", installationId: 222, accountLogin: "acme", accountType: "Organization" },
+      { ...base, id: "ghi_555", installationId: 555, accountLogin: "owner-login", accountType: "User", accountId: "55", linkedUserId: userId },
+      { ...base, id: "ghi_556", installationId: 556, accountLogin: "actor-login", accountType: "User", accountId: "56", linkedUserId: "actor-user" },
+    ]);
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() } }),
+    });
+    return buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: actionPluginByServiceOf("github", {
+        service: "github",
+        actions: [githubRepoAction(), githubInstallationAction()],
+      }),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+  }
+
+  it("the installation tier reaches a user-owned run's own personal installation, and never a team's", async () => {
+    const { appDb, credentials } = await harness();
+    const invoke = await seedPersonalInstallations(appDb, credentials);
+    const call = { service: "github", action: "installation_whoami", params: { owner: "owner-login", repo: "x" } };
+
+    const mine = await invoke({ ...call, invocationId: "workflow:r1:n1" }, { userId, orgId, owner: { type: "user", id: userId } });
+    expect(mine).toEqual({ ok: true, result: { token: "inst-555" } });
+
+    // A team run gets the org installation, never a member's personal one.
+    const team = await invoke({ ...call, invocationId: "workflow:r2:n1" }, teamOwner);
+    expect(team).toEqual({ ok: true, result: { token: "inst-222" } });
+  });
+
   it('credential "app": resolves the installation for the params owner, ignoring a healthy user credential', async () => {
     const { appDb, credentials } = await harness();
     await seedAppAndUser(appDb, credentials);
