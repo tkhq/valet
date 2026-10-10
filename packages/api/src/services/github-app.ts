@@ -37,8 +37,13 @@
  * install it, and discovery files every installation under the org. Use is
  * narrower, and `usableInstallation` is the one rule:
  *
- *   - An installation on a GitHub organization (any `accountType` other
- *     than "User") serves every member, the same as before.
+ *   - An installation on the App owner's own account serves every member,
+ *     also when that account is a personal one (`app_owner`).
+ *   - An installation on another GitHub organization (any `accountType`
+ *     other than "User") serves every member only when it is approved
+ *     (`org_approved`): an org admin approved it, or a member with a
+ *     verified GitHub connection installed it (`sender.id` on
+ *     `installation.created`). A stranger's organization serves nobody.
  *   - An installation on a personal GitHub account serves only the member
  *     it is bound to (`linkedUserId`). A personal installation with no
  *     binding, such as a stranger's, serves nobody.
@@ -487,15 +492,34 @@ const PERSONAL_ACCOUNT_TYPE = "User";
  * still want suspended rows.
  */
 export function usableInstallation(orgId: string, userId: string | undefined): SQL {
+  const orgWide = or(
+    eq(githubInstallations.appOwner, true),
+    and(ne(githubInstallations.accountType, PERSONAL_ACCOUNT_TYPE), eq(githubInstallations.orgApproved, true)),
+  );
   // A binding counts only with a verified account id. Rows bound before the
   // column existed were matched by login (see the `account_id` repair).
   const visible = userId
     ? or(
-        ne(githubInstallations.accountType, PERSONAL_ACCOUNT_TYPE),
-        and(isNotNull(githubInstallations.accountId), eq(githubInstallations.linkedUserId, userId)),
+        orgWide,
+        and(
+          eq(githubInstallations.accountType, PERSONAL_ACCOUNT_TYPE),
+          isNotNull(githubInstallations.accountId),
+          eq(githubInstallations.linkedUserId, userId),
+        ),
       )
-    : ne(githubInstallations.accountType, PERSONAL_ACCOUNT_TYPE);
+    : orgWide;
   return and(eq(githubInstallations.orgId, orgId), visible) ?? sql`false`;
+}
+
+/** What an installation row gives the organization, for display. */
+export type InstallationAccess = "organization" | "member" | "pending" | "none";
+
+export function installationAccess(
+  row: Pick<GithubInstallationRow, "accountType" | "accountId" | "linkedUserId" | "orgApproved" | "appOwner">,
+): InstallationAccess {
+  if (row.appOwner) return "organization";
+  if (row.accountType !== PERSONAL_ACCOUNT_TYPE) return row.orgApproved ? "organization" : "pending";
+  return row.accountId !== null && row.linkedUserId !== null ? "member" : "none";
 }
 
 /** The installations every member may use: the organization installations.
@@ -558,14 +582,50 @@ export async function relinkInstallations(deps: Pick<GithubAppDeps, "db">, orgId
   }
 }
 
+/** The account that owns the App, from `GET /app` (App JWT auth). Null when
+ * GitHub does not answer: then no new row is treated as the owner's, and
+ * existing rows keep their flag. */
+interface AppOwner {
+  id: string | null;
+  login: string;
+}
+
+async function fetchAppOwner(deps: Pick<GithubAppDeps, "apiUrl" | "fetchImpl">, jwt: string): Promise<AppOwner | null> {
+  try {
+    const res = await githubFetch(deps)(`${githubApiUrl(deps)}/app`, { headers: appJwtHeaders(jwt) });
+    if (!res.ok) throw new Error(`GitHub API GET /app returned ${res.status}`);
+    const payload: unknown = await res.json();
+    const owner = isRecord(payload) ? payload.owner : undefined;
+    if (!isRecord(owner) || typeof owner.login !== "string") return null;
+    const id = typeof owner.id === "number" || typeof owner.id === "string" ? String(owner.id) : null;
+    return { id, login: owner.login };
+  } catch (err) {
+    console.error("github-app: reading the App owner failed:", err);
+    return null;
+  }
+}
+
+/** True when the installation is on the App owner's account. GitHub reports
+ * both at the same time, so a login match is safe when an id is missing.
+ * Null when the owner is unknown. */
+function isAppOwnerAccount(inst: ParsedInstallation, owner: AppOwner | null): boolean | null {
+  if (!owner) return null;
+  if (inst.accountId !== null && owner.id !== null) return inst.accountId === owner.id;
+  return inst.accountLogin.toLowerCase() === owner.login.toLowerCase();
+}
+
 /** Inserts or updates one installation row and binds it. Shared by discovery
- * and by `reconcileUserInstallations`. */
+ * and by `reconcileUserInstallations`. This is the only writer of
+ * `github_installations` rows, so every new row gets an explicit
+ * `org_approved` (see the schema comment). An update never changes
+ * `org_approved`: that is an admin's decision, or the installer's. */
 async function upsertInstallation(
   db: AppQueryable,
   orgId: string,
   inst: ParsedInstallation,
   linkedUserId: string | null,
   nowMs: number,
+  appOwner: boolean | null,
   id: string = `ghi_${randomUUID()}`,
 ): Promise<GithubInstallationRow> {
   const [row] = await db
@@ -580,6 +640,8 @@ async function upsertInstallation(
       repositorySelection: inst.repositorySelection,
       suspended: inst.suspended,
       linkedUserId,
+      orgApproved: appOwner === true,
+      appOwner: appOwner === true,
       createdAt: nowMs,
       updatedAt: nowMs,
     })
@@ -592,6 +654,7 @@ async function upsertInstallation(
         repositorySelection: inst.repositorySelection,
         suspended: inst.suspended,
         linkedUserId,
+        ...(appOwner !== null ? { appOwner } : {}),
         updatedAt: nowMs,
       },
     })
@@ -629,8 +692,59 @@ export async function reconcileUserInstallations(
     (inst) => inst.accountType === PERSONAL_ACCOUNT_TYPE && inst.accountId === member.githubId,
   );
   const nowMs = (deps.now ?? Date.now)();
-  for (const inst of own) await upsertInstallation(deps.db, orgId, inst, null, nowMs);
+  for (const inst of own) await upsertInstallation(deps.db, orgId, inst, null, nowMs, null);
   await relinkInstallations(deps, orgId);
+}
+
+export type InstallationApprovalResult = "ok" | "not_found" | "personal";
+
+/**
+ * An org admin approves (or revokes) another GitHub organization's
+ * installation for every member. A personal installation cannot be
+ * approved: it serves only the member who owns that GitHub account.
+ */
+export async function setInstallationApproval(
+  deps: Pick<GithubAppDeps, "db">,
+  orgId: string,
+  installationId: number,
+  approved: boolean,
+): Promise<InstallationApprovalResult> {
+  return deps.db.transaction(async (tx) => {
+    await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
+    const [row] = await tx
+      .select()
+      .from(githubInstallations)
+      .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId)))
+      .limit(1);
+    if (!row) return "not_found";
+    if (row.accountType === PERSONAL_ACCOUNT_TYPE) return "personal";
+    if (row.orgApproved !== approved) {
+      await tx
+        .update(githubInstallations)
+        .set({ orgApproved: approved, updatedAt: Date.now() })
+        .where(eq(githubInstallations.id, row.id));
+      await invalidateWorkflowSources(tx, { orgId });
+    }
+    return "ok";
+  });
+}
+
+/**
+ * Approves another GitHub organization's installation when the GitHub user
+ * who installed it (`sender.id` on `installation.created`) is an org member
+ * with a verified GitHub connection. That member chose to share the
+ * organization with Valet. True when the row is now approved.
+ */
+export async function approveInstalledByMember(
+  deps: Pick<GithubAppDeps, "db">,
+  orgId: string,
+  installationId: number,
+  senderGithubId: string,
+): Promise<boolean> {
+  const memberGithubIds = await loadMemberGithubIds(deps.db, orgId);
+  if (!memberGithubIds.get(senderGithubId)) return false;
+  const result = await setInstallationApproval(deps, orgId, installationId, true);
+  return result === "ok";
 }
 
 const MAX_INSTALLATION_PAGES = 10;
@@ -692,6 +806,7 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
   const installations = await fetchAllInstallations(deps, jwt);
 
   const memberGithubIds = await loadMemberGithubIds(deps.db, orgId);
+  const owner = await fetchAppOwner(deps, jwt);
   return deps.db.transaction(async (tx) => {
     await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
     const existingRows = await tx.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
@@ -705,7 +820,7 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
       seenIds.add(inst.installationId);
       const existing = existingByInstallationId.get(inst.installationId);
       const row = await upsertInstallation(
-        tx, orgId, inst, bindingFor(inst, memberGithubIds), nowMs, existing?.id,
+        tx, orgId, inst, bindingFor(inst, memberGithubIds), nowMs, isAppOwnerAccount(inst, owner), existing?.id,
       );
       rows.push(row);
     }
@@ -716,8 +831,8 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
       }
     }
 
-    const signature = (items: readonly { installationId: number; accountLogin: string; suspended: boolean }[]) =>
-      JSON.stringify(items.map((row) => [row.installationId, row.accountLogin.toLowerCase(), row.suspended])
+    const signature = (items: readonly GithubInstallationRow[]) =>
+      JSON.stringify(items.map((row) => [row.installationId, row.accountLogin.toLowerCase(), row.suspended, installationAccess(row)])
         .sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
     if (signature(existingRows) !== signature(rows)) await invalidateWorkflowSources(tx, { orgId });
     return rows;

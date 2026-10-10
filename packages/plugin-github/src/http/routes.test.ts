@@ -18,7 +18,7 @@ function refuse(): never {
 function app(overrides: Partial<GithubAppCapability> = {}): GithubAppCapability {
   return {
     status: refuse, orgName: refuse, signSetupState: refuse, checkCredential: refuse,
-    saveApp: refuse, refreshInstallations: refuse, disconnect: refuse, ...overrides,
+    saveApp: refuse, refreshInstallations: refuse, disconnect: refuse, setInstallationApproval: refuse, ...overrides,
   };
 }
 

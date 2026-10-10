@@ -68,9 +68,16 @@ function installationId(payload: unknown): number | null {
   return typeof payload.installation.id === "number" ? payload.installation.id : null;
 }
 
+/** The GitHub user who caused the delivery, as a string id. */
+function senderId(payload: unknown): string | null {
+  if (!isRecord(payload) || !isRecord(payload.sender)) return null;
+  return typeof payload.sender.id === "number" ? String(payload.sender.id) : null;
+}
+
 /**
- * `installation` event. `created` re-reads installations from GitHub, which
- * sets the linked user. `deleted`, `suspend`, and `unsuspend` change the row
+ * `installation` event. `created` records the installation, binds a
+ * personal one to its owner, and approves another organization's when an
+ * org member installed it. `deleted`, `suspend`, and `unsuspend` change the row
  * from the payload alone, because webhook delivery has a short timeout.
  * Other actions, such as `new_permissions_accepted`, do nothing.
  */
@@ -89,7 +96,7 @@ async function handleInstallationEvent(effects: GithubDeliveryEffects, payload: 
   }
   if (action === "created") {
     try {
-      await effects.discoverInstallations();
+      await effects.installationCreated({ installationId: id, senderId: senderId(payload) });
     } catch (err) {
       console.error("github-app webhook: discovery after installation.created failed:", err);
     }

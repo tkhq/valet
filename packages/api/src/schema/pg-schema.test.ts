@@ -761,6 +761,8 @@ describe("pg app schema + migrations", () => {
         repositorySelection: "selected",
         suspended: false,
         linkedUserId: null,
+        orgApproved: true,
+        appOwner: false,
         cachedToken: "enc:abc",
         cachedTokenExpiresAt: now + 3600_000,
         createdAt: now,

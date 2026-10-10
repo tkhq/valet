@@ -17,6 +17,7 @@ import {
   useGithubApp,
   useRefreshGithubApp,
   useSaveGithubAppCredential,
+  useSetGithubInstallationApproval,
 } from "~/api/settings";
 
 /** The server checks installations on its own (`POST /refresh` is the
@@ -569,6 +570,7 @@ function ConfiguredCard({
   checkedAt: number | null;
 }) {
   const refresh = useRefreshGithubApp();
+  const approval = useSetGithubInstallationApproval();
   const deleteApp = useDeleteGithubApp();
   const orgQ = useOrg();
   const patchSettings = usePatchOrgSettings();
@@ -705,6 +707,7 @@ function ConfiguredCard({
             This is older than expected. Choose Refresh installations to see the error.
           </p>
         )}
+        {approval.error && <p className="text-xs text-danger-500">{errorText(approval.error)}</p>}
         {data.installations.length === 0 ? (
           <p className="text-sm text-muted">
             No installations yet — the App can't reach any repos until it's installed.
@@ -722,7 +725,37 @@ function ConfiguredCard({
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   {inst.suspended && <Badge variant="danger">Suspended</Badge>}
-                  {inst.linkedUserId && <Badge variant="accent">Linked</Badge>}
+                  {inst.appOwner && <Badge variant="neutral">App owner</Badge>}
+                  {inst.access === "member" && <Badge variant="accent">Linked</Badge>}
+                  {inst.access === "none" && <Badge variant="neutral">No member</Badge>}
+                  {/* The App is public, so any GitHub organization can
+                      install it. Another organization's installation
+                      serves nobody until an admin approves it. */}
+                  {inst.access === "pending" && (
+                    <>
+                      <Badge variant="warning">Awaiting approval</Badge>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        disabled={approval.isPending}
+                        onClick={() => approval.mutate({ installationId: inst.installationId, approved: true })}
+                      >
+                        Approve
+                      </Button>
+                    </>
+                  )}
+                  {inst.access === "organization" && !inst.appOwner && inst.accountType !== "User" && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={approval.isPending}
+                      onClick={() => approval.mutate({ installationId: inst.installationId, approved: false })}
+                    >
+                      Revoke
+                    </Button>
+                  )}
                 </div>
               </div>
             ))}

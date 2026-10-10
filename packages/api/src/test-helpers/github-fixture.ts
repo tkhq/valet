@@ -114,6 +114,9 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
       client_id: "fixture-client-id",
       name: "Fixture App",
       html_url: "https://github.com/apps/fixture-app",
+      // The account that owns the App. An installation on this account
+      // serves every member without an admin's approval.
+      owner: { login: "acme", id: 1, type: "Organization" },
       permissions: {},
       events: [],
       installations_count: 0,

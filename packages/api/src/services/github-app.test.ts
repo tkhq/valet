@@ -24,8 +24,10 @@ import {
   mintAppJwt,
   mintInstallationToken,
   parsePrivateKeyPem,
+  approveInstalledByMember,
   reconcileUserInstallations,
   relinkInstallations,
+  setInstallationApproval,
   resolveGithubAppEnvConfig,
   saveAppConfig,
   syncAllAppWebhookUrls,
@@ -386,8 +388,10 @@ describe("github-app service", () => {
         suspended: true,
       });
 
-      expect(fixture.calls).toHaveLength(1);
-      const call = fixture.calls[0];
+      // Discovery also reads the App owner (`GET /app`).
+      const listCalls = fixture.calls.filter((c) => c.path === "/app/installations");
+      expect(listCalls).toHaveLength(1);
+      const call = listCalls[0];
       expect(call.path).toBe("/app/installations");
       expect(call.authHeader).toMatch(/^Bearer /);
       // App-JWT auth, not an installation token — decode and check `iss`.
@@ -443,9 +447,10 @@ describe("github-app service", () => {
       const remainingIds = allRows.map((r) => r.installationId).sort();
       expect(remainingIds).toEqual([111, 222]); // 333 (genuinely absent) is deleted, 111/222 survive
 
-      expect(fixture.calls).toHaveLength(2);
-      expect(fixture.calls[0].query.page).toBeUndefined();
-      expect(fixture.calls[1].query.page).toBe("2");
+      const pageCalls = fixture.calls.filter((c) => c.path === "/app/installations");
+      expect(pageCalls).toHaveLength(2);
+      expect(pageCalls[0].query.page).toBeUndefined();
+      expect(pageCalls[1].query.page).toBe("2");
     });
 
     it("removes rows whose installation is absent from a later response", async () => {
@@ -469,6 +474,74 @@ describe("github-app service", () => {
       expect(allRows[0].installationId).toBe(111);
     });
 
+  });
+
+  // The App is public, so any GitHub organization can install it. Such an
+  // installation serves every member only when it is on the App owner's own
+  // account, when an org admin approved it, or when a member with a verified
+  // GitHub connection installed it.
+  describe("organization installation approval", () => {
+    const owner = { login: "acme", id: 1, type: "Organization" };
+    const acme = { id: 111, account: { login: "acme", id: 1, type: "Organization" }, repository_selection: "all", suspended_at: null };
+    const strangerOrg = {
+      id: 777, account: { login: "stranger-org", id: 77, type: "Organization" }, repository_selection: "all", suspended_at: null,
+    };
+
+    beforeEach(async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      fixture = startGithubFixture({
+        getApp: () => ({ body: { id: 123456, slug: "valet-app", owner } }),
+        listInstallations: () => ({ body: [acme, strangerOrg] }),
+      });
+    });
+
+    it("serves every member from the App owner's account, and from another organization only after approval", async () => {
+      await discoverInstallations(deps(), orgId);
+      expect(await mintInstallationToken(deps(), orgId, "acme")).toBe("fixture-installation-token");
+      expect(await mintInstallationToken(deps(), orgId, "stranger-org")).toBeNull();
+      expect(await mintInstallationToken(deps(), orgId, "stranger-org", "member-a")).toBeNull();
+
+      expect(await setInstallationApproval(deps(), orgId, 777, true)).toBe("ok");
+      // A later discovery keeps the admin's decision.
+      await discoverInstallations(deps(), orgId);
+      expect(await mintInstallationToken(deps(), orgId, "stranger-org")).toBe("fixture-installation-token");
+
+      expect(await setInstallationApproval(deps(), orgId, 777, false)).toBe("ok");
+      expect(await mintInstallationToken(deps(), orgId, "stranger-org")).toBeNull();
+      expect(await setInstallationApproval(deps(), orgId, 999, true)).toBe("not_found");
+    });
+
+    it("approves an organization installation that a member with a verified GitHub connection installed", async () => {
+      await discoverInstallations(deps(), orgId);
+      await db.insert(users).values({ id: "member-a", name: "A", email: "a@example.com" });
+      await db.insert(orgMembers).values({ orgId, userId: "member-a", role: "member", createdAt: Date.now() });
+      await credentials.save({ type: "user", id: "member-a" }, "github", {
+        type: "oauth2", accessToken: "t", metadata: { login: "member-a", githubId: "4242" },
+      });
+      expect(await approveInstalledByMember(deps(), orgId, 777, "9999")).toBe(false);
+      expect(await mintInstallationToken(deps(), orgId, "stranger-org")).toBeNull();
+      expect(await approveInstalledByMember(deps(), orgId, 777, "4242")).toBe(true);
+      expect(await mintInstallationToken(deps(), orgId, "stranger-org")).toBe("fixture-installation-token");
+    });
+
+    it("never approves a personal installation for the whole organization", async () => {
+      await db.insert(githubInstallations).values({
+        id: "ghi_p", orgId, installationId: 888, accountLogin: "someone", accountType: "User", accountId: "5",
+        createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      expect(await setInstallationApproval(deps(), orgId, 888, true)).toBe("personal");
+      expect(await mintInstallationToken(deps(), orgId, "someone")).toBeNull();
+    });
+
+    it("leaves a new organization installation unapproved when GitHub does not name the App owner", async () => {
+      await fixture?.close();
+      fixture = startGithubFixture({
+        getApp: () => ({ status: 500, body: { message: "boom" } }),
+        listInstallations: () => ({ body: [acme] }),
+      });
+      await discoverInstallations(deps(), orgId);
+      expect(await mintInstallationToken(deps(), orgId, "acme")).toBeNull();
+    });
   });
 
   // A personal installation is bound to the org member whose connected

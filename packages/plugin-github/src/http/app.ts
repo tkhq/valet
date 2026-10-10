@@ -308,3 +308,32 @@ export async function appDisconnect(app: GithubAppCapability): Promise<Response>
   await app.disconnect();
   return noContent();
 }
+
+/**
+ * Approves (`approved: true`) or revokes another GitHub organization's
+ * installation for every member. The App is public, so any organization
+ * can install it, and such an installation serves nobody until an org admin
+ * approves it. Answers with the App status, as refresh does.
+ */
+export async function appInstallationApproval(
+  request: PluginHttpRequest,
+  app: GithubAppCapability,
+  approved: boolean,
+): Promise<Response> {
+  const raw = request.params.installationId ?? "";
+  if (!/^[0-9]{1,18}$/.test(raw)) {
+    return json({ error: "The installation id must be a number. Copy it from the installations list." }, 400);
+  }
+  const installationId = Number(raw);
+  const result = await app.setInstallationApproval(installationId, approved);
+  if (result === "not_found") {
+    return json({ error: `No installation ${installationId}. Choose Refresh installations, then try again.` }, 404);
+  }
+  if (result === "personal") {
+    return json(
+      { error: "A personal installation serves only the member who owns that GitHub account. It cannot serve the whole organization." },
+      400,
+    );
+  }
+  return json(await app.status());
+}

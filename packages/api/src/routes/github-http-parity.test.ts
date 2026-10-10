@@ -12,7 +12,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { resetGithubAppVisibilityCache } from "../services/github-app-visibility.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { credentials, githubInstallations } from "../schema/index.js";
-import type { PostGithubConnectResponse } from "../wire/types.js";
+import type { GetGithubAppResponse, GetGithubOrgStatusResponse, PostGithubConnectResponse } from "../wire/types.js";
 
 const ADMIN = { "Content-Type": "application/json" };
 const MEMBER = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
@@ -347,6 +347,32 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
       });
     });
 
+    it("approves another organization's installation only when a member with a verified connection installed it", async () => {
+      Object.assign(process.env, ENV_APP);
+      api = await bootTestApi({ plugins: [githubPlugin] });
+      await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+        type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242" },
+      });
+      useFixture({
+        listInstallations: () => ({
+          body: [
+            { id: 8803, account: { login: "members-org", id: 30, type: "Organization" }, repository_selection: "all", suspended_at: null },
+            { id: 8804, account: { login: "strangers-org", id: 31, type: "Organization" }, repository_selection: "all", suspended_at: null },
+          ],
+        }),
+      });
+      for (const [id, sender] of [[8803, 4242], [8804, 5]] as const) {
+        const created = JSON.stringify({ action: "created", installation: { id }, sender: { id: sender } });
+        expect(await deliver(created, { "x-github-event": "installation", "x-hub-signature-256": sign(created, ENV_APP.GITHUB_APP_WEBHOOK_SECRET) }))
+          .toEqual({ status: 204, body: null });
+      }
+      const status = await call("app-status", { headers: ADMIN });
+      const access = Object.fromEntries(
+        (status.body as GetGithubAppResponse).installations.map((i) => [i.installationId, i.access]),
+      );
+      expect(access).toEqual({ 8803: "organization", 8804: "pending" });
+    });
+
     it.each([true, false])("refuses a body above 1 MiB (declared length: %s)", async (declared) => {
       Object.assign(process.env, ENV_APP);
       api = await bootTestApi({ plugins: [githubPlugin] });
@@ -369,5 +395,51 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
       expect(response.status).toBe(413);
       expect(await response.json()).toEqual({ error: "payload too large" });
     });
+  });
+});
+
+// Another GitHub organization's installation serves every member only after
+// an org admin approves it. The route is new, so it has no legacy URL.
+describe("installation approval route", () => {
+  const approval = (id: number | string) => `/api/plugins/github/http/app/installations/${id}/approval`;
+
+  async function send(path: string, method: "POST" | "DELETE", headers: Record<string, string>) {
+    const response = await fetch(`${api!.baseUrl}${path}`, { method, headers });
+    const text = await response.text();
+    return { status: response.status, body: text ? JSON.parse(text) : null };
+  }
+
+  it("lets an org admin approve and revoke another organization's installation", async () => {
+    Object.assign(process.env, ENV_APP);
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const now = Date.now();
+    await api.providers.db.insert(githubInstallations).values([
+      { id: "ghi_o", orgId: "local-org", installationId: 777, accountLogin: "stranger-org", accountType: "Organization",
+        orgApproved: false, suspended: false, createdAt: now, updatedAt: now },
+      { id: "ghi_p", orgId: "local-org", installationId: 888, accountLogin: "someone", accountType: "User", accountId: "5",
+        suspended: false, createdAt: now, updatedAt: now },
+    ]);
+    const orgStatus = async () =>
+      (await (await fetch(`${api!.baseUrl}/api/me/github/org-status`, { headers: MEMBER })).json()) as GetGithubOrgStatusResponse;
+
+    expect((await send(approval(777), "POST", MEMBER)).status).toBe(403);
+    expect((await orgStatus()).installationCount).toBe(0);
+
+    const approved = await send(approval(777), "POST", ADMIN);
+    expect(approved.status).toBe(200);
+    const row = (approved.body as GetGithubAppResponse).installations.find((i) => i.installationId === 777);
+    expect(row?.access).toBe("organization");
+    expect((await orgStatus()).installationCount).toBe(1);
+
+    const revoked = await send(approval(777), "DELETE", ADMIN);
+    expect((revoked.body as GetGithubAppResponse).installations.find((i) => i.installationId === 777)?.access).toBe("pending");
+    expect((await orgStatus()).installationCount).toBe(0);
+
+    expect(await send(approval(888), "POST", ADMIN)).toEqual({
+      status: 400,
+      body: { error: "A personal installation serves only the member who owns that GitHub account. It cannot serve the whole organization." },
+    });
+    expect((await send(approval(12345), "POST", ADMIN)).status).toBe(404);
+    expect((await send(approval("abc"), "POST", ADMIN)).status).toBe(400);
   });
 });

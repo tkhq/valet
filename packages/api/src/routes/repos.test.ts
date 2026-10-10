@@ -182,6 +182,7 @@ describe("GET /api/repos", () => {
       "Bearer tok-601": "acme/shared",
       "Bearer tok-602": "member-a/private",
       "Bearer tok-603": "stranger/bait",
+      "Bearer tok-604": "stranger-org/bait",
     };
     useFixture({
       listInstallations: () => ({ body: [] }),
@@ -213,6 +214,8 @@ describe("GET /api/repos", () => {
     await seedInstallationRow({
       id: "ghi_s", installationId: 603, accountLogin: "stranger", accountType: "User", linkedUserId: null,
     });
+    // A stranger's GitHub organization that no admin approved.
+    await seedInstallationRow({ id: "ghi_so", installationId: 604, accountLogin: "stranger-org", orgApproved: false });
 
     async function listAs(headers: Record<string, string>): Promise<string[]> {
       const res = await fetch(`${api!.baseUrl}/api/repos`, { headers });
@@ -223,6 +226,7 @@ describe("GET /api/repos", () => {
     expect(await listAs(HEADERS)).toEqual(["acme/shared", "member-a/private"]);
     expect(await listAs({ ...HEADERS, "x-valet-test-user-id": "test-member" })).toEqual(["acme/shared"]);
     expect(fixture?.calls.some((c) => c.path === "/app/installations/603/access_tokens")).toBe(false);
+    expect(fixture?.calls.some((c) => c.path === "/app/installations/604/access_tokens")).toBe(false);
   });
 
   it("soft-degrades when the installation-repositories call fails: still 200, partial results", async () => {

@@ -4170,6 +4170,14 @@ export interface GithubAppInstallationSummary {
   repositorySelection: string | null;
   suspended: boolean;
   linkedUserId: string | null;
+  /** What the installation gives the organization. `organization`: every
+   * member can use it (the App owner's account, or an approved
+   * organization). `member`: only the member who owns that personal GitHub
+   * account. `pending`: another GitHub organization that no admin approved;
+   * nobody can use it. `none`: a personal installation that no member owns. */
+  access: "organization" | "member" | "pending" | "none";
+  /** The installation is on the account that owns the App. */
+  appOwner: boolean;
 }
 
 export interface GithubAppInfo {

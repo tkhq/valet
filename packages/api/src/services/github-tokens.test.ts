@@ -8,6 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
+import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
@@ -665,6 +666,28 @@ describe("resolveGitHubToken", () => {
       expect(
         await resolveGitHubToken(deps(), { orgId, userId, purpose: "git", repo: { owner: "legacy-login", name: "x" } }),
       ).toEqual({ token: null, source: "none" });
+      expect(mintedInstallations()).toEqual([]);
+    });
+
+    it("never uses an organization installation that no admin approved", async () => {
+      // A stranger installed the public App on their own GitHub organization.
+      await seedInstallation({ id: "ghi_o", installationId: 777, accountLogin: "stranger-org", orgApproved: false });
+      // Not for its own repositories, for any caller.
+      for (const who of [userId, memberB, undefined]) {
+        expect(
+          await resolveGitHubToken(deps(), { orgId, userId: who, purpose: "git", repo: { owner: "stranger-org", name: "x" } }),
+        ).toEqual({ token: null, source: "none" });
+      }
+      // And it does not make the organization's own installation ambiguous.
+      expect((await resolveGitHubToken(deps(), { orgId, userId: memberB, purpose: "api" })).source).toBe("installation");
+      expect(mintedInstallations()).not.toContain("777");
+    });
+
+    it("gives a team no installation when the org has only personal and unapproved ones", async () => {
+      await db.delete(githubInstallations).where(eq(githubInstallations.installationId, 999));
+      await seedInstallation({ id: "ghi_o", installationId: 777, accountLogin: "stranger-org", orgApproved: false });
+      expect(await resolveInstallationApiToken(deps(), orgId)).toBeNull();
+      await expect(resolveGitHubToken(deps(), { orgId, purpose: "api", auth: "app" })).rejects.toThrow(GitHubAuthError);
       expect(mintedInstallations()).toEqual([]);
     });
 

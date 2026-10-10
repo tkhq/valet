@@ -25,6 +25,14 @@ export interface GithubAppInstallationSummary {
   repositorySelection: string | null;
   suspended: boolean;
   linkedUserId: string | null;
+  /** What the installation gives the organization. `organization`: every
+   * member can use it (the App owner's account, or an approved
+   * organization). `member`: only the member who owns that personal GitHub
+   * account. `pending`: another GitHub organization that no admin approved;
+   * nobody can use it. `none`: a personal installation that no member owns. */
+  access: "organization" | "member" | "pending" | "none";
+  /** The installation is on the account that owns the App. */
+  appOwner: boolean;
 }
 
 /** Host-owned storage view of the organization's App. */
@@ -76,6 +84,9 @@ export interface GithubAppCapability {
   refreshInstallations(): Promise<boolean>;
   /** Removes the stored App and its installation rows. */
   disconnect(): Promise<void>;
+  /** Approves or revokes another GitHub organization's installation for
+   * every member. `personal` refuses a personal installation. */
+  setInstallationApproval(installationId: number, approved: boolean): Promise<"ok" | "not_found" | "personal">;
 }
 
 export interface GithubSetupCapability {
@@ -167,8 +178,9 @@ export interface GithubDeliveryEffects {
   installationRemoved(installationId: number): Promise<void>;
   installationSuspended(installationId: number, suspended: boolean): Promise<void>;
   repositorySelectionChanged(installationId: number, repositorySelection: string | undefined): Promise<void>;
-  /** Re-reads installations from GitHub. */
-  discoverInstallations(): Promise<void>;
+  /** Records a new installation. `senderId` is the GitHub user who
+   * installed it, from the delivery. */
+  installationCreated(created: { installationId: number; senderId: string | null }): Promise<void>;
   /** Persists the event and starts subscription dispatch. */
   emit(event: NormalizedEvent): Promise<void>;
   /** Records a verified delivery that no trigger can ingest. */

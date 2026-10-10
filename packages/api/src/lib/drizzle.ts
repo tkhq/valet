@@ -405,6 +405,19 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     // binds again by verified account id.
     backfill: 'UPDATE "github_installations" SET "linked_user_id" = NULL WHERE "account_id" IS NULL AND "linked_user_id" IS NOT NULL RETURNING "id"',
   },
+  {
+    // The default approves every organization installation that existed
+    // before the column, so current deployments keep working. New rows get
+    // an explicit value from `services/github-app.ts`.
+    describe: "github_installations.org_approved column",
+    probe: { kind: "column", table: "github_installations", column: "org_approved" },
+    sql: 'ALTER TABLE "github_installations" ADD COLUMN IF NOT EXISTS "org_approved" boolean DEFAULT true NOT NULL',
+  },
+  {
+    describe: "github_installations.app_owner column",
+    probe: { kind: "column", table: "github_installations", column: "app_owner" },
+    sql: 'ALTER TABLE "github_installations" ADD COLUMN IF NOT EXISTS "app_owner" boolean DEFAULT false NOT NULL',
+  },
   { describe: "identity link codes bound to a DM recipient", probe: { kind: "column", table: "identity_link_codes", column: "external_id" }, sql: 'ALTER TABLE "identity_link_codes" ADD COLUMN "external_id" text' },
   { describe: "generated file reservations", probe: { kind: "table", table: "generated_files" }, sql: `CREATE TABLE "generated_files" (
   "id" text PRIMARY KEY, "org_id" text NOT NULL, "session_id" text NOT NULL,

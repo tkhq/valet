@@ -33,6 +33,7 @@ import type { PluginHttpCaller, PluginHttpRequest } from "@valet/engine";
 import {
   appCredential,
   appDisconnect,
+  appInstallationApproval,
   appManifest,
   appRefresh,
   appSetup,
@@ -67,7 +68,10 @@ import {
   discoverInstallations,
   loadAppConfig,
   loadAppConfigWithSource,
+  approveInstalledByMember,
+  installationAccess,
   reconcileUserInstallations,
+  setInstallationApproval,
   relinkInstallations,
   usableInstallation,
   resolveGithubAppEnvConfig,
@@ -138,6 +142,14 @@ export const githubHttpBindings: Readonly<Record<string, PluginHttpBinding>> = {
     method: "DELETE", path: "/app", auth: "org-admin",
     bind: (context) => appDisconnect(app(context)),
   },
+  "app-installation-approve": {
+    method: "POST", path: "/app/installations/:installationId/approval", auth: "org-admin",
+    bind: (context) => appInstallationApproval(context.request, app(context), true),
+  },
+  "app-installation-revoke": {
+    method: "DELETE", path: "/app/installations/:installationId/approval", auth: "org-admin",
+    bind: (context) => appInstallationApproval(context.request, app(context), false),
+  },
   connect: {
     method: "POST", path: "/connection/connect", auth: "user",
     bind: (context) => connectStart(context.request, connection(context), endpoints()),
@@ -183,6 +195,8 @@ function toInstallationSummary(row: typeof githubInstallations.$inferSelect): Gi
     repositorySelection: row.repositorySelection,
     suspended: row.suspended,
     linkedUserId: row.linkedUserId,
+    access: installationAccess(row),
+    appOwner: row.appOwner,
   };
 }
 
@@ -257,6 +271,8 @@ function appCapability(providers: Providers, caller: PluginHttpCaller, request: 
         return false;
       }
     },
+    setInstallationApproval: (installationId, approved) =>
+      setInstallationApproval(appDeps(providers), orgId, installationId, approved),
     disconnect: async () => {
       const { db, engineCredentials } = providers;
       // Removes the credential row and installation rows only. A
@@ -369,6 +385,7 @@ function connectionCapability(
         .select({
           suspended: githubInstallations.suspended,
           accountType: githubInstallations.accountType,
+          appOwner: githubInstallations.appOwner,
           accountLogin: githubInstallations.accountLogin,
           repositorySelection: githubInstallations.repositorySelection,
         })
@@ -380,9 +397,10 @@ function connectionCapability(
         .where(eq(orgs.id, orgId))
         .limit(1);
       // `usableInstallation` returns a personal row only when it is bound to
-      // this member.
-      const own = rows.filter((row) => row.accountType === "User");
-      const orgWide = rows.filter((row) => row.accountType !== "User");
+      // this member. The App owner's account serves every member, so it
+      // counts as the organization's.
+      const own = rows.filter((row) => row.accountType === "User" && !row.appOwner);
+      const orgWide = rows.filter((row) => row.accountType !== "User" || row.appOwner);
       let personal = {};
       if (config !== null && org?.allowPersonalInstallations === true) {
         const stored = await engineCredentials.get({ type: "user", id: userId }, GITHUB_CREDENTIAL_SERVICE);
@@ -546,8 +564,9 @@ function deliveryEffects(providers: Providers, orgId: string): GithubDeliveryEff
         .set({ updatedAt: Date.now(), ...(repositorySelection !== undefined ? { repositorySelection } : {}) })
         .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId)));
     },
-    discoverInstallations: async () => {
+    installationCreated: async ({ installationId, senderId }) => {
       await discoverInstallations(appDeps(providers), orgId);
+      if (senderId) await approveInstalledByMember(appDeps(providers), orgId, installationId, senderId);
     },
     emit: async (event) => {
       await ingestEvent(
