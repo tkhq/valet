@@ -997,6 +997,30 @@ describe("pg app schema + migrations", () => {
       expect(rows.rows).toEqual([{ linked_user_id: null, account_id: null }]);
     });
 
+    // Before the App was public, GitHub installed it only on its owner's
+    // account. An App created on a personal account (the manifest default)
+    // therefore has one installation, of type User, on the admin's own
+    // account. The upgrade must keep that installation serving every member
+    // until discovery reads the owner again, or teams and workflows stop.
+    it("keeps a formerly private App's installations serving the org across the upgrade repair", async () => {
+      for (const column of ["account_id", "org_approved", "app_owner"]) {
+        await db.query(`ALTER TABLE "github_installations" DROP COLUMN "${column}"`);
+      }
+      await db.query(
+        `INSERT INTO "github_installations" (id, org_id, installation_id, account_login, account_type, linked_user_id, created_at, updated_at)
+         VALUES ('ghi_admin', 'org1', 8, 'admin-person', 'User', 'u1', 1, 1),
+                ('ghi_org', 'org1', 9, 'acme', 'Organization', NULL, 1, 1)`,
+      );
+      await applyAppMigrations(db);
+      const rows = await db.query(
+        `SELECT id, app_owner, org_approved, linked_user_id FROM "github_installations" WHERE id IN ('ghi_admin', 'ghi_org') ORDER BY id`,
+      );
+      expect(rows.rows).toEqual([
+        { id: "ghi_admin", app_owner: true, org_approved: true, linked_user_id: null },
+        { id: "ghi_org", app_owner: false, org_approved: true, linked_user_id: null },
+      ]);
+    });
+
     it("re-adds columns that predate an already-applied 0000_app.sql", async () => {
       for (const { table, column } of REPAIRED_COLUMNS) {
         await db.query(`ALTER TABLE "${table}" DROP COLUMN "${column}"`);

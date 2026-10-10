@@ -25,6 +25,7 @@ import {
   mintInstallationToken,
   parsePrivateKeyPem,
   approveInstalledByMember,
+  discoverLegacyInstallations,
   reconcileUserInstallations,
   relinkInstallations,
   setInstallationApproval,
@@ -557,6 +558,19 @@ describe("github-app service", () => {
       expect(await mintInstallationToken(deps(), orgId, "someone")).toBeNull();
     });
 
+    it("keeps the App owner's installation serving the org when GitHub does not answer GET /app", async () => {
+      await discoverInstallations(deps(), orgId);
+      await fixture?.close();
+      fixture = startGithubFixture({
+        getApp: () => ({ status: 500, body: { message: "boom" } }),
+        listInstallations: () => ({ body: [acme] }),
+      });
+      await discoverInstallations(deps(), orgId);
+      const [row] = await db.select().from(githubInstallations).where(eq(githubInstallations.installationId, 111));
+      expect(row.appOwner).toBe(true);
+      expect(await mintInstallationToken(deps(), orgId, "acme")).toBe("fixture-installation-token");
+    });
+
     it("leaves a new organization installation unapproved when GitHub does not name the App owner", async () => {
       await fixture?.close();
       fixture = startGithubFixture({
@@ -565,6 +579,31 @@ describe("github-app service", () => {
       });
       await discoverInstallations(deps(), orgId);
       expect(await mintInstallationToken(deps(), orgId, "acme")).toBeNull();
+    });
+  });
+
+  // The upgrade repair leaves legacy rows without an account id. Boot reads
+  // installations again for each org that still has one, so bindings and
+  // owner flags are current without an admin's click.
+  describe("discoverLegacyInstallations", () => {
+    it("discovers only the orgs whose installations predate account ids", async () => {
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      await db.insert(orgs).values({ id: "org-current", name: "Current", createdAt: Date.now() });
+      await saveAppConfig({ credentials }, "org-current", baseConfig);
+      const base = { accountType: "Organization", suspended: false, createdAt: Date.now(), updatedAt: Date.now() };
+      await db.insert(githubInstallations).values([
+        { ...base, id: "ghi_legacy", orgId, installationId: 111, accountLogin: "acme" },
+        { ...base, id: "ghi_current", orgId: "org-current", installationId: 222, accountLogin: "acme", accountId: "1" },
+      ]);
+      fixture = startGithubFixture({
+        listInstallations: () => ({
+          body: [{ id: 111, account: { login: "acme", id: 1, type: "Organization" }, repository_selection: "all", suspended_at: null }],
+        }),
+      });
+      expect(await discoverLegacyInstallations(deps())).toEqual([orgId]);
+      const [legacy] = await db.select().from(githubInstallations).where(eq(githubInstallations.id, "ghi_legacy"));
+      expect(legacy.accountId).toBe("1");
+      expect(await discoverLegacyInstallations(deps())).toEqual([]);
     });
   });
 

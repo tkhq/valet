@@ -66,7 +66,7 @@
  */
 import { invalidateWorkflowSources } from "./content-sync/invalidation.js";
 import { createPrivateKey, randomUUID, sign } from "node:crypto";
-import { and, eq, isNotNull, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { credentials, githubInstallations, orgMembers, orgs, type GithubInstallationRow } from "../schema/index.js";
@@ -812,6 +812,43 @@ export async function recordCreatedInstallation(
   if (senderGithubId && inst.accountType !== PERSONAL_ACCOUNT_TYPE) {
     await approveInstalledByMember(deps, orgId, inst.installationId, senderGithubId);
   }
+}
+
+/** Most orgs a boot pass reads installations for. */
+const LEGACY_DISCOVERY_ORG_LIMIT = 25;
+
+/**
+ * Reads installations again for each org that still has a row without an
+ * account id: rows from before the upgrade. The upgrade repair keeps them
+ * working on the old assumption (a personal row is the owner's), and this
+ * pass replaces that with GitHub's answer: account ids, bindings, and the
+ * App owner. Boot calls it once, so no admin has to choose Refresh
+ * installations. Bounded to `LEGACY_DISCOVERY_ORG_LIMIT` orgs; the sweep
+ * covers the rest. Never throws. Returns the orgs it read.
+ */
+export async function discoverLegacyInstallations(deps: GithubAppDeps): Promise<string[]> {
+  let orgIds: string[];
+  try {
+    const rows = await deps.db
+      .selectDistinct({ orgId: githubInstallations.orgId })
+      .from(githubInstallations)
+      .where(isNull(githubInstallations.accountId))
+      .limit(LEGACY_DISCOVERY_ORG_LIMIT);
+    orgIds = rows.map((row) => row.orgId);
+  } catch (err) {
+    console.error("github-app: listing orgs with legacy installations failed:", err);
+    return [];
+  }
+  const read: string[] = [];
+  for (const orgId of orgIds) {
+    try {
+      await discoverInstallations(deps, orgId);
+      read.push(orgId);
+    } catch (err) {
+      console.error(`github-app: boot discovery for org ${orgId} failed:`, err);
+    }
+  }
+  return read;
 }
 
 export type InstallationApprovalResult = "ok" | "not_found" | "personal";

@@ -35,7 +35,7 @@ import {
 import { reconcileInstanceConfig } from "./services/config-reconcile.js";
 import { seedMissingTeamDefaults } from "./services/teams.js";
 import { ModelRegistry, getModelRegistry, setModelRegistry } from "./services/model-registry.js";
-import { syncAllAppWebhookUrls } from "./services/github-app.js";
+import { discoverLegacyInstallations, syncAllAppWebhookUrls } from "./services/github-app.js";
 import { publicUrlFromEnv } from "./channels/host.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { wireChildGateReports } from "./orchestrator/children.js";
@@ -563,6 +563,16 @@ async function runBootChain(): Promise<void> {
     { db: providers.db, credentials: providers.engineCredentials },
     publicUrlFromEnv(process.env),
   );
+
+  // GitHub installations from before account ids and approval: read them
+  // again from GitHub once, so bindings and owner flags are current without
+  // an admin's click. Not awaited, for the same reason as above; it never
+  // throws.
+  void discoverLegacyInstallations({
+    db: providers.db,
+    credentials: providers.engineCredentials,
+    key: deriveSecretKey(encryptionKey),
+  });
 
   if (closed) return;
 

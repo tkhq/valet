@@ -702,6 +702,28 @@ describe("resolveGitHubToken", () => {
     });
   });
 
+  // An App created on a personal account was private, so its only
+  // installation is the admin's own personal one. After the upgrade repair
+  // that row has no account id but is marked as the App owner's, and it must
+  // keep serving members, teams, and readiness before discovery runs again.
+  describe("after the upgrade, before discovery", () => {
+    beforeEach(async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      fixture = startGithubFixture();
+      await seedInstallation({
+        id: "ghi_up", installationId: 1234, accountLogin: "admin-person", accountType: "User", accountId: null, appOwner: true,
+      });
+    });
+
+    it("serves members, teams, and readiness from the owner's personal installation", async () => {
+      const repo = { owner: "admin-person", name: "r" };
+      expect((await resolveGitHubToken(deps(), { orgId, userId, purpose: "git", repo })).source).toBe("installation");
+      expect((await resolveGitHubToken(deps(), { orgId, purpose: "api", auth: "app", repo })).source).toBe("installation");
+      expect((await resolveGitHubToken(deps(), { orgId, purpose: "api", auth: "app" })).source).toBe("installation");
+      expect(await installationResolvesFor(deps(), orgId, "admin-person", { strictOwner: true })).toEqual({ ok: true });
+    });
+  });
+
   describe("installationResolvesFor", () => {
     it("is no_app when the org has no App configured", async () => {
       await seedInstallation();

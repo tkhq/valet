@@ -417,6 +417,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "github_installations.app_owner column",
     probe: { kind: "column", table: "github_installations", column: "app_owner" },
     sql: 'ALTER TABLE "github_installations" ADD COLUMN IF NOT EXISTS "app_owner" boolean DEFAULT false NOT NULL',
+    // Before the App was public, GitHub installed it only on its owner's
+    // account, so a legacy personal row is the owner's (an App created on a
+    // personal account). Mark it, or it serves nobody until discovery reads
+    // the owner again. Boot discovery then corrects the flag from `GET /app`.
+    backfill: 'UPDATE "github_installations" SET "app_owner" = true WHERE "account_type" = \'User\' AND "account_id" IS NULL RETURNING "id"',
   },
   { describe: "identity link codes bound to a DM recipient", probe: { kind: "column", table: "identity_link_codes", column: "external_id" }, sql: 'ALTER TABLE "identity_link_codes" ADD COLUMN "external_id" text' },
   { describe: "generated file reservations", probe: { kind: "table", table: "generated_files" }, sql: `CREATE TABLE "generated_files" (
