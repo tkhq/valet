@@ -635,7 +635,13 @@ export function createUsageTurnExportStream(
           LEFT JOIN "user" u ON u.id = page.user_id
           -- By entry id alone: a Thread step's turn bills to its step's id,
           -- but the assistant session ran it and holds its channel and repos.
+          -- That session's context is exported only when the session itself
+          -- passes this export's scope: a team run can report through a
+          -- member's personal assistant, whose context the team cannot see.
           LEFT JOIN engine_entries e ON page.use_case <> 'proxy' AND e.id = page.entry_id
+            AND (e.session_id = page.session_id OR EXISTS (
+              SELECT 1 FROM agent_sessions run_src WHERE run_src.id = e.session_id
+                AND ${sourceSessionInScope(sql`run_src`, opts.scope)}))
           LEFT JOIN LATERAL (
             SELECT string_agg(sr.full_name, ';' ORDER BY sr.position) AS repository
             FROM session_repos sr WHERE sr.session_id = e.session_id
@@ -663,6 +669,20 @@ export function createUsageTurnExportStream(
       }
     },
   });
+}
+
+/** A session row passes the usage scope, by the rule `cost_entries` applies
+ * to a session's own spend. `alias` is a hardcoded table alias. */
+function sourceSessionInScope(alias: SQL, s: UsageScope): SQL {
+  const base = sql`${alias}.org_id = ${s.orgId}`;
+  switch (s.scope) {
+    case "team":
+      return sql`${base} AND ${alias}.owner_type = 'team' AND ${alias}.owner_id = ${s.teamId}`;
+    case "me":
+      return sql`${base} AND ${alias}.user_id = ${s.userId}`;
+    case "org":
+      return base;
+  }
 }
 
 // ── Per-user windows (home card + /summary) ──────────────────────────────────

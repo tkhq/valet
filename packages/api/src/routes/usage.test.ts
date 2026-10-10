@@ -811,6 +811,41 @@ describe("GET /api/usage/export.csv", () => {
     expect(step).toMatch(/,acme\/assistant-repo,slack,C42$/);
   });
 
+  it("exports a team Thread step's turn without the context of a member's private session", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    const db = api.providers.db;
+    await db.insert(teams).values({ id: "team-ctx", orgId: "local-org", name: "Context", createdAt: now });
+    await db.insert(teamMembers).values([
+      { teamId: "team-ctx", userId: "local-user", role: "member" },
+      { teamId: "team-ctx", userId: "test-member", role: "member" },
+    ]);
+    // The team run reports through the initiating member's personal assistant.
+    await db.insert(agentSessions).values({ id: "personal-asst", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now });
+    await db.execute(sql`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at) VALUES ('wf-ctx','local-org','team','team-ctx','Ctx','{}'::jsonb,${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at) VALUES ('run-ctx','wf-ctx','v1','{}'::jsonb,'{}'::jsonb,'team','team-ctx',${now},${now})`);
+    await db.execute(sql`
+      INSERT INTO engine_queue_items (id, session_id, thread_id, dispatch_id, status, content, channel, attempt_count, max_attempts, timeout_at, created_at, updated_at)
+      VALUES ('q-ctx', 'personal-asst', 'th', 'workflow:run-ctx:think', 'settled', 'prompt',
+              ${JSON.stringify({ channelType: "slack", channelId: "DPRIVATE" })}, 1, 1, ${now}, ${now}, ${now})
+    `);
+    await db.execute(sql`INSERT INTO session_repos (session_id, full_name, clone_url, position)
+      VALUES ('personal-asst', 'acme/private-repo', 'https://example.test/private', 0)`);
+    await seedEngineEntry(api, "e-ctx", "personal-asst", now, "q-ctx");
+
+    const teamCsv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=team&teamId=team-ctx&granularity=turn`,
+      { headers: { "x-valet-test-user-id": "test-member" } })).text();
+    const row = teamCsv.trim().split("\n").find((line) => line.includes("wf:run-ctx:think"));
+    // The team's spend stays; the personal session's repository and channel do not.
+    expect(row).toBeDefined();
+    expect(teamCsv).not.toContain("acme/private-repo");
+    expect(teamCsv).not.toContain("DPRIVATE");
+
+    await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+    const orgCsv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=org&granularity=turn`)).text();
+    expect(orgCsv.trim().split("\n").find((line) => line.includes("wf:run-ctx:think"))).toMatch(/,acme\/private-repo,slack,DPRIVATE$/);
+  });
+
   it("streams every row over 100,000 without gaps or duplicates at tied timestamps", async () => {
     api = await bootTestApi();
     const now = Date.now();
