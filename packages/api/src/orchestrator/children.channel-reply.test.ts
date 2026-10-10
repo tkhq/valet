@@ -394,6 +394,56 @@ describe("delegated child completion over a channel", () => {
     expect((await watchRow())?.replyRoute).toBe("manual");
   });
 
+  it.each([
+    { input: "an idle child", childId: "child-idle-input", followup: false },
+    { input: "a queued followup", childId: "child-followup-input", followup: true },
+  ])("does not post automatically for parent work sent after a person adds input to $input", async ({ childId, followup }) => {
+    const run = await bootDelegation(childId);
+    const { db, engineStore } = api!.providers;
+    const [childRow] = await db.select().from(agentSessions).where(eq(agentSessions.id, childId));
+    if (!childRow) throw new Error("child session row missing");
+    const addPrivateInput = async () => {
+      const sent = await submitSessionPrompt(api!.providers, childRow, "Use the private numbers I pasted", {
+        threadId: run.childThreadId, author: { id: USER_ID }, ...(followup ? { queueMode: "followup" as const } : {}),
+      });
+      if (!sent?.messageId) throw new Error("the private input was not admitted");
+      return sent.messageId;
+    };
+
+    // A followup waits behind the delegated work, so that work's result
+    // never saw it and still posts automatically.
+    const queuedInput = followup ? await addPrivateInput() : undefined;
+    await engineStore.settleUnclaimed(childId, run.childThreadId, run.queueItemId, { outcome: "completed" });
+    await parentUpdateSettled(run, childId, run.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+
+    // The person's input runs in the child (or lands while it is idle).
+    const personItem = queuedInput ?? await addPrivateInput();
+    await engineStore.settleUnclaimed(childId, run.childThreadId, personItem, { outcome: "completed" });
+
+    // The delegating thread sends more work. Its result can carry the
+    // person's input, so it must not post to the channel thread on its own.
+    const sender = buildChildSender(run.deps, run.watcher);
+    const resumed = await sender(
+      { childSessionId: childId, message: "now finish up" },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID },
+    );
+    if (!resumed) throw new Error("child_send did not admit the follow-up");
+    await engineStore.settleUnclaimed(childId, run.childThreadId, resumed.queueItemId, { outcome: "completed" });
+    const signals = await vi.waitFor(async () => {
+      const found = await childSettledSignals(run.parentId);
+      if (found.length < 2) throw new Error("the resumed settlement is not admitted yet");
+      return found;
+    }, { timeout: 30_000, interval: 20 });
+    await run.parentThread.awaitResult(signals[1]!.id);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+    expect(signals[1]?.content.origin).toEqual({ ...ORIGIN, reply: "manual" });
+    const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, childId));
+    expect(watch?.replyRoute).toBe("manual");
+  });
+
   it("drops the origin thread when a person takes over the child", async () => {
     const run = await bootDelegation("child-takeover");
     const { db, engineStore } = api!.providers;

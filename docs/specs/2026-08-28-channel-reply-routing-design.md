@@ -362,7 +362,14 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   person took over the child. Parent work sent after a takeover, from any parent
   thread, sets the route back to `manual`. The person's input is in the
   child's transcript, so the parent can answer the channel thread with
-  `reply_to_origin` but never posts there automatically. It does not read `author`, because a
+  `reply_to_origin` but never posts there automatically.
+  Before the watcher admits a settlement with an `origin` route, it checks
+  the child's queue for a submission from a person that ran before the
+  settled work on the same thread: a prompt while the child was idle, a
+  followup, or a steer. A submission without parent delegation provenance
+  counts, except a signal. If one exists, the watcher sets `reply_route` to
+  `manual` for good, because the result can carry that input. A followup
+  queued behind the delegated work does not affect that work's result. It does not read `author`, because a
   `child_send` names the steering member as its author. A followup, input on
   another child thread, and a rejected prompt never supersede the watched
   submission, so they leave the route intact. Parent-directed steering

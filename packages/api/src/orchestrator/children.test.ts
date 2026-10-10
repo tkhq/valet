@@ -30,6 +30,7 @@ import {
   buildChildSender,
   childSendPromptOptions,
   isParentDelegation,
+  parentDelegationMetadata,
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
@@ -2282,7 +2283,11 @@ describe("buildChildSender", () => {
     const childThread = child.thread("web:default");
     await child.pause();
 
-    await engineStore.admitSubmission(opts.childId, childThread.id, queuedItem(opts.queueItemId, childThread.id, "original task"));
+    // Stamped as the real spawner stamps the delegated work.
+    await engineStore.admitSubmission(opts.childId, childThread.id, {
+      ...queuedItem(opts.queueItemId, childThread.id, "original task"),
+      metadata: parentDelegationMetadata(opts.parentId, parentThread.id),
+    });
     if (opts.settled) {
       await engineStore.settleUnclaimed(opts.childId, childThread.id, opts.queueItemId, { outcome: "completed" });
     }

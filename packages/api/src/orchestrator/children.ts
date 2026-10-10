@@ -304,6 +304,30 @@ function settlementOrigin(originJson: string | null, replyRoute: string | null):
 }
 
 /**
+ * True when a person, not the parent, gave the child input that ran before
+ * `itemId` on the same thread: a prompt while it was idle, a followup, or a
+ * steer. That input is in the transcript the item's result came from. A
+ * submission without parent delegation provenance counts, except a signal
+ * from another session. The check reads durable queue items, so it covers
+ * every way input can reach the child.
+ */
+async function personInputBefore(store: SessionStore, childSessionId: string, itemId: string): Promise<boolean> {
+  const item = await store.getQueueItem(childSessionId, itemId);
+  if (!item) return false;
+  const items = [
+    ...(await store.listUnsettledSubmissions(childSessionId)),
+    ...(await store.listSettledSubmissionsBefore(childSessionId, Number.MAX_SAFE_INTEGER)),
+  ];
+  return items.some((other) => other.id !== item.id && other.threadId === item.threadId
+    && other.createdAt < item.createdAt && !isParentDelegation(other) && !isSignalSubmission(other));
+}
+
+function isSignalSubmission(item: { content: unknown }): boolean {
+  const content = item.content;
+  return content !== null && typeof content === "object" && "kind" in content && content.kind === "signal";
+}
+
+/**
  * The reply route after the watch moves to new child work. Work a person
  * started (no parent delegation provenance) has no route. Parent work after
  * a takeover gets a manual route back: the person's input is in the child's
@@ -844,7 +868,15 @@ export class ChildWatcher {
           )
         : undefined;
 
-    const origin = settlementOrigin(row.originJson, row.replyRoute);
+    // A person's input in this result's transcript downgrades an automatic
+    // route to manual for good. Parent work never restores `origin`.
+    let replyRoute = row.replyRoute;
+    if (replyRoute === "origin" && await personInputBefore(this.deps.engineStore, watch.childSessionId, watch.queueItemId)) {
+      replyRoute = "manual" satisfies ChildReplyRoute;
+      await this.deps.db.update(childWatches).set({ replyRoute })
+        .where(and(eq(childWatches.childSessionId, watch.childSessionId), eq(childWatches.replyRoute, "origin")));
+    }
+    const origin = settlementOrigin(row.originJson, replyRoute);
     const replyId = namespaceInternalDispatchId(watch.childSessionId, `settled:${watch.childSessionId}:${watch.queueItemId}`);
     const automaticReply = origin !== undefined && origin.reply !== "manual";
     // Write the intent before the parent can finish. Dispatch-ID lookup recovers a lost receipt.
