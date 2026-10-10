@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatTokens, formatUsd } from "./format-usage";
+import { formatTokens, formatUsd, formatUsdPrecise } from "./format-usage";
 
 describe("formatTokens", () => {
   it("formats across magnitudes", () => {
@@ -8,6 +8,15 @@ describe("formatTokens", () => {
     expect(formatTokens(1_234)).toBe("1.2k");
     expect(formatTokens(5_600_000)).toBe("5.6M");
     expect(formatTokens(2_000_000_000)).toBe("2B");
+  });
+});
+
+describe("formatUsdPrecise", () => {
+  it("keeps four decimals and never shows a nonzero cost as zero", () => {
+    expect(formatUsdPrecise(0)).toBe("$0.0000");
+    expect(formatUsdPrecise(0.00001)).toBe("<$0.0001");
+    expect(formatUsdPrecise(0.00421)).toBe("$0.0042");
+    expect(formatUsdPrecise(3.456)).toBe("$3.4560");
   });
 });
 

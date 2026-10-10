@@ -1,6 +1,6 @@
 import { decryptSecret, deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
 import { and, eq, inArray } from "drizzle-orm";
-import { workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { workflowRuns } from "../schema/index.js";
 import { runEventVisible } from "../services/thread-access.js";
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
@@ -37,9 +37,10 @@ workspaceOutcomesRouter.get("/:workspace/outcomes", async c => {
   const runIds = [...new Set(items.flatMap(item => item.workflowRunId ? [item.workflowRunId] : []))];
   if (owner.type === "team" && runIds.length) {
     // Event-only runs have no origin thread. Check their source channel too.
+    // A run carries its org, so a deleted workflow's outcomes stay visible.
     const runs = await c.var.providers.db.select({ id: workflowRuns.id, params: workflowRuns.params })
-      .from(workflowRuns).innerJoin(workflowDefinitions, eq(workflowDefinitions.id, workflowRuns.workflowId))
-      .where(and(inArray(workflowRuns.id, runIds), eq(workflowDefinitions.orgId, c.var.user.orgId),
+      .from(workflowRuns)
+      .where(and(inArray(workflowRuns.id, runIds), eq(workflowRuns.orgId, c.var.user.orgId),
         eq(workflowRuns.ownerType, "team"), eq(workflowRuns.ownerId, owner.id)));
     const visible = new Set<string>();
     for (const run of runs) {

@@ -113,6 +113,7 @@ export {
   executeSet,
   executeStop,
   executeTrigger,
+  workflowStepSessionId,
 } from './nodes/index.js';
 export type {
   NodeExecuteResult,

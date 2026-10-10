@@ -35,6 +35,7 @@ import {
   rawToSuspendedTurnRow,
   rawToThreadRow,
   rowToEntry,
+  USAGE_ENTRY_TYPE,
   rowToGate,
   toNum,
   toNumOrNull,
@@ -663,8 +664,8 @@ export class PgSessionStore implements SessionStore {
       const rawThread = threadResult.rows[0];
       if (!rawThread) return null;
       const entryResult = await tx.query(
-        "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 ORDER BY created_at ASC, seq ASC",
-        [sessionId, threadId],
+        "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND entry_type <> $3 ORDER BY created_at ASC, seq ASC",
+        [sessionId, threadId, USAGE_ENTRY_TYPE],
       );
       return {
         thread: rowToThread(rawToThreadRow(rawThread)),
@@ -699,8 +700,8 @@ export class PgSessionStore implements SessionStore {
         const scoped = opts?.queueItemId !== undefined;
         const limit = opts?.limit && opts.limit > 0 ? opts.limit : undefined;
         const newestFirst = scoped || limit !== undefined;
-        const conditions = ["session_id = $1", "thread_id = $2"];
-        const params: unknown[] = [sessionId, threadId];
+        const conditions = ["session_id = $1", "thread_id = $2", "entry_type <> $3"];
+        const params: unknown[] = [sessionId, threadId, USAGE_ENTRY_TYPE];
         if (scoped) {
           params.push(opts.queueItemId);
           conditions.push(`queue_item_id = $${params.length}`);

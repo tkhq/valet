@@ -89,6 +89,9 @@ it('keeps workflow ownership, queue session matching, and UTC session-day counts
   await pg.query(`INSERT INTO workflow_runs(id,workflow_id,definition_version_id,definition,params,owner_type,owner_id,created_at,updated_at)
     VALUES ('r','w','v','{}','{}','team','t',0,0)`);
   await queue('q', 'alice');
+  // A session step: its id is an engine session, so it counts as an agent.
+  await pg.query(`INSERT INTO engine_sessions(id,owner_type,owner_id,user_id,org_id,workspace,purpose,status,created_at,updated_at)
+    VALUES ('wf:r:step','team','t','owner','o','/w','workflow','active',0,0)`);
   await pg.query(`INSERT INTO engine_entries(id,session_id,thread_id,entry_type,queue_item_id,usage,created_at)
     VALUES ('one','wf:r:step','th','message','q','{"total":1}',3600000),
       ('two','wf:r:step','th','message','q','{"total":1}',86400000)`);

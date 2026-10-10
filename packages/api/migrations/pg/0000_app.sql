@@ -763,6 +763,7 @@ CREATE TABLE "workflow_runs" (
 	"owner_id" text DEFAULT '' NOT NULL,
 	"actor_user_id" text,
 	"sandbox_reclaimed_at" bigint,
+	"org_id" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
@@ -770,6 +771,26 @@ CREATE TABLE "workflow_runs" (
 CREATE INDEX "workflow_runs_status_updated" ON "workflow_runs" ("status","updated_at");
 --> statement-breakpoint
 CREATE INDEX "workflow_runs_workflow" ON "workflow_runs" ("workflow_id");
+--> statement-breakpoint
+DO $run_org$ BEGIN
+  -- workflow run org begin
+  -- The org a run belongs to, copied from its workflow when the run starts.
+  -- Deleting a workflow removes its definition and keeps its runs, so usage
+  -- reads the org from the run: the run's spend stays in the org's totals.
+  -- The trigger, not each caller, writes it, so every insert path (and an
+  -- older release during a rolling update) records it.
+  ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS org_id text;
+  CREATE OR REPLACE FUNCTION valet_workflow_run_org() RETURNS trigger LANGUAGE plpgsql AS $org$
+  BEGIN
+    IF NEW.org_id IS NULL THEN
+      SELECT d.org_id INTO NEW.org_id FROM workflow_definitions d WHERE d.id = NEW.workflow_id;
+    END IF;
+    RETURN NEW;
+  END $org$;
+  CREATE OR REPLACE TRIGGER workflow_runs_org BEFORE INSERT ON workflow_runs
+    FOR EACH ROW EXECUTE FUNCTION valet_workflow_run_org();
+  -- workflow run org end
+END $run_org$;
 --> statement-breakpoint
 CREATE TABLE "workflow_checkpoints" (
 	"run_id" text NOT NULL,
@@ -923,7 +944,8 @@ CREATE TABLE "action_invocations" (
 	"error" text,
 	"started_at" bigint,
 	"resolved_by" text,
-	"caller" text
+	"caller" text,
+	"queue_item_id" text
 );
 --> statement-breakpoint
 CREATE INDEX "action_invocations_session" ON "action_invocations" ("session_id");
@@ -1555,10 +1577,46 @@ BEGIN
   CREATE INDEX IF NOT EXISTS usage_entry_facts_tools_window ON usage_entry_facts(created_at, session_id) WHERE tool_calls > 0;
   CREATE INDEX IF NOT EXISTS usage_entry_facts_outcomes_window ON usage_entry_facts(created_at, session_id) WHERE pull_requests > 0 OR reviews > 0;
 
-  CREATE OR REPLACE FUNCTION valet_usage_fact(e engine_entries) RETURNS usage_entry_facts
+  -- usage step attribution begin
+  -- `session_id` of a fact is the session id the entry bills to. A Thread
+  -- workflow step prompts the workspace assistant, so its turns are written
+  -- to the assistant session. The queue item carries the step's dispatch id
+  -- (`workflow:{runId}:{nodeId}[:{iteration}][:repair]`), and the turn bills
+  -- to that step's id (`wf:{runId}:{nodeId}[:{iteration}]`), the key a
+  -- session step already uses. Every rollup then attributes the turn to the
+  -- workflow run and the step, not to the assistant. A run with no org (its
+  -- workflow was deleted before runs kept their org) cannot be scoped to a
+  -- tenant, so its turns stay on the assistant and keep counting there.
+  -- The step id of a turn or action from a queue item, or NULL. Indexed probes of the queue
+  -- item, its source, and the run. A queued prompt that send-now promoted is
+  -- a new item without the dispatch id, which is unique per session; it
+  -- names its source in `promotedFromItemId`, and the source carries the id.
+  -- usage step session begin
+  CREATE OR REPLACE FUNCTION valet_usage_step_session(session_id text, queue_item_id text) RETURNS text
+  LANGUAGE sql STABLE AS $step$
+    -- `:repair` marks the repair turn only after a complete step id
+    -- (`{run}:{node}[:{iteration}]`); a node may itself be named `repair`.
+    SELECT 'wf:' || regexp_replace(substr(src.dispatch_id, 10), '^([^:]+:[^:]+(:[0-9]+)?):repair$', '\1')
+    FROM engine_queue_items src JOIN workflow_runs r ON r.id = split_part(src.dispatch_id, ':', 2)
+    WHERE src.session_id = valet_usage_step_session.session_id AND src.dispatch_id LIKE 'workflow:%' AND r.org_id IS NOT NULL
+      -- A scalar source id keeps this a primary-key probe. The id is read
+      -- from the metadata text, never through a jsonb cast: the metadata
+      -- copies prompt arguments, and text jsonb rejects (a lone surrogate
+      -- escape) would make the cast throw and fail the entry's write. The
+      -- engine writes the key at the top level; a copy nested in a string
+      -- value is escaped (\") and does not match.
+      AND src.id = (SELECT CASE WHEN q.dispatch_id IS NULL
+          THEN substring(q.metadata FROM '"promotedFromItemId":"([^"\\]+)"') ELSE q.id END
+        FROM engine_queue_items q WHERE q.id = valet_usage_step_session.queue_item_id
+          AND q.session_id = valet_usage_step_session.session_id)
+  $step$;
+  -- usage step session end
+
+  -- The fact of an entry billed to `billing_session`.
+  CREATE OR REPLACE FUNCTION valet_usage_fact_for(e engine_entries, billing_session text) RETURNS usage_entry_facts
   LANGUAGE sql IMMUTABLE AS $fact$
-    SELECT e.id, e.session_id,
-      CASE WHEN e.session_id LIKE 'wf:%' THEN split_part(e.session_id, ':', 2) END,
+    SELECT e.id, billing_session,
+      CASE WHEN billing_session LIKE 'wf:%' THEN split_part(billing_session, ':', 2) END,
       e.created_at, e.model, e.usage::jsonb, e.cost::jsonb,
       COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'status' IN ('completed', 'error')),
       COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'toolName' = 'bash'
@@ -1569,6 +1627,17 @@ BEGIN
       THEN COALESCE(replace(e.parts, chr(92) || 'u0000', chr(92) || 'uFFFD')::jsonb, '[]'::jsonb)
       ELSE '[]'::jsonb END) p
   $fact$;
+
+  -- Only an assistant message with a queue item can be a Thread-step turn
+  -- (it alone carries usage or tool calls), so every other entry skips the
+  -- probe, and a Thread-step turn probes once.
+  CREATE OR REPLACE FUNCTION valet_usage_fact(e engine_entries) RETURNS usage_entry_facts
+  LANGUAGE sql STABLE AS $fact$
+    SELECT valet_usage_fact_for(e, CASE WHEN e.queue_item_id IS NOT NULL AND e.entry_type = 'message'
+        AND e.role = 'assistant' AND e.session_id NOT LIKE 'wf:%'
+      THEN COALESCE(valet_usage_step_session(e.session_id, e.queue_item_id), e.session_id) ELSE e.session_id END)
+  $fact$;
+  -- usage step attribution end
 
   DROP TRIGGER IF EXISTS engine_entries_usage_fact ON engine_entries;
   CREATE OR REPLACE FUNCTION valet_sync_usage_fact() RETURNS trigger LANGUAGE plpgsql AS $sync$
@@ -1603,12 +1672,12 @@ BEGIN
     FROM usage_entry_facts f JOIN agent_sessions s ON s.id = f.session_id
     LEFT JOIN workflow_runs r ON r.id = f.workflow_run_id
     UNION ALL
+    -- The run carries its org, so a deleted workflow's spend still counts.
     SELECT f.entry_id, f.session_id, r.id, f.created_at, f.model, f.usage, f.cost,
-      f.tool_calls, f.pull_requests, f.reviews, d.org_id, CASE WHEN r.owner_type = 'user' THEN NULLIF(r.owner_id, '') END,
+      f.tool_calls, f.pull_requests, f.reviews, r.org_id, CASE WHEN r.owner_type = 'user' THEN NULLIF(r.owner_id, '') END,
       r.owner_type, NULLIF(r.owner_id, ''), r.workflow_id, 'workflow'::text
     FROM usage_entry_facts f JOIN workflow_runs r ON r.id = f.workflow_run_id
-    JOIN workflow_definitions d ON d.id = r.workflow_id
-    WHERE NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = f.session_id);
+    WHERE r.org_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = f.session_id);
 
   CREATE OR REPLACE VIEW cost_entries AS
     SELECT entry_id, session_id, created_at, model, org_id, user_id, owner_type, owner_id,
@@ -1937,11 +2006,10 @@ CREATE OR REPLACE VIEW usage_daily_entries AS
  LEFT JOIN workflow_runs r ON h.session_id LIKE 'wf:%' AND r.id=split_part(h.session_id,':',2)
  WHERE h.source_kind='engine'
  UNION ALL
- SELECT h.*,d.org_id,CASE WHEN r.owner_type='user' THEN NULLIF(r.owner_id,'') END,r.owner_type,NULLIF(r.owner_id,''),
+ SELECT h.*,r.org_id,CASE WHEN r.owner_type='user' THEN NULLIF(r.owner_id,'') END,r.owner_type,NULLIF(r.owner_id,''),
  r.id,r.workflow_id,'workflow'::text
  FROM usage_daily h JOIN workflow_runs r ON h.session_id LIKE 'wf:%' AND r.id=split_part(h.session_id,':',2)
- JOIN workflow_definitions d ON d.id=r.workflow_id
- WHERE h.source_kind='engine' AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
+ WHERE h.source_kind='engine' AND r.org_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
  UNION ALL
  SELECT h.*,h.org_id,h.user_id,CASE WHEN h.team_id IS NOT NULL THEN 'team' ELSE 'user' END,
  COALESCE(h.team_id,h.user_id),NULL,NULL,'proxy'
@@ -1963,11 +2031,10 @@ CREATE OR REPLACE VIEW usage_hourly_entries AS
  LEFT JOIN workflow_runs r ON h.session_id LIKE 'wf:%' AND r.id=split_part(h.session_id,':',2)
  WHERE h.source_kind='engine'
  UNION ALL
- SELECT h.*,d.org_id,CASE WHEN r.owner_type='user' THEN NULLIF(r.owner_id,'') END,r.owner_type,NULLIF(r.owner_id,''),
+ SELECT h.*,r.org_id,CASE WHEN r.owner_type='user' THEN NULLIF(r.owner_id,'') END,r.owner_type,NULLIF(r.owner_id,''),
  r.id,r.workflow_id,'workflow'::text
  FROM usage_hourly h JOIN workflow_runs r ON h.session_id LIKE 'wf:%' AND r.id=split_part(h.session_id,':',2)
- JOIN workflow_definitions d ON d.id=r.workflow_id
- WHERE h.source_kind='engine' AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
+ WHERE h.source_kind='engine' AND r.org_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_sessions s WHERE s.id=h.session_id)
  UNION ALL
  SELECT h.*,h.org_id,h.user_id,CASE WHEN h.team_id IS NOT NULL THEN 'team' ELSE 'user' END,
  COALESCE(h.team_id,h.user_id),NULL,NULL,'proxy'
@@ -2004,9 +2071,18 @@ CREATE TABLE IF NOT EXISTS usage_action_hourly (
   PRIMARY KEY (dimension_key, hour_ms)
 );
 CREATE INDEX IF NOT EXISTS usage_action_hourly_window ON usage_action_hourly(org_id, hour_ms);
+-- usage action fact begin
+-- `session_id` of an action fact is the session id the action bills to. A
+-- model-directed action from a Thread step's turn names its queue item and
+-- bills to the step, as the turn's model spend does, so cost per outcome
+-- pairs them. The audit row keeps the session that ran it.
 CREATE OR REPLACE FUNCTION valet_action_fact(a action_invocations)
-RETURNS usage_action_facts LANGUAGE sql IMMUTABLE AS $function$
-  SELECT a.invocation_id, COALESCE(a.started_at, a.created_at), a.org_id, a.session_id, a.workflow_execution_id,
+RETURNS usage_action_facts LANGUAGE sql STABLE AS $function$
+  SELECT a.invocation_id, COALESCE(a.started_at, a.created_at), a.org_id,
+    CASE WHEN a.queue_item_id IS NOT NULL AND a.session_id NOT LIKE 'wf:%'
+      THEN COALESCE(valet_usage_step_session(a.session_id, a.queue_item_id), a.session_id)
+      ELSE a.session_id END,
+    a.workflow_execution_id,
     CASE WHEN a.service IS NOT NULL AND a.action_id IS NOT NULL
       AND a.status IN ('completed', 'error') AND a.duration_ms IS NOT NULL THEN 1 ELSE 0 END::bigint,
     CASE WHEN a.status = 'completed' AND a.duration_ms IS NOT NULL
@@ -2021,6 +2097,7 @@ RETURNS usage_action_facts LANGUAGE sql IMMUTABLE AS $function$
         CASE WHEN a.result->'data'->>'channel' LIKE 'D%' THEN 'slack_dm_sent' ELSE 'slack_message_sent' END
     END END;
 $function$;
+-- usage action fact end
 CREATE TABLE IF NOT EXISTS usage_skill_facts (
   fact_key text PRIMARY KEY,
   invocation_id text NOT NULL REFERENCES skill_invocations(id) ON DELETE CASCADE,
@@ -2476,6 +2553,13 @@ INSERT INTO usage_member_facts
 CREATE OR REPLACE VIEW usage_member_activity_ready AS SELECT 1 AS version FROM usage_member_facts,usage_member_hourly WHERE false;
 
 END $member$;
+
+--> statement-breakpoint
+-- A fresh database has no Thread-step turns to move, so it is ready here.
+-- A deployed database gets this view only from the completed repair
+-- (lib/usage-step-attribution.ts): no install section other repairs run
+-- creates it, so an interrupted backfill stays pending until it finishes.
+CREATE OR REPLACE VIEW usage_step_attribution_ready AS SELECT 1 AS version WHERE false;
 
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "event_receipts" (

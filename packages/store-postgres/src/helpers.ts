@@ -101,6 +101,14 @@ export function asCommandSource(value: unknown): CommandResultEntry["source"] {
   return "builtin";
 }
 
+/**
+ * `entry_type` of a usage-only row: one model call's usage and cost with no
+ * engine entry shape. The API writes it for a workflow LLM step, which
+ * calls the model outside any engine session, so the usage projection
+ * counts the call (api `workflows/step-usage.ts`). Entry readers skip it.
+ */
+export const USAGE_ENTRY_TYPE = "usage";
+
 /** Raw column shape of a `SELECT * FROM engine_entries` row. */
 export interface EntryRow {
   id: string;

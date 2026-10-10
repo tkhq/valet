@@ -7,7 +7,7 @@
  */
 import { eq, inArray, sql, type SQL } from "drizzle-orm";
 import { usageRead } from "./usage-read.js";
-import { getMemberAgentDays } from "./usage-member-activity.js";
+import { getMemberAgentDays, scopedAgentActivity } from "./usage-member-activity.js";
 import { getActionToolCalls, getActionOutcomes, getSkillBreakdown } from "./usage-aux-rollups.js";
 import { proxyPeriodRows, usagePeriodRows, HOURLY_BUCKET_COLS } from "./usage-hourly.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -274,31 +274,25 @@ async function queryDailyAgentActivity(
 ): Promise<DailyAgentActivityResponse> {
   const period = periodFromOpts(opts);
   const activityPeriod = period.activityStartMs === undefined ? period : { ...period, startMs: period.activityStartMs };
-  const where = scopeWhere("ce.", activityPeriod, opts.scope);
   type ActivityRow = {
     day_ms: unknown; team_id: string | null; team_name: string | null;
     kind: "assistant" | "child" | "workflow" | "session"; active_agents: unknown;
   };
   // AppDb abstracts Postgres and PGlite; the selected columns define this result.
+  // Keyed by the session that made each call, as every active-agent count is.
   const rows = await db.execute(sql`
-    SELECT (floor(ce.created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
-      CASE WHEN ce.owner_type = 'team' THEN ce.owner_id END AS team_id,
+    SELECT (floor(x.created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms,
+      CASE WHEN x.owner_type = 'team' THEN x.owner_id END AS team_id,
       t.name AS team_name,
       CASE
-        WHEN ce.use_case = 'workflow' THEN 'workflow'
-        WHEN ce.session_id LIKE 'orchestrator:%' OR EXISTS (
-          SELECT 1 FROM assistants a WHERE a.session_id = ce.session_id AND a.org_id = ce.org_id
-        ) THEN 'assistant'
-        WHEN EXISTS (
-          SELECT 1 FROM child_watches w WHERE w.child_session_id = ce.session_id AND w.org_id = ce.org_id
-        ) THEN 'child'
+        WHEN x.session_id LIKE 'wf:%' THEN 'workflow'
+        WHEN x.assistant THEN 'assistant'
+        WHEN x.child THEN 'child'
         ELSE 'session'
       END AS kind,
-      COUNT(DISTINCT ce.session_id) AS active_agents
-    FROM ${usagePeriodRows(activityPeriod)} ce
-    LEFT JOIN teams t ON ce.owner_type = 'team' AND t.id = ce.owner_id AND t.org_id = ce.org_id
-    WHERE ${where}
-      AND ce.session_id IS NOT NULL AND ce.positive_turns > 0
+      COUNT(DISTINCT x.session_id) AS active_agents
+    FROM ${scopedAgentActivity(opts.scope, activityPeriod)} x
+    LEFT JOIN teams t ON x.owner_type = 'team' AND t.id = x.owner_id AND t.org_id = x.org_id
     GROUP BY 1, 2, 3, 4 ORDER BY 1, 2 NULLS FIRST, 4
   `) as { rows: ActivityRow[] };
   return {
@@ -332,11 +326,11 @@ async function queryUsageBreakdown(
 
   interface GroupRow extends BucketRow {
     grouping_key: unknown; use_case: string | null; model: string | null;
-    day_ms: unknown; user_id: string | null; active_agents: unknown;
+    day_ms: unknown; user_id: string | null;
   }
   // One cost view scan produces the use-case, model, day, member, and total
   // buckets. GROUPING distinguishes a real NULL value from an omitted column.
-  const [grouped, skillBreakdown, agentDays] = await Promise.all([
+  const [grouped, agents, skillBreakdown, agentDays] = await Promise.all([
     db.execute(sql`
       WITH scoped AS MATERIALIZED (
         SELECT use_case, model, user_id, session_id,
@@ -349,10 +343,11 @@ async function queryUsageBreakdown(
         use_case, model, day_ms, user_id, ${HOURLY_BUCKET_COLS}
       FROM scoped
       GROUP BY GROUPING SETS ((use_case), (model), (day_ms), (user_id), ())
-      ) SELECT grouped.*, CASE WHEN grouping_key=15 THEN
-        (SELECT COUNT(DISTINCT session_id) FROM scoped WHERE session_id IS NOT NULL AND positive_turns>0)
-        ELSE 0 END AS active_agents FROM grouped
+      ) SELECT grouped.* FROM grouped
     `) as Promise<{ rows: GroupRow[] }>,
+    // Agents are the sessions that made the calls, not the billing keys.
+    db.execute(sql`SELECT COUNT(DISTINCT x.session_id) AS active_agents
+      FROM ${scopedAgentActivity(opts.scope, period)} x`) as Promise<{ rows: { active_agents: unknown }[] }>,
     getSkillBreakdown(db, period, opts.scope),
     agentWindow ? getMemberAgentDays(db, opts.scope, { ...period, startMs: agentWindow.sinceMs }) : Promise.resolve([]),
   ]);
@@ -381,7 +376,7 @@ async function queryUsageBreakdown(
   return {
     windowMs: period.windowMs ?? period.endMs - period.startMs,
     scope: opts.scope.scope,
-    activeAgents: toNum(totals?.active_agents),
+    activeAgents: toNum(agents.rows[0]?.active_agents),
     totalCostUsd: total.costUsd,
     totalTokens: total.totalTokens,
     totalInputTokens: total.inputTokens,
@@ -428,20 +423,37 @@ async function queryUsageDrillItems(
     }));
   }
   if (useCase === "workflow") {
+    // One row per workflow, then its steps. Every model call a workflow makes
+    // bills to `wf:{runId}:{nodeId}[:{iteration}]`, so the step is the third
+    // part of the session id; foreach iterations of one step add up.
     const whereCe = scopeWhere("ce.", period, scope);
-    interface Row { workflow_run_id: string | null; name: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
+    interface Row { workflow_id: string; name: string | null; node_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown; runs: unknown }
     const r = (await db.execute(sql`
-      SELECT ce.workflow_run_id, wd.name,
-             COALESCE(SUM(ce.cost_total),0) AS cost_usd, COALESCE(SUM(ce.total_tokens),0) AS total_tokens, COALESCE(SUM(ce.turns),0) AS turns
-      FROM ${usagePeriodRows(period)} ce
-      LEFT JOIN workflow_definitions wd ON wd.id = ce.workflow_id
-      WHERE ${whereCe} AND ce.use_case = 'workflow' AND ce.workflow_run_id IS NOT NULL
-      GROUP BY ce.workflow_run_id, wd.name
-      ORDER BY cost_usd DESC LIMIT 200`)) as { rows: Row[] };
-    return r.rows.map((x) => ({
-      id: x.workflow_run_id ?? "", label: x.name ?? `run ${x.workflow_run_id}`, useCase, isChild: false,
-      parentId: null, sessionId: null, costUsd: toNum(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
-    }));
+      WITH spend AS (
+        SELECT ce.workflow_id, split_part(ce.session_id, ':', 3) AS node_id, ce.workflow_run_id,
+               ce.cost_total, ce.total_tokens, ce.turns
+        FROM ${usagePeriodRows(period)} ce
+        WHERE ${whereCe} AND ce.use_case = 'workflow' AND ce.workflow_id IS NOT NULL
+      ), workflows AS (
+        SELECT workflow_id, SUM(cost_total) AS cost_usd FROM spend
+        GROUP BY workflow_id ORDER BY cost_usd DESC LIMIT 200
+      )
+      SELECT s.workflow_id, wd.name, CASE WHEN GROUPING(s.node_id) = 0 THEN s.node_id END AS node_id,
+             COALESCE(SUM(s.cost_total),0) AS cost_usd, COALESCE(SUM(s.total_tokens),0) AS total_tokens,
+             COALESCE(SUM(s.turns),0) AS turns, COUNT(DISTINCT s.workflow_run_id) AS runs
+      FROM spend s JOIN workflows w ON w.workflow_id = s.workflow_id
+      LEFT JOIN workflow_definitions wd ON wd.id = s.workflow_id
+      GROUP BY GROUPING SETS ((s.workflow_id, wd.name), (s.workflow_id, wd.name, s.node_id))
+      ORDER BY cost_usd DESC`)) as { rows: Row[] };
+    return r.rows.map((x) => {
+      const common = {
+        useCase, sessionId: null, workflowId: x.workflow_id, runs: toNum(x.runs),
+        costUsd: toNum(x.cost_usd), totalTokens: toNum(x.total_tokens), turns: toNum(x.turns),
+      };
+      return x.node_id === null
+        ? { ...common, id: x.workflow_id, label: x.name ?? x.workflow_id, isChild: false, parentId: null }
+        : { ...common, id: `${x.workflow_id}/${x.node_id}`, label: x.node_id, isChild: true, parentId: x.workflow_id };
+    });
   }
   // Proxy hours retain harness identity; partial hours retain exact timestamps.
   const whereProxy = scope.scope === "team"
@@ -615,20 +627,25 @@ export function createUsageTurnExportStream(
             WHERE ${scopeWhere("ce.", period, opts.scope)} ${cursorWhere}
             ORDER BY ce.created_at DESC, ce.use_case DESC, ce.entry_id DESC
             LIMIT ${TURN_EXPORT_BATCH_SIZE}
-          ), page_repositories AS (
-            SELECT sr.session_id, string_agg(sr.full_name, ';' ORDER BY sr.position) AS repository
-            FROM session_repos sr
-            JOIN (SELECT DISTINCT session_id FROM page WHERE session_id IS NOT NULL) ps
-              ON ps.session_id = sr.session_id
-            GROUP BY sr.session_id
           )
           SELECT page.*, u.name AS employee_name, u.email AS employee_email,
                  pr.repository, q.channel::jsonb->>'channelType' AS channel_type,
                  q.channel::jsonb->>'channelId' AS channel_id
           FROM page
           LEFT JOIN "user" u ON u.id = page.user_id
-          LEFT JOIN page_repositories pr ON pr.session_id = page.session_id
-          LEFT JOIN engine_entries e ON e.id = page.entry_id AND e.session_id = page.session_id
+          -- By entry id alone: a Thread step's turn bills to its step's id,
+          -- but the assistant session ran it and holds its channel and repos.
+          -- That session's context is exported only when the session itself
+          -- passes this export's scope: a team run can report through a
+          -- member's personal assistant, whose context the team cannot see.
+          LEFT JOIN engine_entries e ON page.use_case <> 'proxy' AND e.id = page.entry_id
+            AND (e.session_id = page.session_id OR EXISTS (
+              SELECT 1 FROM agent_sessions run_src WHERE run_src.id = e.session_id
+                AND ${sourceSessionInScope(sql`run_src`, opts.scope)}))
+          LEFT JOIN LATERAL (
+            SELECT string_agg(sr.full_name, ';' ORDER BY sr.position) AS repository
+            FROM session_repos sr WHERE sr.session_id = e.session_id
+          ) pr ON true
           LEFT JOIN engine_queue_items q ON q.id = e.queue_item_id AND q.session_id = e.session_id
           ORDER BY page.created_at DESC, page.use_case DESC, page.entry_id DESC
         `)) as { rows: TurnExportRow[] };
@@ -652,6 +669,20 @@ export function createUsageTurnExportStream(
       }
     },
   });
+}
+
+/** A session row passes the usage scope, by the rule `cost_entries` applies
+ * to a session's own spend. `alias` is a hardcoded table alias. */
+function sourceSessionInScope(alias: SQL, s: UsageScope): SQL {
+  const base = sql`${alias}.org_id = ${s.orgId}`;
+  switch (s.scope) {
+    case "team":
+      return sql`${base} AND ${alias}.owner_type = 'team' AND ${alias}.owner_id = ${s.teamId}`;
+    case "me":
+      return sql`${base} AND ${alias}.user_id = ${s.userId}`;
+    case "org":
+      return base;
+  }
 }
 
 // ── Per-user windows (home card + /summary) ──────────────────────────────────

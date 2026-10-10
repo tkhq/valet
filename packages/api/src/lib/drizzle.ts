@@ -26,6 +26,7 @@ import { prepareMemberActivity, MEMBER_ACTIVITY_PUBLISH_SQL } from "./usage-memb
 import { prepareAuxUsageRollups, AUX_USAGE_PUBLISH_SQL } from "./usage-aux-rollups.js";
 import { prepareUsageDaily, prepareUsageHourly, usageHourlyPublishSql } from "./usage-hourly-migration.js";
 import { prepareUsageAnalytics, usageAnalyticsPublishSql, projectedCostViewSql } from "./usage-analytics-migration.js";
+import { prepareUsageStepAttribution, USAGE_STEP_ATTRIBUTION_PUBLISH_SQL, WORKFLOW_RUN_ORG_BACKFILL, WORKFLOW_RUN_ORG_SQL } from "./usage-step-attribution.js";
 import * as schema from "../schema/index.js";
 
 /** Application Drizzle handle. The engine's session store has its own
@@ -1735,6 +1736,19 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
       `WHERE "owner_type" = 'team' AND "credential_owner_mode" IS NULL RETURNING "id"`,
   },
   {
+    // Before the usage repairs: the action fact rule reads it.
+    describe: "action_invocations.queue_item_id column",
+    probe: { kind: "column", table: "action_invocations", column: "queue_item_id" },
+    sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "queue_item_id" text',
+  },
+  {
+    // Before the usage repairs: their views and the billing rule read it.
+    describe: "workflow_runs.org_id column",
+    probe: { kind: "column", table: "workflow_runs", column: "org_id" },
+    sql: WORKFLOW_RUN_ORG_SQL,
+    backfill: WORKFLOW_RUN_ORG_BACKFILL,
+  },
+  {
     describe: "usage_entry_facts projection and indexes",
     probe: { kind: "column", table: "usage_entries", column: "entry_id" },
     prepare: prepareUsageAnalytics,
@@ -1789,6 +1803,9 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   {describe:"usage_daily_org_window",probe:{kind:"index",index:"usage_daily_org_window"},sql:"CREATE INDEX IF NOT EXISTS usage_daily_org_window ON usage_daily(org_id,created_at)"},
   {describe:"usage_daily_empty",probe:{kind:"index",index:"usage_daily_empty"},sql:"CREATE INDEX IF NOT EXISTS usage_daily_empty ON usage_daily(created_at) WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0"},
   {describe:"usage_daily_outcomes",probe:{kind:"index",index:"usage_daily_outcomes"},sql:"CREATE INDEX IF NOT EXISTS usage_daily_outcomes ON usage_daily(created_at,session_id) WHERE pull_requests>0 OR reviews>0"},
+  // After every rollup and its views: the backfill moves facts, and their
+  // triggers move the hours and days.
+  { describe: "usage workflow step attribution", probe: { kind: "column", table: "usage_step_attribution_ready", column: "version" }, prepare: prepareUsageStepAttribution, sql: USAGE_STEP_ATTRIBUTION_PUBLISH_SQL },
 
 ];
 

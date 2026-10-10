@@ -1322,6 +1322,10 @@ export const workflowRuns = pgTable(
     // sandboxes (workflows/sandbox-reclaim.ts). NULL until the run settles
     // AND every session sandbox is gone — the sweep retries NULL rows.
     sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
+    // The workflow's org when the run started, written by the
+    // `workflow_runs_org` insert trigger. Usage reads it, so a run's spend
+    // keeps its org after the workflow is deleted.
+    orgId: text("org_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -1597,6 +1601,9 @@ export const actionInvocations = pgTable(
     /** Who made an external call (`pol:ext:` rows): `mcp:<OAuth client id>`,
      * `cli`, `apiKey`, or `session`. Null on other rows. */
     caller: text("caller"),
+    /** The queue item whose turn made a model-directed call. Usage bills the
+     * action with that turn (`valet_action_fact`). Null on other rows. */
+    queueItemId: text("queue_item_id"),
   },
   (t) => [
     index("action_invocations_session").on(t.sessionId),

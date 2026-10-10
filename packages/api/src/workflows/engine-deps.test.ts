@@ -18,7 +18,7 @@ import * as piAi from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage, workflowRunThreadKey } from "./engine-deps.js";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { legacyWorkflowAdmissions, assistants, orgs, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
@@ -843,7 +843,7 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
       }
       const runId = `wfrun_llm_${model.includes("/") ? "namespaced" : "bare"}`;
       await seedRun(api, runId, `wf_llm_${model.includes("/") ? "namespaced" : "bare"}`);
-      const result = await deps.llmComplete({ runId, model, prompt: "hi" });
+      const result = await deps.llmComplete({ runId, nodeId: "summarize", iteration: 0, model, prompt: "hi" });
       expect(result.text).toBe("ok");
       expect(stream).toHaveBeenCalledWith(expect.objectContaining({
         id: "gpt-6.1-sol", provider: "openai", contextWindow: 272_000,
@@ -870,9 +870,9 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
       await db.update(orgs).set({ reasoningSettings: { default: "medium" } }).where(eq(orgs.id, LOCAL_ORG.id));
       const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
       await seedRun(api, "wfrun_reasoning", "wf_reasoning");
-      await deps.llmComplete({ runId: "wfrun_reasoning", model: "openai/gpt-6.1-sol", prompt: "hi" });
+      await deps.llmComplete({ runId: "wfrun_reasoning", nodeId: "summarize", iteration: 0, model: "openai/gpt-6.1-sol", prompt: "hi" });
       expect(stream.mock.calls[0]![2]).toMatchObject({ reasoning: "medium" });
-      await deps.llmComplete({ runId: "wfrun_reasoning", model: "openai/gpt-6.1-sol", prompt: "hi", reasoning: "high" });
+      await deps.llmComplete({ runId: "wfrun_reasoning", nodeId: "summarize", iteration: 0, model: "openai/gpt-6.1-sol", prompt: "hi", reasoning: "high" });
       expect(stream.mock.calls[1]![2]).toMatchObject({ reasoning: "high" });
     } finally { piAi.registerApiProvider(original); }
   });
@@ -893,7 +893,40 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
       const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
       const runId = `wfrun_provider_${stopReason}`;
       await seedRun(api, runId, `wf_provider_${stopReason}`);
-      await expect(deps.llmComplete({ runId, model: "openai/gpt-6.1-sol", prompt: "hi" })).rejects.toThrow('Provider rejected this model');
+      await expect(deps.llmComplete({ runId, nodeId: "summarize", iteration: 0, model: "openai/gpt-6.1-sol", prompt: "hi" })).rejects.toThrow('Provider rejected this model');
+    } finally { piAi.registerApiProvider(original); }
+  });
+
+  it("records each call's usage under its step and iteration, a failed call included", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    const original = piAi.getApiProvider("openai-responses");
+    if (!original) throw new Error("OpenAI transport is required");
+    const usage = { input: 10, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 12,
+      cost: { input: 0.001, output: 0.0005, cacheRead: 0, cacheWrite: 0, total: 0.0015 } };
+    let fail = false;
+    const stream = vi.fn<piAi.ApiStreamSimpleFunction>(() => {
+      const events = piAi.createAssistantMessageEventStream();
+      events.end({ ...fauxAssistantMessage(fail ? "" : "ok"), usage,
+        ...(fail ? { stopReason: "error" as const, errorMessage: "Provider failed after billing" } : {}) });
+      return events;
+    });
+    piAi.registerApiProvider({ api: "openai-responses", stream, streamSimple: stream });
+    try {
+      api = await bootTestApi();
+      const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+      const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+      await seedRun(api, "wfrun_usage", "wf_usage");
+      await deps.llmComplete({ runId: "wfrun_usage", nodeId: "summarize", iteration: 2, model: "openai/gpt-6.1-sol", prompt: "hi" });
+      fail = true;
+      await expect(deps.llmComplete({ runId: "wfrun_usage", nodeId: "classify", iteration: 0, model: "openai/gpt-6.1-sol", prompt: "hi" }))
+        .rejects.toThrow("Provider failed after billing");
+      // AppDb abstracts Postgres and PGlite; the selected columns define the row.
+      const rows = await db.execute(sql`SELECT session_id, entry_type, (usage::jsonb->>'total')::int AS total
+        FROM engine_entries WHERE session_id LIKE 'wf:wfrun_usage:%' ORDER BY session_id`) as { rows: unknown[] };
+      expect(rows.rows).toEqual([
+        { session_id: "wf:wfrun_usage:classify", entry_type: "usage", total: 12 },
+        { session_id: "wf:wfrun_usage:summarize:2", entry_type: "usage", total: 12 },
+      ]);
     } finally { piAi.registerApiProvider(original); }
   });
 
@@ -912,7 +945,7 @@ describe("buildWorkflowEngineDeps: llmComplete", () => {
     const runId = "wfrun_llm_unknown";
     await seedRun(api, runId, "wf_llm_unknown");
     await expect(
-      deps.llmComplete({ runId, model: "definitely-not-a-real-model-id", prompt: "hi" }),
+      deps.llmComplete({ runId, nodeId: "summarize", iteration: 0, model: "definitely-not-a-real-model-id", prompt: "hi" }),
     ).rejects.toThrow(/unknown or unavailable model/);
   });
 });

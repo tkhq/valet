@@ -78,6 +78,7 @@ import {
 import { context as otelContext, trace as otelTrace, type Span } from "@opentelemetry/api";
 import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
+import { modelCallUsage } from "./model-call-usage.js";
 import {
   applyPrune,
   estimateContextTokens,
@@ -5470,16 +5471,12 @@ export class Thread {
         let turnModel: string | undefined;
         if (event.message.role === "assistant") {
           const u = event.message.usage;
-          this.lastAssistantUsage = {
-            input: u.input,
-            output: u.output,
-            cacheRead: u.cacheRead,
-            cacheWrite: u.cacheWrite,
-            total: u.totalTokens || u.input + u.output + u.cacheRead + u.cacheWrite,
-          };
-          // All-zero usage (dev fakes, providers that don't report) is
-          // "no usage reported" — omit, mirroring the cost-is-null rule.
-          if (this.lastAssistantUsage.total > 0) turnUsage = { ...this.lastAssistantUsage };
+          // The shared rule (`modelCallUsage`): all-zero usage is "no usage
+          // reported", and an unpriced call has no cost, never "$0".
+          const call = modelCallUsage(u);
+          this.lastAssistantUsage = call.reported;
+          turnUsage = call.usage;
+          turnCost = call.cost;
           turnModel = event.message.model;
           // Cache-break telemetry (TKAI-320): compare against the previous
           // turn's snapshot and count breaks by cause. Alert-only — nothing
@@ -5505,19 +5502,6 @@ export class Thread {
               }
             }
             this.prevCacheSnapshot = snapshot;
-          }
-          // Cost is null, not zero: unpriced models (custom providers, dev
-          // fakes) omit the field entirely — a missing value reads
-          // "unpriced", never "$0".
-          const c = u.cost;
-          if (c && c.total > 0) {
-            turnCost = {
-              input: c.input,
-              output: c.output,
-              cacheRead: c.cacheRead,
-              cacheWrite: c.cacheWrite,
-              total: c.total,
-            };
           }
           if (this.currentAssistantEntry && turnUsage) {
             const entry = this.currentAssistantEntry;
