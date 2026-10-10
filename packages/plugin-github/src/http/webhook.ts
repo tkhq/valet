@@ -96,7 +96,7 @@ async function handleInstallationEvent(effects: GithubDeliveryEffects, payload: 
   }
   if (action === "created") {
     try {
-      await effects.installationCreated({ installationId: id, senderId: senderId(payload) });
+      await effects.installationCreated({ installation: payload.installation, senderId: senderId(payload) });
     } catch (err) {
       console.error("github-app webhook: discovery after installation.created failed:", err);
     }

@@ -715,6 +715,38 @@ export async function reconcileUserInstallations(
   await relinkInstallations(deps, orgId);
 }
 
+/**
+ * Records the one installation an `installation.created` delivery names,
+ * from the delivery's own `installation` object. Anybody can install the
+ * public App, so a delivery never re-reads every installation: a stranger's
+ * install costs one row. The row is bound like any other (see the module
+ * comment), and another organization's installation is approved when the
+ * GitHub user who installed it is an org member with a verified connection.
+ */
+export async function recordCreatedInstallation(
+  deps: GithubAppDeps,
+  orgId: string,
+  rawInstallation: unknown,
+  senderGithubId: string | null,
+): Promise<void> {
+  const [inst] = parseInstallationsResponse([rawInstallation], "installation.created delivery");
+  const config = await loadAppConfig(deps, orgId);
+  if (!config || !inst) return;
+  const owner = await fetchAppOwner(deps, mintAppJwt(config));
+  const memberGithubIds = await loadMemberGithubIds(deps.db, orgId);
+  await deps.db.transaction(async (tx) => {
+    await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
+    const row = await upsertInstallation(
+      tx, orgId, inst, bindingFor(inst, memberGithubIds), (deps.now ?? Date.now)(), isAppOwnerAccount(inst, owner),
+    );
+    const access = installationAccess(row);
+    if (access === "organization" || access === "member") await invalidateWorkflowSources(tx, { orgId });
+  });
+  if (senderGithubId && inst.accountType !== PERSONAL_ACCOUNT_TYPE) {
+    await approveInstalledByMember(deps, orgId, inst.installationId, senderGithubId);
+  }
+}
+
 export type InstallationApprovalResult = "ok" | "not_found" | "personal";
 
 /**
@@ -786,7 +818,10 @@ function parseNextLink(linkHeader: string | null): string | null {
  * like page-2+ installations were removed. Capped at
  * `MAX_INSTALLATION_PAGES` pages as a sanity bound against a misbehaving or
  * malicious upstream looping forever. */
-async function fetchAllInstallations(deps: GithubAppDeps, jwt: string): Promise<ParsedInstallation[]> {
+async function fetchAllInstallations(
+  deps: GithubAppDeps,
+  jwt: string,
+): Promise<{ installations: ParsedInstallation[]; complete: boolean }> {
   const installations: ParsedInstallation[] = [];
   let url: string | null = `${githubApiUrl(deps)}/app/installations?per_page=100`;
   let pages = 0;
@@ -807,7 +842,8 @@ async function fetchAllInstallations(deps: GithubAppDeps, jwt: string): Promise<
     url = parseNextLink(res.headers.get("link"));
   }
 
-  return installations;
+  // A `next` link left over means the cap cut the list off.
+  return { installations, complete: url === null };
 }
 
 /** Discovers the org's GitHub App installations via `GET /app/installations`
@@ -822,7 +858,13 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
   if (!config) return [];
 
   const jwt = mintAppJwt(config);
-  const installations = await fetchAllInstallations(deps, jwt);
+  const { installations, complete } = await fetchAllInstallations(deps, jwt);
+  if (!complete) {
+    // Anybody can install the public App, so strangers can push the list
+    // past the cap. A row missing from a cut-off list may be on a later
+    // page, so nothing is deleted.
+    console.warn(`github-app discovery for org ${orgId}: more than ${MAX_INSTALLATION_PAGES} pages of installations; deleting none`);
+  }
 
   const memberGithubIds = await loadMemberGithubIds(deps.db, orgId);
   const owner = await fetchAppOwner(deps, jwt);
@@ -845,7 +887,7 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
     }
 
     for (const row of existingRows) {
-      if (!seenIds.has(row.installationId)) {
+      if (complete && !seenIds.has(row.installationId)) {
         await tx.delete(githubInstallations).where(eq(githubInstallations.id, row.id));
       }
     }

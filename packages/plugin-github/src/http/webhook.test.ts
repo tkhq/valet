@@ -106,7 +106,7 @@ describe("receiveWebhook", () => {
     expect(bind).toHaveBeenCalledWith({ installationId: 42 });
     expect(bound.installationRemoved).toHaveBeenCalledWith(42);
     expect(bound.installationSuspended.mock.calls).toEqual([[42, true], [42, false]]);
-    expect(bound.installationCreated.mock.calls).toEqual([[{ installationId: 42, senderId: null }]]);
+    expect(bound.installationCreated.mock.calls).toEqual([[{ installation: { id: 42 }, senderId: null }]]);
     expect(bound.emit).not.toHaveBeenCalled();
   });
 
@@ -115,13 +115,14 @@ describe("receiveWebhook", () => {
     // org member installed it.
     const bound = effects();
     const { capability } = webhook(bound);
-    const body = JSON.stringify({ action: "created", installation: { id: 42 }, sender: { id: 4242 } });
+    const installation = { id: 42, account: { login: "acme", id: 1, type: "Organization" } };
+    const body = JSON.stringify({ action: "created", installation, sender: { id: 4242 } });
     await receiveWebhook(
       request(body, { "x-github-event": "installation", "x-hub-signature-256": sign(body) }),
       capability,
       githubTriggerDefs,
     );
-    expect(bound.installationCreated.mock.calls).toEqual([[{ installationId: 42, senderId: "4242" }]]);
+    expect(bound.installationCreated.mock.calls).toEqual([[{ installation, senderId: "4242" }]]);
   });
 
   it("keeps acknowledging when best-effort effects fail", async () => {

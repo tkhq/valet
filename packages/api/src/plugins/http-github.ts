@@ -68,10 +68,10 @@ import {
   discoverInstallations,
   loadAppConfig,
   loadAppConfigWithSource,
-  approveInstalledByMember,
   installationAccess,
   installationServesOrg,
   reconcileUserInstallations,
+  recordCreatedInstallation,
   setInstallationApproval,
   relinkInstallations,
   usableInstallation,
@@ -568,9 +568,8 @@ function deliveryEffects(providers: Providers, orgId: string, acceptsEvents: boo
         .set({ updatedAt: Date.now(), ...(repositorySelection !== undefined ? { repositorySelection } : {}) })
         .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId)));
     },
-    installationCreated: async ({ installationId, senderId }) => {
-      await discoverInstallations(appDeps(providers), orgId);
-      if (senderId) await approveInstalledByMember(appDeps(providers), orgId, installationId, senderId);
+    installationCreated: async ({ installation, senderId }) => {
+      await recordCreatedInstallation(appDeps(providers), orgId, installation, senderId);
     },
     emit: async (event) => {
       await ingestEvent(

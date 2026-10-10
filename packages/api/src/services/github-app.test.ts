@@ -453,6 +453,30 @@ describe("github-app service", () => {
       expect(pageCalls[1].query.page).toBe("2");
     });
 
+    it("deletes nothing when the installation list is cut off at the page cap", async () => {
+      // Anybody can install the public App, so strangers can push the list
+      // past the cap. A row missing from a cut-off list may only be on a
+      // later page.
+      await saveAppConfig({ credentials }, orgId, baseConfig);
+      await db.insert(githubInstallations).values({
+        id: "ghi_late", orgId, installationId: 1, accountLogin: "acme", accountType: "Organization",
+        repositorySelection: "all", suspended: false, createdAt: Date.now(), updatedAt: Date.now(),
+      });
+      fixture = startGithubFixture({
+        listInstallations: (query) => {
+          const page = Number(query.page ?? "1");
+          return {
+            body: [{ id: 1000 + page, account: { login: `stranger-${page}`, id: 5000 + page, type: "User" }, repository_selection: "all", suspended_at: null }],
+            headers: { link: `<${fixture?.url}/app/installations?per_page=100&page=${page + 1}>; rel="next"` },
+          };
+        },
+      });
+      await discoverInstallations(deps(), orgId);
+      const ids = (await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId))).map((r) => r.installationId);
+      expect(ids).toContain(1);
+      expect(ids).toHaveLength(11);
+    });
+
     it("removes rows whose installation is absent from a later response", async () => {
       await saveAppConfig({ credentials }, orgId, baseConfig);
       let installationsBody: unknown[] = [

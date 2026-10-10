@@ -317,27 +317,33 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
       expect(row).toEqual({ suspended: true });
     });
 
+    /** An `installation.created` delivery, shaped as GitHub sends it. */
+    function createdDelivery(id: number, account: { login: string; id: number; type: string }, sender: number): string {
+      return JSON.stringify({
+        action: "created",
+        installation: { id, account, repository_selection: "selected", suspended_at: null },
+        sender: { id: sender },
+      });
+    }
+
+    async function deliverSigned(body: string) {
+      return deliver(body, { "x-github-event": "installation", "x-hub-signature-256": sign(body, ENV_APP.GITHUB_APP_WEBHOOK_SECRET) });
+    }
+
     it("binds a new personal installation to the member who owns that GitHub account", async () => {
       // A member who connected GitHub follows the personal-install link. The
-      // `installation.created` delivery starts discovery, which binds the
-      // installation by GitHub account id. A stranger's stays unbound.
+      // `installation.created` delivery records that one installation and
+      // binds it by GitHub account id. A stranger's stays unbound.
       Object.assign(process.env, ENV_APP);
       api = await bootTestApi({ plugins: [githubPlugin] });
       await seedInstallation();
       await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
         type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242" },
       });
-      useFixture({
-        listInstallations: () => ({
-          body: [
-            { id: 999, account: { login: "acme", id: 1, type: "Organization" }, repository_selection: "all", suspended_at: null },
-            { id: 8801, account: { login: "member", id: 4242, type: "User" }, repository_selection: "selected", suspended_at: null },
-            { id: 8802, account: { login: "stranger", id: 5, type: "User" }, repository_selection: "all", suspended_at: null },
-          ],
-        }),
-      });
-      const created = JSON.stringify({ action: "created", installation: { id: 8801 } });
-      expect(await deliver(created, { "x-github-event": "installation", "x-hub-signature-256": sign(created, ENV_APP.GITHUB_APP_WEBHOOK_SECRET) }))
+      const f = useFixture();
+      expect(await deliverSigned(createdDelivery(8801, { login: "member", id: 4242, type: "User" }, 4242)))
+        .toEqual({ status: 204, body: null });
+      expect(await deliverSigned(createdDelivery(8802, { login: "stranger", id: 5, type: "User" }, 5)))
         .toEqual({ status: 204, body: null });
       const rows = await api.providers.db
         .select({ installationId: githubInstallations.installationId, linkedUserId: githubInstallations.linkedUserId })
@@ -345,6 +351,9 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
       expect(Object.fromEntries(rows.map((r) => [r.installationId, r.linkedUserId]))).toEqual({
         999: null, 8801: "test-member", 8802: null,
       });
+      // A delivery reconciles only its own installation. It never re-reads
+      // every installation, so a stranger's install costs one row.
+      expect(f.calls.filter((c) => c.path === "/app/installations")).toEqual([]);
     });
 
     it("approves another organization's installation only when a member with a verified connection installed it", async () => {
@@ -353,24 +362,16 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
       await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
         type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242" },
       });
-      useFixture({
-        listInstallations: () => ({
-          body: [
-            { id: 8803, account: { login: "members-org", id: 30, type: "Organization" }, repository_selection: "all", suspended_at: null },
-            { id: 8804, account: { login: "strangers-org", id: 31, type: "Organization" }, repository_selection: "all", suspended_at: null },
-          ],
-        }),
-      });
-      for (const [id, sender] of [[8803, 4242], [8804, 5]] as const) {
-        const created = JSON.stringify({ action: "created", installation: { id }, sender: { id: sender } });
-        expect(await deliver(created, { "x-github-event": "installation", "x-hub-signature-256": sign(created, ENV_APP.GITHUB_APP_WEBHOOK_SECRET) }))
-          .toEqual({ status: 204, body: null });
-      }
+      useFixture();
+      await deliverSigned(createdDelivery(8803, { login: "members-org", id: 30, type: "Organization" }, 4242));
+      await deliverSigned(createdDelivery(8804, { login: "strangers-org", id: 31, type: "Organization" }, 5));
+      // The App owner's own account serves every member without approval.
+      await deliverSigned(createdDelivery(8805, { login: "acme", id: 1, type: "Organization" }, 5));
       const status = await call("app-status", { headers: ADMIN });
       const access = Object.fromEntries(
         (status.body as GetGithubAppResponse).installations.map((i) => [i.installationId, i.access]),
       );
-      expect(access).toEqual({ 8803: "organization", 8804: "pending" });
+      expect(access).toEqual({ 8803: "organization", 8804: "pending", 8805: "organization" });
     });
 
     it.each([true, false])("refuses a body above 1 MiB (declared length: %s)", async (declared) => {

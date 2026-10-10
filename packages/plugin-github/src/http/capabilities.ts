@@ -184,9 +184,11 @@ export interface GithubDeliveryEffects {
   installationRemoved(installationId: number): Promise<void>;
   installationSuspended(installationId: number, suspended: boolean): Promise<void>;
   repositorySelectionChanged(installationId: number, repositorySelection: string | undefined): Promise<void>;
-  /** Records a new installation. `senderId` is the GitHub user who
-   * installed it, from the delivery. */
-  installationCreated(created: { installationId: number; senderId: string | null }): Promise<void>;
+  /** Records the one installation a `created` delivery names (its
+   * `installation` object, unparsed). `senderId` is the GitHub user who
+   * installed it. The host never re-reads every installation here, because
+   * anybody can install the public App. */
+  installationCreated(created: { installation: unknown; senderId: string | null }): Promise<void>;
   /** Persists the event and starts subscription dispatch. */
   emit(event: NormalizedEvent): Promise<void>;
   /** Records a verified delivery that no trigger can ingest. */
