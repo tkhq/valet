@@ -540,7 +540,7 @@ describe("github-app service", () => {
       await db.insert(users).values({ id: "member-a", name: "A", email: "a@example.com" });
       await db.insert(orgMembers).values({ orgId, userId: "member-a", role: "member", createdAt: Date.now() });
       await credentials.save({ type: "user", id: "member-a" }, "github", {
-        type: "oauth2", accessToken: "t", metadata: { login: "member-a", githubId: "4242" },
+        type: "oauth2", accessToken: "t", metadata: { login: "member-a", githubId: "4242", githubHost: fixture?.url },
       });
       expect(await approveInstalledByMember(deps(), orgId, 777, "9999")).toBe(false);
       expect(await mintInstallationToken(deps(), orgId, "stranger-org")).toBeNull();
@@ -591,10 +591,11 @@ describe("github-app service", () => {
     beforeEach(async () => {
       await saveAppConfig({ credentials }, orgId, baseConfig);
       await db.insert(orgs).values({ id: "org2", name: "Other org", createdAt: Date.now() });
-      await member("member-a", orgId, { login: "member-a", githubId: "9001" });
-      await member("member-b", orgId, { login: "lookalike" });
-      await member("outsider", "org2", { login: "outsider", githubId: "9003" });
       fixture = startGithubFixture({ listInstallations: () => ({ body: installs }) });
+      const githubHost = fixture.url;
+      await member("member-a", orgId, { login: "member-a", githubId: "9001", githubHost });
+      await member("member-b", orgId, { login: "lookalike" });
+      await member("outsider", "org2", { login: "outsider", githubId: "9003", githubHost });
     });
 
     function linkedByInstallation(rows: { installationId: number; linkedUserId: string | null }[]) {
@@ -614,9 +615,18 @@ describe("github-app service", () => {
     });
 
     it("binds nobody when two members connected the same GitHub account", async () => {
-      await member("member-c", orgId, { login: "member-a", githubId: "9001" });
+      await member("member-c", orgId, { login: "member-a", githubId: "9001", githubHost: fixture?.url });
       const rows = await discoverInstallations(deps(), orgId);
       expect(linkedByInstallation(rows)[222]).toBeNull();
+    });
+
+    it("binds by account id only on the GitHub host the member connected through", async () => {
+      // A numeric account id names one account on one GitHub host. The same
+      // id on a GitHub Enterprise Server is somebody else.
+      await member("member-e", orgId, { login: "member-e", githubId: "9002", githubHost: "https://ghes.example.com/api/v3" });
+      const rows = await discoverInstallations(deps(), orgId);
+      expect(linkedByInstallation(rows)[333]).toBeNull();
+      expect(linkedByInstallation(rows)[222]).toBe("member-a");
     });
 
     it("mints a personal installation only for its bound member", async () => {
@@ -634,7 +644,7 @@ describe("github-app service", () => {
       await credentials.save({ type: "user", id: "member-b" }, "github", {
         type: "oauth2",
         accessToken: "b-token",
-        metadata: { login: "stranger", githubId: "9002" },
+        metadata: { login: "stranger", githubId: "9002", githubHost: fixture?.url },
       });
       await relinkInstallations(deps(), orgId);
       const rows = await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
@@ -654,6 +664,10 @@ describe("github-app service", () => {
             ],
           },
         }),
+      });
+      // The new fixture is a new GitHub host, so connect member-a there.
+      await credentials.save({ type: "user", id: "member-a" }, "github", {
+        type: "oauth2", accessToken: "member-a-token", metadata: { login: "member-a", githubId: "9001", githubHost: fixture.url },
       });
       await reconcileUserInstallations(deps(), orgId, { userId: "member-a", githubId: "9001", accessToken: "member-a-token" });
       const rows = await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));

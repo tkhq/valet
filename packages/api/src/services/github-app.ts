@@ -71,7 +71,7 @@ import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { credentials, githubInstallations, orgMembers, orgs, type GithubInstallationRow } from "../schema/index.js";
 import { decryptSecret, encryptSecret } from "../lib/secret-crypto.js";
-import { resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
+import { githubHostKey, resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
 import { GITHUB_APP_WEBHOOK_PATH, parsePrivateKeyPem } from "@valet/plugin-github/http";
 
 const GITHUB_APP_SERVICE = "github_app";
@@ -548,21 +548,38 @@ export function orgWideInstallation(orgId: string): SQL {
   return usableInstallation(orgId, undefined);
 }
 
+/**
+ * The member's verified GitHub account id, when it was verified on the
+ * GitHub host this instance talks to (`metadata.githubHost`). Null
+ * otherwise. The connect callback writes both fields.
+ */
+export function verifiedGithubId(metadata: unknown, apiUrl: string): string | null {
+  if (!isRecord(metadata)) return null;
+  const { githubId, githubHost } = metadata;
+  if (typeof githubId !== "string" || githubId.length === 0) return null;
+  if (typeof githubHost !== "string" || githubHostKey(githubHost) !== githubHostKey(apiUrl)) return null;
+  return githubId;
+}
+
 /** `githubId -> userId` for the members of `orgId` who connected GitHub
- * through the App OAuth. A GitHub id that two members connected maps to
- * `null`: nobody is bound. See the module comment for why this reads the
- * `credentials` table directly. */
-async function loadMemberGithubIds(db: AppQueryable, orgId: string): Promise<Map<string, string | null>> {
+ * through the App OAuth on this GitHub host. A GitHub id that two members
+ * connected maps to `null`: nobody is bound. See the module comment for why
+ * this reads the `credentials` table directly. */
+async function loadMemberGithubIds(
+  deps: Pick<GithubAppDeps, "db" | "apiUrl">,
+  orgId: string,
+): Promise<Map<string, string | null>> {
+  const db = deps.db;
   const rows = await db
     .select({ ownerId: credentials.ownerId, metadata: credentials.metadata })
     .from(credentials)
     .innerJoin(orgMembers, and(eq(orgMembers.userId, credentials.ownerId), eq(orgMembers.orgId, orgId)))
     .where(and(eq(credentials.ownerType, "user"), eq(credentials.service, "github")));
   const map = new Map<string, string | null>();
+  const apiUrl = githubApiUrl(deps);
   for (const row of rows) {
-    if (!isRecord(row.metadata)) continue;
-    const githubId = row.metadata.githubId;
-    if (typeof githubId !== "string" || githubId.length === 0) continue;
+    const githubId = verifiedGithubId(row.metadata, apiUrl);
+    if (githubId === null) continue;
     const prior = map.get(githubId);
     map.set(githubId, prior === undefined || prior === row.ownerId ? row.ownerId : null);
   }
@@ -585,10 +602,10 @@ function bindingFor(
  * saves a member's credential, so that member's personal installation is
  * bound at once.
  */
-export async function relinkInstallations(deps: Pick<GithubAppDeps, "db">, orgId: string): Promise<void> {
+export async function relinkInstallations(deps: Pick<GithubAppDeps, "db" | "apiUrl">, orgId: string): Promise<void> {
   const [existingRows, memberGithubIds] = await Promise.all([
     deps.db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId)),
-    loadMemberGithubIds(deps.db, orgId),
+    loadMemberGithubIds(deps, orgId),
   ]);
   const nowMs = Date.now();
   for (const row of existingRows) {
@@ -733,7 +750,7 @@ export async function recordCreatedInstallation(
   const config = await loadAppConfig(deps, orgId);
   if (!config || !inst) return;
   const owner = await fetchAppOwner(deps, mintAppJwt(config));
-  const memberGithubIds = await loadMemberGithubIds(deps.db, orgId);
+  const memberGithubIds = await loadMemberGithubIds(deps, orgId);
   await deps.db.transaction(async (tx) => {
     await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
     const row = await upsertInstallation(
@@ -787,12 +804,12 @@ export async function setInstallationApproval(
  * organization with Valet. True when the row is now approved.
  */
 export async function approveInstalledByMember(
-  deps: Pick<GithubAppDeps, "db">,
+  deps: Pick<GithubAppDeps, "db" | "apiUrl">,
   orgId: string,
   installationId: number,
   senderGithubId: string,
 ): Promise<boolean> {
-  const memberGithubIds = await loadMemberGithubIds(deps.db, orgId);
+  const memberGithubIds = await loadMemberGithubIds(deps, orgId);
   if (!memberGithubIds.get(senderGithubId)) return false;
   const result = await setInstallationApproval(deps, orgId, installationId, true);
   return result === "ok";
@@ -866,7 +883,7 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
     console.warn(`github-app discovery for org ${orgId}: more than ${MAX_INSTALLATION_PAGES} pages of installations; deleting none`);
   }
 
-  const memberGithubIds = await loadMemberGithubIds(deps.db, orgId);
+  const memberGithubIds = await loadMemberGithubIds(deps, orgId);
   const owner = await fetchAppOwner(deps, jwt);
   return deps.db.transaction(async (tx) => {
     await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");

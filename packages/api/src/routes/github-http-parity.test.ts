@@ -177,7 +177,7 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
         status: 200, body: { ...BASE, personalInstallBlocked: "github_not_connected" },
       });
       await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
-        type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242" },
+        type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242", githubHost: f.url },
       });
       expect(await call("org-status", { headers: MEMBER })).toEqual({
         status: 200, body: { ...BASE, personalInstallUrl: `${f.url}/apps/valet-env/installations/new` },
@@ -337,10 +337,10 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
       Object.assign(process.env, ENV_APP);
       api = await bootTestApi({ plugins: [githubPlugin] });
       await seedInstallation();
-      await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
-        type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242" },
-      });
       const f = useFixture();
+      await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+        type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242", githubHost: f.url },
+      });
       expect(await deliverSigned(createdDelivery(8801, { login: "member", id: 4242, type: "User" }, 4242)))
         .toEqual({ status: 204, body: null });
       expect(await deliverSigned(createdDelivery(8802, { login: "stranger", id: 5, type: "User" }, 5)))
@@ -359,10 +359,10 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
     it("approves another organization's installation only when a member with a verified connection installed it", async () => {
       Object.assign(process.env, ENV_APP);
       api = await bootTestApi({ plugins: [githubPlugin] });
+      const f = useFixture();
       await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
-        type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242" },
+        type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242", githubHost: f.url },
       });
-      useFixture();
       await deliverSigned(createdDelivery(8803, { login: "members-org", id: 30, type: "Organization" }, 4242));
       await deliverSigned(createdDelivery(8804, { login: "strangers-org", id: 31, type: "Organization" }, 5));
       // The App owner's own account serves every member without approval.

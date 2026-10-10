@@ -73,6 +73,7 @@ import {
   reconcileUserInstallations,
   recordCreatedInstallation,
   setInstallationApproval,
+  verifiedGithubId,
   relinkInstallations,
   usableInstallation,
   resolveGithubAppEnvConfig,
@@ -405,7 +406,7 @@ function connectionCapability(
       let personal = {};
       if (config !== null && org?.allowPersonalInstallations === true) {
         const stored = await engineCredentials.get({ type: "user", id: userId }, GITHUB_CREDENTIAL_SERVICE);
-        const connected = typeof stored?.metadata?.githubId === "string";
+        const connected = verifiedGithubId(stored?.metadata, resolveGithubApiUrl(process.env)) !== null;
         personal = await personalInstallFields(config.appSlug, process.env, connected);
       }
       const status: GetGithubOrgStatusResponse = {
@@ -450,8 +451,11 @@ function connectionCapability(
               metadata: {
                 login: connection.login,
                 // Verified by GitHub in this flow. Binds the member's personal
-                // App installations (`services/github-app.ts`).
-                ...(connection.githubId ? { githubId: connection.githubId } : {}),
+                // App installations (`services/github-app.ts`). An account id
+                // is unique on one GitHub host only, so the host goes with it.
+                ...(connection.githubId
+                  ? { githubId: connection.githubId, githubHost: resolveGithubApiUrl(process.env) }
+                  : {}),
               },
             });
             await refreshCredentialReadiness(providers, { type: "user", id: userId }, GITHUB_CREDENTIAL_SERVICE);

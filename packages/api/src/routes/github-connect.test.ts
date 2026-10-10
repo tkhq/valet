@@ -197,7 +197,7 @@ describe("GET /api/me/github/org-status", () => {
     await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
       type: "oauth2",
       accessToken: "member-token",
-      metadata: { login: "member", githubId: "4242" },
+      metadata: { login: "member", githubId: "4242", githubHost: fixture?.url },
     });
 
     const res = await fetch(`${api.baseUrl}/api/me/github/org-status`, { headers: MEMBER_HEADERS });
@@ -432,7 +432,8 @@ describe("GET /api/me/github/callback", () => {
       .where(eq(githubInstallations.installationId, 557));
     expect(other?.linkedUserId).toBeNull();
     const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
-    expect(stored?.metadata).toMatchObject({ login: "octouser", githubId: "99" });
+    // The id names an account on one GitHub host, so the host is kept with it.
+    expect(stored?.metadata).toMatchObject({ login: "octouser", githubId: "99", githubHost: fixture?.url });
   });
 
   it("records and binds a personal installation that Valet has not seen yet when the member connects", async () => {
