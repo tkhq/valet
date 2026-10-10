@@ -356,14 +356,18 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
       expect(f.calls.filter((c) => c.path === "/app/installations")).toEqual([]);
     });
 
-    it("approves another organization's installation only when a member with a verified connection installed it", async () => {
+    it("approves another organization's installation only when an org admin with a verified connection installed it", async () => {
       Object.assign(process.env, ENV_APP);
       api = await bootTestApi({ plugins: [githubPlugin] });
       const f = useFixture();
-      await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
-        type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242", githubHost: f.url },
-      });
-      await deliverSigned(createdDelivery(8803, { login: "members-org", id: 30, type: "Organization" }, 4242));
+      // `local-user` is an org admin; `test-member` is not.
+      for (const [id, githubId] of [["local-user", "4242"], ["test-member", "4343"]] as const) {
+        await api.providers.engineCredentials.save({ type: "user", id }, "github", {
+          type: "oauth2", accessToken: `${id}-token`, metadata: { login: id, githubId, githubHost: f.url },
+        });
+      }
+      await deliverSigned(createdDelivery(8803, { login: "admins-org", id: 30, type: "Organization" }, 4242));
+      await deliverSigned(createdDelivery(8806, { login: "members-org", id: 32, type: "Organization" }, 4343));
       await deliverSigned(createdDelivery(8804, { login: "strangers-org", id: 31, type: "Organization" }, 5));
       // The App owner's own account serves every member without approval.
       await deliverSigned(createdDelivery(8805, { login: "acme", id: 1, type: "Organization" }, 5));
@@ -371,7 +375,7 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
       const access = Object.fromEntries(
         (status.body as GetGithubAppResponse).installations.map((i) => [i.installationId, i.access]),
       );
-      expect(access).toEqual({ 8803: "organization", 8804: "pending", 8805: "organization" });
+      expect(access).toEqual({ 8803: "organization", 8806: "pending", 8804: "pending", 8805: "organization" });
     });
 
     it.each([true, false])("refuses a body above 1 MiB (declared length: %s)", async (declared) => {

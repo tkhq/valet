@@ -71,6 +71,7 @@ import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { credentials, githubInstallations, orgMembers, orgs, type GithubInstallationRow } from "../schema/index.js";
 import { decryptSecret, encryptSecret } from "../lib/secret-crypto.js";
+import { isOrgAdmin } from "./org.js";
 import { githubHostKey, resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
 import { GITHUB_APP_WEBHOOK_PATH, parsePrivateKeyPem } from "@valet/plugin-github/http";
 
@@ -886,9 +887,11 @@ export async function setInstallationApproval(
 
 /**
  * Approves another GitHub organization's installation when the GitHub user
- * who installed it (`sender.id` on `installation.created`) is an org member
- * with a verified GitHub connection. That member chose to share the
- * organization with Valet. True when the row is now approved.
+ * who installed it (`sender.id` on `installation.created`) is an org ADMIN
+ * with a verified GitHub connection. Approval puts the organization's
+ * repositories in every member's picker and changes the sole-installation
+ * fallback, which is an admin's decision. An installation by any other
+ * member waits for an admin. True when the row is now approved.
  */
 export async function approveInstalledByMember(
   deps: Pick<GithubAppDeps, "db" | "apiUrl">,
@@ -897,7 +900,8 @@ export async function approveInstalledByMember(
   senderGithubId: string,
 ): Promise<boolean> {
   const memberGithubIds = await loadMemberGithubIds(deps, orgId);
-  if (!memberGithubIds.get(senderGithubId)) return false;
+  const installer = memberGithubIds.get(senderGithubId);
+  if (!installer || !(await isOrgAdmin(deps.db, orgId, installer))) return false;
   const result = await setInstallationApproval(deps, orgId, installationId, true);
   return result === "ok";
 }

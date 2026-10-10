@@ -536,16 +536,22 @@ describe("github-app service", () => {
       expect(await setInstallationApproval(deps(), orgId, 999, true)).toBe("not_found");
     });
 
-    it("approves an organization installation that a member with a verified GitHub connection installed", async () => {
+    it("approves an organization installation only when an org admin with a verified GitHub connection installed it", async () => {
       await discoverInstallations(deps(), orgId);
-      await db.insert(users).values({ id: "member-a", name: "A", email: "a@example.com" });
-      await db.insert(orgMembers).values({ orgId, userId: "member-a", role: "member", createdAt: Date.now() });
-      await credentials.save({ type: "user", id: "member-a" }, "github", {
-        type: "oauth2", accessToken: "t", metadata: { login: "member-a", githubId: "4242", githubHost: fixture?.url },
-      });
+      for (const [id, role, githubId] of [["member-a", "member", "4242"], ["admin-a", "admin", "4343"]] as const) {
+        await db.insert(users).values({ id, name: id, email: `${id}@example.com` });
+        await db.insert(orgMembers).values({ orgId, userId: id, role, createdAt: Date.now() });
+        await credentials.save({ type: "user", id }, "github", {
+          type: "oauth2", accessToken: "t", metadata: { login: id, githubId, githubHost: fixture?.url },
+        });
+      }
       expect(await approveInstalledByMember(deps(), orgId, 777, "9999")).toBe(false);
+      // A member who is not an org admin installed it on their own GitHub
+      // organization: it waits for an admin, so it cannot enter every
+      // member's picker or make the sole-installation fallback ambiguous.
+      expect(await approveInstalledByMember(deps(), orgId, 777, "4242")).toBe(false);
       expect(await mintInstallationToken(deps(), orgId, "stranger-org")).toBeNull();
-      expect(await approveInstalledByMember(deps(), orgId, 777, "4242")).toBe(true);
+      expect(await approveInstalledByMember(deps(), orgId, 777, "4343")).toBe(true);
       expect(await mintInstallationToken(deps(), orgId, "stranger-org")).toBe("fixture-installation-token");
     });
 
