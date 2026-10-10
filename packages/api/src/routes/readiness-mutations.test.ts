@@ -321,10 +321,12 @@ describe("readiness refresh paths", () => {
     const before = (await row("github")).syncRevision;
     await discover();
     expect((await row("github")).syncRevision).toBe(before);
+    // A stranger's organization installation serves nobody until approved,
+    // so it changes no team's workflow sources. Anybody can install the
+    // public App, so it must not force org-wide re-syncs.
     installations = [...installations, { ...installations[0], id: 456, account: { login: "other", type: "Organization" } }];
     await discover();
-    await expectDirty("github");
-    await prime("github");
+    expect((await row("github")).syncRevision).toBe(before);
     installations = installations.map((installation) => ({ ...installation, suspended_at: "2026-09-10T00:00:00Z" }));
     await discover();
     await expectDirty("github");
@@ -351,6 +353,29 @@ describe("readiness refresh paths", () => {
     expect(response.status).toBe(204);
     await expectDirty("github");
     expect((await row("foreign")).syncRevision).toBe(0);
+  });
+
+  // Anybody can install the public App and loop install and uninstall. A
+  // stranger's installation serves nobody, so its lifecycle must not force
+  // org-wide workflow source re-syncs.
+  it.each([
+    ["suspend", "User"], ["unsuspend", "User"], ["deleted", "User"],
+    ["suspend", "Organization"], ["unsuspend", "Organization"], ["deleted", "Organization"],
+  ])("does not refresh org teams on installation.%s of a stranger's %s installation", async (action, accountType) => {
+    await source("github");
+    await saveAppConfig({ credentials: api.providers.engineCredentials }, ORG, appConfig);
+    await api.providers.db.insert(githubInstallations).values({
+      id: "stranger", orgId: ORG, installationId: 777, accountLogin: "stranger", accountType, accountId: "5",
+      orgApproved: false, repositorySelection: "all", suspended: action === "unsuspend", createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const before = (await row("github")).syncRevision;
+    const body = JSON.stringify({ action, installation: { id: 777 } });
+    const response = await fetch(`${api.baseUrl}/webhooks/github-app`, {
+      method: "POST", body, headers: { ...HEADERS, "x-github-event": "installation",
+        "x-hub-signature-256": `sha256=${createHmac("sha256", appConfig.webhookSecret).update(body).digest("hex")}` },
+    });
+    expect(response.status).toBe(204);
+    expect((await row("github")).syncRevision).toBe(before);
   });
 
   it("refreshes org teams when the GitHub App is disconnected", async () => {

@@ -557,12 +557,17 @@ function deliveryEffects(
       await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
       const scope = and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId));
       const changed = suspended === null
-        ? await tx.delete(githubInstallations).where(scope).returning({ id: githubInstallations.id })
+        ? await tx.delete(githubInstallations).where(scope).returning()
         : await tx.update(githubInstallations)
           .set({ suspended, updatedAt: Date.now() })
           .where(and(scope, eq(githubInstallations.suspended, !suspended)))
-          .returning({ id: githubInstallations.id });
-      if (changed.length > 0) await invalidateWorkflowSources(tx, { orgId });
+          .returning();
+      // Team workflow sources resolve only organization installations.
+      // Anybody can install the public App, so a stranger's lifecycle must
+      // not force org-wide re-syncs.
+      if (changed.some((row) => installationAccess(row) === "organization")) {
+        await invalidateWorkflowSources(tx, { orgId });
+      }
     });
   };
   return {

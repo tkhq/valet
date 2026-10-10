@@ -846,8 +846,7 @@ export async function recordCreatedInstallation(
     const row = await upsertInstallation(
       tx, orgId, inst, bindingFor(inst, memberGithubIds), (deps.now ?? Date.now)(), isAppOwnerAccount(inst, owner),
     );
-    const access = installationAccess(row);
-    if (access === "organization" || access === "member") await invalidateWorkflowSources(tx, { orgId });
+    if (installationAccess(row) === "organization") await invalidateWorkflowSources(tx, { orgId });
   });
   if (senderGithubId && inst.accountType !== PERSONAL_ACCOUNT_TYPE) {
     await approveInstalledByMember(deps, orgId, inst.installationId, senderGithubId);
@@ -1040,8 +1039,12 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
       }
     }
 
+    // Team workflow sources resolve only organization installations, so only
+    // those count as a change. Anybody can install the public App, and a
+    // stranger's installation must not force org-wide re-syncs.
     const signature = (items: readonly GithubInstallationRow[]) =>
-      JSON.stringify(items.map((row) => [row.installationId, row.accountLogin.toLowerCase(), row.suspended, installationAccess(row)])
+      JSON.stringify(items.filter((row) => installationAccess(row) === "organization")
+        .map((row) => [row.installationId, row.accountLogin.toLowerCase(), row.suspended])
         .sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
     if (signature(existingRows) !== signature(rows)) await invalidateWorkflowSources(tx, { orgId });
     return rows;
