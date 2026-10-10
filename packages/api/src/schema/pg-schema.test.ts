@@ -980,6 +980,21 @@ describe("pg app schema + migrations", () => {
       await expect(mirrored("wf_d")).rejects.toThrow();
     });
 
+    // Before `account_id`, discovery bound an installation to any user whose
+    // credential carried a matching login, from any org, and a pasted token
+    // could carry any login. The repair that adds the column clears those
+    // bindings, so each one is proved again by account id.
+    it("clears login-based installation bindings in the repair that adds account_id", async () => {
+      await db.query('ALTER TABLE "github_installations" DROP COLUMN "account_id"');
+      await db.query(
+        `INSERT INTO "github_installations" (id, org_id, installation_id, account_login, account_type, linked_user_id, created_at, updated_at)
+         VALUES ('ghi_legacy', 'org1', 7, 'someone', 'User', 'u1', 1, 1)`,
+      );
+      await applyAppMigrations(db);
+      const rows = await db.query(`SELECT linked_user_id, account_id FROM "github_installations" WHERE id = 'ghi_legacy'`);
+      expect(rows.rows).toEqual([{ linked_user_id: null, account_id: null }]);
+    });
+
     it("re-adds columns that predate an already-applied 0000_app.sql", async () => {
       for (const { table, column } of REPAIRED_COLUMNS) {
         await db.query(`ALTER TABLE "${table}" DROP COLUMN "${column}"`);

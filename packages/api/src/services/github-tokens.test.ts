@@ -607,7 +607,9 @@ describe("resolveGitHubToken", () => {
       await saveAppConfig({ credentials }, orgId, appConfig);
       fixture = startGithubFixture();
       await seedInstallation();
-      await seedInstallation({ id: "ghi_a", installationId: 501, accountLogin: "member-a", accountType: "User", linkedUserId: userId });
+      await seedInstallation({
+        id: "ghi_a", installationId: 501, accountLogin: "member-a", accountType: "User", accountId: "9001", linkedUserId: userId,
+      });
       await seedInstallation({ id: "ghi_s", installationId: 502, accountLogin: "stranger", accountType: "User", linkedUserId: null });
     });
 
@@ -652,6 +654,18 @@ describe("resolveGitHubToken", () => {
         expect(sole.source).toBe("installation");
       }
       expect(new Set(mintedInstallations())).toEqual(new Set(["999"]));
+    });
+
+    it("does not trust a binding that has no verified account id", async () => {
+      // Rows bound before account ids existed were matched by login, which a
+      // pasted token could forge, and across organizations.
+      await seedInstallation({
+        id: "ghi_legacy", installationId: 503, accountLogin: "legacy-login", accountType: "User", accountId: null, linkedUserId: userId,
+      });
+      expect(
+        await resolveGitHubToken(deps(), { orgId, userId, purpose: "git", repo: { owner: "legacy-login", name: "x" } }),
+      ).toEqual({ token: null, source: "none" });
+      expect(mintedInstallations()).toEqual([]);
     });
 
     it("gives a team or unattended caller no personal installation", async () => {

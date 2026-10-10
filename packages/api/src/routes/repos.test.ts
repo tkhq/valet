@@ -208,7 +208,7 @@ describe("GET /api/repos", () => {
     await configureOrgApp(api.baseUrl);
     await seedInstallationRow({ id: "ghi_org", installationId: 601, accountLogin: "acme" });
     await seedInstallationRow({
-      id: "ghi_a", installationId: 602, accountLogin: "member-a", accountType: "User", linkedUserId: "local-user",
+      id: "ghi_a", installationId: 602, accountLogin: "member-a", accountType: "User", accountId: "9001", linkedUserId: "local-user",
     });
     await seedInstallationRow({
       id: "ghi_s", installationId: 603, accountLogin: "stranger", accountType: "User", linkedUserId: null,

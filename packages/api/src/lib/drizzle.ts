@@ -396,7 +396,15 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
-  { describe: "github_installations.account_id column", probe: { kind: "column", table: "github_installations", column: "account_id" }, sql: 'ALTER TABLE "github_installations" ADD COLUMN IF NOT EXISTS "account_id" text' },
+  {
+    describe: "github_installations.account_id column",
+    probe: { kind: "column", table: "github_installations", column: "account_id" },
+    sql: 'ALTER TABLE "github_installations" ADD COLUMN IF NOT EXISTS "account_id" text',
+    // Bindings made before this column matched a credential's login, which a
+    // pasted token could forge, across organizations. Clear them; discovery
+    // binds again by verified account id.
+    backfill: 'UPDATE "github_installations" SET "linked_user_id" = NULL WHERE "account_id" IS NULL AND "linked_user_id" IS NOT NULL RETURNING "id"',
+  },
   { describe: "identity link codes bound to a DM recipient", probe: { kind: "column", table: "identity_link_codes", column: "external_id" }, sql: 'ALTER TABLE "identity_link_codes" ADD COLUMN "external_id" text' },
   { describe: "generated file reservations", probe: { kind: "table", table: "generated_files" }, sql: `CREATE TABLE "generated_files" (
   "id" text PRIMARY KEY, "org_id" text NOT NULL, "session_id" text NOT NULL,

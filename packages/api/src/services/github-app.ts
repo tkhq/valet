@@ -61,7 +61,7 @@
  */
 import { invalidateWorkflowSources } from "./content-sync/invalidation.js";
 import { createPrivateKey, randomUUID, sign } from "node:crypto";
-import { and, eq, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, isNotNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { credentials, githubInstallations, orgMembers, orgs, type GithubInstallationRow } from "../schema/index.js";
@@ -487,10 +487,12 @@ const PERSONAL_ACCOUNT_TYPE = "User";
  * still want suspended rows.
  */
 export function usableInstallation(orgId: string, userId: string | undefined): SQL {
+  // A binding counts only with a verified account id. Rows bound before the
+  // column existed were matched by login (see the `account_id` repair).
   const visible = userId
     ? or(
         ne(githubInstallations.accountType, PERSONAL_ACCOUNT_TYPE),
-        eq(githubInstallations.linkedUserId, userId),
+        and(isNotNull(githubInstallations.accountId), eq(githubInstallations.linkedUserId, userId)),
       )
     : ne(githubInstallations.accountType, PERSONAL_ACCOUNT_TYPE);
   return and(eq(githubInstallations.orgId, orgId), visible) ?? sql`false`;
