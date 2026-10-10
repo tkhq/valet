@@ -4326,6 +4326,10 @@ export interface GetGithubOrgStatusResponse {
    * connected GitHub through the App, so Valet cannot bind an installation
    * to them. */
   personalInstallBlocked?: GithubPersonalInstallBlocked;
+  /** Present with `personalInstallUrl` when the server requires sign-in for
+   * the visibility check (a private-mode GitHub Enterprise Server), so Valet
+   * could not confirm that the App is public. */
+  personalInstallUnverified?: boolean;
   /** The caller's own personal installations, bound to them. Absent when
    * there are none. */
   personalInstallations?: GithubPersonalInstallation[];

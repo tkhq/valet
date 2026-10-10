@@ -386,6 +386,32 @@ describe("GithubAppSection", () => {
     expect(screen.getAllByText("Linked").length).toBeGreaterThan(0);
   });
 
+  it("warns that an App owned by a personal account shares that account's installation", () => {
+    githubAppData = {
+      configured: true,
+      app: {
+        appId: "123",
+        appSlug: "valet-acme",
+        htmlUrl: "https://github.com/apps/valet-acme",
+        installUrl: "https://github.com/apps/valet-acme/installations/new",
+      },
+      installations: [
+        {
+          id: "inst_owner", installationId: 1, accountLogin: "admin-person", accountType: "User", repositorySelection: "all",
+          suspended: false, linkedUserId: null, access: "organization", appOwner: true,
+        },
+      ],
+      webhook: { mode: "public" },
+      installationsCheckedAt: null,
+    };
+    render(<GithubAppSection />);
+    expect(
+      screen.getByText(
+        "The personal account admin-person owns this App. Every member of your organisation can use the repositories that account's installation reaches.",
+      ),
+    ).toBeTruthy();
+  });
+
   it("lets an admin approve or revoke another GitHub organization's installation", () => {
     approvalMutate.mockClear();
     const base = { repositorySelection: "all", suspended: false, linkedUserId: null, accountType: "Organization", appOwner: false };

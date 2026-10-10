@@ -780,19 +780,28 @@ export async function reconcileUserInstallations(
   orgId: string,
   member: { userId: string; githubId: string; accessToken: string },
 ): Promise<void> {
-  const res = await githubFetch(deps)(`${githubApiUrl(deps)}/user/installations?per_page=100`, {
-    headers: {
-      Authorization: `Bearer ${member.accessToken}`,
-      Accept: "application/vnd.github+json",
-      "User-Agent": "Valet-App",
-    },
-  });
-  if (!res.ok) throw new Error(`GitHub API GET /user/installations returned ${res.status}`);
-  const payload: unknown = await res.json();
-  const list = isRecord(payload) ? payload.installations : undefined;
-  const own = parseInstallationsResponse(list, "GET /user/installations").filter(
-    (inst) => inst.accountType === PERSONAL_ACCOUNT_TYPE && inst.accountId === member.githubId,
-  );
+  // Paginated, as the legacy stack did: a member can reach more than 100
+  // installations of the App through the GitHub organizations they are in.
+  const own: ParsedInstallation[] = [];
+  let url: string | null = `${githubApiUrl(deps)}/user/installations?per_page=100`;
+  for (let pages = 0; url && pages < MAX_INSTALLATION_PAGES; pages++) {
+    const res: Response = await githubFetch(deps)(url, {
+      headers: {
+        Authorization: `Bearer ${member.accessToken}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "Valet-App",
+      },
+    });
+    if (!res.ok) throw new Error(`GitHub API GET /user/installations returned ${res.status}`);
+    const payload: unknown = await res.json();
+    const list = isRecord(payload) ? payload.installations : undefined;
+    own.push(
+      ...parseInstallationsResponse(list, "GET /user/installations").filter(
+        (inst) => inst.accountType === PERSONAL_ACCOUNT_TYPE && inst.accountId === member.githubId,
+      ),
+    );
+    url = parseNextLink(res.headers.get("link"));
+  }
   const nowMs = (deps.now ?? Date.now)();
   for (const inst of own) await upsertInstallation(deps.db, orgId, inst, null, nowMs, null);
   await relinkInstallations(deps, orgId);

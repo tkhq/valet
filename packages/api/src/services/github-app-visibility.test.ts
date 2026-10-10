@@ -31,6 +31,10 @@ describe("githubAppVisibility", () => {
     expect(priv.requests[0].headers.has("authorization")).toBe(false);
   });
 
+  it("reads a sign-in requirement as unverifiable", async () => {
+    expect(await githubAppVisibility("app", ENV, { apiUrl: API, fetchImpl: fakeGithub([401]).fetchImpl })).toBe("unverifiable");
+  });
+
   it("reads a rate limit, a 5xx, and a network error as unknown", async () => {
     for (const status of [403, 503]) {
       resetGithubAppVisibilityCache();
@@ -79,6 +83,20 @@ describe("personalInstallFields", () => {
       personalInstallBlocked: "app_private",
     });
     expect(await personalInstallFields("flaky-app", ENV, true, { apiUrl: API, fetchImpl: fakeGithub([502]).fetchImpl })).toEqual({
+      personalInstallBlocked: "app_visibility_unknown",
+    });
+  });
+
+  it("still links when the server requires sign-in for the check, and says so", async () => {
+    // A private-mode GitHub Enterprise Server answers every unauthenticated
+    // API read with 401, so the check cannot tell a public App from a
+    // private one there. github.com answers 200 or 404.
+    expect(await personalInstallFields("app", ENV, true, { apiUrl: API, fetchImpl: fakeGithub([401]).fetchImpl })).toEqual({
+      personalInstallUrl: "https://github.example/apps/app/installations/new",
+      personalInstallUnverified: true,
+    });
+    // Any other failure still hides the link.
+    expect(await personalInstallFields("other-app", ENV, true, { apiUrl: API, fetchImpl: fakeGithub([503]).fetchImpl })).toEqual({
       personalInstallBlocked: "app_visibility_unknown",
     });
   });

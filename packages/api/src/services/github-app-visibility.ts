@@ -25,7 +25,10 @@
 import type { GetGithubOrgStatusResponse } from "../wire/types.js";
 import { githubAppInstallUrl, resolveGithubApiUrl } from "./github-env.js";
 
-export type GithubAppVisibility = "public" | "private" | "unknown";
+/** `unverifiable`: the server requires sign-in for every API read (a
+ * private-mode GitHub Enterprise Server answers 401), so the check cannot
+ * tell. github.com answers 200 or 404. */
+export type GithubAppVisibility = "public" | "private" | "unverifiable" | "unknown";
 
 const KNOWN_TTL_MS = 10 * 60 * 1000;
 const UNKNOWN_TTL_MS = 60 * 1000;
@@ -59,6 +62,7 @@ export async function githubAppVisibility(
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     if (res.status === 404) visibility = "private";
+    else if (res.status === 401) visibility = "unverifiable";
     else if (res.ok) visibility = "public";
   } catch (err) {
     console.error(`github app visibility: GET /apps/${appSlug} failed:`, err);
@@ -84,11 +88,16 @@ export async function personalInstallFields(
   env: NodeJS.ProcessEnv,
   connected: boolean,
   deps: GithubAppVisibilityDeps = {},
-): Promise<Pick<GetGithubOrgStatusResponse, "personalInstallUrl" | "personalInstallBlocked">> {
+): Promise<Pick<GetGithubOrgStatusResponse, "personalInstallUrl" | "personalInstallBlocked" | "personalInstallUnverified">> {
   switch (await githubAppVisibility(appSlug, env, deps)) {
     case "public":
       if (!connected) return { personalInstallBlocked: "github_not_connected" };
       return { personalInstallUrl: githubAppInstallUrl(env, appSlug) };
+    case "unverifiable":
+      // Hiding the link would end personal installs on such a server for
+      // good. Show it, and say that GitHub may list only the owner.
+      if (!connected) return { personalInstallBlocked: "github_not_connected" };
+      return { personalInstallUrl: githubAppInstallUrl(env, appSlug), personalInstallUnverified: true };
     case "private":
       return { personalInstallBlocked: "app_private" };
     case "unknown":

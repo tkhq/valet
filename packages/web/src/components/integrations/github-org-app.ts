@@ -170,7 +170,11 @@ export function githubOrgReachLines(
  */
 export function githubPersonalInstallNote(status: GetGithubOrgStatusResponse): string | null {
   if (status.personalInstallUrl) {
-    return "Only you can use the repositories you add to your personal installation.";
+    const only = "Only you can use the repositories you add to your personal installation.";
+    // A private-mode GitHub Enterprise Server refuses the visibility check.
+    return status.personalInstallUnverified
+      ? `Valet could not check whether the App is public. If GitHub lists only your organisation, ask the App's owner to make the App public. ${only}`
+      : only;
   }
   switch (status.personalInstallBlocked) {
     case "app_private":

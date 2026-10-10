@@ -135,6 +135,14 @@ describe("githubPersonalInstallNote", () => {
     expect(note).toBe("Only you can use the repositories you add to your personal installation.");
   });
 
+  it("warns when the server could not confirm that the App is public", () => {
+    const note = githubPersonalInstallNote(
+      status({ personalInstallUrl: "https://ghes.example/apps/valet/installations/new", personalInstallUnverified: true }),
+    );
+    expect(note).toContain("Valet could not check whether the App is public");
+    expect(note).toContain("Only you can use the repositories you add to your personal installation.");
+  });
+
   it("explains a private App, names who can change it, and names the path that works now", () => {
     // GitHub's install page for a private App lists only the owner, so a
     // link there strands the member.

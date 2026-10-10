@@ -64,7 +64,7 @@ export interface GithubFixtureHandlers {
   checkToken?: (clientId: string, accessToken: string | undefined) => GithubFixtureResponse;
   /** `GET /user/installations`, read with a user's OAuth token. GitHub
    * wraps the array in `{ installations }`. */
-  listUserInstallations?: (authHeader: string | undefined) => GithubFixtureResponse;
+  listUserInstallations?: (authHeader: string | undefined, query: Record<string, string>) => GithubFixtureResponse;
   /** `POST /app-manifests/:code/conversions` */
   convertManifest?: (code: string) => GithubFixtureResponse;
   /** `GET /app/hook/config` — the App's OWN webhook config. */
@@ -344,7 +344,10 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
 
   app.get("/user/installations", (c) => {
     record(c, {});
-    const { status, body } = handlers.listUserInstallations(c.req.header("authorization"));
+    const { status, body, headers } = handlers.listUserInstallations(c.req.header("authorization"), c.req.query());
+    if (headers) {
+      for (const [name, value] of Object.entries(headers)) c.header(name, value);
+    }
     return c.json(body as object, status ?? 200);
   });
 

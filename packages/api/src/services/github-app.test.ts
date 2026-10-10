@@ -721,6 +721,41 @@ describe("github-app service", () => {
       expect(stored).toMatchObject({ accessToken: "app-oauth-token", refreshToken: "r" });
     });
 
+    it("finds the member's installation past the first page of their installations", async () => {
+      // A member can reach more than 100 installations of the App, through
+      // GitHub organizations they belong to.
+      await fixture?.close();
+      fixture = startGithubFixture({
+        listUserInstallations: (_auth, query) => {
+          if (query.page === "2") {
+            return {
+              body: {
+                total_count: 101,
+                installations: [
+                  { id: 9999, account: { login: "member-a", id: 9001, type: "User" }, repository_selection: "all", suspended_at: null },
+                ],
+              },
+            };
+          }
+          return {
+            body: {
+              total_count: 101,
+              installations: Array.from({ length: 100 }, (_, i) => ({
+                id: 7000 + i, account: { login: `org-${i}`, id: 70000 + i, type: "Organization" }, repository_selection: "all", suspended_at: null,
+              })),
+            },
+            headers: { link: `<${fixture?.url}/user/installations?per_page=100&page=2>; rel="next"` },
+          };
+        },
+      });
+      await credentials.save({ type: "user", id: "member-a" }, "github", {
+        type: "oauth2", accessToken: "member-a-token", metadata: { login: "member-a", githubId: "9001", githubHost: fixture.url },
+      });
+      await reconcileUserInstallations(deps(), orgId, { userId: "member-a", githubId: "9001", accessToken: "member-a-token" });
+      const rows = await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
+      expect(rows.map((r) => [r.installationId, r.linkedUserId])).toEqual([[9999, "member-a"]]);
+    });
+
     it("serves every member from an App owner's personal account", async () => {
       // An App created on a personal account installs only there, and that
       // installation is the organization's.

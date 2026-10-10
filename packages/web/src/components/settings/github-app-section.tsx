@@ -708,6 +708,17 @@ function ConfiguredCard({
           </p>
         )}
         {approval.error && <p className="text-xs text-danger-500">{errorText(approval.error)}</p>}
+        {/* An App created on a personal account installs there, and that
+            installation serves every member. The admin should know that the
+            account's repositories are shared with the organisation. */}
+        {data.installations
+          .filter((inst) => inst.appOwner && inst.accountType === "User")
+          .map((inst) => (
+            <p key={`owner-${inst.id}`} className="text-xs text-amber-700 dark:text-amber-400">
+              The personal account {inst.accountLogin} owns this App. Every member of your organisation can use the
+              repositories that account&apos;s installation reaches.
+            </p>
+          ))}
         {data.installations.length === 0 ? (
           <p className="text-sm text-muted">
             No installations yet — the App can't reach any repos until it's installed.

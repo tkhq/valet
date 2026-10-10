@@ -52,6 +52,7 @@ export interface GithubOrgStatus {
   suspendedCount: number;
   personalInstallUrl?: string;
   personalInstallBlocked?: "app_private" | "app_visibility_unknown" | "github_not_connected";
+  personalInstallUnverified?: boolean;
   personalInstallations?: Array<{ accountLogin: string; repositorySelection: string | null; suspended: boolean }>;
 }
 
