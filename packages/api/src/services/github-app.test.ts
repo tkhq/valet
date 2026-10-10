@@ -629,6 +629,53 @@ describe("github-app service", () => {
       expect(linkedByInstallation(rows)[222]).toBe("member-a");
     });
 
+    it("verifies the account of a member who connected before account ids were saved", async () => {
+      // Credentials saved before this release carry a login only. Discovery
+      // asks GitHub who each stored App OAuth token belongs to, so an owner
+      // keeps their personal installation without reconnecting.
+      const now = Date.now();
+      await member("member-d", orgId, null);
+      await credentials.save({ type: "user", id: "member-d" }, "github", {
+        type: "oauth2", accessToken: "app-oauth-token", refreshToken: "r", expiresAt: now + 3_600_000,
+        metadata: { login: "stranger" },
+      });
+      // A pasted token proves nothing about the account it names.
+      await member("member-f", orgId, null);
+      await credentials.save({ type: "user", id: "member-f" }, "github", {
+        type: "oauth2", accessToken: "pasted-pat", metadata: { login: "lookalike" },
+      });
+      await fixture?.close();
+      fixture = startGithubFixture({
+        listInstallations: () => ({ body: installs }),
+        getUser: () => ({ body: { login: "stranger", id: 9002 } }),
+      });
+
+      const rows = await discoverInstallations(deps(), orgId);
+      expect(linkedByInstallation(rows)[333]).toBe("member-d");
+      expect(linkedByInstallation(rows)[555]).toBeNull();
+      const userCalls = fixture.calls.filter((c) => c.path === "/user");
+      expect(userCalls.map((c) => c.authHeader)).toEqual(["Bearer app-oauth-token"]);
+      const stored = await credentials.get({ type: "user", id: "member-d" }, "github");
+      expect(stored?.metadata).toMatchObject({ login: "stranger", githubId: "9002", githubHost: fixture.url });
+      // The token itself is untouched.
+      expect(stored).toMatchObject({ accessToken: "app-oauth-token", refreshToken: "r" });
+    });
+
+    it("serves every member from an App owner's personal account", async () => {
+      // An App created on a personal account installs only there, and that
+      // installation is the organization's.
+      await fixture?.close();
+      fixture = startGithubFixture({
+        getApp: () => ({ body: { id: 123456, slug: "valet-app", owner: { login: "solo-dev", id: 7, type: "User" } } }),
+        listInstallations: () => ({
+          body: [{ id: 999, account: { login: "solo-dev", id: 7, type: "User" }, repository_selection: "all", suspended_at: null }],
+        }),
+      });
+      await discoverInstallations(deps(), orgId);
+      expect(await mintInstallationToken(deps(), orgId, "solo-dev")).toBe("fixture-installation-token");
+      expect(await mintInstallationToken(deps(), orgId, "solo-dev", "member-b")).toBe("fixture-installation-token");
+    });
+
     it("mints a personal installation only for its bound member", async () => {
       await discoverInstallations(deps(), orgId);
       expect(await mintInstallationToken(deps(), orgId, "member-a", "member-a")).toBe("fixture-installation-token");

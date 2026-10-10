@@ -586,6 +586,55 @@ async function loadMemberGithubIds(
   return map;
 }
 
+/**
+ * Saves the verified GitHub account id of each org member who connected
+ * through the App OAuth before the connect callback saved one. Without it,
+ * the first discovery after the upgrade unbinds every personal
+ * installation until its owner reconnects.
+ *
+ * Only an App OAuth token proves the account: GitHub issued it to that
+ * account through this App's own flow. The credential has a refresh token
+ * or an expiry, and is not `identityOnly`. A pasted token (no refresh, no
+ * expiry) proves nothing about whose account it names, so it is skipped,
+ * as is an expired token. The id comes only from GitHub's `GET /user`
+ * answer. The update merges into `metadata` alone, so it never writes a
+ * token that a concurrent refresh may have rotated. Best effort: a failure
+ * is logged and retried at the next discovery.
+ */
+async function backfillMemberGithubIds(deps: GithubAppDeps, orgId: string): Promise<void> {
+  const apiUrl = githubApiUrl(deps);
+  const rows = await deps.db
+    .select({ ownerId: credentials.ownerId, metadata: credentials.metadata })
+    .from(credentials)
+    .innerJoin(orgMembers, and(eq(orgMembers.userId, credentials.ownerId), eq(orgMembers.orgId, orgId)))
+    .where(and(eq(credentials.ownerType, "user"), eq(credentials.service, "github")));
+  const nowMs = (deps.now ?? Date.now)();
+  for (const row of rows) {
+    if (verifiedGithubId(row.metadata, apiUrl) !== null) continue;
+    try {
+      const cred = await deps.credentials.get({ type: "user", id: row.ownerId }, "github");
+      if (!cred?.accessToken) continue;
+      const appOauth = Boolean(cred.refreshToken) || cred.expiresAt !== undefined;
+      const identityOnly = isRecord(cred.metadata) && cred.metadata.identityOnly === true;
+      if (!appOauth || identityOnly) continue;
+      if (cred.expiresAt !== undefined && cred.expiresAt <= nowMs) continue;
+      const res = await githubFetch(deps)(`${apiUrl}/user`, {
+        headers: { Authorization: `Bearer ${cred.accessToken}`, Accept: "application/vnd.github+json", "User-Agent": "Valet-App" },
+      });
+      if (!res.ok) continue;
+      const payload: unknown = await res.json();
+      if (!isRecord(payload) || typeof payload.id !== "number") continue;
+      const patch = JSON.stringify({ githubId: String(payload.id), githubHost: apiUrl });
+      await deps.db
+        .update(credentials)
+        .set({ metadata: sql`coalesce(${credentials.metadata}, '{}'::jsonb) || ${patch}::jsonb` })
+        .where(and(eq(credentials.ownerType, "user"), eq(credentials.ownerId, row.ownerId), eq(credentials.service, "github")));
+    } catch (err) {
+      console.error(`github-app: verifying the GitHub account of user ${row.ownerId} failed:`, err);
+    }
+  }
+}
+
 /** The member a personal installation is bound to, or null. An organization
  * installation is never bound: it serves every member. */
 function bindingFor(
@@ -883,6 +932,7 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
     console.warn(`github-app discovery for org ${orgId}: more than ${MAX_INSTALLATION_PAGES} pages of installations; deleting none`);
   }
 
+  await backfillMemberGithubIds(deps, orgId);
   const memberGithubIds = await loadMemberGithubIds(deps, orgId);
   const owner = await fetchAppOwner(deps, jwt);
   return deps.db.transaction(async (tx) => {
