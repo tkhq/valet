@@ -311,20 +311,27 @@ function settlementOrigin(originJson: string | null, replyRoute: string | null):
 /**
  * True when a person, not the parent, gave the child input that ran before
  * `itemId` on the same thread: a prompt while it was idle, a followup, or a
- * steer. That input is in the transcript the item's result came from. A
- * submission without parent delegation provenance counts, except a signal
- * from another session. The check reads durable queue items, so it covers
- * every way input can reach the child.
+ * steer. A submission without parent delegation provenance counts, except a
+ * signal from another session. It counts only if it ran: a run claims the
+ * submission and writes it into the transcript. A followup that later work
+ * replaced before it started never reached the transcript. The check reads
+ * durable queue items and entries, so it covers every way input can reach
+ * the child.
  */
 async function personInputBefore(store: SessionStore, childSessionId: string, itemId: string): Promise<boolean> {
   const item = await store.getQueueItem(childSessionId, itemId);
   if (!item) return false;
-  const items = [
+  const candidates = [
     ...(await store.listUnsettledSubmissions(childSessionId)),
     ...(await store.listSettledSubmissionsBefore(childSessionId, Number.MAX_SAFE_INTEGER)),
-  ];
-  return items.some((other) => other.id !== item.id && other.threadId === item.threadId
+  ].filter((other) => other.id !== item.id && other.threadId === item.threadId
     && other.createdAt < item.createdAt && !isParentDelegation(other) && !isSignalSubmission(other));
+  for (const other of candidates) {
+    if (other.attemptCount > 0) return true;
+    const entries = await store.getEntries(childSessionId, other.threadId, { queueItemId: other.id, limit: 1 });
+    if (entries.length > 0) return true;
+  }
+  return false;
 }
 
 function isSignalSubmission(item: { content: unknown }): boolean {

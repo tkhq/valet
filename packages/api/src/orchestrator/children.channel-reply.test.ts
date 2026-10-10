@@ -418,8 +418,13 @@ describe("delegated child completion over a channel", () => {
     await api!.providers.channelHost.retryChildReplies();
     expect(run.transport.sent).toHaveLength(1);
 
-    // The person's input runs in the child (or lands while it is idle).
+    // The person's input runs in the child (or lands while it is idle). A
+    // run writes the input into the child's transcript.
     const personItem = queuedInput ?? await addPrivateInput();
+    await engineStore.appendEntries(childId, run.childThreadId, [{
+      type: "message", id: `entry-${personItem}`, sessionId: childId, threadId: run.childThreadId, parentId: null,
+      createdAt: Date.now(), role: "user", content: "Use the private numbers I pasted", queueItemId: personItem,
+    }]);
     await engineStore.settleUnclaimed(childId, run.childThreadId, personItem, { outcome: "completed" });
 
     // The delegating thread sends more work. Its result can carry the
@@ -442,6 +447,34 @@ describe("delegated child completion over a channel", () => {
     expect(signals[1]?.content.origin).toEqual({ ...ORIGIN, reply: "manual" });
     const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, childId));
     expect(watch?.replyRoute).toBe("manual");
+  });
+
+  it("keeps automatic replies when the parent's work replaces a person's followup before it runs", async () => {
+    const run = await bootDelegation("child-unrun-followup");
+    const { db, engineStore } = api!.providers;
+    const [childRow] = await db.select().from(agentSessions).where(eq(agentSessions.id, "child-unrun-followup"));
+    if (!childRow) throw new Error("child session row missing");
+    const followup = await submitSessionPrompt(api!.providers, childRow, "Use the private numbers I pasted", {
+      threadId: run.childThreadId, queueMode: "followup", author: { id: USER_ID },
+    });
+    if (!followup?.messageId) throw new Error("the followup was not admitted");
+
+    // The parent's steer replaces the delegated work and the queued followup.
+    // The followup never runs, so it never enters the child's transcript.
+    const sender = buildChildSender(run.deps, run.watcher);
+    const resumed = await sender(
+      { childSessionId: "child-unrun-followup", message: "do this instead" },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID },
+    );
+    if (!resumed) throw new Error("child_send did not admit the steer");
+    expect((await engineStore.getQueueItem("child-unrun-followup", followup.messageId))?.supersededByItemId).toBe(resumed.queueItemId);
+
+    await engineStore.settleUnclaimed("child-unrun-followup", run.childThreadId, resumed.queueItemId, { outcome: "completed" });
+    await parentUpdateSettled(run, "child-unrun-followup", resumed.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+    const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-unrun-followup"));
+    expect(watch?.replyRoute).toBe("origin");
   });
 
   it("posts a completion whose admission was still in flight when the parent sent more work", async () => {

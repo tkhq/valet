@@ -367,7 +367,10 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   the child's queue for a submission from a person that ran before the
   settled work on the same thread: a prompt while the child was idle, a
   followup, or a steer. A submission without parent delegation provenance
-  counts, except a signal. If one exists, the watcher sets `reply_route` to
+  counts, except a signal. It counts only if it ran: a run claims the
+  submission and writes it into the transcript, so a followup that later
+  work replaced before it started does not count. If one exists, the
+  watcher sets `reply_route` to
   `manual` for good, because the result can carry that input. A followup
   queued behind the delegated work does not affect that work's result. It does not read `author`, because a
   `child_send` names the steering member as its author. A followup, input on
