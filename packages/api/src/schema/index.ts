@@ -609,6 +609,12 @@ export const childWatches = pgTable(
     // child.settled signal so the settlement turn can reach the channel
     // that asked. Null for spawns from non-channel turns.
     originJson: text("origin_json"),
+    // Reply-route state, kept apart from the origin above, which never
+    // changes and also decides transcript sharing. "origin": the origin's
+    // own reply policy, written only at spawn. "manual": explicit replies
+    // only. "none": a person took over the child. Null: a row from before
+    // this column, read as "manual" (`ChildReplyRoute`).
+    replyRoute: text("reply_route"),
     // Display-state only: a dismissed watch leaves the thread tree. The
     // child session row and its history stay reachable from Sessions.
     dismissedAt: bigint("dismissed_at", { mode: "number" }),
@@ -2913,3 +2919,22 @@ export const generatedFiles = pgTable("generated_files", {
   ready: boolean("ready").notNull().default(false),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, t => [uniqueIndex("generated_files_scope_digest").on(t.orgId, t.sessionId, t.threadId, t.digest)]);
+
+export const childReplyDeliveries = pgTable("child_reply_deliveries", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  queueItemId: text("queue_item_id"),
+  nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+  completedAt: bigint("completed_at", { mode: "number" }),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+  /** Set when retries stop. `last_error` and an `event_drop_log` row say why. */
+  failedAt: bigint("failed_at", { mode: "number" }),
+  /** When the intent was written. Reports how long a reply has waited. */
+  createdAt: bigint("created_at", { mode: "number" }),
+  /** The child submission this reply reports. Its child watch decides whether admission can still happen. */
+  childSessionId: text("child_session_id"),
+  childQueueItemId: text("child_queue_item_id"),
+}, (t) => [index("child_reply_deliveries_due").on(t.orgId, t.completedAt, t.nextAttemptAt)]);

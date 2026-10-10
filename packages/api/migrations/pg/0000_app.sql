@@ -355,7 +355,8 @@ CREATE TABLE "child_watches" (
 	"settled_at" bigint,
 	"sandbox_reclaimed_at" bigint,
 	"parked_sandbox_id" text,
-	"origin_json" text
+	"origin_json" text,
+	"reply_route" text
 );
 --> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");
@@ -2617,3 +2618,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS "cli_tokens_refresh" ON "cli_tokens" ("refresh
 CREATE INDEX IF NOT EXISTS "cli_tokens_user" ON "cli_tokens" ("user_id");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "cli_device_requests_expires" ON "cli_device_requests" ("expires_at");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "child_reply_deliveries" (
+  "id" text PRIMARY KEY NOT NULL,
+  "org_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "queue_item_id" text,
+  "next_attempt_at" bigint NOT NULL,
+  "completed_at" bigint,
+  "attempts" integer DEFAULT 0 NOT NULL,
+  "last_error" text,
+  "failed_at" bigint,
+  "created_at" bigint,
+  "child_session_id" text,
+  "child_queue_item_id" text
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "child_reply_deliveries_due" ON "child_reply_deliveries" ("org_id", "completed_at", "next_attempt_at");

@@ -332,11 +332,106 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
 ## Deviations (Part 1, as built)
 
 - **Only the first addressed response posts automatically.** Final-message fallback delivery remains removed. A successful explicit origin reply anywhere in the submission suppresses the automatic copy. A pending call anywhere in the submission defers it. When all calls fail, the host falls back to the original first text.
-- **`child.settled` inherits the spawning submission's origin.** A manual
-  settlement does not post automatically. It uses the same once-per-thread
-  silence reminder as other manual turns. PR #772 is the complementary owner
-  for durable automatic child replies. Its dispatcher must bypass this live
-  feedback path and retain provider send errors for retry.
+- **`child.settled` preserves the spawning submission's origin and reply policy.**
+  For an automatic origin, the parent's first response to the settlement posts
+  to the original channel thread. A manual settlement does not post
+  automatically. It uses the same once-per-thread silence reminder as other
+  manual turns. The child result itself does not post directly.
+  The watch stores the spawning origin in `origin_json`, which never
+  changes, because it also decides whether the child shares its transcript.
+  Reply-route state is a separate `reply_route` column. `origin` follows
+  the origin's own policy, `manual` downgrades the settlement to a manual
+  reply, and `none` sends the settlement with no origin. Only the spawner
+  writes `origin`. A null route marks a watch from before this column. Its
+  takeover or cross-thread history is unknown, so it reads as `manual`.
+  `child_send` passes the sending turn's channel origin to the host. The
+  route stays automatic only when a channel turn on the delegating parent
+  thread replies to the same channel thread, and restart recovery keeps that
+  route. A `child_send` from another parent thread, or from a web turn on the
+  delegating thread, sets `reply_route` to `manual`. The web composer can
+  post to a channel-keyed parent thread, so that turn's context can be
+  private. The parent can still reply to the channel thread explicitly.
+  The spawner and `child_send` stamp each child submission with parent
+  delegation provenance (`metadata.parentDelegation`): the parent session,
+  the parent thread that sent it, and the sending turn's channel thread when
+  that turn replies there automatically. When the watcher follows delegated
+  work from another parent thread, it sets `reply_route` to `manual`. This
+  covers a `child_send` whose sender stopped before it stored the route.
+  Promotion copies
+  metadata, so delegated work that a person sends now keeps it. The watcher
+  is the only owner of the takeover decision. When the watched submission
+  is superseded, the watcher follows its successor and sets `reply_route`
+  to `none` only when the successor has no parent delegation provenance: a
+  person took over the child. Parent work sent after a takeover, from any parent
+  thread, sets the route back to `manual`. The person's input is in the
+  child's transcript, so the parent can answer the channel thread with
+  `reply_to_origin` but never posts there automatically.
+  Before the watcher admits a settlement with an `origin` route, it checks
+  the child's queue for a submission from a person that ran before the
+  settled work on the same thread: a prompt while the child was idle, a
+  followup, or a steer. A submission without parent delegation provenance
+  counts, except a signal. It counts only if it ran: a run claims the
+  submission and writes it into the transcript, so a followup that later
+  work replaced before it started does not count. If one exists, the
+  watcher sets `reply_route` to
+  `manual` for good, because the result can carry that input. A followup
+  queued behind the delegated work does not affect that work's result. It does not read `author`, because a
+  `child_send` names the steering member as its author. A followup, input on
+  another child thread, and a rejected prompt never supersede the watched
+  submission, so they leave the route intact. Parent-directed steering
+  keeps the route, including recovery after an interrupted `child_send`.
+- **Automatic child completion replies have durable delivery intents.** The
+  watcher stores an intent before it submits `child.settled`. It stores the
+  parent submission ID before it marks the watch settled. The `child_status`
+  repair, which marks a stale watch settled when the child's work is done,
+  skips only a watch whose automatic reply has no admitted parent update.
+  Every other watch, including a manual one, is repaired and frees its
+  active-child slot. Restart recovery
+  resolves missing receipts by the immutable, namespaced dispatch ID, even if
+  later work changed the child watch. `SessionStore.getQueueItemByDispatchId`
+  scopes this lookup to the parent session in both store implementations.
+  The channel host polls up to 20 due intents per pass. A conditional lease
+  prevents concurrent workers from claiming the same intent during that lease.
+  The dispatcher bypasses the live dropped-reply feedback path. A waiting
+  intent records no failure. The dispatcher checks it after a tenth of the
+  time it has waited, from two seconds up to one minute. It reads no
+  transcript before the parent turn starts, and then reads only that turn's
+  entries through the queue item index. The engine settles every
+  submission, so a wait after admission ends. A wait has no time limit, but
+  a wait longer than one hour is logged once per process and counted in
+  `valet.channels.child_reply.over_age_waits`. The intent stays open.
+  The watcher owns admission. It retries a failed admission, including on
+  the next boot, and marks its watch settled only after it admits. So an
+  intent with no admitted parent update waits, with no time limit. The
+  intent stores its child submission. A settled watch with no admitted
+  update is a failed attempt. A watch that moved to later work is not proof
+  that admission failed, because the admission can still be in flight. Only
+  the watcher ends such an intent: when an attempt for that work finds the
+  watch moved, and on `rearm()` after a restart, when no admission is in
+  flight. It records the landed receipt if there is one, and otherwise
+  completes the intent without a send. A landed admission re-opens an
+  intent that was never sent. Before each admission
+  attempt, the watcher re-opens an intent that failed before any update
+  was admitted, and deletes its problem row.
+  A provider send error or a missing route (for example, a stopped channel)
+  is a failed attempt. Each failed attempt records `attempts` and
+  `last_error`, logs the intent ID, and increments the
+  `valet.channels.child_reply.failures` counter. The next attempt waits one
+  second, doubling to a five-minute cap. After 20 failed attempts, which
+  span about one hour, the dispatcher sets `failed_at` and writes a
+  `child_reply_failed` problem row in one transaction. It does not try
+  again. A provider outage or channel restart longer than one hour needs a
+  person to ask the agent to post the result again. A successful send
+  completes the intent and clears `last_error`. The dispatcher deletes
+  completed intents after seven days and failed intents after 30 days, at
+  most once per hour. An explicit reply or an
+  aborted parent turn suppresses automatic delivery. Assistant entries that
+  ended in an error or abort are never selected, so a parent round that fails
+  and then succeeds under the same submission posts the successful text.
+  The live event handler does not also send automatic child replies.
+  Delivery is at least once: a crash after provider acceptance but before the
+  completion write can duplicate a reply. No provider-independent atomic send
+  and database commit exists. This queue does not replay older untracked replies.
 - **Telegram has an explicit text reply action.** `telegram.reply_to_origin`
   sends text to the origin DM through the organization bot credential.
 - **Slack text uses the CommonMark converter.** The channel transport,

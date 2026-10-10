@@ -125,6 +125,17 @@ describe("child_send tool: sender present", () => {
     expect(result.text).toContain("child.settled");
   });
 
+  it("passes the current turn's channel origin to the sender", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const origin = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" as const };
+    const ctx = makeCtx({
+      origin,
+      config: { childSender: async (_req: unknown, sendCtx: Record<string, unknown>) => { seen.push(sendCtx); return { queueItemId: "queue-3" }; } },
+    });
+    await childSendTool.execute({ child_session_id: "child-1", message: "continue" }, ctx);
+    expect(seen[0]?.origin).toEqual(origin);
+  });
+
   it("confirms that a default send supersedes in-flight work", async () => {
     const ctx = makeCtx({
       config: { childSender: async () => ({ queueItemId: "queue-default" }) },

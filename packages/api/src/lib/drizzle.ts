@@ -579,6 +579,26 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     probe: { kind: "column", table: "session_threads", column: "last_user_activity_at" },
     sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "last_user_activity_at" bigint',
   },
+  { describe: "child completion reply deliveries", probe: { kind: "table", table: "child_reply_deliveries" }, sql: `CREATE TABLE IF NOT EXISTS "child_reply_deliveries" (
+  "id" text PRIMARY KEY NOT NULL,
+  "org_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "queue_item_id" text,
+  "next_attempt_at" bigint NOT NULL,
+  "completed_at" bigint,
+  "attempts" integer DEFAULT 0 NOT NULL,
+  "last_error" text,
+  "failed_at" bigint,
+  "created_at" bigint,
+  "child_session_id" text,
+  "child_queue_item_id" text
+);` },
+  { describe: "child completion reply due index", probe: { kind: "index", index: "child_reply_deliveries_due" }, sql: `CREATE INDEX IF NOT EXISTS "child_reply_deliveries_due" ON "child_reply_deliveries" ("org_id", "completed_at", "next_attempt_at");` },
+  { describe: "child completion reply terminal failures", probe: { kind: "column", table: "child_reply_deliveries", column: "failed_at" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "failed_at" bigint' },
+  { describe: "child completion reply creation time", probe: { kind: "column", table: "child_reply_deliveries", column: "created_at" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "created_at" bigint' },
+  { describe: "child completion reply child session", probe: { kind: "column", table: "child_reply_deliveries", column: "child_session_id" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "child_session_id" text' },
+  { describe: "child completion reply child submission", probe: { kind: "column", table: "child_reply_deliveries", column: "child_queue_item_id" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "child_queue_item_id" text' },
   {
     describe: "session_repos.resolved_ref column",
     probe: { kind: "column", table: "session_repos", column: "resolved_ref" },
@@ -785,6 +805,14 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "child_watches.origin_json column",
     probe: { kind: "column", table: "child_watches", column: "origin_json" },
     sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "origin_json" text',
+  },
+  {
+    // Reply-route state of a child watch. Null on older rows, which read
+    // as "manual": their takeover or cross-thread history is unknown, so
+    // they never post automatically. New watches store an explicit route.
+    describe: "child_watches.reply_route column",
+    probe: { kind: "column", table: "child_watches", column: "reply_route" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "reply_route" text',
   },
   {
     // The last delivered message ts on a followed thread, read by the
