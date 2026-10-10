@@ -98,6 +98,7 @@ The next turn can try native generation again.
 
 The adapter writes validated original bytes before making the preview. It registers the receipt as soon as the write completes.
 Receipt tool calls are placed before any other tool call in the message. Tools run in content order, so a stop or restart during a slow or gated call cannot leave a saved original unrecorded.
+As soon as an original is written, the thread appends the assistant entry with the receipt tool call as a checkpoint, before the stream ends. A process crash before the terminal event then resumes the turn with the saved path in context instead of paying for the image again. `message_end` replaces the checkpoint entry with the full message.
 If the provider throws before it streams anything, the bridge still ends the stream with an error message, so the agent loop settles.
 If the preview fails, the receipt returns the saved path and a warning instead of asking for another paid generation.
 The web renderer keeps that path visible without a preview.
@@ -148,6 +149,8 @@ Relative input and output paths stay relative to the sandbox working directory, 
 Absolute container paths must resolve inside `/workspace`. Sandbox providers retain their own isolation and filesystem policy.
 The fallback response reader bounds bytes before JSON parsing. Error bodies are capped at 64 KB and retain their HTTP status.
 All invocations prepare the target directory before the request. Workflow agent sessions with a writable sandbox can generate images.
+The action identity selects the operation: `openai.generate_image` rejects `image_path` with a corrective error, and `openai.edit_image` requires it. A generation call cannot perform an edit under the generation policy.
+The schema declares defaults for `model`, `size`, `quality`, and `output_format`, and policy resolves on the defaulted parameters, so a policy scoped to Sunburst applies when the model is omitted.
 Sandbox-less workflow tool nodes fail during directory preparation, before payment. Sandbox preparation failures retain their real cause.
 Input size is checked before and after the sandbox read. Source-read errors retain the sandbox cause with credential values redacted.
 The plugin does not retry paid image requests automatically. Provider errors redact credential values.

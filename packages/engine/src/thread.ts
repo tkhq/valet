@@ -4981,6 +4981,48 @@ export class Thread {
     return this.nativeImageGrant !== undefined;
   }
 
+  /** The assistant entry a native image checkpoint appended before message_end. */
+  private checkpointEntryId: string | undefined;
+
+  /**
+   * Persist a saved native image before the stream ends. The entry carries the
+   * receipt tool call with its path, so a crash before the terminal event
+   * resumes this turn with the saved original in context instead of paying
+   * for the image again. message_end replaces the entry with the full message.
+   */
+  private async checkpointNativeImage(receipt: { path: string; image_id: string; callId: string }): Promise<void> {
+    const messageId = this.currentAssistantMessageId;
+    if (!messageId) return;
+    const part: MessagePart = {
+      type: "tool_call",
+      callId: receipt.callId,
+      toolName: NATIVE_IMAGE_RESULT_TOOL,
+      status: "running",
+      args: { path: receipt.path, image_id: receipt.image_id },
+    };
+    this.currentToolCalls.set(receipt.callId, part);
+    this.currentAssistantParts.push(part);
+    const entry: MessageEntry = {
+      id: messageId,
+      sessionId: this.session.id,
+      threadId: this.id,
+      parentId: null,
+      type: "message",
+      role: "assistant",
+      content: "",
+      parts: [...this.currentAssistantParts],
+      model: this.agent.state.model.id,
+      queueItemId: this.runningItem?.id,
+      createdAt: Date.now(),
+    };
+    if (this.checkpointEntryId === messageId) {
+      await this.fencedWrite(() => this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence));
+    } else {
+      await this.fencedWrite(() => this.appendEntry(entry, this.fence));
+      this.checkpointEntryId = messageId;
+    }
+  }
+
   /** Hosted spend appears in the action audit like a plugin invocation would. */
   private recordNativeImage(receipt: { path: string; image_id: string }): void {
     const grant = this.nativeImageGrant;
@@ -5070,7 +5112,10 @@ export class Thread {
           samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
         }, this.session.sandbox, {
           permitted: () => this.nativeImageGenerationPermitted(options?.signal),
-          saved: (receipt) => this.recordNativeImage(receipt),
+          saved: async (receipt) => {
+            await this.checkpointNativeImage(receipt);
+            this.recordNativeImage({ path: receipt.path, image_id: receipt.image_id });
+          },
         });
       },
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
@@ -5354,6 +5399,8 @@ export class Thread {
             });
           }
         } else if (ev.type === "toolcall_end") {
+          // A native image receipt was checkpointed when its file was saved; keep that part.
+          if (this.currentToolCalls.has(ev.toolCall.id)) break;
           const part: MessagePart = {
             type: "tool_call",
             callId: ev.toolCall.id,
@@ -5427,9 +5474,17 @@ export class Thread {
             stopReason,
             createdAt: Date.now(),
           };
-          await this.fencedWrite(() =>
-            this.appendEntry(entry, this.fence),
-          );
+          if (this.checkpointEntryId === entry.id) {
+            // The native image checkpoint already appended this entry. Replace it with the full message.
+            await this.fencedWrite(() =>
+              this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
+            );
+          } else {
+            await this.fencedWrite(() =>
+              this.appendEntry(entry, this.fence),
+            );
+          }
+          this.checkpointEntryId = undefined;
           // Hold a reference so tool_execution_end can re-persist as each
           // tool completes (`parts` is shared by reference; mutating a
           // tool_call's status flows through to this entry's parts array).

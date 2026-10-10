@@ -436,6 +436,24 @@ describe("openaiPlugin", () => {
     expect(files.has("/workspace/fox.png")).toBe(true);
   });
 
+  it("never edits through generate_image and never generates through edit_image", async () => {
+    const { ctx, files } = makeCtx({ credential: { accessToken: "sk-test" }, files: new Map([["/workspace/in.png", PNG_BYTES]]) });
+    const generated = await getAction("openai.generate_image").execute({ prompt: "fox", image_path: "/workspace/in.png" }, ctx);
+    expect(generated).toMatchObject({ success: false, error: expect.stringContaining("Use openai.edit_image") });
+    const edited = await getAction("openai.edit_image").execute({ prompt: "fox" }, ctx);
+    expect(edited).toMatchObject({ success: false, error: expect.stringContaining("needs image_path") });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(files.size).toBe(1);
+  });
+
+  it("declares its defaults in the schema so policy resolves on effective parameters", () => {
+    const schema = getAction("openai.generate_image").parameters as { properties: Record<string, { default?: unknown }> };
+    expect(schema.properties.model.default).toBe("gpt-image-2.5-sunburst");
+    expect(schema.properties.output_format.default).toBe("png");
+    expect(schema.properties.quality.default).toBe("auto");
+    expect(schema.properties.size.default).toBe("auto");
+  });
+
   it("uses the native binary's supplied Sharp runtime for validation", async () => {
     const embeddedSharp = vi.fn((input: Uint8Array, options: sharp.SharpOptions) => sharp(input, options));
     vi.stubGlobal("__VALET_SHARP__", embeddedSharp);

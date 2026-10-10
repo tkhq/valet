@@ -673,12 +673,17 @@ export async function invokeAction(
   // canonical form means one actionId an admin can target that matches both
   // the session and workflow paths.
   const policyActionId = qualifiedId(entry);
+  // Policy sees the effective parameters: schema defaults applied, so an
+  // omitted field cannot slip past a matcher on its default value. Invalid
+  // params keep the raw shape here; executeAction reports the validation error.
+  const prepared = prepareActionArgs(entry.action.parameters, args);
+  const effectiveArgs = prepared.ok ? prepared.args : args;
   const input: PolicyResolveInput = {
     teamId: ctx.owner?.type === "team" ? ctx.owner.id : undefined,
     service: entry.service,
     actionId: policyActionId,
     riskLevel: entry.action.riskLevel,
-    params: args,
+    params: effectiveArgs,
     userId: ctx.userId,
     orgId: ctx.orgId,
     sessionId: ctx.sessionId,
@@ -699,7 +704,7 @@ export async function invokeAction(
     summary,
     resumeKey,
     queueItemId: ctx.queueItemId,
-    params: args,
+    params: effectiveArgs,
   };
 
   let decision: PolicyDecision;

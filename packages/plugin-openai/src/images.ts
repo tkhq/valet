@@ -14,12 +14,14 @@ const MAX_RESPONSE_BYTES = Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 1024 * 1024;
 
 export const imageParameters = {
   prompt: Type.String({ minLength: 1, description: "What to draw or change. Be specific about style, subject, and composition." }),
+  // Schema defaults are applied before policy resolution, so a policy scoped to the default value applies to an omitted field.
   model: Type.Optional(Type.Union(IMAGE_MODELS.map((model) => Type.Literal(model)), {
+    default: "gpt-image-2.5-sunburst",
     description: "Image model, separate from the chat model. Default gpt-image-2.5-sunburst for precision; choose gpt-image-2.5-flare for speed.",
   })),
-  size: Type.Optional(Type.Union([Type.Literal("1024x1024"), Type.Literal("1536x1024"), Type.Literal("1024x1536"), Type.Literal("auto")], { description: 'Output size. Default "auto".' })),
-  quality: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max"), Type.Literal("auto")], { description: 'Quality. Default "auto". xhigh and max require a GPT Image 2.5 model.' })),
-  output_format: Type.Optional(Type.Union([Type.Literal("png"), Type.Literal("jpeg"), Type.Literal("webp")], { description: 'File format. Default "png".' })),
+  size: Type.Optional(Type.Union([Type.Literal("1024x1024"), Type.Literal("1536x1024"), Type.Literal("1024x1536"), Type.Literal("auto")], { default: "auto", description: 'Output size. Default "auto".' })),
+  quality: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max"), Type.Literal("auto")], { default: "auto", description: 'Quality. Default "auto". xhigh and max require a GPT Image 2.5 model.' })),
+  output_format: Type.Optional(Type.Union([Type.Literal("png"), Type.Literal("jpeg"), Type.Literal("webp")], { default: "png", description: 'File format. Default "png".' })),
   background: Type.Optional(Type.Union([Type.Literal("transparent"), Type.Literal("opaque"), Type.Literal("auto")])),
   output_compression: Type.Optional(Type.Integer({ minimum: 0, maximum: 100, description: "Compression, 0-100. Only valid for JPEG or WebP." })),
   output_path: Type.Optional(Type.String({ description: "File path in the sandbox working directory. Absolute container paths must be inside /workspace. Extension must match output_format. Default generated-images/<unique-id>-<slug>.<ext>." })),
@@ -95,15 +97,24 @@ function returnedImage(body: unknown) {
     revisedPrompt: typeof item.revised_prompt === "string" ? item.revised_prompt : undefined };
 }
 
-/** Direct Images API fallback for models without native image generation. */
-export async function executeImage(args: ImageArgs, ctx: PluginActionContext, key: string, apiUrl: string): Promise<PluginActionResult> {
+/**
+ * Direct Images API fallback for models without native image generation.
+ * The action identity selects the operation: only `edit` reads a source image,
+ * so a stray `image_path` cannot turn a generation into an edit under the
+ * generation action's policy.
+ */
+export async function executeImage(args: ImageArgs, ctx: PluginActionContext, key: string, apiUrl: string, operation: "generate" | "edit"): Promise<PluginActionResult> {
   ctx.signal.throwIfAborted();
+  if (operation === "generate" && args.image_path !== undefined) {
+    return { success: false, error: "openai.generate_image does not edit files. Use openai.edit_image with image_path to edit an existing image." };
+  }
   const { model, format, path, options } = validateArgs(args);
   const sharp = await imageDecoder();
   let source: Uint8Array | undefined;
   let sourceFormat: string | undefined;
   let sourcePath: string | undefined;
-  if (args.image_path !== undefined) {
+  if (operation === "edit") {
+    if (args.image_path === undefined) return { success: false, error: "openai.edit_image needs image_path. Give the sandbox path of the image to edit." };
     sourcePath = sandboxPath(args.image_path);
     try {
       const stat = await ctx.sandbox.stat(sourcePath);

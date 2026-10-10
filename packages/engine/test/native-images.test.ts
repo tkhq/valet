@@ -562,7 +562,7 @@ it("checks policy once per turn, prepares the sandbox before the paid request, a
   await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox, { permitted, saved }).result();
   expect(bridge.offered).toBe(true);
   expect(mkdir.mock.invocationCallOrder[0]).toBeLessThan(fetchMock.mock.invocationCallOrder[0]);
-  expect(saved).toHaveBeenCalledWith({ path: expect.stringMatching(/^generated-images\//), image_id: "img_1" });
+  expect(saved).toHaveBeenCalledWith({ path: expect.stringMatching(/^generated-images\//), image_id: "img_1", callId: expect.stringMatching(/^call_/) });
   await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox, { permitted, saved }).result();
   expect(permitted).toHaveBeenCalledTimes(1);
   expect(requestTools(fetchMock, 1)).toContain("image_generation");
@@ -626,4 +626,50 @@ it("offers no hosted tool when editing is denied, because the hosted tool also e
     : { mode: "allow" as const, provenance: { baseMode: "allow" as const, source: "risk_default" as const } });
   expect(await promptWithPolicy({ pluginCatalog: openaiCatalog(), policyResolver: { resolve } })).not.toContain("image_generation");
   expect(resolve.mock.calls.map(([input]) => input.actionId).sort()).toEqual(["openai.edit_image", "openai.generate_image"]);
+});
+
+it("checkpoints a saved image as an assistant entry before the stream ends, then replaces it once", async () => {
+  const store = new InMemorySessionStore();
+  const events = new InMemoryEventStream();
+  const engine = new Engine({ providers: { store, stream: events, sandboxProvider: new VirtualSandboxProvider() } });
+  // The provider sends the finished image, then holds the stream open until released.
+  let release: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: item() })}\n\n`));
+      await held;
+      const response = { id: "resp_held", status: "completed", output: [item()], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } };
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "response.completed", response })}\n\ndata: [DONE]\n\n`));
+      controller.close();
+    },
+  });
+  const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(body, { headers: { "content-type": "text/event-stream" } }))
+    .mockImplementation(async () => wire([{ type: "message", id: "msg_done", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Saved.", annotations: [] }] }]));
+  vi.stubGlobal("fetch", fetchMock);
+  const session = await engine.createSession({ userId: "u", orgId: "o", workspace: "/workspace", sandbox: {}, model,
+    purpose: "child", resolveModel: async () => ({ model, apiKey: "sk-fixture-key" }), pluginCatalog: openaiCatalog() });
+  let settled = false;
+  events.subscribe({ sessionId: session.id }, ({ event }) => { if (event.type === "submission_settled") settled = true; });
+  try {
+    const receipt = await session.prompt("Draw a square");
+    const checkpoint = await expect.poll(async () => {
+      const entries = await store.getEntries(session.id, receipt.threadId);
+      return entries.find((entry) => entry.type === "message" && entry.role === "assistant");
+    }, { timeout: 5_000 }).toBeDefined().then(async () => (await store.getEntries(session.id, receipt.threadId)).find((entry) => entry.type === "message" && entry.role === "assistant"));
+    if (checkpoint?.type !== "message") throw new Error("missing checkpoint");
+    // Durable before the terminal event: a crash here resumes with the saved path in context.
+    expect(checkpoint.parts).toEqual([expect.objectContaining({ type: "tool_call", toolName: NATIVE_IMAGE_RESULT_TOOL, status: "running", args: { path: expect.stringMatching(/^generated-images\//), image_id: "img_1" } })]);
+    release?.();
+    await expect.poll(() => settled, { timeout: 10_000 }).toBe(true);
+    const entries = await store.getEntries(session.id, receipt.threadId);
+    const assistants = entries.filter((entry) => entry.type === "message" && entry.role === "assistant");
+    // The checkpoint entry became the full message: same id, receipt completed, no duplicate.
+    expect(assistants.filter((entry) => entry.id === checkpoint.id)).toHaveLength(1);
+    const final = assistants.find((entry) => entry.id === checkpoint.id);
+    if (final?.type !== "message") throw new Error("missing final entry");
+    expect(final.parts?.filter((part) => part.type === "tool_call" && part.toolName === NATIVE_IMAGE_RESULT_TOOL)).toEqual([expect.objectContaining({ status: "completed", callId: checkpoint.parts?.[0]?.type === "tool_call" ? checkpoint.parts[0].callId : "" })]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  } finally { await session.destroy(); }
 });

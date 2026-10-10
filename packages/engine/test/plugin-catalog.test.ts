@@ -73,6 +73,29 @@ it("hides duplicate generation for native models but keeps sandbox-file editing"
   expect((await invokeAction(buildPluginCatalog([plugin]), "openai.generate_image", {}, makeCtx({ nativeImageGeneration: true }), "generate")).kind).toBe("unknown");
 });
 
+it("resolves policy on defaulted parameters, so an omitted field cannot bypass a matcher", async () => {
+  let executed = 0;
+  const plugin: ActionPlugin = { service: "openai", actions: [{
+    id: "openai.generate_image", name: "Generate Image", description: "Generate", riskLevel: "low",
+    parameters: Type.Object({ prompt: Type.String(), model: Type.Optional(Type.String({ default: "gpt-image-2.5-sunburst" })) }),
+    execute: async () => { executed++; return { success: true }; },
+  }] };
+  const records: PolicyInvocationRecord[] = [];
+  const resolver: PolicyResolver = {
+    resolve: async (input) => input.params?.model === "gpt-image-2.5-sunburst"
+      ? { mode: "deny", provenance: { baseMode: "deny", source: "org_policy" } }
+      : { mode: "allow", provenance: { baseMode: "allow", source: "risk_default" } },
+    onInvocation: async (record) => { records.push(record); },
+  };
+  const catalog = buildPluginCatalog([plugin]);
+  expect((await invokeAction(catalog, "openai.generate_image", { prompt: "fox" }, makeCtx({ policyResolver: resolver }), "generate")).kind).toBe("denied-policy");
+  expect(executed).toBe(0);
+  expect((await invokeAction(catalog, "openai.generate_image", { prompt: "fox", model: "gpt-image-2.5-flare" }, makeCtx({ policyResolver: resolver }), "generate")).kind).toBe("ok");
+  expect(executed).toBe(1);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(records[0]?.params).toEqual({ prompt: "fox", model: "gpt-image-2.5-sunburst" });
+});
+
 describe("actionRunsUngated", () => {
   const plugin: ActionPlugin = { service: "openai", actions: [{
     id: "openai.generate_image", name: "Generate Image", description: "Generate", riskLevel: "low", parameters: Type.Object({}),
@@ -2055,16 +2078,15 @@ describe("pinned tool: the model's summary", () => {
     // The action receives schema defaults: `name` was not sent, so
     // `prepareActionArgs` supplied it.
     expect(calls).toEqual([{ workflow_id: "wf-1", name: "untitled" }]);
-    // The audit record does NOT carry those defaults. `invokeAction` builds
-    // the record from the arguments as received, and `prepareActionArgs` runs
-    // afterwards inside `executeAction`, so the record answers "what was
-    // asked for" rather than "what ran". That is the shared behaviour of
-    // every path — `call_tool` and the slash-command path record the same
-    // way — so the pinned tool matching it is the point.
+    // The audit record carries the same defaults: `invokeAction` resolves
+    // policy on the effective arguments (defaults applied), so the record
+    // answers "what ran" and a matcher on a default value applies to an
+    // omitted field. `call_tool`, the slash-command path, and the pinned
+    // tool all record the same way.
     //
     // What this test actually guards is the summary: it must reach neither
     // the action's arguments nor the audit params.
-    expect(records[0]?.params).toEqual({ workflow_id: "wf-1" });
+    expect(records[0]?.params).toEqual({ workflow_id: "wf-1", name: "untitled" });
   });
 
   it("falls back to the derived summary when the model sends a blank one", async () => {

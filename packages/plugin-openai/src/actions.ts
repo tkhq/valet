@@ -96,7 +96,7 @@ const generateImage = action(Type.Object(imageParameters))({
   name: "Generate Image",
   description: "Generate an image with a selectable OpenAI image model, save it in the sandbox, and show it inline. Uses the direct Images API.",
   riskLevel: "low",
-  execute: async (args, ctx) => executeImage(args, ctx, await getApiKey(ctx), OPENAI_API_URL),
+  execute: async (args, ctx) => executeImage(args, ctx, await getApiKey(ctx), OPENAI_API_URL, "generate"),
 });
 
 const editImage = action(Type.Object({
@@ -107,7 +107,7 @@ const editImage = action(Type.Object({
   name: "Edit Image",
   description: "Edit a sandbox image with a selectable OpenAI image model, save the result, and show it inline. Uses the direct Images API.",
   riskLevel: "low",
-  execute: async (args, ctx) => executeImage(args, ctx, await getApiKey(ctx), OPENAI_API_URL),
+  execute: async (args, ctx) => executeImage(args, ctx, await getApiKey(ctx), OPENAI_API_URL, "edit"),
 });
 
 const transcribeAudio = action(

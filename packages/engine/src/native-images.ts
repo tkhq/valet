@@ -65,8 +65,13 @@ function emptyAssistantMessage(model: Model<Api>): AssistantMessage {
 export interface HostedImageHooks {
   /** The turn's policy check. False or a throw withholds the hosted tool for the turn. */
   permitted: () => Promise<boolean>;
-  /** Called once per saved original, right after its write. */
-  saved?: (receipt: { path: string; image_id: string }) => void;
+  /**
+   * Called once per saved original, right after its write and before the
+   * stream continues. `callId` is the receipt tool call the message will carry,
+   * so the thread can persist a checkpoint that survives a crash before the
+   * terminal stream event.
+   */
+  saved?: (receipt: { path: string; image_id: string; callId: string }) => void | Promise<void>;
 }
 
 /** One thread owns this bridge. The engine stores its results through ordinary tool persistence. */
@@ -167,7 +172,9 @@ export class NativeImageBridge {
       }
     }
     const output = createAssistantMessageEventStream();
-    const receipts: Array<{ path: string; image_id: string }> = [];
+    const receipts: Array<{ path: string; image_id: string; callId: string }> = [];
+    const receiptCall = (receipt: { path: string; image_id: string; callId: string }) =>
+      ({ type: "toolCall" as const, id: receipt.callId, name: NATIVE_IMAGE_RESULT_TOOL, arguments: { path: receipt.path, image_id: receipt.image_id } });
     const seen = new Map<string, string>();
     // Function calls the provider marked completed with parseable arguments, by call_id.
     // Pi also ends an incomplete item, so only the provider's status counts.
@@ -192,7 +199,7 @@ export class NativeImageBridge {
       const firstCall = message.content.findIndex((block) => block.type === "toolCall");
       let contentIndex = firstCall === -1 ? message.content.length : firstCall;
       for (const receipt of receipts) {
-        const toolCall = { type: "toolCall" as const, id: `call_${crypto.randomUUID().replaceAll("-", "")}`, name: NATIVE_IMAGE_RESULT_TOOL, arguments: receipt };
+        const toolCall = receiptCall(receipt);
         message.content.splice(contentIndex, 0, toolCall);
         output.push({ type: "toolcall_start", contentIndex, partial: message });
         output.push({ type: "toolcall_end", contentIndex, toolCall, partial: message });
@@ -207,7 +214,7 @@ export class NativeImageBridge {
       const note = savedNote(receipts.map((receipt) => receipt.path), "The turn was aborted.");
       message.content.push({ type: "text", text: note });
       for (const receipt of receipts) {
-        const toolCall = { type: "toolCall" as const, id: `call_${crypto.randomUUID().replaceAll("-", "")}`, name: NATIVE_IMAGE_RESULT_TOOL, arguments: receipt };
+        const toolCall = receiptCall(receipt);
         const contentIndex = message.content.length;
         message.content.push(toolCall);
         output.push({ type: "toolcall_start", contentIndex, partial: message });
@@ -239,8 +246,9 @@ export class NativeImageBridge {
       } catch { options.signal?.throwIfAborted(); throw new Error("Cannot save the generated image. Check the sandbox storage and request it again."); }
       // Register the original immediately. Preview work or a later abort cannot erase its receipt.
       this.savedInRequest = true;
-      receipts.push({ path, image_id: item.id });
-      if (typeof hosted !== "boolean") hosted.saved?.({ path, image_id: item.id });
+      const receipt = { path, image_id: item.id, callId: `call_${crypto.randomUUID().replaceAll("-", "")}` };
+      receipts.push(receipt);
+      if (typeof hosted !== "boolean") await hosted.saved?.(receipt);
       seen.set(item.id, hash);
       const key = `${item.id}:${path}`;
       this.saved.set(key, this.receipt(bytes, path, item.id, format, "Image saved. Use the saved original; do not regenerate it."));
