@@ -344,14 +344,17 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   reply, and `none` sends the settlement with no origin. Only the spawner
   writes `origin`. A null route marks a watch from before this column. Its
   takeover or cross-thread history is unknown, so it reads as `manual`.
-  A `child_send` from the parent thread that delegated the work, and restart
-  recovery, keep the route. A `child_send` from another parent thread sets
-  `reply_route` to `manual`, so that thread's context never posts to the
-  original channel thread automatically. The parent can still reply there
-  explicitly.
+  `child_send` passes the sending turn's channel origin to the host. The
+  route stays automatic only when a channel turn on the delegating parent
+  thread replies to the same channel thread, and restart recovery keeps that
+  route. A `child_send` from another parent thread, or from a web turn on the
+  delegating thread, sets `reply_route` to `manual`. The web composer can
+  post to a channel-keyed parent thread, so that turn's context can be
+  private. The parent can still reply to the channel thread explicitly.
   The spawner and `child_send` stamp each child submission with parent
-  delegation provenance (`metadata.parentDelegation`): the parent session
-  and the parent thread that sent it. When the watcher follows delegated
+  delegation provenance (`metadata.parentDelegation`): the parent session,
+  the parent thread that sent it, and the sending turn's channel thread when
+  that turn replies there automatically. When the watcher follows delegated
   work from another parent thread, it sets `reply_route` to `manual`. This
   covers a `child_send` whose sender stopped before it stored the route.
   Promotion copies

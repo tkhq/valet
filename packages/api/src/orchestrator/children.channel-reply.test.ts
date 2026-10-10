@@ -69,7 +69,7 @@ function delegatedItem(id: string, threadId: string, parent: { sessionId: string
   return {
     id, threadId, content: "delegated work", status: "queued", attemptCount: 0,
     maxAttempts: 10, timeoutAt: now + 3_600_000, createdAt: now, updatedAt: now,
-    metadata: parentDelegationMetadata(parent.sessionId, parent.threadId),
+    metadata: parentDelegationMetadata(parent.sessionId, parent.threadId, ORIGIN),
   };
 }
 
@@ -186,12 +186,12 @@ describe("delegated child completion over a channel", () => {
     await api!.providers.channelHost.retryChildReplies();
     expect(run.transport.sent).toHaveLength(1);
 
-    // The thread that delegated the task sends follow-up work. The new
-    // result still belongs to that thread's channel turn.
+    // A channel turn on the thread that delegated the task sends follow-up
+    // work. The new result still belongs to that channel thread.
     const sender = buildChildSender(run.deps, run.watcher);
     const resumed = await sender(
       { childSessionId: "child-resume", message: "one more thing: add tests" },
-      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID, origin: ORIGIN },
     );
     if (!resumed) throw new Error("child_send did not admit the follow-up");
     await engineStore.settleUnclaimed("child-resume", run.childThreadId, resumed.queueItemId, { outcome: "completed" });
@@ -202,6 +202,36 @@ describe("delegated child completion over a channel", () => {
     expect(run.transport.sent.every((sent) => sent.conversationKey === "fake:dm:C1")).toBe(true);
     const signals = await childSettledSignals(run.parentId);
     expect(signals.map((signal) => signal.content.origin)).toEqual([ORIGIN, ORIGIN]);
+  });
+
+  it("does not post automatically when a web turn on the delegating thread resumes a settled child", async () => {
+    const run = await bootDelegation("child-resume-web");
+    const { db, engineStore } = api!.providers;
+    await engineStore.settleUnclaimed("child-resume-web", run.childThreadId, run.queueItemId, { outcome: "completed" });
+    await parentUpdateSettled(run, "child-resume-web", run.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+
+    // A person writes in the same parent thread from the web. That turn has
+    // no channel origin, and its context can be private.
+    const sender = buildChildSender(run.deps, run.watcher);
+    const resumed = await sender(
+      { childSessionId: "child-resume-web", message: "use the private numbers from the web" },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID },
+    );
+    if (!resumed) throw new Error("child_send did not admit the follow-up");
+    await engineStore.settleUnclaimed("child-resume-web", run.childThreadId, resumed.queueItemId, { outcome: "completed" });
+    const signals = await vi.waitFor(async () => {
+      const found = await childSettledSignals(run.parentId);
+      if (found.length < 2) throw new Error("the resumed settlement is not admitted yet");
+      return found;
+    }, { timeout: 30_000, interval: 20 });
+    await run.parentThread.awaitResult(signals[1]!.id);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+    expect(signals[1]?.content.origin).toEqual({ ...ORIGIN, reply: "manual" });
+    const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-resume-web"));
+    expect(watch?.replyRoute).toBe("manual");
   });
 
   it("does not post automatically when another parent thread resumes a settled child", async () => {
@@ -267,7 +297,7 @@ describe("delegated child completion over a channel", () => {
     // The parent's child_send admitted its steer, then the process stopped
     // before the sender moved the watch. The watcher follows the steer.
     const steer = await run.child.prompt("one more thing: add tests",
-      childSendPromptOptions({ parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID }, false));
+      childSendPromptOptions({ parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID, origin: ORIGIN }, false));
     await vi.waitFor(async () => {
       const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-crash"));
       expect(watch?.queueItemId).toBe(steer.queueItemId);
@@ -432,7 +462,7 @@ describe("delegated child completion over a channel", () => {
     const sender = buildChildSender(run.deps, run.watcher);
     const resumed = await sender(
       { childSessionId: childId, message: "now finish up" },
-      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID, origin: ORIGIN },
     );
     if (!resumed) throw new Error("child_send did not admit the follow-up");
     await engineStore.settleUnclaimed(childId, run.childThreadId, resumed.queueItemId, { outcome: "completed" });
@@ -464,7 +494,7 @@ describe("delegated child completion over a channel", () => {
     const sender = buildChildSender(run.deps, run.watcher);
     const resumed = await sender(
       { childSessionId: "child-unrun-followup", message: "do this instead" },
-      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID, origin: ORIGIN },
     );
     if (!resumed) throw new Error("child_send did not admit the steer");
     expect((await engineStore.getQueueItem("child-unrun-followup", followup.messageId))?.supersededByItemId).toBe(resumed.queueItemId);
@@ -497,7 +527,7 @@ describe("delegated child completion over a channel", () => {
       const sender = buildChildSender(run.deps, run.watcher);
       const resumed = await sender(
         { childSessionId: "child-admit-race", message: "one more thing" },
-        { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID },
+        { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID, origin: ORIGIN },
       );
       if (!resumed) throw new Error("child_send did not admit the follow-up");
       // A dispatcher pass while the admission is in flight must not end the reply.

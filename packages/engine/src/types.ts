@@ -2844,7 +2844,8 @@ export type ChildStatusReader = (
  */
 export type ChildSender = (
   req: { childSessionId: string; message: string; queue?: boolean },
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
+  /** `origin`: the sending turn's channel origin, absent for a web or other non-channel turn. */
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin },
 ) => Promise<{ queueItemId: string } | null>;
 
 /**

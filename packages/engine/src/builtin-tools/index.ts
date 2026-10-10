@@ -576,7 +576,11 @@ export const childSendTool = defineTool({
         message: args.message,
         ...(args.queue !== undefined ? { queue: args.queue } : {}),
       },
-      { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId },
+      {
+        parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId,
+        // The host keeps automatic channel replies only for a channel turn.
+        ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
+      },
     );
     if (result === null) {
       return {

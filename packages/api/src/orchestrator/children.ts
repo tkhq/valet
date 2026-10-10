@@ -274,8 +274,17 @@ function settledReplyId(childSessionId: string, childItemId: string): string {
  */
 export const PARENT_DELEGATION_METADATA_KEY = "parentDelegation";
 
-export function parentDelegationMetadata(parentSessionId: string, parentThreadId: string): Record<string, unknown> {
-  return { [PARENT_DELEGATION_METADATA_KEY]: { parentSessionId, parentThreadId } };
+/**
+ * `replyThreadKey` names the channel thread of the sending turn, only when
+ * that turn replies there automatically. A web turn has none.
+ */
+export function parentDelegationMetadata(
+  parentSessionId: string,
+  parentThreadId: string,
+  origin?: ChannelOrigin,
+): Record<string, unknown> {
+  const replyThreadKey = origin !== undefined && origin.reply !== "manual" ? origin.threadKey : undefined;
+  return { [PARENT_DELEGATION_METADATA_KEY]: { parentSessionId, parentThreadId, ...(replyThreadKey ? { replyThreadKey } : {}) } };
 }
 
 /** True when the submission is work the parent delegated, not input from a person. */
@@ -284,12 +293,18 @@ export function isParentDelegation(item: { metadata?: Record<string, unknown> } 
   return provenance !== null && typeof provenance === "object";
 }
 
-/** The parent thread that delegated the submission, when its provenance names one. */
-function delegatingThreadId(item: { metadata?: Record<string, unknown> } | null | undefined): string | undefined {
+/** Where delegated work came from: the parent thread, and the sending turn's automatic channel thread. */
+function delegationSource(item: { metadata?: Record<string, unknown> } | null | undefined): DelegationSource {
   const provenance = item?.metadata?.[PARENT_DELEGATION_METADATA_KEY];
-  if (provenance === null || typeof provenance !== "object" || !("parentThreadId" in provenance)) return undefined;
-  return typeof provenance.parentThreadId === "string" ? provenance.parentThreadId : undefined;
+  if (provenance === null || typeof provenance !== "object") return {};
+  const field = (name: string) => {
+    const value: unknown = name in provenance ? (provenance as Record<string, unknown>)[name] : undefined;
+    return typeof value === "string" ? value : undefined;
+  };
+  return { parentThreadId: field("parentThreadId"), replyThreadKey: field("replyThreadKey") };
 }
+
+type DelegationSource = { parentThreadId?: string; replyThreadKey?: string };
 
 /**
  * Reply-route state of a child watch (`child_watches.reply_route`). The
@@ -344,23 +359,26 @@ function isSignalSubmission(item: { content: unknown }): boolean {
  * started (no parent delegation provenance) has no route. Parent work after
  * a takeover gets a manual route back: the person's input is in the child's
  * transcript, so the parent may answer the channel thread but never posts
- * there automatically. Parent work from another parent thread downgrades an
- * automatic route to manual.
+ * there automatically. An automatic route stays only for parent work sent
+ * by a channel turn on the delegating parent thread that replies to the
+ * same channel thread. Work from another parent thread, or from a web turn
+ * on the same thread, can carry private context, so it downgrades to manual.
  */
 export function nextReplyRoute(
   current: string | null,
-  work: { delegated: boolean; parentThreadId?: string },
-  delegatingThreadId: string,
+  work: { delegated: boolean } & DelegationSource,
+  watch: { parentThreadId: string; originThreadKey?: string },
 ): string | null {
   if (!work.delegated) return "none";
   if (current === "none") return "manual";
-  if (current === "origin" && work.parentThreadId !== delegatingThreadId) return "manual";
+  if (current === "origin" && (work.parentThreadId !== watch.parentThreadId
+    || work.replyThreadKey === undefined || work.replyThreadKey !== watch.originThreadKey)) return "manual";
   return current;
 }
 
 /** The prompt options of a parent `child_send`. Tests use them to model the real sender. */
 export function childSendPromptOptions(
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin },
   queue: boolean,
 ): { author: { id: string; name: string }; queueMode: "followup" | "steer"; metadata: Record<string, unknown> } {
   return {
@@ -369,7 +387,7 @@ export function childSendPromptOptions(
     // the spawner.
     author: { id: ctx.actorUserId, name: "Valet" },
     queueMode: queue ? "followup" : "steer",
-    metadata: parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId),
+    metadata: parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId, ctx.origin),
   };
 }
 
@@ -532,7 +550,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       // Per-turn role overlay (the security dispatch names the persona
       // role; the claimed child's build registered it in options.roles).
       ...(req.role !== undefined ? { role: req.role } : {}),
-      metadata: parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId),
+      metadata: parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId, ctx.origin),
     }).catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error));
 
     await deps.db
@@ -853,8 +871,8 @@ export class ChildWatcher {
       // the same route the sender would have stored. The stored origin never
       // changes.
       const replyRoute = nextReplyRoute(row.replyRoute, {
-        delegated: isParentDelegation(successorItem), parentThreadId: delegatingThreadId(successorItem),
-      }, watch.parentThreadId);
+        delegated: isParentDelegation(successorItem), ...delegationSource(successorItem),
+      }, { parentThreadId: watch.parentThreadId, originThreadKey: parseOriginJson(row.originJson)?.threadKey });
       await this.deps.db
         .update(childWatches)
         .set({ queueItemId: successor, settled: false, ...(replyRoute !== row.replyRoute ? { replyRoute } : {}) })
@@ -1523,15 +1541,15 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // active even when the revived turn never touches the sandbox.
     await deps.engineHost.markSessionUsed(req.childSessionId);
 
-    const receipt = await childSession.prompt(req.message, childSendPromptOptions(ctx, req.queue === true));
+    const promptOptions = childSendPromptOptions(ctx, req.queue === true);
+    const receipt = await childSession.prompt(req.message, promptOptions);
 
-    // Only the parent thread that delegated the work keeps automatic posts
-    // to its channel thread. Work continued from another parent thread can
-    // carry that thread's context, so from then on the parent replies to the
-    // channel thread only when it chooses to (`reply: "manual"`). Parent work
-    // after a takeover gets a manual route back.
-    const replyRoute = nextReplyRoute(watchRow.replyRoute, { delegated: true, parentThreadId: ctx.parentThreadId },
-      watchRow.parentThreadId);
+    // Only a channel turn on the delegating thread keeps automatic posts to
+    // its channel thread (`nextReplyRoute`). Otherwise the parent replies to
+    // the channel thread only when it chooses to (`reply: "manual"`).
+    const replyRoute = nextReplyRoute(watchRow.replyRoute, {
+      delegated: true, ...delegationSource({ metadata: promptOptions.metadata }),
+    }, { parentThreadId: watchRow.parentThreadId, originThreadKey: parseOriginJson(watchRow.originJson)?.threadKey });
 
     // Re-point BEFORE arming: the fresh watcher must find the row already
     // tracking its submission, and the stale watcher (if any) must find it
