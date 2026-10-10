@@ -345,6 +345,39 @@ describe("POST /api/org/policies/preview", () => {
     expect(invocations).toHaveLength(0);
   });
 
+  it("previews on defaulted params, so an omitted field matches a policy on its default", async () => {
+    const render = {
+      id: "widgets.render",
+      name: "Render",
+      description: "defaulted fixture action",
+      riskLevel: "low" as const,
+      parameters: Type.Object({ prompt: Type.String(), model: Type.Optional(Type.String({ default: "sunburst" })) }),
+      execute: async () => ({ success: true as const, data: {} }),
+    };
+    const plugin: ValetPlugin = {
+      name: "preview-defaults-fixture",
+      version: "0.0.1",
+      actions: [{ service: "widgets", actions: [render] }],
+    };
+    api = await bootTestApi({ plugins: [plugin] });
+    await fetch(`${api.baseUrl}/api/org/policies`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ actionId: "widgets.render", mode: "deny", paramMatchers: [{ path: "model", op: "eq", value: "sunburst" }] }),
+    });
+    const preview = async (params: Record<string, unknown>) => {
+      const res = await fetch(`${api!.baseUrl}/api/org/policies/preview`, {
+        method: "POST",
+        headers: HEADERS,
+        body: JSON.stringify({ service: "widgets", actionId: "widgets.render", riskLevel: "low", appliesIn: "session", sessionId: "s1", params }),
+      });
+      expect(res.status).toBe(200);
+      return ((await res.json()) as PreviewOrgPolicyResponse).mode;
+    };
+    expect(await preview({ prompt: "x" })).toBe("deny");
+    expect(await preview({ prompt: "x", model: "flare" })).toBe("allow");
+  });
+
   it("400s when appliesIn=session but sessionId is missing", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/org/policies/preview`, {

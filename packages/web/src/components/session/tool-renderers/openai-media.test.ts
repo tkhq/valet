@@ -52,6 +52,13 @@ describe("openai-media renderer", () => {
     expect(pickRenderer("call_tool", callArgs)).toBe(openaiMediaRenderer);
   });
 
+  it("claims pinned media actions with direct parameters", () => {
+    expect(isOpenaiCallTool("openai__generate_image", { prompt: "fox" })).toBe(true);
+    expect(openaiActionId({ prompt: "fox" }, "openai__generate_image")).toBe("openai.generate_image");
+    expect(pickRenderer("openai__edit_image", { prompt: "fox" })).toBe(openaiMediaRenderer);
+    expect(openaiMediaRenderer.formatTarget({ prompt: "fox" }, "openai__edit_image")).toBe("fox");
+  });
+
   it("recovers the inline image from the persisted result shape", () => {
     expect(imageDataUrl(persistedImageResult)).toBe(`data:image/png;base64,${B64}`);
   });

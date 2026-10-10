@@ -144,6 +144,10 @@ export {
 export {
   pluginCatalogTools,
   buildPluginCatalog,
+  actionRunsUngated,
+  resolveUngatedAction,
+  recordHostedActionInvocation,
+  type HostedActionGrant,
   invokeAction,
   prepareActionArgs,
   approvalModeForAction,
@@ -307,3 +311,5 @@ export { formatTranscriptText } from "./transcript-formatter.js";
 export { nestedKubernetesDecision, NESTED_KUBERNETES_IDENTITY, NESTED_KUBERNETES_UNSUPPORTED } from "./sandbox/nested-kubernetes.js";
 
 export { validatePluginHttpRoutes, MAX_PLUGIN_HTTP_BODY_BYTES, type PluginHttpRoute, type PluginHttpRequest, type PluginHttpCaller, type PluginIngressVerification } from "./plugin-http.js";
+
+export { MAX_IMAGE_BYTES, IMAGE_FORMATS, imageDecoder, validateImage, imageAttachment, decodeImageBase64 } from "./image-output.js";

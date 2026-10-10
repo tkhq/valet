@@ -27,6 +27,8 @@ import {
   validateTarget,
   type ActionLogFilters,
 } from "../policies/admin.js";
+import { prepareActionArgs } from "@valet/engine";
+import { findAction } from "../plugins/action-invoker.js";
 import { resolveActionPolicy } from "../policies/service.js";
 import { validateParamMatchers } from "../policies/matchers.js";
 import type { ActionInvocationRow, ActionPolicyRow } from "../schema/index.js";
@@ -264,13 +266,17 @@ policiesRouter.post("/preview", async (c) => {
     return c.json({ error: "workflowExecutionId is required when appliesIn is workflow" }, 400);
   }
 
+  // Preview what execution decides: schema defaults applied when the action is known.
+  const previewAction = actionPluginByService.get(body.service)?.actionPlugin.actions;
+  const action = previewAction ? findAction(previewAction, body.service, body.actionId) : undefined;
+  const prepared = action && body.params !== undefined ? prepareActionArgs(action.parameters, body.params) : undefined;
   const decision = await resolveActionPolicy(db, {
     orgId: user.orgId,
     userId: body.userId,
     service: body.service,
     actionId: body.actionId,
     riskLevel: body.riskLevel,
-    params: body.params,
+    params: prepared?.ok ? prepared.args : body.params,
     appliesIn: body.appliesIn,
     sessionId: body.sessionId,
     workflowExecutionId: body.workflowExecutionId,
