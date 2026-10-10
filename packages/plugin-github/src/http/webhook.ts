@@ -139,6 +139,17 @@ export async function receiveWebhook(
   if (!effects) return noContent();
 
   const event = request.headers["x-github-event"];
+  // Anybody can install the public App, and the App's webhook secret signs
+  // every installation's deliveries. Only installation lifecycle events
+  // apply to an installation that does not serve this organization.
+  const lifecycle = event === "installation" || event === "installation_repositories" || event === "ping";
+  if (event && !lifecycle && !effects.acceptsEvents) {
+    await effects.recordUndeliverable({
+      deliveryId: request.headers["x-github-delivery"],
+      detail: `github event ${event} from installation ${installationId(payload) ?? "none"}: the installation does not serve this organization`,
+    });
+    return noContent();
+  }
   // A verified push marks every matching enabled source due. The sync runs
   // later under each source's own credential, so a push storm collapses into
   // one sync per source per tick.

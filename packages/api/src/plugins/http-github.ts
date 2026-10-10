@@ -70,6 +70,7 @@ import {
   loadAppConfigWithSource,
   approveInstalledByMember,
   installationAccess,
+  installationServesOrg,
   reconcileUserInstallations,
   setInstallationApproval,
   relinkInstallations,
@@ -528,14 +529,16 @@ function webhookCapability(providers: Providers): GithubWebhookCapability {
         webhookSecret: config.webhookSecret,
         bind: async ({ installationId }) => {
           const orgId = ownerOrgId ?? (await resolveEnvFallbackOrgId(db, installationId));
-          return orgId ? deliveryEffects(providers, orgId) : null;
+          if (!orgId) return null;
+          const acceptsEvents = installationId !== null && (await installationServesOrg({ db }, orgId, installationId));
+          return deliveryEffects(providers, orgId, acceptsEvents);
         },
       };
     },
   };
 }
 
-function deliveryEffects(providers: Providers, orgId: string): GithubDeliveryEffects {
+function deliveryEffects(providers: Providers, orgId: string, acceptsEvents: boolean): GithubDeliveryEffects {
   const { db } = providers;
   /** Changes one installation row under the organization row lock. */
   const changeInstallation = async (installationId: number, suspended: boolean | null): Promise<void> => {
@@ -552,6 +555,7 @@ function deliveryEffects(providers: Providers, orgId: string): GithubDeliveryEff
     });
   };
   return {
+    acceptsEvents,
     contentPushed: async (push) => {
       await providers.contentSync.onPush(orgId, push.repoFullName, push.gitRef, push.defaultBranch);
     },

@@ -172,6 +172,12 @@ export interface GithubPushRef {
 }
 
 export interface GithubDeliveryEffects {
+  /** The delivery's installation serves the organization: the App owner's
+   * account, an approved organization, or a personal installation bound to
+   * a member. When false, only `installation` and
+   * `installation_repositories` events apply. Every other event is dropped,
+   * because anybody can install the public App. */
+  acceptsEvents: boolean;
   /** Marks matching content sources due. */
   contentPushed(push: GithubPushRef): Promise<void>;
   pullRequestChanged(change: { url: string; state: GithubPullRequestState }): Promise<void>;

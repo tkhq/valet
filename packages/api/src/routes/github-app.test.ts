@@ -839,8 +839,10 @@ describe("POST /webhooks/github-app", () => {
     const later = Date.now() + 3_600_000;
     await api.providers.db.update(contentSources).set({ nextAttemptAt: later });
 
+    await seedOrgInstallation();
     const payload = {
       ref: "refs/heads/main",
+      installation: { id: 4040 },
       repository: { full_name: "tkhq/skills", default_branch: "main" },
     };
     const sig = signWebhookBody(JSON.stringify(payload), webhookSecret);
@@ -888,14 +890,53 @@ describe("POST /webhooks/github-app", () => {
 
   const PR_OPENED_PAYLOAD = {
     action: "opened",
+    installation: { id: 4040 },
     pull_request: { number: 7, title: "Add thing" },
     repository: { full_name: "acme/widgets" },
     sender: { id: 1234, login: "octocat" },
   };
 
+  /** The organization's own installation, which the deliveries above name. */
+  async function seedOrgInstallation(overrides: Partial<typeof githubInstallations.$inferInsert> = {}): Promise<void> {
+    const now = Date.now();
+    await api!.providers.db.insert(githubInstallations).values({
+      id: `ghi_${overrides.installationId ?? 4040}`, orgId: "local-org", installationId: 4040, accountLogin: "acme",
+      accountType: "Organization", suspended: false, createdAt: now, updatedAt: now, ...overrides,
+    });
+  }
+
+  async function seedPrSubscription(): Promise<void> {
+    const now = Date.now();
+    await api!.providers.db.insert(eventSubscriptions).values({
+      id: "sub_gh_drop", orgId: "local-org", ownerType: "org", ownerId: "local-org", name: "PR opened",
+      eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "orchestrator" }, enabled: true,
+      createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+  }
+
+  // The App is public. A stranger who installs it on an account of theirs
+  // and opens a pull request must not reach the organization's
+  // subscriptions with text they wrote.
+  it("drops a delivery from an installation that does not serve the organization", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedPrSubscription();
+    await seedOrgInstallation({ installationId: 5050, accountLogin: "stranger-org", orgApproved: false });
+    await seedOrgInstallation({ installationId: 6060, accountLogin: "stranger", accountType: "User", accountId: "5" });
+
+    for (const [id, delivery] of [[5050, "gh-drop-1"], [6060, "gh-drop-2"], [7070, "gh-drop-3"]] as const) {
+      const res = await postForwardedWebhook(
+        api.baseUrl, "pull_request", { ...PR_OPENED_PAYLOAD, installation: { id } }, webhookSecret, delivery,
+      );
+      expect(res.status).toBe(204);
+    }
+    expect(await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"))).toHaveLength(0);
+  });
+
   it("forwards a pull_request webhook into the event pipeline: events row + matched pending delivery", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedOrgInstallation();
 
     const now = Date.now();
     await api.providers.db.insert(eventSubscriptions).values({
@@ -941,6 +982,7 @@ describe("POST /webhooks/github-app", () => {
   it("drops forwarded events with no matching subscription (nothing stored)", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedOrgInstallation();
 
     const res = await postForwardedWebhook(api.baseUrl, "pull_request", PR_OPENED_PAYLOAD, webhookSecret, "gh-del-2");
     // The route still acks (204): the event verified, it just matched no
@@ -955,6 +997,7 @@ describe("POST /webhooks/github-app", () => {
   it("dedupes a redelivered webhook (same x-github-delivery -> one events row, one delivery)", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedOrgInstallation();
 
     const now = Date.now();
     await api.providers.db.insert(eventSubscriptions).values({

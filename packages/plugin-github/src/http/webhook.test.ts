@@ -23,8 +23,9 @@ function sign(body: string, secret = SECRET): string {
 
 type Effects = GithubDeliveryEffects;
 
-function effects() {
+function effects(acceptsEvents = true) {
   return {
+    acceptsEvents,
     contentPushed: vi.fn<Effects["contentPushed"]>(async () => {}),
     pullRequestChanged: vi.fn<Effects["pullRequestChanged"]>(async () => {}),
     installationRemoved: vi.fn<Effects["installationRemoved"]>(async () => {}),
@@ -167,6 +168,43 @@ describe("receiveWebhook", () => {
       [{ deliveryId: undefined, detail: "github event pull_request: missing x-github-delivery header" }],
       [{ deliveryId: "d-2", detail: "github event unknown_family: no registered TriggerDef (github.unknown_family)" }],
     ]);
+  });
+
+  // The App is public. A stranger who installs it and opens a pull request
+  // must not start the organization's subscriptions with text they wrote.
+  it("drops every non-installation event from an installation that does not serve the organization", async () => {
+    const bound = effects(false);
+    const { capability } = webhook(bound);
+    const pr = JSON.stringify({
+      action: "opened", installation: { id: 777 },
+      pull_request: { html_url: "https://github.com/stranger/app/pull/1", state: "open" },
+    });
+    const push = JSON.stringify({ ref: "refs/heads/main", installation: { id: 777 }, repository: { full_name: "stranger/app" } });
+    for (const [event, body] of [["pull_request", pr], ["push", push]] as const) {
+      expect(
+        (await receiveWebhook(
+          request(body, { "x-github-event": event, "x-github-delivery": `d-${event}`, "x-hub-signature-256": sign(body) }),
+          capability,
+          githubTriggerDefs,
+        )).status,
+      ).toBe(204);
+    }
+    expect(bound.emit).not.toHaveBeenCalled();
+    expect(bound.pullRequestChanged).not.toHaveBeenCalled();
+    expect(bound.contentPushed).not.toHaveBeenCalled();
+    expect(bound.recordUndeliverable.mock.calls).toEqual([
+      [{ deliveryId: "d-pull_request", detail: "github event pull_request from installation 777: the installation does not serve this organization" }],
+      [{ deliveryId: "d-push", detail: "github event push from installation 777: the installation does not serve this organization" }],
+    ]);
+
+    // Installation lifecycle events still apply, so the row stays current.
+    const deleted = JSON.stringify({ action: "deleted", installation: { id: 777 } });
+    await receiveWebhook(
+      request(deleted, { "x-github-event": "installation", "x-hub-signature-256": sign(deleted) }),
+      capability,
+      githubTriggerDefs,
+    );
+    expect(bound.installationRemoved).toHaveBeenCalledWith(777);
   });
 
   it("acknowledges a verified delivery with no organization to receive it", async () => {
