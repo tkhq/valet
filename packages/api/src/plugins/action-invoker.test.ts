@@ -1998,6 +1998,33 @@ describe("buildActionInvoker: github service resolution", () => {
     expect(team).toEqual({ ok: true, result: { token: "inst-222" } });
   });
 
+  it("a user-owned run started by another member resolves as the owner, not the actor", async () => {
+    const { appDb, credentials } = await harness();
+    const invoke = await seedPersonalInstallations(appDb, credentials);
+    const ctx = { userId: "actor-user", orgId, owner: { type: "user" as const, id: userId } };
+
+    // `app` resolves the installation of the repository's owner.
+    const own = await invoke(
+      {
+        service: "github", action: "create_comment", params: { owner: "owner-login", repo: "x" },
+        invocationId: "workflow:r3:n1", credential: "app",
+      },
+      ctx,
+    );
+    expect(own).toEqual({ ok: true, result: { token: "inst-555" } });
+
+    // The actor's own personal installation is not the run owner's.
+    const actors = await invoke(
+      {
+        service: "github", action: "create_comment", params: { owner: "actor-login", repo: "x" },
+        invocationId: "workflow:r4:n1", credential: "app",
+      },
+      ctx,
+    );
+    expect(actors.ok).toBe(false);
+    expect(fixture?.calls.some((c) => c.path === "/app/installations/556/access_tokens")).toBe(false);
+  });
+
   it('credential "app": resolves the installation for the params owner, ignoring a healthy user credential', async () => {
     const { appDb, credentials } = await harness();
     await seedAppAndUser(appDb, credentials);

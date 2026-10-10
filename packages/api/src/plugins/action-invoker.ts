@@ -1120,8 +1120,10 @@ function buildGithubCredentialProvider(
         orgId: ctx.orgId,
         // A team or org owner must not resolve the prompting member's PAT:
         // the synthetic `team:{id}` actor is never a person, and `auto`
-        // without userId can still mint a sole installation token.
-        ...(owner.type === "user" ? { userId: ctx.userId } : {}),
+        // without userId can still mint a sole installation token. A
+        // user-owned run resolves as its owner, not as whoever started it,
+        // the same as the installation tier above.
+        ...(owner.type === "user" ? { userId: owner.id } : {}),
         sessionId: ctx.sessionId,
         purpose: "api",
         // `auto` means "keep the default precedence", so it must NOT
