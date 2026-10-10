@@ -207,15 +207,26 @@ function matchesTarget(
 }
 
 /**
- * Apply a row's matchers. With `partialParams`, a matcher whose path is
- * absent from the known params might match once the action runs: a deny or
- * approval row then counts as matching, an allow row does not.
+ * Under `partialParams`, a matcher is unresolved when its path is absent or
+ * resolves to an object: the root object and nested objects can still gain
+ * fields when the action runs, so a whole-object `eq` or `in` cannot be
+ * decided yet. Scalar paths that are present evaluate exactly.
+ */
+function unresolvedUnderPartial(matcher: ParamMatcher, params: unknown): boolean {
+  const actual = readPath(params, matcher.path);
+  return actual === undefined || (typeof actual === "object" && actual !== null);
+}
+
+/**
+ * Apply a row's matchers. With `partialParams`, an unresolved matcher might
+ * match once the action runs: a deny or approval row then counts as
+ * matching, an allow row does not.
  */
 function matchesParams(row: { mode: ApprovalMode; paramMatchers: ParamMatcher[] }, input: PolicyResolutionInput): boolean {
   if (!input.partialParams) return evaluateMatchers(row.paramMatchers, input.params);
-  const known = row.paramMatchers.filter((matcher) => readPath(input.params, matcher.path) !== undefined);
-  if (known.length !== row.paramMatchers.length && row.mode === "allow") return false;
-  return evaluateMatchers(known, input.params);
+  const resolved = row.paramMatchers.filter((matcher) => !unresolvedUnderPartial(matcher, input.params));
+  if (resolved.length !== row.paramMatchers.length && row.mode === "allow") return false;
+  return evaluateMatchers(resolved, input.params);
 }
 
 function matchesPolicyRow(row: ActionPolicyRow, input: PolicyResolutionInput): boolean {

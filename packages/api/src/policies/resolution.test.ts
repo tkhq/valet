@@ -486,4 +486,23 @@ describe("resolvePolicyDecision — partialParams (hosted provider tools)", () =
     expect(resolvePolicyDecision(rows({ policies: [modelDeny] }), hosted({ partialParams: true }), undefined).mode).toBe("deny");
     expect(resolvePolicyDecision(rows({ policies: [modelDeny] }), hosted({ params: { model: "flare" }, partialParams: true }), undefined).mode).toBe("allow");
   });
+
+  it("treats whole-object matchers as unresolved, so a root deny applies and a root allow does not", () => {
+    const full = { prompt: "a fox", model: "sunburst", output_format: "png", quality: "auto" };
+    const rootEqDeny = orgPolicy({ id: "pol-root-eq", actionId: action, mode: "deny", paramMatchers: [{ path: "", op: "eq", value: full }] });
+    const rootInDeny = orgPolicy({ id: "pol-root-in", actionId: action, mode: "deny", paramMatchers: [{ path: "", op: "in", value: [full] }] });
+    const rootAllow = orgPolicy({ id: "pol-root-allow", actionId: action, mode: "allow", paramMatchers: [{ path: "", op: "eq", value: { model: "sunburst" } }] });
+    const nestedDeny = orgPolicy({ id: "pol-nested", actionId: action, mode: "deny", paramMatchers: [{ path: "options", op: "eq", value: { safe: false } }] });
+    // The full invocation decides exactly.
+    expect(resolvePolicyDecision(rows({ policies: [rootEqDeny] }), hosted({ params: full }), undefined).mode).toBe("deny");
+    expect(resolvePolicyDecision(rows({ policies: [rootEqDeny] }), hosted({ params: { model: "sunburst" } }), undefined).mode).toBe("allow");
+    // The hosted check cannot complete the object, so deny and approval rows apply and allow rows do not.
+    for (const policy of [rootEqDeny, rootInDeny]) {
+      expect(resolvePolicyDecision(rows({ policies: [policy] }), hosted({ params: { model: "sunburst" }, partialParams: true }), undefined)).toMatchObject({ mode: "deny", provenance: { matchedPolicyId: policy.id } });
+    }
+    expect(resolvePolicyDecision(rows({ policies: [nestedDeny] }), hosted({ params: { model: "sunburst", options: {} }, partialParams: true }), undefined).mode).toBe("deny");
+    const allow = resolvePolicyDecision(rows({ policies: [rootAllow] }), hosted({ riskLevel: "high", params: { model: "sunburst" }, partialParams: true }), undefined);
+    expect(allow.mode).toBe("require_approval");
+    expect(allow.provenance.matchedPolicyId).toBeUndefined();
+  });
 });
