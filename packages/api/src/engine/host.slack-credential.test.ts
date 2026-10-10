@@ -163,7 +163,7 @@ describe("EngineHost session slack credential resolution", () => {
     const { appDb, credentials } = await harness();
     // The containment rule. `linear` is not declared org-provided, so its org
     // row is machinery rather than a shared secret — and it carries
-    // `metadata.webhookSecret` in production (`routes/linear-connect.ts`),
+    // `metadata.webhookSecret` in production (`plugins/http-linear-connection.ts`),
     // which the inbound webhook verifies HMACs with. A member's session that
     // has no linear row of its own must see nothing.
     await credentials.save({ type: "org", id: orgId }, "linear", {

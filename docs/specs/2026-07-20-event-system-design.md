@@ -522,6 +522,8 @@ No `admin` scope is requested: `actor=app` installations cannot hold it. Valet n
 
 Readiness requires the installation, the signing secret, and a matching workspace. `DELETE /api/org/linear` removes such a legacy webhook best effort, then deletes the installation, the org `linear` row, and `linear_app`. The app itself stays in Linear.
 
+The Linear plugin serves GET, PUT, and DELETE at `/api/plugins/linear/http/connection`. The host keeps `/api/org/linear` as an alias with the same authentication and responses ([Plugin HTTP interfaces](2026-10-07-plugin-http-interfaces-design.md#linear-connection-binding)).
+
 Deployment environment variables (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`) are no longer a fallback. App credentials stay excluded from agent and workflow credential resolution, and generic credential routes cannot change them.
 
 Known gaps: when a workspace removes the app, Linear sends a signed `OAuthApp` `revoked` event. The ingress acknowledges it and drop-logs it as `unsupported_event` with a reconnect instruction, but does not mark the connection broken. Valet does not revoke tokens with Linear on disconnect.

@@ -75,11 +75,11 @@ export function slackSetupCapability(providers: Providers, caller: PluginHttpCal
 
 export const slackHttpBindings: Readonly<Record<string, PluginHttpBinding>> = {
   events: {
-    auth: 'public',
+    method: 'POST', path: '/events', auth: 'public',
     bind: ({ providers, request }) => handleSlackEvents(request, slackIngressCapability(providers, request)),
   },
   app: {
-    auth: 'org-admin',
+    method: 'GET', path: '/app', auth: 'org-admin',
     bind: async ({ providers, request, caller }) => {
       if (!caller) throw new Error('Slack setup requires an authenticated caller. Check the route authentication.');
       return handleSlackApp(request, slackSetupCapability(providers, caller));

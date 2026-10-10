@@ -7,7 +7,7 @@ import { isOrgMember } from '../services/org.js';
 import { ingestEvent } from '../events/ingest.js';
 import { writeDropLog } from '../orchestrator/signals.js';
 import { httpInstallationResolvers } from './http-installations.js';
-import { httpRouteBinding, httpRouteBindings } from './http-bindings.js';
+import { httpBindingMismatch, httpRouteBinding, httpRouteBindings } from './http-bindings.js';
 
 interface LegacyRoute {
   path: string;
@@ -21,7 +21,13 @@ interface LegacyRoute {
  * access to an existing URL by changing its declaration.
  */
 const LEGACY_ROUTES: Readonly<Record<string, Readonly<Record<string, LegacyRoute>>>> = {
-  linear: { events: { path: '/webhooks/events/linear', method: 'POST', auth: 'signature' } },
+  linear: {
+    events: { path: '/webhooks/events/linear', method: 'POST', auth: 'signature' },
+    // The web client's Linear settings read and write the organization connection here.
+    'connection-status': { path: '/api/org/linear', method: 'GET', auth: 'org-admin' },
+    'connection-save': { path: '/api/org/linear', method: 'PUT', auth: 'org-admin' },
+    'connection-delete': { path: '/api/org/linear', method: 'DELETE', auth: 'org-admin' },
+  },
   github: {
     // Existing GitHub Apps store the setup, callback, and webhook URLs.
     'app-status': { path: '/api/org/github-app', method: 'GET', auth: 'org-admin' },
@@ -109,10 +115,9 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
       if (route.auth === 'signature' && !resolveInstallation) {
         throw new Error(`Configure an installation resolver for plugin ${plugin.name} before mounting signed ingress.`);
       }
+      const mismatch = httpBindingMismatch(plugin.name, route);
+      if (mismatch) throw new Error(mismatch);
       const binding = httpRouteBinding(plugin.name, route.id);
-      if (binding && binding.auth !== route.auth) {
-        throw new Error(`Host binding for ${plugin.name} route ${route.id} requires ${binding.auth} authentication.`);
-      }
       const handler: Handler<AppEnv> = async (c) => {
         let caller: PluginHttpCaller | undefined;
         if (!publicRoute) {

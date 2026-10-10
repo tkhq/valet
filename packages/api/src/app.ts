@@ -73,7 +73,6 @@ import { modelTiersRouter } from "./routes/model-tiers.js";
 import { approvedModelsRouter } from "./routes/approved-models.js";
 import { orgReasoningRouter } from "./routes/org-reasoning.js";
 import { llmProvidersRouter } from "./routes/llm-providers.js";
-import { linearConnectRouter } from "./routes/linear-connect.js";
 import { reposRouter } from "./routes/repos.js";
 import { sourcesRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
@@ -320,8 +319,9 @@ export function createApp(
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
   app.use("/api/*", refuseTeamKeyOutsideScope());
   app.use("/api/*", refuseAgentAuthority());
-  // Plugin routes mount before the core routers. The GitHub plugin serves
-  // `/api/me/github/*` and `/api/org/github-app/*` through host aliases here.
+  // Plugin routes mount before the core routers. Host aliases here serve
+  // `/api/me/github/*`, `/api/org/github-app/*`, `/api/org/slack`, and
+  // `/api/org/linear` from the GitHub, Slack, and Linear plugins.
   mountPluginHttpRoutes(app, providers.plugins, "authenticated");
 
   app.route("/api/threads", threadsRouter);
@@ -399,7 +399,6 @@ export function createApp(
   // rather than before it.
   app.route("/api/me/policy-overrides", mePolicyOverridesRouter);
   app.route("/api/me/grants", meGrantsRouter);
-  app.route("/api/org/linear", linearConnectRouter);
   app.route("/api/org/sources", sourcesRouter);
   app.route("/api/repos", reposRouter);
   app.route("/api/sandbox", sandboxGitCredentialRouter);
