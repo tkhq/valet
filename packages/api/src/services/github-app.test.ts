@@ -686,6 +686,35 @@ describe("github-app service", () => {
       expect(await mintInstallationToken(deps(), orgId, "stranger", "attacker")).toBeNull();
     });
 
+    // The member replaced the token while GitHub's token check was in flight.
+    // The check proved the old token's account, not the new one's.
+    it("discards a token check whose credential changed before the answer", async () => {
+      await member("member-r", orgId, null);
+      await credentials.save({ type: "user", id: "member-r" }, "github", {
+        type: "oauth2", accessToken: "app-oauth-token", refreshToken: "r", metadata: { login: "stranger" },
+      });
+      await fixture?.close();
+      fixture = startGithubFixture({
+        listInstallations: () => ({ body: installs }),
+        checkToken: (_clientId, token) =>
+          token === "app-oauth-token"
+            ? { body: { user: { login: "stranger", id: 9002 } } }
+            : { status: 404, body: { message: "Not Found" } },
+      });
+      const racingFetch: typeof fetch = async (input, init) => {
+        if (String(input).includes("/applications/") && String(init?.body).includes("app-oauth-token")) {
+          await credentials.save({ type: "user", id: "member-r" }, "github", {
+            type: "oauth2", accessToken: "replacement-pat", metadata: { login: "someone-else" },
+          });
+        }
+        return fetch(input, init);
+      };
+      const rows = await discoverInstallations(deps({ fetchImpl: racingFetch }), orgId);
+      expect(linkedByInstallation(rows)[333]).toBeNull();
+      expect((await credentials.get({ type: "user", id: "member-r" }, "github"))?.metadata).toEqual({ login: "someone-else" });
+      expect(await mintInstallationToken(deps(), orgId, "stranger", "member-r")).toBeNull();
+    });
+
     it("binds by account id only on the GitHub host the member connected through", async () => {
       // A numeric account id names one account on one GitHub host. The same
       // id on a GitHub Enterprise Server is somebody else.

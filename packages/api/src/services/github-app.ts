@@ -622,7 +622,7 @@ export const GITHUB_APP_OAUTH_SOURCE = "github-app-oauth";
 async function backfillMemberGithubIds(deps: GithubAppDeps, orgId: string, config: GithubAppConfig): Promise<void> {
   const apiUrl = githubApiUrl(deps);
   const rows = await deps.db
-    .select({ ownerId: credentials.ownerId, metadata: credentials.metadata })
+    .select({ ownerId: credentials.ownerId, metadata: credentials.metadata, accessTokenEnc: credentials.accessTokenEnc })
     .from(credentials)
     .innerJoin(orgMembers, and(eq(orgMembers.userId, credentials.ownerId), eq(orgMembers.orgId, orgId)))
     .where(and(eq(credentials.ownerType, "user"), eq(credentials.service, "github")));
@@ -630,6 +630,7 @@ async function backfillMemberGithubIds(deps: GithubAppDeps, orgId: string, confi
   for (const row of rows) {
     if (verifiedGithubId(row.metadata, apiUrl) !== null) continue;
     try {
+      if (row.accessTokenEnc === null) continue;
       const cred = await deps.credentials.get({ type: "user", id: row.ownerId }, "github");
       if (!cred?.accessToken) continue;
       const res = await githubFetch(deps)(`${apiUrl}/applications/${encodeURIComponent(config.oauthClientId)}/token`, {
@@ -650,7 +651,16 @@ async function backfillMemberGithubIds(deps: GithubAppDeps, orgId: string, confi
       await deps.db
         .update(credentials)
         .set({ metadata: sql`coalesce(${credentials.metadata}, '{}'::jsonb) || ${patch}::jsonb` })
-        .where(and(eq(credentials.ownerType, "user"), eq(credentials.ownerId, row.ownerId), eq(credentials.service, "github")));
+        .where(
+          and(
+            eq(credentials.ownerType, "user"),
+            eq(credentials.ownerId, row.ownerId),
+            eq(credentials.service, "github"),
+            // Only the credential that was checked. A credential the member
+            // replaced during the check (new ciphertext) gets nothing.
+            eq(credentials.accessTokenEnc, row.accessTokenEnc),
+          ),
+        );
     } catch (err) {
       console.error(`github-app: verifying the GitHub account of user ${row.ownerId} failed:`, err);
     }
