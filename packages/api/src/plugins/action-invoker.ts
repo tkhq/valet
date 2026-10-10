@@ -844,6 +844,9 @@ export async function externalActionMode(
   params?: Record<string, unknown>,
 ): Promise<ApprovalMode> {
   const entry = opts.actionPluginByService.get(service);
+  // Preview what execution decides: schema defaults applied, as `invoke` does.
+  // Without params the answer is for any params, so nothing is defaulted.
+  const prepared = params === undefined ? undefined : prepareActionArgs(action.parameters, params);
   const decision = await resolveActionPolicy(opts.db, {
     orgId: ctx.orgId,
     teamId: ctx.owner.type === "team" ? ctx.owner.id : undefined,
@@ -851,7 +854,7 @@ export async function externalActionMode(
     service,
     actionId: qualifiedActionId(service, action),
     riskLevel: action.riskLevel,
-    params,
+    params: prepared?.ok ? prepared.args : params,
     appliesIn: "session",
     pluginDefault: entry?.actionPlugin.defaultApprovalMode,
     now: (opts.clock ?? Date.now)(),

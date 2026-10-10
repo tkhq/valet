@@ -8,6 +8,7 @@ import { workflowActionGrants } from "../schema/index.js";
 import { canAdministerTeam } from "../services/teams.js";
 import { resolvePolicyDecision } from "../policies/resolution.js";
 import { loadPolicyRows } from "../policies/service.js";
+import { prepareActionArgs } from "@valet/engine";
 import { findAction, qualifiedActionId } from "../plugins/action-invoker.js";
 import type {
   AllowWorkflowPermissionsResponse,
@@ -112,13 +113,15 @@ async function analyzeDefinitionPermissions(
       continue;
     }
     const actionId = qualifiedActionId(ref.service, action);
+    // Preview what the run decides: schema defaults applied, as the invoker does.
+    const prepared = ref.params === undefined ? undefined : prepareActionArgs(action.parameters, ref.params);
     const decision = resolvePolicyDecision(
       rows,
       {
         service: ref.service,
         actionId,
         riskLevel: action.riskLevel,
-        params: ref.params,
+        params: prepared?.ok ? prepared.args : ref.params,
         appliesIn: "workflow",
         now,
       },

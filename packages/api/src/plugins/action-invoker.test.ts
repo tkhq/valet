@@ -35,7 +35,7 @@ import { linkIdentity } from "../channels/identity-links.js";
 import { PgCredentialStore } from "./credential-store.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import type { OnePasswordCtx, OnePasswordService } from "../services/onepassword.js";
-import { buildActionInvoker, type ActionInvocationContext } from "./action-invoker.js";
+import { buildActionInvoker, type ActionInvocationContext, externalActionMode } from "./action-invoker.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { InMemoryWorkflowStore } from "@valet/workflow";
 
@@ -2222,6 +2222,27 @@ describe("buildActionInvoker: workflow policy enforcement (action-policies T3)",
     const audit = await db.select().from(actionInvocations).where(eq(actionInvocations.orgId, ORG));
     const deniedRow = audit.find((row) => row.status === "denied");
     expect(deniedRow?.params).toEqual({ prompt: "x", model: "sunburst" });
+  });
+
+  it("describe_tool's policy preview applies schema defaults, so it matches what call_tool decides", async () => {
+    const db = await makeDb();
+    const action: PluginAction = {
+      id: "demo.publish", name: "publish", description: "publish", riskLevel: "low",
+      parameters: Type.Object({ title: Type.String(), visibility: Type.Optional(Type.String({ default: "public" })) }),
+      execute: async () => ({ success: true, data: {} }),
+    };
+    await db.insert(actionPolicies).values({
+      id: "pv", orgId: ORG, principalType: "org", principalId: ORG,
+      service: null, actionId: "demo.publish", riskLevel: null, mode: "deny",
+      paramMatchers: [{ path: "visibility", op: "eq", value: "public" }], appliesIn: "any", origin: "settings", managedBy: null,
+      expiresAt: null, revokedAt: null, createdAt: 1, updatedAt: 1,
+    });
+    const opts = { db, credentials: new FakeCredentialStore(), actionPluginByService: actionPluginByServiceOf("demo", { service: "demo", actions: [action] }) };
+    const ctx: ActionInvocationContext = { userId: "u1", orgId: ORG, owner: { type: "user", id: "u1" }, external: { client: "cli", attempt: "a1" } };
+    expect(await externalActionMode(opts, ctx, "demo", action, { title: "x" })).toBe("deny");
+    expect(await externalActionMode(opts, ctx, "demo", action, { title: "x", visibility: "private" })).toBe("allow");
+    // No params means any params: nothing is defaulted, and the base mode answers.
+    expect(await externalActionMode(opts, ctx, "demo", action)).toBe("allow");
   });
 
   it("an exec-scoped grant covers the action → it runs", async () => {
