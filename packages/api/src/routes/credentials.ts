@@ -1,4 +1,5 @@
 import { deleteTeamCredential } from "../services/team-resource-deletion.js";
+import { GITHUB_APP_OAUTH_SOURCE } from "../services/github-app.js";
 /**
  * `/api/credentials` — manual token entry + connection summary for the
  * connect UI (plugin-system-v2 plan Task 15). OAuth connect/callback lives
@@ -410,6 +411,12 @@ credentialsRouter.put("/:service", async (c) => {
   // value sent here could claim another person's installation.
   if (body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) && "githubId" in body.metadata) {
     return c.json({ error: "metadata.githubId is reserved. Connect GitHub through the GitHub connect flow." }, 400);
+  }
+  // The connect callback marks a token that GitHub issued through the App's
+  // OAuth. A pasted marker could make an unverified token look like one.
+  if (body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) && "source" in body.metadata &&
+      body.metadata.source === GITHUB_APP_OAUTH_SOURCE) {
+    return c.json({ error: "metadata.source is reserved. Connect GitHub through the GitHub connect flow." }, 400);
   }
   if (body.onepassword) {
     // Structural validation (reserved service name) takes precedence over

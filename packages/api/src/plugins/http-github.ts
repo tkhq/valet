@@ -74,6 +74,7 @@ import {
   recordCreatedInstallation,
   setInstallationApproval,
   verifiedGithubId,
+  GITHUB_APP_OAUTH_SOURCE,
   relinkInstallations,
   usableInstallation,
   resolveGithubAppEnvConfig,
@@ -456,6 +457,8 @@ function connectionCapability(
                 ...(connection.githubId
                   ? { githubId: connection.githubId, githubHost: resolveGithubApiUrl(process.env) }
                   : {}),
+                // GitHub issued this token through the App's own OAuth.
+                source: GITHUB_APP_OAUTH_SOURCE,
               },
             });
             await refreshCredentialReadiness(providers, { type: "user", id: userId }, GITHUB_CREDENTIAL_SERVICE);

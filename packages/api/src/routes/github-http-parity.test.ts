@@ -448,3 +448,34 @@ describe("installation approval route", () => {
     expect((await send(approval("abc"), "POST", ADMIN)).status).toBe(400);
   });
 });
+
+// A member pasted another person's token, with a made-up refresh token, to
+// claim that person's personal installation. Discovery must not bind it:
+// only GitHub's token check proves that this App issued a token.
+describe("pasted GitHub tokens", () => {
+  it("never bind a personal installation", async () => {
+    Object.assign(process.env, ENV_APP);
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    useFixture({
+      getUser: () => ({ body: { login: "alice", id: 555 } }),
+      listInstallations: () => ({
+        body: [
+          { id: 999, account: { login: "acme", id: 1, type: "Organization" }, repository_selection: "all", suspended_at: null },
+          { id: 5050, account: { login: "alice", id: 555, type: "User" }, repository_selection: "all", suspended_at: null },
+        ],
+      }),
+    });
+    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: MEMBER,
+      body: JSON.stringify({ type: "oauth2", accessToken: "alices-token", refreshToken: "made-up", metadata: { login: "alice" } }),
+    });
+    expect(put.status).toBe(200);
+    const refresh = await fetch(`${api.baseUrl}/api/org/github-app/refresh`, { method: "POST", headers: ADMIN });
+    expect(refresh.status).toBe(200);
+    const rows = await api.providers.db
+      .select({ installationId: githubInstallations.installationId, linkedUserId: githubInstallations.linkedUserId })
+      .from(githubInstallations);
+    expect(rows.find((r) => r.installationId === 5050)?.linkedUserId).toBeNull();
+  });
+});

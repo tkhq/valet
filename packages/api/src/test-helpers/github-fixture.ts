@@ -58,6 +58,10 @@ export interface GithubFixtureHandlers {
    * so a fixture with several installations can answer per installation
    * token. */
   listInstallationRepositories?: (authHeader: string | undefined) => GithubFixtureResponse;
+  /** `POST /applications/:clientId/token`: GitHub's token check, with the
+   * App's client id and secret as Basic auth. It answers 200 with the token's
+   * `user` only for a token that this App issued, and 404 for any other. */
+  checkToken?: (clientId: string, accessToken: string | undefined) => GithubFixtureResponse;
   /** `GET /user/installations`, read with a user's OAuth token. GitHub
    * wraps the array in `{ installations }`. */
   listUserInstallations?: (authHeader: string | undefined) => GithubFixtureResponse;
@@ -132,6 +136,7 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   listUserRepos: () => ({ body: [] }),
   listInstallationRepositories: () => ({ body: { total_count: 0, repositories: [] } }),
   listUserInstallations: () => ({ body: { total_count: 0, installations: [] } }),
+  checkToken: () => ({ status: 404, body: { message: "Not Found" } }),
   convertManifest: () => ({
     body: {
       id: 1,
@@ -318,6 +323,23 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
     record(c, {});
     const { status, body } = handlers.listInstallationRepositories(c.req.header("authorization"));
     return c.json(body as object, status ?? 200);
+  });
+
+  app.post("/applications/:clientId/token", async (c) => {
+    const clientId = c.req.param("clientId");
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      body = undefined;
+    }
+    record(c, { clientId }, body);
+    const token =
+      typeof body === "object" && body !== null && "access_token" in body && typeof body.access_token === "string"
+        ? body.access_token
+        : undefined;
+    const { status, body: respBody } = handlers.checkToken(clientId, token);
+    return c.json(respBody as object, status ?? 200);
   });
 
   app.get("/user/installations", (c) => {

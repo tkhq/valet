@@ -433,7 +433,7 @@ describe("GET /api/me/github/callback", () => {
     expect(other?.linkedUserId).toBeNull();
     const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github");
     // The id names an account on one GitHub host, so the host is kept with it.
-    expect(stored?.metadata).toMatchObject({ login: "octouser", githubId: "99", githubHost: fixture?.url });
+    expect(stored?.metadata).toMatchObject({ login: "octouser", githubId: "99", githubHost: fixture?.url, source: "github-app-oauth" });
   });
 
   it("records and binds a personal installation that Valet has not seen yet when the member connects", async () => {

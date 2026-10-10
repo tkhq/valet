@@ -588,45 +588,54 @@ async function loadMemberGithubIds(
   return map;
 }
 
+/** Marks a credential that GitHub issued through this App's OAuth: the
+ * connect callback writes it, and so does `backfillMemberGithubIds` after
+ * GitHub's token check. `PUT /api/credentials/:service` rejects it. */
+export const GITHUB_APP_OAUTH_SOURCE = "github-app-oauth";
+
 /**
  * Saves the verified GitHub account id of each org member who connected
  * through the App OAuth before the connect callback saved one. Without it,
  * the first discovery after the upgrade unbinds every personal
  * installation until its owner reconnects.
  *
- * Only an App OAuth token proves the account: GitHub issued it to that
- * account through this App's own flow. The credential has a refresh token
- * or an expiry, and is not `identityOnly`. A pasted token (no refresh, no
- * expiry) proves nothing about whose account it names, so it is skipped,
- * as is an expired token. The id comes only from GitHub's `GET /user`
- * answer. The update merges into `metadata` alone, so it never writes a
- * token that a concurrent refresh may have rotated. Best effort: a failure
- * is logged and retried at the next discovery.
+ * The proof is GitHub's token check (`POST /applications/{client_id}/token`
+ * with the App's client id and secret as Basic auth). It answers 200 with
+ * the token's `user` only for a token this App issued. A pasted token, even
+ * with a made-up refresh token, gets 404 and is left alone: a credential's
+ * own fields prove nothing. The update merges `githubId`, `githubHost`, and
+ * the `source` marker into `metadata` alone, so it never writes a token
+ * that a concurrent refresh may have rotated. Best effort: a failure is
+ * logged and retried at the next discovery.
  */
-async function backfillMemberGithubIds(deps: GithubAppDeps, orgId: string): Promise<void> {
+async function backfillMemberGithubIds(deps: GithubAppDeps, orgId: string, config: GithubAppConfig): Promise<void> {
   const apiUrl = githubApiUrl(deps);
   const rows = await deps.db
     .select({ ownerId: credentials.ownerId, metadata: credentials.metadata })
     .from(credentials)
     .innerJoin(orgMembers, and(eq(orgMembers.userId, credentials.ownerId), eq(orgMembers.orgId, orgId)))
     .where(and(eq(credentials.ownerType, "user"), eq(credentials.service, "github")));
-  const nowMs = (deps.now ?? Date.now)();
+  const basic = Buffer.from(`${config.oauthClientId}:${config.oauthClientSecret}`).toString("base64");
   for (const row of rows) {
     if (verifiedGithubId(row.metadata, apiUrl) !== null) continue;
     try {
       const cred = await deps.credentials.get({ type: "user", id: row.ownerId }, "github");
       if (!cred?.accessToken) continue;
-      const appOauth = Boolean(cred.refreshToken) || cred.expiresAt !== undefined;
-      const identityOnly = isRecord(cred.metadata) && cred.metadata.identityOnly === true;
-      if (!appOauth || identityOnly) continue;
-      if (cred.expiresAt !== undefined && cred.expiresAt <= nowMs) continue;
-      const res = await githubFetch(deps)(`${apiUrl}/user`, {
-        headers: { Authorization: `Bearer ${cred.accessToken}`, Accept: "application/vnd.github+json", "User-Agent": "Valet-App" },
+      const res = await githubFetch(deps)(`${apiUrl}/applications/${encodeURIComponent(config.oauthClientId)}/token`, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${basic}`,
+          Accept: "application/vnd.github+json",
+          "Content-Type": "application/json",
+          "User-Agent": "Valet-App",
+        },
+        body: JSON.stringify({ access_token: cred.accessToken }),
       });
       if (!res.ok) continue;
       const payload: unknown = await res.json();
-      if (!isRecord(payload) || typeof payload.id !== "number") continue;
-      const patch = JSON.stringify({ githubId: String(payload.id), githubHost: apiUrl });
+      const user = isRecord(payload) ? payload.user : undefined;
+      if (!isRecord(user) || typeof user.id !== "number") continue;
+      const patch = JSON.stringify({ githubId: String(user.id), githubHost: apiUrl, source: GITHUB_APP_OAUTH_SOURCE });
       await deps.db
         .update(credentials)
         .set({ metadata: sql`coalesce(${credentials.metadata}, '{}'::jsonb) || ${patch}::jsonb` })
@@ -974,7 +983,7 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
     console.warn(`github-app discovery for org ${orgId}: more than ${MAX_INSTALLATION_PAGES} pages of installations; deleting none`);
   }
 
-  await backfillMemberGithubIds(deps, orgId);
+  await backfillMemberGithubIds(deps, orgId, config);
   const memberGithubIds = await loadMemberGithubIds(deps, orgId);
   const owner = await fetchAppOwner(deps, jwt);
   return deps.db.transaction(async (tx) => {

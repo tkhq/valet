@@ -676,32 +676,45 @@ describe("github-app service", () => {
 
     it("verifies the account of a member who connected before account ids were saved", async () => {
       // Credentials saved before this release carry a login only. Discovery
-      // asks GitHub who each stored App OAuth token belongs to, so an owner
-      // keeps their personal installation without reconnecting.
+      // asks GitHub's token check whether this App issued each stored token
+      // and to whom, so an owner keeps their personal installation without
+      // reconnecting.
       const now = Date.now();
       await member("member-d", orgId, null);
       await credentials.save({ type: "user", id: "member-d" }, "github", {
         type: "oauth2", accessToken: "app-oauth-token", refreshToken: "r", expiresAt: now + 3_600_000,
         metadata: { login: "stranger" },
       });
-      // A pasted token proves nothing about the account it names.
+      // A pasted token proves nothing about the account it names, even with
+      // a refresh token the caller made up: this App did not issue it.
       await member("member-f", orgId, null);
       await credentials.save({ type: "user", id: "member-f" }, "github", {
-        type: "oauth2", accessToken: "pasted-pat", metadata: { login: "lookalike" },
+        type: "oauth2", accessToken: "pasted-token", refreshToken: "made-up", metadata: { login: "lookalike" },
       });
       await fixture?.close();
       fixture = startGithubFixture({
         listInstallations: () => ({ body: installs }),
-        getUser: () => ({ body: { login: "stranger", id: 9002 } }),
+        // GET /user would answer for any token. The binding must not use it.
+        getUser: () => ({ body: { login: "lookalike", id: 9005 } }),
+        checkToken: (_clientId, token) =>
+          token === "app-oauth-token"
+            ? { body: { token: "app-oauth-token", user: { login: "stranger", id: 9002 } } }
+            : { status: 404, body: { message: "Not Found" } },
       });
 
       const rows = await discoverInstallations(deps(), orgId);
       expect(linkedByInstallation(rows)[333]).toBe("member-d");
       expect(linkedByInstallation(rows)[555]).toBeNull();
-      const userCalls = fixture.calls.filter((c) => c.path === "/user");
-      expect(userCalls.map((c) => c.authHeader)).toEqual(["Bearer app-oauth-token"]);
+      const checks = fixture.calls.filter((c) => c.path === `/applications/${baseConfig.oauthClientId}/token`);
+      const basic = `Basic ${Buffer.from(`${baseConfig.oauthClientId}:${baseConfig.oauthClientSecret}`).toString("base64")}`;
+      // Every unverified member's token is checked, always with the App's own client.
+      expect(checks.length).toBeGreaterThanOrEqual(2);
+      expect(new Set(checks.map((c) => c.authHeader))).toEqual(new Set([basic]));
       const stored = await credentials.get({ type: "user", id: "member-d" }, "github");
-      expect(stored?.metadata).toMatchObject({ login: "stranger", githubId: "9002", githubHost: fixture.url });
+      expect(stored?.metadata).toMatchObject({
+        login: "stranger", githubId: "9002", githubHost: fixture.url, source: "github-app-oauth",
+      });
+      expect((await credentials.get({ type: "user", id: "member-f" }, "github"))?.metadata).toEqual({ login: "lookalike" });
       // The token itself is untouched.
       expect(stored).toMatchObject({ accessToken: "app-oauth-token", refreshToken: "r" });
     });
