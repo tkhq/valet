@@ -1044,6 +1044,28 @@ describe("pg app schema + migrations", () => {
       ]);
     });
 
+    // Before this release, the credentials route stored any metadata. The
+    // repair that adds `account_id` strips every GitHub identity field, so a
+    // value written then can never pass as the connect's verification.
+    it("strips GitHub identity fields from credential metadata in the account_id repair", async () => {
+      await db.query('ALTER TABLE "github_installations" DROP COLUMN "account_id"');
+      await db.query(
+        `INSERT INTO "credentials" (owner_type, owner_id, service, type, metadata, created_at, updated_at)
+         VALUES ('user', 'u-forged', 'github', 'oauth2', $1::jsonb, 1, 1),
+                ('user', 'u-other', 'linear', 'oauth2', $2::jsonb, 1, 1)`,
+        [
+          JSON.stringify({ login: "attacker", githubId: "9002", githubHost: "https://api.github.com", source: "github-app-oauth" }),
+          JSON.stringify({ githubId: "kept", source: "github-app-oauth" }),
+        ],
+      );
+      await applyAppMigrations(db);
+      const rows = await db.query(`SELECT owner_id, metadata FROM "credentials" WHERE owner_id IN ('u-forged', 'u-other') ORDER BY owner_id`);
+      expect(rows.rows).toEqual([
+        { owner_id: "u-forged", metadata: { login: "attacker" } },
+        { owner_id: "u-other", metadata: { githubId: "kept", source: "github-app-oauth" } },
+      ]);
+    });
+
     it("re-adds columns that predate an already-applied 0000_app.sql", async () => {
       for (const { table, column } of REPAIRED_COLUMNS) {
         await db.query(`ALTER TABLE "${table}" DROP COLUMN "${column}"`);

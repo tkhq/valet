@@ -1981,7 +1981,7 @@ describe("buildActionInvoker: github service resolution", () => {
     // credentials out of token resolution, so installations answer.
     for (const [id, githubId] of [[userId, "55"], ["actor-user", "56"]] as const) {
       await credentials.save({ type: "user", id }, "github", {
-        type: "oauth2", accessToken: `${id}-tok`, metadata: { login: id, githubId, identityOnly: true },
+        type: "oauth2", accessToken: `${id}-tok`, metadata: { source: "github-app-oauth", login: id, githubId, identityOnly: true },
       });
     }
     fixture = startGithubFixture({

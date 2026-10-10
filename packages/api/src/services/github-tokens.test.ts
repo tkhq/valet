@@ -609,7 +609,7 @@ describe("resolveGitHubToken", () => {
       // The bound member verified account 9001. `identityOnly` keeps the
       // credential out of token resolution, so the installation answers.
       await credentials.save({ type: "user", id: userId }, "github", {
-        type: "oauth2", accessToken: "a", metadata: { login: "member-a", githubId: "9001", identityOnly: true },
+        type: "oauth2", accessToken: "a", metadata: { source: "github-app-oauth", login: "member-a", githubId: "9001", identityOnly: true },
       });
       await saveAppConfig({ credentials }, orgId, appConfig);
       fixture = startGithubFixture();

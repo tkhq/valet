@@ -544,7 +544,7 @@ describe("github-app service", () => {
         await db.insert(users).values({ id, name: id, email: `${id}@example.com` });
         await db.insert(orgMembers).values({ orgId, userId: id, role, createdAt: Date.now() });
         await credentials.save({ type: "user", id }, "github", {
-          type: "oauth2", accessToken: "t", metadata: { login: id, githubId, githubHost: fixture?.url },
+          type: "oauth2", accessToken: "t", metadata: { source: "github-app-oauth", login: id, githubId, githubHost: fixture?.url },
         });
       }
       expect(await approveInstalledByMember(deps(), orgId, 777, "9999")).toBe(false);
@@ -627,11 +627,17 @@ describe("github-app service", () => {
       { id: 555, account: { login: "lookalike", id: 9005, type: "User" }, repository_selection: "all", suspended_at: null },
     ];
 
-    async function member(id: string, org: string, metadata: Record<string, unknown> | null): Promise<void> {
+    /** An org member. A `githubId` in `metadata` is marked as written by the
+     * App OAuth connect, unless `fromConnect` is false: then it is only what
+     * the member wrote. */
+    async function member(
+      id: string, org: string, metadata: Record<string, unknown> | null, fromConnect = true,
+    ): Promise<void> {
       await db.insert(users).values({ id, name: id, email: `${id}@example.com` });
       await db.insert(orgMembers).values({ orgId: org, userId: id, role: "member", createdAt: Date.now() });
       if (metadata) {
-        await credentials.save({ type: "user", id }, "github", { type: "oauth2", accessToken: `${id}-token`, metadata });
+        const marked = fromConnect && "githubId" in metadata ? { ...metadata, source: "github-app-oauth" } : metadata;
+        await credentials.save({ type: "user", id }, "github", { type: "oauth2", accessToken: `${id}-token`, metadata: marked });
       }
     }
 
@@ -665,6 +671,19 @@ describe("github-app service", () => {
       await member("member-c", orgId, { login: "member-a", githubId: "9001", githubHost: fixture?.url });
       const rows = await discoverInstallations(deps(), orgId);
       expect(linkedByInstallation(rows)[222]).toBeNull();
+    });
+
+    // A credential's metadata is the member's to write. Only the App OAuth
+    // connect and the token-check backfill mark a GitHub id as verified
+    // (`source: "github-app-oauth"`), and the upgrade repair strips every
+    // identity field written before this release.
+    it("never binds or serves a personal installation on identity metadata the connect did not write", async () => {
+      await member("attacker", orgId, { login: "attacker", githubId: "9002", githubHost: fixture?.url }, false);
+      const rows = await discoverInstallations(deps(), orgId);
+      expect(linkedByInstallation(rows)[333]).toBeNull();
+      // Not even with a binding written some other way.
+      await db.update(githubInstallations).set({ linkedUserId: "attacker" }).where(eq(githubInstallations.installationId, 333));
+      expect(await mintInstallationToken(deps(), orgId, "stranger", "attacker")).toBeNull();
     });
 
     it("binds by account id only on the GitHub host the member connected through", async () => {
@@ -749,7 +768,7 @@ describe("github-app service", () => {
         },
       });
       await credentials.save({ type: "user", id: "member-a" }, "github", {
-        type: "oauth2", accessToken: "member-a-token", metadata: { login: "member-a", githubId: "9001", githubHost: fixture.url },
+        type: "oauth2", accessToken: "member-a-token", metadata: { source: "github-app-oauth", login: "member-a", githubId: "9001", githubHost: fixture.url },
       });
       await reconcileUserInstallations(deps(), orgId, { userId: "member-a", githubId: "9001", accessToken: "member-a-token" });
       const rows = await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
@@ -786,7 +805,7 @@ describe("github-app service", () => {
       await credentials.save({ type: "user", id: "member-b" }, "github", {
         type: "oauth2",
         accessToken: "b-token",
-        metadata: { login: "stranger", githubId: "9002", githubHost: fixture?.url },
+        metadata: { source: "github-app-oauth", login: "stranger", githubId: "9002", githubHost: fixture?.url },
       });
       await relinkInstallations(deps(), orgId);
       const rows = await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
@@ -809,7 +828,7 @@ describe("github-app service", () => {
       });
       // The new fixture is a new GitHub host, so connect member-a there.
       await credentials.save({ type: "user", id: "member-a" }, "github", {
-        type: "oauth2", accessToken: "member-a-token", metadata: { login: "member-a", githubId: "9001", githubHost: fixture.url },
+        type: "oauth2", accessToken: "member-a-token", metadata: { source: "github-app-oauth", login: "member-a", githubId: "9001", githubHost: fixture.url },
       });
       await reconcileUserInstallations(deps(), orgId, { userId: "member-a", githubId: "9001", accessToken: "member-a-token" });
       const rows = await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));

@@ -511,7 +511,8 @@ export function usableInstallation(orgId: string, userId: string | undefined): S
           sql`EXISTS (SELECT 1 FROM ${credentials} WHERE ${credentials.ownerType} = 'user'
             AND ${credentials.ownerId} = ${githubInstallations.linkedUserId}
             AND ${credentials.service} = 'github'
-            AND ${credentials.metadata}->>'githubId' = ${githubInstallations.accountId})`,
+            AND ${credentials.metadata}->>'githubId' = ${githubInstallations.accountId}
+            AND ${credentials.metadata}->>'source' = ${GITHUB_APP_OAUTH_SOURCE})`,
         ),
       )
     : orgWide;
@@ -563,7 +564,11 @@ export function orgWideInstallation(orgId: string): SQL {
  */
 export function verifiedGithubId(metadata: unknown, apiUrl: string): string | null {
   if (!isRecord(metadata)) return null;
-  const { githubId, githubHost } = metadata;
+  const { githubId, githubHost, source } = metadata;
+  // Only the connect callback and the token-check backfill mark an id as
+  // verified. The member can write any other metadata, and the upgrade
+  // repair strips identity fields written before this release.
+  if (source !== GITHUB_APP_OAUTH_SOURCE) return null;
   if (typeof githubId !== "string" || githubId.length === 0) return null;
   if (typeof githubHost !== "string" || githubHostKey(githubHost) !== githubHostKey(apiUrl)) return null;
   return githubId;

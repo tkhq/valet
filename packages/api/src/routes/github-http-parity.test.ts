@@ -177,7 +177,7 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
         status: 200, body: { ...BASE, personalInstallBlocked: "github_not_connected" },
       });
       await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
-        type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242", githubHost: f.url },
+        type: "oauth2", accessToken: "member-token", metadata: { source: "github-app-oauth", login: "member", githubId: "4242", githubHost: f.url },
       });
       expect(await call("org-status", { headers: MEMBER })).toEqual({
         status: 200, body: { ...BASE, personalInstallUrl: `${f.url}/apps/valet-env/installations/new` },
@@ -340,7 +340,7 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
       await seedInstallation();
       const f = useFixture();
       await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
-        type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242", githubHost: f.url },
+        type: "oauth2", accessToken: "member-token", metadata: { source: "github-app-oauth", login: "member", githubId: "4242", githubHost: f.url },
       });
       expect(await deliverSigned(createdDelivery(8801, { login: "member", id: 4242, type: "User" }, 4242)))
         .toEqual({ status: 204, body: null });
@@ -364,7 +364,7 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
       // `local-user` is an org admin; `test-member` is not.
       for (const [id, githubId] of [["local-user", "4242"], ["test-member", "4343"]] as const) {
         await api.providers.engineCredentials.save({ type: "user", id }, "github", {
-          type: "oauth2", accessToken: `${id}-token`, metadata: { login: id, githubId, githubHost: f.url },
+          type: "oauth2", accessToken: `${id}-token`, metadata: { source: "github-app-oauth", login: id, githubId, githubHost: f.url },
         });
       }
       await deliverSigned(createdDelivery(8803, { login: "admins-org", id: 30, type: "Organization" }, 4242));

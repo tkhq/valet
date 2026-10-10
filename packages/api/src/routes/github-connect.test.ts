@@ -199,7 +199,7 @@ describe("GET /api/me/github/org-status", () => {
     await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
       type: "oauth2",
       accessToken: "member-token",
-      metadata: { login: "member", githubId: "4242", githubHost: fixture?.url },
+      metadata: { source: "github-app-oauth", login: "member", githubId: "4242", githubHost: fixture?.url },
     });
 
     const res = await fetch(`${api.baseUrl}/api/me/github/org-status`, { headers: MEMBER_HEADERS });

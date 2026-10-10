@@ -205,7 +205,7 @@ describe("EngineHost session github credential resolution", () => {
     ]);
     // The session owner verified account 21 through the App OAuth.
     await credentials.save({ type: "user", id: userId }, "github", {
-      type: "oauth2", accessToken: "user-tok", metadata: { login: "me", githubId: "21" },
+      type: "oauth2", accessToken: "user-tok", metadata: { source: "github-app-oauth", login: "me", githubId: "21" },
     });
     await appDb.insert(sessionRepos).values({
       sessionId: "sess-personal", host: "github", fullName: "me/private",

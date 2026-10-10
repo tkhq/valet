@@ -400,6 +400,12 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "github_installations.account_id column",
     probe: { kind: "column", table: "github_installations", column: "account_id" },
     sql: 'ALTER TABLE "github_installations" ADD COLUMN IF NOT EXISTS "account_id" text',
+    // Before this release the credentials route stored any metadata, so a
+    // GitHub identity field written then proves nothing. Strip them once;
+    // the token-check backfill or a reconnect marks real connections again.
+    before:
+      `UPDATE "credentials" SET "metadata" = "metadata" - 'githubId' - 'githubHost' - 'source' ` +
+      `WHERE "owner_type" = 'user' AND "service" = 'github' AND "metadata" IS NOT NULL`,
     // Bindings made before this column matched a credential's login, which a
     // pasted token could forge, across organizations. Clear them; discovery
     // binds again by verified account id.

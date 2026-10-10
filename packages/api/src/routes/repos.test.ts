@@ -215,7 +215,7 @@ describe("GET /api/repos", () => {
     // local-user verified account 9001. `identityOnly` keeps the credential
     // out of the personal repo listing.
     await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
-      type: "oauth2", accessToken: "a", metadata: { login: "member-a", githubId: "9001", identityOnly: true },
+      type: "oauth2", accessToken: "a", metadata: { source: "github-app-oauth", login: "member-a", githubId: "9001", identityOnly: true },
     });
     await seedInstallationRow({
       id: "ghi_s", installationId: 603, accountLogin: "stranger", accountType: "User", linkedUserId: null,
@@ -244,7 +244,7 @@ describe("GET /api/repos", () => {
     // local-user verified account 9001. `identityOnly` keeps the credential
     // out of the personal repo listing.
     await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
-      type: "oauth2", accessToken: "a", metadata: { login: "member-a", githubId: "9001", identityOnly: true },
+      type: "oauth2", accessToken: "a", metadata: { source: "github-app-oauth", login: "member-a", githubId: "9001", identityOnly: true },
     });
     await seedInstallationRow({ id: "ghi_so", installationId: 604, accountLogin: "stranger-org", orgApproved: false });
     const installed = async (headers: Record<string, string>) =>
