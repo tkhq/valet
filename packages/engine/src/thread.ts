@@ -4981,8 +4981,8 @@ export class Thread {
     return this.nativeImageGrant !== undefined;
   }
 
-  /** The assistant entry a native image checkpoint appended before message_end. */
-  private checkpointEntryId: string | undefined;
+  /** The assistant entry a native image checkpoint appended before message_end. Its parentId is the DAG link to keep. */
+  private checkpointEntry: MessageEntry | undefined;
 
   /**
    * Persist a saved native image before the stream ends. The entry carries the
@@ -5015,12 +5015,14 @@ export class Thread {
       queueItemId: this.runningItem?.id,
       createdAt: Date.now(),
     };
-    if (this.checkpointEntryId === messageId) {
+    if (this.checkpointEntry?.id === messageId) {
+      entry.parentId = this.checkpointEntry.parentId;
       await this.fencedWrite(() => this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence));
     } else {
+      // appendEntry assigns the parent and advances the leaf; later replacements must keep that parent.
       await this.fencedWrite(() => this.appendEntry(entry, this.fence));
-      this.checkpointEntryId = messageId;
     }
+    this.checkpointEntry = entry;
   }
 
   /** Hosted spend appears in the action audit like a plugin invocation would. */
@@ -5474,8 +5476,10 @@ export class Thread {
             stopReason,
             createdAt: Date.now(),
           };
-          if (this.checkpointEntryId === entry.id) {
-            // The native image checkpoint already appended this entry. Replace it with the full message.
+          if (this.checkpointEntry?.id === entry.id) {
+            // The native image checkpoint already appended this entry. Replace it with the
+            // full message, keeping the DAG parent appendEntry assigned to the checkpoint.
+            entry.parentId = this.checkpointEntry.parentId;
             await this.fencedWrite(() =>
               this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
             );
@@ -5484,7 +5488,7 @@ export class Thread {
               this.appendEntry(entry, this.fence),
             );
           }
-          this.checkpointEntryId = undefined;
+          this.checkpointEntry = undefined;
           // Hold a reference so tool_execution_end can re-persist as each
           // tool completes (`parts` is shared by reference; mutating a
           // tool_call's status flows through to this entry's parts array).

@@ -98,7 +98,7 @@ The next turn can try native generation again.
 
 The adapter writes validated original bytes before making the preview. It registers the receipt as soon as the write completes.
 Receipt tool calls are placed before any other tool call in the message. Tools run in content order, so a stop or restart during a slow or gated call cannot leave a saved original unrecorded.
-As soon as an original is written, the thread appends the assistant entry with the receipt tool call as a checkpoint, before the stream ends. A process crash before the terminal event then resumes the turn with the saved path in context instead of paying for the image again. `message_end` replaces the checkpoint entry with the full message.
+As soon as an original is written, the thread appends the assistant entry with the receipt tool call as a checkpoint, before the stream ends. A process crash before the terminal event then resumes the turn with the saved path in context instead of paying for the image again. `message_end` replaces the checkpoint entry with the full message and keeps the DAG parent that the checkpoint append assigned, so earlier turns stay reachable from the leaf.
 If the provider throws before it streams anything, the bridge still ends the stream with an error message, so the agent loop settles.
 If the preview fails, the receipt returns the saved path and a warning instead of asking for another paid generation.
 The web renderer keeps that path visible without a preview.

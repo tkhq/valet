@@ -6,7 +6,7 @@ import sharp from "sharp";
 import { Type } from "typebox";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type ActionPlugin, type PolicyInvocationRecord, type PolicyResolver } from "../src/index.js";
 import { buildPluginCatalog } from "../src/plugin-catalog.js";
-import { ELIDED_TOOL_OUTPUT } from "../src/compaction.js";
+import { ELIDED_TOOL_OUTPUT, walkTranscriptDag } from "../src/compaction.js";
 import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_TOOL_PARAMS } from "../src/native-images.js";
 import { isAnimatedPng, validateImage } from "../src/image-output.js";
 import { crc32 } from "node:zlib";
@@ -671,5 +671,35 @@ it("checkpoints a saved image as an assistant entry before the stream ends, then
     if (final?.type !== "message") throw new Error("missing final entry");
     expect(final.parts?.filter((part) => part.type === "tool_call" && part.toolName === NATIVE_IMAGE_RESULT_TOOL)).toEqual([expect.objectContaining({ status: "completed", callId: checkpoint.parts?.[0]?.type === "tool_call" ? checkpoint.parts[0].callId : "" })]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  } finally { await session.destroy(); }
+});
+
+it("keeps earlier turns in the transcript DAG after a checkpointed image message", async () => {
+  const store = new InMemorySessionStore();
+  const events = new InMemoryEventStream();
+  const engine = new Engine({ providers: { store, stream: events, sandboxProvider: new VirtualSandboxProvider() } });
+  const plain = (text: string) => wire([{ type: "message", id: `msg_${text}`, role: "assistant", status: "completed", content: [{ type: "output_text", text, annotations: [] }] }]);
+  const fetchMock = vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(plain("A1"))
+    .mockResolvedValueOnce(wire([item(), item("img_2")]))
+    .mockImplementation(async () => plain("Saved."));
+  vi.stubGlobal("fetch", fetchMock);
+  const session = await engine.createSession({ userId: "u", orgId: "o", workspace: "/workspace", sandbox: {}, model,
+    purpose: "child", resolveModel: async () => ({ model, apiKey: "sk-fixture-key" }), pluginCatalog: openaiCatalog() });
+  let settledCount = 0;
+  events.subscribe({ sessionId: session.id }, ({ event }) => { if (event.type === "submission_settled") settledCount++; });
+  try {
+    const first = await session.prompt("U1");
+    await expect.poll(() => settledCount).toBe(1);
+    await session.prompt("U2 draw two squares");
+    await expect.poll(() => settledCount, { timeout: 10_000 }).toBe(2);
+    const snapshot = await store.getThreadSnapshot(session.id, first.threadId);
+    if (!snapshot) throw new Error("missing thread");
+    const active = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId);
+    const texts = active.filter((entry) => entry.type === "message").map((entry) => entry.type === "message" ? `${entry.role}:${entry.content}` : "");
+    // Every earlier turn survives the checkpoint replacement; nothing is unlinked from the DAG.
+    expect(texts).toEqual(expect.arrayContaining(["user:U1", "assistant:A1", "user:U2 draw two squares", "assistant:Saved."]));
+    expect(active.length).toBe(snapshot.entries.length);
+    for (const entry of snapshot.entries.slice(1)) expect(entry.parentId).not.toBeNull();
   } finally { await session.destroy(); }
 });
