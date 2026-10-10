@@ -744,6 +744,18 @@ describe("the organisation's GitHub App", () => {
     currentOrg = org("member");
   });
 
+  it("explains a private org App instead of linking to an install page that lists only the owner", () => {
+    currentOrgStatus = {
+      configured: true,
+      installationCount: 1,
+      suspendedCount: 0,
+      personalInstallBlocked: "app_private",
+    };
+    openIntegration("github");
+    expect(screen.queryByRole("link", { name: "Install on personal account" })).toBeNull();
+    expect(screen.getByText(/GitHub installs a private App only on the account that owns it/)).toBeTruthy();
+  });
+
   it("counts the accounts the App reaches, and says the App is not the user", () => {
     openIntegration("github");
     expect(screen.getByText("Org App installed")).toBeTruthy();

@@ -15,8 +15,8 @@
  *   - `connected`: the signed-in user has a healthy personal GitHub
  *     credential (`resolveUserApiToken`) — same health rules
  *     `services/github-tokens.ts` uses everywhere else.
- *   - `installed`: the org has at least one non-suspended
- *     `github_installations` row.
+ *   - `installed`: the caller can use at least one non-suspended
+ *     `github_installations` row (`usableInstallation`).
  */
 import { Hono } from "hono";
 import { and, eq } from "drizzle-orm";
@@ -24,6 +24,7 @@ import type { AppEnv } from "../env.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { githubInstallations } from "../schema/index.js";
 import { resolveUserApiToken } from "../services/github-tokens.js";
+import { usableInstallation } from "../services/github-app.js";
 import { githubHost } from "../repos/github-host.js";
 import type { RepoHostContext } from "../repos/host.js";
 import type { GetReposResponse } from "../wire/types.js";
@@ -46,7 +47,7 @@ reposRouter.get("/", async (c) => {
     db
       .select({ id: githubInstallations.id })
       .from(githubInstallations)
-      .where(and(eq(githubInstallations.orgId, user.orgId), eq(githubInstallations.suspended, false)))
+      .where(and(usableInstallation(user.orgId, user.id), eq(githubInstallations.suspended, false)))
       .limit(1),
   ]);
 

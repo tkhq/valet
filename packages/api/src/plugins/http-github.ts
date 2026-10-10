@@ -61,12 +61,15 @@ import { publicUrlFromEnv } from "../channels/host.js";
 import { resolveReturnOrigin } from "../routes/credential-connect.js";
 import { credentials, githubInstallations, orgs } from "../schema/index.js";
 import { githubAppInstallUrl, resolveGithubApiUrl, resolveGithubUrl } from "../services/github-env.js";
+import { personalInstallFields } from "../services/github-app-visibility.js";
 import {
   buildAppConfig,
   discoverInstallations,
   loadAppConfig,
   loadAppConfigWithSource,
+  reconcileUserInstallations,
   relinkInstallations,
+  usableInstallation,
   resolveGithubAppEnvConfig,
   saveAppConfig,
   syncAppWebhookUrl,
@@ -356,23 +359,49 @@ function connectionCapability(
       );
     },
     orgStatus: async () => {
-      const { db } = providers;
+      const { db, engineCredentials } = providers;
       const config = await loadAppConfig(appDeps(providers), orgId);
+      // The installations this member can use: the organization's, plus the
+      // member's own personal ones. Another member's or a stranger's
+      // personal installation is never read. The counts describe the
+      // organization's half, so they leave the member's own out.
       const rows = await db
-        .select({ suspended: githubInstallations.suspended })
+        .select({
+          suspended: githubInstallations.suspended,
+          accountType: githubInstallations.accountType,
+          accountLogin: githubInstallations.accountLogin,
+          repositorySelection: githubInstallations.repositorySelection,
+        })
         .from(githubInstallations)
-        .where(eq(githubInstallations.orgId, orgId));
+        .where(usableInstallation(orgId, userId));
       const [org] = await db
         .select({ allowPersonalInstallations: orgs.allowPersonalInstallations })
         .from(orgs)
         .where(eq(orgs.id, orgId))
         .limit(1);
+      // `usableInstallation` returns a personal row only when it is bound to
+      // this member.
+      const own = rows.filter((row) => row.accountType === "User");
+      const orgWide = rows.filter((row) => row.accountType !== "User");
+      let personal = {};
+      if (config !== null && org?.allowPersonalInstallations === true) {
+        const stored = await engineCredentials.get({ type: "user", id: userId }, GITHUB_CREDENTIAL_SERVICE);
+        const connected = typeof stored?.metadata?.githubId === "string";
+        personal = await personalInstallFields(config.appSlug, process.env, connected);
+      }
       const status: GetGithubOrgStatusResponse = {
         configured: config !== null,
-        installationCount: rows.length,
-        suspendedCount: rows.filter((row) => row.suspended).length,
-        ...(config !== null && org?.allowPersonalInstallations === true
-          ? { personalInstallUrl: githubAppInstallUrl(process.env, config.appSlug) }
+        installationCount: orgWide.length,
+        suspendedCount: orgWide.filter((row) => row.suspended).length,
+        ...personal,
+        ...(own.length > 0
+          ? {
+              personalInstallations: own.map((row) => ({
+                accountLogin: row.accountLogin,
+                repositorySelection: row.repositorySelection,
+                suspended: row.suspended,
+              })),
+            }
           : {}),
       };
       const projected: GithubOrgStatus = status;
@@ -399,14 +428,27 @@ function connectionCapability(
               accessToken: connection.accessToken,
               refreshToken: connection.refreshToken,
               expiresAt: connection.expiresAt,
-              metadata: { login: connection.login },
+              metadata: {
+                login: connection.login,
+                // Verified by GitHub in this flow. Binds the member's personal
+                // App installations (`services/github-app.ts`).
+                ...(connection.githubId ? { githubId: connection.githubId } : {}),
+              },
             });
             await refreshCredentialReadiness(providers, { type: "user", id: userId }, GITHUB_CREDENTIAL_SERVICE);
             // Best-effort: the next discovery run catches up.
             try {
-              await relinkInstallations(appDeps(providers), verified.orgId);
+              if (connection.githubId) {
+                await reconcileUserInstallations(appDeps(providers), verified.orgId, {
+                  userId,
+                  githubId: connection.githubId,
+                  accessToken: connection.accessToken,
+                });
+              } else {
+                await relinkInstallations(appDeps(providers), verified.orgId);
+              }
             } catch (err) {
-              console.error("github connect callback: post-save relink failed:", err);
+              console.error("github connect callback: post-save installation binding failed:", err);
             }
           },
         },

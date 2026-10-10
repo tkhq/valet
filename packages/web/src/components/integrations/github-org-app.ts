@@ -149,3 +149,49 @@ export function githubOrgReachLines(
       ];
   }
 }
+
+/**
+ * The sentence that goes with a member's personal install of the org App.
+ *
+ * With a link: a personal installation is bound to the member whose GitHub
+ * account it is on, and only that member can use it (`services/github-app.ts`
+ * in the api). The member should know that before they select repositories.
+ *
+ * With no link, the reason:
+ *   - GitHub installs a private App only on the account that owns it, so
+ *     its install page lists only that owner. The App's owner can make it
+ *     public. Until then, a personal access token reaches the member's own
+ *     repositories.
+ *   - Valet binds an installation to the member through their GitHub
+ *     connection, so the member connects first.
+ *   - GitHub did not answer the visibility check.
+ *
+ * Null when the org offers no personal installation at all.
+ */
+export function githubPersonalInstallNote(status: GetGithubOrgStatusResponse): string | null {
+  if (status.personalInstallUrl) {
+    return "Only you can use the repositories you add to your personal installation.";
+  }
+  switch (status.personalInstallBlocked) {
+    case "app_private":
+      return "Your organisation's App is private. GitHub installs a private App only on the account that owns it. Ask the App's owner to make the App public on GitHub. Until then, connect GitHub with a personal access token to use your personal repositories.";
+    case "github_not_connected":
+      return "To install the App on your personal account, connect GitHub first.";
+    case "app_visibility_unknown":
+      return "Valet could not check whether you can install the App on a personal account. Reload the page to try again.";
+    case undefined:
+      return null;
+  }
+}
+
+/** The member's own personal installations, in one sentence. Null when
+ * there are none. */
+export function githubPersonalInstallationsLine(status: GetGithubOrgStatusResponse): string | null {
+  const own = status.personalInstallations ?? [];
+  if (own.length === 0) return null;
+  const items = own.map((inst) => {
+    const reach = inst.repositorySelection === "selected" ? "selected repositories" : "all repositories";
+    return `${inst.accountLogin} (${inst.suspended ? "suspended" : reach})`;
+  });
+  return `Installed on your personal account: ${items.join(", ")}.`;
+}

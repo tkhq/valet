@@ -43,6 +43,8 @@ export interface GithubOrgStatus {
   installationCount: number;
   suspendedCount: number;
   personalInstallUrl?: string;
+  personalInstallBlocked?: "app_private" | "app_visibility_unknown" | "github_not_connected";
+  personalInstallations?: Array<{ accountLogin: string; repositorySelection: string | null; suspended: boolean }>;
 }
 
 /** Parts of an App credential. The host fills the page URL and empty secrets. */
@@ -119,7 +121,8 @@ export interface GithubCallbackGrant {
   postAuthDestination?: GithubPostAuthDestination;
   /** The App OAuth client of the organization the state names. Null when no App exists. */
   oauthClient(): Promise<{ clientId: string; clientSecret: string } | null>;
-  /** Saves the caller's credential, refreshes readiness, and relinks installations. */
+  /** Saves the caller's credential, refreshes readiness, records the caller's
+   * own personal installations, and relinks installations. */
   saveConnection(connection: GithubUserConnection): Promise<void>;
 }
 
@@ -128,6 +131,9 @@ export interface GithubUserConnection {
   refreshToken?: string;
   expiresAt?: number;
   login: string;
+  /** GitHub's numeric account id from `GET /user`, as a string. The host
+   * binds personal App installations to the member by this id. */
+  githubId?: string;
 }
 
 export interface GithubWebhookCapability {

@@ -9,6 +9,7 @@ import { createHmac, generateKeyPairSync } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { resetGithubAppVisibilityCache } from "../services/github-app-visibility.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { credentials, githubInstallations } from "../schema/index.js";
 import type { PostGithubConnectResponse } from "../wire/types.js";
@@ -42,6 +43,7 @@ afterEach(async () => {
   api = undefined;
   await fixture?.close();
   fixture = undefined;
+  resetGithubAppVisibilityCache();
   for (const [name, value] of Object.entries(SAVED_ENV)) {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
@@ -146,6 +148,50 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
     });
     expect(await call("app-setup", { headers: MEMBER }, "?code=c")).toEqual({ status: 400, body: { error: "missing code or state" } });
     expect(await call("disconnect", { method: "DELETE", headers: MEMBER })).toEqual({ status: 204, body: null });
+  });
+
+  // GitHub installs a private App only on the account that owns it. Its
+  // `/installations/new` page then lists only that owner, so a member who
+  // follows the link cannot pick a personal account.
+  describe("personal install link", () => {
+    const BASE = { configured: true, installationCount: 0, suspendedCount: 0 };
+
+    it("gives no link for a private App, and says why", async () => {
+      Object.assign(process.env, ENV_APP);
+      api = await bootTestApi({ plugins: [githubPlugin] });
+      const f = useFixture({ getAppBySlug: () => ({ status: 404, body: { message: "Not Found" } }) });
+      expect(await call("org-status", { headers: MEMBER })).toEqual({
+        status: 200, body: { ...BASE, personalInstallBlocked: "app_private" },
+      });
+      // GitHub answers this read without authentication only for a public
+      // App, so the check must not send a credential.
+      const probe = f.calls.find((c) => c.path === "/apps/valet-env");
+      expect(probe).toMatchObject({ method: "GET", authHeader: undefined });
+    });
+
+    it("links a public App's installation page for a member who connected GitHub", async () => {
+      Object.assign(process.env, ENV_APP);
+      api = await bootTestApi({ plugins: [githubPlugin] });
+      const f = useFixture();
+      expect(await call("org-status", { headers: MEMBER })).toEqual({
+        status: 200, body: { ...BASE, personalInstallBlocked: "github_not_connected" },
+      });
+      await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+        type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242" },
+      });
+      expect(await call("org-status", { headers: MEMBER })).toEqual({
+        status: 200, body: { ...BASE, personalInstallUrl: `${f.url}/apps/valet-env/installations/new` },
+      });
+    });
+
+    it("gives no link when GitHub cannot say whether the App is public", async () => {
+      Object.assign(process.env, ENV_APP);
+      api = await bootTestApi({ plugins: [githubPlugin] });
+      useFixture({ getAppBySlug: () => ({ status: 503, body: { message: "unavailable" } }) });
+      expect(await call("org-status", { headers: MEMBER })).toEqual({
+        status: 200, body: { ...BASE, personalInstallBlocked: "app_visibility_unknown" },
+      });
+    });
   });
 
   it("refuses unauthenticated callers on every authenticated route", async () => {
@@ -269,6 +315,36 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
       });
       const [row] = await api.providers.db.select({ suspended: githubInstallations.suspended }).from(githubInstallations);
       expect(row).toEqual({ suspended: true });
+    });
+
+    it("binds a new personal installation to the member who owns that GitHub account", async () => {
+      // A member who connected GitHub follows the personal-install link. The
+      // `installation.created` delivery starts discovery, which binds the
+      // installation by GitHub account id. A stranger's stays unbound.
+      Object.assign(process.env, ENV_APP);
+      api = await bootTestApi({ plugins: [githubPlugin] });
+      await seedInstallation();
+      await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+        type: "oauth2", accessToken: "member-token", metadata: { login: "member", githubId: "4242" },
+      });
+      useFixture({
+        listInstallations: () => ({
+          body: [
+            { id: 999, account: { login: "acme", id: 1, type: "Organization" }, repository_selection: "all", suspended_at: null },
+            { id: 8801, account: { login: "member", id: 4242, type: "User" }, repository_selection: "selected", suspended_at: null },
+            { id: 8802, account: { login: "stranger", id: 5, type: "User" }, repository_selection: "all", suspended_at: null },
+          ],
+        }),
+      });
+      const created = JSON.stringify({ action: "created", installation: { id: 8801 } });
+      expect(await deliver(created, { "x-github-event": "installation", "x-hub-signature-256": sign(created, ENV_APP.GITHUB_APP_WEBHOOK_SECRET) }))
+        .toEqual({ status: 204, body: null });
+      const rows = await api.providers.db
+        .select({ installationId: githubInstallations.installationId, linkedUserId: githubInstallations.linkedUserId })
+        .from(githubInstallations);
+      expect(Object.fromEntries(rows.map((r) => [r.installationId, r.linkedUserId]))).toEqual({
+        999: null, 8801: "test-member", 8802: null,
+      });
     });
 
     it.each([true, false])("refuses a body above 1 MiB (declared length: %s)", async (declared) => {

@@ -15,7 +15,7 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { decryptSecret, deriveSecretKey } from "../lib/secret-crypto.js";
-import { orgs, users, githubInstallations } from "../schema/index.js";
+import { orgMembers, orgs, users, githubInstallations } from "../schema/index.js";
 import {
   buildAppConfig,
   discoverInstallations,
@@ -24,6 +24,8 @@ import {
   mintAppJwt,
   mintInstallationToken,
   parsePrivateKeyPem,
+  reconcileUserInstallations,
+  relinkInstallations,
   resolveGithubAppEnvConfig,
   saveAppConfig,
   syncAllAppWebhookUrls,
@@ -467,22 +469,100 @@ describe("github-app service", () => {
       expect(allRows[0].installationId).toBe(111);
     });
 
-    it("sets linkedUserId when a connected user's github login case-insensitively matches the account login", async () => {
+  });
+
+  // A personal installation is bound to the org member whose connected
+  // GitHub account id (from the App OAuth `GET /user`) equals the
+  // installation's account id. The legacy stack used the same rule.
+  describe("personal installation binding", () => {
+    const installs = [
+      { id: 111, account: { login: "acme", id: 1, type: "Organization" }, repository_selection: "all", suspended_at: null },
+      { id: 222, account: { login: "member-a", id: 9001, type: "User" }, repository_selection: "selected", suspended_at: null },
+      { id: 333, account: { login: "stranger", id: 9002, type: "User" }, repository_selection: "all", suspended_at: null },
+      { id: 444, account: { login: "outsider", id: 9003, type: "User" }, repository_selection: "all", suspended_at: null },
+      { id: 555, account: { login: "lookalike", id: 9005, type: "User" }, repository_selection: "all", suspended_at: null },
+    ];
+
+    async function member(id: string, org: string, metadata: Record<string, unknown> | null): Promise<void> {
+      await db.insert(users).values({ id, name: id, email: `${id}@example.com` });
+      await db.insert(orgMembers).values({ orgId: org, userId: id, role: "member", createdAt: Date.now() });
+      if (metadata) {
+        await credentials.save({ type: "user", id }, "github", { type: "oauth2", accessToken: `${id}-token`, metadata });
+      }
+    }
+
+    beforeEach(async () => {
       await saveAppConfig({ credentials }, orgId, baseConfig);
-      await db.insert(users).values({ id: "user1", name: "User One", email: "u1@example.com" });
-      await credentials.save(
-        { type: "user", id: "user1" },
-        "github",
-        { type: "oauth2", accessToken: "user-token", metadata: { login: "Acme" } },
-      );
+      await db.insert(orgs).values({ id: "org2", name: "Other org", createdAt: Date.now() });
+      await member("member-a", orgId, { login: "member-a", githubId: "9001" });
+      await member("member-b", orgId, { login: "lookalike" });
+      await member("outsider", "org2", { login: "outsider", githubId: "9003" });
+      fixture = startGithubFixture({ listInstallations: () => ({ body: installs }) });
+    });
+
+    function linkedByInstallation(rows: { installationId: number; linkedUserId: string | null }[]) {
+      return Object.fromEntries(rows.map((r) => [r.installationId, r.linkedUserId]));
+    }
+
+    it("binds a personal installation to the member who owns that GitHub account, and nothing else", async () => {
+      const rows = await discoverInstallations(deps(), orgId);
+      expect(linkedByInstallation(rows)).toEqual({
+        111: null, // an organization installation serves every member
+        222: "member-a",
+        333: null, // a stranger installed the public App
+        444: null, // that GitHub account belongs to a member of another org
+        555: null, // a login match is not proof: the binding needs the verified account id
+      });
+      expect(rows.find((r) => r.installationId === 222)?.accountId).toBe("9001");
+    });
+
+    it("binds nobody when two members connected the same GitHub account", async () => {
+      await member("member-c", orgId, { login: "member-a", githubId: "9001" });
+      const rows = await discoverInstallations(deps(), orgId);
+      expect(linkedByInstallation(rows)[222]).toBeNull();
+    });
+
+    it("mints a personal installation only for its bound member", async () => {
+      await discoverInstallations(deps(), orgId);
+      expect(await mintInstallationToken(deps(), orgId, "member-a", "member-a")).toBe("fixture-installation-token");
+      expect(await mintInstallationToken(deps(), orgId, "member-a", "member-b")).toBeNull();
+      expect(await mintInstallationToken(deps(), orgId, "member-a")).toBeNull();
+      expect(await mintInstallationToken(deps(), orgId, "stranger", "member-a")).toBeNull();
+      expect(await mintInstallationToken(deps(), orgId, "acme", "member-b")).toBe("fixture-installation-token");
+      expect(await mintInstallationToken(deps(), orgId, "acme")).toBe("fixture-installation-token");
+    });
+
+    it("rebinds when a member connects later", async () => {
+      await discoverInstallations(deps(), orgId);
+      await credentials.save({ type: "user", id: "member-b" }, "github", {
+        type: "oauth2",
+        accessToken: "b-token",
+        metadata: { login: "stranger", githubId: "9002" },
+      });
+      await relinkInstallations(deps(), orgId);
+      const rows = await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
+      expect(linkedByInstallation(rows)[333]).toBe("member-b");
+    });
+
+    it("records the member's own installations from GitHub at connect time", async () => {
+      await fixture?.close();
       fixture = startGithubFixture({
-        listInstallations: () => ({
-          body: [{ id: 111, account: { login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
+        listUserInstallations: () => ({
+          body: {
+            total_count: 3,
+            installations: [
+              { id: 777, account: { login: "member-a", id: 9001, type: "User" }, repository_selection: "selected", suspended_at: null },
+              { id: 778, account: { login: "acme", id: 1, type: "Organization" }, repository_selection: "all", suspended_at: null },
+              { id: 779, account: { login: "someone", id: 9999, type: "User" }, repository_selection: "all", suspended_at: null },
+            ],
+          },
         }),
       });
-
-      const rows = await discoverInstallations(deps(), orgId);
-      expect(rows[0].linkedUserId).toBe("user1");
+      await reconcileUserInstallations(deps(), orgId, { userId: "member-a", githubId: "9001", accessToken: "member-a-token" });
+      const rows = await db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
+      expect(rows.map((r) => [r.installationId, r.accountLogin, r.linkedUserId])).toEqual([[777, "member-a", "member-a"]]);
+      const call = fixture.calls.find((c) => c.path === "/user/installations");
+      expect(call?.authHeader).toBe("Bearer member-a-token");
     });
   });
 

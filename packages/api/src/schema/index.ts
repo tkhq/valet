@@ -1800,8 +1800,16 @@ export const githubInstallations = pgTable(
     installationId: bigint("installation_id", { mode: "number" }).notNull(),
     accountLogin: text("account_login").notNull(),
     accountType: text("account_type").notNull(),
+    /** GitHub's numeric id for the installation account, as a string. Null on
+     * rows that discovery has not read since the column was added. */
+    accountId: text("account_id"),
     repositorySelection: text("repository_selection"),
     suspended: boolean("suspended").notNull().default(false),
+    /** For an installation on a personal GitHub account (`accountType`
+     * "User"): the org member whose connected GitHub account has
+     * `accountId`. Only that member may use the installation. Null on an
+     * organization installation, and on a personal installation that no
+     * member owns (see `services/github-app.ts`). */
     linkedUserId: text("linked_user_id"),
     cachedToken: text("cached_token"),
     cachedTokenExpiresAt: bigint("cached_token_expires_at", { mode: "number" }),

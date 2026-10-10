@@ -757,6 +757,7 @@ describe("pg app schema + migrations", () => {
         installationId: 12345,
         accountLogin: "acme",
         accountType: "Organization",
+        accountId: null,
         repositorySelection: "selected",
         suspended: false,
         linkedUserId: null,

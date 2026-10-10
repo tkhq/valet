@@ -176,6 +176,55 @@ describe("GET /api/repos", () => {
     expect(two?.installed).toBeUndefined();
   });
 
+  it("lists a personal installation's repositories only to the member it is bound to", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const repoByToken: Record<string, string> = {
+      "Bearer tok-601": "acme/shared",
+      "Bearer tok-602": "member-a/private",
+      "Bearer tok-603": "stranger/bait",
+    };
+    useFixture({
+      listInstallations: () => ({ body: [] }),
+      convertManifest: () => ({
+        body: {
+          id: 42,
+          slug: "valet-acme",
+          name: "Valet Acme",
+          client_id: "Iv1.client",
+          client_secret: "oauth-client-secret",
+          webhook_secret: "the-webhook-secret",
+          pem: TEST_PEM,
+          html_url: "https://github.com/apps/valet-acme",
+        },
+      }),
+      createInstallationToken: (id) => ({
+        body: { token: `tok-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
+      }),
+      listInstallationRepositories: (auth) => {
+        const fullName = repoByToken[auth ?? ""];
+        return { body: { total_count: 1, repositories: fullName ? [rawRepo({ full_name: fullName })] : [] } };
+      },
+    });
+    await configureOrgApp(api.baseUrl);
+    await seedInstallationRow({ id: "ghi_org", installationId: 601, accountLogin: "acme" });
+    await seedInstallationRow({
+      id: "ghi_a", installationId: 602, accountLogin: "member-a", accountType: "User", linkedUserId: "local-user",
+    });
+    await seedInstallationRow({
+      id: "ghi_s", installationId: 603, accountLogin: "stranger", accountType: "User", linkedUserId: null,
+    });
+
+    async function listAs(headers: Record<string, string>): Promise<string[]> {
+      const res = await fetch(`${api!.baseUrl}/api/repos`, { headers });
+      expect(res.status).toBe(200);
+      return ((await res.json()) as GetReposResponse).repos.map((r) => r.fullName).sort();
+    }
+
+    expect(await listAs(HEADERS)).toEqual(["acme/shared", "member-a/private"]);
+    expect(await listAs({ ...HEADERS, "x-valet-test-user-id": "test-member" })).toEqual(["acme/shared"]);
+    expect(fixture?.calls.some((c) => c.path === "/app/installations/603/access_tokens")).toBe(false);
+  });
+
   it("soft-degrades when the installation-repositories call fails: still 200, partial results", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture({

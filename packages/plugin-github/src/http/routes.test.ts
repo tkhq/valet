@@ -61,7 +61,7 @@ describe("GitHub App setup", () => {
         url: "http://127.0.0.1:9",
         redirect_url: "http://127.0.0.1:9/api/org/github-app/setup",
         callback_urls: ["http://127.0.0.1:9/api/me/github/callback"],
-        public: false,
+        public: true,
         default_events: [],
         default_permissions: {
           contents: "write", metadata: "read", pull_requests: "write", issues: "write",

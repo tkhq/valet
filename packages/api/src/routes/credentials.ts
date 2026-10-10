@@ -404,6 +404,13 @@ credentialsRouter.put("/:service", async (c) => {
   if (body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) && "onepassword" in body.metadata) {
     return c.json({ error: "metadata.onepassword is reserved; use the onepassword request field" }, 400);
   }
+  // `metadata.githubId` binds a personal GitHub App installation to the
+  // member who owns that GitHub account (`services/github-app.ts`). Only the
+  // GitHub connect callback writes it, after GitHub verified the account. A
+  // value sent here could claim another person's installation.
+  if (body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) && "githubId" in body.metadata) {
+    return c.json({ error: "metadata.githubId is reserved. Connect GitHub through the GitHub connect flow." }, 400);
+  }
   if (body.onepassword) {
     // Structural validation (reserved service name) takes precedence over
     // every policy check below — a request naming the reserved service is

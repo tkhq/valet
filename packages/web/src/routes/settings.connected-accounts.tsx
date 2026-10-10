@@ -2,15 +2,15 @@ import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import type { CredentialSummary, IdentityLinkStatus } from "@valet/api/wire";
 import { useIdentityLinks, useSetLinkNotify, useUnlinkIdentity } from "~/api/queries";
-import { useConnectGithub, useDisconnectGithub } from "~/api/repos";
+import { useConnectGithub, useDisconnectGithub, useGithubOrgStatus } from "~/api/repos";
 import { useCredentials } from "~/api/integrations";
-import { useGithubApp } from "~/api/settings";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { Badge, Button, ConfirmDialog, Spinner, Switch } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { formatDateOr } from "~/lib/format-when";
 import { displayName } from "~/components/integrations/display-name";
+import { githubPersonalInstallationsLine, githubPersonalInstallNote } from "~/components/integrations/github-org-app";
 import { useOnePasswordSettings } from "~/api/onepassword";
 import { OnePasswordTokenRow } from "~/components/integrations/onepassword-setup";
 import { IdentityLinkBlock } from "~/components/integrations/identity-link-block";
@@ -178,7 +178,7 @@ function isExpired(cred: CredentialSummary): boolean {
 
 function GithubRow() {
   const credentialsQ = useCredentials();
-  const githubAppQ = useGithubApp();
+  const orgStatusQ = useGithubOrgStatus();
   const connectGithub = useConnectGithub();
   const disconnectGithub = useDisconnectGithub();
   const [connectError, setConnectError] = useState<string | null>(null);
@@ -204,8 +204,9 @@ function GithubRow() {
 
   const github = credentialsQ.data?.credentials.find((c) => c.service === "github");
   const repoCapable = !!github && !github.identityOnly;
-  const installUrl =
-    githubAppQ.data?.configured && githubAppQ.data.app ? githubAppQ.data.app.installUrl : undefined;
+  const installUrl = orgStatusQ.data?.personalInstallUrl;
+  const personalNote = orgStatusQ.data ? githubPersonalInstallNote(orgStatusQ.data) : null;
+  const ownInstallations = orgStatusQ.data ? githubPersonalInstallationsLine(orgStatusQ.data) : null;
 
   /** Answers whether the OAuth flow started, so the replace dialog can stay
    * open carrying the reason when it did not. */
@@ -291,6 +292,8 @@ function GithubRow() {
             Install on your personal account
           </a>
         )}
+        {ownInstallations && <p className="text-xs text-ink">{ownInstallations}</p>}
+        {personalNote && <p className="text-xs text-muted">{personalNote}</p>}
 
         <ConfirmDialog
           open={confirmReplace}

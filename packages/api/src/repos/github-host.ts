@@ -53,7 +53,7 @@ import { and, eq } from "drizzle-orm";
 import type { RepoListItem } from "@valet/sdk/repos";
 import { githubInstallations } from "../schema/index.js";
 import { resolveGithubApiUrl } from "../services/github-env.js";
-import { mintInstallationToken, type GithubAppDeps } from "../services/github-app.js";
+import { mintInstallationToken, usableInstallation, type GithubAppDeps } from "../services/github-app.js";
 import {
   resolveGitHubToken,
   resolveOrgPatApiToken,
@@ -183,16 +183,17 @@ async function listInstallationRepos(ctx: RepoHostContext): Promise<RepoListItem
     fetchImpl: ctx.deps.fetchImpl,
     now: ctx.deps.now,
   };
+  // Organization installations, plus the caller's own personal ones.
   const rows = await ctx.deps.db
     .select()
     .from(githubInstallations)
-    .where(and(eq(githubInstallations.orgId, ctx.orgId), eq(githubInstallations.suspended, false)));
+    .where(and(usableInstallation(ctx.orgId, ctx.userId), eq(githubInstallations.suspended, false)));
 
   const perInstallation = await Promise.all(
     rows.map(async (row): Promise<RepoListItem[]> => {
       let token: string | null;
       try {
-        token = await mintInstallationToken(appDeps, ctx.orgId, row.accountLogin);
+        token = await mintInstallationToken(appDeps, ctx.orgId, row.accountLogin, ctx.userId);
       } catch (err) {
         console.error(`github-host: minting installation token for ${row.accountLogin} failed:`, err);
         return [];

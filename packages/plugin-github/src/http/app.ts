@@ -117,7 +117,11 @@ export async function appManifest(
     redirect_url: `${apiBase}${GITHUB_APP_SETUP_PATH}`,
     callback_urls: [`${apiBase}${GITHUB_CONNECT_CALLBACK_PATH}`],
     ...(webhookOn ? { hook_attributes: { url: `${apiBase}${GITHUB_APP_WEBHOOK_PATH}` } } : {}),
-    public: false,
+    // Public, as the legacy stack made it, so members can install the App on
+    // their personal accounts. A private App installs only on its owner. The
+    // host lets a personal installation serve only the member it is bound to
+    // (`services/github-app.ts`, "Who may use an installation").
+    public: true,
     // GitHub delivers `installation` and `installation_repositories` to
     // every App, and rejects a manifest that lists them.
     default_events: webhookOn ? (eventsOverride ?? triggerEvents) : [],

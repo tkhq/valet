@@ -976,6 +976,7 @@ CREATE TABLE "github_installations" (
 	"installation_id" bigint NOT NULL,
 	"account_login" text NOT NULL,
 	"account_type" text NOT NULL,
+	"account_id" text,
 	"repository_selection" text,
 	"suspended" boolean DEFAULT false NOT NULL,
 	"linked_user_id" text,

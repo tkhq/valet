@@ -1085,8 +1085,11 @@ function buildGithubCredentialProvider(
         // `scope: "installation"`). The action's own `owner` parameter picks
         // the installation when present; otherwise the org's sole
         // installation applies. Same org-scoped lookup as the `"app"`
-        // selection below — no cross-tenant reach.
-        const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner);
+        // selection below — no cross-tenant reach. A user-owned run may also
+        // reach that user's own personal installation; a team run may not.
+        const token = await resolveInstallationApiToken(
+          deps, ctx.orgId, repoFromParams(req.params)?.owner, owner.type === "user" ? owner.id : undefined,
+        );
         return token === null ? null : { accessToken: token };
       }
       const selection = req.credential ?? "auto";

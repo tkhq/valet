@@ -11,7 +11,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type {
   CredentialSummary,
-  GetGithubAppResponse,
+  GetGithubOrgStatusResponse,
   IdentityLinkStatus,
 } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
@@ -43,7 +43,7 @@ let isError = false;
 let credentialsData: { credentials: CredentialSummary[] } | undefined = { credentials: [] };
 let credentialsLoading = false;
 let credentialsError = false;
-let githubAppData: GetGithubAppResponse | undefined;
+let githubOrgStatus: GetGithubOrgStatusResponse | undefined;
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
@@ -68,6 +68,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
 });
 
 vi.mock("~/api/repos", () => ({
+  useGithubOrgStatus: () => ({ data: githubOrgStatus }),
   useConnectGithub: () => ({ mutateAsync: connectGithubMutateAsync, isPending: false }),
   useDisconnectGithub: () => ({
     mutate: disconnectGithubMutate,
@@ -101,15 +102,6 @@ vi.mock("~/api/integrations", () => ({
   // The 1Password row removes its token through this mutation.
   useDisconnectCredential: () => ({ mutate: vi.fn(), isPending: false, error: null, reset: vi.fn() }),
 }));
-
-// importOriginal keeps the module's other exports real (see vitest.config.ts).
-vi.mock("~/api/settings", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/settings")>();
-  return {
-    ...actual,
-    useGithubApp: () => ({ data: githubAppData, isLoading: false, error: null }),
-  };
-});
 
 import { ConnectedAccountsPage } from "./settings.connected-accounts";
 
@@ -150,7 +142,7 @@ describe("ConnectedAccountsPage", () => {
     credentialsData = { credentials: [] };
     credentialsLoading = false;
     credentialsError = false;
-    githubAppData = undefined;
+    githubOrgStatus = undefined;
     disconnectGithubState = { isPending: false, error: null };
     // Still stubbed so the tests below can assert the page NEVER reaches for
     // the native dialog, which browser automation accepts for free.
@@ -466,18 +458,12 @@ describe("ConnectedAccountsPage", () => {
       expect(within(await screen.findByRole("dialog")).getByText(refusal)).toBeTruthy();
     });
 
-    it("shows an Install on your personal account link when the org App is configured", () => {
-      githubAppData = {
+    it("shows an Install on your personal account link when the API permits it", () => {
+      githubOrgStatus = {
         configured: true,
-        app: {
-          appId: "1",
-          appSlug: "valet-acme",
-          htmlUrl: "https://github.com/apps/valet-acme",
-          installUrl: "https://github.com/apps/valet-acme/installations/new",
-        },
-        installations: [],
-        webhook: { mode: "public" },
-        installationsCheckedAt: null,
+        installationCount: 1,
+        suspendedCount: 0,
+        personalInstallUrl: "https://github.com/apps/valet-acme/installations/new",
       };
       render(<ConnectedAccountsPage />);
       expect(
@@ -485,8 +471,33 @@ describe("ConnectedAccountsPage", () => {
       ).toHaveProperty("href", "https://github.com/apps/valet-acme/installations/new");
     });
 
+    it("explains a private org App instead of linking to its install page", () => {
+      githubOrgStatus = {
+        configured: true,
+        installationCount: 1,
+        suspendedCount: 0,
+        personalInstallBlocked: "app_private",
+      };
+      render(<ConnectedAccountsPage />);
+      expect(screen.queryByRole("link", { name: "Install on your personal account" })).toBeNull();
+      expect(screen.getByText(/GitHub installs a private App only on the account that owns it/)).toBeTruthy();
+    });
+
+    it("lists the member's own personal installations", () => {
+      githubOrgStatus = {
+        configured: true,
+        installationCount: 1,
+        suspendedCount: 0,
+        personalInstallUrl: "https://github.com/apps/valet-acme/installations/new",
+        personalInstallations: [{ accountLogin: "octouser", repositorySelection: "selected", suspended: false }],
+      };
+      render(<ConnectedAccountsPage />);
+      expect(screen.getByText("Installed on your personal account: octouser (selected repositories).")).toBeTruthy();
+      expect(screen.getByText("Only you can use the repositories you add to your personal installation.")).toBeTruthy();
+    });
+
     it("omits the install link when the org App isn't configured", () => {
-      githubAppData = { configured: false, installations: [], webhook: { mode: "manual" }, installationsCheckedAt: null };
+      githubOrgStatus = { configured: false, installationCount: 0, suspendedCount: 0 };
       render(<ConnectedAccountsPage />);
       expect(screen.queryByRole("link", { name: "Install on your personal account" })).toBeNull();
     });

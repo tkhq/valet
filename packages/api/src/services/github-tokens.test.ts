@@ -19,6 +19,7 @@ import {
   GitHubAuthError,
   installationResolvesFor,
   resolveGitHubToken,
+  resolveInstallationApiToken,
   type GitHubTokenDeps,
 } from "./github-tokens.js";
 
@@ -592,6 +593,78 @@ describe("resolveGitHubToken", () => {
   // installation would answer, without minting a token. Mirrors
   // `resolveInstallationApiToken`: the owner's installation first, then the
   // org's sole non-suspended one.
+  // A personal installation is bound to the member whose connected GitHub
+  // account it is on (`linkedUserId`). Only that member may use it. An
+  // installation on a GitHub organization serves every member. A personal
+  // installation with no binding (a stranger installed the public App)
+  // serves nobody.
+  describe("personal installations", () => {
+    const memberB = "user2";
+    const personalRepo = { owner: "member-a", name: "private" };
+
+    beforeEach(async () => {
+      await db.insert(users).values({ id: memberB, name: "User Two", email: "u2@example.com" });
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      fixture = startGithubFixture();
+      await seedInstallation();
+      await seedInstallation({ id: "ghi_a", installationId: 501, accountLogin: "member-a", accountType: "User", linkedUserId: userId });
+      await seedInstallation({ id: "ghi_s", installationId: 502, accountLogin: "stranger", accountType: "User", linkedUserId: null });
+    });
+
+    function mintedInstallations(): string[] {
+      return (fixture?.calls ?? []).filter((c) => c.path.endsWith("/access_tokens")).map((c) => c.params.id);
+    }
+
+    it("mints a personal installation for the member it is bound to", async () => {
+      const a = await resolveGitHubToken(deps(), { orgId, userId, purpose: "git", repo: personalRepo });
+      expect(a.source).toBe("installation");
+      expect(mintedInstallations()).toEqual(["501"]);
+    });
+
+    it("never mints another member's personal installation", async () => {
+      expect(await resolveGitHubToken(deps(), { orgId, userId: memberB, purpose: "git", repo: personalRepo })).toEqual({
+        token: null,
+        source: "none",
+      });
+      await expect(
+        resolveGitHubToken(deps(), { orgId, userId: memberB, purpose: "api", auth: "app", repo: personalRepo }),
+      ).rejects.toThrow(GitHubAuthError);
+      expect(await resolveInstallationApiToken(deps(), orgId, "member-a", memberB)).not.toBe(null);
+      expect(mintedInstallations()).not.toContain("501");
+    });
+
+    it("never mints a stranger's installation, for any member", async () => {
+      for (const who of [userId, memberB]) {
+        expect(
+          await resolveGitHubToken(deps(), { orgId, userId: who, purpose: "git", repo: { owner: "stranger", name: "x" } }),
+        ).toEqual({ token: null, source: "none" });
+      }
+      expect(mintedInstallations()).toEqual([]);
+    });
+
+    it("keeps the organization installation for every member, and as the sole installation", async () => {
+      for (const who of [userId, memberB]) {
+        const org = await resolveGitHubToken(deps(), { orgId, userId: who, purpose: "git", repo: { owner: "acme", name: "x" } });
+        expect(org.source).toBe("installation");
+        // No repository names an owner: personal installations do not make
+        // the organization installation ambiguous.
+        const sole = await resolveGitHubToken(deps(), { orgId, userId: who, purpose: "api" });
+        expect(sole.source).toBe("installation");
+      }
+      expect(new Set(mintedInstallations())).toEqual(new Set(["999"]));
+    });
+
+    it("gives a team or unattended caller no personal installation", async () => {
+      expect(await resolveInstallationApiToken(deps(), orgId, "member-a")).not.toBe(null);
+      expect(mintedInstallations()).toEqual(["999"]);
+      expect(await installationResolvesFor(deps(), orgId, "member-a", { strictOwner: true })).toEqual({
+        ok: false,
+        gap: "no_installation_for_owner",
+        owner: "member-a",
+      });
+    });
+  });
+
   describe("installationResolvesFor", () => {
     it("is no_app when the org has no App configured", async () => {
       await seedInstallation();
