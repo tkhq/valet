@@ -43,6 +43,7 @@ const dailyEntriesViewSql = "CREATE OR REPLACE VIEW usage_daily_entries AS"
 export const USAGE_STEP_ATTRIBUTION_PUBLISH_SQL = `DO $publish$ BEGIN
   ${dailyEntriesViewSql}
   CREATE OR REPLACE VIEW usage_step_attribution_ready AS SELECT 1 AS version WHERE false;
+  DELETE FROM usage_hourly_progress WHERE source_kind = 'step-attribution';
 END $publish$`;
 
 export async function prepareUsageStepAttribution(db: PgDb): Promise<void> {
@@ -56,31 +57,46 @@ export async function prepareUsageStepAttribution(db: PgDb): Promise<void> {
     await tx.query(usageAnalyticsPublishSql);
     await tx.query(usageHourlyPublishSql);
   });
-  // Page by Thread-step queue item. Each batch commits on its own, so a
-  // restart resumes; the moved facts no longer match and are skipped.
-  let cursor = "";
+  await backfillStepAttribution(db);
+}
+
+/** The backfill's progress row in `usage_hourly_progress`, the table the
+ * hourly backfill keeps its own watermarks in. */
+const PROGRESS = "step-attribution";
+const PAGE_ITEMS = 2000;
+
+/**
+ * Moves Thread-step facts recorded before the rule to their step. It makes
+ * one pass over `engine_queue_items` in primary-key order, a fixed number of
+ * items per page, so its cost is bounded by the table's size. A page touches
+ * only the entries of its workflow-dispatched items and of items that
+ * send-now promoted, through `engine_entries_queue_item`;
+ * `valet_usage_fact` decides each entry's billing, so a promoted item whose
+ * source is not a workflow step keeps its fact. Each page commits with the
+ * watermark it reached, so a restart resumes there, and the progress row's
+ * lock serializes concurrent boots.
+ */
+export async function backfillStepAttribution(db: PgDb): Promise<void> {
+  await db.query("INSERT INTO usage_hourly_progress (source_kind, watermark) VALUES ($1, '') ON CONFLICT DO NOTHING", [PROGRESS]);
   for (;;) {
-    const result = await db.query(`WITH items AS MATERIALIZED (
-      SELECT id, session_id FROM engine_queue_items
-      WHERE id > $1 AND dispatch_id LIKE 'workflow:%' AND session_id NOT LIKE 'wf:%'
-      ORDER BY id LIMIT 200
+    const result = await db.query(`WITH progress AS MATERIALIZED (
+      SELECT watermark FROM usage_hourly_progress WHERE source_kind = $1 FOR UPDATE
+    ), page AS MATERIALIZED (
+      SELECT q.id, q.session_id, q.dispatch_id, q.metadata FROM engine_queue_items q
+      WHERE q.id > (SELECT watermark FROM progress) ORDER BY q.id LIMIT ${PAGE_ITEMS}
     ), targets AS (
-      SELECT id, session_id FROM items
-      UNION ALL
-      -- A prompt that send-now promoted runs as a new item naming its source.
-      -- Read without a jsonb cast, as valet_usage_step_session does, so one
-      -- unparsable metadata row cannot abort the repair and the boot.
-      SELECT p.id, p.session_id FROM items i JOIN engine_queue_items p ON p.session_id = i.session_id
-        AND p.dispatch_id IS NULL
-        AND substring(p.metadata FROM '"promotedFromItemId":"([^"\\\\]+)"') = i.id
+      -- A text match, never a jsonb cast: metadata copies prompt arguments.
+      SELECT id, session_id FROM page WHERE session_id NOT LIKE 'wf:%'
+        AND (dispatch_id LIKE 'workflow:%' OR (dispatch_id IS NULL AND metadata LIKE '%"promotedFromItemId"%'))
     ), moved AS (
       UPDATE usage_entry_facts f SET session_id = n.session_id, workflow_run_id = n.workflow_run_id
-      FROM targets i JOIN engine_entries e ON e.queue_item_id = i.id AND e.session_id = i.session_id
+      FROM targets t JOIN engine_entries e ON e.queue_item_id = t.id AND e.session_id = t.session_id
       CROSS JOIN LATERAL valet_usage_fact(e) n
       WHERE f.entry_id = e.id AND f.session_id IS DISTINCT FROM n.session_id
-    ) SELECT MAX(id) AS cursor FROM items`, [cursor]);
-    const next = result.rows[0]?.cursor;
-    if (typeof next !== "string") break;
-    cursor = next;
+    ), advanced AS (
+      UPDATE usage_hourly_progress SET watermark = (SELECT MAX(id) FROM page)
+      WHERE source_kind = $1 AND EXISTS (SELECT 1 FROM page) RETURNING watermark
+    ) SELECT watermark FROM advanced`, [PROGRESS]);
+    if (typeof result.rows[0]?.watermark !== "string") break;
   }
 }

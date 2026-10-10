@@ -16,7 +16,7 @@ import type { Usage } from "@earendil-works/pi-ai/compat";
 import { pgDbFromPglite, type PgDb } from "@valet/store-postgres";
 import { applyAppMigrations, missingSchemaRepairs, type AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { prepareUsageStepAttribution } from "../lib/usage-step-attribution.js";
+import { backfillStepAttribution, prepareUsageStepAttribution } from "../lib/usage-step-attribution.js";
 import { usageAnalyticsInstallSql } from "../lib/usage-analytics-migration.js";
 import { recordLlmStepUsage, stepUsageEntry } from "../workflows/step-usage.js";
 import { getDailyAgentActivity, getUsageBreakdown } from "../services/usage.js";
@@ -133,6 +133,34 @@ describe("usage workflow step attribution", () => {
       [JSON.stringify({ skillArgs: '"promotedFromItemId":"q-thread"' })]);
     await assistantTurn(db, "e-plain", "q-plain");
     expect(await factFor(db, "e-plain")).toEqual({ session_id: ASSISTANT, workflow_run_id: null });
+  });
+
+  it("resumes the backfill where an interrupted boot stopped", async () => {
+    // More unrelated queue items than one page, then the Thread-step item last by id.
+    await db.query(`INSERT INTO engine_queue_items (id, session_id, thread_id, status, content, attempt_count, max_attempts, timeout_at, created_at, updated_at)
+      SELECT 'q-a-' || lpad(g::text, 5, '0'), $1, 'th', 'settled', 'p', 1, 3, 1, 1, 1 FROM generate_series(1, 2500) g`, [ASSISTANT]);
+    await queueItem(db, "q-z-thread", "workflow:run-1:think");
+    await assistantTurn(db, "e-thread", "q-z-thread");
+    await db.query("UPDATE usage_entry_facts SET session_id = $1, workflow_run_id = NULL WHERE entry_id = 'e-thread'", [ASSISTANT]);
+
+    let pages = 0;
+    const counted = (stopAt?: number): PgDb => ({
+      ...db,
+      async query(text, params) {
+        if (text.startsWith("WITH progress") && ++pages === stopAt) throw new Error("Interrupted upgrade");
+        return db.query(text, params);
+      },
+    });
+    await expect(backfillStepAttribution(counted(2))).rejects.toThrow("Interrupted upgrade");
+    const progress = (await db.query("SELECT watermark FROM usage_hourly_progress WHERE source_kind = 'step-attribution'")).rows[0];
+    expect(progress).toEqual({ watermark: "q-a-02000" });
+    expect(await factFor(db, "e-thread")).toEqual({ session_id: ASSISTANT, workflow_run_id: null });
+
+    pages = 0;
+    await backfillStepAttribution(counted());
+    // The rest of the table and the final empty page; the first page is not read again.
+    expect(pages).toBe(2);
+    expect(await factFor(db, "e-thread")).toEqual({ session_id: "wf:run-1:think", workflow_run_id: "run-1" });
   });
 
   it("moves Thread-step turns recorded before the rule, hours included", async () => {
@@ -268,7 +296,7 @@ describe("a step attribution repair that fails", () => {
     const interrupted: PgDb = {
       ...pg,
       async query(text, params) {
-        if (text.startsWith("WITH items")) throw new Error("Interrupted upgrade");
+        if (text.startsWith("WITH progress")) throw new Error("Interrupted upgrade");
         return pg.query(text, params);
       },
     };
