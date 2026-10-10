@@ -115,7 +115,16 @@ export class NativeImageBridge {
     if (signal?.aborted) return false;
     const prepared = sandbox.mkdir("generated-images").then(() => true, () => false);
     if (!signal) return prepared;
-    return Promise.race([prepared, new Promise<boolean>((resolve) => signal.addEventListener("abort", () => resolve(false), { once: true }))]);
+    const onAbort = () => resolveAborted?.(false);
+    let resolveAborted: ((value: boolean) => void) | undefined;
+    const aborted = new Promise<boolean>((resolve) => { resolveAborted = resolve; });
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      return await Promise.race([prepared, aborted]);
+    } finally {
+      // A multi-request turn shares one signal; never leave a listener per request.
+      signal.removeEventListener("abort", onAbort);
+    }
   }
 
   tool(): ToolDef {
@@ -308,32 +317,44 @@ export class NativeImageBridge {
           if (!record(transformed)) throw new Error("Invalid Responses payload. Restart this turn.");
           // Receipt paths, keyed by call_id. A pruned receipt output replays the path alone.
           const receiptPaths = new Map<string, string>();
+          // Receipt context waits until the message's last function output, so an ordinary
+          // call and its output stay adjacent. Receipts run first, so their outputs come first.
+          const deferred: unknown[] = [];
+          const replayItem = (item: unknown): unknown[] => {
+            if (!record(item)) return [item];
+            if (item.type === "reasoning" && typeof item.id === "string" && orphanedReasoning.has(item.id)) return [];
+            // Internal receipts are not provider function calls. Replay their text/vision as user context.
+            if (item.type === "function_call" && item.name === NATIVE_IMAGE_RESULT_TOOL) {
+              const args: unknown = typeof item.arguments === "string" ? JSON.parse(item.arguments) : item.arguments;
+              if (typeof item.call_id === "string" && record(args) && typeof args.path === "string") receiptPaths.set(item.call_id, args.path);
+              return [];
+            }
+            if (item.type === "function_call_output" && typeof item.call_id === "string" && receiptCalls.has(item.call_id)) {
+              // A pruned, interrupted, or errored receipt result loses its path. The call arguments keep it.
+              const path = receiptPaths.get(item.call_id);
+              const text = outputText(item.output);
+              if (path && !(text ?? "").includes(path)) {
+                const detail = text === ELIDED_TOOL_OUTPUT ? "Its preview was removed to save context." : "Its receipt did not complete.";
+                deferred.push({ role: "user", content: [{ type: "input_text", text: savedNote([path], detail) }] });
+              } else {
+                deferred.push({ role: "user", content: Array.isArray(item.output) ? item.output : [{ type: "input_text", text: item.output }] });
+              }
+              return [];
+            }
+            if ((typeof item.id === "string" && unpairedItemIds.has(item.id))
+              || ((item.type === "function_call" || item.type === "custom_tool_call") && typeof item.call_id === "string" && unpairedCalls.has(item.call_id))) {
+              const { id: _id, ...unpaired } = item;
+              return [unpaired];
+            }
+            return [item];
+          };
           const replay = receiptCalls.size && Array.isArray(transformed.input)
-            ? { ...transformed, input: transformed.input.flatMap((item): unknown[] => {
-              if (!record(item)) return [item];
-              if (item.type === "reasoning" && typeof item.id === "string" && orphanedReasoning.has(item.id)) return [];
-              // Internal receipts are not provider function calls. Replay their text/vision as user context.
-              if (item.type === "function_call" && item.name === NATIVE_IMAGE_RESULT_TOOL) {
-                const args: unknown = typeof item.arguments === "string" ? JSON.parse(item.arguments) : item.arguments;
-                if (typeof item.call_id === "string" && record(args) && typeof args.path === "string") receiptPaths.set(item.call_id, args.path);
-                return [];
-              }
-              if (item.type === "function_call_output" && typeof item.call_id === "string" && receiptCalls.has(item.call_id)) {
-                // A pruned, interrupted, or errored receipt result loses its path. The call arguments keep it.
-                const path = receiptPaths.get(item.call_id);
-                const text = outputText(item.output);
-                if (path && !(text ?? "").includes(path)) {
-                  const detail = text === ELIDED_TOOL_OUTPUT ? "Its preview was removed to save context." : "Its receipt did not complete.";
-                  return [{ role: "user", content: [{ type: "input_text", text: savedNote([path], detail) }] }];
-                }
-                return [{ role: "user", content: Array.isArray(item.output) ? item.output : [{ type: "input_text", text: item.output }] }];
-              }
-              if ((typeof item.id === "string" && unpairedItemIds.has(item.id))
-                || ((item.type === "function_call" || item.type === "custom_tool_call") && typeof item.call_id === "string" && unpairedCalls.has(item.call_id))) {
-                const { id: _id, ...unpaired } = item;
-                return [unpaired];
-              }
-              return [item];
+            ? { ...transformed, input: transformed.input.flatMap((item, index, items): unknown[] => {
+              const out = replayItem(item);
+              const next = items[index + 1];
+              const lastOutput = !(record(next) && next.type === "function_call_output");
+              if (deferred.length && lastOutput) out.push(...deferred.splice(0));
+              return out;
             }) }
             : transformed;
           if (!native) return replay;

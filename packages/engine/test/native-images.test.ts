@@ -274,15 +274,17 @@ it.each([false, true])("replays image-turn items without orphaned IDs (mixed res
   const unrelatedReasoning = { ...reasoning, id: "rs_unrelated", encrypted_content: "encrypted-unrelated" };
   const prior: typeof final = { ...final, content: [{ type: "thinking", thinking: "Prior task", thinkingSignature: JSON.stringify(unrelatedReasoning) }, { type: "text", text: "Prior answer", textSignature: "msg_prior" }] };
   fetchMock.mockImplementation(async () => wire([]));
-  await bridge.stream(model, { messages: [prior, user, final, ...(mixed ? [{
-    role: "toolResult" as const, toolCallId: "call_image_bash|fc_image_bash", toolName: "bash",
-    content: [{ type: "text" as const, text: "image.png" }], isError: false, timestamp: 2,
-  }] : []), {
+  // The thread's real order: receipts run first, so the receipt result precedes the bash result.
+  await bridge.stream(model, { messages: [prior, user, final, {
     role: "toolResult", toolCallId: call.id, toolName: NATIVE_IMAGE_RESULT_TOOL,
     content: [{ type: "text", text: result.text }, { type: "image", data: base64, mimeType: "image/png" }], isError: false, timestamp: 2,
-  }, { role: "user", content: "Make it blue", timestamp: 3 }] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox).result();
+  }, ...(mixed ? [{
+    role: "toolResult" as const, toolCallId: "call_image_bash|fc_image_bash", toolName: "bash",
+    content: [{ type: "text" as const, text: "image.png" }], isError: false, timestamp: 2,
+  }] : []), { role: "user", content: "Make it blue", timestamp: 3 }] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox).result();
   const [, init] = fetchMock.mock.calls[1];
   const body = JSON.parse(String(init?.body));
+  // Exact order: the ordinary call stays adjacent to its output; receipt context follows the last output.
   expect(body.input).toEqual([
     unrelatedReasoning,
     { type: "message", role: "assistant", content: [{ type: "output_text", text: "Prior answer", annotations: [] }], status: "completed", id: "msg_prior" },

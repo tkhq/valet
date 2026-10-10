@@ -119,6 +119,14 @@ it("the selected OpenAI model generates and edits natively with sandbox files, l
     expect(JSON.stringify(requests[1].input)).not.toContain("rs_resp_1");
     expect(JSON.stringify(requests[2].input)).not.toContain("rs_resp_1");
     expect(JSON.stringify(requests[1].input)).not.toContain('"name":"openai_native_image"');
+    // Real thread order: the ordinary call is adjacent to its output, and receipt context follows the last output.
+    const replayed = requests[1].input as Array<Record<string, unknown>>;
+    const callIndex = replayed.findIndex((item) => item.type === "function_call" && item.call_id === "call_mixed_resp_1");
+    const outputIndex = replayed.findIndex((item) => item.type === "function_call_output" && item.call_id === "call_mixed_resp_1");
+    const receiptIndex = replayed.findIndex((item) => item.role === "user" && JSON.stringify(item.content).includes("generated-images/"));
+    expect(callIndex).toBeGreaterThan(-1);
+    expect(outputIndex).toBe(callIndex + 1);
+    expect(receiptIndex).toBeGreaterThan(outputIndex);
     expect(requests[1].input).toEqual(expect.arrayContaining([
       { type: "message", role: "assistant", status: "completed", phase: "commentary", content: [{ type: "output_text", text: "Checking the saved image", annotations: [] }] },
       { type: "function_call", call_id: "call_mixed_resp_1", name: "bash", arguments: '{"command":"pwd"}' },

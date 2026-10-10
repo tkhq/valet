@@ -124,6 +124,7 @@ Pi-ai replays reasoning signatures but does not replay their following hosted im
 The payload hook omits reasoning from native-image turns and converts internal receipt function pairs into ordinary text/vision user context.
 The same assistant message's text and real function-call items lose their provider IDs when its reasoning is omitted.
 Real function calls retain their call IDs and matching outputs. Unrelated reasoning, item IDs, and assistant phases remain unchanged.
+Receipt context is placed after the message's last function output, so an ordinary call and its output stay adjacent even though the receipt ran first. The replay test asserts the exact input order the thread produces.
 The [Responses input reference](https://developers.openai.com/api/reference/resources/responses/methods/create) accepts hosted image items with base64 results.
 This adapter instead uses ID-free replay and bounded previews, so it does not resend large originals. The next request contains no orphaned image-turn reasoning or fabricated receipt function pair.
 The [image guide](https://developers.openai.com/api/docs/guides/image-generation) supports edits from image inputs without prior reasoning.
