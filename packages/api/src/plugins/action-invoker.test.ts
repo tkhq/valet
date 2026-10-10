@@ -2006,9 +2006,12 @@ describe("buildActionInvoker: github service resolution", () => {
     const mine = await invoke({ ...call, invocationId: "workflow:r1:n1" }, { userId, orgId, owner: { type: "user", id: userId } });
     expect(mine).toEqual({ ok: true, result: { token: "inst-555" } });
 
-    // A team run gets the org installation, never a member's personal one.
+    // A team run gets the org installation, never a member's personal one,
+    // also when that member is the one who started the run.
     const team = await invoke({ ...call, invocationId: "workflow:r2:n1" }, teamOwner);
     expect(team).toEqual({ ok: true, result: { token: "inst-222" } });
+    const startedByMember = await invoke({ ...call, invocationId: "workflow:r3:n1" }, { ...teamOwner, userId });
+    expect(startedByMember).toEqual({ ok: true, result: { token: "inst-222" } });
   });
 
   it("a user-owned run started by another member resolves as the owner, not the actor", async () => {

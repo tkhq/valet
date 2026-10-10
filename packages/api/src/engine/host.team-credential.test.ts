@@ -105,6 +105,13 @@ describe("EngineHost team-owned session credentials", () => {
       { ...base, id: "ghi_org", installationId: 333, accountLogin: "acme", accountType: "Organization", orgApproved: true },
       { ...base, id: "ghi_mine", installationId: 444, accountLogin: "creator", accountType: "User", accountId: "44", linkedUserId: userId },
     ]);
+    // The creator verified that account through the connect, so the
+    // installation would serve the creator's own sessions. Only the session
+    // owner decides here.
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2", accessToken: "creator-tok",
+      metadata: { login: "creator", githubId: "44", source: "github-app-oauth", identityOnly: true },
+    });
     await appDb.insert(sessionRepos).values({
       sessionId: "sess-team-personal", host: "github", fullName: "creator/private",
       cloneUrl: "https://github.com/creator/private.git", auth: "auto", position: 0,
