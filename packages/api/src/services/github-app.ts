@@ -511,23 +511,24 @@ export function usableInstallation(orgId: string, userId: string | undefined): S
   return and(eq(githubInstallations.orgId, orgId), visible) ?? sql`false`;
 }
 
-/** True when the installation serves the organization at all: the App
- * owner's account, an approved organization, or a personal installation
- * bound to a member. The webhook drops every other event from any other
- * installation, such as a stranger's. */
-export async function installationServesOrg(
+/** What a webhook delivery's installation gives the organization:
+ * `organization` (the App owner's account or an approved organization),
+ * `member` (a personal installation bound to one member), or `none` (a
+ * stranger's, an unbound, or an unknown installation). The webhook applies
+ * every event only for `organization` (see `GithubDeliveryEffects`). */
+export async function installationEventAccess(
   deps: Pick<GithubAppDeps, "db">,
   orgId: string,
   installationId: number,
-): Promise<boolean> {
+): Promise<"organization" | "member" | "none"> {
   const [row] = await deps.db
     .select()
     .from(githubInstallations)
     .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId)))
     .limit(1);
-  if (!row) return false;
+  if (!row) return "none";
   const access = installationAccess(row);
-  return access === "organization" || access === "member";
+  return access === "organization" || access === "member" ? access : "none";
 }
 
 /** What an installation row gives the organization, for display. */

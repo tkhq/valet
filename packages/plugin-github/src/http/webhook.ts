@@ -141,12 +141,26 @@ export async function receiveWebhook(
   const event = request.headers["x-github-event"];
   // Anybody can install the public App, and the App's webhook secret signs
   // every installation's deliveries. Only installation lifecycle events
-  // apply to an installation that does not serve this organization.
+  // apply to an installation that does not serve this organization. A
+  // member's personal installation also updates pull request state, which
+  // carries no content, but its events never enter the org event pipeline,
+  // where every member can read the payload.
   const lifecycle = event === "installation" || event === "installation_repositories" || event === "ping";
-  if (event && !lifecycle && !effects.acceptsEvents) {
+  if (event && !lifecycle && effects.eventAccess !== "organization") {
+    const id = installationId(payload) ?? "none";
+    if (effects.eventAccess === "member" && event === "pull_request") {
+      const pr = pullRequestWebhookState(payload);
+      if (pr) {
+        await effects.pullRequestChanged(pr).catch((err) => {
+          console.error(`thread pull request state (${pr.url}):`, err);
+        });
+      }
+    }
     await effects.recordUndeliverable({
       deliveryId: request.headers["x-github-delivery"],
-      detail: `github event ${event} from installation ${installationId(payload) ?? "none"}: the installation does not serve this organization`,
+      detail: effects.eventAccess === "member"
+        ? `github event ${event} from installation ${id}: a member's personal installation sends no events to the organization`
+        : `github event ${event} from installation ${id}: the installation does not serve this organization`,
     });
     return noContent();
   }

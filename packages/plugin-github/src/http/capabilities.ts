@@ -172,12 +172,14 @@ export interface GithubPushRef {
 }
 
 export interface GithubDeliveryEffects {
-  /** The delivery's installation serves the organization: the App owner's
-   * account, an approved organization, or a personal installation bound to
-   * a member. When false, only `installation` and
-   * `installation_repositories` events apply. Every other event is dropped,
-   * because anybody can install the public App. */
-  acceptsEvents: boolean;
+  /** What the delivery's installation gives the organization.
+   * `organization`: the App owner's account or an approved organization;
+   * every event applies. `member`: a personal installation bound to one
+   * member; only the installation lifecycle and the pull request state that
+   * thread icons follow apply, because the org event pipeline shows payloads
+   * to every member. `none`: a stranger's or unknown installation; only the
+   * installation lifecycle applies. Anybody can install the public App. */
+  eventAccess: "organization" | "member" | "none";
   /** Marks matching content sources due. */
   contentPushed(push: GithubPushRef): Promise<void>;
   pullRequestChanged(change: { url: string; state: GithubPullRequestState }): Promise<void>;

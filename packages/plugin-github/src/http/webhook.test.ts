@@ -23,9 +23,9 @@ function sign(body: string, secret = SECRET): string {
 
 type Effects = GithubDeliveryEffects;
 
-function effects(acceptsEvents = true) {
+function effects(eventAccess: Effects["eventAccess"] = "organization") {
   return {
-    acceptsEvents,
+    eventAccess,
     contentPushed: vi.fn<Effects["contentPushed"]>(async () => {}),
     pullRequestChanged: vi.fn<Effects["pullRequestChanged"]>(async () => {}),
     installationRemoved: vi.fn<Effects["installationRemoved"]>(async () => {}),
@@ -174,7 +174,7 @@ describe("receiveWebhook", () => {
   // The App is public. A stranger who installs it and opens a pull request
   // must not start the organization's subscriptions with text they wrote.
   it("drops every non-installation event from an installation that does not serve the organization", async () => {
-    const bound = effects(false);
+    const bound = effects("none");
     const { capability } = webhook(bound);
     const pr = JSON.stringify({
       action: "opened", installation: { id: 777 },
@@ -206,6 +206,33 @@ describe("receiveWebhook", () => {
       githubTriggerDefs,
     );
     expect(bound.installationRemoved).toHaveBeenCalledWith(777);
+  });
+
+  // A member's personal installation is theirs. Its pull requests and pushes
+  // must not reach the organization's subscriptions, where every member can
+  // read the payload. Only the pull request state that thread icons follow
+  // applies, plus the installation lifecycle.
+  it("applies only pull request state from a member's personal installation", async () => {
+    const bound = effects("member");
+    const { capability } = webhook(bound);
+    const pr = JSON.stringify({
+      action: "closed", installation: { id: 5050 },
+      pull_request: { html_url: "https://github.com/alice/secret/pull/3", state: "closed", merged: true, title: "SECRET" },
+    });
+    const push = JSON.stringify({ ref: "refs/heads/main", installation: { id: 5050 }, repository: { full_name: "alice/secret" } });
+    for (const [event, body] of [["pull_request", pr], ["push", push], ["issues", pr]] as const) {
+      await receiveWebhook(
+        request(body, { "x-github-event": event, "x-github-delivery": `d-${event}`, "x-hub-signature-256": sign(body) }),
+        capability,
+        githubTriggerDefs,
+      );
+    }
+    expect(bound.pullRequestChanged.mock.calls).toEqual([[{ url: "https://github.com/alice/secret/pull/3", state: "merged" }]]);
+    expect(bound.emit).not.toHaveBeenCalled();
+    expect(bound.contentPushed).not.toHaveBeenCalled();
+    expect(bound.recordUndeliverable.mock.calls.map(([notice]) => notice.deliveryId)).toEqual([
+      "d-pull_request", "d-push", "d-issues",
+    ]);
   });
 
   it("acknowledges a verified delivery with no organization to receive it", async () => {

@@ -69,7 +69,7 @@ import {
   loadAppConfig,
   loadAppConfigWithSource,
   installationAccess,
-  installationServesOrg,
+  installationEventAccess,
   reconcileUserInstallations,
   recordCreatedInstallation,
   setInstallationApproval,
@@ -534,15 +534,19 @@ function webhookCapability(providers: Providers): GithubWebhookCapability {
         bind: async ({ installationId }) => {
           const orgId = ownerOrgId ?? (await resolveEnvFallbackOrgId(db, installationId));
           if (!orgId) return null;
-          const acceptsEvents = installationId !== null && (await installationServesOrg({ db }, orgId, installationId));
-          return deliveryEffects(providers, orgId, acceptsEvents);
+          const eventAccess = installationId === null ? "none" : await installationEventAccess({ db }, orgId, installationId);
+          return deliveryEffects(providers, orgId, eventAccess);
         },
       };
     },
   };
 }
 
-function deliveryEffects(providers: Providers, orgId: string, acceptsEvents: boolean): GithubDeliveryEffects {
+function deliveryEffects(
+  providers: Providers,
+  orgId: string,
+  eventAccess: GithubDeliveryEffects["eventAccess"],
+): GithubDeliveryEffects {
   const { db } = providers;
   /** Changes one installation row under the organization row lock. */
   const changeInstallation = async (installationId: number, suspended: boolean | null): Promise<void> => {
@@ -559,7 +563,7 @@ function deliveryEffects(providers: Providers, orgId: string, acceptsEvents: boo
     });
   };
   return {
-    acceptsEvents,
+    eventAccess,
     contentPushed: async (push) => {
       await providers.contentSync.onPush(orgId, push.repoFullName, push.gitRef, push.defaultBranch);
     },

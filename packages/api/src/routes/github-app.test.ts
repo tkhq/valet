@@ -914,6 +914,31 @@ describe("POST /webhooks/github-app", () => {
     });
   }
 
+  // A member's personal installation is theirs. Its events must not reach
+  // the organization's subscriptions, whose payloads every member can read.
+  it("never ingests events from a member's personal installation", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedPrSubscription();
+    await seedOrgInstallation({
+      installationId: 5050, accountLogin: "alice", accountType: "User", accountId: "777", linkedUserId: "local-user",
+    });
+    const res = await postForwardedWebhook(
+      api.baseUrl,
+      "pull_request",
+      {
+        ...PR_OPENED_PAYLOAD,
+        installation: { id: 5050 },
+        pull_request: { number: 3, title: "SECRET: rotate prod keys", body: "private body text" },
+        repository: { full_name: "alice/secret-repo", private: true },
+      },
+      webhookSecret,
+      "gh-member-1",
+    );
+    expect(res.status).toBe(204);
+    expect(await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"))).toHaveLength(0);
+  });
+
   // The App is public. A stranger who installs it on an account of theirs
   // and opens a pull request must not reach the organization's
   // subscriptions with text they wrote.
