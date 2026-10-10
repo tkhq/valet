@@ -1592,7 +1592,9 @@ BEGIN
   -- names its source in `promotedFromItemId`, and the source carries the id.
   CREATE OR REPLACE FUNCTION valet_usage_step_session(e engine_entries) RETURNS text
   LANGUAGE sql STABLE AS $step$
-    SELECT 'wf:' || regexp_replace(substr(src.dispatch_id, 10), ':repair$', '')
+    -- `:repair` marks the repair turn only after a complete step id
+    -- (`{run}:{node}[:{iteration}]`); a node may itself be named `repair`.
+    SELECT 'wf:' || regexp_replace(substr(src.dispatch_id, 10), '^([^:]+:[^:]+(:[0-9]+)?):repair$', '\1')
     FROM engine_queue_items src JOIN workflow_runs r ON r.id = split_part(src.dispatch_id, ':', 2)
     WHERE src.session_id = e.session_id AND src.dispatch_id LIKE 'workflow:%' AND r.org_id IS NOT NULL
       -- A scalar source id keeps this a primary-key probe. The id is read

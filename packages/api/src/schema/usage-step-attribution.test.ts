@@ -79,6 +79,14 @@ describe("usage workflow step attribution", () => {
 
     expect(await factFor(db, "e-thread")).toEqual({ session_id: "wf:run-1:think", workflow_run_id: "run-1" });
     expect(await factFor(db, "e-repair")).toEqual({ session_id: "wf:run-1:think:2", workflow_run_id: "run-1" });
+    // A node may be named `repair`: only a suffix after a complete step id is the repair turn.
+    await queueItem(db, "q-node-repair", "workflow:run-1:repair");
+    await queueItem(db, "q-node-repair-repair", "workflow:run-1:repair:repair");
+    await queueItem(db, "q-iteration-repair", "workflow:run-1:repair:3:repair");
+    for (const id of ["q-node-repair", "q-node-repair-repair", "q-iteration-repair"]) await assistantTurn(db, `e-${id}`, id);
+    expect(await factFor(db, "e-q-node-repair")).toEqual({ session_id: "wf:run-1:repair", workflow_run_id: "run-1" });
+    expect(await factFor(db, "e-q-node-repair-repair")).toEqual({ session_id: "wf:run-1:repair", workflow_run_id: "run-1" });
+    expect(await factFor(db, "e-q-iteration-repair")).toEqual({ session_id: "wf:run-1:repair:3", workflow_run_id: "run-1" });
     expect(await factFor(db, "e-chat")).toEqual({ session_id: ASSISTANT, workflow_run_id: null });
 
     const cost = (await db.query("SELECT use_case, workflow_id, workflow_run_id, owner_id FROM cost_entries WHERE entry_id = 'e-thread'")).rows[0];
