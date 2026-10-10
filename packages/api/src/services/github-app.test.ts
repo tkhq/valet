@@ -378,6 +378,7 @@ describe("github-app service", () => {
         orgId,
         accountLogin: "acme",
         accountType: "Organization",
+        orgApproved: true,
         repositorySelection: "all",
         suspended: false,
         linkedUserId: null,
@@ -411,6 +412,7 @@ describe("github-app service", () => {
         installationId: 333,
         accountLogin: "stale",
         accountType: "Organization",
+        orgApproved: true,
         repositorySelection: "all",
         suspended: false,
         createdAt: Date.now(),
@@ -460,7 +462,7 @@ describe("github-app service", () => {
       // later page.
       await saveAppConfig({ credentials }, orgId, baseConfig);
       await db.insert(githubInstallations).values({
-        id: "ghi_late", orgId, installationId: 1, accountLogin: "acme", accountType: "Organization",
+        id: "ghi_late", orgId, installationId: 1, accountLogin: "acme", accountType: "Organization", orgApproved: true,
         repositorySelection: "all", suspended: false, createdAt: Date.now(), updatedAt: Date.now(),
       });
       fixture = startGithubFixture({
@@ -596,7 +598,7 @@ describe("github-app service", () => {
       await saveAppConfig({ credentials }, orgId, baseConfig);
       await db.insert(orgs).values({ id: "org-current", name: "Current", createdAt: Date.now() });
       await saveAppConfig({ credentials }, "org-current", baseConfig);
-      const base = { accountType: "Organization", suspended: false, createdAt: Date.now(), updatedAt: Date.now() };
+      const base = { accountType: "Organization", orgApproved: true, suspended: false, createdAt: Date.now(), updatedAt: Date.now() };
       await db.insert(githubInstallations).values([
         { ...base, id: "ghi_legacy", orgId, installationId: 111, accountLogin: "acme" },
         { ...base, id: "ghi_current", orgId: "org-current", installationId: 222, accountLogin: "acme", accountId: "1" },
@@ -902,6 +904,7 @@ describe("github-app service", () => {
         installationId: 999,
         accountLogin: "acme",
         accountType: "Organization",
+        orgApproved: true,
         repositorySelection: "all",
         suspended: false,
         cachedToken: null,

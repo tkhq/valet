@@ -95,6 +95,7 @@ describe("EngineHost session github credential resolution", () => {
       installationId: 111,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -133,6 +134,7 @@ describe("EngineHost session github credential resolution", () => {
       installationId: 999,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -171,6 +173,7 @@ describe("EngineHost session github credential resolution", () => {
       installationId: 211,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -197,9 +200,13 @@ describe("EngineHost session github credential resolution", () => {
     await saveAppConfig({ credentials }, orgId, appConfig);
     const base = { orgId, repositorySelection: "all", suspended: false, createdAt: NOW, updatedAt: NOW };
     await appDb.insert(githubInstallations).values([
-      { ...base, id: "ghi_org", installationId: 211, accountLogin: "acme", accountType: "Organization" },
+      { ...base, id: "ghi_org", installationId: 211, accountLogin: "acme", accountType: "Organization", orgApproved: true },
       { ...base, id: "ghi_mine", installationId: 212, accountLogin: "me", accountType: "User", accountId: "21", linkedUserId: userId },
     ]);
+    // The session owner verified account 21 through the App OAuth.
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2", accessToken: "user-tok", metadata: { login: "me", githubId: "21" },
+    });
     await appDb.insert(sessionRepos).values({
       sessionId: "sess-personal", host: "github", fullName: "me/private",
       cloneUrl: "https://github.com/me/private.git", auth: "auto", position: 0,

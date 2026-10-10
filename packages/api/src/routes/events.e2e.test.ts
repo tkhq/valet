@@ -365,7 +365,7 @@ describe("event system e2e: signed GitHub webhook → subscription match → wor
     await configureGithubApp(api.baseUrl);
     const now = Date.now();
     await api.providers.db.insert(githubInstallations).values({
-      id: "ghi_e2e", orgId: "local-org", installationId: 4040, accountLogin: "acme", accountType: "Organization",
+      id: "ghi_e2e", orgId: "local-org", installationId: 4040, accountLogin: "acme", accountType: "Organization", orgApproved: true,
       suspended: false, createdAt: now, updatedAt: now,
     });
 

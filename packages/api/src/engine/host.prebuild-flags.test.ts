@@ -217,6 +217,7 @@ describe("childSessionFor repo prebuild flags", () => {
       installationId: 111,
       accountLogin: "tkhq",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -305,7 +306,8 @@ describe("childSessionFor repo prebuild flags", () => {
     const now = Date.now();
     await db.insert(githubInstallations).values({
       id: "ghi_mutable_flags", orgId: "local-org", installationId: 333, accountLogin: "tkhq",
-      accountType: "Organization", repositorySelection: "all", suspended: false,
+      accountType: "Organization",
+      orgApproved: true, repositorySelection: "all", suspended: false,
       cachedToken: null, cachedTokenExpiresAt: null, createdAt: now, updatedAt: now,
     });
     const parent = await engineHost.sessionFor("parent-mutable-flags", {
@@ -387,6 +389,7 @@ describe("childSessionFor repo prebuild flags", () => {
       installationId: 222,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -599,6 +602,7 @@ describe("childSessionFor repo prebuild flags", () => {
       installationId: 222,
       accountLogin: "tkhq",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,

@@ -267,7 +267,8 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
       const now = Date.now();
       await api!.providers.db.insert(githubInstallations).values({
         id: "ghi_parity", orgId: "local-org", installationId: 999, accountLogin: "acme",
-        accountType: "Organization", repositorySelection: "all", suspended: false, createdAt: now, updatedAt: now,
+        accountType: "Organization",
+        orgApproved: true, repositorySelection: "all", suspended: false, createdAt: now, updatedAt: now,
       });
     }
 

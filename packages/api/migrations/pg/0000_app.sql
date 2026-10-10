@@ -980,7 +980,7 @@ CREATE TABLE "github_installations" (
 	"repository_selection" text,
 	"suspended" boolean DEFAULT false NOT NULL,
 	"linked_user_id" text,
-	"org_approved" boolean DEFAULT true NOT NULL,
+	"org_approved" boolean DEFAULT false NOT NULL,
 	"app_owner" boolean DEFAULT false NOT NULL,
 	"cached_token" text,
 	"cached_token_expires_at" bigint,

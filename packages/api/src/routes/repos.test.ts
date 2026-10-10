@@ -66,6 +66,7 @@ async function seedInstallationRow(overrides: Partial<typeof githubInstallations
     installationId: 999,
     accountLogin: "acme",
     accountType: "Organization",
+    orgApproved: true,
     repositorySelection: "all",
     suspended: false,
     createdAt: now,
@@ -211,6 +212,11 @@ describe("GET /api/repos", () => {
     await seedInstallationRow({
       id: "ghi_a", installationId: 602, accountLogin: "member-a", accountType: "User", accountId: "9001", linkedUserId: "local-user",
     });
+    // local-user verified account 9001. `identityOnly` keeps the credential
+    // out of the personal repo listing.
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+      type: "oauth2", accessToken: "a", metadata: { login: "member-a", githubId: "9001", identityOnly: true },
+    });
     await seedInstallationRow({
       id: "ghi_s", installationId: 603, accountLogin: "stranger", accountType: "User", linkedUserId: null,
     });
@@ -234,6 +240,11 @@ describe("GET /api/repos", () => {
     useFixture({ listInstallations: () => ({ body: [] }) });
     await seedInstallationRow({
       id: "ghi_a", installationId: 602, accountLogin: "member-a", accountType: "User", accountId: "9001", linkedUserId: "local-user",
+    });
+    // local-user verified account 9001. `identityOnly` keeps the credential
+    // out of the personal repo listing.
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+      type: "oauth2", accessToken: "a", metadata: { login: "member-a", githubId: "9001", identityOnly: true },
     });
     await seedInstallationRow({ id: "ghi_so", installationId: 604, accountLogin: "stranger-org", orgApproved: false });
     const installed = async (headers: Record<string, string>) =>

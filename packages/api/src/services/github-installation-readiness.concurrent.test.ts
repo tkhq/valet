@@ -40,7 +40,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("GitHub discovery readiness lock
       await db.insert(contentSources).values({ id: "source", orgId: "org", ownerType: "team", ownerId: "team",
         repoFullName: "test/repo", kinds: ["workflows"], nextAttemptAt: 0, createdAt: 0, updatedAt: 0 });
       await db.insert(githubInstallations).values({ id: "installation", orgId: "org", installationId: 123,
-        accountLogin: "acme", accountType: "Organization", suspended: false, createdAt: 0, updatedAt: 0 });
+        accountLogin: "acme", accountType: "Organization", orgApproved: true, suspended: false, createdAt: 0, updatedAt: 0 });
       const credentials = new InMemoryCredentialStore();
       const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048,
         privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });

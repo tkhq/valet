@@ -1609,6 +1609,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 4242,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -1676,6 +1677,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 4343,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -1744,6 +1746,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 999,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -1785,6 +1788,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 444,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -1828,6 +1832,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 111,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -1936,6 +1941,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 222,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -1967,10 +1973,17 @@ describe("buildActionInvoker: github service resolution", () => {
     await saveAppConfig({ credentials }, orgId, appConfig);
     const base = { orgId, repositorySelection: "all", suspended: false, createdAt: NOW, updatedAt: NOW };
     await appDb.insert(githubInstallations).values([
-      { ...base, id: "ghi_222", installationId: 222, accountLogin: "acme", accountType: "Organization" },
+      { ...base, id: "ghi_222", installationId: 222, accountLogin: "acme", accountType: "Organization", orgApproved: true },
       { ...base, id: "ghi_555", installationId: 555, accountLogin: "owner-login", accountType: "User", accountId: "55", linkedUserId: userId },
       { ...base, id: "ghi_556", installationId: 556, accountLogin: "actor-login", accountType: "User", accountId: "56", linkedUserId: "actor-user" },
     ]);
+    // Both members verified their accounts. `identityOnly` keeps the
+    // credentials out of token resolution, so installations answer.
+    for (const [id, githubId] of [[userId, "55"], ["actor-user", "56"]] as const) {
+      await credentials.save({ type: "user", id }, "github", {
+        type: "oauth2", accessToken: `${id}-tok`, metadata: { login: id, githubId, identityOnly: true },
+      });
+    }
     fixture = startGithubFixture({
       createInstallationToken: (id) => ({ body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() } }),
     });
@@ -2147,6 +2160,7 @@ describe("buildActionInvoker: github service resolution", () => {
       installationId: 333,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,

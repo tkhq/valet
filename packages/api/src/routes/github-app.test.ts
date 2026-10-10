@@ -327,7 +327,7 @@ describe("GET /api/org/github-app/setup", () => {
       installUrl: "https://github.com/apps/valet-acme/installations/new",
     });
     expect(body.installations).toHaveLength(1);
-    expect(body.installations[0]).toMatchObject({ accountLogin: "acme", accountType: "Organization", suspended: false });
+    expect(body.installations[0]).toMatchObject({ accountLogin: "acme", accountType: "Organization", access: "organization", suspended: false });
 
     const raw = JSON.stringify(body);
     expect(raw).not.toContain("oauth-client-secret");
@@ -568,6 +568,7 @@ describe("POST /api/org/github-app/credential", () => {
       installationId: 999,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       createdAt: now,
@@ -702,6 +703,7 @@ describe("POST /webhooks/github-app", () => {
       installationId: 999,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       createdAt: now,
@@ -901,7 +903,8 @@ describe("POST /webhooks/github-app", () => {
     const now = Date.now();
     await api!.providers.db.insert(githubInstallations).values({
       id: `ghi_${overrides.installationId ?? 4040}`, orgId: "local-org", installationId: 4040, accountLogin: "acme",
-      accountType: "Organization", suspended: false, createdAt: now, updatedAt: now, ...overrides,
+      accountType: "Organization",
+      orgApproved: true, suspended: false, createdAt: now, updatedAt: now, ...overrides,
     });
   }
 
@@ -1063,6 +1066,7 @@ describe("POST /webhooks/github-app", () => {
       installationId: 999,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       createdAt: Date.now(),

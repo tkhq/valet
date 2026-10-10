@@ -340,7 +340,7 @@ describe("readiness refresh paths", () => {
     await source("foreign", { orgId: "other-org" });
     await saveAppConfig({ credentials: api.providers.engineCredentials }, ORG, appConfig);
     await api.providers.db.insert(githubInstallations).values({
-      id: "installation", orgId: ORG, installationId: 123, accountLogin: "acme", accountType: "Organization",
+      id: "installation", orgId: ORG, installationId: 123, accountLogin: "acme", accountType: "Organization", orgApproved: true,
       repositorySelection: "all", suspended: action === "unsuspend", createdAt: Date.now(), updatedAt: Date.now(),
     });
     const body = JSON.stringify({ action, installation: { id: 123 } });

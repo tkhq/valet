@@ -358,6 +358,7 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
       installationId: 77,
       accountLogin,
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,

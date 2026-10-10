@@ -761,7 +761,7 @@ describe("pg app schema + migrations", () => {
         repositorySelection: "selected",
         suspended: false,
         linkedUserId: null,
-        orgApproved: true,
+        orgApproved: false,
         appOwner: false,
         cachedToken: "enc:abc",
         cachedTokenExpiresAt: now + 3600_000,
@@ -1018,6 +1018,29 @@ describe("pg app schema + migrations", () => {
       expect(rows.rows).toEqual([
         { id: "ghi_admin", app_owner: true, org_approved: true, linked_user_id: null },
         { id: "ghi_org", app_owner: false, org_approved: true, linked_user_id: null },
+      ]);
+    });
+
+    // The repair approves the organization installations that exist when it
+    // runs, then flips the default. A row inserted later without the column,
+    // as an older pod does during a rolling deploy, stays unapproved.
+    it("approves existing organization installations, then defaults org_approved to false", async () => {
+      await db.query('ALTER TABLE "github_installations" DROP COLUMN "org_approved"');
+      await db.query(
+        `INSERT INTO "github_installations" (id, org_id, installation_id, account_login, account_type, created_at, updated_at)
+         VALUES ('ghi_before', 'org1', 21, 'acme', 'Organization', 1, 1)`,
+      );
+      await applyAppMigrations(db);
+      await db.query(
+        `INSERT INTO "github_installations" (id, org_id, installation_id, account_login, account_type, created_at, updated_at)
+         VALUES ('ghi_after', 'org1', 22, 'stranger-org', 'Organization', 1, 1)`,
+      );
+      const rows = await db.query(
+        `SELECT id, org_approved FROM "github_installations" WHERE id IN ('ghi_before', 'ghi_after') ORDER BY id`,
+      );
+      expect(rows.rows).toEqual([
+        { id: "ghi_after", org_approved: false },
+        { id: "ghi_before", org_approved: true },
       ]);
     });
 

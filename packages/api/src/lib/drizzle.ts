@@ -406,12 +406,14 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     backfill: 'UPDATE "github_installations" SET "linked_user_id" = NULL WHERE "account_id" IS NULL AND "linked_user_id" IS NOT NULL RETURNING "id"',
   },
   {
-    // The default approves every organization installation that existed
-    // before the column, so current deployments keep working. New rows get
-    // an explicit value from `services/github-app.ts`.
+    // Added with DEFAULT true so every organization installation that exists
+    // now stays approved, then the default flips to false (as in
+    // `0000_app.sql`): a row an older pod inserts later without the column
+    // serves nobody until an admin approves it.
     describe: "github_installations.org_approved column",
     probe: { kind: "column", table: "github_installations", column: "org_approved" },
     sql: 'ALTER TABLE "github_installations" ADD COLUMN IF NOT EXISTS "org_approved" boolean DEFAULT true NOT NULL',
+    backfill: 'ALTER TABLE "github_installations" ALTER COLUMN "org_approved" SET DEFAULT false',
   },
   {
     describe: "github_installations.app_owner column",

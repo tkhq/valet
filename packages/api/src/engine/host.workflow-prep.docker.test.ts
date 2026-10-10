@@ -161,6 +161,7 @@ async function bootWithApp(): Promise<TestApi> {
     installationId: INSTALLATION_ID,
     accountLogin: "tkhq",
     accountType: "Organization",
+    orgApproved: true,
     repositorySelection: "all",
     suspended: false,
     cachedToken: null,

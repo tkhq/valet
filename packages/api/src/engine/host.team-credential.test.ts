@@ -102,7 +102,7 @@ describe("EngineHost team-owned session credentials", () => {
     await saveAppConfig({ credentials }, orgId, appConfig);
     const base = { orgId, repositorySelection: "all", suspended: false, createdAt: NOW, updatedAt: NOW };
     await appDb.insert(githubInstallations).values([
-      { ...base, id: "ghi_org", installationId: 333, accountLogin: "acme", accountType: "Organization" },
+      { ...base, id: "ghi_org", installationId: 333, accountLogin: "acme", accountType: "Organization", orgApproved: true },
       { ...base, id: "ghi_mine", installationId: 444, accountLogin: "creator", accountType: "User", accountId: "44", linkedUserId: userId },
     ]);
     await appDb.insert(sessionRepos).values({
@@ -132,6 +132,7 @@ describe("EngineHost team-owned session credentials", () => {
       installationId: 333,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -199,6 +200,7 @@ describe("EngineHost team-owned session credentials", () => {
       installationId: 444,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -616,6 +618,7 @@ describe("EngineHost team-owned session credentials", () => {
         installationId: 555,
         accountLogin: "acme",
         accountType: "Organization",
+        orgApproved: true,
         repositorySelection: "all",
         suspended: false,
         cachedToken: null,

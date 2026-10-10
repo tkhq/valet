@@ -84,6 +84,7 @@ describe("resolveGitHubToken", () => {
       installationId: 999,
       accountLogin: "acme",
       accountType: "Organization",
+      orgApproved: true,
       repositorySelection: "all",
       suspended: false,
       cachedToken: null,
@@ -605,6 +606,11 @@ describe("resolveGitHubToken", () => {
 
     beforeEach(async () => {
       await db.insert(users).values({ id: memberB, name: "User Two", email: "u2@example.com" });
+      // The bound member verified account 9001. `identityOnly` keeps the
+      // credential out of token resolution, so the installation answers.
+      await credentials.save({ type: "user", id: userId }, "github", {
+        type: "oauth2", accessToken: "a", metadata: { login: "member-a", githubId: "9001", identityOnly: true },
+      });
       await saveAppConfig({ credentials }, orgId, appConfig);
       fixture = startGithubFixture();
       await seedInstallation();
@@ -655,6 +661,22 @@ describe("resolveGitHubToken", () => {
         expect(sole.source).toBe("installation");
       }
       expect(new Set(mintedInstallations())).toEqual(new Set(["999"]));
+    });
+
+    it("does not trust a binding whose member never verified that account", async () => {
+      // An older pod, mid rolling deploy, still binds by login. The binding
+      // counts only when the bound member's verified GitHub id is the
+      // installation's account id.
+      await credentials.save({ type: "user", id: memberB }, "github", {
+        type: "oauth2", accessToken: "b", metadata: { login: "lookalike", githubId: "1234" },
+      });
+      await seedInstallation({
+        id: "ghi_old", installationId: 504, accountLogin: "lookalike", accountType: "User", accountId: "9009", linkedUserId: memberB,
+      });
+      expect(
+        await resolveGitHubToken(deps(), { orgId, userId: memberB, purpose: "git", repo: { owner: "lookalike", name: "x" } }),
+      ).toMatchObject({ source: "pat" });
+      expect(mintedInstallations()).not.toContain("504");
     });
 
     it("does not trust a binding that has no verified account id", async () => {

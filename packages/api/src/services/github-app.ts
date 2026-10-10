@@ -497,8 +497,10 @@ export function usableInstallation(orgId: string, userId: string | undefined): S
     eq(githubInstallations.appOwner, true),
     and(ne(githubInstallations.accountType, PERSONAL_ACCOUNT_TYPE), eq(githubInstallations.orgApproved, true)),
   );
-  // A binding counts only with a verified account id. Rows bound before the
-  // column existed were matched by login (see the `account_id` repair).
+  // A binding counts only with a verified account id, and only when the
+  // bound member's own credential carries that verified id. Rows bound
+  // before the column existed were matched by login (see the `account_id`
+  // repair), and an older pod mid rolling deploy may still bind by login.
   const visible = userId
     ? or(
         orgWide,
@@ -506,6 +508,10 @@ export function usableInstallation(orgId: string, userId: string | undefined): S
           eq(githubInstallations.accountType, PERSONAL_ACCOUNT_TYPE),
           isNotNull(githubInstallations.accountId),
           eq(githubInstallations.linkedUserId, userId),
+          sql`EXISTS (SELECT 1 FROM ${credentials} WHERE ${credentials.ownerType} = 'user'
+            AND ${credentials.ownerId} = ${githubInstallations.linkedUserId}
+            AND ${credentials.service} = 'github'
+            AND ${credentials.metadata}->>'githubId' = ${githubInstallations.accountId})`,
         ),
       )
     : orgWide;

@@ -1812,14 +1812,13 @@ export const githubInstallations = pgTable(
      * member owns (see `services/github-app.ts`). */
     linkedUserId: text("linked_user_id"),
     /** For an installation on a GitHub organization: whether it serves every
-     * member. The App is public, so any organization can install it. The
-     * one writer (`services/github-app.ts`) sets it on every insert: true
-     * for the App owner's account and for an installation that a member with
-     * a verified GitHub connection made, false otherwise. An org admin
-     * approves or revokes it. The default only seeds rows that existed
-     * before the column, so current deployments keep working. Ignored on a
-     * personal installation. */
-    orgApproved: boolean("org_approved").notNull().default(true),
+     * member. The App is public, so any organization can install it. It is
+     * true for the App owner's account, for an installation an org admin
+     * made, and after an org admin approves it. The default is false, so a
+     * row written without it (an older pod during a rolling deploy) serves
+     * nobody. The repair that added the column approved the rows that
+     * existed then. Ignored on a personal installation. */
+    orgApproved: boolean("org_approved").notNull().default(false),
     /** The installation is on the account that owns the App. It serves
      * every member, also when that account is a personal one. */
     appOwner: boolean("app_owner").notNull().default(false),
