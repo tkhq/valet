@@ -809,6 +809,30 @@ describe("POST /webhooks/github-app", () => {
     expect(body.installations.some((i) => i.accountLogin === "newco")).toBe(true);
   });
 
+  // The legacy rule: a personal installation links to the member whose
+  // GitHub account id, saved by the connect callback, equals `account.id`.
+  // A login proves nothing, because a member can paste any login.
+  it("links a personal installation to its owner by GitHub account id on installation.created", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const personal = { id: 556, account: { login: "octouser", id: 4242, type: "User" }, repository_selection: "all", suspended_at: null };
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, { listInstallations: () => ({ body: [personal] }) });
+    // The owner connected before renaming the account on GitHub.
+    await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2", accessToken: "member-token", metadata: { login: "old-name", githubId: "4242" },
+    });
+    // Another member pasted a token that names the same login.
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+      type: "oauth2", accessToken: "pasted-token", metadata: { login: "octouser" },
+    });
+
+    const payload = { action: "created", installation: personal };
+    const res = await postWebhook(api.baseUrl, "installation", payload, signWebhookBody(JSON.stringify(payload), webhookSecret));
+    expect(res.status).toBe(204);
+
+    const [row] = await api.providers.db.select().from(githubInstallations).where(eq(githubInstallations.installationId, 556));
+    expect(row?.linkedUserId).toBe("test-member");
+  });
+
   // A push marks every matching enabled source due, whoever owns it, and
   // syncs none of them inline. Marking a personal source due used to be
   // skipped on the reasoning that it often has no App installation; true, and

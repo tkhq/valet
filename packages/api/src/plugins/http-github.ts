@@ -66,7 +66,7 @@ import {
   discoverInstallations,
   loadAppConfig,
   loadAppConfigWithSource,
-  relinkInstallations,
+  reconcileUserInstallations,
   resolveGithubAppEnvConfig,
   saveAppConfig,
   syncAppWebhookUrl,
@@ -359,7 +359,12 @@ function connectionCapability(
       const { db } = providers;
       const config = await loadAppConfig(appDeps(providers), orgId);
       const rows = await db
-        .select({ suspended: githubInstallations.suspended })
+        .select({
+          accountLogin: githubInstallations.accountLogin,
+          repositorySelection: githubInstallations.repositorySelection,
+          suspended: githubInstallations.suspended,
+          linkedUserId: githubInstallations.linkedUserId,
+        })
         .from(githubInstallations)
         .where(eq(githubInstallations.orgId, orgId));
       const [org] = await db
@@ -367,13 +372,21 @@ function connectionCapability(
         .from(orgs)
         .where(eq(orgs.id, orgId))
         .limit(1);
+      // As in the legacy stack, the install link shows once the member has
+      // connected GitHub, so the installation can link to them.
+      const own = await providers.engineCredentials.get({ type: "user", id: userId }, GITHUB_CREDENTIAL_SERVICE);
+      const connected = typeof own?.metadata?.githubId === "string";
+      const personalInstallations = rows
+        .filter((row) => row.linkedUserId === userId)
+        .map(({ accountLogin, repositorySelection, suspended }) => ({ accountLogin, repositorySelection, suspended }));
       const status: GetGithubOrgStatusResponse = {
         configured: config !== null,
         installationCount: rows.length,
         suspendedCount: rows.filter((row) => row.suspended).length,
-        ...(config !== null && org?.allowPersonalInstallations === true
+        ...(config !== null && org?.allowPersonalInstallations === true && connected
           ? { personalInstallUrl: githubAppInstallUrl(process.env, config.appSlug) }
           : {}),
+        ...(personalInstallations.length > 0 ? { personalInstallations } : {}),
       };
       const projected: GithubOrgStatus = status;
       return projected;
@@ -399,14 +412,20 @@ function connectionCapability(
               accessToken: connection.accessToken,
               refreshToken: connection.refreshToken,
               expiresAt: connection.expiresAt,
-              metadata: { login: connection.login },
+              // `githubId` comes from GitHub's `GET /user`, never from the
+              // caller. It links the member's personal installations.
+              metadata: { login: connection.login, ...(connection.githubId ? { githubId: connection.githubId } : {}) },
             });
             await refreshCredentialReadiness(providers, { type: "user", id: userId }, GITHUB_CREDENTIAL_SERVICE);
             // Best-effort: the next discovery run catches up.
-            try {
-              await relinkInstallations(appDeps(providers), verified.orgId);
-            } catch (err) {
-              console.error("github connect callback: post-save relink failed:", err);
+            if (connection.githubId) {
+              try {
+                await reconcileUserInstallations(appDeps(providers), verified.orgId, {
+                  userId, githubId: connection.githubId, accessToken: connection.accessToken,
+                });
+              } catch (err) {
+                console.error("github connect callback: personal installation reconcile failed:", err);
+              }
             }
           },
         },

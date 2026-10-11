@@ -1011,6 +1011,24 @@ describe("GET /api/credentials — onepasswordRef summary", () => {
   });
 });
 
+describe("PUT /api/credentials/github — metadata.githubId guard", () => {
+  // The id links a personal GitHub App installation to its owner. Only the
+  // GitHub connect callback may write it, from GitHub's own `GET /user`.
+  it("rejects a pasted githubId, no row saved", async () => {
+    api = await bootTestApi();
+    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "oauth2", accessToken: "ghp_pasted", metadata: { login: "octouser", githubId: "4242" } }),
+    });
+    expect(put.status).toBe(400);
+    expect(await put.json()).toEqual({
+      error: "metadata.githubId is reserved. Connect GitHub through the GitHub connect flow.",
+    });
+    expect(await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github")).toBeNull();
+  });
+});
+
 describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard", () => {
   it("plain PUT with metadata.onepassword (no body.onepassword) 400s, no row saved", async () => {
     api = await bootTestApi();

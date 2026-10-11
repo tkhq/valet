@@ -4292,7 +4292,7 @@ export interface PostGithubConnectResponse {
  * but it is org-admin-only — so a member had no way to learn that the App
  * they depend on is missing or uninstalled. This is the projection a
  * connect surface needs and nothing more: no app id, no slug, no
- * installation logins, no secrets.
+ * installation logins other than the caller's own, no secrets.
  */
 export interface GetGithubOrgStatusResponse {
   /** The org has a GitHub App — its own credential row, or the
@@ -4308,8 +4308,11 @@ export interface GetGithubOrgStatusResponse {
    * `installationCount` means the App reaches nothing. */
   suspendedCount: number;
   /** Full GitHub installation URL. Present only when this org allows
-   * personal installations. */
+   * personal installations and the caller connected GitHub. */
   personalInstallUrl?: string;
+  /** The caller's own personal installations: the rows linked to the
+   * caller. Absent when there are none. */
+  personalInstallations?: Array<{ accountLogin: string; repositorySelection: string | null; suspended: boolean }>;
 }
 
 // ── REST: repo listing (GitHub/repo integration plan, Task 7)
