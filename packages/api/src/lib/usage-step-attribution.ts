@@ -11,6 +11,14 @@ import { usageHourlyPublishSql } from "./usage-hourly-migration.js";
  * On a deployed database only this repair's publish step creates the view,
  * after the backfill finishes.
  *
+ * The ready view's name carries the rule's version. A database that ran the
+ * first version of this repair has `usage_step_attribution_ready`, so the
+ * probe of `usage_step_attribution_v2_ready` still runs this repair there
+ * once: it installs the current rule over the first one and re-bills every
+ * Thread-step fact through it. The old view stays. A rollback then skips
+ * the first repair and keeps the current rule, which the older release
+ * reads unchanged.
+ *
  * The backfill moves existing Thread-step facts from the assistant session
  * to their step. Each fact update fires the hourly trigger, which subtracts
  * the turn from the assistant's bucket and adds it to the step's, so the
@@ -43,9 +51,13 @@ export const WORKFLOW_RUN_ORG_BACKFILL = `UPDATE workflow_runs r SET org_id = d.
 const dailyEntriesViewSql = "CREATE OR REPLACE VIEW usage_daily_entries AS"
   + between("CREATE OR REPLACE VIEW usage_daily_entries AS", "CREATE OR REPLACE VIEW usage_daily_ready");
 
+/** The repair's ready view. Its name carries the rule's version; a new
+ * version of the rule that must re-bill existing facts takes a new name. */
+export const USAGE_STEP_ATTRIBUTION_READY = "usage_step_attribution_v2_ready";
+
 export const USAGE_STEP_ATTRIBUTION_PUBLISH_SQL = `DO $publish$ BEGIN
   ${dailyEntriesViewSql}
-  CREATE OR REPLACE VIEW usage_step_attribution_ready AS SELECT 1 AS version WHERE false;
+  CREATE OR REPLACE VIEW ${USAGE_STEP_ATTRIBUTION_READY} AS SELECT 1 AS version WHERE false;
   DELETE FROM usage_hourly_progress WHERE source_kind = 'step-attribution';
 END $publish$`;
 
@@ -57,6 +69,9 @@ export async function prepareUsageStepAttribution(db: PgDb): Promise<void> {
     // updated". Writers pause only for this short transaction.
     await tx.query("LOCK TABLE engine_entries IN SHARE ROW EXCLUSIVE MODE");
     await tx.query(`DO $install$ BEGIN ${functionsSql} ${actionFactSql} END $install$`);
+    // The first version's helper. The current `valet_usage_fact` no longer
+    // calls it, so nothing reads it after the install above.
+    await tx.query("DROP FUNCTION IF EXISTS valet_usage_billing_session(engine_entries)");
     await tx.query(usageAnalyticsPublishSql);
     await tx.query(usageHourlyPublishSql);
   });

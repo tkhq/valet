@@ -2563,7 +2563,9 @@ END $member$;
 -- A deployed database gets this view only from the completed repair
 -- (lib/usage-step-attribution.ts): no install section other repairs run
 -- creates it, so an interrupted backfill stays pending until it finishes.
-CREATE OR REPLACE VIEW usage_step_attribution_ready AS SELECT 1 AS version WHERE false;
+-- The name carries the rule's version: a database that ran the first rule
+-- has `usage_step_attribution_ready` and still needs this repair.
+CREATE OR REPLACE VIEW usage_step_attribution_v2_ready AS SELECT 1 AS version WHERE false;
 
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "event_receipts" (

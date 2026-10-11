@@ -310,7 +310,7 @@ describe("a step attribution repair that fails", () => {
     await assistantTurn(pg, "e-thread", "q-thread");
     // A deployed database before the rule: the turn bills to the assistant.
     await pg.query("UPDATE usage_entry_facts SET session_id = $1, workflow_run_id = NULL WHERE entry_id = 'e-thread'", [ASSISTANT]);
-    await pg.query("DROP VIEW usage_step_attribution_ready");
+    await pg.query("DROP VIEW usage_step_attribution_v2_ready");
 
     const interrupted: PgDb = {
       ...pg,
@@ -361,7 +361,7 @@ describe("upgrading a database that has runs of deleted workflows", () => {
     await db.query("DROP TRIGGER workflow_runs_org ON workflow_runs");
     await db.query("DROP FUNCTION valet_workflow_run_org()");
     await db.query("ALTER TABLE workflow_runs DROP COLUMN org_id CASCADE");
-    await db.query("DROP VIEW usage_step_attribution_ready");
+    await db.query("DROP VIEW usage_step_attribution_v2_ready");
     // The previous release's audit table and action rule: no queue item, no step billing.
     await db.query(`DO $old$ BEGIN ${actionFactBefore()} END $old$`);
     await db.query("ALTER TABLE action_invocations DROP COLUMN queue_item_id");
@@ -392,6 +392,110 @@ describe("upgrading a database that has runs of deleted workflows", () => {
       .toEqual([{ session_id: "wf:run-kept:think", outcome_kind: "slack_message_sent" }]);
   });
 });
+
+describe("upgrading a database that ran the first step attribution repair", () => {
+  let db: PgDb | undefined;
+  afterEach(async () => { await db?.close(); db = undefined; });
+
+  it("runs the current repair once, re-bills the first rule's facts, and keeps every total", async () => {
+    db = pgDbFromPglite(new PGlite());
+    const pg = db;
+    await applyAppMigrations(pg);
+    await pg.query("INSERT INTO orgs (id, name, created_at) VALUES ('org-a', 'Org A', $1)", [NOW]);
+    await pg.query(`INSERT INTO agent_sessions (id, user_id, org_id, workspace, status, owner_type, owner_id, created_at, updated_at)
+      VALUES ($1, 'u-alice', 'org-a', '/tmp/o', 'active', 'user', 'u-alice', $2, $2)`, [ASSISTANT, NOW]);
+    await pg.query(`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at)
+      VALUES ('wf-kept', 'org-a', 'user', 'u-alice', 'Kept', '{}'::jsonb, $1, $1), ('wf-gone', 'org-a', 'user', 'u-alice', 'Gone', '{}'::jsonb, $1, $1)`, [NOW]);
+    await pg.query(`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at)
+      VALUES ('run-kept', 'wf-kept', 'v1', '{}'::jsonb, '{}'::jsonb, 'user', 'u-alice', $1, $1),
+             ('run-gone', 'wf-gone', 'v1', '{}'::jsonb, '{}'::jsonb, 'user', 'u-alice', $1, $1)`, [NOW]);
+    await queueItem(pg, "q-kept", "workflow:run-kept:think");
+    await queueItem(pg, "q-node-repair", "workflow:run-kept:repair");
+    await queueItem(pg, "q-source", "workflow:run-kept:review");
+    await queueItem(pg, "q-promoted", null);
+    await pg.query("UPDATE engine_queue_items SET metadata = $1 WHERE id = 'q-promoted'", [JSON.stringify({ promotedFromItemId: "q-source" })]);
+    await queueItem(pg, "q-gone", "workflow:run-gone:think");
+    await queueItem(pg, "q-chat", null);
+    for (const item of ["kept", "node-repair", "promoted", "gone", "chat"]) await assistantTurn(pg, `e-${item}`, `q-${item}`);
+    // Five turns, each counted once in the org, whichever session it bills to.
+    const before = await orgTotals(pg);
+    expect(before.ledger).toBeCloseTo(5 * 0.003);
+
+    // The database as the first repair left it. The first rule billed a
+    // workflow-dispatched turn to its step, read `:repair` off any node (a
+    // node named `repair` billed to the run), ignored promoted prompts, and
+    // kept a deleted workflow's turns on the step. Runs had no org yet.
+    const firstRule: Record<string, string | null> = {
+      "e-kept": "wf:run-kept:think", "e-node-repair": "wf:run-kept", "e-promoted": null, "e-gone": "wf:run-gone:think",
+    };
+    for (const [entry, step] of Object.entries(firstRule)) {
+      await pg.query("UPDATE usage_entry_facts SET session_id = $2, workflow_run_id = $3 WHERE entry_id = $1",
+        [entry, step ?? ASSISTANT, step ? step.split(":")[1] : null]);
+    }
+    await pg.query("DELETE FROM workflow_definitions WHERE id = 'wf-gone'");
+    await pg.query("DROP TRIGGER workflow_runs_org ON workflow_runs");
+    await pg.query("DROP FUNCTION valet_workflow_run_org()");
+    await pg.query("ALTER TABLE workflow_runs DROP COLUMN org_id CASCADE");
+    await pg.query(`DO $old$ BEGIN ${actionFactBefore()} END $old$`);
+    await pg.query("ALTER TABLE action_invocations DROP COLUMN queue_item_id");
+    await pg.query(`DO $first$ BEGIN ${FIRST_STEP_ATTRIBUTION_RULE} END $first$`);
+    await pg.query("DROP VIEW usage_step_attribution_v2_ready");
+    expect((await missingSchemaRepairs(pg)).map((r) => r.describe)).toContain("usage workflow step attribution");
+
+    await applyAppMigrations(pg);
+
+    expect(await missingSchemaRepairs(pg)).toEqual([]);
+    expect(await factFor(pg, "e-kept")).toEqual({ session_id: "wf:run-kept:think", workflow_run_id: "run-kept" });
+    expect(await factFor(pg, "e-node-repair")).toEqual({ session_id: "wf:run-kept:repair", workflow_run_id: "run-kept" });
+    expect(await factFor(pg, "e-promoted")).toEqual({ session_id: "wf:run-kept:review", workflow_run_id: "run-kept" });
+    // Its run resolves no org, so the turn returns to the assistant and stays counted.
+    expect(await factFor(pg, "e-gone")).toEqual({ session_id: ASSISTANT, workflow_run_id: null });
+    expect(await factFor(pg, "e-chat")).toEqual({ session_id: ASSISTANT, workflow_run_id: null });
+    // The hours moved with the facts: the first rule's run-level bucket is empty.
+    expect(await hourlyCost(pg, "wf:run-kept")).toBe(0);
+    expect(await hourlyCost(pg, "wf:run-kept:repair")).toBeCloseTo(0.003);
+    const after = await orgTotals(pg);
+    expect(after.ledger).toBeCloseTo(before.ledger);
+    expect(after.hourly).toBeCloseTo(before.hourly);
+    expect(after.daily).toBeCloseTo(before.daily);
+
+    // The first rule's helper is gone; its ready view stays, so a rollback
+    // does not reinstall the first rule.
+    const leftovers = (await pg.query(`SELECT to_regprocedure('valet_usage_billing_session(engine_entries)')::text AS helper,
+      to_regclass('usage_step_attribution_ready')::text AS first_view`)).rows[0];
+    expect(leftovers).toEqual({ helper: null, first_view: "usage_step_attribution_ready" });
+    // New turns follow the current rule.
+    await queueItem(pg, "q-promoted-2", null);
+    await pg.query("UPDATE engine_queue_items SET metadata = $1 WHERE id = 'q-promoted-2'", [JSON.stringify({ promotedFromItemId: "q-node-repair" })]);
+    await assistantTurn(pg, "e-promoted-2", "q-promoted-2");
+    expect(await factFor(pg, "e-promoted-2")).toEqual({ session_id: "wf:run-kept:repair", workflow_run_id: "run-kept" });
+  });
+});
+
+/** The billing rule and ready view the first step attribution repair installed. */
+const FIRST_STEP_ATTRIBUTION_RULE = `
+  CREATE OR REPLACE FUNCTION valet_usage_billing_session(e engine_entries) RETURNS text
+  LANGUAGE sql STABLE AS $billing$
+    SELECT COALESCE((SELECT 'wf:' || regexp_replace(substr(q.dispatch_id, 10), ':repair$', '')
+      FROM engine_queue_items q
+      WHERE q.id = e.queue_item_id AND q.session_id = e.session_id
+        AND q.dispatch_id LIKE 'workflow:%' AND e.session_id NOT LIKE 'wf:%'), e.session_id)
+  $billing$;
+  CREATE OR REPLACE FUNCTION valet_usage_fact(e engine_entries) RETURNS usage_entry_facts
+  LANGUAGE sql STABLE AS $fact$
+    SELECT e.id, valet_usage_billing_session(e),
+      CASE WHEN valet_usage_billing_session(e) LIKE 'wf:%' THEN split_part(valet_usage_billing_session(e), ':', 2) END,
+      e.created_at, e.model, e.usage::jsonb, e.cost::jsonb,
+      COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'status' IN ('completed', 'error')),
+      COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'toolName' = 'bash'
+        AND p->>'status' = 'completed' AND p->'result'->'details'->'outcome'->>'kind' = 'pull_request_created'),
+      COUNT(*) FILTER (WHERE p->>'type' = 'tool_call' AND p->>'toolName' = 'bash'
+        AND p->>'status' = 'completed' AND p->'result'->'details'->'outcome'->>'kind' = 'review_submitted'), false
+    FROM jsonb_array_elements(CASE WHEN e.entry_type = 'message' AND e.role = 'assistant'
+      THEN COALESCE(replace(e.parts, chr(92) || 'u0000', chr(92) || 'uFFFD')::jsonb, '[]'::jsonb)
+      ELSE '[]'::jsonb END) p
+  $fact$;
+  CREATE OR REPLACE VIEW usage_step_attribution_ready AS SELECT 1 AS version WHERE false;`;
 
 /** The action fact rule as the previous release installed it. */
 function actionFactBefore(): string {
