@@ -184,7 +184,7 @@ describe("POST /api/org/github-app/manifest", () => {
     // redirect_url) — without it the App can't do user connects at all.
     expect(body.manifest.callback_urls).toHaveLength(1);
     expect(body.manifest.callback_urls[0]).toContain("/api/me/github/callback");
-    expect(body.manifest.public).toBe(false);
+    expect(body.manifest.public).toBe(true);
     expect(body.manifest.default_permissions).toEqual({
       contents: "write",
       metadata: "read",
