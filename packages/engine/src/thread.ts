@@ -12,7 +12,7 @@ import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js
 import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION, NATIVE_IMAGE_EDIT_ACTION, NATIVE_IMAGE_TOOL_PARAMS } from "./native-images.js";
 import { recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
-import { appendRuntimeModelContext } from "./model-context.js";
+import { appendRuntimeModelContext, threadStartedSection } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
@@ -141,6 +141,7 @@ import type {
   ToolResult,
   WriteFence,
 } from "./types.js";
+import { THREAD_USER_TIMEZONE_KEY } from "./types.js";
 
 /** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
 const MAX_MERGE_DELEGATION_DEPTH = 5;
@@ -580,6 +581,9 @@ export class Thread {
    */
   private turnApiKey?: string;
   private readonly threadCreatedAt: number;
+  /** Creation-time user timezone from persisted thread state (TKAI-584). */
+  private readonly threadUserTimezone: string | undefined;
+  private readonly threadMetadata: Record<string, unknown> | undefined;
   /** Durable leaf used to link each new entry into the active transcript path. */
   private activeLeafEntryId: string | undefined;
 
@@ -600,6 +604,9 @@ export class Thread {
     this.reasoningDisabled = data.reasoning === THREAD_REASONING_DISABLED;
     this.paused = data.paused ?? false;
     this.threadCreatedAt = data.createdAt || Date.now();
+    this.threadMetadata = data.metadata;
+    const persistedTimezone = data.metadata?.[THREAD_USER_TIMEZONE_KEY];
+    this.threadUserTimezone = typeof persistedTimezone === "string" ? persistedTimezone : undefined;
     this.activeLeafEntryId = data.activeLeafEntryId;
     this.lastRequestModel = session.options.model;
     this.agent = this.buildAgent();
@@ -2170,6 +2177,7 @@ export class Thread {
       model: this.modelOverride,
       reasoning: this.reasoningDisabled ? THREAD_REASONING_DISABLED : this.reasoningOverride,
       summary: undefined,
+      metadata: this.threadMetadata,
       createdAt: this.threadCreatedAt,
       updatedAt: Date.now(),
     };
@@ -5167,7 +5175,11 @@ export class Thread {
    */
   private buildBaseSystemPrompt(): string {
     const threadContext = this.session.options.threadSystemContext?.({ id: this.id, key: this.key });
-    const base = [this.session.options.systemPrompt, threadContext].filter(Boolean).join("\n\n");
+    // TKAI-584: fixed at thread creation (persisted `createdAt`), so the text
+    // is byte-identical on every call and across restarts. It sits in the
+    // stable prefix; a per-call clock would break the prompt cache.
+    const threadStarted = threadStartedSection(this.threadCreatedAt, this.threadUserTimezone);
+    const base = [this.session.options.systemPrompt, threadContext, threadStarted].filter(Boolean).join("\n\n");
     const fragments = this.session.options.systemContext ?? [];
     if (fragments.length === 0) return base;
     const sorted = [...fragments].sort((a, b) => {

@@ -201,7 +201,8 @@ async function resolveThread(
     });
     throw new SignalEdgeDeniedError(args.from.sessionId, args.to, "thread not found");
   }
-  return session.thread(args.threadKey);
+  // `createThread` stamps the user's current timezone on a new thread (TKAI-584).
+  return session.createThread(args.threadKey);
 }
 
 /**

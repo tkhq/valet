@@ -120,10 +120,17 @@ export interface ThreadData {
    */
   reasoning?: string;
   summary?: string;
+  /**
+   * `userTimezone` (string, or null when unknown) is stamped at creation with
+   * `createdAt` and never rewritten (TKAI-584). See `THREAD_USER_TIMEZONE_KEY`.
+   */
   metadata?: Record<string, unknown>;
   createdAt: number;
   updatedAt: number;
 }
+
+/** Key in `ThreadData.metadata` that holds the creation-time user timezone. */
+export const THREAD_USER_TIMEZONE_KEY = "userTimezone";
 
 export interface QueueState {
   threadId: string;
@@ -2547,6 +2554,18 @@ export interface CreateSessionOptions {
    * to their supported retentions.
    */
   cacheRetention?: "none" | "short" | "long";
+  /**
+   * IANA timezone of the user (TKAI-584), as known when the session is built.
+   * A new thread snapshots it into its persisted state at creation. A live
+   * thread never re-reads it, so its prompt stays fixed. Unset renders as unknown.
+   */
+  userTimezone?: string;
+  /**
+   * Reads the user's current IANA timezone (TKAI-584). The session calls it
+   * when it creates a thread, so a new thread picks up a changed value.
+   * A failure keeps the last known value.
+   */
+  resolveUserTimezone?: () => Promise<string | undefined>;
   /**
    * Max time (ms) a tool op will wait for the sandbox attachment to become
    * ready before failing with WorkspaceProvisioningError. Default: 60_000

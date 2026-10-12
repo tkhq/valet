@@ -115,6 +115,13 @@ export const users = pgTable("user", {
   newThreadBehavior: text("new_thread_behavior", {
     enum: ["keep_current", "use_defaults"],
   }).notNull().default("keep_current"),
+  /** IANA timezone (TKAI-584). Null = unknown. Validated with `Intl` on write. */
+  timezone: text("timezone"),
+  /**
+   * True once the timezone was set or cleared by the user, or auto-reported
+   * from the browser. The auto-report never runs again, so a clear sticks.
+   */
+  timezoneReportDone: boolean("timezone_report_done").notNull().default(false),
 });
 
 // ─── better-auth core + plugin tables ───────────────────────────────────────

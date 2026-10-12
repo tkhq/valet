@@ -31,9 +31,9 @@ export async function resolveWorkflowReportTarget(
     const assistant = await loadAssistantBySessionId(deps.db, mapping.id);
     if (!assistant) throw new Error("The workflow's original execution is unavailable. Restore its runtime before retrying.");
     const { session: execution } = await ensureAssistantRuntime(deps, assistant, meta);
-    return { session: execution, thread: execution.thread(thread.key) };
+    return { session: execution, thread: await execution.createThread(thread.key) };
   }
   if (!session.options.readOnlyReason || await isLegacyAssistantRuntime(deps.db, session.id, meta.orgId)) return { session, thread };
   const { session: execution } = await ensureAssistantExecution(deps, owner, meta, thread.key);
-  return { session: execution, thread: execution.thread(thread.key) };
+  return { session: execution, thread: await execution.createThread(thread.key) };
 }

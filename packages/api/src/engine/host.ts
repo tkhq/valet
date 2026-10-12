@@ -146,6 +146,7 @@ import {
   securityDeclaredMcpPlugins,
 } from "./security-provisioning.js";
 import { egressHostInScope } from "@valet/plugin-security";
+import { isValidTimezone } from "../lib/timezone.js";
 import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
@@ -1215,6 +1216,8 @@ export class EngineHost {
     const sessionRoles = personaCell
       ? [...extras.roles, ...securityRolesForCell(personaCell.persona, personaRepoRoleMarkdown)]
       : extras.roles;
+    // A team conversation has many participants, so no one timezone applies.
+    const timezoneOptions = await this.userTimezoneOptions(principal.type === "user" ? meta.userId : undefined);
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -1245,6 +1248,7 @@ export class EngineHost {
             ...this.browserOptions(sessionId),
             extractDocument: extractDocumentText,
             ...this.threadAccessOptions(),
+            ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
           },
         })
@@ -1276,6 +1280,7 @@ export class EngineHost {
           ...this.browserOptions(sessionId),
           extractDocument: extractDocumentText,
           ...this.threadAccessOptions(),
+          ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
         });
 
@@ -1804,6 +1809,28 @@ export class EngineHost {
 
   browserPolicy() {
     return this.opts.db ? createBrowserPolicy(this.opts.db, this.opts.engineStore, this.opts.blobs) : undefined;
+  }
+
+  /**
+   * Timezone options for a session (TKAI-584). `userTimezone` is the value
+   * stored now. `resolveUserTimezone` re-reads it whenever the session creates
+   * a thread, so a new thread sees a changed value. A thread stamps the value
+   * at creation and never re-reads it, so a live prompt stays fixed. An absent
+   * user yields `{}`, and the prompt then says the timezone is unknown.
+   */
+  private async userTimezoneOptions(userId: string | undefined): Promise<{
+    userTimezone?: string;
+    resolveUserTimezone?: () => Promise<string | undefined>;
+  }> {
+    const db = this.opts.db;
+    if (!userId || !db) return {};
+    const read = async (): Promise<string | undefined> => {
+      const rows = await db.select({ timezone: users.timezone }).from(users).where(eq(users.id, userId)).limit(1);
+      const timezone = rows[0]?.timezone;
+      return timezone && isValidTimezone(timezone) ? timezone : undefined;
+    };
+    const userTimezone = await read();
+    return { ...(userTimezone ? { userTimezone } : {}), resolveUserTimezone: read };
   }
 
   /** Team runtime threads read only what their audience may see
@@ -2770,6 +2797,8 @@ export class EngineHost {
       } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       threadSystemContext: workflowEditorThreadContext,
+      // A team or org orchestrator is shared, so no one timezone applies.
+      ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
       tools: [...buildMemoryTools(), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
@@ -3797,6 +3826,7 @@ export class EngineHost {
       orgId: opts.orgId,
       workspace: opts.workspace,
       purpose: "child" as const,
+      ...(await this.userTimezoneOptions(opts.actorUserId)),
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
@@ -3992,6 +4022,7 @@ export class EngineHost {
       orgId: opts.orgId,
       workspace,
       purpose: "workflow" as const,
+      ...(await this.userTimezoneOptions(opts.actorUserId)),
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(specProvider ? { specProvider } : {}),
       ...(policyResolver ? { policyResolver } : {}),

@@ -10,7 +10,7 @@
  * assume it) reads as `"member"`.
  *
  * `PATCH` accepts a strict whitelist (`name`, `avatarUrl`, `defaultModel`,
- * `defaultReasoning`, `newThreadBehavior`);
+ * `defaultReasoning`, `newThreadBehavior`, `timezone`);
  * any other key 400s rather than being silently ignored, so a typo'd field
  * name in a client doesn't quietly no-op. `defaultModel` (when non-null) is
  * validated against the org model catalog's active id set — the same set
@@ -20,9 +20,10 @@
  * null-clears pattern.
  */
 import { Hono } from "hono";
-import { eq, and } from "drizzle-orm";
+import { eq, and, isNull } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
+import { isValidTimezone } from "../lib/timezone.js";
 import { requirePrincipal, requireUser } from "../middleware/auth.js";
 import { orgMembers, users } from "../schema/index.js";
 import { getTeamInOrg } from "../services/teams.js";
@@ -40,6 +41,8 @@ const PATCH_FIELDS = new Set([
   "defaultModel",
   "defaultReasoning",
   "newThreadBehavior",
+  "timezone",
+  "reportedTimezone",
 ]);
 
 async function loadMeResponse(
@@ -68,6 +71,8 @@ async function loadMeResponse(
     defaultModel: row.defaultModel,
     defaultReasoning: row.defaultReasoning ?? null,
     newThreadBehavior: row.newThreadBehavior,
+    timezone: row.timezone ?? null,
+    timezoneReportDone: row.timezoneReportDone,
   };
 }
 
@@ -123,6 +128,8 @@ meRouter.patch("/", async (c) => {
     defaultModel?: string | null;
     defaultReasoning?: string | null;
     newThreadBehavior?: NewThreadBehavior;
+    timezone?: string | null;
+    timezoneReportDone?: boolean;
   } = {};
 
   if ("name" in raw) {
@@ -186,8 +193,36 @@ meRouter.patch("/", async (c) => {
     update.newThreadBehavior = raw.newThreadBehavior;
   }
 
+  if ("timezone" in raw) {
+    if (raw.timezone !== null && !isValidTimezone(raw.timezone)) {
+      return c.json(
+        { error: "timezone is not a valid IANA name. Send a name such as America/Los_Angeles, or null to clear it." },
+        400,
+      );
+    }
+    update.timezone = raw.timezone;
+    // An explicit set or clear is the user's choice. Never auto-report over it.
+    update.timezoneReportDone = true;
+  }
+
+  let reportedTimezone: string | undefined;
+  if ("reportedTimezone" in raw) {
+    if (!isValidTimezone(raw.reportedTimezone)) {
+      return c.json({ error: "reportedTimezone is not a valid IANA name. Send a name such as America/Los_Angeles." }, 400);
+    }
+    reportedTimezone = raw.reportedTimezone;
+  }
+
   if (Object.keys(update).length > 0) {
     await db.update(users).set(update).where(eq(users.id, user.id));
+  }
+
+  // Apply the browser report once, and only if nothing was ever set or cleared.
+  if (reportedTimezone !== undefined) {
+    await db
+      .update(users)
+      .set({ timezone: reportedTimezone, timezoneReportDone: true })
+      .where(and(eq(users.id, user.id), isNull(users.timezone), eq(users.timezoneReportDone, false)));
   }
 
   const body = await loadMeResponse(db, user);
