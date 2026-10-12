@@ -164,3 +164,29 @@ describe("InstanceClient typed round-trips", () => {
     expect(lastRequest?.url).toBe("/api/health");
   });
 });
+
+// Unfiltered, these listings return team content too. An explicit
+// `--workspace user` must filter to the personal workspace.
+describe("InstanceClient workspace scoping", () => {
+  it("filters an explicit user listing by the caller's own id, and leaves an omitted one unfiltered", async () => {
+    const urls: string[] = [];
+    handler = (req, res) => {
+      urls.push(req.url ?? "");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(req.url === "/api/me" ? JSON.stringify({ id: "u-1", email: "a@x.test" }) : JSON.stringify({ workflows: [], artifacts: [], skills: [], nextCursor: null }));
+    };
+    const client = new InstanceClient({ url: baseUrl });
+    await client.listWorkflows("user");
+    await client.listArtifacts("user");
+    await client.listSkills({ workspace: "user" });
+    await client.listWorkflows();
+    await client.listWorkflows("team-1");
+    expect(urls).toEqual([
+      "/api/me", "/api/workflows?ownerType=user&ownerId=u-1",
+      "/api/me", "/api/artifacts?ownerType=user&ownerId=u-1",
+      "/api/me", "/api/skills?limit=50&ownerType=user&ownerId=u-1",
+      "/api/workflows",
+      "/api/workflows?ownerType=team&ownerId=team-1",
+    ]);
+  });
+});

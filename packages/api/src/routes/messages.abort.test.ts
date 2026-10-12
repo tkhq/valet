@@ -153,7 +153,7 @@ describe("POST /threads/:threadId/abort", () => {
 
     const res = await abortTurn(api.baseUrl, sessionId, thread.id, "item-1");
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
+    expect(await res.json()).toEqual({ ok: true, stopped: false });
   });
 
   it("preserves a queued submission when no submission is running", async () => {
@@ -171,7 +171,7 @@ describe("POST /threads/:threadId/abort", () => {
 
     const abortRes = await abortTurn(api.baseUrl, sessionId, thread.id, receipt.queueItemId);
     expect(abortRes.status).toBe(200);
-    expect(await abortRes.json()).toEqual({ ok: true });
+    expect(await abortRes.json()).toEqual({ ok: true, stopped: false });
 
     const item = await api.providers.engineStore.getQueueItem(sessionId, receipt.queueItemId);
     expect(item?.status).toBe("queued");
@@ -288,7 +288,7 @@ describeIfKey("POST /threads/:threadId/abort (real turn)", () => {
 
       const abortRes = await abortTurn(api.baseUrl, sessionId, thread.id, messageId);
       expect(abortRes.status).toBe(200);
-      expect(await abortRes.json()).toEqual({ ok: true });
+      expect(await abortRes.json()).toEqual({ ok: true, stopped: true });
 
       const result = await thread.awaitResult(messageId, { timeoutMs: 30_000 });
       expect(result.outcome).toBe("aborted");

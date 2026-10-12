@@ -323,6 +323,55 @@ describeE2E("CLI e2e against a real `valet serve`", () => {
     }
   }, 20_000);
 
+  it("memory write → read → patch → mv → rm round-trips a file", async () => {
+    const file = join(serve.dataDir, "note.md");
+    writeFileSync(file, "# Release\n\nWe deploy on Tuesdays.");
+    const run = (args: string[]) => runCli(args, dataEnv());
+
+    const written = await run(["memory", "write", "notes/release.md", "--file", file, "--json"]);
+    expect(written.code, `stderr: ${written.stderr}`).toBe(0);
+    expect((await run(["memory", "read", "notes/release.md"])).stdout).toContain("Tuesdays");
+
+    expect((await run(["memory", "patch", "notes/release.md", "--old", "Tuesdays", "--new", "Wednesdays"])).code).toBe(0);
+    // A passage that matches more than once is refused, so the wrong one is never edited.
+    const ambiguous = await run(["memory", "patch", "notes/release.md", "--old", "e", "--new", "E"]);
+    expect(ambiguous.code).not.toBe(0);
+    expect(ambiguous.stderr).toContain("appears more than once");
+
+    expect((await run(["memory", "mv", "notes/release.md", "projects/release.md"])).code).toBe(0);
+    expect((await run(["memory", "read", "projects/release.md"])).stdout).toContain("Wednesdays");
+    expect((await run(["memory", "search", "Wednesdays", "--json"])).stdout).toContain("projects/release.md");
+    expect((await run(["memory", "rm", "projects/release.md"])).code).toBe(0);
+    expect((await run(["memory", "read", "projects/release.md"])).code).not.toBe(0);
+  }, 120_000);
+
+  it("artifacts publish → list → unpublish round-trips a page", async () => {
+    const file = join(serve.dataDir, "weekly-report.md");
+    writeFileSync(file, "# Weekly report\n\nAll green.");
+    const run = (args: string[]) => runCli(args, dataEnv());
+
+    const published = await run(["artifacts", "publish", file, "--json"]);
+    expect(published.code, `stderr: ${published.stderr}`).toBe(0);
+    // The key defaults to the file name without its extension.
+    expect(JSON.parse(published.stdout)).toMatchObject({ path: "weekly-report", version: 1 });
+
+    const listed = JSON.parse((await run(["artifacts", "list", "weekly", "--json"])).stdout) as { artifacts: Array<{ id: string; path: string }> };
+    const [item] = listed.artifacts;
+    expect(item?.path).toBe("weekly-report");
+
+    expect((await run(["artifacts", "unpublish", item?.id ?? ""])).code).toBe(0);
+    expect(JSON.parse((await run(["artifacts", "list", "weekly", "--json"])).stdout).artifacts).toEqual([]);
+  }, 120_000);
+
+  it("whoami, workspaces, skills, inbox, and workflows list answer against the serve", async () => {
+    for (const args of [["whoami"], ["workspaces"], ["skills", "list"], ["inbox"], ["workflows", "list"]]) {
+      const r = await runCli([...args, "--json"], dataEnv());
+      expect(r.code, `${args.join(" ")} stderr: ${r.stderr}`).toBe(0);
+      expect(() => JSON.parse(r.stdout)).not.toThrow();
+    }
+    expect(JSON.parse((await runCli(["workspaces", "--json"], dataEnv())).stdout).workspaces[0]).toMatchObject({ workspace: "user", name: "Personal" });
+  }, 120_000);
+
   it("unknown command → exit 2 (Usage)", async () => {
     const r = await runCli(["definitely-not-a-command"], dataEnv());
     expect(r.code).toBe(2);

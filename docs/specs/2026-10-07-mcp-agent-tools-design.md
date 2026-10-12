@@ -62,7 +62,7 @@ These tools give a local agent the rest of the workspace. Each one calls the rou
 | `list_artifacts`, `publish_artifact` | `GET /api/artifacts`, `POST /api/artifacts/share` | Lists and publishes artifact pages. The list is newest update first. `query` matches the title or key, and `limit` (default 25) caps the list. The tool applies both, because the route pages only under an owner filter. A repeated key adds a version at the same link. Artifacts are visible to the whole organization (the narrowest visibility), and the tool says so, so an agent does not publish what the person has not agreed to share. The list returns each `artifact_id`. |
 | `unpublish_artifact` | `DELETE /api/artifacts/:id` | Revokes an artifact, so its link stops working. A revoke cannot be undone, so an agent may revoke only artifacts its user published. An org admin revokes another member's artifact in the browser. |
 
-A team workspace maps to `ownerType=team&ownerId=<team id>` on the memory, skills, workflow, and artifact routes.
+A team workspace maps to `ownerType=team&ownerId=<team id>` on the memory, skills, workflow, and artifact routes. Unfiltered, the skill, workflow, and artifact listings return everything the caller can reach, so an explicit `"user"` on those listings sends `ownerType=user&ownerId=<caller id>`. An omitted workspace leaves them unfiltered.
 
 MCP prompts are not exposed. The server is created for each request, so listing skills as prompts would add a skill query to every MCP call.
 

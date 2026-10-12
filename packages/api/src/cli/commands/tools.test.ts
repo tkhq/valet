@@ -88,4 +88,10 @@ describe("valet tools", () => {
     expect(d.calls).toEqual([]);
     expect(stderr()).toContain("JSON object");
   });
+
+  it("refuses an empty --workspace instead of calling with personal credentials", async () => {
+    const d = deps({ tool_id: "github.create_issue", status: "completed", result: null });
+    expect(await run(d, ["call", "github.create_issue", "--workspace", ""])).toBe(ExitCode.Usage);
+    expect(d.calls).toEqual([]);
+  });
 });

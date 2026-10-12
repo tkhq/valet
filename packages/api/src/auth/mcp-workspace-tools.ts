@@ -12,6 +12,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { renderTemplate } from "@valet/engine";
 import { z } from "zod";
 import type {
+  GetMeResponse,
   GetSkillResponse,
   GetWorkflowRunResponse,
   ListArtifactsResponse,
@@ -75,6 +76,23 @@ function ownerParams(workspace: string | undefined, params = new URLSearchParams
   }
   return params;
 }
+
+/**
+ * Owner parameters for a listing that, unfiltered, returns everything the
+ * caller can reach (workflows, artifacts, skills). An explicit "user" must
+ * filter to the personal workspace, so it sends the caller's own user id.
+ * Omitted, the listing stays unfiltered.
+ */
+async function listOwnerParams(deps: McpToolDeps, workspace: string | undefined, params = new URLSearchParams()): Promise<URLSearchParams> {
+  if (workspace !== "user") return ownerParams(workspace, params);
+  const me = await call<GetMeResponse>(deps, "GET", "/api/me", "Profile");
+  params.set("ownerType", "user");
+  params.set("ownerId", me.id);
+  return params;
+}
+
+const listWorkspaceArg = z.string().min(1).optional()
+  .describe('Workspace: "user" for only your personal workspace, or a team id from list_workspaces. Omit it to list everything you can access.');
 
 function withQuery(path: string, params: URLSearchParams): string {
   return params.size > 0 ? `${path}?${params.toString()}` : path;
@@ -164,13 +182,13 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
         "Call get_skill with a name to read one before you follow it.",
       inputSchema: {
         query: z.string().min(1).optional().describe("Only skills whose name or description matches this text."),
-        workspace: workspaceArg,
+        workspace: listWorkspaceArg,
         limit: z.number().int().min(1).max(100).optional().describe("Maximum skills to return. Default: 50."),
       },
       annotations: { readOnlyHint: true },
     },
     run(async ({ query, workspace, limit }: { query?: string; workspace?: string; limit?: number }) => {
-      const params = ownerParams(workspace);
+      const params = await listOwnerParams(deps, workspace);
       if (query) params.set("q", query);
       params.set("limit", String(limit ?? 50));
       const res = await call<ListSkillsResponse>(deps, "GET", withQuery("/api/skills", params), "Skills");
@@ -332,11 +350,11 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
     "list_workflows",
     {
       description: `Lists the Valet workflows (saved automations) you can run, with each one's latest run. ${RUN_STATUSES}`,
-      inputSchema: { workspace: workspaceArg },
+      inputSchema: { workspace: listWorkspaceArg },
       annotations: { readOnlyHint: true },
     },
     run(async ({ workspace }: { workspace?: string }) => {
-      const res = await call<ListWorkflowsResponse>(deps, "GET", withQuery("/api/workflows", ownerParams(workspace)), "Workflows");
+      const res = await call<ListWorkflowsResponse>(deps, "GET", withQuery("/api/workflows", await listOwnerParams(deps, workspace)), "Workflows");
       return {
         workflows: res.workflows.map((w) => ({
           workflow_id: w.id,
@@ -456,13 +474,13 @@ export function registerWorkspaceTools(server: McpServer, deps: McpToolDeps): vo
       description: "Lists published Valet artifacts (shareable pages and documents) in a workspace, newest update first.",
       inputSchema: {
         query: z.string().min(1).optional().describe("Only artifacts whose title or key contains this text (case-insensitive)."),
-        workspace: workspaceArg,
+        workspace: listWorkspaceArg,
         limit: z.number().int().min(1).max(100).optional().describe("Maximum artifacts to return. Default: 25."),
       },
       annotations: { readOnlyHint: true },
     },
     run(async ({ query, workspace, limit }: { query?: string; workspace?: string; limit?: number }) => {
-      const res = await call<ListArtifactsResponse>(deps, "GET", withQuery("/api/artifacts", ownerParams(workspace)), "Artifacts");
+      const res = await call<ListArtifactsResponse>(deps, "GET", withQuery("/api/artifacts", await listOwnerParams(deps, workspace)), "Artifacts");
       // The route pages only under an owner filter, and a personal list has
       // none, so the filter and the limit apply here. Without them, an org
       // with a few hundred artifacts overflowed the output cap on every call.
