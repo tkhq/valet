@@ -220,7 +220,7 @@ sandbox:
   # multi-GiB working trees (large prebuilt bakes) should raise
   # workspaceStorage so new claims start big enough.
   workspaceStorage: "1Gi"
-  workspaceStorageMax: "20Gi"
+  workspaceStorageMax: "1Ti"
 
   # How long a suspended sandbox is kept before its workspace volume is
   # reclaimed. Both windows measure IDLE time, not age: they run from the
