@@ -1,5 +1,5 @@
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as pi from "@earendil-works/pi-ai/compat";
 import {
   Engine,
@@ -14,6 +14,7 @@ import {
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
+  vi.useRealTimers();
   for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
@@ -67,7 +68,8 @@ describe("runtime model context delivered to the provider", () => {
     await run(session);
 
     const prompt = s.prompts[0];
-    expect(prompt).toContain("Base instructions.\n\n## Runtime model");
+    expect(prompt).toContain("Base instructions.\n\n## Thread started");
+    expect(prompt).toContain("\n\n## Runtime model");
     expect(prompt).toContain("Assigned selection: s");
     expect(prompt).toContain("Active selection: s");
     expect(prompt).toContain("Current provider: model-context-small");
@@ -225,5 +227,167 @@ describe("runtime model context delivered to the provider", () => {
     expect(s.prompts[0]).toContain("Active selection: s");
     expect(s.prompts[0]).toContain("Current provider: model-context-small");
     expect(s.prompts[0]).toContain("Temporary override: none");
+  });
+
+  describe("thread started block (TKAI-584)", () => {
+    // Mon 2026-10-12 09:35 PDT = 16:35 UTC. Fixed value, no real clock in assertions.
+    const T0 = Date.UTC(2026, 9, 12, 16, 35, 20);
+    const block = (prompt: string | undefined) => prompt?.match(/## Thread started[\s\S]*?(?=\n\n## Runtime model)/)?.[0];
+
+    async function startedAt(s: ReturnType<typeof setup>, userTimezone?: string) {
+      const session = await s.engine.createSession({ ...s.options, ...(userTimezone ? { userTimezone } : {}) });
+      const thread = await session.ensureDefaultThread();
+      const data = await s.store.getThread(session.id, thread.id);
+      await s.store.saveThread(session.id, { ...data!, createdAt: T0 });
+      const restored = await new Engine({ providers: s.providers }).restoreSession({
+        sessionId: session.id, options: { ...s.options, ...(userTimezone ? { userTimezone } : {}) },
+      });
+      return restored;
+    }
+
+    it("renders the persisted creation time with weekday, UTC and user-local time", async () => {
+      const s = setup();
+      s.small.setResponses([s.capture()]);
+      await run(await startedAt(s, "America/Los_Angeles"));
+
+      const b = block(s.prompts[0]);
+      expect(b).toContain("Thread started (UTC): 2026-10-12T16:35:00Z (Monday)");
+      expect(b).toContain("Thread started (user local): Monday 2026-10-12 09:35 PDT (America/Los_Angeles)");
+      expect(b).toContain("This is not the current time");
+      expect(b).toContain("date -u");
+    });
+
+    it("is byte-identical across calls", async () => {
+      const s = setup();
+      s.small.setResponses([s.capture(), s.capture()]);
+      const session = await startedAt(s, "America/Los_Angeles");
+      await run(session);
+      await run(session);
+
+      expect(block(s.prompts[0])).toBeDefined();
+      expect(block(s.prompts[1])).toBe(block(s.prompts[0]));
+      expect(s.prompts[1]).toBe(s.prompts[0]);
+      expect(JSON.stringify(await session.readEntries("web:default"))).not.toContain("Thread started");
+    });
+
+    it("survives a restart with the same bytes", async () => {
+      const s = setup();
+      s.small.setResponses([s.capture(), s.capture()]);
+      await run(await startedAt(s, "America/Los_Angeles"));
+      const again = await new Engine({ providers: s.providers }).restoreSession({
+        sessionId: (await s.store.listSessions("u1"))[0]!.id,
+        options: { ...s.options, userTimezone: "America/Los_Angeles" },
+      });
+      await run(again);
+
+      expect(block(s.prompts[1])).toBe(block(s.prompts[0]));
+    });
+
+    it("states the timezone is unknown when unset or invalid", async () => {
+      for (const tz of [undefined, "Not/AZone"]) {
+        const s = setup();
+        s.small.setResponses([s.capture()]);
+        await run(await startedAt(s, tz));
+        expect(block(s.prompts[0])).toContain("Thread started (user local): unknown");
+        expect(block(s.prompts[0])).toContain("Do not guess it");
+      }
+    });
+
+    /**
+     * Serialize a captured engine transcript through the real pi-ai Anthropic
+     * serializer, without a network call. `onPayload` runs after `buildParams`
+     * and before the request, so it sees the exact `system`, `tools` and
+     * `messages` with their `cache_control` markers.
+     */
+    async function anthropicPayload(ctx: pi.Context): Promise<AnthropicPayload> {
+      let captured: AnthropicPayload | undefined;
+      const stream = pi.streamSimple(pi.getModel("anthropic", "claude-opus-4-7"), ctx, {
+        apiKey: "sk-ant-test",
+        cacheRetention: "long",
+        onPayload: (params) => {
+          captured = structuredClone(params) as AnthropicPayload;
+          throw new Error("stop before the network");
+        },
+      });
+      await stream.result();
+      if (!captured) throw new Error("the Anthropic serializer did not run");
+      return captured;
+    }
+
+    interface AnthropicBlock { cache_control?: unknown; [key: string]: unknown }
+    interface AnthropicPayload {
+      system?: AnthropicBlock[];
+      tools?: AnthropicBlock[];
+      messages: Array<{ role: string; content: string | AnthropicBlock[] }>;
+    }
+
+    const withoutCacheMarkers = (value: unknown): unknown =>
+      JSON.parse(JSON.stringify(value, (key, v) => (key === "cache_control" ? undefined : v)));
+
+    it("keeps the serialized Anthropic system block and history cache prefix identical across calls at different clock times", async () => {
+      const s = setup();
+      const ctxs: pi.Context[] = [];
+      const record = (reply: pi.AssistantMessage) => (ctx: pi.Context) => {
+        ctxs.push(structuredClone(ctx));
+        // Move the wall clock between model calls on the same thread.
+        vi.setSystemTime(Date.now() + 25 * 60_000 + 24 * 3_600_000);
+        return reply;
+      };
+      s.small.setResponses([
+        record(pi.fauxAssistantMessage([pi.fauxToolCall("list_threads", {})], { stopReason: "toolUse" })),
+        record(pi.fauxAssistantMessage("done")),
+      ]);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(T0);
+      const session = await s.engine.createSession({ ...s.options, userTimezone: "America/Los_Angeles" });
+      await run(session);
+      expect(ctxs).toHaveLength(2);
+
+      const [first, second] = [await anthropicPayload(ctxs[0]!), await anthropicPayload(ctxs[1]!)];
+
+      // Sanity: the clock moved, and the payload is one system block with a cache marker after it.
+      expect(Date.now()).toBeGreaterThan(T0 + 24 * 3_600_000);
+      expect(first.system).toHaveLength(1);
+      expect(first.system![0]!.cache_control).toBeDefined();
+      expect(String(first.system![0]!.text)).toContain("Thread started (UTC): 2026-10-12T16:35:00Z (Monday)");
+
+      // The full system block (text and cache marker) and the tools are byte-identical.
+      expect(JSON.stringify(second.system)).toBe(JSON.stringify(first.system));
+      expect(JSON.stringify(second.tools)).toBe(JSON.stringify(first.tools));
+
+      // The history prefix call 1 cached is byte-identical in call 2. Only the marker moves to the new tail.
+      expect(second.messages.length).toBeGreaterThan(first.messages.length);
+      expect(JSON.stringify(withoutCacheMarkers(second.messages.slice(0, first.messages.length))))
+        .toBe(JSON.stringify(withoutCacheMarkers(first.messages)));
+      const marked = (p: AnthropicPayload) => JSON.stringify(p.messages).split('"cache_control"').length - 1;
+      expect(marked(first)).toBe(1);
+      expect(marked(second)).toBe(1);
+    });
+
+    it("keeps the whole Runtime model section unchanged between calls in steady state", async () => {
+      const s = setup();
+      const record = (reply: pi.AssistantMessage) => (ctx: pi.Context) => {
+        s.prompts.push(getCurrentSystemPrompt(ctx.messages));
+        vi.setSystemTime(Date.now() + 25 * 60_000);
+        return reply;
+      };
+      s.small.setResponses([
+        record(pi.fauxAssistantMessage([pi.fauxToolCall("list_threads", {})], { stopReason: "toolUse" })),
+        record(pi.fauxAssistantMessage("done")),
+        record(pi.fauxAssistantMessage("done")),
+      ]);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(T0);
+      const session = await s.engine.createSession({ ...s.options, userTimezone: "America/Los_Angeles" });
+      await run(session);
+      await run(session);
+
+      const runtime = (prompt: string | undefined) => prompt?.slice(prompt.indexOf("## Runtime model"));
+      expect(s.prompts).toHaveLength(3);
+      expect(runtime(s.prompts[0])).toContain("Temporary override: none");
+      expect(runtime(s.prompts[1])).toBe(runtime(s.prompts[0]));
+      expect(runtime(s.prompts[2])).toBe(runtime(s.prompts[0]));
+      expect(s.prompts[2]).toBe(s.prompts[0]);
+    });
   });
 });

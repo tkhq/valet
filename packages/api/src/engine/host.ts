@@ -146,6 +146,7 @@ import {
   securityDeclaredMcpPlugins,
 } from "./security-provisioning.js";
 import { egressHostInScope } from "@valet/plugin-security";
+import { isValidTimezone } from "../lib/timezone.js";
 import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
@@ -1806,6 +1807,18 @@ export class EngineHost {
     return this.opts.db ? createBrowserPolicy(this.opts.db, this.opts.engineStore, this.opts.blobs) : undefined;
   }
 
+  /**
+   * IANA timezone stored for `userId` (TKAI-584), or `{}` when the user has
+   * none or the host has no database. The engine renders an absent value as
+   * "unknown" and never guesses.
+   */
+  private async userTimezoneOptions(userId: string | undefined): Promise<{ userTimezone?: string }> {
+    if (!userId || !this.opts.db) return {};
+    const rows = await this.opts.db.select({ timezone: users.timezone }).from(users).where(eq(users.id, userId)).limit(1);
+    const timezone = rows[0]?.timezone;
+    return timezone && isValidTimezone(timezone) ? { userTimezone: timezone } : {};
+  }
+
   /** Team runtime threads read only what their audience may see
    * (`services/thread-access.ts`). */
   private threadAccessOptions() {
@@ -2770,6 +2783,8 @@ export class EngineHost {
       } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       threadSystemContext: workflowEditorThreadContext,
+      // A team or org orchestrator is shared, so no one timezone applies.
+      ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
       tools: [...buildMemoryTools(), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
@@ -3797,6 +3812,7 @@ export class EngineHost {
       orgId: opts.orgId,
       workspace: opts.workspace,
       purpose: "child" as const,
+      ...(await this.userTimezoneOptions(opts.actorUserId)),
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
@@ -3992,6 +4008,7 @@ export class EngineHost {
       orgId: opts.orgId,
       workspace,
       purpose: "workflow" as const,
+      ...(await this.userTimezoneOptions(opts.actorUserId)),
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(specProvider ? { specProvider } : {}),
       ...(policyResolver ? { policyResolver } : {}),

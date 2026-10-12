@@ -2548,6 +2548,11 @@ export interface CreateSessionOptions {
    */
   cacheRetention?: "none" | "short" | "long";
   /**
+   * IANA timezone of the user (TKAI-584). Rendered once in the fixed
+   * "Thread started" block. Unset or invalid renders as unknown.
+   */
+  userTimezone?: string;
+  /**
    * Max time (ms) a tool op will wait for the sandbox attachment to become
    * ready before failing with WorkspaceProvisioningError. Default: 60_000
    * (SANDBOX_READY_TIMEOUT_MS, defined in sandbox/policy.ts).

@@ -115,6 +115,8 @@ export const users = pgTable("user", {
   newThreadBehavior: text("new_thread_behavior", {
     enum: ["keep_current", "use_defaults"],
   }).notNull().default("keep_current"),
+  /** IANA timezone (TKAI-584). Null = unknown. Validated with `Intl` on write. */
+  timezone: text("timezone"),
 });
 
 // ─── better-auth core + plugin tables ───────────────────────────────────────

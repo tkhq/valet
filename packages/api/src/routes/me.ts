@@ -10,7 +10,7 @@
  * assume it) reads as `"member"`.
  *
  * `PATCH` accepts a strict whitelist (`name`, `avatarUrl`, `defaultModel`,
- * `defaultReasoning`, `newThreadBehavior`);
+ * `defaultReasoning`, `newThreadBehavior`, `timezone`);
  * any other key 400s rather than being silently ignored, so a typo'd field
  * name in a client doesn't quietly no-op. `defaultModel` (when non-null) is
  * validated against the org model catalog's active id set — the same set
@@ -23,6 +23,7 @@ import { Hono } from "hono";
 import { eq, and } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
+import { isValidTimezone } from "../lib/timezone.js";
 import { requirePrincipal, requireUser } from "../middleware/auth.js";
 import { orgMembers, users } from "../schema/index.js";
 import { getTeamInOrg } from "../services/teams.js";
@@ -40,6 +41,7 @@ const PATCH_FIELDS = new Set([
   "defaultModel",
   "defaultReasoning",
   "newThreadBehavior",
+  "timezone",
 ]);
 
 async function loadMeResponse(
@@ -68,6 +70,7 @@ async function loadMeResponse(
     defaultModel: row.defaultModel,
     defaultReasoning: row.defaultReasoning ?? null,
     newThreadBehavior: row.newThreadBehavior,
+    timezone: row.timezone ?? null,
   };
 }
 
@@ -123,6 +126,7 @@ meRouter.patch("/", async (c) => {
     defaultModel?: string | null;
     defaultReasoning?: string | null;
     newThreadBehavior?: NewThreadBehavior;
+    timezone?: string | null;
   } = {};
 
   if ("name" in raw) {
@@ -184,6 +188,16 @@ meRouter.patch("/", async (c) => {
       );
     }
     update.newThreadBehavior = raw.newThreadBehavior;
+  }
+
+  if ("timezone" in raw) {
+    if (raw.timezone !== null && !isValidTimezone(raw.timezone)) {
+      return c.json(
+        { error: "timezone is not a valid IANA name. Send a name such as America/Los_Angeles, or null to clear it." },
+        400,
+      );
+    }
+    update.timezone = raw.timezone;
   }
 
   if (Object.keys(update).length > 0) {

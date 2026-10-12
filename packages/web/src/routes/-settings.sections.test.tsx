@@ -181,6 +181,13 @@ describe("ProfilePage", () => {
     expect(patchMeMutate).toHaveBeenCalledWith({ name: "Ada Lovelace", avatarUrl: "" });
   });
 
+  it("sends the timezone only when it changed", () => {
+    render(<ProfilePage />);
+    fireEvent.change(screen.getByLabelText("Timezone"), { target: { value: "Europe/Paris" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(patchMeMutate).toHaveBeenLastCalledWith({ name: "Ada", avatarUrl: "", timezone: "Europe/Paris" });
+  });
+
   it("shows the enable-org card for an admin with the gate off, and it PATCHes + navigates", async () => {
     render(<ProfilePage />);
     expect(screen.getByText("Working with a team? Enable organizations")).toBeTruthy();

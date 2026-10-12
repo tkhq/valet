@@ -12,7 +12,7 @@ import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js
 import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION, NATIVE_IMAGE_EDIT_ACTION, NATIVE_IMAGE_TOOL_PARAMS } from "./native-images.js";
 import { recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
-import { appendRuntimeModelContext } from "./model-context.js";
+import { appendRuntimeModelContext, threadStartedSection } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
@@ -5167,7 +5167,11 @@ export class Thread {
    */
   private buildBaseSystemPrompt(): string {
     const threadContext = this.session.options.threadSystemContext?.({ id: this.id, key: this.key });
-    const base = [this.session.options.systemPrompt, threadContext].filter(Boolean).join("\n\n");
+    // TKAI-584: fixed at thread creation (persisted `createdAt`), so the text
+    // is byte-identical on every call and across restarts. It sits in the
+    // stable prefix; a per-call clock would break the prompt cache.
+    const threadStarted = threadStartedSection(this.threadCreatedAt, this.session.options.userTimezone);
+    const base = [this.session.options.systemPrompt, threadContext, threadStarted].filter(Boolean).join("\n\n");
     const fragments = this.session.options.systemContext ?? [];
     if (fragments.length === 0) return base;
     const sorted = [...fragments].sort((a, b) => {

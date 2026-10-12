@@ -3,6 +3,7 @@ import { WorkspaceAssistantProvider, WorkspaceAssistantDock } from "~/components
 import { ApiError } from "~/api/client";
 import { useEffect, useState, type ReactNode } from "react";
 import { useMe } from "~/api/settings";
+import { useReportTimezoneOnce } from "~/lib/report-timezone";
 import { useComposerDraftStore } from "~/stores/composer-drafts";
 import { Link, Outlet, createRootRouteWithContext, useRouterState } from "@tanstack/react-router";
 import type { QueryClient } from "@tanstack/react-query";
@@ -168,6 +169,7 @@ function useUnlockAudioOnFirstGesture() {
 /** Mount composers only after their draft namespace matches the authenticated account. */
 export function DraftAccountBoundary({ children }: { children: ReactNode }) {
   const me = useMe({ staleTime: 0, refetchOnMount: "always", refetchOnWindowFocus: "always" });
+  useReportTimezoneOnce(me.error ? undefined : me.data);
   const owner = me.data ? JSON.stringify([me.data.orgId, me.data.id]) : "";
   const activeOwner = useComposerDraftStore((s) => s.owner);
   const [verifiedOwner, setVerifiedOwner] = useState("");

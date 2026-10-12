@@ -936,7 +936,7 @@ describe("reconciliation executor (integration)", () => {
         4000,
       );
       expect(nextCalls).toBe(1);
-      expect(nextPromptSystem).toMatch(/^Baseline recovery prompt\.\n\n## Runtime model\n/);
+      expect(nextPromptSystem).toMatch(/^Baseline recovery prompt\.\n\n## Thread started[\s\S]*?\n\n## Runtime model\n/);
       expect(nextPromptSystem).toContain(`Current provider: ${nextFaux.getModel().provider}`);
       expect(nextPromptSystem).toContain("Temporary override: none");
       recoveryFaux.unregister();
@@ -1098,7 +1098,7 @@ describe("reconciliation executor (integration)", () => {
         4000,
       );
       expect(nextCalls).toBe(1);
-      expect(nextPromptSystem).toMatch(/^Baseline recovery prompt\.\n\n## Runtime model\n/);
+      expect(nextPromptSystem).toMatch(/^Baseline recovery prompt\.\n\n## Thread started[\s\S]*?\n\n## Runtime model\n/);
       expect(nextPromptSystem).toContain(`Current provider: ${nextFaux.getModel().provider}`);
       expect(nextPromptSystem).toContain("Temporary override: none");
       expect(modelStatesFor(events, next.queueItemId)).toEqual([

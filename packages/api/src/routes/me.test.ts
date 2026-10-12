@@ -92,6 +92,37 @@ describe("PATCH /api/me", () => {
     expect(body.error).toContain("Select keep_current or use_defaults");
   });
 
+  it("stores a valid IANA timezone, returns it on GET, and clears it with null", async () => {
+    api = await bootTestApi();
+    const baseUrl = api.baseUrl;
+    const patch = (body: unknown) =>
+      fetch(`${baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    const set = await patch({ timezone: "America/Los_Angeles" });
+    expect(set.status).toBe(200);
+    expect(((await set.json()) as MeResponse).timezone).toBe("America/Los_Angeles");
+    const get = await fetch(`${api.baseUrl}/api/me`);
+    expect(((await get.json()) as MeResponse).timezone).toBe("America/Los_Angeles");
+
+    const cleared = await patch({ timezone: null });
+    expect(((await cleared.json()) as MeResponse).timezone).toBeNull();
+  });
+
+  it.each(["Mars/Olympus", "EST", "+05:00", "", 42])("rejects invalid timezone %j", async (timezone) => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timezone }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("valid IANA name");
+  });
+
   it("updates name and round-trips it on GET", async () => {
     api = await bootTestApi();
 
