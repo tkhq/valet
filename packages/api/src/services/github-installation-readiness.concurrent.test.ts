@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /** Installation discovery and webhook writes share an organization lock. */
 import { readFileSync } from "node:fs";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
@@ -34,20 +35,21 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("GitHub discovery readiness lock
         if (!table) throw new Error(`Missing ${name} migration`);
         await pool.query(table);
       }
-      await pool.query("CREATE TABLE orgs (id text PRIMARY KEY)");
-      await pool.query("INSERT INTO orgs VALUES ('org')");
+      await pool.query("CREATE TABLE orgs (id text PRIMARY KEY, allow_personal_installations boolean)");
+      await pool.query("INSERT INTO orgs (id) VALUES ('org')");
+      await pool.query("CREATE TABLE org_members (org_id text, user_id text, role text, created_at bigint)");
       await pool.query("CREATE UNIQUE INDEX installation_org_id ON github_installations (org_id, installation_id)");
       await db.insert(contentSources).values({ id: "source", orgId: "org", ownerType: "team", ownerId: "team",
         repoFullName: "test/repo", kinds: ["workflows"], nextAttemptAt: 0, createdAt: 0, updatedAt: 0 });
       await db.insert(githubInstallations).values({ id: "installation", orgId: "org", installationId: 123,
-        accountLogin: "acme", accountType: "Organization", suspended: false, createdAt: 0, updatedAt: 0 });
+        accountLogin: "acme", accountId: githubAccountId("acme"), accountType: "Organization", suspended: false, createdAt: 0, updatedAt: 0 });
       const credentials = new InMemoryCredentialStore();
       const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048,
         privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
       await saveAppConfig({ credentials }, "org", { appId: "123", appSlug: "test", oauthClientId: "client",
         htmlUrl: "https://github.com/apps/test", privateKeyPem: privateKey, oauthClientSecret: "secret", webhookSecret: "hook" });
       const discover = () => discoverInstallations({ db, credentials, key: Buffer.alloc(32),
-        fetchImpl: async () => new Response(JSON.stringify([{ id: 123, account: { login: "acme", type: "Organization" },
+        fetchImpl: async (url) => new Response(JSON.stringify(String(url).endsWith("/app") ? { owner: { id: githubAccountId("acme"), login: "acme" } } : [{ id: 123, account: { login: "acme", type: "Organization" },
           repository_selection: "all", suspended_at: null }]), { status: 200 }),
       }, "org");
       webhook = db.transaction(async (tx) => {

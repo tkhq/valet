@@ -1,8 +1,9 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /**
  * Team-owned workflow service readiness (team-credentials design, decision 15).
  */
 import { generateKeyPairSync } from "node:crypto";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCredentialStore } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
 import type { WorkflowDefinition } from "@valet/workflow";
@@ -120,7 +121,13 @@ describe("teamServiceReadiness", () => {
   beforeEach(async () => {
     ({ appDb: db } = await freshTestPgDb());
     credentials = new InMemoryCredentialStore();
+    vi.stubGlobal("fetch", async (url: string | URL | Request) => {
+      if (String(url).endsWith("/app")) return Response.json({ owner: { id: githubAccountId("acme"), login: "acme" } });
+      throw new Error("Unexpected GitHub request");
+    });
   });
+
+  afterEach(() => vi.unstubAllGlobals());
 
   function deps(plugins: ValetPlugin[] = [gmailPlugin, slackOrgPlugin, githubPlugin]) {
     return { db, credentials, plugins, env: {} as NodeJS.ProcessEnv };
@@ -407,7 +414,7 @@ describe("teamServiceReadiness", () => {
     expect(result.ready).toEqual([]);
     expect(result.blocked).toHaveLength(1);
     await db.insert(githubInstallations).values({
-      id: "app-pin", orgId: ORG, installationId: 1, accountLogin: "acme",
+      id: "app-pin", orgId: ORG, installationId: 1, accountLogin: "acme", accountId: githubAccountId("acme"),
       accountType: "Organization", repositorySelection: "selected", suspended: false,
       createdAt: 1000, updatedAt: 1000,
     });
@@ -428,7 +435,7 @@ describe("teamServiceReadiness", () => {
     expect((await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition })).blocked).toHaveLength(1);
     await saveAppConfig({ credentials }, ORG, appConfig);
     await db.insert(githubInstallations).values({
-      id: "wrong-owner", orgId: ORG, installationId: 1, accountLogin: "other",
+      id: "wrong-owner", orgId: ORG, installationId: 1, accountLogin: "other", accountId: githubAccountId("other"),
       accountType: "Organization", repositorySelection: "all", suspended: false,
       createdAt: 1000, updatedAt: 1000,
     });
@@ -461,7 +468,7 @@ describe("teamServiceReadiness", () => {
           id: `ghi_${i}`,
           orgId: ORG,
           installationId: i + 1,
-          accountLogin,
+          accountLogin, accountId: githubAccountId(accountLogin),
           accountType: "Organization",
           repositorySelection: "all",
           suspended: false,
@@ -497,7 +504,7 @@ describe("teamServiceReadiness", () => {
       expect(result.blocked).toEqual([]);
     });
 
-    it("is blocked when several installations exist and no owner parameter picks one", async () => {
+    it("ignores excluded org installations when no owner parameter is supplied", async () => {
       await installApp(["acme", "other"]);
 
       const result = await teamServiceReadiness(deps(), {
@@ -506,14 +513,11 @@ describe("teamServiceReadiness", () => {
         definition: toolDefinition("github"),
       });
 
-      expect(result.ready).toEqual([]);
-      expect(result.blocked).toHaveLength(1);
-      expect(result.blocked[0]!.service).toBe("github");
-      expect(result.blocked[0]!.reason).toContain("owner");
-      expect(result.blocked[0]!.reason).toContain("install the App on exactly one account");
+      expect(result.ready).toEqual(["github"]);
+      expect(result.blocked).toEqual([]);
     });
 
-    it("is blocked naming the owner that has no installation", async () => {
+    it("uses the owner installation fallback when another owner has no installation", async () => {
       await installApp(["acme", "other"]);
 
       const result = await teamServiceReadiness(deps(), {
@@ -522,15 +526,8 @@ describe("teamServiceReadiness", () => {
         definition: toolDefinition("github", undefined, { owner: "nobody", repo: "repo" }),
       });
 
-      expect(result.ready).toEqual([]);
-      expect(result.blocked).toEqual([
-        {
-          service: "github",
-          reason:
-            "github has no App installation for nobody. Install the App on nobody in " +
-            "Settings → Organization → GitHub, or store a github credential for the team.",
-        },
-      ]);
+      expect(result.ready).toEqual(["github"]);
+      expect(result.blocked).toEqual([]);
     });
 
     it.each([false, true])("points to organization setup when no installation resolves (App configured=%s)", async (configured) => {

@@ -1095,7 +1095,7 @@ function buildGithubCredentialProvider(
         // the installation when present; otherwise the org's sole
         // installation applies. Same org-scoped lookup as the `"app"`
         // selection below — no cross-tenant reach.
-        const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner);
+        const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner, owner.type === "user" ? owner.id : undefined);
         return token === null ? null : { accessToken: token };
       }
       const selection = req.credential ?? "auto";
@@ -1107,14 +1107,13 @@ function buildGithubCredentialProvider(
         // either: it falls to the App path like a team with no row.
         if (teamRow && isUsableGithubUserRow(teamRow, (deps.now ?? Date.now)())) return teamRow;
         if (selection === "user") return null;
-        const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner);
+        const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner, undefined);
         return token === null ? null : { accessToken: token };
       }
       // `params` are template-rendered, so a webhook payload can choose this
       // repo. That is safe only because `mintInstallationToken` looks an
-      // installation up by `(orgId, accountLogin)` — the reachable set is
-      // the caller's own org. Keep that scoping: a global installation
-      // lookup would turn this node into cross-tenant access.
+      // installation up under this org and acting user. Personal installations
+      // require their linked owner, even when a webhook supplies the repo.
       const repo = selection === "app" ? repoFromParams(req.params) : undefined;
       if (selection === "app" && !repo) {
         throw new Error(
@@ -1127,7 +1126,7 @@ function buildGithubCredentialProvider(
         // A team or org owner must not resolve the prompting member's PAT:
         // the synthetic `team:{id}` actor is never a person, and `auto`
         // without userId can still mint a sole installation token.
-        ...(owner.type === "user" ? { userId: ctx.userId } : {}),
+        ...(owner.type === "user" ? { userId: owner.id } : {}),
         sessionId: ctx.sessionId,
         purpose: "api",
         // `auto` means "keep the default precedence", so it must NOT

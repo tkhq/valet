@@ -279,7 +279,9 @@ export async function runInstallationSweepTick(
 
   let found: number;
   try {
-    found = (await discoverInstallations(deps, target.orgId)).length;
+    const result = await discoverInstallations(deps, target.orgId);
+    if (result === "stale") throw new Error("GitHub installations changed during discovery. Retry after the webhook completes.");
+    found = result.length;
   } catch (err) {
     recordFailure(state, target.orgId, target.tier, now, random, err, "read the installations of");
     return null;

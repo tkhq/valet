@@ -64,6 +64,7 @@ export interface GithubAppCapability {
   status(): Promise<GithubAppStatus>;
   /** The organization name, or its ID when the organization row is missing. */
   orgName(): Promise<string>;
+  allowPersonalInstallations(): Promise<boolean>;
   /** Signs a 15-minute setup state for the calling admin, their organization, and the return origin. */
   signSetupState(): string;
   /** Asks GitHub whether the App ID and key match. Stores nothing and never throws. */
@@ -128,6 +129,7 @@ export interface GithubUserConnection {
   refreshToken?: string;
   expiresAt?: number;
   login: string;
+  githubUserId: number;
 }
 
 export interface GithubWebhookCapability {
@@ -141,9 +143,14 @@ export interface GithubWebhookDelivery {
   /**
    * Binds effects to the App owner's organization. Call it only after the
    * signature verifies. The environment fallback routes by the verified
-   * installation ID. Null when no organization exists.
+   * installation ID. Creation re-discovers before binding. Excluded installations return null.
    */
-  bind(verified: { installationId: number | null }): Promise<GithubDeliveryEffects | null>;
+  bind(verified: {
+    installationId: number | null; installationCreated: boolean;
+    deliveryId?: string;
+    revocation?: boolean; targetRenamed?: boolean;
+    account?: { id: number; login: string; type: string };
+  }): Promise<GithubDeliveryEffects | "retry" | null>;
 }
 
 export type GithubPullRequestState = "open" | "closed" | "merged";
@@ -158,11 +165,10 @@ export interface GithubDeliveryEffects {
   /** Marks matching content sources due. */
   contentPushed(push: GithubPushRef): Promise<void>;
   pullRequestChanged(change: { url: string; state: GithubPullRequestState }): Promise<void>;
+  installationRenamed?(installationId: number, account: { id: number; login: string }): Promise<void>;
   installationRemoved(installationId: number): Promise<void>;
   installationSuspended(installationId: number, suspended: boolean): Promise<void>;
   repositorySelectionChanged(installationId: number, repositorySelection: string | undefined): Promise<void>;
-  /** Re-reads installations from GitHub. */
-  discoverInstallations(): Promise<void>;
   /** Persists the event and starts subscription dispatch. */
   emit(event: NormalizedEvent): Promise<void>;
   /** Records a verified delivery that no trigger can ingest. */

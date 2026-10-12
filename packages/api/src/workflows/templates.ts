@@ -773,7 +773,7 @@ export async function listWorkflowTemplateSummaries(
     const pending =
       readinessBySignature.get(signature) ??
       teamServiceReadiness(
-        { db: deps.db, credentials: deps.credentials, plugins: deps.plugins, onePassword: deps.onePassword },
+        { db: deps.db, credentials: deps.credentials, plugins: deps.plugins, onePassword: deps.onePassword, github: deps.github },
         { orgId: caller.orgId, teamId, definition },
       );
     readinessBySignature.set(signature, pending);
@@ -1056,7 +1056,7 @@ export async function installWorkflowTemplate(
     // fund a team run, and an org Slack bot they never connected does.
     // `teamServiceReadiness` is the one predicate (decision 15).
     const readiness = await teamServiceReadiness(
-      { db: deps.db, credentials: deps.credentials, plugins: deps.plugins, onePassword: deps.onePassword },
+      { db: deps.db, credentials: deps.credentials, plugins: deps.plugins, onePassword: deps.onePassword, github: deps.github },
       { orgId: owner.orgId, teamId, definition: summarized.value.definition },
     );
     const refusals = teamArmRefusals(readiness);

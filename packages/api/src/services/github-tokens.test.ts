@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /**
  * Canonical GitHub token resolution tests (GitHub/repo integration plan,
  * Task 4). Covers the full precedence matrix (both purposes ×
@@ -7,18 +8,21 @@
  * sole-installation fallback (positive + NOT-sole negative).
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
+import { verifiedGithubUserId } from "./github-user-credentials.js";
 import { generateKeyPairSync } from "node:crypto";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { orgs, users, githubInstallations } from "../schema/index.js";
-import { saveAppConfig, type GithubAppConfig } from "./github-app.js";
+import { orgs, orgMembers, users, githubInstallations } from "../schema/index.js";
+import { mintInstallationToken, requestInstallationForLogin, saveVerifiedGithubIdentity, saveAppConfig, type GithubAppConfig } from "./github-app.js";
 import {
   GitHubAuthError,
   installationResolvesFor,
   resolveGitHubToken,
+  resolveInstallationApiToken,
   type GitHubTokenDeps,
 } from "./github-tokens.js";
 
@@ -81,6 +85,7 @@ describe("resolveGitHubToken", () => {
       orgId,
       installationId: 999,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -103,6 +108,65 @@ describe("resolveGitHubToken", () => {
   function oauthFixtureCalls(): number {
     return (fixture?.calls ?? []).filter((c) => c.path === "/login/oauth/access_token").length;
   }
+
+  describe("personal installation authorization", () => {
+    async function personalFixture() {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await db.insert(orgMembers).values({ orgId, userId, role: "member" });
+      await saveUserGithub({ type: "oauth2", accessToken: "identity-token", metadata: { login: "alice", identityOnly: true } });
+      await seedInstallation({ accountLogin: "alice", accountId: githubAccountId("alice"), accountType: "User", linkedUserId: userId });
+      fixture = startGithubFixture({ getUser: () => ({ body: { login: "alice" } }), createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }) });
+    }
+
+    it.each(["other-member", undefined])("refuses personal app tokens for actor %s", async (actor) => {
+      await personalFixture();
+      await expect(resolveGitHubToken(deps(), { orgId, userId: actor, purpose: "git", auth: "app",
+        repo: { owner: "alice", name: "private" } })).rejects.toBeInstanceOf(GitHubAuthError);
+      expect(await resolveGitHubToken(deps(), { orgId, userId: actor, purpose: "git",
+        repo: { owner: "alice", name: "private" } })).toEqual({ token: null, source: "none" });
+      expect(await resolveInstallationApiToken(deps(), orgId, "alice", actor)).toBeNull();
+      expect(await installationResolvesFor(deps(), orgId, "alice", { userId: actor })).toEqual({ ok: false, gap: "no_installations" });
+      expect(fixture?.calls.filter((call) => call.path.includes("access_tokens"))).toEqual([]);
+    });
+
+    it("allows the linked member through canonical and installation-only resolution", async () => {
+      await personalFixture();
+      expect(await resolveGitHubToken(deps(), { orgId, userId, purpose: "git", auth: "app",
+        repo: { owner: "alice", name: "private" } })).toEqual({ token: "inst-999", source: "installation" });
+      expect(await resolveInstallationApiToken(deps(), orgId, "alice", userId)).toBe("inst-999");
+    });
+
+    it("keeps anonymous sole-org resolution with a personal installation present", async () => {
+      await personalFixture();
+      await seedInstallation({ installationId: 111, accountLogin: "acme", accountId: githubAccountId("acme"), accountType: "Organization" });
+      expect(await resolveGitHubToken(deps(), { orgId, purpose: "api" })).toEqual({ token: "inst-111", source: "installation" });
+      expect(await resolveGitHubToken(deps(), { orgId, purpose: "api", auth: "app" })).toEqual({ token: "inst-111", source: "installation" });
+      expect(await resolveInstallationApiToken(deps(), orgId)).toBe("inst-111");
+      expect(await installationResolvesFor(deps(), orgId, undefined)).toEqual({ ok: true });
+    });
+  });
+
+  it("keeps User-owned App installations org-wide with personal installs disabled", async () => {
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await db.update(orgs).set({ allowPersonalInstallations: false }).where(eq(orgs.id, orgId));
+    fixture = startGithubFixture({ getApp: () => ({ body: { owner: { id: githubAccountId("ACME"), login: "ACME", type: "User" } } }),
+      listInstallations: () => ({ body: [{ id: 999, account: { login: "acme", type: "User" } }] }),
+      createInstallationToken: () => ({ body: { token: "owner-installation", expires_at: new Date(NOW + 3600_000).toISOString() } }),
+    });
+    const { discoverInstallations } = await import("./github-app.js");
+    expect(await discoverInstallations(deps(), orgId)).toMatchObject([{ accountType: "User", linkedUserId: null }]);
+    for (const actor of [userId, undefined]) {
+      expect(await resolveGitHubToken(deps(), { orgId, userId: actor, purpose: "git", auth: "app",
+        repo: { owner: "acme", name: "private" } })).toEqual({ token: "owner-installation", source: "installation" });
+      expect(await resolveInstallationApiToken(deps(), orgId, undefined, actor)).toBe("owner-installation");
+    }
+    expect(await resolveGitHubToken(deps(), { orgId, purpose: "api" })).toEqual({ token: "owner-installation", source: "installation" });
+    expect(await installationResolvesFor(deps(), orgId, undefined)).toEqual({ ok: true });
+    expect(await installationResolvesFor(deps(), orgId, "ACME", { strictOwner: true })).toEqual({ ok: true });
+    expect(fixture.calls.filter((call) => call.path.includes("access_tokens"))).toHaveLength(1);
+  });
 
   // ── explicit auth: "app" ─────────────────────────────────────────────
   describe('explicit auth: "app"', () => {
@@ -350,13 +414,13 @@ describe("resolveGitHubToken", () => {
       expect(result).toEqual({ token: "inst-999", source: "installation" });
     });
 
-    it("does NOT use the sole-installation fallback when TWO installations exist", async () => {
+    it("ignores excluded org rows in the sole-installation fallback", async () => {
       await saveAppConfig({ credentials }, orgId, appConfig);
-      await seedInstallation({ id: "ghi_1", installationId: 111, accountLogin: "acme" });
-      await seedInstallation({ id: "ghi_2", installationId: 222, accountLogin: "other" });
+      await seedInstallation({ id: "ghi_1", installationId: 111, accountLogin: "acme", accountId: githubAccountId("acme") });
+      await seedInstallation({ id: "ghi_2", installationId: 222, accountLogin: "other", accountId: githubAccountId("other") });
       fixture = startGithubFixture();
 
-      await expect(resolveGitHubToken(deps(), { orgId, userId, purpose: "api" })).rejects.toThrow(GitHubAuthError);
+      expect(await resolveGitHubToken(deps(), { orgId, userId, purpose: "api" })).toEqual({ token: "fixture-installation-token", source: "installation" });
     });
 
     it("THROWS with a connect hint when nothing is available", async () => {
@@ -451,6 +515,52 @@ describe("resolveGitHubToken", () => {
     });
   });
 
+  describe("owner-lookup failures preserve auto fallthrough", () => {
+    it.each([401, 503] as const)("missing row skips GET /app despite an upstream %s", async (status) => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await saveUserGithub({ type: "oauth2", accessToken: "user-token", expiresAt: NOW + 3600_000 });
+      fixture = startGithubFixture({ getApp: () => ({ status, body: {} }) });
+      expect(await mintInstallationToken(deps(), orgId, "facebook", userId)).toBeNull();
+      expect(await resolveGitHubToken(deps(), {
+        orgId, userId, purpose: "git", repo: { owner: "facebook", name: "react" },
+      })).toMatchObject({ token: "user-token", source: "user" });
+      await requestInstallationForLogin(deps(), orgId, "facebook");
+      expect(fixture.calls.some((call) => call.path === "/app" || call.path === "/app/installations")).toBe(false);
+    });
+
+    it.each([401, 503] as const)("existing row + GET /app %s still uses the user's token", async (status) => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await saveUserGithub({ type: "oauth2", accessToken: "user-token", expiresAt: NOW + 3600_000 });
+      fixture = startGithubFixture({ getApp: () => ({ status, body: {} }) });
+      expect(await resolveGitHubToken(deps(), {
+        orgId, userId, purpose: "git", repo: { owner: "acme", name: "repo" },
+      })).toMatchObject({ token: "user-token", source: "user" });
+      expect(fixture.calls.filter((call) => call.path === "/app")).toHaveLength(1);
+      expect(fixture.calls.some((call) => call.path.includes("access_tokens"))).toBe(false);
+    });
+
+    it("git/auto falls through a failed owner lookup to a personal PAT", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await saveUserGithub({ type: "api_key", accessToken: "personal-pat" });
+      fixture = startGithubFixture({ getApp: () => ({ status: 401, body: {} }) });
+      expect(await resolveGitHubToken(deps(), {
+        orgId, userId, purpose: "git", repo: { owner: "acme", name: "repo" },
+      })).toMatchObject({ token: "personal-pat", source: "pat" });
+    });
+
+    it("api/auto falls through failed owner and sole lookups to the org PAT", async () => {
+      await saveAppConfig({ credentials }, orgId, appConfig);
+      await seedInstallation();
+      await saveOrgGithub({ type: "api_key", accessToken: "org-pat" });
+      fixture = startGithubFixture({ getApp: () => ({ status: 401, body: {} }) });
+      expect(await resolveGitHubToken(deps(), {
+        orgId, purpose: "api", repo: { owner: "acme", name: "repo" },
+      })).toMatchObject({ token: "org-pat", source: "pat" });
+    });
+  });
+
   // ── refresh subsystem ────────────────────────────────────────────────
   describe("refresh subsystem", () => {
     async function seedStaleOAuth(): Promise<void> {
@@ -463,6 +573,44 @@ describe("resolveGitHubToken", () => {
         metadata: { login: "octocat" },
       });
     }
+
+    it("rebinds verified identity to the rotated token and rejects transplanted metadata", async () => {
+      await seedStaleOAuth();
+      fixture = startGithubFixture({ getUser: () => ({ body: { id: 42, login: "octocat" } }), oauthAccessToken: () => ({ body: {
+        access_token: "new-access", refresh_token: "new-refresh", expires_in: 28800,
+      } }) });
+      await saveVerifiedGithubIdentity(deps(), userId, { id: 42, login: "octocat" }, "old-access");
+      await resolveGitHubToken(deps(), { orgId, userId, purpose: "api", auth: "user" });
+      const rotated = await credentials.get({ type: "user", id: userId }, "github");
+      expect(rotated).not.toBeNull();
+      if (!rotated) throw new Error("expected rotated credential");
+      expect(verifiedGithubUserId(deps().key, userId, rotated)).toBe(42);
+      expect(verifiedGithubUserId(deps().key, userId, { ...rotated, accessToken: "different" })).toBeNull();
+      expect(verifiedGithubUserId(deps().key, "another-user", rotated)).toBeNull();
+      expect(verifiedGithubUserId(deps().key, userId, { ...rotated,
+        metadata: { ...rotated.metadata, githubIdentityProof: "short" },
+      })).toBeNull();
+    });
+
+    it.each(["503", "network", "timeout"])("keeps refresh retryable after %s", async (failure) => {
+      await seedStaleOAuth();
+      fixture = startGithubFixture();
+      const fetchImpl: typeof fetch = async (url, init) => {
+        if (String(url).includes("oauth/access_token")) {
+          if (failure === "503") return new Response("", { status: 503 });
+          if (failure === "timeout") throw new DOMException("Timeout", "TimeoutError");
+          throw new Error("Network unavailable");
+        }
+        return fetch(url, init);
+      };
+      await expect(resolveGitHubToken({ ...deps(), fetchImpl }, {
+        orgId, userId, purpose: "api", auth: "user",
+      })).rejects.toThrow("temporarily unavailable");
+      const saved = await credentials.get({ type: "user", id: userId }, "github");
+      expect(saved?.accessToken).toBe("old-access");
+      expect(saved?.refreshToken).toBe("old-refresh");
+      expect(saved?.metadata?.refreshFailedAt).toBeUndefined();
+    });
 
     it("refreshes a stale credential and persists the rotated pair", async () => {
       await seedStaleOAuth();
@@ -543,7 +691,7 @@ describe("resolveGitHubToken", () => {
       );
     });
 
-    it("a throwing loadAppConfig (malformed github_app row) falls through to the next tier in auto and marks refreshFailedAt — never propagates", async () => {
+    it("a malformed App config falls through without poisoning the user credential", async () => {
       // A malformed github_app credential row: metadata.appId is missing, so
       // `loadAppConfig` throws instead of returning null. `performRefresh`
       // must catch this, not let it reject the single-flight promise.
@@ -569,7 +717,7 @@ describe("resolveGitHubToken", () => {
       const persisted = await credentials.get({ type: "user", id: userId }, "github");
       expect(persisted?.accessToken).toBe("old-access"); // credential kept, unrotated
       const metadata = persisted?.metadata as Record<string, unknown>;
-      expect(metadata.refreshFailedAt).toBe(NOW);
+      expect(metadata.refreshFailedAt).toBeUndefined();
     });
   });
 
@@ -593,6 +741,7 @@ describe("resolveGitHubToken", () => {
   // `resolveInstallationApiToken`: the owner's installation first, then the
   // org's sole non-suspended one.
   describe("installationResolvesFor", () => {
+    beforeEach(() => { fixture = startGithubFixture(); });
     it("is no_app when the org has no App configured", async () => {
       await seedInstallation();
       expect(await installationResolvesFor(deps(), orgId, undefined)).toEqual({ ok: false, gap: "no_app" });
@@ -609,17 +758,17 @@ describe("resolveGitHubToken", () => {
       expect(await installationResolvesFor(deps(), orgId, undefined)).toEqual({ ok: false, gap: "no_installations" });
     });
 
-    it("is ambiguous with two installations and no owner", async () => {
+    it("ignores excluded org rows when no owner is named", async () => {
       await saveAppConfig({ credentials }, orgId, appConfig);
       await seedInstallation();
-      await seedInstallation({ id: "ghi_2", installationId: 2, accountLogin: "other" });
-      expect(await installationResolvesFor(deps(), orgId, undefined)).toEqual({ ok: false, gap: "ambiguous", count: 2 });
+      await seedInstallation({ id: "ghi_2", installationId: 2, accountLogin: "other", accountId: githubAccountId("other") });
+      expect(await installationResolvesFor(deps(), orgId, undefined)).toEqual({ ok: true });
     });
 
     it("is ok for the named owner's installation among several, case-insensitively", async () => {
       await saveAppConfig({ credentials }, orgId, appConfig);
       await seedInstallation();
-      await seedInstallation({ id: "ghi_2", installationId: 2, accountLogin: "other" });
+      await seedInstallation({ id: "ghi_2", installationId: 2, accountLogin: "other", accountId: githubAccountId("other") });
       expect(await installationResolvesFor(deps(), orgId, "ACME")).toEqual({ ok: true });
     });
 
@@ -629,11 +778,11 @@ describe("resolveGitHubToken", () => {
       expect(await installationResolvesFor(deps(), orgId, "nobody")).toEqual({ ok: true });
     });
 
-    it("names the owner when it has no installation and the org has several", async () => {
+    it("names a strict owner when only excluded org rows match", async () => {
       await saveAppConfig({ credentials }, orgId, appConfig);
       await seedInstallation();
-      await seedInstallation({ id: "ghi_2", installationId: 2, accountLogin: "other" });
-      expect(await installationResolvesFor(deps(), orgId, "nobody")).toEqual({
+      await seedInstallation({ id: "ghi_2", installationId: 2, accountLogin: "other", accountId: githubAccountId("other") });
+      expect(await installationResolvesFor(deps(), orgId, "nobody", { strictOwner: true })).toEqual({
         ok: false,
         gap: "no_installation_for_owner",
         owner: "nobody",

@@ -9,7 +9,7 @@
  * `resolveGitHubToken(deps, { orgId, userId?, purpose, repo?, auth? })`:
  *
  *   - Explicit `auth: "app"`  → installation token for `repo.owner`, or the
- *     org's SOLE non-suspended installation when no repo is given, or THROW
+ *     org's SOLE non-suspended App-owner installation when no repo is given, or THROW
  *     (`GitHubAuthError`). Never falls back to a user credential or an org
  *     PAT.
  *   - Explicit `auth: "user"` → the USER's healthy App-OAuth/PAT credential,
@@ -22,7 +22,7 @@
  *     public clones proceed bare; a private-repo failure surfaces git's own
  *     error).
  *   - `auto` + `api`: healthy user credential → installation(`repo.owner`)
- *     when a repo is given → the org's SOLE non-suspended installation when
+ *     when a repo is given → the org's SOLE non-suspended App-owner installation when
  *     exactly one exists → healthy org PAT → THROW with a connect hint.
  *
  * ── "Healthy" user credential ───────────────────────────────────────────
@@ -51,20 +51,18 @@
  * `POST {github}/login/oauth/access_token` (the App's client id/secret,
  * `grant_type=refresh_token`). The rotated `{ accessToken, refreshToken,
  * expiresAt }` is persisted, keeping `metadata` (incl. `login`). Refresh
- * failure marks `metadata.refreshFailedAt` (keeping the credential) and the
- * credential is then treated as absent for `auto` / a STRICT throw for
- * explicit `auth: "user"`. Single-flight is an in-module map keyed by
- * org+user+service, cleared in `finally` — two concurrent resolves of the
- * same stale credential hit the refresh endpoint exactly once.
+ * failure marks `metadata.refreshFailedAt` only for permanent authorization
+ * failures. Transient failures remain retryable. The shared credential module
+ * serializes rotation under the credential row lock across pods. It re-reads
+ * the row before exchanging a single-use refresh token.
  *
  * No token material ever appears in an error message or log — errors name
  * the missing/unhealthy credential (the GAP), never the secret.
  */
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import { githubInstallations, orgs } from "../schema/index.js";
-import { resolveGithubUrl } from "./github-env.js";
-import { discoverInstallations, loadAppConfig, mintInstallationToken, type GithubAppDeps } from "./github-app.js";
+import { ensureInstallationAccountIds, requestInstallationDiscovery, installationAccessCondition, loadAppConfig, loadAppOwner, mintInstallationToken, type GithubAppDeps } from "./github-app.js";
 
 export const GITHUB_CREDENTIAL_SERVICE = "github";
 /**
@@ -131,18 +129,6 @@ function nowOf(deps: GitHubTokenDeps): number {
   return (deps.now ?? Date.now)();
 }
 
-function githubBaseUrl(deps: GitHubTokenDeps): string {
-  return deps.githubUrl ?? resolveGithubUrl(process.env);
-}
-
-function githubFetchOf(deps: GitHubTokenDeps): typeof fetch {
-  return deps.fetchImpl ?? fetch;
-}
-
-function userOwner(userId: string): CredentialOwner {
-  return { type: "user", id: userId };
-}
-
 function orgOwner(orgId: string): CredentialOwner {
   return { type: "org", id: orgId };
 }
@@ -151,232 +137,11 @@ function loginOf(metadata: unknown): string | undefined {
   return isRecord(metadata) && typeof metadata.login === "string" ? metadata.login : undefined;
 }
 
-// ── Single-flight refresh ──────────────────────────────────────────────
+export { checkGithubUserRow, isUsableGithubUserRow } from "./github-user-credentials.js";
+import { checkGithubUserRow, resolveUserCredential as resolveUserCredentialWithConfig } from "./github-user-credentials.js";
 
-/** In-module single-flight registry, keyed by `${orgId}:${userId}:${service}`
- * — the org id is part of the key because the refresh hits that org's App
- * config (`loadAppConfig(deps, orgId)`); without it, concurrent refreshes
- * for the same user across two different orgs would collapse onto whichever
- * org's config happened to win the race. A second concurrent resolve of the
- * same stale credential joins the in-flight refresh rather than issuing a
- * duplicate token exchange. Cleared in `finally`, so the next resolve after
- * completion refreshes anew if needed. */
-const refreshInFlight = new Map<string, Promise<StoredCredential | null>>();
-
-function refreshSingleFlight(
-  deps: GitHubTokenDeps,
-  orgId: string,
-  userId: string,
-  cred: StoredCredential,
-): Promise<StoredCredential | null> {
-  const key = `${orgId}:${userId}:${GITHUB_CREDENTIAL_SERVICE}`;
-  const existing = refreshInFlight.get(key);
-  if (existing) return existing;
-  const promise = performRefresh(deps, orgId, userId, cred).finally(() => refreshInFlight.delete(key));
-  refreshInFlight.set(key, promise);
-  return promise;
-}
-
-interface ParsedRefresh {
-  accessToken: string;
-  refreshToken?: string;
-  expiresInMs?: number;
-}
-
-/** GitHub's `POST /login/oauth/access_token` returns HTTP 200 even on error
- * (the error rides an `{ error, error_description }` body), so a missing
- * `access_token` — not just a non-2xx status — is a refresh failure. */
-function parseRefreshResponse(payload: unknown): ParsedRefresh | null {
-  if (!isRecord(payload)) return null;
-  const accessToken = payload.access_token;
-  if (typeof accessToken !== "string" || accessToken.length === 0) return null;
-  const refreshToken = typeof payload.refresh_token === "string" ? payload.refresh_token : undefined;
-  const expiresIn = payload.expires_in;
-  const expiresInMs = typeof expiresIn === "number" ? expiresIn * 1000 : undefined;
-  return { accessToken, refreshToken, expiresInMs };
-}
-
-/** Marks the credential unhealthy (`metadata.refreshFailedAt`) while keeping
- * it otherwise intact, then returns `null`. The credential store stays dumb:
- * liveness lives entirely here. Persisting the marker is itself best-effort
- * — if `credentials.save` throws (store outage, etc.) this still resolves to
- * `null` rather than rejecting, so a failed refresh NEVER propagates as an
- * unhandled rejection out of the single-flight promise. */
-async function markRefreshFailed(
-  deps: GitHubTokenDeps,
-  owner: CredentialOwner,
-  cred: StoredCredential,
-): Promise<null> {
-  try {
-    const metadata = { ...(isRecord(cred.metadata) ? cred.metadata : {}), refreshFailedAt: nowOf(deps) };
-    await deps.credentials.save(owner, GITHUB_CREDENTIAL_SERVICE, { ...cred, metadata });
-  } catch {
-    // Best-effort marker — see doc comment above.
-  }
-  return null;
-}
-
-/** Every failure mode here — `loadAppConfig` throwing on a malformed
- * `github_app` row, the fetch rejecting, a non-2xx/unparseable response, or
- * `credentials.save` rejecting on the rotated credential — funnels to
- * `markRefreshFailed` and resolves `null` (never rejects). This is load-
- * bearing for `auto` mode: a throwing refresh must fall through to the next
- * resolution tier, not blow up the caller. `resolveUserCredential` maps a
- * `null` here to a STRICT throw only for explicit `auth: "user"`. */
-async function performRefresh(
-  deps: GitHubTokenDeps,
-  orgId: string,
-  userId: string,
-  cred: StoredCredential,
-): Promise<StoredCredential | null> {
-  const owner = userOwner(userId);
-  try {
-    const config = await loadAppConfig(deps, orgId);
-    if (!config || !cred.refreshToken) return markRefreshFailed(deps, owner, cred);
-
-    let res: Response;
-    try {
-      res = await githubFetchOf(deps)(`${githubBaseUrl(deps)}/login/oauth/access_token`, {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-          "User-Agent": "Valet-App",
-        },
-        body: JSON.stringify({
-          client_id: config.oauthClientId,
-          client_secret: config.oauthClientSecret,
-          grant_type: "refresh_token",
-          refresh_token: cred.refreshToken,
-        }),
-      });
-    } catch {
-      return markRefreshFailed(deps, owner, cred);
-    }
-    if (!res.ok) return markRefreshFailed(deps, owner, cred);
-
-    let payload: unknown;
-    try {
-      payload = await res.json();
-    } catch {
-      return markRefreshFailed(deps, owner, cred);
-    }
-    const parsed = parseRefreshResponse(payload);
-    if (!parsed) return markRefreshFailed(deps, owner, cred);
-
-    const now = nowOf(deps);
-    const rotated: StoredCredential = {
-      ...cred,
-      accessToken: parsed.accessToken,
-      refreshToken: parsed.refreshToken ?? cred.refreshToken,
-      expiresAt: parsed.expiresInMs !== undefined ? now + parsed.expiresInMs : undefined,
-    };
-    // `refreshFailedAt` is intentionally never cleared here: a credential
-    // already marked unhealthy is rejected by `resolveUserCredential` before
-    // it ever reaches a refresh attempt, so recovery is a reconnect (which
-    // overwrites the row), not a successful refresh.
-    await deps.credentials.save(owner, GITHUB_CREDENTIAL_SERVICE, rotated);
-    return rotated;
-  } catch {
-    return markRefreshFailed(deps, owner, cred);
-  }
-}
-
-// ── User-credential health ─────────────────────────────────────────────
-
-/** The fields the health rules read. `StoredCredential` and the engine's
- * `Credential` both satisfy it, so a row read through any store shape can
- * be checked. */
-export interface GithubUserRowLike {
-  accessToken?: string;
-  refreshToken?: string;
-  expiresAt?: number;
-  metadata?: unknown;
-}
-
-export type GithubUserRowHealth =
-  | { ok: true; token: string; state: "pat" | "fresh" | "stale-refreshable" }
-  | { ok: false; reason: string };
-
-/**
- * The ONE definition of a usable user `github` row, with no I/O: it must
- * hold a token, must not be identity-only (sign-in scopes cannot reach
- * repositories), must not be marked by a failed refresh, and must be fresh
- * or refreshable. `resolveUserCredential` applies it before it refreshes;
- * the delegate route and the workflow invoker's team branch apply it so a
- * row a user's own runs would refuse is never shared with, or acted on by,
- * a team. `reason` names the gap for a caller that reports it.
- */
-export function checkGithubUserRow(cred: GithubUserRowLike, now: number): GithubUserRowHealth {
-  if (!cred.accessToken) {
-    return { ok: false, reason: "no GitHub account is connected for this user" };
-  }
-  const metadata = cred.metadata;
-  if (isRecord(metadata) && metadata.identityOnly === true) {
-    return {
-      ok: false,
-      reason: "the connected GitHub account is identity-only (sign-in scopes) and cannot access repositories; reconnect GitHub with repo access",
-    };
-  }
-  if (isRecord(metadata) && metadata.refreshFailedAt !== undefined && metadata.refreshFailedAt !== null) {
-    return { ok: false, reason: "the connected GitHub credential needs to be reconnected (a previous token refresh failed)" };
-  }
-  // PAT: no expiry and no refresh token → always fresh.
-  if (cred.expiresAt === undefined && cred.refreshToken === undefined) {
-    return { ok: true, token: cred.accessToken, state: "pat" };
-  }
-  const stale = cred.expiresAt !== undefined && cred.expiresAt - STALE_MARGIN_MS <= now;
-  if (!stale) {
-    return { ok: true, token: cred.accessToken, state: "fresh" };
-  }
-  if (!cred.refreshToken) {
-    return { ok: false, reason: "the connected GitHub credential has expired and cannot be refreshed; reconnect GitHub" };
-  }
-  return { ok: true, token: cred.accessToken, state: "stale-refreshable" };
-}
-
-/** `checkGithubUserRow` as a boolean, for callers that only branch on it. */
-export function isUsableGithubUserRow(cred: GithubUserRowLike, now: number): boolean {
-  return checkGithubUserRow(cred, now).ok;
-}
-
-type UserCredResult =
-  | { ok: true; token: string; source: "user" | "pat"; login?: string }
-  | { ok: false; reason: string };
-
-/** Resolves the user's `github` credential to a healthy token, refreshing a
- * stale App-OAuth credential in-place. Returns `{ ok: false, reason }` (the
- * reason names the gap for a STRICT `auth: "user"` throw) rather than
- * throwing, so `auto` can treat an absent/unhealthy credential as a
- * fallthrough. */
-async function resolveUserCredential(
-  deps: GitHubTokenDeps,
-  orgId: string,
-  userId: string | undefined,
-): Promise<UserCredResult> {
-  if (!userId) {
-    return { ok: false, reason: "no user is associated with this request to resolve a user GitHub credential" };
-  }
-  const cred = await deps.credentials.get(userOwner(userId), GITHUB_CREDENTIAL_SERVICE);
-  if (!cred) {
-    return { ok: false, reason: "no GitHub account is connected for this user" };
-  }
-  const health = checkGithubUserRow(cred, nowOf(deps));
-  if (!health.ok) return health;
-  const login = loginOf(cred.metadata);
-  if (health.state === "pat") {
-    return { ok: true, token: health.token, source: "pat", login };
-  }
-  if (health.state === "fresh") {
-    return { ok: true, token: health.token, source: "user", login };
-  }
-
-  // Stale App-OAuth credential with a refresh token.
-  const rotated = await refreshSingleFlight(deps, orgId, userId, cred);
-  if (!rotated || !rotated.accessToken) {
-    return { ok: false, reason: "the connected GitHub credential could not be refreshed; reconnect GitHub" };
-  }
-  return { ok: true, token: rotated.accessToken, source: "user", login: loginOf(rotated.metadata) ?? login };
+function resolveUserCredential(deps: GitHubTokenDeps, orgId: string, userId: string | undefined, identityOnly = false) {
+  return resolveUserCredentialWithConfig(deps, orgId, userId, (id) => loadAppConfig(deps, id), identityOnly);
 }
 
 // ── Org-owned PAT ────────────────────────────────────────────────────────
@@ -427,6 +192,16 @@ export async function resolveUserApiToken(
   return result.ok ? { token: result.token, login: result.login } : null;
 }
 
+/** Refresh-aware identity token. It does not grant direct repository access. */
+export async function resolveUserIdentityToken(
+  deps: GitHubTokenDeps,
+  orgId: string,
+  userId: string,
+): Promise<string | null> {
+  const result = await resolveUserCredential(deps, orgId, userId, true);
+  return result.ok ? result.token : null;
+}
+
 /** Narrow read-only wrapper over `resolveOrgPatCredential`, for the same
  * reason as `resolveUserApiToken` above — the org-PAT tier of listing needs
  * the health check without the `auto`/`app`/`user` selection machinery
@@ -444,24 +219,33 @@ export async function resolveOrgPatApiToken(deps: GitHubTokenDeps, orgId: string
  * malformed `github_app` row. The wrapped message names the failure class
  * and carries the underlying message (which itself never includes secret or
  * response-body material — only a status code at most). */
-async function mintInstallation(deps: GitHubTokenDeps, orgId: string, accountLogin: string): Promise<string | null> {
+async function mintInstallation(deps: GitHubTokenDeps, orgId: string, accountLogin: string, userId?: string): Promise<string | null> {
   try {
-    return await mintInstallationToken(deps, orgId, accountLogin);
+    return await mintInstallationToken(deps, orgId, accountLogin, userId);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     throw new GitHubAuthError(`installation token minting failed for ${accountLogin}: ${detail}`);
   }
 }
 
-/** The org's SOLE non-suspended installation token, when exactly one
- * installation exists. `null` when there are zero or more than one — the
+/** The org's SOLE non-suspended App-owner installation token, regardless of
+ * GitHub account type. `null` when there are zero or more than one — the
  * anonymous org-token path only auto-applies when the choice is
  * unambiguous. */
 async function resolveSoleInstallationToken(deps: GitHubTokenDeps, orgId: string): Promise<string | null> {
-  const rows = await deps.db
-    .select()
-    .from(githubInstallations)
+  await ensureInstallationAccountIds(deps, orgId);
+  const candidates = await deps.db.select().from(githubInstallations)
     .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.suspended, false)));
+  if (candidates.length === 0) return null;
+  let owner: import("./github-app.js").GithubAccountIdentity;
+  try {
+    const config = await loadAppConfig(deps, orgId);
+    if (!config) return null;
+    owner = await loadAppOwner(deps, orgId, config);
+  } catch {
+    return null;
+  }
+  const rows = candidates.filter((row) => row.accountId === owner.id);
   if (rows.length !== 1) return null;
   return mintInstallation(deps, orgId, rows[0].accountLogin);
 }
@@ -479,10 +263,11 @@ export async function resolveInstallationApiToken(
   deps: GitHubTokenDeps,
   orgId: string,
   repoOwner?: string,
+  userId?: string,
 ): Promise<string | null> {
-  await ensureInstallationsSynced(deps, orgId);
+  if (!repoOwner) await ensureInstallationsSynced(deps, orgId);
   if (repoOwner) {
-    const token = await mintInstallation(deps, orgId, repoOwner);
+    const token = await mintInstallation(deps, orgId, repoOwner, userId);
     // `null` alone means "no installation for this owner" — the one case
     // the sole-installation fallback is for. Any other value, even an
     // empty string, is a mint result and must surface, not be masked by
@@ -496,6 +281,7 @@ export async function resolveInstallationApiToken(
 export type InstallationResolution =
   | { ok: true }
   | { ok: false; gap: "no_app" }
+  | { ok: false; gap: "app_unavailable" }
   | { ok: false; gap: "no_installations" }
   | { ok: false; gap: "no_installation_for_owner"; owner: string }
   | { ok: false; gap: "ambiguous"; count: number };
@@ -511,32 +297,45 @@ export type InstallationResolution =
  * `dynamicOwner` defers an expression's owner match until install or run time.
  * The template installer checks the exact repository before arming events.
  *
- * Reads the installations table as it stands. The lazy sync that
- * `resolveInstallationApiToken` runs on an empty table needs the App's
- * signing key, which a readiness caller does not hold; an App installed in
- * manual webhook mode and never refreshed reads as `no_installations` until
- * a run or "Refresh installations" fills the table.
+ * Reads the installations table as it stands and verifies the App owner.
+ * Transient failures use persisted owner authority; absent authority is unavailable. Readiness does not run lazy discovery;
+ * a manual installation reads as `no_installations` until a run or
+ * "Refresh installations" fills the table.
  */
 export async function installationResolvesFor(
-  deps: Pick<GithubAppDeps, "db" | "credentials" | "env">,
+  deps: Pick<GithubAppDeps, "db" | "credentials" | "env" | "apiUrl" | "fetchImpl" | "now">,
   orgId: string,
   repoOwner: string | undefined,
-  options: { strictOwner?: boolean; dynamicOwner?: boolean } = {},
+  options: { strictOwner?: boolean; dynamicOwner?: boolean; userId?: string } = {},
 ): Promise<InstallationResolution> {
-  if (!(await loadAppConfig(deps, orgId))) return { ok: false, gap: "no_app" };
+  const config = await loadAppConfig(deps, orgId);
+  if (!config) return { ok: false, gap: "no_app" };
+  let owner: import("./github-app.js").GithubAccountIdentity;
+  try {
+    owner = await loadAppOwner(deps, orgId, config);
+  } catch {
+    return { ok: false, gap: "app_unavailable" };
+  }
+  await ensureInstallationAccountIds(deps, orgId);
+  const [unverified] = await deps.db.select({ id: githubInstallations.id }).from(githubInstallations)
+    .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.suspended, false),
+      isNull(githubInstallations.accountId))).limit(1);
+  if (unverified) return { ok: false, gap: "app_unavailable" };
   const rows = await deps.db
-    .select({ accountLogin: githubInstallations.accountLogin })
+    .select({ accountLogin: githubInstallations.accountLogin, accountId: githubInstallations.accountId })
     .from(githubInstallations)
-    .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.suspended, false)));
+    .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.suspended, false),
+      installationAccessCondition(owner, options.userId)));
   if (rows.length === 0) return { ok: false, gap: "no_installations" };
   if (options.dynamicOwner && !repoOwner) return { ok: true };
   // Same case-insensitive match as `mintInstallationToken`.
   if (repoOwner && rows.some((row) => row.accountLogin.toLowerCase() === repoOwner.toLowerCase())) {
     return { ok: true };
   }
-  if (rows.length === 1 && !(options.strictOwner && repoOwner)) return { ok: true };
+  const orgRows = rows.filter((row) => row.accountId === owner.id);
+  if (orgRows.length === 1 && !(options.strictOwner && repoOwner)) return { ok: true };
   if (repoOwner) return { ok: false, gap: "no_installation_for_owner", owner: repoOwner };
-  return { ok: false, gap: "ambiguous", count: rows.length };
+  return { ok: false, gap: "ambiguous", count: orgRows.length };
 }
 
 // ── Lazy installation sync ──────────────────────────────────────────────
@@ -546,25 +345,11 @@ export async function installationResolvesFor(
  * clicks "Refresh installations". When an App config exists but the
  * installations table is empty, sync once (throttled per process+org so a
  * genuinely uninstalled App doesn't hammer GitHub on every tool call). */
-const lastLazyDiscovery = new Map<string, number>();
-const LAZY_DISCOVERY_MIN_INTERVAL_MS = 60_000;
-
 async function ensureInstallationsSynced(deps: GitHubTokenDeps, orgId: string): Promise<void> {
-  const rows = await deps.db
-    .select({ id: githubInstallations.id })
-    .from(githubInstallations)
-    .where(eq(githubInstallations.orgId, orgId))
-    .limit(1);
-  if (rows.length > 0) return;
-  const last = lastLazyDiscovery.get(orgId) ?? 0;
-  if (Date.now() - last < LAZY_DISCOVERY_MIN_INTERVAL_MS) return;
-  lastLazyDiscovery.set(orgId, Date.now());
-  try {
-    await discoverInstallations(deps, orgId);
-  } catch (err) {
-    // Best-effort: resolution continues and reports its own state.
-    console.error(`github lazy installation discovery failed for org ${orgId}:`, err);
-  }
+  await ensureInstallationAccountIds(deps, orgId);
+  const [row] = await deps.db.select({ id: githubInstallations.id }).from(githubInstallations)
+    .where(eq(githubInstallations.orgId, orgId)).limit(1);
+  if (!row) await requestInstallationDiscovery(deps, orgId);
 }
 
 // ── The resolution function ────────────────────────────────────────────
@@ -574,12 +359,14 @@ export async function resolveGitHubToken(
   req: ResolveGitHubTokenRequest,
 ): Promise<ResolvedGitHubToken> {
   const auth = req.auth ?? "auto";
-  await ensureInstallationsSynced(deps, req.orgId);
+  // Repo-scoped requests use row-first minting and nonblocking targeted recovery.
+  // They must not wait on a full listing before the user/PAT tiers can run.
+  if (!req.repo && auth !== "user") await ensureInstallationsSynced(deps, req.orgId);
 
   // ── Explicit selections are strict — no fallback across them. ──
   if (auth === "app") {
     if (req.repo) {
-      const token = await mintInstallation(deps, req.orgId, req.repo.owner);
+      const token = await mintInstallation(deps, req.orgId, req.repo.owner, req.userId);
       if (!token) {
         throw new GitHubAuthError(
           `the GitHub App is not installed on ${req.repo.owner} — open Settings → Organization → GitHub and install it on ${req.repo.owner}`,
@@ -608,7 +395,7 @@ export async function resolveGitHubToken(
   if (req.purpose === "git") {
     // installation(owner) → user → org PAT → tokenless.
     if (req.repo) {
-      const installation = await mintInstallation(deps, req.orgId, req.repo.owner);
+      const installation = await mintInstallation(deps, req.orgId, req.repo.owner, req.userId);
       if (installation) return { token: installation, source: "installation" };
     }
     const user = await resolveUserCredential(deps, req.orgId, req.userId);
@@ -623,7 +410,7 @@ export async function resolveGitHubToken(
   if (user.ok) return { token: user.token, source: user.source, login: user.login };
 
   if (req.repo) {
-    const installation = await mintInstallation(deps, req.orgId, req.repo.owner);
+    const installation = await mintInstallation(deps, req.orgId, req.repo.owner, req.userId);
     if (installation) return { token: installation, source: "installation" };
   }
 

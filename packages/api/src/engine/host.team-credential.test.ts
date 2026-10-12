@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Team-owned sessions resolve credentials from the team principal, not the
@@ -107,6 +108,7 @@ describe("EngineHost team-owned session credentials", () => {
       orgId,
       installationId: 333,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -174,6 +176,7 @@ describe("EngineHost team-owned session credentials", () => {
       orgId,
       installationId: 444,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -591,6 +594,7 @@ describe("EngineHost team-owned session credentials", () => {
         orgId,
         installationId: 555,
         accountLogin: "acme",
+        accountId: githubAccountId("acme"),
         accountType: "Organization",
         repositorySelection: "all",
         suspended: false,

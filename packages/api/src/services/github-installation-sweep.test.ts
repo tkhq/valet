@@ -175,14 +175,15 @@ describe("runInstallationSweepTick", () => {
   function stubFetch(failFor: string[] = []): typeof fetch {
     const impl = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : input.toString();
-      fetchCalls.push(url);
+      if (!url.endsWith("/app")) fetchCalls.push(url);
       const appId = appIdOf(init);
       if (failFor.includes(appId)) return new Response("bad credentials", { status: 401 });
+      if (url.endsWith("/app")) return Response.json({ owner: { id: Number(appId), login: `acct-${appId}` } });
       return new Response(
         JSON.stringify([
           {
             id: Number(appId),
-            account: { login: `acct-${appId}`, type: "Organization" },
+            account: { id: Number(appId), login: `acct-${appId}`, type: "Organization" },
             repository_selection: "all",
             suspended_at: null,
           },
@@ -294,6 +295,22 @@ describe("runInstallationSweepTick", () => {
     expect(await installationCount("org2")).toBe(1);
     expect(state.get("org1")?.failures).toBe(1);
     expect(state.get("org2")?.failures).toBe(0);
+  });
+
+  it("backs off a stale snapshot without recording an empty success", async () => {
+    await saveAppConfig({ credentials }, "org1", config("111"));
+    const state = createSweepState();
+    const native = stubFetch();
+    const fetchImpl: typeof fetch = async (url, init) => {
+      if (String(url).includes("/app/installations")) {
+        await db.update(orgs).set({ githubInstallationRevision: 1 }).where(eq(orgs.id, "org1"));
+      }
+      return native(url, init);
+    };
+    expect(await runInstallationSweepTick(deps({ fetchImpl }), state)).toBeNull();
+    expect(state.get("org1")).toMatchObject({ failures: 1, emptyStreak: 0 });
+    expect(state.get("org1")!.nextDueAt).toBeGreaterThan(NOW);
+    expect(await installationCount("org1")).toBe(0);
   });
 
   it("backs a failing org off, and clears the backoff once the check succeeds", async () => {

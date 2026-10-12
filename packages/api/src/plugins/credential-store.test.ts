@@ -38,6 +38,22 @@ describe("PgCredentialStore", () => {
 
   describeCredentialStoreContract(() => freshStore());
 
+  it("serializes rotation across separate store clients and re-reads the latest token", async () => {
+    const first = await freshStore();
+    const second = new PgCredentialStore(db, deriveSecretKey("test-key"));
+    await first.save(userOwner, "github", { type: "oauth2", accessToken: "old", refreshToken: "single-use" });
+    let exchanges = 0;
+    const rotate = (store: PgCredentialStore) => store.withLock(userOwner, "github", async (locked) => {
+      const row = await locked.get(userOwner, "github");
+      if (row?.refreshToken !== "single-use") return row?.accessToken;
+      exchanges++;
+      await locked.save(userOwner, "github", { type: "oauth2", accessToken: "new", refreshToken: "rotated" });
+      return "new";
+    });
+    expect(await Promise.all([rotate(first), rotate(second)])).toEqual(["new", "new"]);
+    expect(exchanges).toBe(1);
+  });
+
   it("overwrites on save (upsert) and updates updated_at; still exactly one row", async () => {
     let now = 1_000;
     const store = await freshStore(() => now);

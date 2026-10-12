@@ -59,6 +59,17 @@ afterEach(async () => {
 });
 
 describe("PUT /api/credentials/:service", () => {
+  it("rejects caller-supplied GitHub identity metadata", async () => {
+    api = await bootTestApi();
+    const response = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT", headers: HEADERS,
+      body: JSON.stringify({ type: "oauth2", accessToken: "not-alices-token", metadata: { login: "alice" } }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "GitHub login metadata is reserved. Connect GitHub through the OAuth flow in Settings." });
+    expect(await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github")).toBeNull();
+  });
+
   it("saves an api_key credential and GET reports it connected without leaking the token", async () => {
     api = await bootTestApi();
 

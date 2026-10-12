@@ -117,7 +117,7 @@ export async function appManifest(
     redirect_url: `${apiBase}${GITHUB_APP_SETUP_PATH}`,
     callback_urls: [`${apiBase}${GITHUB_CONNECT_CALLBACK_PATH}`],
     ...(webhookOn ? { hook_attributes: { url: `${apiBase}${GITHUB_APP_WEBHOOK_PATH}` } } : {}),
-    public: false,
+    public: await app.allowPersonalInstallations(),
     // GitHub delivers `installation` and `installation_repositories` to
     // every App, and rejects a manifest that lists them.
     default_events: webhookOn ? (eventsOverride ?? triggerEvents) : [],

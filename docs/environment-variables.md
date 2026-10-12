@@ -293,6 +293,20 @@ env-fallback entry in
 `docs/specs/2026-07-16-github-repo-integration-design.md` has the full
 semantics.
 
+Personal installations require a public App. If `allowPersonalInstallations` is on, make the App public:
+
+1. Open GitHub App settings.
+2. Select **Advanced**.
+3. Select **Make public**.
+
+Deploy the installation authorization checks before you make an existing App public.
+A private App can install only on the account that owns it.
+
+**Deployment compatibility:** GitHub Organization installations other than the App owner's are excluded.
+Existing deployments lose App-token access and webhooks if the App owner differs from the organization where it is installed.
+Operators must re-register the App under the organization that installs it, or use PAT/OAuth credentials.
+PAT/OAuth credentials provide token access, not the excluded App's webhooks.
+
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `GITHUB_APP_ID` | Yes | The App's numeric id |

@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /**
  * Route parity for the GitHub HTTP surface. Each case runs against the legacy
  * URL and the canonical plugin URL, so both answer with the same status and
@@ -220,7 +221,7 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
     async function seedInstallation(): Promise<void> {
       const now = Date.now();
       await api!.providers.db.insert(githubInstallations).values({
-        id: "ghi_parity", orgId: "local-org", installationId: 999, accountLogin: "acme",
+        id: "ghi_parity", orgId: "local-org", installationId: 999, accountLogin: "acme", accountId: githubAccountId("acme"),
         accountType: "Organization", repositorySelection: "all", suspended: false, createdAt: now, updatedAt: now,
       });
     }
@@ -262,6 +263,7 @@ describe.each(SURFACES)("$name GitHub routes", ({ url }) => {
       Object.assign(process.env, ENV_APP);
       api = await bootTestApi({ plugins: [githubPlugin] });
       await seedInstallation();
+      useFixture();
       // Whitespace and key order differ from JSON.stringify output on purpose.
       const raw = '{ "installation": {"id":999},  "action":"suspend" }\n';
       expect(await deliver(raw, { "x-github-event": "installation", "x-hub-signature-256": sign(raw, ENV_APP.GITHUB_APP_WEBHOOK_SECRET) })).toEqual({

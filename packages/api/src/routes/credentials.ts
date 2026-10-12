@@ -390,6 +390,12 @@ credentialsRouter.put("/:service", async (c) => {
     return c.json({ error: `type must be one of ${CREDENTIAL_TYPES.join("|")}` }, 400);
   }
 
+  // Only the GitHub OAuth callback can establish the login used for personal
+  // installation ownership. A caller must not claim another account in metadata.
+  if (service === GITHUB_CREDENTIAL_SERVICE && body.metadata && typeof body.metadata === "object" && ["login", "githubUserId", "githubIdentityProof"].some((field) => field in body.metadata!)) {
+    return c.json({ error: "GitHub login metadata is reserved. Connect GitHub through the OAuth flow in Settings." }, 400);
+  }
+
   // `metadata.onepassword` is a write-once-by-this-route field: the ONLY
   // place a `{reference, tokenScope}` pair may land in a stored credential's
   // metadata is the validated `body.onepassword` branch below, which runs

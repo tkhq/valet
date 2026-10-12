@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 import linearEventPlugin from "@valet/plugin-linear/plugin";
 import { generateKeyPairSync } from "node:crypto";
 /**
@@ -737,20 +738,21 @@ describe("listWorkflowTemplateSummaries in a team workspace", () => {
     await seedTeam("team-list-4", [OWNER.userId]);
     await credentials.save({ type: "org", id: OWNER.orgId }, "github_app", {
       type: "api_key",
-      apiKey: "-----BEGIN RSA PRIVATE KEY-----\nkey\n-----END RSA PRIVATE KEY-----",
+      apiKey: generateKeyPairSync("rsa", { modulusLength: 2048,
+        privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey,
       accessToken: "client-secret",
       refreshToken: "webhook-secret",
       metadata: { appId: "1", appSlug: "valet", oauthClientId: "iv1", htmlUrl: "https://github.com/apps/valet" },
     });
 
     await db.insert(githubInstallations).values({
-      id: "app-list", orgId: OWNER.orgId, installationId: 1, accountLogin: "acme",
+      id: "app-list", orgId: OWNER.orgId, installationId: 1, accountLogin: "acme", accountId: githubAccountId("acme"),
       accountType: "Organization", repositorySelection: "selected", suspended: false,
       createdAt: 1000, updatedAt: 1000,
     });
-    const list = await listWorkflowTemplateSummaries(deps([githubPlugin]), OWNER, {
-      teamId: "team-list-4",
-    });
+    const list = await listWorkflowTemplateSummaries({ ...deps([githubPlugin]),
+      github: { fetchImpl: async () => Response.json({ owner: { id: githubAccountId("acme"), login: "acme" } }) },
+    }, OWNER, { teamId: "team-list-4" });
     expect(list.find((t) => t.id === "github-app-issues")?.requires).toEqual([
       { service: "github", connected: true, organizationProvided: true },
     ]);
@@ -1449,7 +1451,7 @@ describe("team GitHub template repository prerequisites", () => {
       metadata: { appId: "1", appSlug: "test", oauthClientId: "iv1", htmlUrl: "https://github.com/apps/test" },
     });
     await db.insert(githubInstallations).values({
-      id: "review-app", orgId: OWNER.orgId, installationId: 1, accountLogin: "acme",
+      id: "review-app", orgId: OWNER.orgId, installationId: 1, accountLogin: "acme", accountId: githubAccountId("acme"),
       accountType: "Organization", repositorySelection: "selected", suspended: false,
       createdAt: 1000, updatedAt: 1000,
     });
@@ -1466,6 +1468,7 @@ describe("team GitHub template repository prerequisites", () => {
     let checks = 0;
     const dependencies = deps(bundledPlugins);
     dependencies.github = { fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/app")) return Response.json({ owner: { id: githubAccountId("acme"), login: "acme" } });
       checks++;
       expect(String(url)).toBe("https://api.github.com/repos/acme/platform/installation");
       expect(new Headers(init?.headers).get("Authorization")).toMatch(/^Bearer ey/);
@@ -1475,7 +1478,7 @@ describe("team GitHub template repository prerequisites", () => {
     expect(list.find((entry) => entry.id === "github.pull-request-review")?.requires).toContainEqual({
       service: "github", connected: true, organizationProvided: true, repositoryCheckOnInstall: true,
     });
-    expect(checks).toBe(0); // Gallery is a local readiness read, not a provider probe.
+    expect(checks).toBe(0); // Gallery confirms the App owner, but never probes repository access.
     const result = await installWorkflowTemplate(dependencies, OWNER, "github.pull-request-review", {
       teamId: "review-team", inputs: { repository: "acme/platform", mention: "@review" },
     });

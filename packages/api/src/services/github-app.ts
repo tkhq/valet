@@ -32,22 +32,22 @@
  * `schema/index.ts`) and re-mints only once the cached token is within 5
  * minutes of expiring.
  *
- * ── `linkedUserId` matching (honest cheap path) ────────────────────────
- * `CredentialStore.get`/`list` are owner-scoped — there is no "find the
- * owner whose credential metadata matches X" method on the port. Rather
- * than invent one, `discoverInstallations` reads the `credentials` table
- * directly (`owner_type = 'user' AND service = 'github'`) via the shared
- * `AppQueryable` and matches `metadata.login` case-insensitively in JS.
- * `metadata` is unencrypted jsonb, so no decryption is needed. This is a
- * full table scan of user-owned `github` credential rows; fine at today's
- * scale (one query, small row count), and confined to this one function.
+ * ── Linked identity ────────────────────────────────────────────────────
+ * Discovery joins org membership to GitHub credential rows. Only candidate
+ * personal installations require identity checks, with concurrency of one.
+ * GitHub account IDs establish authority; logins are mutable display names.
+ * Verified member IDs are persisted with a token-bound HMAC. App-owner IDs
+ * are persisted separately, bound to the App config, for transient outages.
  */
+import { githubIdentityProof, verifiedGithubUserId, resolveUserCredential, checkGithubUserRow } from "./github-user-credentials.js";
 import { invalidateWorkflowSources } from "./content-sync/invalidation.js";
-import { createPrivateKey, randomUUID, sign } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { createHash, createPrivateKey, randomUUID, sign } from "node:crypto";
+import { and, eq, or, sql } from "drizzle-orm";
 import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
-import { credentials, githubInstallations, orgs, type GithubInstallationRow } from "../schema/index.js";
+import {
+  credentials, githubInstallations, orgMembers, orgs, type GithubInstallationRow,
+} from "../schema/index.js";
 import { decryptSecret, encryptSecret } from "../lib/secret-crypto.js";
 import { resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
 import { GITHUB_APP_WEBHOOK_PATH, parsePrivateKeyPem } from "@valet/plugin-github/http";
@@ -77,6 +77,8 @@ export interface GithubAppDeps {
   /** Overrides `resolveGithubApiUrl(process.env)` — tests point this at
    * `startGithubFixture()`'s `url`. */
   apiUrl?: string;
+  /** OAuth base URL for refreshing linked GitHub credentials. */
+  githubUrl?: string;
   /** Injectable `fetch` for tests; defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
   /** Injectable clock; defaults to `Date.now`. */
@@ -430,6 +432,7 @@ export async function verifyAppCredential(
 interface ParsedInstallation {
   installationId: number;
   accountLogin: string;
+  accountId: number;
   accountType: string;
   repositorySelection: string | null;
   suspended: boolean;
@@ -444,12 +447,16 @@ function parseInstallationsResponse(payload: unknown): ParsedInstallation[] {
     const { id, account, repository_selection: repositorySelection, suspended_at: suspendedAt } = item;
     if (typeof id !== "number") throw new Error(`installations[${i}].id: expected a number`);
     if (!isRecord(account)) throw new Error(`installations[${i}].account: expected an object`);
-    const { login, type } = account;
+    const { login, type, id: accountId } = account;
+    if (typeof accountId !== "number" || !Number.isSafeInteger(accountId) || accountId <= 0) {
+      throw new Error(`installations[${i}].account.id: expected a positive account ID`);
+    }
     if (typeof login !== "string") throw new Error(`installations[${i}].account.login: expected a string`);
     if (typeof type !== "string") throw new Error(`installations[${i}].account.type: expected a string`);
     return {
       installationId: id,
       accountLogin: login,
+      accountId,
       accountType: type,
       repositorySelection: typeof repositorySelection === "string" ? repositorySelection : null,
       suspended: suspendedAt !== null && suspendedAt !== undefined,
@@ -457,48 +464,288 @@ function parseInstallationsResponse(payload: unknown): ParsedInstallation[] {
   });
 }
 
-/** Direct `credentials` table scan for user-owned `github` rows — see the
- * module doc comment ("honest cheap path") for why this bypasses the
- * owner-scoped `CredentialStore` port. Returns a `login.toLowerCase() ->
- * userId` map. */
-async function loadLinkedUserLoginMap(db: AppQueryable): Promise<Map<string, string>> {
-  const rows = await db
-    .select({ ownerId: credentials.ownerId, metadata: credentials.metadata })
-    .from(credentials)
-    .where(and(eq(credentials.ownerType, "user"), eq(credentials.service, "github")));
-  const map = new Map<string, string>();
-  for (const row of rows) {
-    if (!isRecord(row.metadata)) continue;
-    const login = row.metadata.login;
-    if (typeof login !== "string") continue;
-    map.set(login.toLowerCase(), row.ownerId);
-  }
-  return map;
+export interface GithubAccountIdentity { id: number; login: string }
+
+type PersonalIdentityResult =
+  | { state: "verified"; identity: GithubAccountIdentity }
+  | { state: "unlinked" | "unavailable" };
+
+function githubRateLimited(response: Response): boolean {
+  return response.status === 429 || (response.status === 403 &&
+    (response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after")));
 }
 
-/**
- * Cheap DB-only re-match of `github_installations.linkedUserId` for one org
- * — re-derives `loadLinkedUserLoginMap` and updates any row whose
- * `linkedUserId` disagrees with the fresh match. No GitHub API round trip
- * (unlike `discoverInstallations`, which re-fetches installations too);
- * this is what Task 6's user-connect callback calls after saving a new
- * user `github` credential, so a fresh `login` gets matched against
- * already-known installations without paying for a live App JWT + API
- * call on every connect. */
-export async function relinkInstallations(deps: Pick<GithubAppDeps, "db">, orgId: string): Promise<void> {
-  const [existingRows, linkedByLogin] = await Promise.all([
-    deps.db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId)),
-    loadLinkedUserLoginMap(deps.db),
-  ]);
-  const nowMs = Date.now();
-  for (const row of existingRows) {
-    const linkedUserId = linkedByLogin.get(row.accountLogin.toLowerCase()) ?? null;
-    if (linkedUserId === row.linkedUserId) continue;
-    await deps.db
-      .update(githubInstallations)
-      .set({ linkedUserId, updatedAt: nowMs })
-      .where(eq(githubInstallations.id, row.id));
+/** This is the sole signing boundary: /user must confirm this exact token.
+ * The token is rechecked under lock before its identity proof is stored. */
+async function verifyAndSaveGithubIdentity(
+  deps: Pick<GithubAppDeps, "credentials" | "key" | "apiUrl" | "fetchImpl">,
+  userId: string, token: string, expectedId?: number,
+): Promise<PersonalIdentityResult> {
+  if (!token) return { state: "unlinked" };
+  try {
+    const response = await githubFetch(deps)(`${githubApiUrl(deps)}/user`, {
+      headers: appJwtHeaders(token), signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      if (response.status === 401) return { state: "unlinked" };
+      if (response.status === 403 && !githubRateLimited(response)) {
+        const error: unknown = await response.json();
+        const message = isRecord(error) && typeof error.message === "string" ? error.message.trim().toLowerCase() : "";
+        if (message === "bad credentials" || message === "requires authentication" ||
+            message === "invalid authentication credentials") return { state: "unlinked" };
+      }
+      // Ambiguous 4xx responses can be throttling or provider faults, not revoked authority.
+      return { state: "unavailable" };
+    }
+    const body: unknown = await response.json();
+    if (!isRecord(body) || typeof body.id !== "number" || !Number.isSafeInteger(body.id) || body.id <= 0 ||
+        typeof body.login !== "string" || !body.login) return { state: "unavailable" };
+    if (expectedId !== undefined && body.id !== expectedId) return { state: "unlinked" };
+    const identity = { id: body.id, login: body.login };
+    const owner: CredentialOwner = { type: "user", id: userId };
+    const operation = async (store: CredentialStore): Promise<PersonalIdentityResult> => {
+      const current = await store.get(owner, "github");
+      if (!current) return { state: "unlinked" };
+      if ((current.accessToken ?? current.apiKey) !== token) return { state: "unavailable" };
+      await store.save(owner, "github", { ...current, metadata: {
+        ...current.metadata, login: identity.login, githubUserId: identity.id,
+        githubIdentityProof: githubIdentityProof(deps.key, userId, identity.id, current),
+      } });
+      return { state: "verified", identity };
+    };
+    return await (deps.credentials.withLock
+      ? deps.credentials.withLock(owner, "github", operation) : operation(deps.credentials));
+  } catch {
+    return { state: "unavailable" };
   }
+}
+
+/** Caller-supplied identities can never bypass the /user signing boundary. */
+export async function saveVerifiedGithubIdentity(
+  deps: Pick<GithubAppDeps, "credentials" | "key" | "apiUrl" | "fetchImpl">,
+  userId: string, profile: GithubAccountIdentity, token: string,
+): Promise<boolean> {
+  return (await verifyAndSaveGithubIdentity(deps, userId, token, profile.id)).state === "verified";
+}
+
+/** Permanent credential loss is distinct from a retryable provider outage. */
+async function checkPersonalIdentity(
+  deps: GithubAppDeps, orgId: string, userId: string,
+): Promise<PersonalIdentityResult> {
+  try {
+    const stored = await deps.credentials.get({ type: "user", id: userId }, "github");
+    if (!stored) return { state: "unlinked" };
+    const health = checkGithubUserRow({ ...stored,
+      metadata: { ...stored.metadata, identityOnly: false },
+    }, (deps.now ?? Date.now)());
+    if (!health.ok) return { state: "unlinked" };
+    const verifiedId = verifiedGithubUserId(deps.key, userId, stored);
+    if (health.state !== "stale-refreshable" && verifiedId !== null && typeof stored.metadata?.login === "string") {
+      return { state: "verified", identity: { id: verifiedId, login: stored.metadata.login } };
+    }
+    const result = await resolveUserCredential(deps, orgId, userId, (id) => loadAppConfig(deps, id), true);
+    if (!result.ok) {
+      const current = await deps.credentials.get({ type: "user", id: userId }, "github");
+      return { state: !current || current.metadata?.refreshFailedAt ? "unlinked" : "unavailable" };
+    }
+    return await verifyAndSaveGithubIdentity(deps, userId, result.token);
+  } catch {
+    return { state: "unavailable" };
+  }
+}
+
+export async function personalInstallationLinkState(
+  deps: GithubAppDeps, orgId: string, userId: string, accountId: number,
+): Promise<"linked" | "unlinked" | "unavailable"> {
+  const result = await checkPersonalIdentity(deps, orgId, userId);
+  return result.state === "verified" ? result.identity.id === accountId ? "linked" : "unlinked" : result.state;
+}
+
+export async function personalInstallationIsLinked(
+  deps: GithubAppDeps, orgId: string, userId: string, accountId: number,
+): Promise<boolean> {
+  return await personalInstallationLinkState(deps, orgId, userId, accountId) === "linked";
+}
+
+/** Scan only this org's members who have a candidate non-owner User install.
+ * Verification is serial (one request at a time), outside the discovery transaction.
+ * Verified IDs survive renames; logins select only unverified legacy candidates. */
+async function loadLinkedUserIdentityMap(
+  deps: GithubAppDeps, orgId: string, candidates: ParsedInstallation[],
+): Promise<{ linked: Map<number, string>; unavailable: Set<string> }> {
+  const linked = new Map<number, string>();
+  const unavailable = new Set<string>();
+  if (candidates.length === 0) return { linked, unavailable };
+  const rows = await deps.db.select({ ownerId: credentials.ownerId, metadata: credentials.metadata })
+    .from(credentials)
+    .innerJoin(orgMembers, and(eq(orgMembers.userId, credentials.ownerId), eq(orgMembers.orgId, orgId)))
+    .where(and(eq(credentials.ownerType, "user"), eq(credentials.service, "github")));
+  const existing = await deps.db.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
+  for (const row of rows) {
+    if (!isRecord(row.metadata)) continue;
+    const metadata = row.metadata;
+    if (!candidates.some((candidate) => metadata.githubUserId === candidate.accountId ||
+        (typeof metadata.login === "string" &&
+          metadata.login.toLowerCase() === candidate.accountLogin.toLowerCase()) ||
+        existing.some((install) => install.linkedUserId === row.ownerId &&
+          (install.accountId === candidate.accountId ||
+            (install.accountId === null && install.installationId === candidate.installationId))))) continue;
+    const result = await checkPersonalIdentity(deps, orgId, row.ownerId);
+    if (result.state !== "verified") {
+      if (result.state === "unavailable") unavailable.add(row.ownerId);
+      continue;
+    }
+    const profile = result.identity;
+    linked.set(profile.id, row.ownerId);
+    const candidate = candidates.find((install) => install.accountId === profile.id);
+    // A verified ID can update a display login, but must never be re-signed from an installation record.
+    try {
+      if (candidate) {
+        const owner: CredentialOwner = { type: "user", id: row.ownerId };
+        const updateLogin = async (store: CredentialStore) => {
+          const current = await store.get(owner, "github");
+          if (current && verifiedGithubUserId(deps.key, row.ownerId, current) === candidate.accountId &&
+              current.metadata?.login !== candidate.accountLogin) {
+            await store.save(owner, "github", { ...current,
+              metadata: { ...current.metadata, login: candidate.accountLogin },
+            });
+          }
+        };
+        if (deps.credentials.withLock) await deps.credentials.withLock(owner, "github", updateLogin);
+        else await updateLogin(deps.credentials);
+      }
+    } catch {
+      linked.delete(profile.id);
+      unavailable.add(row.ownerId);
+    }
+  }
+  return { linked, unavailable };
+}
+
+export async function relinkInstallations(deps: GithubAppDeps, orgId: string): Promise<void> {
+  if (await discoverInstallations(deps, orgId) === "stale") throw new Error("GitHub installations changed during discovery. Retry after the webhook completes.");
+}
+
+const appOwnerCache = new WeakMap<CredentialStore, Map<string, {
+  binding: string; owner: GithubAccountIdentity; expiresAt: number;
+}>>();
+
+/** Last-known owners are bound to App ID, private key and API URL. Transient
+ * failures retain that authority; authentication failures never use the fallback. */
+export async function loadAppOwner(
+  deps: Pick<GithubAppDeps, "db" | "credentials" | "apiUrl" | "fetchImpl" | "now">,
+  orgId: string, config: GithubAppConfig, jwt?: string,
+): Promise<GithubAccountIdentity> {
+  const now = (deps.now ?? Date.now)();
+  const apiUrl = githubApiUrl(deps);
+  const binding = createHash("sha256").update(`${config.appId}:${config.privateKeyPem}:${apiUrl}`).digest("hex");
+  const cache = appOwnerCache.get(deps.credentials) ?? new Map();
+  appOwnerCache.set(deps.credentials, cache);
+  const cached = cache.get(orgId);
+  if (cached?.binding === binding && cached.expiresAt > now) return cached.owner;
+  const [org] = await deps.db.select({ owner: orgs.githubAppOwner }).from(orgs).where(eq(orgs.id, orgId));
+  const savedOwner = org?.owner;
+  const fallback = cached?.binding === binding ? cached.owner :
+    savedOwner?.binding === binding ? { id: savedOwner.id, login: savedOwner.login } : null;
+  let res: Response;
+  try {
+    res = await githubFetch(deps)(`${apiUrl}/app`, {
+      headers: appJwtHeaders(jwt ?? mintAppJwt(config)), signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+    });
+  } catch {
+    if (fallback) return fallback;
+    throw new Error("GitHub App owner is unavailable. Refresh installations when GitHub recovers.");
+  }
+  if (!res.ok) {
+    const rateLimited = res.status === 403 &&
+      (res.headers.get("x-ratelimit-remaining") === "0" || res.headers.has("retry-after"));
+    if ((rateLimited || (res.status !== 401 && res.status !== 403)) && fallback) return fallback;
+    throw new Error(`GitHub API GET /app returned ${res.status}. Check the App credential in Settings.`);
+  }
+  let body: unknown;
+  try { body = await res.json(); } catch { body = null; }
+  if (!isRecord(body) || !isRecord(body.owner) || typeof body.owner.login !== "string" ||
+      !body.owner.login || typeof body.owner.id !== "number" || !Number.isSafeInteger(body.owner.id) || body.owner.id <= 0) {
+    if (fallback) return fallback;
+    throw new Error("GitHub did not report the App owner. Refresh installations when GitHub recovers.");
+  }
+  const owner = { id: body.owner.id, login: body.owner.login };
+  if (savedOwner?.binding !== binding || savedOwner.id !== owner.id || savedOwner.login !== owner.login) {
+    await deps.db.update(orgs).set({ githubAppOwner: { binding, ...owner } }).where(eq(orgs.id, orgId));
+  }
+  cache.set(orgId, { binding, owner, expiresAt: now + 300_000 });
+  return owner;
+}
+
+export function appOwnerInstallationCondition(owner: GithubAccountIdentity) {
+  return eq(githubInstallations.accountId, owner.id);
+}
+
+export function installationAccessCondition(owner: GithubAccountIdentity, userId: string | undefined) {
+  return or(appOwnerInstallationCondition(owner), userId ? and(
+    eq(githubInstallations.accountType, "User"), eq(githubInstallations.linkedUserId, userId),
+    personalInstallationEligibilityCondition(),
+  ) : sql`false`);
+}
+
+/** Membership and policy are always live. Credential IDs require HMAC verification
+ * before minting or webhook dispatch; SQL is only a candidate prefilter. */
+export function personalInstallationEligibilityCondition() {
+  return sql`exists (select 1 from ${orgMembers} join ${orgs} on ${orgs.id} = ${orgMembers.orgId}
+    where ${orgMembers.orgId} = ${githubInstallations.orgId}
+      and ${orgMembers.userId} = ${githubInstallations.linkedUserId}
+      and ${orgs.allowPersonalInstallations} = true)
+    and exists (select 1 from ${credentials}
+      where ${credentials.ownerType} = 'user' and ${credentials.service} = 'github'
+        and ${credentials.ownerId} = ${githubInstallations.linkedUserId})`;
+}
+
+/** Shared admission view for UI counts and repo listing. No stale or foreign rows. */
+export async function admittedInstallations(
+  deps: GithubAppDeps, orgId: string, actor?: string, allMembers = false,
+): Promise<GithubInstallationRow[]> {
+  const config = await loadAppConfig(deps, orgId);
+  if (!config) return [];
+  const [held] = await deps.db.select({ id: githubInstallations.id }).from(githubInstallations)
+    .where(eq(githubInstallations.orgId, orgId)).limit(1);
+  if (!held) return [];
+  const owner = await loadAppOwner(deps, orgId, config);
+  await ensureInstallationAccountIds(deps, orgId);
+  const rows = await deps.db.select().from(githubInstallations).where(and(
+    eq(githubInstallations.orgId, orgId), or(appOwnerInstallationCondition(owner), and(
+      eq(githubInstallations.accountType, "User"), personalInstallationEligibilityCondition(),
+      allMembers ? sql`true` : actor ? eq(githubInstallations.linkedUserId, actor) : sql`false`,
+    )),
+  ));
+  const admitted: GithubInstallationRow[] = [];
+  for (const row of rows) {
+    if (row.accountId === owner.id || (row.accountId !== null && row.linkedUserId &&
+        await personalInstallationIsLinked(deps, orgId, row.linkedUserId, row.accountId))) admitted.push(row);
+  }
+  return admitted;
+}
+
+/** Candidate selection accepts legacy logins, but only /user can establish authority. */
+export async function installationAccountCandidateState(
+  deps: GithubAppDeps, orgId: string, accountId: number, owner: GithubAccountIdentity, accountLogin?: string,
+): Promise<"candidate" | "excluded" | "unavailable"> {
+  if (accountId === owner.id) return "candidate";
+  const [org] = await deps.db.select({ allowed: orgs.allowPersonalInstallations }).from(orgs).where(eq(orgs.id, orgId));
+  if (org?.allowed !== true) return "excluded";
+  const members = await deps.db.select({ userId: credentials.ownerId }).from(credentials)
+    .innerJoin(orgMembers, and(eq(orgMembers.userId, credentials.ownerId), eq(orgMembers.orgId, orgId)))
+    .where(and(eq(credentials.ownerType, "user"), eq(credentials.service, "github"), or(
+      sql`${credentials.metadata}->>'githubUserId' = ${String(accountId)}`,
+      accountLogin ? and(sql`${credentials.metadata}->>'githubUserId' IS NULL`,
+        sql`lower(${credentials.metadata}->>'login') = lower(${accountLogin})`) : sql`false`,
+    )));
+  let unavailable = false;
+  for (const member of members) {
+    const state = await personalInstallationLinkState(deps, orgId, member.userId, accountId);
+    if (state === "linked") return "candidate";
+    if (state === "unavailable") unavailable = true;
+  }
+  return unavailable ? "unavailable" : "excluded";
 }
 
 const MAX_INSTALLATION_PAGES = 10;
@@ -521,7 +768,7 @@ function parseNextLink(linkHeader: string | null): string | null {
  * like page-2+ installations were removed. Capped at
  * `MAX_INSTALLATION_PAGES` pages as a sanity bound against a misbehaving or
  * malicious upstream looping forever. */
-async function fetchAllInstallations(deps: GithubAppDeps, jwt: string): Promise<ParsedInstallation[]> {
+async function fetchAllInstallations(deps: GithubAppDeps, jwt: string): Promise<{ installations: ParsedInstallation[]; complete: boolean }> {
   const installations: ParsedInstallation[] = [];
   let url: string | null = `${githubApiUrl(deps)}/app/installations?per_page=100`;
   let pages = 0;
@@ -529,6 +776,7 @@ async function fetchAllInstallations(deps: GithubAppDeps, jwt: string): Promise<
   while (url && pages < MAX_INSTALLATION_PAGES) {
     pages++;
     const res: Response = await githubFetch(deps)(url, {
+      signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
       headers: {
         Authorization: `Bearer ${jwt}`,
         Accept: "application/vnd.github+json",
@@ -542,38 +790,309 @@ async function fetchAllInstallations(deps: GithubAppDeps, jwt: string): Promise<
     url = parseNextLink(res.headers.get("link"));
   }
 
-  return installations;
+  return { installations, complete: url === null };
+}
+
+type InstallationLookupDeps = Pick<GithubAppDeps, "db" | "credentials" | "apiUrl" | "fetchImpl" | "now" | "env">;
+
+/** An authenticated targeted lookup avoids capped-listing gaps for signed creation. */
+async function fetchInstallation(
+  deps: InstallationLookupDeps, jwt: string, installationId: number,
+): Promise<ParsedInstallation> {
+  const response = await githubFetch(deps)(`${githubApiUrl(deps)}/app/installations/${installationId}`, {
+    headers: appJwtHeaders(jwt), signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
+  });
+  if (response.status === 404) throw new InstallationNotFoundError();
+  if (!response.ok) throw new Error(`GitHub installation lookup returned ${response.status}. Refresh installations after GitHub recovers.`);
+  const [installation] = parseInstallationsResponse([await response.json()]);
+  if (installation.installationId !== installationId) throw new Error("GitHub returned a different installation. Refresh installations after GitHub recovers.");
+  return installation;
+}
+
+class InstallationNotFoundError extends Error {}
+
+export const WEBHOOK_INSTALLATION_RECOVERY_BUDGET = 64;
+const WEBHOOK_RECOVERY_MAX_ENTRIES = 128;
+type WebhookRecoveryResult = "admitted" | "excluded" | "unavailable" | "budget_exhausted";
+interface WebhookRecoveryEntry {
+  active: boolean;
+  expiresAt: number;
+  promise: Promise<WebhookRecoveryResult>;
+}
+interface WebhookRecoveryState {
+  windowAt: number;
+  used: number;
+  entries: Map<number, WebhookRecoveryEntry>;
+}
+const webhookRecoveries = new WeakMap<AppQueryable, Map<string, WebhookRecoveryState>>();
+
+const unheldWebhookDrops = new WeakMap<AppQueryable, Map<string, Map<number, number>>>();
+
+/** Claim at most one unheld drop record per installation recovery window.
+ * The claim cache never evicts live claims to make room for new stranger IDs. */
+export function claimUnheldWebhookDrop(
+  deps: Pick<GithubAppDeps, "db" | "now">, orgId: string, installationId: number,
+): boolean {
+  const now = (deps.now ?? Date.now)();
+  const orgClaims = unheldWebhookDrops.get(deps.db) ?? new Map<string, Map<number, number>>();
+  unheldWebhookDrops.set(deps.db, orgClaims);
+  const claims = orgClaims.get(orgId) ?? new Map<number, number>();
+  orgClaims.set(orgId, claims);
+  for (const [id, expiresAt] of claims) if (expiresAt <= now) claims.delete(id);
+  if (claims.has(installationId) || claims.size >= WEBHOOK_RECOVERY_MAX_ENTRIES) return false;
+  const recovery = webhookRecoveries.get(deps.db)?.get(orgId)?.entries.get(installationId);
+  claims.set(installationId, Math.max(now + 60_000, recovery?.expiresAt ?? 0));
+  return true;
+}
+
+/** Signed deliveries recover a missed creation using targeted lookups, never a full listing.
+ * Budget, cache and single-flight apply even when the webhook URL is live. */
+export async function recoverWebhookInstallation(
+  deps: GithubAppDeps, orgId: string, installationId: number,
+): Promise<WebhookRecoveryResult> {
+  if (!Number.isSafeInteger(installationId) || installationId <= 0) return "excluded";
+  const now = (deps.now ?? Date.now)();
+  const orgStates = webhookRecoveries.get(deps.db) ?? new Map<string, WebhookRecoveryState>();
+  webhookRecoveries.set(deps.db, orgStates);
+  const state = orgStates.get(orgId) ?? { windowAt: now, used: 0, entries: new Map<number, WebhookRecoveryEntry>() };
+  orgStates.set(orgId, state);
+  for (const [id, entry] of state.entries) if (!entry.active && entry.expiresAt <= now) state.entries.delete(id);
+  const cached = state.entries.get(installationId);
+  if (cached) return cached.promise;
+  if (now - state.windowAt >= 60_000) { state.windowAt = now; state.used = 0; }
+  if (state.used >= WEBHOOK_INSTALLATION_RECOVERY_BUDGET) return "budget_exhausted";
+  if (state.entries.size >= WEBHOOK_RECOVERY_MAX_ENTRIES) {
+    const oldest = [...state.entries].find(([, entry]) => !entry.active);
+    if (!oldest) return "budget_exhausted";
+    state.entries.delete(oldest[0]);
+  }
+  state.used++;
+  const entry = { active: true, expiresAt: now + 60_000, promise: Promise.resolve<WebhookRecoveryResult>("unavailable") };
+  state.entries.set(installationId, entry);
+  entry.promise = (async (): Promise<WebhookRecoveryResult> => {
+    const config = await loadAppConfig(deps, orgId);
+    if (!config) return "excluded";
+    const installation = await fetchInstallation(deps, mintAppJwt(config), installationId);
+    const owner = await loadAppOwner(deps, orgId, config);
+    const candidate = await installationAccountCandidateState(deps, orgId, installation.accountId, owner, installation.accountLogin);
+    if (candidate !== "candidate") return candidate;
+    const rows = await discoverInstallations(deps, orgId, installationId);
+    if (rows === "stale") return "unavailable";
+    return rows.some((row) => row.installationId === installationId) ? "admitted" : "excluded";
+  })().catch((error): WebhookRecoveryResult => {
+    if (error instanceof InstallationNotFoundError) return "excluded";
+    console.error("GitHub targeted webhook recovery unavailable:", error);
+    return "unavailable";
+  }).then((result) => {
+    entry.active = false;
+    entry.expiresAt = (deps.now ?? Date.now)() + (result === "excluded" ? 300_000 : 60_000);
+    return result;
+  });
+  return entry.promise;
+}
+
+const installationSyncs = new WeakMap<AppQueryable, Map<string, { at: number; active: boolean; promise: Promise<void> }>>();
+const INSTALLATION_SYNC_INTERVAL_MS = 60_000;
+
+/** Join in-flight syncs and throttle failed attempts as well as successful ones. */
+async function throttledInstallationSync(
+  deps: InstallationLookupDeps, orgId: string, mode: "legacy" | "discovery", operation: () => Promise<void>,
+): Promise<void> {
+  const entries = installationSyncs.get(deps.db) ?? new Map();
+  installationSyncs.set(deps.db, entries);
+  const key = `${orgId}:${mode}`;
+  const current = entries.get(key);
+  const now = (deps.now ?? Date.now)();
+  if (current && (current.active || now - current.at < INSTALLATION_SYNC_INTERVAL_MS)) return current.promise;
+  const entry = { at: now, active: true, promise: Promise.resolve() };
+  entries.set(key, entry);
+  const promise = operation().catch((error) => {
+    console.error(`GitHub ${mode} sync failed for org ${orgId}:`, error);
+  }).finally(() => {
+    entry.active = false;
+    entry.at = (deps.now ?? Date.now)();
+  });
+  entry.promise = promise;
+  return promise;
+}
+
+/** Legacy rows gain IDs only from authenticated GitHub installation records.
+ * This narrow backfill needs no member credentials, so readiness can use it too.
+ * It never changes suspension: a concurrent revocation must remain effective. */
+export async function ensureInstallationAccountIds(deps: InstallationLookupDeps, orgId: string): Promise<void> {
+  const held = await deps.db.select().from(githubInstallations)
+    .where(and(eq(githubInstallations.orgId, orgId), sql`${githubInstallations.accountId} is null`));
+  if (held.length === 0) return;
+  await throttledInstallationSync(deps, orgId, "legacy", async () => {
+    const config = await loadAppConfig(deps, orgId);
+    if (!config) return;
+    const jwt = mintAppJwt(config);
+    let changed = false;
+    for (const row of held) {
+      try {
+        const installation = await fetchInstallation(deps, jwt, row.installationId);
+        const updated = await deps.db.update(githubInstallations).set({
+          accountId: installation.accountId, accountLogin: installation.accountLogin,
+          accountType: installation.accountType, updatedAt: (deps.now ?? Date.now)(),
+        }).where(and(eq(githubInstallations.id, row.id), sql`${githubInstallations.accountId} is null`))
+          .returning({ id: githubInstallations.id });
+        changed ||= updated.length > 0;
+      } catch (error) {
+        console.error(`GitHub legacy installation ${row.installationId} backfill failed:`, error);
+      }
+    }
+    if (changed) await invalidateWorkflowSources(deps.db, { orgId });
+  });
+}
+
+/** Hot-path discovery shares one attempt per org per minute, including failures. */
+export async function requestInstallationDiscovery(deps: GithubAppDeps, orgId: string): Promise<void> {
+  await throttledInstallationSync(deps, orgId, "discovery", async () => {
+    if (await discoverInstallations(deps, orgId) === "stale") throw new Error("GitHub installations changed during discovery. Retry after the webhook completes.");
+  });
+}
+
+export const GITHUB_LOGIN_RECOVERY_BUDGET = 8;
+export const GITHUB_LOGIN_RECOVERY_MAX_ENTRIES = 64;
+const LOGIN_RECOVERY_NEGATIVE_TTL_MS = 5 * 60_000;
+interface LoginRecoveryEntry { active: boolean; expiresAt: number; promise: Promise<void> }
+interface LoginRecoveryState {
+  windowAt: number; used: number; entries: Map<string, LoginRecoveryEntry>;
+}
+const loginRecoveries = new WeakMap<AppQueryable, Map<string, LoginRecoveryState>>();
+
+/** Diagnostic counts only; never expose login text or token material. */
+export function githubLoginRecoveryStats(deps: Pick<GithubAppDeps, "db">, orgId: string) {
+  const state = loginRecoveries.get(deps.db)?.get(orgId);
+  return { entries: state?.entries.size ?? 0, used: state?.used ?? 0 };
+}
+
+/** Missing rows never block minting. Manual-webhook deployments can recover
+ * renames within a fixed org budget, with bounded LRU entries and negative caching. */
+export async function requestInstallationForLogin(
+  deps: GithubAppDeps, orgId: string, accountLogin: string,
+): Promise<void> {
+  const login = accountLogin.toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(login) || login.includes("--")) return;
+  // A live webhook URL receives installation_target renames without speculative queries.
+  if ((deps.env ?? process.env).VALET_PUBLIC_URL?.trim()) return;
+  const now = (deps.now ?? Date.now)();
+  const orgs = loginRecoveries.get(deps.db) ?? new Map<string, LoginRecoveryState>();
+  loginRecoveries.set(deps.db, orgs);
+  const state = orgs.get(orgId) ?? { windowAt: now, used: 0, entries: new Map<string, LoginRecoveryEntry>() };
+  orgs.set(orgId, state);
+  for (const [key, entry] of state.entries) {
+    if (!entry.active && entry.expiresAt <= now) state.entries.delete(key);
+  }
+  const cached = state.entries.get(login);
+  if (cached) {
+    state.entries.delete(login);
+    state.entries.set(login, cached); // LRU hit.
+    return cached.promise;
+  }
+  if (now - state.windowAt >= INSTALLATION_SYNC_INTERVAL_MS) {
+    state.windowAt = now;
+    state.used = 0;
+  }
+  if (state.used >= GITHUB_LOGIN_RECOVERY_BUDGET) return;
+  if (state.entries.size >= GITHUB_LOGIN_RECOVERY_MAX_ENTRIES) {
+    const oldest = [...state.entries].find(([, entry]) => !entry.active);
+    if (!oldest) return;
+    state.entries.delete(oldest[0]);
+  }
+  state.used++;
+  const entry: LoginRecoveryEntry = { active: true, expiresAt: now + INSTALLATION_SYNC_INTERVAL_MS,
+    promise: Promise.resolve() };
+  state.entries.set(login, entry);
+  entry.promise = (async () => {
+    const config = await loadAppConfig(deps, orgId);
+    if (!config) return;
+    const jwt = mintAppJwt(config);
+    for (const namespace of ["orgs", "users"]) {
+      const response = await githubFetch(deps)(
+        `${githubApiUrl(deps)}/${namespace}/${encodeURIComponent(login)}/installation`,
+        { headers: appJwtHeaders(jwt), signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS) },
+      );
+      if (response.status === 404) continue;
+      if (!response.ok) throw new Error(`GitHub account installation lookup returned ${response.status}. Refresh installations after GitHub recovers.`);
+      const [installation] = parseInstallationsResponse([await response.json()]);
+      if (installation.accountLogin.toLowerCase() !== login) return;
+      if (await discoverInstallations(deps, orgId, installation.installationId) === "stale") {
+        throw new Error("GitHub installations changed during discovery. Retry after the webhook completes.");
+      }
+      return;
+    }
+    entry.expiresAt = (deps.now ?? Date.now)() + LOGIN_RECOVERY_NEGATIVE_TTL_MS;
+  })().catch((error) => {
+    console.error(`GitHub login recovery failed for org ${orgId}:`, error);
+  }).finally(() => {
+    entry.active = false;
+    entry.expiresAt = Math.max(entry.expiresAt, (deps.now ?? Date.now)() + INSTALLATION_SYNC_INTERVAL_MS);
+  });
+  return entry.promise;
 }
 
 /** Discovers the org's GitHub App installations via `GET /app/installations`
  * (App JWT auth, paginated — see `fetchAllInstallations`), upserts
  * `github_installations` by `(orgId, installationId)`, deletes rows absent
- * from the response, and sets `linkedUserId` for installations whose account
- * login matches a connected user's GitHub login. Returns the org's
- * installation rows (post-sync). `[]` when no app is configured for the
- * org. */
-export async function discoverInstallations(deps: GithubAppDeps, orgId: string): Promise<GithubInstallationRow[]> {
+ * from a complete response, and links installations by verified account ID.
+ * Returns admitted rows, [] when no App is configured, or "stale" when a held-row
+ * authority change invalidates the snapshot. Stale is retryable, never an empty success. */
+export async function discoverInstallations(deps: GithubAppDeps, orgId: string, installationId?: number): Promise<GithubInstallationRow[] | "stale"> {
+  // Capture before network I/O. An authority-changing webhook must win over this snapshot.
+  const [snapshot] = await deps.db.select({ revision: orgs.githubInstallationRevision }).from(orgs).where(eq(orgs.id, orgId));
+  if (!snapshot) return [];
   const config = await loadAppConfig(deps, orgId);
   if (!config) return [];
 
   const jwt = mintAppJwt(config);
-  const installations = await fetchAllInstallations(deps, jwt);
-
-  const linkedByLogin = await loadLinkedUserLoginMap(deps.db);
-  return deps.db.transaction(async (tx) => {
-    await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
+  const owner = await loadAppOwner(deps, orgId, config, jwt);
+  const { installations, complete } = installationId === undefined
+    ? await fetchAllInstallations(deps, jwt)
+    : { installations: [await fetchInstallation(deps, jwt, installationId)], complete: false };
+  // CredentialStore reads use their own DB client. Resolve them before the row lock.
+  const [policy] = await deps.db.select({ allowed: orgs.allowPersonalInstallations }).from(orgs).where(eq(orgs.id, orgId));
+  const candidates = policy?.allowed === true
+    ? installations.filter((inst) => inst.accountId !== owner.id && inst.accountType === "User") : [];
+  const { linked: linkedById, unavailable } = await loadLinkedUserIdentityMap(deps, orgId, candidates);
+  return deps.db.transaction(async (tx): Promise<GithubInstallationRow[] | "stale"> => {
+    const [org] = await tx.select({ allowPersonalInstallations: orgs.allowPersonalInstallations,
+      revision: orgs.githubInstallationRevision })
+      .from(orgs).where(eq(orgs.id, orgId)).for("update");
+    // Conservative org-wide fence: discard an outdated snapshot, including inserts and deletions.
+    // A fresh snapshot can reconcile again without retaining locks during identity HTTP calls.
+    if (!org || org.revision !== snapshot.revision) return "stale";
     const existingRows = await tx.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
     const existingByInstallationId = new Map(existingRows.map((row) => [row.installationId, row]));
 
     const nowMs = (deps.now ?? Date.now)();
     const seenIds = new Set<number>();
     const rows: GithubInstallationRow[] = [];
+    const retained: GithubInstallationRow[] = [];
 
     for (const inst of installations) {
-      seenIds.add(inst.installationId);
       const existing = existingByInstallationId.get(inst.installationId);
+      if (inst.accountId !== owner.id && !(org?.allowPersonalInstallations === true &&
+          inst.accountType === "User" && linkedById.has(inst.accountId))) {
+        // Keep a previously linked row during credential outages, but do not
+        // admit it for this call. Minting still verifies identity before cache reads.
+        if (org?.allowPersonalInstallations === true && inst.accountType === "User" &&
+            existing?.accountType === "User" && (existing.accountId === null || existing.accountId === inst.accountId) &&
+            existing.linkedUserId && unavailable.has(existing.linkedUserId)) {
+          seenIds.add(inst.installationId);
+          const [updated] = await tx.update(githubInstallations).set({
+            suspended: inst.suspended, accountLogin: inst.accountLogin,
+            repositorySelection: inst.repositorySelection, updatedAt: nowMs,
+          }).where(eq(githubInstallations.id, existing.id)).returning();
+          retained.push(updated);
+        } else if (existing) {
+          await tx.delete(githubInstallations).where(eq(githubInstallations.id, existing.id));
+        }
+        continue;
+      }
+      seenIds.add(inst.installationId);
       const id = existing?.id ?? `ghi_${randomUUID()}`;
-      const linkedUserId = linkedByLogin.get(inst.accountLogin.toLowerCase()) ?? null;
+      const linkedUserId = inst.accountType === "User" ? linkedById.get(inst.accountId) ?? null : null;
 
       const [row] = await tx
         .insert(githubInstallations)
@@ -582,6 +1101,7 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
           orgId,
           installationId: inst.installationId,
           accountLogin: inst.accountLogin,
+          accountId: inst.accountId,
           accountType: inst.accountType,
           repositorySelection: inst.repositorySelection,
           suspended: inst.suspended,
@@ -593,6 +1113,7 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
           target: [githubInstallations.orgId, githubInstallations.installationId],
           set: {
             accountLogin: inst.accountLogin,
+            accountId: inst.accountId,
             accountType: inst.accountType,
             repositorySelection: inst.repositorySelection,
             suspended: inst.suspended,
@@ -605,15 +1126,16 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
     }
 
     for (const row of existingRows) {
-      if (!seenIds.has(row.installationId)) {
+      if (complete && !seenIds.has(row.installationId)) {
         await tx.delete(githubInstallations).where(eq(githubInstallations.id, row.id));
       }
     }
 
-    const signature = (items: readonly { installationId: number; accountLogin: string; suspended: boolean }[]) =>
-      JSON.stringify(items.map((row) => [row.installationId, row.accountLogin.toLowerCase(), row.suspended])
+    const signature = (items: readonly { installationId: number; accountLogin: string; suspended: boolean; linkedUserId: string | null }[]) =>
+      JSON.stringify(items.map((row) => [row.installationId, row.accountLogin.toLowerCase(), row.suspended, row.linkedUserId])
         .sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
-    if (signature(existingRows) !== signature(rows)) await invalidateWorkflowSources(tx, { orgId });
+    const synchronized = await tx.select().from(githubInstallations).where(eq(githubInstallations.orgId, orgId));
+    if (signature(existingRows) !== signature(synchronized)) await invalidateWorkflowSources(tx, { orgId });
     return rows;
   });
 }
@@ -752,7 +1274,7 @@ export async function listOrgsWithAppCredential(db: AppQueryable): Promise<strin
 /**
  * Boot-time counterpart to `syncAppWebhookUrl`: syncs every org that owns a
  * `github_app` credential row. The scan reads the `credentials` table
- * directly for the same reason `loadLinkedUserLoginMap` does (see the module
+ * directly for the same reason `loadLinkedUserIdentityMap` does (see the module
  * doc comment) — the `CredentialStore` port is owner-scoped and cannot
  * answer "which owners hold this service". Only credential-row apps can pass
  * the `source === "org"` guard, so the scan already gives the exact
@@ -795,7 +1317,8 @@ function parseAccessTokenResponse(payload: unknown): ParsedAccessToken {
 }
 
 /** THE one cached installation-token minting path. Looks up the
- * non-suspended installation for `(orgId, accountLogin)` (case-insensitive);
+ * non-suspended installation for `(orgId, accountLogin)` (case-insensitive).
+ * Personal installations require the linked acting user before cache reads;
  * returns `null` when there is none. Returns the cached token when it has
  * more than 5 minutes left before expiry; otherwise mints a fresh one via
  * `POST /app/installations/{id}/access_tokens`, caches it (encrypted) on
@@ -805,22 +1328,48 @@ export async function mintInstallationToken(
   deps: GithubAppDeps,
   orgId: string,
   accountLogin: string,
+  userId?: string,
 ): Promise<string | null> {
   const nowMs = (deps.now ?? Date.now)();
-
-  const rows = await deps.db
-    .select()
-    .from(githubInstallations)
-    .where(
-      and(
-        eq(githubInstallations.orgId, orgId),
-        sql`lower(${githubInstallations.accountLogin}) = lower(${accountLogin})`,
-        eq(githubInstallations.suspended, false),
-      ),
-    )
-    .limit(1);
-  const row = rows[0];
+  const find = async () => (await deps.db.select().from(githubInstallations).where(and(
+    eq(githubInstallations.orgId, orgId),
+    sql`lower(${githubInstallations.accountLogin}) = lower(${accountLogin})`,
+    eq(githubInstallations.suspended, false),
+  )).limit(1))[0];
+  let row = await find();
+  if (!row) {
+    // The throttle handles and records failures; this task never rejects.
+    void requestInstallationForLogin(deps, orgId, accountLogin);
+    return null;
+  }
+  let config: GithubAppConfig | null;
+  try { config = await loadAppConfig(deps, orgId); } catch { return null; }
+  if (!config) return null;
+  let owner: GithubAccountIdentity;
+  try { owner = await loadAppOwner(deps, orgId, config); } catch { return null; }
+  if (row.accountId === null) {
+    await ensureInstallationAccountIds(deps, orgId);
+    row = await find();
+  } else if (row.accountId !== owner.id && row.accountType !== "User") {
+    await requestInstallationDiscovery(deps, orgId);
+    row = await find();
+  }
   if (!row) return null;
+  if (row.accountId === null) {
+    // Upgrade-only compatibility for tokens cached before account IDs existed.
+    // Remove after deployed installation rows have completed their ID backfill.
+    // Never mint new authority from a mutable login or use a personal cache here.
+    if (row.accountLogin.toLowerCase() === owner.login.toLowerCase() && row.cachedToken &&
+        row.cachedTokenExpiresAt && row.cachedTokenExpiresAt - CACHED_TOKEN_MARGIN_MS > nowMs) {
+      try { return decryptSecret(row.cachedToken, deps.key); } catch { return null; }
+    }
+    return null;
+  }
+  if (row.accountId !== owner.id) {
+    const [eligible] = await deps.db.select({ id: githubInstallations.id }).from(githubInstallations)
+      .where(and(eq(githubInstallations.id, row.id), installationAccessCondition(owner, userId)));
+    if (!eligible || !userId || !(await personalInstallationIsLinked(deps, orgId, userId, row.accountId))) return null;
+  }
 
   if (row.cachedToken !== null && row.cachedTokenExpiresAt !== null) {
     if (row.cachedTokenExpiresAt - CACHED_TOKEN_MARGIN_MS > nowMs) {
@@ -838,8 +1387,6 @@ export async function mintInstallationToken(
     }
   }
 
-  const config = await loadAppConfig(deps, orgId);
-  if (!config) return null;
   const jwt = mintAppJwt(config);
 
   const res = await githubFetch(deps)(`${githubApiUrl(deps)}/app/installations/${row.installationId}/access_tokens`, {

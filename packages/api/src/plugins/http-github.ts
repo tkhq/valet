@@ -28,7 +28,7 @@
  * App-to-organization lookup.
  */
 import { randomBytes } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 import type { PluginHttpCaller, PluginHttpRequest } from "@valet/engine";
 import {
   appCredential,
@@ -65,7 +65,17 @@ import {
   buildAppConfig,
   discoverInstallations,
   loadAppConfig,
+  admittedInstallations,
+  installationAccountCandidateState,
+  recoverWebhookInstallation,
+  claimUnheldWebhookDrop,
+  saveVerifiedGithubIdentity,
+  appOwnerInstallationCondition,
+  personalInstallationEligibilityCondition,
+  personalInstallationLinkState,
   loadAppConfigWithSource,
+  loadAppOwner,
+  ensureInstallationAccountIds,
   relinkInstallations,
   resolveGithubAppEnvConfig,
   saveAppConfig,
@@ -218,7 +228,9 @@ async function saveApp(providers: Providers, orgId: string, input: GithubAppConf
   await saveAppConfig({ credentials: engineCredentials }, orgId, buildAppConfig(input, process.env));
   await invalidateWorkflowSources(db, { orgId });
   try {
-    await discoverInstallations(appDeps(providers), orgId);
+    if (await discoverInstallations(appDeps(providers), orgId) === "stale") {
+      throw new Error("GitHub installations changed during discovery. Retry after the webhook completes.");
+    }
   } catch (err) {
     console.error(`${label}: post-save discovery failed:`, err);
   }
@@ -235,6 +247,10 @@ function appCapability(providers: Providers, caller: PluginHttpCaller, request: 
       const [row] = await providers.db.select({ name: orgs.name }).from(orgs).where(eq(orgs.id, orgId)).limit(1);
       return row?.name ?? orgId;
     },
+    allowPersonalInstallations: async () => {
+      const [row] = await providers.db.select({ allowed: orgs.allowPersonalInstallations }).from(orgs).where(eq(orgs.id, orgId));
+      return row?.allowed === true;
+    },
     signSetupState: () => {
       const returnTo = returnOrigin(request);
       return signState(
@@ -247,8 +263,7 @@ function appCapability(providers: Providers, caller: PluginHttpCaller, request: 
     saveApp: (input) => saveApp(providers, orgId, input, "github-app credential"),
     refreshInstallations: async () => {
       try {
-        await discoverInstallations(appDeps(providers), orgId);
-        return true;
+        return await discoverInstallations(appDeps(providers), orgId) !== "stale";
       } catch (err) {
         console.error("github-app refresh: discovery failed:", err);
         return false;
@@ -358,10 +373,10 @@ function connectionCapability(
     orgStatus: async () => {
       const { db } = providers;
       const config = await loadAppConfig(appDeps(providers), orgId);
-      const rows = await db
-        .select({ suspended: githubInstallations.suspended })
-        .from(githubInstallations)
-        .where(eq(githubInstallations.orgId, orgId));
+      const rows = await admittedInstallations(appDeps(providers), orgId, undefined, true).catch((error) => {
+        console.warn("GitHub org installation status unavailable:", error);
+        return [];
+      });
       const [org] = await db
         .select({ allowPersonalInstallations: orgs.allowPersonalInstallations })
         .from(orgs)
@@ -401,6 +416,8 @@ function connectionCapability(
               expiresAt: connection.expiresAt,
               metadata: { login: connection.login },
             });
+            await saveVerifiedGithubIdentity(appDeps(providers), userId,
+              { id: connection.githubUserId, login: connection.login }, connection.accessToken);
             await refreshCredentialReadiness(providers, { type: "user", id: userId }, GITHUB_CREDENTIAL_SERVICE);
             // Best-effort: the next discovery run catches up.
             try {
@@ -466,9 +483,74 @@ function webhookCapability(providers: Providers): GithubWebhookCapability {
       if (!config) return null;
       return {
         webhookSecret: config.webhookSecret,
-        bind: async ({ installationId }) => {
+        bind: async ({ installationId, installationCreated, revocation, targetRenamed, account, deliveryId }) => {
           const orgId = ownerOrgId ?? (await resolveEnvFallbackOrgId(db, installationId));
-          return orgId ? deliveryEffects(providers, orgId) : null;
+          if (!orgId) return null;
+          if (installationId === null) return deliveryEffects(providers, orgId);
+          const scope = and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId));
+          let [held] = await db.select().from(githubInstallations).where(scope);
+          // Removing authority never needs fresh admission or a GitHub API call.
+          if (revocation) return held ? deliveryEffects(providers, orgId) : null;
+          if (targetRenamed && held && account?.id === held.accountId) return deliveryEffects(providers, orgId);
+          const exclude = async (detail: string) => {
+            if (held) await writeDropLog(db, { orgId, reason: "event_not_ingestable", conversationKey: deliveryId,
+              detail: `GitHub installation ${installationId}: ${detail}` });
+            return null;
+          };
+          const retry = async (detail: string, record = true) => {
+            // GitHub does not auto-redeliver failures. An admin must redeliver manually or through the API.
+            if (record && (held || claimUnheldWebhookDrop(appDeps(providers), orgId, installationId))) {
+              await writeDropLog(db, { orgId, reason: "event_not_ingestable", conversationKey: deliveryId,
+                detail: `GitHub installation ${installationId}: ${detail} Redeliver manually or through the GitHub API after recovery.` });
+            }
+            return "retry" as const;
+          };
+          try {
+            if (!held && !installationCreated) {
+              const recovered = await recoverWebhookInstallation(appDeps(providers), orgId, installationId);
+              if (recovered === "excluded") return null;
+              if (recovered === "budget_exhausted") return retry("Targeted installation recovery budget is exhausted.", false);
+              if (recovered === "unavailable") return retry("Targeted installation recovery is temporarily unavailable.");
+              [held] = await db.select().from(githubInstallations).where(scope);
+            }
+            const owner = await loadAppOwner(appDeps(providers), orgId, config);
+            if (installationCreated) {
+              if (!account) return exclude("account is missing.");
+              const candidate = await installationAccountCandidateState(
+                appDeps(providers), orgId, account.id, owner, account.login,
+              );
+              if (candidate === "unavailable") return retry("Candidate member identity is temporarily unavailable.");
+              if (candidate !== "candidate") return exclude("account is not admitted by current policy.");
+              if (await discoverInstallations(appDeps(providers), orgId, installationId) === "stale") {
+                return retry("Installation discovery was invalidated by a held-row authority change.");
+              }
+              [held] = await db.select().from(githubInstallations).where(scope);
+            }
+            if (held?.accountId === null) {
+              await ensureInstallationAccountIds(appDeps(providers), orgId);
+              const [backfilled] = await db.select({ accountId: githubInstallations.accountId }).from(githubInstallations).where(scope);
+              if (backfilled?.accountId === null) return retry("Installation account identity is unavailable.");
+            }
+            const [installation] = await db.select().from(githubInstallations).where(and(scope,
+              or(appOwnerInstallationCondition(owner), and(
+                eq(githubInstallations.accountType, "User"), personalInstallationEligibilityCondition(),
+              )),
+            ));
+            if (!installation) return exclude("installation is not admitted by current policy.");
+            if (installation.accountId === null) return retry("Installation account identity is unavailable.");
+            if (installation.accountId !== owner.id) {
+              if (!installation.linkedUserId) return exclude("no linked member.");
+              const identity = await personalInstallationLinkState(
+                appDeps(providers), orgId, installation.linkedUserId, installation.accountId,
+              );
+              if (identity === "unavailable") return retry("Linked member identity is unavailable.");
+              if (identity !== "linked") return exclude("member identity does not match.");
+            }
+            return deliveryEffects(providers, orgId);
+          } catch (error) {
+            console.error("GitHub webhook admission unavailable:", error);
+            return retry("Admission lookup is temporarily unavailable.");
+          }
         },
       };
     },
@@ -479,16 +561,23 @@ function deliveryEffects(providers: Providers, orgId: string): GithubDeliveryEff
   const { db } = providers;
   /** Changes one installation row under the organization row lock. */
   const changeInstallation = async (installationId: number, suspended: boolean | null): Promise<void> => {
+    const scope = and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId));
+    const [target] = await db.select({ id: githubInstallations.id }).from(githubInstallations)
+      .where(suspended === null ? scope : and(scope, eq(githubInstallations.suspended, !suspended))).limit(1);
+    if (!target) return;
     await db.transaction(async (tx) => {
       await tx.select({ id: orgs.id }).from(orgs).where(eq(orgs.id, orgId)).for("update");
-      const scope = and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId));
       const changed = suspended === null
         ? await tx.delete(githubInstallations).where(scope).returning({ id: githubInstallations.id })
         : await tx.update(githubInstallations)
           .set({ suspended, updatedAt: Date.now() })
           .where(and(scope, eq(githubInstallations.suspended, !suspended)))
           .returning({ id: githubInstallations.id });
-      if (changed.length > 0) await invalidateWorkflowSources(tx, { orgId });
+      if (changed.length > 0) {
+        await tx.update(orgs).set({ githubInstallationRevision: sql`${orgs.githubInstallationRevision} + 1` })
+          .where(eq(orgs.id, orgId));
+        await invalidateWorkflowSources(tx, { orgId });
+      }
     });
   };
   return {
@@ -496,6 +585,11 @@ function deliveryEffects(providers: Providers, orgId: string): GithubDeliveryEff
       await providers.contentSync.onPush(orgId, push.repoFullName, push.gitRef, push.defaultBranch);
     },
     pullRequestChanged: (change) => setPullRequestState(db, orgId, change.url, change.state),
+    installationRenamed: async (installationId, account) => {
+      await db.update(githubInstallations).set({ accountLogin: account.login, updatedAt: Date.now() })
+        .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId),
+          eq(githubInstallations.accountId, account.id)));
+    },
     installationRemoved: (installationId) => changeInstallation(installationId, null),
     installationSuspended: (installationId, suspended) => changeInstallation(installationId, suspended),
     repositorySelectionChanged: async (installationId, repositorySelection) => {
@@ -503,9 +597,6 @@ function deliveryEffects(providers: Providers, orgId: string): GithubDeliveryEff
         .update(githubInstallations)
         .set({ updatedAt: Date.now(), ...(repositorySelection !== undefined ? { repositorySelection } : {}) })
         .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId)));
-    },
-    discoverInstallations: async () => {
-      await discoverInstallations(appDeps(providers), orgId);
     },
     emit: async (event) => {
       await ingestEvent(

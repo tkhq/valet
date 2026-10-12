@@ -66,6 +66,10 @@ export const orgs = pgTable("orgs", {
   allowAnonymousImageBakes: boolean("allow_anonymous_image_bakes").notNull().default(false),
   /** Allow members to install the GitHub App on personal accounts. */
   allowPersonalInstallations: boolean("allow_personal_installations").notNull().default(true),
+  /** Verified App owner, bound to App configuration; not a credential. */
+  githubAppOwner: jsonb("github_app_owner").$type<{ binding: string; id: number; login: string }>(),
+  /** Webhook authority changes fence discovery snapshots taken before them. */
+  githubInstallationRevision: bigint("github_installation_revision", { mode: "number" }).notNull().default(0),
   // Tier map: `{ xs: ["anthropic/claude-haiku-4-5"], ... }`. Nullable — null
   // means "use built-in defaults" (same pattern as `ssoTeamGroups`).
   modelTiers: jsonb("model_tiers"),
@@ -1799,6 +1803,7 @@ export const githubInstallations = pgTable(
     orgId: text("org_id").notNull(),
     installationId: bigint("installation_id", { mode: "number" }).notNull(),
     accountLogin: text("account_login").notNull(),
+    accountId: bigint("account_id", { mode: "number" }),
     accountType: text("account_type").notNull(),
     repositorySelection: text("repository_selection"),
     suspended: boolean("suspended").notNull().default(false),

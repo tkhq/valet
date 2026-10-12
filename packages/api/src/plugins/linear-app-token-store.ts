@@ -54,6 +54,15 @@ export class LinearAppTokenStore implements CredentialStore {
     private readonly deps: Deps,
   ) {}
 
+  withLock<T>(
+    owner: CredentialOwner, service: string,
+    operation: (store: CredentialStore) => Promise<T>,
+  ): Promise<T> {
+    return this.inner.withLock
+      ? this.inner.withLock(owner, service, operation)
+      : operation(this.inner);
+  }
+
   async get(owner: CredentialOwner, service: string): Promise<StoredCredential | null> {
     const stored = await this.inner.get(owner, service);
     const now = (this.deps.now ?? Date.now)();
