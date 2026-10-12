@@ -23,7 +23,7 @@ describe("assembleMemorySnapshot", () => {
 
     const snapshot = await assembleMemorySnapshot(db, scope);
     expect(snapshot).toContain("Memory snapshot");
-    expect(snapshot).toMatch(/snapshot built \d{4}-\d{2}-\d{2} UTC \(not the current date/);
+    expect(snapshot).toMatch(/snapshot built \d{4}-\d{2}-\d{2} UTC \(the date the snapshot was built, not the current date\)/);
     expect(snapshot).toContain("user:local-user");
     expect(snapshot.length).toBeLessThan(DEFAULT_SNAPSHOT_BUDGET_CHARS);
   });

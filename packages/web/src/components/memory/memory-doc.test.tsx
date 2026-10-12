@@ -57,6 +57,7 @@ const meFixture = {
   defaultReasoning: null,
   newThreadBehavior: "keep_current" as const,
   timezone: null,
+  timezoneReportDone: false,
 };
 
 const orgFixture = {

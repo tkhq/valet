@@ -69,7 +69,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   resolvePending = false;
   withdrawPending = false;
-  meData = { id: "u1", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current", timezone: null };
+  meData = { id: "u1", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current", timezone: null, timezoneReportDone: false };
 });
 
 describe("DecisionGateCard — action rendering", () => {
@@ -114,7 +114,7 @@ describe("DecisionGateCard — always_allow admin gate", () => {
   });
 
   it("enables Always allow for an org admin and submits actionId on click", async () => {
-    meData = { id: "u1", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "admin", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current", timezone: null };
+    meData = { id: "u1", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "admin", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current", timezone: null, timezoneReportDone: false };
     const user = userEvent.setup();
     renderCard();
 
@@ -151,14 +151,14 @@ describe("DecisionGateCard — another member's shared account", () => {
   const borrow = gate({ title: "Let a teammate use your linear account?", actions: [{ id: "approve", label: "Allow" }, { id: "deny", label: "Deny" }], approver: { userId: "bea", name: "Bea" } });
 
   it("tells everyone else the request went to that member, with no buttons", () => {
-    meData = { id: "al", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current", timezone: null };
+    meData = { id: "al", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current", timezone: null, timezoneReportDone: false };
     renderCard(borrow);
     expect(screen.getByText("Asked Bea for permission")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Allow" })).toBeNull();
   });
 
   it("gives that member the buttons", () => {
-    meData = { id: "bea", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current", timezone: null };
+    meData = { id: "bea", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current", timezone: null, timezoneReportDone: false };
     renderCard(borrow);
     expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
   });

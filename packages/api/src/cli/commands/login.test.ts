@@ -23,6 +23,7 @@ const ME: MeResponse = {
   defaultReasoning: null,
   newThreadBehavior: "keep_current",
     timezone: null,
+    timezoneReportDone: false,
 };
 
 let dir: string;

@@ -1216,6 +1216,8 @@ export class EngineHost {
     const sessionRoles = personaCell
       ? [...extras.roles, ...securityRolesForCell(personaCell.persona, personaRepoRoleMarkdown)]
       : extras.roles;
+    // A team conversation has many participants, so no one timezone applies.
+    const timezoneOptions = await this.userTimezoneOptions(principal.type === "user" ? meta.userId : undefined);
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -1246,6 +1248,7 @@ export class EngineHost {
             ...this.browserOptions(sessionId),
             extractDocument: extractDocumentText,
             ...this.threadAccessOptions(),
+            ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
           },
         })
@@ -1277,6 +1280,7 @@ export class EngineHost {
           ...this.browserOptions(sessionId),
           extractDocument: extractDocumentText,
           ...this.threadAccessOptions(),
+          ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
         });
 
@@ -1808,15 +1812,25 @@ export class EngineHost {
   }
 
   /**
-   * IANA timezone stored for `userId` (TKAI-584), or `{}` when the user has
-   * none or the host has no database. The engine renders an absent value as
-   * "unknown" and never guesses.
+   * Timezone options for a session (TKAI-584). `userTimezone` is the value
+   * stored now. `resolveUserTimezone` re-reads it whenever the session creates
+   * a thread, so a new thread sees a changed value. A thread stamps the value
+   * at creation and never re-reads it, so a live prompt stays fixed. An absent
+   * user yields `{}`, and the prompt then says the timezone is unknown.
    */
-  private async userTimezoneOptions(userId: string | undefined): Promise<{ userTimezone?: string }> {
-    if (!userId || !this.opts.db) return {};
-    const rows = await this.opts.db.select({ timezone: users.timezone }).from(users).where(eq(users.id, userId)).limit(1);
-    const timezone = rows[0]?.timezone;
-    return timezone && isValidTimezone(timezone) ? { userTimezone: timezone } : {};
+  private async userTimezoneOptions(userId: string | undefined): Promise<{
+    userTimezone?: string;
+    resolveUserTimezone?: () => Promise<string | undefined>;
+  }> {
+    const db = this.opts.db;
+    if (!userId || !db) return {};
+    const read = async (): Promise<string | undefined> => {
+      const rows = await db.select({ timezone: users.timezone }).from(users).where(eq(users.id, userId)).limit(1);
+      const timezone = rows[0]?.timezone;
+      return timezone && isValidTimezone(timezone) ? timezone : undefined;
+    };
+    const userTimezone = await read();
+    return { ...(userTimezone ? { userTimezone } : {}), resolveUserTimezone: read };
   }
 
   /** Team runtime threads read only what their audience may see

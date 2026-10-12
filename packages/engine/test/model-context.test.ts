@@ -239,10 +239,8 @@ describe("runtime model context delivered to the provider", () => {
       const thread = await session.ensureDefaultThread();
       const data = await s.store.getThread(session.id, thread.id);
       await s.store.saveThread(session.id, { ...data!, createdAt: T0 });
-      const restored = await new Engine({ providers: s.providers }).restoreSession({
-        sessionId: session.id, options: { ...s.options, ...(userTimezone ? { userTimezone } : {}) },
-      });
-      return restored;
+      // Restore without the timezone option: the thread's own persisted state must supply it.
+      return new Engine({ providers: s.providers }).restoreSession({ sessionId: session.id, options: s.options });
     }
 
     it("renders the persisted creation time with weekday, UTC and user-local time", async () => {
@@ -253,7 +251,10 @@ describe("runtime model context delivered to the provider", () => {
       const b = block(s.prompts[0]);
       expect(b).toContain("Thread started (UTC): 2026-10-12T16:35:00Z (Monday)");
       expect(b).toContain("Thread started (user local): Monday 2026-10-12 09:35 PDT (America/Los_Angeles)");
-      expect(b).toContain("This is not the current time");
+      expect(b).toContain("It is not the current time");
+      expect(b).toContain("date the snapshot was built");
+      expect(b).not.toContain("older");
+      expect(b).not.toContain("Current time");
       expect(b).toContain("date -u");
     });
 
@@ -276,11 +277,60 @@ describe("runtime model context delivered to the provider", () => {
       await run(await startedAt(s, "America/Los_Angeles"));
       const again = await new Engine({ providers: s.providers }).restoreSession({
         sessionId: (await s.store.listSessions("u1"))[0]!.id,
-        options: { ...s.options, userTimezone: "America/Los_Angeles" },
+        options: s.options,
       });
       await run(again);
 
       expect(block(s.prompts[1])).toBe(block(s.prompts[0]));
+    });
+
+    it("takes the start time from the persisted createdAt after a rebuild, not from when the agent was built", async () => {
+      const s = setup();
+      s.small.setResponses([s.capture(), s.capture()]);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(T0);
+      const session = await startedAt(s, "America/Los_Angeles");
+      await run(session);
+      // Three days later a new engine rehydrates the thread and builds a new agent.
+      vi.setSystemTime(T0 + 3 * 24 * 3_600_000);
+      const rebuilt = await new Engine({ providers: s.providers }).restoreSession({ sessionId: session.id, options: s.options });
+      await run(rebuilt);
+
+      expect(block(s.prompts[1])).toContain("Thread started (UTC): 2026-10-12T16:35:00Z (Monday)");
+      expect(s.prompts[1]).toBe(s.prompts[0]);
+    });
+
+    it("stamps the timezone at creation: a later change leaves the thread alone and a new thread uses it", async () => {
+      const s = setup();
+      s.small.setResponses([s.capture(), s.capture(), s.capture()]);
+      let zone: string | undefined = "America/Los_Angeles";
+      const options = { ...s.options, userTimezone: zone, resolveUserTimezone: async () => zone };
+      const session = await s.engine.createSession(options);
+      const first = await session.ensureDefaultThread();
+      const stored = await s.store.getThread(session.id, first.id);
+      await s.store.saveThread(session.id, { ...stored!, createdAt: T0 });
+
+      zone = "Asia/Tokyo";
+      const restored = await new Engine({ providers: s.providers }).restoreSession({ sessionId: session.id, options });
+      const existing = await restored.ensureDefaultThread();
+      await existing.awaitResult((await existing.submitPrompt("work", {})).queueItemId, { timeoutMs: 3000 });
+      const next = await restored.createThread("web:second");
+      await next.awaitResult((await next.submitPrompt("work", {})).queueItemId, { timeoutMs: 3000 });
+
+      expect(block(s.prompts[0])).toContain("Monday 2026-10-12 09:35 PDT (America/Los_Angeles)");
+      expect(block(s.prompts[1])).toContain("(Asia/Tokyo)");
+      expect(block(s.prompts[1])).not.toContain("America/Los_Angeles");
+    });
+
+    it("keeps the last known timezone when the resolver fails", async () => {
+      const s = setup();
+      s.small.setResponses([s.capture()]);
+      const session = await s.engine.createSession({
+        ...s.options, userTimezone: "Europe/Paris", resolveUserTimezone: async () => { throw new Error("db down"); },
+      });
+      const thread = await session.createThread("web:second");
+      await thread.awaitResult((await thread.submitPrompt("work", {})).queueItemId, { timeoutMs: 3000 });
+      expect(block(s.prompts[0])).toContain("(Europe/Paris)");
     });
 
     it("states the timezone is unknown when unset or invalid", async () => {

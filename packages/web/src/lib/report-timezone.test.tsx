@@ -16,20 +16,34 @@ function browserZone(zone: string) {
   vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({ ...real, timeZone: zone });
 }
 
+type Me = { timezone: string | null; timezoneReportDone: boolean };
+
 describe("useReportTimezoneOnce", () => {
-  it("reports the browser timezone once when none is stored", () => {
+  it("reports the browser timezone once when none was ever set", () => {
     browserZone("America/Los_Angeles");
     const { rerender } = renderHook(({ me }) => useReportTimezoneOnce(me), {
-      initialProps: { me: { timezone: null } as { timezone: string | null } | undefined },
+      initialProps: { me: { timezone: null, timezoneReportDone: false } as Me | undefined },
     });
-    rerender({ me: { timezone: null } });
+    rerender({ me: { timezone: null, timezoneReportDone: false } });
     expect(mutate).toHaveBeenCalledTimes(1);
-    expect(mutate).toHaveBeenCalledWith({ timezone: "America/Los_Angeles" });
+    expect(mutate).toHaveBeenCalledWith({ reportedTimezone: "America/Los_Angeles" });
   });
 
   it("never overrides a stored value", () => {
     browserZone("America/Los_Angeles");
-    renderHook(() => useReportTimezoneOnce({ timezone: "Europe/Paris" }));
+    renderHook(() => useReportTimezoneOnce({ timezone: "Europe/Paris", timezoneReportDone: true }));
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it("does not undo a clear: a cleared timezone with the done flag is not reported again", () => {
+    browserZone("America/New_York");
+    const { rerender } = renderHook(({ me }) => useReportTimezoneOnce(me), {
+      initialProps: { me: { timezone: "Europe/Paris", timezoneReportDone: true } as Me | undefined },
+    });
+    rerender({ me: { timezone: null, timezoneReportDone: true } });
+    expect(mutate).not.toHaveBeenCalled();
+    // A fresh mount on a later page load behaves the same.
+    renderHook(() => useReportTimezoneOnce({ timezone: null, timezoneReportDone: true }));
     expect(mutate).not.toHaveBeenCalled();
   });
 

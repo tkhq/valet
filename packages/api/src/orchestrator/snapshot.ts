@@ -95,7 +95,7 @@ export async function assembleMemorySnapshot(
   const indexResult = await readFile(db, scope, "");
   const indexContent = indexResult.kind === "directory" ? indexResult.rendered : "";
 
-  const header = `# Memory snapshot — ${ownerLabel(scope)} — snapshot built ${new Date().toISOString().slice(0, 10)} UTC (not the current date; see Current time in the Runtime section)\n`;
+  const header = `# Memory snapshot — ${ownerLabel(scope)} — snapshot built ${new Date().toISOString().slice(0, 10)} UTC (the date the snapshot was built, not the current date)\n`;
 
   // `journalBlocks` is already newest-first (see the sort above); its last
   // element is the oldest of the (up to 3) included journals.

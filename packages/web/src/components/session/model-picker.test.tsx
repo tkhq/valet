@@ -32,6 +32,7 @@ function makeMe(overrides: Partial<MeResponse> = {}): MeResponse {
     defaultReasoning: null,
     newThreadBehavior: "keep_current",
     timezone: null,
+    timezoneReportDone: false,
     ...overrides,
   };
 }

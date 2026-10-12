@@ -9,12 +9,16 @@ import type {
 } from "@valet/api/wire";
 
 const createTeam = vi.fn();
+const patchMe = vi.fn();
 
 vi.mock("./client", () => ({
-  api: { createTeam: (body: CreateTeamRequest) => createTeam(body) },
+  api: {
+    createTeam: (body: CreateTeamRequest) => createTeam(body),
+    patchMe: (body: unknown) => patchMe(body),
+  },
 }));
 
-import { qkSettings, teamCreateQueryKeys, useCreateTeam } from "./settings";
+import { qkSettings, teamCreateQueryKeys, useCreateTeam, usePatchMe } from "./settings";
 
 const created: CreateTeamResponse = {
   team: {
@@ -51,5 +55,36 @@ describe("workspace creation", () => {
     await result.current.mutateAsync({ name: "Platform" });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: qkSettings.teams() });
     expect(client.getQueryData(["assistants"])).toBeUndefined();
+  });
+});
+
+describe("usePatchMe timezone", () => {
+  const me = {
+    id: "u1", email: "a@b.c", name: "A", avatarUrl: null, role: "member", orgId: "o1", orgRole: "member",
+    defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current",
+    timezone: "Europe/Paris", timezoneReportDone: false,
+  } as const;
+
+  it("marks the report done as soon as the user clears the timezone, before the server answers", async () => {
+    let release: (value: unknown) => void = () => {};
+    patchMe.mockReturnValueOnce(new Promise((resolve) => { release = resolve; }));
+    const client = makeClient();
+    client.setQueryData(qkSettings.me(), me);
+    const { result } = renderHook(() => usePatchMe(), { wrapper: wrapperFor(client) });
+    result.current.mutate({ timezone: null });
+    await vi.waitFor(() => {
+      expect(client.getQueryData(qkSettings.me())).toMatchObject({ timezone: null, timezoneReportDone: true });
+    });
+    release({ ...me, timezone: null, timezoneReportDone: true });
+  });
+
+  it("does not copy the browser report into the visible profile", async () => {
+    patchMe.mockResolvedValueOnce({ ...me, timezone: "America/New_York", timezoneReportDone: true });
+    const client = makeClient();
+    client.setQueryData(qkSettings.me(), { ...me, timezone: null });
+    const { result } = renderHook(() => usePatchMe(), { wrapper: wrapperFor(client) });
+    result.current.mutate({ reportedTimezone: "America/New_York" });
+    await vi.waitFor(() => expect(patchMe).toHaveBeenCalledWith({ reportedTimezone: "America/New_York" }));
+    expect(client.getQueryData(qkSettings.me())).not.toHaveProperty("reportedTimezone");
   });
 });

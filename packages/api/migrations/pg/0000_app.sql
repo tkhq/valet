@@ -25,7 +25,8 @@ CREATE TABLE "user" (
 	"default_model" text,
 	"default_reasoning" text,
 	"new_thread_behavior" text DEFAULT 'keep_current' NOT NULL,
-	"timezone" text
+	"timezone" text,
+	"timezone_report_done" boolean DEFAULT false NOT NULL
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "user_email_unique" ON "user" ("email");

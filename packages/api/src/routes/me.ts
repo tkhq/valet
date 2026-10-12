@@ -20,7 +20,7 @@
  * null-clears pattern.
  */
 import { Hono } from "hono";
-import { eq, and } from "drizzle-orm";
+import { eq, and, isNull } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { isValidTimezone } from "../lib/timezone.js";
@@ -42,6 +42,7 @@ const PATCH_FIELDS = new Set([
   "defaultReasoning",
   "newThreadBehavior",
   "timezone",
+  "reportedTimezone",
 ]);
 
 async function loadMeResponse(
@@ -71,6 +72,7 @@ async function loadMeResponse(
     defaultReasoning: row.defaultReasoning ?? null,
     newThreadBehavior: row.newThreadBehavior,
     timezone: row.timezone ?? null,
+    timezoneReportDone: row.timezoneReportDone,
   };
 }
 
@@ -127,6 +129,7 @@ meRouter.patch("/", async (c) => {
     defaultReasoning?: string | null;
     newThreadBehavior?: NewThreadBehavior;
     timezone?: string | null;
+    timezoneReportDone?: boolean;
   } = {};
 
   if ("name" in raw) {
@@ -198,10 +201,28 @@ meRouter.patch("/", async (c) => {
       );
     }
     update.timezone = raw.timezone;
+    // An explicit set or clear is the user's choice. Never auto-report over it.
+    update.timezoneReportDone = true;
+  }
+
+  let reportedTimezone: string | undefined;
+  if ("reportedTimezone" in raw) {
+    if (!isValidTimezone(raw.reportedTimezone)) {
+      return c.json({ error: "reportedTimezone is not a valid IANA name. Send a name such as America/Los_Angeles." }, 400);
+    }
+    reportedTimezone = raw.reportedTimezone;
   }
 
   if (Object.keys(update).length > 0) {
     await db.update(users).set(update).where(eq(users.id, user.id));
+  }
+
+  // Apply the browser report once, and only if nothing was ever set or cleared.
+  if (reportedTimezone !== undefined) {
+    await db
+      .update(users)
+      .set({ timezone: reportedTimezone, timezoneReportDone: true })
+      .where(and(eq(users.id, user.id), isNull(users.timezone), eq(users.timezoneReportDone, false)));
   }
 
   const body = await loadMeResponse(db, user);

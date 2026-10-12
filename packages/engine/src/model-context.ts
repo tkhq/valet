@@ -44,7 +44,7 @@ function localTime(ms: number, timeZone: string | undefined): string | undefined
 
 /**
  * Fixed block for the stable prompt prefix (TKAI-584). It depends only on the
- * persisted thread creation time and the user timezone, so it never changes
+ * persisted thread creation time and the timezone stamped at creation, so it never changes
  * between calls. UTC time is to the minute.
  */
 export function threadStartedSection(createdAtMs: number, userTimezone: string | undefined): string {
@@ -54,8 +54,9 @@ export function threadStartedSection(createdAtMs: number, userTimezone: string |
     ?? "unknown, the user timezone is not known. Do not guess it.";
   return `## Thread started
 
-This thread started at the time below. This is not the current time. Time has passed since then, and the memory snapshot date is older still.
+This block shows when this thread started. It is not the current time.
 Thread started (UTC): ${utc} (${WEEKDAYS[date.getUTCDay()]})
 Thread started (user local): ${local}
+A memory snapshot header, if present, shows the date the snapshot was built. That date is separate from the thread start.
 If you have a shell tool, run \`date -u\` when you need the exact current time.`;
 }
