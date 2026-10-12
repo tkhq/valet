@@ -373,7 +373,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       promptOpts: WorkflowPromptOptions,
     ): Promise<WorkflowPromptReceipt> {
       const session = await ensureSession(opts, sessionId);
-      const thread = session.thread();
+      const thread = await session.ensureDefaultThread();
       const context = await resolveRunContext(opts, parseWorkflowDispatchId(promptOpts.dispatchId));
       const previous = await legacyWorkflowAdmission(opts.db, promptOpts.dispatchId, context.orgId);
       if (previous) {
@@ -587,7 +587,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       // from instead.
       let thread = origin
         ? session.threadById(origin.threadId)
-        : session.thread(workflowRunThreadKey(runId, ctx.slackChannel));
+        // `createThread`, not `thread`: a new run thread stamps the user's
+        // current timezone (TKAI-584).
+        : await session.createThread(workflowRunThreadKey(runId, ctx.slackChannel));
       if (!thread) {
         throw new Error(
           `Workflow origin thread ${origin?.threadId} is missing from session ${session.id}. ` +

@@ -837,6 +837,12 @@ export class Session {
     };
   }
 
+  /**
+   * Get or create a thread synchronously. A new thread stamps the last known
+   * user timezone and cannot call `resolveUserTimezone`. Callers that create
+   * threads should use `createThread` or `ensureDefaultThread`, which read the
+   * current value first (TKAI-584).
+   */
   thread(key?: string): Thread {
     const k = key ?? "web:default";
     const existing = this.threadsByKey.get(k);

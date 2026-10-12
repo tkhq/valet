@@ -322,6 +322,23 @@ describe("runtime model context delivered to the provider", () => {
       expect(block(s.prompts[1])).not.toContain("America/Los_Angeles");
     });
 
+    it("stamps the last known timezone on a synchronous thread(key), and the current one on createThread", async () => {
+      const s = setup();
+      s.small.setResponses([s.capture(), s.capture()]);
+      let zone: string | undefined = "America/Los_Angeles";
+      const session = await s.engine.createSession({
+        ...s.options, userTimezone: zone, resolveUserTimezone: async () => zone,
+      });
+      zone = "Asia/Tokyo";
+      const sync = session.thread("workflow-run:sync");
+      const created = await session.createThread("workflow-run:async");
+      await sync.awaitResult((await sync.submitPrompt("work", {})).queueItemId, { timeoutMs: 3000 });
+      await created.awaitResult((await created.submitPrompt("work", {})).queueItemId, { timeoutMs: 3000 });
+
+      expect(block(s.prompts[0])).toContain("(America/Los_Angeles)");
+      expect(block(s.prompts[1])).toContain("(Asia/Tokyo)");
+    });
+
     it("keeps the last known timezone when the resolver fails", async () => {
       const s = setup();
       s.small.setResponses([s.capture()]);
