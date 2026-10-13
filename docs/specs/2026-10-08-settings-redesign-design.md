@@ -169,6 +169,14 @@ a prompt badge for a stored prompt, the description (hidden below `sm`), and
 the id an agent passes (hidden below `md`). The whole row opens the skill.
 The filters, search, the Catalog and Sources tabs, and New skill stay.
 
+A plugin skill's page lists the integrations it uses as Integrations rows
+(2026-10-13), each a link to `/integrations?service=<plugin>`. Skill metadata
+declares no tools, so the list is the reverse of a panel's Related skills: the
+plugin that ships the skill, and any plugin that lists it. In the personal
+workspace the rows carry your tool summary. A stored or repository skill
+declares no integrations and keeps its note. A skill has no permissions of its
+own.
+
 ## Testing
 
 - `settings-rail.test.tsx`: the four groups, teams by name through the typed
@@ -198,5 +206,5 @@ The filters, search, the Catalog and Sources tabs, and New skill stay.
   the optimistic write and its rollback.
   `-integrations-workspace.test.tsx` covers the team view.
 - `-skills.index.test.tsx` and `-skills.stored.test.tsx`: one list and the
-  scope badges.
+  scope badges. `skill-usage.test.tsx`: the integration rows and their links.
 - `make e2e` passes before a deploy.
