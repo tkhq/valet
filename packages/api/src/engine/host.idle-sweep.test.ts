@@ -296,6 +296,37 @@ describe("EngineHost idle sweep", () => {
     host.evictAll();
   });
 
+  it("a hold set during the race window wins — suspend is skipped (PR review 2, item 1)", async () => {
+    vi.useFakeTimers();
+    const provider = new HibernatingTestProvider();
+    const store = new InMemorySessionStore();
+    let hookCalls = 0;
+    const host = buildHost(store, provider, {
+      idleMinutes: 1,
+      idleSweepTestHooks: {
+        beforeSuspend: async (sessionId) => {
+          hookCalls++;
+          const now = Date.now();
+          await store.createLease({
+            id: "ls_race", sessionId, ownerKind: "hold", reason: "keep it", createdAt: now, deadlineAt: now + 3_600_000,
+          });
+        },
+      },
+    });
+
+    const sessionId = "s-hold-race";
+    const session = await buildReadySession(host, sessionId);
+    await stampActivity(store, sessionId, "th-hold-race-initial");
+
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    expect(hookCalls).toBeGreaterThanOrEqual(1);
+    expect(provider.suspendCalls).toEqual([]);
+    expect(session.attachment.state).toBe("ready");
+
+    host.evictAll();
+  });
+
   it("never starts the sweep when the provider lacks hibernation capability", async () => {
     vi.useFakeTimers();
     const setIntervalSpy = vi.spyOn(global, "setInterval");

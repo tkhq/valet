@@ -937,6 +937,9 @@ export class EngineHost {
     if ((await this.opts.engineStore.listDecisionGates(sessionId, undefined, "pending")).length > 0) return;
     const recheck = await this.opts.engineStore.listUnsettledSubmissions(sessionId);
     if (recheck.length > 0 || session.hasOtherActiveRuns("") || session.pendingJobCount() > 0) return;
+    // A turn that started, set a hold or a process, and finished inside this
+    // window leaves a lease the first check never saw (PR review 2, item 1).
+    if ((await this.opts.engineStore.countActiveLeases(sessionId)) > 0) return;
     if (this.cache.get(sessionId)?.session !== session) return;
     if (session.attachment.state !== "ready") {
       if (execution && ["detached", "suspended"].includes(session.attachment.state)) this.evictCache(sessionId);

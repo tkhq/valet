@@ -688,6 +688,42 @@ describe("owner move stops background work only on force (H11, fix wave 3 H2)", 
     expect(rows[0]?.ownerType).toBe("team");
   });
 
+  it("a timer set while the forced cancel runs stops the move (PR review 2, item 2)", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "team_mv_race", [{ userId: "local-user", role: "admin" }]);
+    await seedSession(api, "wk-move-race");
+    const session = await api.providers.engineHost.sessionFor("wk-move-race", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/wakeups-route-wk-move-race",
+    });
+    const thread = await session.ensureDefaultThread();
+    await seedHold(api, "wk-move-race", thread.id, 1);
+    const store = api.providers.engineStore;
+    const original = store.releaseLease.bind(store);
+    const t = api;
+    const spy = vi.spyOn(store, "releaseLease").mockImplementation(async (...args) => {
+      spy.mockRestore();
+      const released = await original(...args);
+      await seedTimer(t, "wk-move-race", thread.id, 7);
+      return released;
+    });
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/wk-move-race`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ teamId: "team_mv_race", force: true }),
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("background work started, so the request did not move the session.");
+    expect(body.error).toContain("The background work already stopped.");
+    const rows = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, "wk-move-race"));
+    expect(rows[0]?.ownerType).toBe("user");
+    expect(await store.getWakeup("wk_timer7")).toMatchObject({ status: "pending" });
+    expect(await store.getQueueItemByDispatchId("wk-move-race", "lease:ls_hold1:released")).not.toBeNull();
+  });
+
   it("a move with no background work reports no count", async () => {
     api = await bootTestApi();
     await seedTeam(api, "team_mv_none", [{ userId: "local-user", role: "admin" }]);

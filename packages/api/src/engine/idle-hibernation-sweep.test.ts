@@ -185,6 +185,16 @@ describe("IdleHibernationSweep", () => {
     expect((await row(id))?.status).toBe("hibernated");
   });
 
+  it("a lease set between check and suspend wins (PR review 2, item 1)", async () => {
+    const id = await seed();
+    const { deps, suspended } = fakeDeps({ activeLeaseQueue: [0, 1] });
+
+    await new IdleHibernationSweep(deps).sweep(NOW);
+
+    expect(suspended).toEqual([]);
+    expect((await row(id))?.status).toBe("active");
+  });
+
   it("a submission admitted between check and suspend wins (re-check race rule)", async () => {
     const id = await seed();
     const { deps, suspended } = fakeDeps({ unsettledQueue: [0, 1] });

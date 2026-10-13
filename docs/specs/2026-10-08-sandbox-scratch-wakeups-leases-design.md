@@ -1303,6 +1303,23 @@ with an earlier entry, the entry below wins.
   preparation-step failure on a leased adopted pod keeps the pod and
   logs; it no longer calls `release`, which would suspend the CR and
   delete the pod with its `/scratch`. The next attach retries the steps.
+- **PR review 2, idle sweeps re-check leases.** Both idle sweeps read the
+  active lease count again in their last check before the suspend. A turn
+  that set a hold and settled inside the window no longer loses its pod.
+- **PR review 2, a forced move re-reads the work.** After its cancel, a
+  forced owner move or profile change selects the work again with the
+  gate's own filter. Work set while the cancel ran returns 409 with the
+  "background work started" text, and the deferred signals still go out.
+- **PR review 2, holds in child settlement.** The ChildWatcher remembers
+  the holds it saw active. Once one is released, it awaits the
+  `lease:<id>:expired` or `lease:<id>:released` turn under the same
+  admission grace as a wakeup's terminal turn.
+- **PR review 2, length-preserving decode.** The kubernetes job poll
+  replaces each byte of ill-formed UTF-8 with one `?`. The decoded text
+  then has the same byte length as the raw range `nextOffset`
+  covers, so the watch kernel's offset never falls behind lines it already
+  sent. Docker already counts offsets in its decoded text, so it needs no
+  change.
 - **PR review, EXIT after the log drain.** The kubernetes kickoff saves
   the job's status, waits for the capping filter, then writes `.exit`.
   A poll that sees `.exit` reads a complete log.
