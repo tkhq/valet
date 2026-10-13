@@ -439,30 +439,33 @@ export function UsagePage() {
               }`}
             />
           </label>
-          <label className="text-sm text-muted">
-            <span className="sr-only">Custom start date</span>
-            <input
-              type="date"
-              aria-label="Custom start date"
-              max={todayUtc}
-              value={customStart}
-              onChange={(event) => setCustomStart(event.target.value)}
-              className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
-            />
-          </label>
-          <span className="text-sm text-muted">to</span>
-          <label className="text-sm text-muted">
-            <span className="sr-only">Custom end date</span>
-            <input
-              type="date"
-              aria-label="Custom end date"
-              min={customStart}
-              max={todayUtc}
-              value={customEnd}
-              onChange={(event) => setCustomEnd(event.target.value)}
-              className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
-            />
-          </label>
+          {/* One row that shrinks its inputs, so the range never splits. */}
+          <div className="flex min-w-0 items-center gap-2 max-sm:w-full">
+            <label className="min-w-0 flex-1 text-sm text-muted sm:flex-none">
+              <span className="sr-only">Custom start date</span>
+              <input
+                type="date"
+                aria-label="Custom start date"
+                max={todayUtc}
+                value={customStart}
+                onChange={(event) => setCustomStart(event.target.value)}
+                className="min-h-11 w-full min-w-0 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+              />
+            </label>
+            <span className="text-sm text-muted">to</span>
+            <label className="min-w-0 flex-1 text-sm text-muted sm:flex-none">
+              <span className="sr-only">Custom end date</span>
+              <input
+                type="date"
+                aria-label="Custom end date"
+                min={customStart}
+                max={todayUtc}
+                value={customEnd}
+                onChange={(event) => setCustomEnd(event.target.value)}
+                className="min-h-11 w-full min-w-0 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+              />
+            </label>
+          </div>
           <button
             type="button"
             disabled={!customStart || !customEnd || customStart > customEnd}
