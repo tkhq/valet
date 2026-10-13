@@ -56,6 +56,7 @@ export const MessageItem = memo(function MessageItem({
   suppressEmptyPlaceholder = false,
   viewerId,
   onReply,
+  ratings = true,
 }: {
   message: StreamMessage;
   /** True for the last message while the agent is mid-turn — an empty
@@ -65,6 +66,8 @@ export const MessageItem = memo(function MessageItem({
   viewerId?: string;
   /** Selects a completed assistant text message as the composer reply target. */
   onReply?: (target: MessageReplyReference) => void;
+  /** The per-reply rating buttons; see `MessageList`'s prop doc. */
+  ratings?: boolean;
 }) {
   if (isEmptyInterruption(message)) return null;
   const isUser = message.role === "user";
@@ -110,7 +113,7 @@ export const MessageItem = memo(function MessageItem({
                   Reply
                 </button>
               )}
-              {message.role === "assistant" && <MessageRating message={message} />}
+              {ratings && message.role === "assistant" && <MessageRating message={message} />}
               {copyText && (
                 <CopyButton
                   getText={() => copyText}

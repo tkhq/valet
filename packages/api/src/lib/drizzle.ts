@@ -601,6 +601,11 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   { describe: "child completion reply child session", probe: { kind: "column", table: "child_reply_deliveries", column: "child_session_id" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "child_session_id" text' },
   { describe: "child completion reply child submission", probe: { kind: "column", table: "child_reply_deliveries", column: "child_queue_item_id" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "child_queue_item_id" text' },
   {
+    describe: "session_threads.share_mode column",
+    probe: { kind: "column", table: "session_threads", column: "share_mode" },
+    sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "share_mode" text',
+  },
+  {
     describe: "session_repos.resolved_ref column",
     probe: { kind: "column", table: "session_repos", column: "resolved_ref" },
     sql: 'ALTER TABLE "session_repos" ADD COLUMN IF NOT EXISTS "resolved_ref" text',

@@ -639,6 +639,11 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
    * run such a tool, because the policy refuses what needs approval; other
    * tools act as the workspace and refuse that turn (`Thread.buildTools`). */
   policyChecked?: boolean;
+  /** The tool reads or changes what the owner of a personal workspace keeps
+   * beyond this thread: other threads or memory. A turn that another member
+   * wrote there, such as a reply in a shared thread, refuses it
+   * (`Thread.buildTools`). */
+  ownerOnly?: boolean;
   riskLevel?: RiskLevel;
   requiresApproval?: boolean | ((args: Static<TParams>, ctx: ToolContext) => Promise<boolean> | boolean);
   /** When true, this tool's outputs are exempt from pruning during compaction. */

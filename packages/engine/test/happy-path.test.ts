@@ -198,7 +198,9 @@ describe("engine: single-thread happy path", () => {
       userId: "credential-owner", owner: { type: ownerType, id: "credential-owner" },
       orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
       credentialResolver: async (owner) => { credentialOwners.push(owner); return null; },
-      tools: [{ name: "actor", description: "record actor", parameters: Type.Object({}), execute: async (_args, ctx) => {
+      // A plugin action: on a personal session, another member's turn may
+      // run only policy-checked tools (thread sharing spec).
+      tools: [{ name: "actor", description: "record actor", parameters: Type.Object({}), policyChecked: true, execute: async (_args, ctx) => {
         actors.push(ctx.userId); await ctx.credentials.get("slack"); return { text: "ok" };
       } }],
     });

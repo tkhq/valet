@@ -369,6 +369,7 @@ export function threadReference(value: string): string {
 export const threadReadTool = defineTool({
   name: "thread_read",
   concurrencySafe: true,
+  ownerOnly: true,
   description:
     "Read recent messages from another thread in this session. Useful for cross-thread context (e.g. an orchestrator pulling notes from a worker thread, or a thread checking what a sibling has done). " +
     "Accepts a thread key, a thread id, or a Valet thread link a person pasted (`/threads/<id>`, or a chat link with `?thread=<id>`).",
@@ -651,6 +652,7 @@ export const childStatusTool = defineTool({
 export const listThreadsTool = defineTool({
   name: "list_threads",
   concurrencySafe: true,
+  ownerOnly: true,
   description:
     "List sibling threads in this session, including paused ones. Use this " +
     "to discover thread keys before calling `thread_read`. Returns key, " +

@@ -78,15 +78,18 @@ function invalidatePersistedTitles(
   }
 }
 
-function wsUrl(sessionId: string, fromOffset: string | undefined): string {
+function wsUrl(sessionId: string, fromOffset: string | undefined, threadId: string | undefined): string {
   // Vite proxy upgrades /api → server, including WS (`ws: true`).
   // In production, the same /api path is served by the API directly.
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const base = `${proto}//${window.location.host}/api/sessions/${encodeURIComponent(sessionId)}/ws`;
-  return fromOffset ? `${base}?fromOffset=${encodeURIComponent(fromOffset)}` : base;
+  const query = new URLSearchParams({ ...(fromOffset ? { fromOffset } : {}), ...(threadId ? { threadId } : {}) }).toString();
+  return query ? `${base}?${query}` : base;
 }
 
-export function useSessionWebSocket(sessionId: string) {
+/** `sharedThreadId` opens the stream of one shared thread for a person who
+ * is not the session's owner: the server sends that thread's frames only. */
+export function useSessionWebSocket(sessionId: string, sharedThreadId?: string) {
   const qc = useQueryClient();
   const setConnection = useStreamStore((s) => s.setConnection);
   const ingest = useStreamStore((s) => s.ingest);
@@ -119,7 +122,7 @@ export function useSessionWebSocket(sessionId: string) {
     function open() {
       if (cancelled) return;
       const lastOffset = useStreamStore.getState().bySession[sessionId]?.lastOffset;
-      socket = new WebSocket(wsUrl(sessionId, lastOffset || undefined));
+      socket = new WebSocket(wsUrl(sessionId, lastOffset || undefined, sharedThreadId));
       socket.onopen = () => {
         setConnection(sessionId, "open");
       };
@@ -194,7 +197,7 @@ export function useSessionWebSocket(sessionId: string) {
     };
     // We intentionally exclude the store actions from the dep list — Zustand
     // returns stable function refs per call but TypeScript can't prove that.
-    // The hook only re-runs when sessionId changes.
+    // The hook only re-runs when the session or shared thread changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+  }, [sessionId, sharedThreadId]);
 }

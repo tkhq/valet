@@ -256,7 +256,8 @@ CREATE TABLE "session_threads" (
 	"title" text,
 	"created_at" bigint NOT NULL,
 	"last_user_activity_at" bigint,
-	"archived_at" bigint
+	"archived_at" bigint,
+	"share_mode" text
 );
 --> statement-breakpoint
 CREATE INDEX "session_threads_session" ON "session_threads" ("session_id");

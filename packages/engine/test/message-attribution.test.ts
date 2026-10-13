@@ -5,8 +5,8 @@
  * thread, and the model cannot tell their messages apart from the text
  * alone. `entriesToAgentMessages` therefore renders each user entry's
  * `author` as a `[from: …]` line — but only when the caller opts in
- * (`attributeAuthors`), because on a personal session every prompt has the
- * same author and the line would be noise.
+ * (`attributeAuthors`). On a personal session only a prompt from someone
+ * other than the owner gets the line, such as a reply in a shared thread.
  *
  * One render function (`formatSenderLine`) serves three call sites — the
  * hot path (`Thread.runAgent`), rehydrate (`entriesToAgentMessages`), and
@@ -133,6 +133,31 @@ describe("entriesToAgentMessages — attributeAuthors", () => {
     ];
     const msgs = entriesToAgentMessages(entries, MODEL, { attributeAuthors: true });
     expect(textOf(msgs[0].content)).not.toContain("[from:");
+  });
+});
+
+describe("attributeAuthors — personal session with a shared thread", () => {
+  // The owner's prompts stay bare. A member who replies in the owner's
+  // shared thread is named, so the model knows who is speaking.
+  const entries = [
+    userEntry({ id: "e1", author: { id: "owner", name: "Ops Lead" }, content: "look at checkout" }),
+    userEntry({ id: "e2", author: { id: "guest", name: "Guest Member" }, content: "check payments too" }),
+  ];
+
+  it("names only authors other than the owner in the live transcript", () => {
+    const msgs = entriesToAgentMessages(entries, MODEL, { attributeAuthors: { ownerId: "owner" } });
+    expect(msgs.map((m) => textOf(m.content))).toEqual([
+      "look at checkout",
+      "[from: Guest Member]\n\ncheck payments too",
+    ]);
+  });
+
+  it("names only authors other than the owner in the summarizer input", () => {
+    const msgs = entriesToSummaryMessages(entries, { toolOutputMaxChars: 2000, attributeAuthors: { ownerId: "owner" } });
+    expect(msgs.map((m) => textOf(m.content))).toEqual([
+      "look at checkout",
+      "[from: Guest Member]\n\ncheck payments too",
+    ]);
   });
 });
 

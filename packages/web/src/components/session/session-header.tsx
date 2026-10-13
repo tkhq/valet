@@ -7,6 +7,7 @@ import {
   Moon,
   MoreHorizontal,
   RefreshCw,
+  Share2,
   SquareTerminal,
   Trash2,
 } from "lucide-react";
@@ -53,6 +54,7 @@ import {
 } from "~/stores/stream";
 import { ModelPicker } from "./model-picker";
 import { MoveSessionDialog } from "./move-session-dialog";
+import { ShareThreadDialog } from "./share-thread-dialog";
 import { ThreadStatusIcon } from "./thread-status-icon";
 import { buildTranscript } from "./transcript";
 import { ThreadChannelChip } from "~/components/channels/thread-channel-chip";
@@ -169,6 +171,7 @@ export function SessionHeader({
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [moving, setMoving] = useState(false);
+  const [sharing, setSharing] = useState(false);
   // Enter and blur both reach `commitRename`, and Enter unmounts the input,
   // which fires blur straight after. The ref makes the commit idempotent so
   // one edit sends one PATCH.
@@ -304,6 +307,9 @@ export function SessionHeader({
   const deleteDescription = `${teamId !== null ? `Everyone on ${team?.name ?? "the team"} loses it. ` : ""}This deletes all threads, history, and child sessions, and tears down the sandbox.`;
   // Fail closed until the detail response identifies the runtime boundary.
   const canDelete = canAdminister && session.isWorkspaceRuntime === false;
+  // Only the owner shares a personal thread. A team thread is already open
+  // to its team.
+  const canShare = activeThread !== undefined && owner.type === "user" && owner.id === me.data?.id;
 
   // The edit box replaces the title cluster. The right-hand side keeps the
   // read-only signals — sandbox, connection, agent status — and the error
@@ -373,6 +379,9 @@ export function SessionHeader({
               {team?.name ?? "Team"}
             </Badge>
           )}
+          {activeThread?.share && (
+            <Badge variant="accent" className="max-w-full truncate" data-testid="thread-shared">Shared</Badge>
+          )}
           {/* Runtime workspace paths are internal; standalone paths describe the work. */}
           {session.workspace && !isWorkspaceRuntime && (
             <span className="hidden sm:inline text-[10px] font-mono tracking-wide text-muted truncate">
@@ -426,6 +435,13 @@ export function SessionHeader({
         )}
         {modelSaving && (
           <span role="status" className="text-xs text-neutral-500">Saving model…</span>
+        )}
+        {canShare && (
+          <Tooltip content="Share this thread with your organization">
+            <Button variant="ghost" size="sm" onClick={() => setSharing(true)} aria-label="Share thread">
+              <Share2 className="h-4 w-4" aria-hidden />
+            </Button>
+          </Tooltip>
         )}
         <div className="hidden sm:contents">
           <ThreadStatusIcon status={agentStatus} busy={threadBusy} needsApproval={Boolean(pendingGate)} conn={conn} />
@@ -529,6 +545,9 @@ export function SessionHeader({
         </p>
       )}
       {actionError && <p role="alert" className="basis-full min-w-0 break-words text-xs text-danger-500">{actionError}</p>}
+      {canShare && sharing && (
+        <ShareThreadDialog sessionId={session.id} threadId={activeThread.id} share={activeThread.share} open={sharing} onOpenChange={setSharing} />
+      )}
       {moving && (
         <MoveSessionDialog
           sessionId={session.id}

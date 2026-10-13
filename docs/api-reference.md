@@ -28,7 +28,7 @@ App webhooks (HMAC-verified).
 | `/api/sessions/:id` | GET / PATCH / DELETE | Detail, update (title etc.), delete |
 | `/api/sessions/:id/pause` | POST | Pause the session |
 | `/api/sessions/:id/sandbox-jwt` | POST | Mint a short-lived gateway JWT |
-| `/api/sessions/:id/ws` | WebSocket | Live event stream (`?fromOffset=` to resume) |
+| `/api/sessions/:id/ws` | WebSocket | Live event stream (`?fromOffset=` to resume; `?threadId=` for a shared thread's guest) |
 | `/api/sessions/:id/gateway/*` | ALL | Authenticated proxy to the sandbox gateway (terminal, VS Code) |
 
 ### Messages, threads, decisions
@@ -37,11 +37,13 @@ App webhooks (HMAC-verified).
 |----------|--------|-------------|
 | `/api/sessions/:id/messages` | GET / POST | Thread history (`?threadId=`) / send a prompt → `{ messageId, threadId }` |
 | `/api/sessions/:id/threads` | GET / POST | List / create threads |
-| `/api/sessions/:id/threads/:threadId` | PATCH | Rename, set queue mode |
+| `/api/sessions/:id/threads/:threadId` | PATCH | Rename, archive, set the model, or share a personal thread (`share`: `off`, `view`, `reply`) |
 | `/api/sessions/:id/threads/:threadId/abort` | POST | Abort the running turn |
 | `/api/sessions/:id/decisions` | GET | List decision gates |
 | `/api/sessions/:id/decisions/:gateId/resolve` | POST | Resolve a gate |
 | `/api/sessions/:id/decisions/:gateId/withdraw` | POST | Withdraw a gate |
+
+The `/api/threads/:threadId` routes run the same operations by thread address. They are the only routes a shared thread's guest can use ([thread sharing](specs/2026-10-13-thread-sharing-design.md)).
 
 The WebSocket `init` frame is metadata-only. History always loads over REST.
 Wire event types are listed in

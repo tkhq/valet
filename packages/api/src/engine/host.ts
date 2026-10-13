@@ -2652,6 +2652,10 @@ export class EngineHost {
     // The OWNER, not the assistant: memory, journal and skills belong to the
     // principal. The runtime keeps its own working directory.
     const principal: Principal = { type: assistant.ownerType, id: assistant.ownerId };
+    // A personal runtime acts for its owner, whoever woke it: a reply in a
+    // shared thread can be the first request. An author-less turn (a signal
+    // or a schedule) then runs as the owner, not as that guest.
+    const runtimeUserId = principal.type === "user" ? principal.id : meta.actorUserId;
 
     const [execution] = await db.select().from(assistantExecutions)
       .where(and(eq(assistantExecutions.sessionId, sessionId), eq(assistantExecutions.assistantId, assistantId))).limit(1);
@@ -2664,7 +2668,7 @@ export class EngineHost {
       : join(homedir(), ".valet", "assistants", assistantId);
     await mkdir(workspace, { recursive: true });
 
-    const scope: MemoryScope = { owner: principal, actorUserId: meta.actorUserId, ...(principal.type === "team" ? { namespace: await assistantMemoryNamespace(db, sessionId, principal.id, meta.orgId) } : {}) };
+    const scope: MemoryScope = { owner: principal, actorUserId: runtimeUserId, ...(principal.type === "team" ? { namespace: await assistantMemoryNamespace(db, sessionId, principal.id, meta.orgId) } : {}) };
     await ensureTodayJournal(db, scope);
     const snapshotContent = await assembleMemorySnapshot(db, scope);
     const personaPrefix = await this.resolvePersonaPrefix(db, meta.orgId, scope, assistant.id);
@@ -2732,13 +2736,13 @@ export class EngineHost {
     // first web visit) means headless, the same value the column defaults
     // to. See `PATCH /api/sessions/:id`.
     const profile = await this.storedProfile(sessionId);
-    const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, profile);
+    const sandboxMint = await this.mintSandboxEnv(sessionId, runtimeUserId, meta.orgId, profile);
     // Same row read as the profile: a team assistant from before team-owner
     // resolution keeps reading credentials as the member prompting it.
     const credentialOwnerMode = await this.storedCredentialOwnerMode(sessionId);
     const credentialResolver = this.buildCredentialResolver(
       sessionId,
-      meta.actorUserId,
+      runtimeUserId,
       meta.orgId,
       resolvesAsActingMember({ ownerType: principal.type, credentialOwnerMode }),
     );
@@ -2763,7 +2767,7 @@ export class EngineHost {
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId);
     const resolveOutboundSender = this.outboundSenderResolver(meta.orgId, principal, assistant.id);
     const sessionOptions = {
-      userId: meta.actorUserId,
+      userId: runtimeUserId,
       orgId: meta.orgId,
       workspace,
       purpose: "orchestrator" as const,

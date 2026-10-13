@@ -52,6 +52,7 @@ import type {
   AbortThreadRequest,
   SendPromptRequest,
   SendPromptResponse,
+  ThreadShareMode,
   ThreadSummary,
   WithdrawDecisionRequest,
 } from "../wire/types.js";
@@ -71,6 +72,7 @@ import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
 import { recordSessionActivity, recordThreadActivityBestEffort, recordThreadUserActivity } from "../services/thread-activity.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
+import { isThreadShareMode, setThreadShare } from "../services/thread-share.js";
 import { listThreadActivity, markThreadsRead } from "../services/thread-read-state.js";
 import { threadChannel } from "../services/channels.js";
 import { threadChannelActivity } from "../services/channel-messages.js";
@@ -91,7 +93,14 @@ export async function loadOwnedSession(
   const { db, engineStore } = c.var.providers;
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || row.orgId !== c.var.user.orgId || !(await canViewSession(db, row, c.var.principal))) return null;
+  if (!row || row.orgId !== c.var.user.orgId) return null;
+  if (!(await canViewSession(db, row, c.var.principal))) {
+    // A shared thread's guest, admitted by `routes/threads.ts` for this one
+    // session and thread. Every operation it reaches is bound to that thread.
+    const guest = c.var.threadShareGuest;
+    const sameThread = !decisionAccess?.threadId || decisionAccess.threadId === guest?.threadId;
+    return guest?.sessionId === row.id && sameThread ? row : null;
+  }
   const thread = decisionAccess?.threadId ? await engineStore.getThread(id, decisionAccess.threadId) : undefined;
   if (decisionAccess?.threadId && !thread) return null;
   if (await spawnedFromVisibleThread(c, row) && (!thread || await threadsVisibleTo(c, row)(thread.key))) return row;
@@ -428,6 +437,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
           title: sessionThreads.title,
           archivedAt: sessionThreads.archivedAt,
           lastUserActivityAt: sessionThreads.lastUserActivityAt,
+          shareMode: sessionThreads.shareMode,
         })
         .from(sessionThreads)
         .where(inArray(sessionThreads.id, ids))
@@ -441,6 +451,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
             title: r.title ?? undefined,
             archivedAt: r.archivedAt ?? undefined,
             lastUserActivityAt: r.lastUserActivityAt ?? undefined,
+            share: r.shareMode ?? undefined,
           },
         ] as const,
     ),
@@ -465,9 +476,12 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   const summaries = threads
     .filter(t => !query || matchingIds.has(t.id) || metaById.get(t.id)?.title?.toLowerCase().includes(query))
     .filter(t => t.id === selectedThreadId || (metaById.get(t.id)?.archivedAt !== undefined) === wantArchived)
-    .map(t => threadToSummary(t.id, t.createdAt, t.sessionId,
-      metaById.get(t.id)?.lastUserActivityAt ?? t.createdAt, metaById.get(t.id)?.title,
-      t.model, t.key, metaById.get(t.id)?.archivedAt, t.reasoning ?? null));
+    .map(t => {
+      const meta = metaById.get(t.id);
+      const summary = threadToSummary(t.id, t.createdAt, t.sessionId, meta?.lastUserActivityAt ?? t.createdAt, meta?.title,
+        t.model, t.key, meta?.archivedAt, t.reasoning ?? null);
+      return meta?.share ? { ...summary, share: meta.share } : summary;
+    });
   let body: ListThreadsResponse;
   try { body = threadPage(summaries, new URL(c.req.url).searchParams); }
   catch (error) { return c.json({ error: error instanceof Error ? error.message : "Refresh the thread list." }, 400); }
@@ -593,12 +607,26 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
     body.model === undefined &&
     body.archived === undefined &&
     body.title === undefined &&
-    body.reasoning === undefined
+    body.reasoning === undefined &&
+    body.share === undefined
   ) {
     return c.json(
-      { error: "nothing to patch: send model (null to clear), archived, title, and/or reasoning" },
+      { error: "nothing to patch: send model (null to clear), archived, title, reasoning, and/or share" },
       400,
     );
+  }
+
+  // Only the owner shares a personal thread. A team thread is already open to
+  // its team, so it has no share (`services/thread-share.ts`).
+  let nextShare: ThreadShareMode | null | undefined;
+  if (body.share !== undefined) {
+    if (body.share !== "off" && !isThreadShareMode(body.share)) {
+      return c.json({ error: "Set share to \"off\", \"view\", or \"reply\"." }, 400);
+    }
+    if (session.ownerType !== "user") {
+      return c.json({ error: "Only a personal thread can be shared. Everyone on the team can already open team threads." }, 400);
+    }
+    nextShare = body.share === "off" ? null : body.share;
   }
 
   // Validate the title before changing any thread settings.
@@ -709,12 +737,17 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
       });
   }
 
+  if (nextShare !== undefined) {
+    await setThreadShare(db, { id: thread.id, sessionId: session.id, createdAt: thread.toThreadData().createdAt }, nextShare);
+  }
+
   // Return the same title and archive state as a subsequent GET.
   const rows = await db
     .select({
       archivedAt: sessionThreads.archivedAt,
       title: sessionThreads.title,
       lastUserActivityAt: sessionThreads.lastUserActivityAt,
+      shareMode: sessionThreads.shareMode,
     })
     .from(sessionThreads)
     .where(eq(sessionThreads.id, thread.id))
@@ -733,7 +766,7 @@ export async function patchThread(c: Context<AppEnv>, sessionId: string, threadI
     archivedAt,
     thread.reasoning() ?? null,
   );
-  return c.json(summary);
+  return c.json(rows[0]?.shareMode ? { ...summary, share: rows[0].shareMode } : summary);
 }
 
 messagesRouter.post("/:id/threads", (c) => createThread(c, c.req.param("id")));
@@ -1155,6 +1188,16 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
   }
 
   if (loadedPrompt.engineSession.options.readOnlyReason) return c.json({ error: loadedPrompt.engineSession.options.readOnlyReason }, 409);
+  // A shared thread's guest sends prompts only. A command such as /model
+  // changes the owner's thread, and a file reference names an upload into
+  // the owner's working directory.
+  if (c.var.threadShareGuest) {
+    if (body.fileRefs?.length) return c.json({ error: "Files cannot be attached in a shared thread. Paste the content into the message." }, 403);
+    const text = body.text ?? "";
+    if (text.startsWith("/") && dispatchCommand(text, loadedPrompt.engineSession.commandRegistry()).kind === "execute") {
+      return c.json({ error: "Only the thread owner can run commands in a shared thread. Send the request as a message." }, 403);
+    }
+  }
 
   try {
     let replyTo: MessageReplyReference | undefined;
@@ -1315,6 +1358,15 @@ async function canAnswerDecision(c: Context<AppEnv>, session: SessionOwnerLike, 
   return canResolveSessionGate(c.var.providers.db, session, c.var.principal);
 }
 
+/** The 403 for a caller who may see a gate but not answer it. A shared
+ * thread's guest never answers: approvals stay with the thread's owner. */
+function decisionDenied(c: Context<AppEnv>) {
+  const error = c.var.threadShareGuest
+    ? "Only the thread owner can answer approvals in a shared thread. Ask the owner to answer it."
+    : "Only the session owner or a member of its team can resolve this approval. Ask one of them.";
+  return c.json({ error }, 403);
+}
+
 /** Workflow agent gates have a run owner, but no app session row. Only
  * decision endpoints use this fallback; it grants no sandbox or prompt access.
  */
@@ -1393,10 +1445,7 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
   // view check: answering a gate acts on the session's behalf. The same
   // named check gates the channel gate-callback path.
   if (!(await canAnswerDecision(c, session, sessionId))) {
-    return c.json(
-      { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
-      403,
-    );
+    return decisionDenied(c);
   }
 
   let body: ResolveDecisionRequest;
@@ -1505,10 +1554,7 @@ export async function withdrawDecision(c: Context<AppEnv>, sessionId: string, th
   // Same explicit resolve authorization as the resolve route above —
   // withdrawing settles the gate too.
   if (!(await canAnswerDecision(c, session, sessionId))) {
-    return c.json(
-      { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
-      403,
-    );
+    return decisionDenied(c);
   }
 
   let body: WithdrawDecisionRequest = {};
