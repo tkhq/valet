@@ -27,10 +27,8 @@ The system resolves the best available token for each request. You do not pass a
 
 ## Attribution
 
-When acting under a bot token (App install), actions automatically add attribution so the user's identity is visible:
-
-- **Commits** — `Co-Authored-By: <name> <email>` trailer appended to commit message
-- **PR and issue bodies** — a suffix noting the action was performed on behalf of the user
+GitHub attributes action writes to the resolved user account or App bot.
+The v2 actions do not add personal co-author trailers or an on-behalf-of suffix.
 
 Users connect their personal GitHub account at **Settings → Integrations → GitHub**.
 
@@ -56,7 +54,7 @@ Users connect their personal GitHub account at **Settings → Integrations → G
 - `github.create_pull_request` — create a new PR
 - `github.update_pull_request` — update a PR (title, body, state, labels, assignees)
 - `github.merge_pull_request` — merge a PR
-- `github.create_comment` — comment on an issue or PR
+- `github.create_comment` - comment on an issue or PR. Supply optional `images` to attach sandbox images to a PR.
 - `github.create_review` — post a PR review with optional inline comments; set `updateExisting` to replace its own previous review
 - `github.request_reviewers` — request GitHub users, team slugs, or both for PR review; this does not change assignees
 
@@ -89,6 +87,28 @@ call_tool github:github.create_pull_request \
   head="feature/my-change" base="main" \
   summary="Create PR for feature/my-change"
 ```
+
+### Attach images to a PR comment
+
+Use any supported sandbox image files. No browser or capture step is required.
+
+```
+call_tool github:github.create_comment params={
+  "owner": "acme", "repo": "widgets", "issueNumber": 42,
+  "body": "Updated views",
+  "images": [{"path": "/workspace/view.png", "alt": "Updated view", "caption": "New layout"}]
+} summary="Post PR comment with images"
+```
+
+`body` is optional with images. Images appear after the body.
+Supply 1 to 10 PNG, JPEG, GIF, or WebP files, up to 10 MiB each and 20 MiB total.
+The result includes normal comment fields plus `imageUrls`, `assetsBranch`, and `assetsCommit`.
+Images stay on `valet-pr-assets-<PR number>`, outside the PR diff.
+Public repository images are public. Private images require GitHub repository access.
+The App needs contents write, pull requests read, and issues write permissions.
+Keep the assets branch while comments need the images. Branch deletion does not securely erase Git objects or cached images.
+If storage succeeds but commenting fails, retry with the returned URLs in `body`, without `images`.
+Check the PR before retrying after a lost response, because a comment might already exist.
 
 ### List all repos you have access to
 ```

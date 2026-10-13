@@ -14,6 +14,7 @@ import {
   type PluginActionResult,
 } from "@valet/engine";
 import { Octokit } from "octokit";
+import { imageCommentBody, imageUploadError, storeCommentImages } from "./comment-images.js";
 import { parseJobLog } from "./parse-job-log.js";
 import {
   collectDirectoryEntries,
@@ -363,21 +364,43 @@ const createComment = action(Type.Object({
     owner: Type.String(),
     repo: Type.String(),
     issueNumber: Type.Integer(),
-    body: Type.String(),
+    body: Type.Optional(Type.String({ description: "Comment body. Optional when images are supplied." })),
+    images: Type.Optional(Type.Array(Type.Object({
+      path: Type.String({ minLength: 1, description: "Sandbox image file path (PNG, JPEG, GIF, or WebP)." }),
+      alt: Type.Optional(Type.String({ maxLength: 1000, description: "Plain-text image description." })),
+      caption: Type.Optional(Type.String({ maxLength: 1000, description: "Plain-text caption below the image." })),
+    }), { minItems: 1, maxItems: 10, description: "PR images, appended after the body. Maximum 10 MiB each and 20 MiB total. Stored on an isolated assets branch, not in the PR diff." })),
   }))({
   id: "github.create_comment",
   name: "Create Comment",
-  description: "Create a comment on an issue or pull request",
+  description: "Create a comment on an issue or pull request. Optionally attach sandbox images to a PR without browser uploads.",
   riskLevel: "medium",
-  execute: async ({ owner, repo, issueNumber, body }, ctx) => {
+  execute: async ({ owner, repo, issueNumber, body, images }, ctx) => {
     const octokit = await getOctokit(ctx);
+    let stored: Awaited<ReturnType<typeof storeCommentImages>> | undefined;
     try {
+      if (body === undefined && images === undefined) {
+        return { success: false, error: "The comment is empty. Supply a body or sandbox images and retry." };
+      }
+      if (images !== undefined) {
+        if (imageCommentBody(body, images, images.map(() => "x".repeat(500))).length > 60_000) {
+          return { success: false, error: "The image comment is too long. Shorten the body or captions to fewer than 60,000 characters." };
+        }
+        stored = await storeCommentImages(octokit, ctx, owner, repo, issueNumber, images);
+        body = imageCommentBody(body, images, stored.imageUrls);
+      }
       const { data } = await octokit.request(
         "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
-        { owner, repo, issue_number: issueNumber, body },
+        { owner, repo, issue_number: issueNumber, body: body ?? "" },
       );
-      return { success: true, data };
+      return { success: true, data: stored ? { ...data, ...stored } : data };
     } catch (err) {
+      if (images !== undefined) {
+        return {
+          success: false, data: stored, error: imageUploadError(err) + (stored
+            ? " Images are stored. Retry create_comment with these image URLs in body and omit images to avoid another upload." : ""),
+        };
+      }
       return handleOctokitError(err, "github.create_comment", "Create comment");
     }
   },
