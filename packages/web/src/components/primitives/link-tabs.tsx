@@ -21,7 +21,7 @@ export interface LinkTab {
  */
 export function LinkTabs({ tabs, activeTo, label }: { tabs: readonly LinkTab[]; activeTo: AppPath; label: string }) {
   return (
-    <nav aria-label={label} className="flex min-w-0 max-w-full gap-1 overflow-x-auto border-b border-line">
+    <nav aria-label={label} className="flex min-w-0 max-w-full gap-1 overflow-x-auto border-b border-line [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {tabs.map((tab) => {
         const active = tab.to === activeTo;
         return (

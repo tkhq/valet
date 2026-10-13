@@ -349,7 +349,7 @@ export function SessionHeader({
   return (
     <header className="border-b border-line bg-paper px-3 py-1 min-h-[--nav-height] shrink-0 flex min-w-0 flex-wrap items-center gap-1 sm:px-4 sm:py-2 sm:gap-3">
       <Tooltip content={workspaceHint} delayDuration={400}>
-        <div className="min-w-0 flex-1 sm:flex-initial max-w-full flex flex-wrap items-baseline gap-2 cursor-default">
+        <div className="min-w-0 flex-1 max-w-full flex flex-wrap items-baseline gap-2 cursor-default">
           {canRename ? (
             <button
               type="button"

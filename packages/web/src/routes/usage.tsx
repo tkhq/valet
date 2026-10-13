@@ -425,45 +425,48 @@ export function UsagePage() {
               }`}
             />
           </label>
-          <label className="text-sm text-muted">
-            <span className="sr-only">Custom start date</span>
-            <input
-              type="date"
-              aria-label="Custom start date"
-              max={todayUtc}
-              value={customStart}
-              onChange={(event) => setCustomStart(event.target.value)}
-              className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
-            />
-          </label>
-          <span className="text-sm text-muted">to</span>
-          <label className="text-sm text-muted">
-            <span className="sr-only">Custom end date</span>
-            <input
-              type="date"
-              aria-label="Custom end date"
-              min={customStart}
-              max={todayUtc}
-              value={customEnd}
-              onChange={(event) => setCustomEnd(event.target.value)}
-              className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
-            />
-          </label>
-          <button
-            type="button"
-            disabled={!customStart || !customEnd || customStart > customEnd}
-            onClick={applyCustomPeriod}
-            aria-pressed={customPeriodApplied}
-            className={`min-h-11 rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:py-1 ${
-              customPeriodApplied
-                ? "border-moss bg-moss-wash font-medium text-moss"
-                : customPeriodPending
-                  ? "border-amber-500 bg-amber-500/10 font-medium text-amber-800 dark:text-amber-300"
-                  : "border-line text-muted hover:border-ink hover:text-ink"
-            }`}
-          >
-            Apply dates
-          </button>
+          {/* One group, so the range wraps as a unit on a narrow screen. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-sm text-muted">
+              <span className="sr-only">Custom start date</span>
+              <input
+                type="date"
+                aria-label="Custom start date"
+                max={todayUtc}
+                value={customStart}
+                onChange={(event) => setCustomStart(event.target.value)}
+                className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+              />
+            </label>
+            <span className="text-sm text-muted">to</span>
+            <label className="text-sm text-muted">
+              <span className="sr-only">Custom end date</span>
+              <input
+                type="date"
+                aria-label="Custom end date"
+                min={customStart}
+                max={todayUtc}
+                value={customEnd}
+                onChange={(event) => setCustomEnd(event.target.value)}
+                className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+              />
+            </label>
+            <button
+              type="button"
+              disabled={!customStart || !customEnd || customStart > customEnd}
+              onClick={applyCustomPeriod}
+              aria-pressed={customPeriodApplied}
+              className={`min-h-11 rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:py-1 ${
+                customPeriodApplied
+                  ? "border-moss bg-moss-wash font-medium text-moss"
+                  : customPeriodPending
+                    ? "border-amber-500 bg-amber-500/10 font-medium text-amber-800 dark:text-amber-300"
+                    : "border-line text-muted hover:border-ink hover:text-ink"
+              }`}
+            >
+              Apply dates
+            </button>
+          </div>
           {personalWorkspace && isOrgAdmin && (
             <FilterChips
               label="Whose usage"

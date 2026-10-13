@@ -53,7 +53,7 @@ export function TabBar<Id extends string>({
   }
 
   return (
-    <div role="tablist" aria-label={label} className="flex min-w-0 max-w-full gap-1 overflow-x-auto border-b border-line">
+    <div role="tablist" aria-label={label} className="flex min-w-0 max-w-full gap-1 overflow-x-auto border-b border-line [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {tabs.map((t, i) => (
         <button
           key={t.id}
