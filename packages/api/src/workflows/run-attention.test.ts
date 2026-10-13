@@ -44,16 +44,16 @@ describe("failedNodeSummary", () => {
       checkpoint({ nodeId: "fetch", status: "completed" }),
       checkpoint({ nodeId: "call-api", status: "failed", error: "HTTP 500" }),
     ]);
-    expect(summary).toBe("call-api: HTTP 500. Open the run to see the full error.");
+    expect(summary).toBe("call-api: HTTP 500");
   });
 
-  it("labels a foreach body row with its iteration and counts the rest", () => {
+  it("lists every failed foreach row with its iteration", () => {
     const summary = failedNodeSummary([
       checkpoint({ nodeId: "body", iteration: 1, status: "failed", error: "a" }),
       checkpoint({ nodeId: "body", iteration: 2, status: "failed", error: "b" }),
       checkpoint({ nodeId: "body", iteration: 3, status: "failed", error: "c" }),
     ]);
-    expect(summary).toBe("body[1]: a; body[2]: b (+1 more). Open the run to see the full error.");
+    expect(summary).toBe("body[1]: a\nbody[2]: b\nbody[3]: c");
   });
 
   it("still directs the reader to the run when no checkpoint failed", () => {
@@ -61,10 +61,25 @@ describe("failedNodeSummary", () => {
     expect(summary).toBe("Open the run to see why it stopped.");
   });
 
-  it("truncates a long error rather than pasting a whole response body", () => {
-    const summary = failedNodeSummary([checkpoint({ nodeId: "n", status: "failed", error: "x".repeat(500) })]);
-    expect(summary).toContain("…");
-    expect(summary.length).toBeLessThan(300);
+  it("keeps a whole error the reader would otherwise open the run for", () => {
+    const error = `parsing start time: ${"x".repeat(480)}`;
+    const summary = failedNodeSummary([checkpoint({ nodeId: "recent_errors", status: "failed", error })]);
+    expect(summary).toBe(`recent_errors: ${error}`);
+  });
+
+  it("stops building the summary at the budget when many rows fail with large errors", () => {
+    const rows = Array.from({ length: 250 }, (_, i) =>
+      checkpoint({ nodeId: "body", iteration: i + 1, status: "failed", error: "x".repeat(1 << 20) }));
+    const summary = failedNodeSummary(rows);
+    expect(summary.startsWith("body[1]: x")).toBe(true);
+    expect(summary.endsWith("…\n\nOpen the run to see the rest.")).toBe(true);
+    expect(summary.length).toBeLessThan(3_100);
+  });
+
+  it("cuts only a summary longer than one Slack section, and points to the run", () => {
+    const summary = failedNodeSummary([checkpoint({ nodeId: "n", status: "failed", error: "x".repeat(5_000) })]);
+    expect(summary.endsWith("…\n\nOpen the run to see the rest.")).toBe(true);
+    expect(summary.length).toBeLessThan(3_100);
   });
 });
 
@@ -116,7 +131,7 @@ describe("buildRunSettledAttention", () => {
       kind: "notification",
       urgency: "high",
       title: "Workflow run failed: Customer artifacts",
-      body: "call-api: HTTP 500. Open the run to see the full error.",
+      body: "call-api: HTTP 500",
       href: "/workflows/runs/run-1",
     });
   });
