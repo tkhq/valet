@@ -302,6 +302,7 @@ function TeamRow({
 
       {open && (
         <div className={page ? "mt-6 space-y-10" : "ml-6 mt-3 space-y-8 border-l border-line pl-4"}>
+          {canMutate && team.origin === "local" && <TeamName key={team.id} team={team} />}
           <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} onSelfRemoved={leavePage} />
           <TeamDefaults team={team} canMutate={canMutate} />
           <TeamSlack key={team.id} team={team} canMutate={canMutate} />
@@ -685,6 +686,30 @@ function AddMemberPicker({
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+/** Rename. Shown only for a team created in Valet: the API refuses a team
+ * declared in the config file or mirrored from the identity provider. */
+function TeamName({ team }: { team: TeamSummary }) {
+  const [name, setName] = useState(team.name);
+  const patch = usePatchTeam();
+  useEffect(() => setName(team.name), [team.name]);
+  const next = name.trim();
+  return (
+    <SubSection title="Name">
+      <FieldRow label="Team name" error={patch.error ? errorText(patch.error) : undefined}>
+        <div className="flex gap-2">
+          <Input aria-label="Team name" value={name} onChange={(event) => setName(event.target.value)} />
+          <Button
+            disabled={patch.isPending || next === "" || next === team.name}
+            onClick={() => patch.mutate({ id: team.id, body: { name: next } })}
+          >
+            Save
+          </Button>
+        </div>
+      </FieldRow>
+    </SubSection>
   );
 }
 

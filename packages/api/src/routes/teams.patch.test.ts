@@ -82,6 +82,33 @@ describe("PATCH /api/teams/:id", () => {
     expect(((await cleared.json()) as PatchTeamResponse).team.slackHomeChannelId).toBeNull();
   });
 
+  it("team admin renames a team; members, taken names, and managed teams are refused", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    await api.providers.db.insert(teams).values([
+      { id: "other-team", orgId: "local-org", name: "Other", createdAt: 1 },
+      { id: "declared-team", orgId: "local-org", name: "Declared", origin: "config", createdAt: 2 },
+    ]);
+
+    expect((await patchTeam(api, { name: "Infra" }, "test-member")).status).toBe(404);
+    expect((await patchTeam(api, { name: "   " }, "test-lead")).status).toBe(400);
+    const taken = await patchTeam(api, { name: "Other" }, "test-lead");
+    expect(taken.status).toBe(409);
+    expect(((await taken.json()) as { error: string }).error).toContain("Another team already uses the name Other");
+
+    const renamed = await patchTeam(api, { name: "  Infra  " }, "test-lead");
+    expect(renamed.status).toBe(200);
+    expect(((await renamed.json()) as PatchTeamResponse).team.name).toBe("Infra");
+
+    const declared = await fetch(`${api.baseUrl}/api/teams/declared-team`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Renamed" }),
+    });
+    expect(declared.status).toBe(409);
+    expect(((await declared.json()) as { error: string }).error).toContain("instance config file");
+  });
+
   it("team admin sets the default model; GET /api/teams reflects it", async () => {
     // The catalog reports an Anthropic entry as valid only when a key
     // exists (zero-config env fallback), same as me.test.ts.
@@ -167,7 +194,7 @@ describe("PATCH /api/teams/:id", () => {
     api = await bootTestApi();
     await seedTeam(api);
 
-    const res = await patchTeam(api, { name: "Renamed" }, "test-lead");
+    const res = await patchTeam(api, { origin: "local" }, "test-lead");
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/unknown field/);

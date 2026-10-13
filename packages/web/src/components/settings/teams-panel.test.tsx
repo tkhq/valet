@@ -5,7 +5,7 @@
  * admin. The API enforces the same gate (`canMutateTeam`); this suite pins
  * that the UI stops offering controls that would 404.
  */
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 import type { ReactNode } from "react";
@@ -226,6 +226,38 @@ describe("TeamsPanel — identity-provider provenance", () => {
     expect(screen.getByText("Identity provider")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Add member/ })).toBeTruthy();
+  });
+});
+
+describe("TeamsPanel — rename", () => {
+  beforeEach(() => {
+    patchTeamMutate.mockClear();
+  });
+
+  afterEach(() => {
+    origin = "local";
+  });
+
+  it("team admin saves a trimmed new name", () => {
+    callerRole = "admin";
+    orgRole = "member";
+    openTeam();
+    fireEvent.change(screen.getByRole("textbox", { name: "Team name" }), { target: { value: "  Infra  " } });
+    // The Name section is first, so its Save is the first one.
+    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
+    expect(patchTeamMutate).toHaveBeenCalledWith({ id: "team_1", body: { name: "Infra" } });
+  });
+
+  it("offers no rename to a plain member or for a declared team", () => {
+    callerRole = "member";
+    orgRole = "member";
+    openTeam();
+    expect(screen.queryByRole("textbox", { name: "Team name" })).toBeNull();
+    cleanup();
+    callerRole = "admin";
+    origin = "config";
+    openTeam();
+    expect(screen.queryByRole("textbox", { name: "Team name" })).toBeNull();
   });
 });
 
