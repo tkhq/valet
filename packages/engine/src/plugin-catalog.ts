@@ -715,7 +715,7 @@ export async function invokeAction(
   } catch (err) {
     // Log and keep the cause: without it, every team action fails with no
     // trace of why the policy check threw.
-    const cause = err instanceof Error ? err.message : String(err);
+    const cause = innermostMessage(err);
     console.error(`[policy] resolve failed for ${policyActionId} in ${ctx.sessionId}:`, err);
     // A failed read cannot establish whether the team has an absolute deny.
     if (ctx.owner?.type === "team") {
@@ -986,6 +986,15 @@ async function checkServiceAvailability(
       ? { error: `could not verify service availability: ${message}; retry` }
       : {};
   }
+}
+
+/** The innermost error's message. A database error wraps the driver's
+ * failure in `cause` behind the query text, and the driver's message is the
+ * one that names the problem. The full error goes to the server log. */
+function innermostMessage(err: unknown): string {
+  let current = err;
+  while (current instanceof Error && current.cause !== undefined) current = current.cause;
+  return current instanceof Error ? current.message : String(current);
 }
 
 function availabilityOutcome(check: ServiceAvailabilityCheck): InvokeActionResult | undefined {
@@ -1399,7 +1408,7 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
     case "denied-policy":
       if (outcome.scope === "shared_account") {
         return {
-          text: `denied: ${toolId} would use a teammate's shared account, and this caller cannot ask the account owner for approval. Do not retry it. Tell the user that a teammate who can use the account must run it, or that they can connect their own account on the Integrations page (/integrations).`,
+          text: `denied: ${toolId} would use a teammate's shared account, and this caller cannot ask the account owner for approval. Do not retry it. Tell the user to ask a team member to run it, or to ask a team admin to connect a team account on the team's Integrations page.`,
         };
       }
       return { text: `denied: ${toolId} is blocked by ${outcome.scope === "team" ? "team" : "org"} policy` };

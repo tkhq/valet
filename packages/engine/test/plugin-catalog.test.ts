@@ -1256,14 +1256,17 @@ describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
 
   // A team's policy check that throws failed every service with a bare
   // "error" and no log, so the cause stayed invisible.
-  it("team discovery keeps the cause when the policy check throws", async () => {
+  it("team discovery names the innermost cause when the policy check throws", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", vi.fn(async () => []))] });
     const result = await list.execute({ service: "remote" }, makeCtx({ owner: { type: "team", id: "team" },
-      policyResolver: { resolve: async () => { throw new Error("invalid regular expression: /(/"); } } }));
+      policyResolver: { resolve: async () => {
+        throw new Error("Failed query: select * from action_policies", { cause: new Error('relation "action_policies" does not exist') });
+      } } }));
     const payload = decode(result.text) as { warnings?: Array<{ service: string; reason: string }> };
     const reason = payload.warnings?.find((w) => w.service === "remote")?.reason;
-    expect(reason).toContain("Could not check this team's action policies (invalid regular expression: /(/)");
+    expect(reason).toContain(`Could not check this team's action policies (relation "action_policies" does not exist)`);
+    expect(reason).not.toContain("Failed query");
     expect(error).toHaveBeenCalled();
     error.mockRestore();
   });
