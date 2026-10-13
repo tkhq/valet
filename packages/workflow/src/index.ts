@@ -129,3 +129,6 @@ export type { InterpreterDeps, OnRunSettled, RunSettledInfo } from './interprete
 
 export { LocalRunHost } from './local-host.js';
 export type { LocalRunHostDeps, RunHost } from './local-host.js';
+
+export { AgentInputFileError, validateAgentFiles, validateRenderedAgentFiles, renderAgentFiles, MAX_AGENT_INPUT_FILES, MAX_AGENT_INPUT_FILE_BYTES, MAX_AGENT_INPUT_TOTAL_BYTES } from './dag/agent-files.js';
+export type { RenderedAgentFile } from './dag/agent-files.js';

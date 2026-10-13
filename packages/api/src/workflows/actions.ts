@@ -5,6 +5,7 @@
  * create, inspect, and run dag/v1 workflows conversationally. Every result
  * carries the ids (`workflowId`/`runId`) the web chat renderer fetches by.
  */
+import { SHARED_ASSISTANT_INPUT_ERROR } from "./agent-files.js";
 import type {
   ActionPlugin,
   PluginAction,
@@ -329,6 +330,13 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "`definition` MUST be a dag/v1 object: { version: 'dag/v1', nodes: [...], edges: [...] } " +
       "using node types trigger|set|if|wait|approval|session|orchestrator|tool|llm|stop|foreach|workflow. " +
       "The app labels an `orchestrator` step \"Thread\"; its stored type is still `orchestrator`. " +
+      "Session and orchestrator nodes accept files: { 'data.json': '{{nodes.fetch.result}}' }. " +
+      "Keys are literal relative paths. The host writes rendered inputs before the first turn and appends a path/byte manifest. " +
+      "Files are ephemeral and require until_idle waiting. Shared legacy team sandboxes cannot receive them. " +
+      "Use session steps for agent work that needs files. Orchestrator files require an isolated, non-legacy team execution sandbox. " +
+      "Personal assistant roots cannot receive files because channel turns can read their shared sandbox. " +
+      `The error is: ${SHARED_ASSISTANT_INPUT_ERROR} ` +
+      "Use files instead of pasting large data into prompts. Limits: 100 files, 10 MiB each, 25 MiB per node. " +
       "The definition is validated before saving; validation errors come back in `error`. " +
       "Returns { workflowId } — always surface it to the user.",
     riskLevel: "medium",
@@ -348,7 +356,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const env = validationDeps
         ? await buildOrgValidateEnvironment(validationDeps, owner.orgId)
         : buildValidateEnvironment();
-      const validation = validateDefinitionInput(definition, env);
+      const existing = workflow_id && validationDeps ? await getWorkflowDefinition(validationDeps, owner, workflow_id) : undefined;
+      const targetOwnerType = workflow_id ? existing?.ownerType : owner.principal?.type ?? "user";
+      const validation = validateDefinitionInput(definition, env, targetOwnerType);
       if (!validation.ok) {
         return {
           success: false,
@@ -672,6 +682,12 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Edit a workflow WITHOUT re-sending the whole definition: rename, upsert single nodes " +
       "(replace-by-id or append), remove nodes (their edges go too), add/remove edges, or set presence. " +
       "Presence replaces the channel identity; null clears it. " +
+      "Session and orchestrator upserts accept files mapping literal relative paths to template strings. " +
+      "The host writes these inputs before the first turn (100 files, 10 MiB each, 25 MiB total). " +
+      "Inputs are ephemeral, require until_idle waiting, and cannot use shared legacy team sandboxes. " +
+      "Use session steps for agent work that needs files. Orchestrator files require an isolated, non-legacy team execution sandbox. " +
+      "Personal assistant roots cannot receive files because channel turns can read their shared sandbox. " +
+      `The error is: ${SHARED_ASSISTANT_INPUT_ERROR} ` +
       "Prefer this over save_workflow for small edits — the patched result runs the full " +
       "linter, so a bad patch returns lint errors instead of saving. The linter reads the " +
       "WHOLE merged definition, so an error in a node you did not touch also blocks the " +
@@ -717,11 +733,11 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
 
       if (changesGraph) {
         const env = await buildOrgValidateEnvironment(deps, owner.orgId);
-        const validation = validateDefinitionInput(patched.definition, env);
+        const validation = validateDefinitionInput(patched.definition, env, wf.ownerType);
         if (!validation.ok) {
           // Validate the stored definition too, so the reply can say which
           // errors the patch introduced and which the workflow already held.
-          const before = validateDefinitionInput(stored, env);
+          const before = validateDefinitionInput(stored, env, wf.ownerType);
           // When the patch removed edges and the lint reports unreachable
           // nodes, the removal is the likely cause — say so in one line.
           const withHint = appendRemovedEdgeHint(

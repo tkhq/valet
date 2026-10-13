@@ -74,6 +74,8 @@ export interface ApprovalNode {
 export interface SessionNode {
   id: string;
   type: 'session';
+  /** Literal relative paths mapped to template strings. */
+  files?: Record<string, string>;
   mode: 'start';
   prompt: string;
   title?: string;
@@ -126,6 +128,8 @@ export interface LlmNode {
 export interface ThreadNode {
   id: string;
   type: 'orchestrator';
+  /** Literal relative paths mapped to template strings. */
+  files?: Record<string, string>;
   prompt: string;
   outputSchema?: Record<string, unknown>;
   wait?: {

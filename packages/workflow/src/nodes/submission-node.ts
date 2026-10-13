@@ -25,6 +25,7 @@
 import type { SubmissionResult } from '@valet/engine';
 import { ValidationError } from '@valet/engine';
 
+import { AgentInputFileError } from '../dag/agent-files.js';
 import type { WorkflowPromptReceipt, WorkflowEngineDeps } from '../engine-deps.js';
 import type { NodeCheckpoint, WorkflowRun, WorkflowStore } from '../store.js';
 
@@ -49,6 +50,7 @@ export interface SubmissionNodeContext {
 export interface SubmissionNodeHooks<TDispatched, TSettled> {
   /** Short label for error messages ("session" | "orchestrator"). */
   nodeKind: string;
+  hasInputFiles?: boolean;
   /** `workflow:{runId}:{nodeId}[:{iteration}]` — the primary submission's dispatchId (repairs append `:repair`). */
   dispatchId: string;
   /** Effects to persist on the very first intent write, before any dispatch happens (e.g. `{ sessionId }` when the caller mints its own id up front; `{}` when the dispatch itself resolves the session). */
@@ -56,7 +58,7 @@ export interface SubmissionNodeHooks<TDispatched, TSettled> {
   waitMode: 'none' | 'until_idle' | undefined;
   outputSchema: Record<string, unknown> | undefined;
   /** Issues (or, on re-entry with an identical `dispatchId`, re-issues idempotently) the primary submission. */
-  dispatch(dispatchId: string): Promise<SubmissionDispatch>;
+  dispatch(dispatchId: string, onInputTarget: (sessionId: string) => Promise<void>): Promise<SubmissionDispatch>;
   /** Issues the ONE bounded repair submission against the already-dispatched session. */
   dispatchRepair(repairDispatchId: string, repairPrompt: string, sessionId: string): Promise<WorkflowPromptReceipt>;
   buildDispatchedResult(dispatch: SubmissionDispatch): TDispatched;
@@ -79,6 +81,31 @@ export async function executeSubmissionNode<TDispatched, TSettled>(
   | { status: 'failed'; error: string }
   | { status: 'parked'; waitingOn: [{ kind: 'submission'; nodeId: string; sessionId: string; threadId: string; queueItemId: string }] }
 > {
+  let inputSessionId = readSubmissionEffects(ctx.existingCheckpoint).sessionId;
+  const onInputTarget = async (sessionId: string) => {
+    inputSessionId = sessionId;
+    await ctx.store.putIntent({ runId: ctx.run.runId, nodeId: ctx.nodeId, iteration: ctx.iteration,
+      status: 'intent', attempt: ctx.attempt, createdAt: ctx.clock(),
+      effects: { ...hooks.initialEffects, sessionId, inputFilesAttempted: true } });
+  };
+  const outcome = await executeSubmission(ctx, hooks, onInputTarget, () => inputSessionId);
+  if (outcome.status !== 'parked' && hooks.hasInputFiles && inputSessionId && ctx.engine.cleanupAgentInputs) {
+    try { await ctx.engine.cleanupAgentInputs(inputSessionId, hooks.dispatchId); }
+    catch (err) { console.warn(`workflow input cleanup failed for ${hooks.dispatchId}:`, err); }
+  }
+  return outcome;
+}
+
+async function executeSubmission<TDispatched, TSettled>(
+  ctx: SubmissionNodeContext,
+  hooks: SubmissionNodeHooks<TDispatched, TSettled>,
+  onInputTarget: (sessionId: string) => Promise<void>,
+  inputSessionId: () => string | undefined,
+): Promise<
+  | { status: 'completed'; result: TDispatched | TSettled }
+  | { status: 'failed'; error: string }
+  | { status: 'parked'; waitingOn: [{ kind: 'submission'; nodeId: string; sessionId: string; threadId: string; queueItemId: string }] }
+> {
   const { run, nodeId, attempt, iteration, store, clock, engine, existingCheckpoint } = ctx;
   const effects = readSubmissionEffects(existingCheckpoint);
 
@@ -94,7 +121,7 @@ export async function executeSubmissionNode<TDispatched, TSettled>(
         status: 'intent',
         attempt,
         createdAt: clock(),
-        effects: hooks.initialEffects,
+        effects: { ...hooks.initialEffects, ...(hooks.hasInputFiles ? { inputFilesAttempted: true } : {}) },
       });
     }
 
@@ -107,9 +134,9 @@ export async function executeSubmissionNode<TDispatched, TSettled>(
     // keep propagating for the drive's retry semantics.
     let dispatch: SubmissionDispatch;
     try {
-      dispatch = await hooks.dispatch(hooks.dispatchId);
+      dispatch = await hooks.dispatch(hooks.dispatchId, onInputTarget);
     } catch (err) {
-      if (!(err instanceof ValidationError)) throw err;
+      if (!(err instanceof ValidationError) && !(err instanceof AgentInputFileError)) throw err;
       const error = err.message;
       await store.completeCheckpoint(run.runId, nodeId, iteration, attempt, {
         runId: run.runId,
@@ -117,7 +144,7 @@ export async function executeSubmissionNode<TDispatched, TSettled>(
         iteration,
         status: 'failed',
         error,
-        effects: hooks.initialEffects,
+        effects: { ...hooks.initialEffects, ...(hooks.hasInputFiles ? { inputFilesAttempted: true, sessionId: inputSessionId() ?? hooks.initialEffects.sessionId } : {}) },
         attempt,
         createdAt: clock(),
       });
@@ -260,7 +287,7 @@ async function handleOutcome<TDispatched, TSettled>(
   try {
     repairReceipt = await hooks.dispatchRepair(`${hooks.dispatchId}:repair`, repairText, sessionId);
   } catch (err) {
-    if (!(err instanceof ValidationError)) throw err;
+    if (!(err instanceof ValidationError) && !(err instanceof AgentInputFileError)) throw err;
     const error = err.message;
     await store.completeCheckpoint(run.runId, nodeId, iteration, attempt, {
       runId: run.runId,

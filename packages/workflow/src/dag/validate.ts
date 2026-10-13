@@ -31,6 +31,7 @@ import { validatePresence } from '@valet/shared';
  * downstream, the web canvas).
  */
 
+import { agentFileWaitError, validateAgentFiles } from './agent-files.js';
 import { parseDurationMs } from './duration.js';
 import {
   collectExpressionPaths,
@@ -112,10 +113,10 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   if: ['id', 'type', 'combinator', 'conditions'],
   wait: ['id', 'type', 'mode', 'duration'],
   approval: ['id', 'type', 'prompt', 'summary', 'details', 'timeout', 'onDeny'],
-  session: ['id', 'type', 'mode', 'prompt', 'title', 'model', 'outputSchema', 'wait'],
+  session: ['id', 'type', 'mode', 'prompt', 'title', 'model', 'outputSchema', 'wait', 'files'],
   stop: ['id', 'type', 'outcome', 'output', 'message'],
   llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens', 'reasoning', 'onError'],
-  orchestrator: ['id', 'type', 'prompt', 'outputSchema', 'wait'],
+  orchestrator: ['id', 'type', 'prompt', 'outputSchema', 'wait', 'files'],
   // A tool node carries BOTH policies, and they answer different questions.
   // `onError` decides what a node FAILURE does to the rest of the run;
   // `onDeny`/`approvalTimeout` decide what a policy GATE's refusal or
@@ -401,6 +402,10 @@ function lintNodeKeys(node: WorkflowNode, label: string, errors: string[]): void
       );
       continue;
     }
+    if (key === 'files') {
+      errors.push(`${label}: files is supported only on session and orchestrator nodes. Remove files from this node.`);
+      continue;
+    }
     const alias = KEY_ALIASES[node.type]?.[key];
     if (alias) {
       errors.push(
@@ -450,6 +455,12 @@ function validateTriggerDataSchema(dataSchema: unknown, label: string, errors: s
       }
     }
   }
+}
+
+function checkAgentFiles(files: unknown, label: string, refCtx: RefContext, errors: string[]): void {
+  if (files === undefined) return;
+  errors.push(...validateAgentFiles(files).map((error) => `${label}: ${error}`));
+  checkJsonTemplates(label, 'files', files, refCtx, errors);
 }
 
 function validateNodeFields(
@@ -510,6 +521,11 @@ function validateNodeFields(
       checkJsonTemplates(label, 'details', node.details, refCtx, errors);
       break;
     case 'session':
+      checkAgentFiles(node.files, label, refCtx, errors);
+      {
+        const waitError = agentFileWaitError(node.files, node.wait);
+        if (waitError) errors.push(`${label}: ${waitError}`);
+      }
       if (node.mode !== 'start') {
         errors.push(`${label}: session.mode must be the string "start"`);
       }
@@ -561,6 +577,11 @@ function validateNodeFields(
       checkErrorPolicy(label, 'llm', node.onError, errors);
       break;
     case 'orchestrator':
+      checkAgentFiles(node.files, label, refCtx, errors);
+      {
+        const waitError = agentFileWaitError(node.files, node.wait);
+        if (waitError) errors.push(`${label}: ${waitError}`);
+      }
       if (!isNonEmptyString(node.prompt)) {
         errors.push(`${label}: orchestrator.prompt must be a non-empty string`);
       } else {

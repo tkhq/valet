@@ -1,5 +1,3 @@
-import type { Presence } from "@valet/shared";
-import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Unit tests for `buildWorkflowEngineDeps`'s Task 7/Task 6 seams:
  * `invokeAction` (now a real headless `ActionInvoker` with durable dedup —
@@ -9,6 +7,8 @@ import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
  * failure path. The key-gated real-Anthropic completion path is exercised
  * separately in `src/integration/workflow-engine-deps.test.ts`.
  */
+import type { Presence } from "@valet/shared";
+import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, ValetPlugin } from "@valet/engine";
@@ -17,9 +17,11 @@ import type { Usage } from "@earendil-works/pi-ai/compat";
 import * as piAi from "@earendil-works/pi-ai/compat";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { linkIdentity } from "../channels/identity-links.js";
+import { agentInputPrompt, UNVERIFIED_INPUT_AUDIENCE_ERROR, SHARED_ASSISTANT_INPUT_ERROR } from "./agent-files.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage, workflowRunThreadKey } from "./engine-deps.js";
 import { eq } from "drizzle-orm";
-import { legacyWorkflowAdmissions, assistants, orgs, workflowDefinitions } from "../schema/index.js";
+import { legacyAssistantRuntimes, legacyWorkflowRuntimes, legacyWorkflowAdmissions, assistants, orgs, teamMembers, sessionThreads, workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { ensureDefaultAssistantSession, loadAssistantBySessionId, resolveDefaultAssistant } from "../assistants/service.js";
@@ -429,21 +431,127 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
       origin: { assistantSessionId: root.sessionId, threadId: originThread.id } },
     { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
     const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
-    const options = { dispatchId: `workflow:${runId}:report`, queueMode: "followup", ownerHint: { ownerType: "team", ownerId: team.id } } as const;
+    const options = { dispatchId: `workflow:${runId}:report`, queueMode: "followup" as const, ownerHint: { ownerType: "team", ownerId: team.id }, files: key.startsWith("slack:") ? undefined : [{ path: "audience.txt", content: "private input" }] };
     const receipt = await deps.promptOrchestrator("report into the original audience", options);
     expect(receipt.sessionId).not.toBe(root.sessionId);
     expect(await engineStore.getSession(receipt.sessionId)).toMatchObject({ parentSessionId: root.sessionId, parentThreadId: originThread.id });
     expect(await engineStore.getThread(receipt.sessionId, receipt.threadId)).toMatchObject({ key });
     expect(await deps.promptOrchestrator("report into the original audience", options)).toEqual(receipt);
+    if (options.files) {
+      expect(await engineHost.liveSession(receipt.sessionId)?.attachment.current()?.readFile(
+        `/workspace/.valet/workflow-inputs/${runId}/report/0/audience.txt`)).toBe("private input");
+    }
     expect(await engineStore.listUnsettledSubmissions(root.sessionId)).toEqual([]);
     // A pre-cutover admission whose workflow checkpoint was lost must not run again.
     await engineStore.admitSubmission(root.sessionId, originThread.id, { id: "old-admission", threadId: originThread.id,
       dispatchId: `workflow:${runId}:old-report`, content: { kind: "signal", signalType: "workflow.request", body: "old report", attributes: { runId } },
       status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now });
+    const retainedOptions = { ...options, files: [{ path: "audience.txt", content: "private input" }], dispatchId: `workflow:${runId}:retained-files` };
+    await engineStore.admitSubmission(root.sessionId, originThread.id, { id: "retained-files", threadId: originThread.id,
+      dispatchId: retainedOptions.dispatchId,
+      content: { kind: "signal", signalType: "workflow.request",
+        body: agentInputPrompt(engineHost.sandboxWorkingDirectory(root.session), "retained report", retainedOptions), attributes: { runId } },
+      status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 60_000, createdAt: now, updatedAt: now });
+    await expect(deps.promptOrchestrator("retained report", retainedOptions))
+      .rejects.toMatchObject({ name: "AgentInputFileError", message: SHARED_ASSISTANT_INPUT_ERROR });
     engineHost.evictCache(root.sessionId);
-    const oldReceipt = await deps.promptOrchestrator("old report", { ...options, dispatchId: `workflow:${runId}:old-report` });
+    const oldReceipt = await deps.promptOrchestrator("old report", { ...options, files: undefined, dispatchId: `workflow:${runId}:old-report` });
     expect(oldReceipt).toEqual({ sessionId: root.sessionId, threadId: originThread.id, queueItemId: "old-admission" });
     expect(await deps.awaitResult(oldReceipt.sessionId, oldReceipt.threadId, oldReceipt.queueItemId)).toMatchObject({ outcome: "aborted" });
+  });
+
+  it.each(["no channels", "owner DM", "archived shared thread"])("rejects personal-root orchestrator files with %s before any write", async scenario => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const root = await ensureDefaultAssistantSession(api.providers, { type: "user", id: LOCAL_USER.id }, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+    if (scenario !== "no channels") {
+      const thread = await root.session.createThread(scenario === "owner DM" ? "slack:D_OWN:1.2" : "slack:C_SHARED:1.2");
+      if (scenario === "owner DM") await linkIdentity(db, { provider: "slack", externalId: "U_OWNER", userId: LOCAL_USER.id });
+      else await db.insert(sessionThreads).values({ id: thread.id, sessionId: root.sessionId, createdAt: Date.now(), archivedAt: Date.now() });
+    }
+    await seedRun(api, "personal-inputs", "personal-inputs-wf");
+    const ready = vi.spyOn(root.session.attachment, "ensureReady");
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    await expect(deps.promptOrchestrator("Read", { dispatchId: "workflow:personal-inputs:build", queueMode: "followup",
+      ownerHint: { ownerType: "user", ownerId: LOCAL_USER.id }, files: [{ path: "private.txt", content: "secret" }] }))
+      .rejects.toMatchObject({ name: "AgentInputFileError", message: SHARED_ASSISTANT_INPUT_ERROR });
+    expect(ready).not.toHaveBeenCalled();
+    expect(await engineStore.listUnsettledSubmissions(root.sessionId)).toEqual([]);
+  });
+
+  it("returns admitted receipt after actor loses team access without filesystem work", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { createTeam } = await import("../services/teams.js");
+    const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "Replay files", creatorUserId: LOCAL_USER.id });
+    const definition = { version: "dag/v1" as const, nodes: [], edges: [] };
+    const now = Date.now();
+    await db.insert(workflowDefinitions).values({ id: "replay-wf", orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "Replay", definition, createdAt: now, updatedAt: now });
+    await workflowStore.createRun("replay-files", { workflowId: "replay-wf", definitionVersionId: "v1" },
+      definition, "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    const options = { dispatchId: "workflow:replay-files:build", queueMode: "followup" as const,
+      ownerHint: { ownerType: "team", ownerId: team.id }, files: [{ path: "private.txt", content: "input" }] };
+    const receipt = await deps.promptOrchestrator("Read", options);
+    const session = engineHost.liveSession(receipt.sessionId);
+    const sandbox = session?.attachment.current();
+    if (!session || !sandbox) throw new Error("Missing input session");
+    await db.delete(teamMembers).where(eq(teamMembers.teamId, team.id));
+    const ready = vi.spyOn(session.attachment, "ensureReady");
+    const operations = [vi.spyOn(sandbox, "exec"), vi.spyOn(sandbox, "readFile"), vi.spyOn(sandbox, "readBinary"),
+      vi.spyOn(sandbox, "writeBinary"), vi.spyOn(sandbox, "stat"), vi.spyOn(sandbox, "rm"), vi.spyOn(sandbox, "readdir"), vi.spyOn(sandbox, "mkdir")];
+    await expect(deps.promptOrchestrator("Read", options)).resolves.toEqual(receipt);
+    expect(ready).not.toHaveBeenCalled();
+    for (const operation of operations) expect(operation).not.toHaveBeenCalled();
+    await expect(deps.promptOrchestrator("Read", { ...options, dispatchId: "workflow:replay-files:new" }))
+      .rejects.toMatchObject({ name: "AgentInputFileError", message: UNVERIFIED_INPUT_AUDIENCE_ERROR });
+    for (const operation of operations) expect(operation).not.toHaveBeenCalled();
+  });
+
+  it("rejects a team Slack execution whose resource audience cannot be verified", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { createTeam } = await import("../services/teams.js");
+    const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "Unverified files", creatorUserId: LOCAL_USER.id });
+    const root = await ensureDefaultAssistantSession(api.providers, { type: "team", id: team.id }, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+    const thread = await root.session.createThread("slack:C_PRIVATE:1.2");
+    const now = Date.now(), runId = "unverified-files", workflowId = "unverified-wf";
+    const definition = { version: "dag/v1" as const, nodes: [], edges: [] };
+    await db.insert(workflowDefinitions).values({ id: workflowId, orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "Unverified", definition, createdAt: now, updatedAt: now });
+    await workflowStore.createRun(runId, { workflowId, definitionVersionId: "v1", origin: { assistantSessionId: root.sessionId, threadId: thread.id } },
+      definition, "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    await expect(deps.promptOrchestrator("Read", { dispatchId: `workflow:${runId}:build`, queueMode: "followup",
+      ownerHint: { ownerType: "team", ownerId: team.id }, files: [{ path: "private.txt", content: "secret" }] }))
+      .rejects.toMatchObject({ name: "AgentInputFileError", message: UNVERIFIED_INPUT_AUDIENCE_ERROR });
+    const sessions = await engineStore.listSessions(LOCAL_USER.id);
+    for (const session of sessions) {
+      expect(await engineStore.listUnsettledSubmissions(session.id)).toEqual([]);
+      expect(engineHost.liveSession(session.id)?.attachment.state).not.toBe("ready");
+    }
+  });
+
+  it("rejects input delivery to a retained shared team runtime before provisioning", async () => {
+    api = await bootTestApi();
+    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+    const { createTeam } = await import("../services/teams.js");
+    const team = await createTeam(db, { orgId: LOCAL_ORG.id, name: "Shared files", creatorUserId: LOCAL_USER.id });
+    const root = await ensureDefaultAssistantSession(api.providers, { type: "team", id: team.id }, { actorUserId: LOCAL_USER.id, orgId: LOCAL_ORG.id });
+    const now = Date.now(), runId = "shared-inputs", workflowId = "shared-workflow";
+    await db.insert(legacyAssistantRuntimes).values({ sessionId: root.sessionId, orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id });
+    await db.insert(workflowDefinitions).values({ id: workflowId, orgId: LOCAL_ORG.id, ownerType: "team", ownerId: team.id,
+      name: "Shared", definition: { version: "dag/v1", nodes: [], edges: [] }, createdAt: now, updatedAt: now });
+    await db.insert(legacyWorkflowRuntimes).values({ workflowId, sessionId: root.sessionId, orgId: LOCAL_ORG.id });
+    await workflowStore.createRun(runId, { workflowId, definitionVersionId: "v1" }, { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: team.id, actorUserId: LOCAL_USER.id });
+    const ready = vi.spyOn(root.session.attachment, "ensureReady");
+    const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+    await expect(deps.promptOrchestrator("Read", { dispatchId: `workflow:${runId}:build`, queueMode: "followup",
+      ownerHint: { ownerType: "team", ownerId: team.id }, files: [{ path: "private.txt", content: "secret" }] }))
+      .rejects.toMatchObject({ name: "AgentInputFileError", message: SHARED_ASSISTANT_INPUT_ERROR });
+    expect(ready).not.toHaveBeenCalled();
+    expect(await engineStore.listUnsettledSubmissions(root.sessionId)).toEqual([]);
   });
 
   it.each(["archived", "missing"])("fails closed for a supplied %s origin instead of using the default audience", async (state) => {

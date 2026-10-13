@@ -28,6 +28,8 @@
  * result shapes.
  */
 
+import type { WorkflowDefinition } from '../dag/shape.js';
+import { AgentInputFileError, agentFileWaitError, renderAgentFiles } from '../dag/agent-files.js';
 import { renderTemplate, type TemplateContext } from '../dag/expression.js';
 import type { SessionNode } from '../dag/nodes.js';
 import type { WorkflowPromptReceipt } from '../engine-deps.js';
@@ -57,14 +59,18 @@ export async function executeSession(args: NodeExecutorArgs<SessionNode>): Promi
     { run, nodeId: node.id, attempt, iteration, store, clock, engine, existingCheckpoint },
     {
       nodeKind: 'session',
+      hasInputFiles: !!node.files && Object.keys(node.files).length > 0,
       dispatchId,
       initialEffects: { sessionId },
       waitMode: node.wait?.mode,
       outputSchema: node.outputSchema,
-      dispatch: async (id): Promise<SubmissionDispatch> => {
+      dispatch: async (id, onInputTarget): Promise<SubmissionDispatch> => {
+        const files = renderAgentFiles(node.files, templateContext, run.definition as WorkflowDefinition); // Validated snapshot, as in the interpreter.
+        const waitError = agentFileWaitError(node.files, node.wait);
+        if (waitError) throw new AgentInputFileError(waitError);
         await engine.createSession({ id: sessionId, title: node.title, purpose: 'workflow' });
         const promptText = withOutputSchemaPrompt(renderText(node.prompt, templateContext), node.outputSchema);
-        const receipt = await engine.prompt(sessionId, promptText, { dispatchId: id, model: node.model });
+        const receipt = await engine.prompt(sessionId, promptText, { dispatchId: id, model: node.model, ...(files.length ? { files, onInputTarget, inputAttempt: attempt } : {}) });
         return { sessionId, receipt };
       },
       dispatchRepair: async (repairDispatchId, repairPrompt, id) =>

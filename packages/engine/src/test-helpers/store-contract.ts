@@ -681,6 +681,18 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(e && e.type === "decision_gate" && e.resolution?.actionId).toBe("approve");
     });
 
+    it("finds dispatch admissions across settlement and isolates session keys", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      expect(await store.getSubmissionByDispatchId("sess-1", "dispatch-1")).toBeNull();
+      const item = { ...queueItem("q-1", 100, 100), dispatchId: "dispatch-1" };
+      await store.admitSubmission("sess-1", "th-1", item);
+      expect(await store.getSubmissionByDispatchId("sess-1", "dispatch-1")).toMatchObject(item);
+      expect(await store.getSubmissionByDispatchId("other-session", "dispatch-1")).toBeNull();
+      await store.forceSettle("sess-1", "q-1", "failed");
+      expect(await store.getSubmissionByDispatchId("sess-1", "dispatch-1")).toMatchObject({ id: "q-1", status: "settled" });
+    });
+
     it("latestActivityAt: null when empty, tracks the max queue-item updatedAt through admit + settle", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1"));

@@ -1096,6 +1096,12 @@ export class PgSessionStore implements SessionStore {
     return result.rows.map((r) => queueItemRowToItem(rawToQueueItemRow(r)));
   }
 
+  async getSubmissionByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null> {
+    const result = await this.db.query("SELECT * FROM engine_queue_items WHERE session_id = $1 AND dispatch_id = $2", [sessionId, dispatchId]);
+    const raw = result.rows[0];
+    return raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
+  }
+
   async getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null> {
     const result = await this.db.query("SELECT * FROM engine_queue_items WHERE session_id = $1 AND id = $2", [
       sessionId,

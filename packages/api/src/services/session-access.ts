@@ -183,7 +183,7 @@ export async function isSessionDirectOwner(
 
 /** Preserve established legacy access; new executions use their governing audience. */
 export async function canAccessSessionResources(
-  deps: Pick<Providers, "db" | "engineStore" | "engineCredentials" | "onePassword">,
+  deps: Pick<Providers, "db" | "engineStore" | "engineCredentials"> & { onePassword?: Providers["onePassword"] },
   session: SessionOwnerLike & { id: string; orgId: string; status: string },
   caller: RequestPrincipal,
 ): Promise<boolean> {

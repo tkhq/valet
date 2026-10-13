@@ -9,6 +9,7 @@ import {
 } from "./actions.js";
 import type { PluginActionContext } from "@valet/engine";
 import {
+  validateDefinitionInput,
   createWorkflowDefinition,
   getWorkflowDefinition,
   workflowActionOrigin,
@@ -163,6 +164,29 @@ describe("ownerFromContext", () => {
 });
 
 describe("save_workflow validation", () => {
+  it("rejects personal orchestrator files at save time with a session-step correction", async () => {
+    const save = workflowsActionPlugin(noDeps).actions.find(a => a.id === "workflows.save_workflow");
+    if (!save) throw new Error("Missing save action");
+    const definition = { version: "dag/v1", nodes: [{ id: "t", type: "trigger" },
+      { id: "agent", type: "orchestrator", prompt: "Read", files: { "data.txt": "input" } }], edges: [{ from: "t", to: "agent" }] };
+    expect(await save.execute({ definition }, ctx())).toMatchObject({ success: false,
+      error: expect.stringContaining("Use a session step for agent work that needs input files") });
+    expect(validateDefinitionInput(definition, undefined, "team").ok).toBe(true);
+    expect(validateDefinitionInput(definition).ok).toBe(true);
+  });
+
+  it("lints personal foreach orchestrator files but preserves session-file definitions", () => {
+    const body = { id: "agent", type: "orchestrator", prompt: "Read", files: { "data.txt": "input" } };
+    const definition = { version: "dag/v1", nodes: [{ id: "t", type: "trigger" },
+      { id: "fan", type: "foreach", items: "{{trigger.data.rows}}", body }], edges: [{ from: "t", to: "fan" }] };
+    expect(validateDefinitionInput(definition, undefined, "user")).toMatchObject({ ok: false,
+      errors: [expect.stringContaining("shared assistant sandbox")] });
+    const sessionDefinition = { ...definition, nodes: [definition.nodes[0], {
+      id: "agent", type: "session", mode: "start", prompt: "Read", files: { "data.txt": "input" },
+    }], edges: [{ from: "t", to: "agent" }] };
+    expect(validateDefinitionInput(sessionDefinition, undefined, "user").ok).toBe(true);
+  });
+
   it("rejects a non-dag definition with success:false instead of throwing", async () => {
     const plugin = workflowsActionPlugin(noDeps);
     const save = plugin.actions.find((a) => a.id === "workflows.save_workflow");
@@ -295,6 +319,17 @@ describe("DB-backed actions", () => {
     );
     return created.id;
   }
+
+  it("rejects personal orchestrator files introduced by a node patch", async () => {
+    const workflowId = await seedWorkflow();
+    const patch = workflowsActionPlugin(() => deps).actions.find(a => a.id === "workflows.patch_workflow");
+    if (!patch) throw new Error("Missing patch action");
+    const result = await patch.execute({ workflow_id: workflowId,
+      upsert_nodes: [{ id: "trigger", type: "trigger" }, { id: "agent", type: "orchestrator", prompt: "Read", files: { "data.txt": "input" } }],
+      add_edges: [{ from: "trigger", to: "agent" }],
+    }, ctx());
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining("Use a session step") });
+  });
 
   it("proposes disabled schedules and preserves enabled records on concurrent retries", async () => {
     const tool = workflowsActionPlugin(() => deps).actions.find(a => a.id === "workflows.propose_schedule")!;

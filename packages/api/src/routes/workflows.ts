@@ -194,10 +194,6 @@ workflowsRouter.post("/", async (c) => {
     return c.json({ error: "definition is required" }, 400);
   }
 
-  const validation = validateDefinitionInput(body.definition, env);
-  if (!validation.ok) {
-    return c.json({ error: "invalid workflow definition", errors: validation.errors }, 400);
-  }
 
   const principal = requirePrincipal(c);
   if (!principal) return c.json({ error: "unauthorized" }, 401);
@@ -209,6 +205,9 @@ workflowsRouter.post("/", async (c) => {
     isTeamMember: (teamId) => isTeamMember(deps.db, teamId, owner.userId),
   });
   if (!createdOwner.ok) return c.json({ error: createdOwner.error }, createdOwner.status);
+
+  const validation = validateDefinitionInput(body.definition, env, createdOwner.owner.type);
+  if (!validation.ok) return c.json({ error: "invalid workflow definition", errors: validation.errors }, 400);
 
   let created;
   try {
@@ -510,7 +509,9 @@ workflowsRouter.put("/:id", async (c) => {
   }
 
   if (body.definition !== undefined) {
-    const validation = validateDefinitionInput(body.definition, env);
+    const existing = await getWorkflowDefinition(deps, owner, id);
+    if (!existing) return c.json({ error: "workflow not found" }, 404);
+    const validation = validateDefinitionInput(body.definition, env, existing.ownerType);
     if (!validation.ok) {
       return c.json({ error: "invalid workflow definition", errors: validation.errors }, 400);
     }
@@ -558,7 +559,7 @@ workflowsRouter.patch("/:id/model", async (c) => {
   if (!stored.ok) return c.json({ error: "invalid stored workflow definition", errors: stored.errors }, 409);
   const patched = applyWorkflowModelPatch(stored.definition, body.model, body.nodeIds);
   if (!patched.ok) return c.json({ error: "model update is invalid", errors: patched.errors }, 400);
-  const validation = validateDefinitionInput(patched.definition, env);
+  const validation = validateDefinitionInput(patched.definition, env, wf.ownerType);
   if (!validation.ok) return c.json({ error: "model update is invalid", errors: validation.errors }, 400);
   const updated = await updateWorkflowDefinition(deps, owner, c.req.param("id"), { definition: patched.definition });
   if (!updated) return c.json({ error: "workflow not found" }, 404);
