@@ -33,6 +33,20 @@ describe("extractStructuredOutput", () => {
     expect(output).toEqual({ summary: "Run:\n```bash\npnpm test\n```" });
   });
 
+  it("reads a reply as before when an earlier block closed on the same line", () => {
+    const schema = Type.Object({ answer: Type.String() });
+    const earlier = ['Example: ```json', '{"answer":"example"}```', ""];
+    const cases: Array<[string[], string]> = [
+      [["Final:", "```json", '{"answer":"42"}', "```"], "42"],
+      [["```bash", "pnpm test", "```"], "example"],
+    ];
+    for (const [rest, answer] of cases) {
+      const { output, error } = extractStructuredOutput([...earlier, ...rest].join("\n"), schema);
+      expect(error).toBeUndefined();
+      expect(output).toEqual({ answer });
+    }
+  });
+
   it("still reads a fenced block written on one line", () => {
     const { output, error } = extractStructuredOutput('Result: ```json {"answer": 3}```', schema);
     expect(error).toBeUndefined();

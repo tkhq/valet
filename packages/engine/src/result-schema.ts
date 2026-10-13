@@ -48,11 +48,24 @@ function lastFencedBlock(text: string, re: RegExp): string | undefined {
   return lastMatch;
 }
 
+function parses(candidate: string): boolean {
+  try {
+    JSON.parse(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function extractCandidate(text: string): string | undefined {
   const trimmed = text.trim();
   if (trimmed.length === 0) return undefined;
 
-  const lastMatch = lastFencedBlock(trimmed, LINE_FENCED_JSON_RE) ?? lastFencedBlock(trimmed, FENCED_JSON_RE);
+  // The line match is used only when it parses. Otherwise the original
+  // match applies, so a reply that parsed before still parses.
+  const lineMatch = lastFencedBlock(trimmed, LINE_FENCED_JSON_RE)?.trim();
+  if (lineMatch !== undefined && parses(lineMatch)) return lineMatch;
+  const lastMatch = lastFencedBlock(trimmed, FENCED_JSON_RE);
   if (lastMatch !== undefined) {
     return lastMatch.trim();
   }
