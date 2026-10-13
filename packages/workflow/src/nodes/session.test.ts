@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { SubmissionResult } from '@valet/engine';
-import { ValidationError } from '@valet/engine';
+import { extractStructuredOutput, ValidationError } from '@valet/engine';
 
 import type { SessionNode } from '../dag/nodes.js';
 import type { WorkflowDefinition } from '../dag/shape.js';
@@ -286,6 +286,50 @@ describe('executeSession: settled completed with valid output', () => {
   });
 });
 
+// ─── 5b. A schema step keeps its prose response ──────────────────────────────
+
+describe('executeSession: schema step keeps its prose response', () => {
+  const outputSchema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] };
+
+  it('asks for the normal response plus a trailing json block, not JSON only', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine, calls } = makeEngine();
+
+    await store.createRun('run-5b', runParams(), sessionDefinition({ outputSchema }), 'v1');
+    const attempt = await claimAttempt(store, 'run-5b');
+    await driveUntilPark('run-5b', attempt, { store, engine, clock: clock.now });
+
+    const primary = String(calls.find((c) => c.kind === 'prompt')?.text);
+    expect(primary).toContain(JSON.stringify(outputSchema));
+    expect(primary).not.toMatch(/ONLY JSON/i);
+    expect(primary).toContain('End it with one fenced ```json block');
+  });
+
+  it('keeps the prose in response and the parsed block in output', async () => {
+    const prose = '| PR | Status |\n| --- | --- |\n| #1 | merged |\n\nOne pull request merged today.';
+    const reply = `${prose}\n\n\`\`\`json\n{"answer":"42"}\n\`\`\``;
+    const extracted = extractStructuredOutput(reply, outputSchema);
+    expect(extracted.output).toEqual({ answer: '42' });
+    expect(extractStructuredOutput('{"answer":"42"}', outputSchema).output).toEqual({ answer: '42' });
+
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine } = makeEngine({
+      isSettledQueue: [true],
+      awaitResultQueue: [{ outcome: 'completed', text: reply, output: extracted.output }],
+    });
+
+    await store.createRun('run-5c', runParams(), sessionDefinition({ outputSchema }), 'v1');
+    await driveUntilPark('run-5c', await claimAttempt(store, 'run-5c'), { store, engine, clock: clock.now });
+    await driveUntilPark('run-5c', await claimAttempt(store, 'run-5c', 'owner-2'), { store, engine, clock: clock.now });
+
+    const result = (await store.getCheckpoints('run-5c')).find((cp) => cp.nodeId === 's')?.result;
+    expect(result).toMatchObject({ output: { answer: '42' } });
+    expect(String((result as { response?: string }).response)).toContain(prose);
+  });
+});
+
 // ─── 6. isSettled false on re-entry: re-parks without calling awaitResult ────
 
 describe('executeSession: isSettled false on re-entry', () => {
@@ -340,7 +384,7 @@ describe('executeSession: schema validation failure triggers exactly one repair'
     expect(repairText).toContain('Do not invent empty arrays');
     const primary = calls.find((call) => call.kind === 'prompt' && call.dispatchId === 'workflow:run-7:s');
     expect(String(primary?.text)).toContain(JSON.stringify(outputSchema));
-    expect(String(primary?.text)).toContain('Return ONLY JSON');
+    expect(String(primary?.text)).toContain('End it with one fenced ```json block');
 
     const byNode = new Map((await store.getCheckpoints('run-7')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('s')?.status).toBe('intent'); // still parked on the repair submission, not terminal
