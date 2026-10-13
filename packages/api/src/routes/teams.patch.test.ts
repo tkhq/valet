@@ -4,6 +4,9 @@
  * team admin of that team, or org admin), and validation matches
  * `PATCH /api/me`'s `defaultModel` (org-catalog id set, null clears).
  */
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { orgMembers, teamMembers, teams, users } from "../schema/index.js";
@@ -116,6 +119,31 @@ describe("PATCH /api/teams/:id", () => {
       body: JSON.stringify({ name: "Mirror renamed" }),
     });
     expect(mirror.status).toBe(200);
+  });
+
+  it("refuses renames that the next boot's config reconcile would reject", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    await api.providers.db.insert(teams).values({ id: "mirror-team", orgId: "local-org", name: "Mirror", origin: "idp", externalId: "/mirror", createdAt: 3 });
+    // The config file names the local team Platform for a skill source, and declares Declared.
+    const dir = mkdtempSync(join(tmpdir(), "valet-rename-"));
+    const configPath = join(dir, "valet.yaml");
+    writeFileSync(configPath, "version: 1\nteams:\n  - name: Declared\nskillSources:\n  - repo: owner/repo\n    team: Platform\n");
+    vi.stubEnv("VALET_CONFIG", configPath);
+
+    const referenced = await patchTeam(api, { name: "Infra" }, "test-lead");
+    expect(referenced.status).toBe(409);
+    expect(((await referenced.json()) as { error: string }).error).toContain("instance config file names this team");
+
+    const mirrorPatch = (name: string) => fetch(`${api!.baseUrl}/api/teams/mirror-team`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    // A case variant of another team's name, or of a name in the config file, is taken.
+    expect((await mirrorPatch("platform")).status).toBe(409);
+    expect((await mirrorPatch("declared")).status).toBe(409);
+    expect((await mirrorPatch("Mirror two")).status).toBe(200);
   });
 
   it("team admin sets the default model; GET /api/teams reflects it", async () => {

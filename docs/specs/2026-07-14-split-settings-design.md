@@ -102,7 +102,7 @@ id from the session. It never accepts a target user id from the client.
 ### Organization · Teams
 - Team list: name, member count, created date — `GET /api/teams` (existing).
 - New team: name input + Create button (existing `POST /api/teams`); inline validation on duplicate name (409 from api).
-- Team rename: a team admin or org admin edits the Name field, which sends `PATCH /api/teams/:id { name }`. The API trims the name and refuses an empty name or a name another team in the org uses. It also refuses a team declared in the config file, because the config reconciler matches a declared team by name. An identity-provider team can be renamed, because the team sync matches it by group path. The panel hides the field for a declared team.
+- Team rename: a team admin or org admin edits the Name field, which sends `PATCH /api/teams/:id { name }`. The API trims the name and refuses an empty name, and a name that another team in the org or the config file uses, compared without case. It also refuses a team that the config file names under `teams` or `skillSources`, because the config reconciler matches those by name at boot. An identity-provider team can be renamed, because the team sync matches it by group path. The panel hides the field for a declared team.
 - Per-team expandable panel: member rows (name, role badge), role toggle (existing `PATCH /api/teams/:id/members/:userId`), Remove member (existing `DELETE`), Add member (select from the org directory, `GET /api/org/directory`, filtered to people not yet on the team → existing `POST /api/teams/:id/members`).
 - Delete team: per-team overflow menu → confirm dialog → existing `DELETE /api/teams/:id`.
 

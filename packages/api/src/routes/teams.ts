@@ -42,11 +42,12 @@ import { deleteTeamResources } from "../services/team-resource-deletion.js";
  * be renamed: the team sync matches a mirror by its group path, not its name.
  */
 import { Hono, type Context } from "hono";
-import { and, eq, inArray, ne } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { channelsVisibleTo } from "./_thread-access.js";
+import { loadInstanceConfig } from "../config/instance-config.js";
 import { requirePrincipal } from "../middleware/auth.js";
 import {
   assistants,
@@ -333,6 +334,15 @@ teamsRouter.post("/", async (c) => {
 
 // ── Update ────────────────────────────────────────────────────────────────
 
+/** Lowercased team names the instance config file refers to. */
+function configTeamNames(): Set<string> {
+  const cfg = loadInstanceConfig(process.env);
+  return new Set([
+    ...(cfg?.teams ?? []).map((t) => t.name),
+    ...(cfg?.skillSources ?? []).flatMap((s) => (s.team ? [s.team] : [])),
+  ].map((n) => n.toLowerCase()));
+}
+
 const PATCH_TEAM_FIELDS = new Set(["name", "defaultModel", "defaultReasoning", "slackHomeChannelId"]);
 
 /**
@@ -379,12 +389,17 @@ teamsRouter.patch("/:id", async (c) => {
   if ("name" in raw) {
     const name = typeof raw.name === "string" ? raw.name.trim() : "";
     if (!name) return c.json({ error: "Send a team name that is not empty." }, 400);
-    if (team.origin === "config" && name !== team.name) {
-      return c.json({ error: "This team is declared in the instance config file. Rename it there, then restart.", code: "team_name_managed" }, 409);
+    // The next boot resolves `teams[].name` and `skillSources[].team` by
+    // name and refuses near-name collisions, so a rename must keep both intact.
+    const configNames = configTeamNames();
+    if (name !== team.name && (team.origin === "config" || configNames.has(team.name.toLowerCase()))) {
+      return c.json({ error: "The instance config file names this team. Rename it there, then restart.", code: "team_name_managed" }, 409);
     }
     const [taken] = await db.select({ id: teams.id }).from(teams)
-      .where(and(eq(teams.orgId, user.orgId), eq(teams.name, name), ne(teams.id, id))).limit(1);
-    if (taken) return c.json({ error: `Another team already uses the name ${name}. Choose another name.`, code: "team_name_conflict" }, 409);
+      .where(and(eq(teams.orgId, user.orgId), sql`lower(${teams.name}) = lower(${name})`, ne(teams.id, id))).limit(1);
+    if (taken || (name !== team.name && configNames.has(name.toLowerCase()))) {
+      return c.json({ error: `Another team already uses the name ${name}. Choose another name.`, code: "team_name_conflict" }, 409);
+    }
     update.name = name;
   }
   if ("slackHomeChannelId" in raw) {
