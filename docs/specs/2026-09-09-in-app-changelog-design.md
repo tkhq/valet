@@ -89,12 +89,18 @@ The client stores the newest displayed checkpoint ID and the visible unreleased 
 
 ### Page presentation
 
-Filters have visible labels and padded gutters. They stack on phones, use two columns on tablets, and share one row on wide screens.
-All controls have visible keyboard focus. Mobile controls and source links have touch targets of at least 44 pixels.
+Filters have visible labels that supply their accessible names. Their column layout follows the page content width, not the viewport width.
+Below 32 rem, filters stack. At 32 rem, search spans two columns. At 48 rem, all three controls share one row.
+Category headings move beside entries only when the page content is at least 40 rem wide.
+All controls have visible keyboard focus. Search and selects use the same solid palette-accent focus ring, including on phones.
+Mobile controls and source links have touch targets of at least 44 by 44 pixels.
 Release cards and entry groups use consistent gutters. The first entry keeps the same vertical padding as later entries.
-Unread checkpoints and entries use rounded `New` badges with the palette accent wash and primary text color. Unread rows do not change background or gutter width.
-Descriptions use the primary text color. Secondary text follows the palette muted token.
-Loading and errors have accessible status messages. A mounted live region announces when filters have no matches. Empty states retain the release-card spacing.
+Unread checkpoints and entries use rounded `New` badges with the palette accent wash, primary text color, and solid palette-accent border. Unread rows do not change background or gutter width.
+Descriptions use the primary text color. Small secondary text mixes 80% palette muted with 20% palette ink for readable contrast.
+The copy button uses palette text and accent hover colors in both themes. Global palette tokens do not change.
+Loading and errors have accessible status messages. The loading spinner is decorative and hidden from assistive technology.
+One mounted live region shows and announces the no-match message without a duplicate hidden copy.
+The latest-known build notice uses an information icon, accent wash, and solid accent edge. Empty states retain the release-card spacing.
 Filtering, sorting, pagination, source links, and read-state storage do not change.
 
 Only application tags reachable from the build commit define changelog checkpoints. Legacy tags on other branches are excluded.

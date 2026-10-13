@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
-import { Check, ClipboardCopy, ExternalLink } from "lucide-react";
+import { Check, ClipboardCopy, ExternalLink, Info } from "lucide-react";
 import type { ChangelogCategory } from "@valet/api/wire";
 import { useChangelog } from "~/api/changelog";
 import { useMe } from "~/api/settings";
@@ -65,8 +65,9 @@ const CATEGORY: Record<ChangelogCategory, { label: string }> = {
   security: { label: "Security" },
 };
 
-const secondaryTextClass = "text-muted";
-const newBadgeClass = "shrink-0 rounded-full bg-moss-wash px-2.5 text-ink tracking-normal dark:bg-moss-wash dark:text-ink";
+// Mix palette tokens locally so small text stays readable without changing other pages.
+const secondaryTextClass = "text-[color-mix(in_oklch,var(--muted),var(--ink)_20%)]";
+const newBadgeClass = "shrink-0 rounded-full border border-moss bg-moss-wash px-2.5 text-ink tracking-normal dark:bg-moss-wash dark:text-ink";
 const focusClass = "rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss focus-visible:ring-offset-2 focus-visible:ring-offset-paper";
 const selectClass = "h-12 w-full min-w-0 rounded-xl border border-line bg-paper px-3 text-base text-ink sm:h-11 sm:rounded sm:text-sm focus-visible:border-moss focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss";
 
@@ -143,7 +144,7 @@ export function ChangelogPage() {
   if (changelog.isPending) {
     return (
       <div role="status" className={cn("flex flex-1 items-center justify-center gap-2 p-6 text-sm", secondaryTextClass)}>
-        <Spinner size={14} className="motion-reduce:animate-none" /> Loading changelog…
+        <span aria-hidden="true"><Spinner size={14} className="motion-reduce:animate-none" /></span> Loading changelog…
       </div>
     );
   }
@@ -157,7 +158,7 @@ export function ChangelogPage() {
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
-      <div className={pageClass}>
+      <div className={cn(pageClass, "[container-type:inline-size]")}>
         <h1 className="font-display text-2xl font-medium text-ink">Changelog</h1>
         <p className={cn("mt-2 text-sm leading-6", secondaryTextClass)}>Changes in rolling builds and released versions.</p>
         {runningSha && (
@@ -169,7 +170,7 @@ export function ChangelogPage() {
               rel="noreferrer"
               aria-label={`Running commit ${runningSha}`}
               title={runningSha}
-              className={cn(textLinkClass, focusClass, "min-h-6 font-mono max-sm:min-h-11")}
+              className={cn(textLinkClass, focusClass, "min-h-6 font-mono max-sm:min-h-11 max-sm:min-w-11")}
             >
               {runningSha.slice(0, 9)}
             </a>
@@ -178,7 +179,7 @@ export function ChangelogPage() {
               size="icon"
               aria-label="Copy running commit"
               onClick={() => void copy(runningSha)}
-              className="hover:text-moss focus-visible:ring-moss"
+              className="text-ink hover:bg-moss-wash hover:text-moss focus-visible:ring-moss dark:text-ink dark:hover:bg-moss-wash dark:hover:text-moss"
             >
               {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <ClipboardCopy className="h-3.5 w-3.5" aria-hidden />}
             </Button>
@@ -186,8 +187,9 @@ export function ChangelogPage() {
         )}
 
         {changelog.data.artifact.status === "latest-known" && (
-          <div className={cn(cardClass, "mt-6 px-4 py-4 text-sm leading-6 text-ink sm:px-5")}>
-            This build has no release checkpoint. The latest known checkpoint is shown.
+          <div role="note" aria-label="Build information" className={cn(cardClass, "mt-6 flex gap-3 border-l-4 border-l-moss bg-moss-wash px-4 py-4 text-sm leading-6 text-ink sm:px-5")}>
+            <Info className="mt-0.5 h-5 w-5 shrink-0 text-moss" aria-hidden="true" />
+            <p>This build has no release checkpoint. The latest known checkpoint is shown.</p>
           </div>
         )}
 
@@ -195,9 +197,9 @@ export function ChangelogPage() {
           <div
             role="group"
             aria-label="Changelog filters"
-            className={cn(cardClass, "mt-8 grid gap-4 p-4 sm:grid-cols-2 sm:p-5 lg:grid-cols-[minmax(0,1fr)_auto_auto]")}
+            className={cn(cardClass, "mt-8 grid gap-4 p-4 sm:p-5 [@container(min-width:32rem)]:grid-cols-2 [@container(min-width:48rem)]:grid-cols-[minmax(0,1fr)_auto_auto]")}
           >
-            <div className="min-w-0 space-y-2 sm:col-span-2 lg:col-span-1">
+            <div className="min-w-0 space-y-2 [@container(min-width:32rem)]:col-span-2 [@container(min-width:48rem)]:col-span-1">
               <Label htmlFor="changelog-search" className={secondaryTextClass}>Search changes</Label>
               <SearchInput
                 id="changelog-search"
@@ -206,15 +208,13 @@ export function ChangelogPage() {
                   go({ q: value.trim().length === 0 ? undefined : value, page: undefined })
                 }
                 placeholder="Search changes…"
-                aria-label="Search changes"
-                className="h-12 bg-paper focus-visible:border-moss focus-visible:ring-moss sm:h-11"
+                className="h-12 bg-paper placeholder:text-[color-mix(in_oklch,var(--muted),var(--ink)_20%)] focus-visible:border-moss focus-visible:ring-moss max-sm:focus-visible:ring-2 max-sm:focus-visible:ring-moss sm:h-11"
               />
             </div>
             <div className="min-w-0 space-y-2">
               <Label htmlFor="changelog-category" className={secondaryTextClass}>Change type</Label>
               <select
                 id="changelog-category"
-                aria-label="Filter by change type"
                 value={category}
                 onChange={(event) => {
                   const next = CHANGELOG_CATEGORIES.find((value) => value === event.target.value);
@@ -232,7 +232,6 @@ export function ChangelogPage() {
               <Label htmlFor="changelog-sort" className={secondaryTextClass}>Sort releases</Label>
               <select
                 id="changelog-sort"
-                aria-label="Sort releases"
                 value={sort}
                 onChange={(event) =>
                   go({ sort: event.target.value === "oldest" ? "oldest" : undefined, page: undefined })
@@ -246,17 +245,23 @@ export function ChangelogPage() {
           </div>
         )}
 
-        <p role="status" className="sr-only">
-          {checkpoints.length > 0 && visibleCheckpoints.length === 0 ? "No changes match these filters." : ""}
-        </p>
+        <div
+          role="status"
+          aria-atomic="true"
+          className={checkpoints.length > 0 && visibleCheckpoints.length === 0
+            ? cn(cardClass, "mt-8 px-4 py-10 text-center")
+            : "sr-only"}
+        >
+          {checkpoints.length > 0 && visibleCheckpoints.length === 0 && (
+            <>
+              <p className="text-sm font-medium text-ink">No changes match these filters.</p>
+              <p className={cn("mt-2 text-sm leading-6", secondaryTextClass)}>Change the type filter or search terms.</p>
+            </>
+          )}
+        </div>
         {checkpoints.length === 0 ? (
           <p className={cn(cardClass, "mt-8 px-4 py-10 text-center text-sm", secondaryTextClass)}>No release checkpoints are available for this build.</p>
-        ) : visibleCheckpoints.length === 0 ? (
-          <div className={cn(cardClass, "mt-8 px-4 py-10 text-center")}>
-            <p className="text-sm font-medium text-ink">No changes match these filters.</p>
-            <p className={cn("mt-2 text-sm leading-6", secondaryTextClass)}>Change the type filter or search terms.</p>
-          </div>
-        ) : (
+        ) : visibleCheckpoints.length === 0 ? null : (
           <>
             <div className="mt-10 space-y-8">
               {pageCheckpoints.map((checkpoint) => {
@@ -284,7 +289,7 @@ export function ChangelogPage() {
                             href={`https://github.com/tkhq/valet/commit/${checkpointSha}`}
                             target="_blank"
                             rel="noreferrer"
-                            className={cn(textLinkClass, focusClass, "min-h-6 font-mono max-sm:min-h-11")}
+                            className={cn(textLinkClass, focusClass, "min-h-6 font-mono max-sm:min-h-11 max-sm:min-w-11")}
                           >
                             Build {checkpointSha.slice(0, 9)}
                           </a>
@@ -294,7 +299,7 @@ export function ChangelogPage() {
                             href={checkpointUrl}
                             target="_blank"
                             rel="noreferrer"
-                            className={cn(textLinkClass, focusClass, "min-h-6 max-sm:min-h-11")}
+                            className={cn(textLinkClass, focusClass, "min-h-6 max-sm:min-h-11 max-sm:min-w-11")}
                           >
                             {unreleased ? "Build" : "Release"} <ExternalLink className="h-3 w-3" aria-hidden />
                           </a>
@@ -313,8 +318,8 @@ export function ChangelogPage() {
                         {groups.map((group) => {
                           const presentation = CATEGORY[group.category];
                           return (
-                            <div key={group.category} className="grid min-w-0 gap-1 py-5 md:grid-cols-[8rem_minmax(0,1fr)] md:gap-5">
-                              <h3 className={cn("text-xs font-semibold uppercase tracking-wide md:pt-4", secondaryTextClass)}>
+                            <div key={group.category} className="grid min-w-0 py-5 [@container(min-width:40rem)]:grid-cols-[8rem_minmax(0,1fr)] [@container(min-width:40rem)]:gap-5">
+                              <h3 className={cn("text-xs font-semibold uppercase tracking-wide [@container(min-width:40rem)]:pt-4", secondaryTextClass)}>
                                 {presentation.label}
                               </h3>
                               <ul className="min-w-0 divide-y divide-line">
@@ -350,7 +355,7 @@ export function ChangelogPage() {
                                               href={`https://github.com/tkhq/valet/pull/${entry.sources.pullRequest}`}
                                               target="_blank"
                                               rel="noreferrer"
-                                              className={cn(textLinkClass, focusClass, "min-h-6 whitespace-nowrap max-sm:min-h-11")}
+                                              className={cn(textLinkClass, focusClass, "min-h-6 whitespace-nowrap max-sm:min-h-11 max-sm:min-w-11")}
                                             >
                                               PR #{entry.sources.pullRequest}
                                             </a>
@@ -360,7 +365,7 @@ export function ChangelogPage() {
                                             target="_blank"
                                             rel="noreferrer"
                                             aria-label={`Commit ${commit}`}
-                                            className={cn(textLinkClass, focusClass, "min-h-6 font-mono max-sm:min-h-11")}
+                                            className={cn(textLinkClass, focusClass, "min-h-6 font-mono max-sm:min-h-11 max-sm:min-w-11")}
                                           >
                                             {commit.slice(0, 9)}
                                           </a>
