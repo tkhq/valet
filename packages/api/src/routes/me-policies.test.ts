@@ -13,12 +13,14 @@ import { describe, it, expect, afterEach } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, RiskLevel, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { runtimeGrants } from "../schema/index.js";
+import { runtimeGrants, teamMembers, teams } from "../schema/index.js";
+import { buildPolicyResolver } from "../policies/service.js";
 import type {
   DeleteGrantResponse,
   DeletePolicyOverrideResponse,
   ListGrantsResponse,
   ListPolicyOverridesResponse,
+  ListToolPermissionsResponse,
   PutPolicyOverrideResponse,
 } from "../wire/types.js";
 
@@ -49,7 +51,13 @@ function testPolicyPlugin(): ValetPlugin {
     service: "slack",
     actions: [testCatalogAction("slack.post_message", "low")],
   };
-  return { name: "test-policy-plugin", version: "0.0.1", actions: [github, slack] };
+  // A plugin default, so the tool-permissions read can report `plugin`.
+  const notion: ActionPlugin = {
+    service: "notion",
+    defaultApprovalMode: "require_approval",
+    actions: [testCatalogAction("notion.search", "low")],
+  };
+  return { name: "test-policy-plugin", version: "0.0.1", actions: [github, slack, notion] };
 }
 
 const PLUGINS = [testPolicyPlugin()];
@@ -562,6 +570,94 @@ describe("GET/DELETE /api/me/grants", () => {
       headers: HEADERS, // local-user (admin), grant was granted by test-member
       body: JSON.stringify({ sessionId: "s1", service: "github", actionId: "create_issue" }),
     });
+    expect(res.status).toBe(404);
+  });
+});
+
+// ── GET /api/me/tool-permissions — effective mode per action ────────────
+
+describe("GET /api/me/tool-permissions", () => {
+  async function tools(query = ""): Promise<Map<string, ListToolPermissionsResponse["tools"][number]>> {
+    const res = await fetch(`${api!.baseUrl}/api/me/tool-permissions${query}`, { headers: HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListToolPermissionsResponse;
+    return new Map(body.tools.map((tool) => [tool.actionId, tool]));
+  }
+
+  it("reports the risk default and the plugin default when no rule applies", async () => {
+    api = await bootTestApi({ plugins: PLUGINS });
+    const all = await tools();
+    expect(all.get("github.create_issue")).toMatchObject({
+      service: "github", name: "github.create_issue", description: "github.create_issue", riskLevel: "medium",
+      mode: "allow", source: "default", overridden: false, settable: ["allow", "require_approval", "deny"],
+    });
+    expect(all.get("github.create_repository")).toMatchObject({ mode: "require_approval", source: "default" });
+    expect(all.get("notion.search")).toMatchObject({ mode: "require_approval", source: "plugin" });
+    expect(all.get("github.create_issue")?.lockedBy).toBeUndefined();
+  });
+
+  it("narrows to one service and 404s an unknown one", async () => {
+    api = await bootTestApi({ plugins: PLUGINS });
+    expect([...(await tools("?service=github")).keys()]).toEqual(["github.create_issue", "github.create_repository"]);
+    const res = await fetch(`${api.baseUrl}/api/me/tool-permissions?service=nope`, { headers: HEADERS });
+    expect(res.status).toBe(404);
+  });
+
+  it("reports an org rule and locks the modes it forbids", async () => {
+    api = await bootTestApi({ plugins: PLUGINS });
+    await fetch(`${api.baseUrl}/api/org/policies`, {
+      method: "POST", headers: HEADERS, body: JSON.stringify({ actionId: "github.create_issue", mode: "require_approval" }),
+    });
+    await fetch(`${api.baseUrl}/api/org/policies`, {
+      method: "POST", headers: HEADERS, body: JSON.stringify({ actionId: "slack.post_message", mode: "deny" }),
+    });
+    const all = await tools();
+    expect(all.get("github.create_issue")).toMatchObject({
+      mode: "require_approval", source: "org", settable: ["require_approval", "deny"], lockedBy: "org",
+    });
+    expect(all.get("slack.post_message")).toMatchObject({ mode: "deny", source: "org", settable: ["deny"], lockedBy: "org" });
+    // The lock matches the write path: the bounds check refuses the same allow.
+    const refused = await fetch(`${api.baseUrl}/api/me/policy-overrides`, {
+      method: "PUT", headers: HEADERS, body: JSON.stringify({ actionId: "github.create_issue", mode: "allow" }),
+    });
+    expect(refused.status).toBe(400);
+  });
+
+  it("reports a personal override, and Off makes the session resolver deny the tool", async () => {
+    api = await bootTestApi({ plugins: PLUGINS });
+    const put = await fetch(`${api.baseUrl}/api/me/policy-overrides`, {
+      method: "PUT", headers: HEADERS, body: JSON.stringify({ actionId: "slack.post_message", mode: "deny" }),
+    });
+    expect(put.status).toBe(200);
+    expect((await tools()).get("slack.post_message")).toMatchObject({ mode: "deny", source: "personal", overridden: true });
+
+    const resolver = buildPolicyResolver({ db: api.providers.db, actionPluginByService: api.providers.actionPluginByService });
+    const decision = await resolver.resolve({
+      orgId: "local-org", userId: "local-user", service: "slack", actionId: "slack.post_message", riskLevel: "low",
+      params: {}, sessionId: "s-1", threadId: "t-1", appliesIn: "session",
+    });
+    expect(decision).toMatchObject({ mode: "deny", provenance: { source: "override" } });
+
+    const reset = await fetch(`${api.baseUrl}/api/me/policy-overrides`, {
+      method: "DELETE", headers: HEADERS, body: JSON.stringify({ actionId: "slack.post_message" }),
+    });
+    expect(reset.status).toBe(200);
+    expect((await tools()).get("slack.post_message")).toMatchObject({ mode: "allow", source: "default", overridden: false });
+  });
+
+  it("reports a team rule for a team the caller is on, with nothing settable", async () => {
+    api = await bootTestApi({ plugins: PLUGINS });
+    await api.providers.db.insert(teams).values({ id: "perm-team", orgId: "local-org", name: "Team", createdAt: Date.now() });
+    await api.providers.db.insert(teamMembers).values({ teamId: "perm-team", userId: "local-user", role: "admin" });
+    await fetch(`${api.baseUrl}/api/teams/perm-team/policies`, {
+      method: "POST", headers: HEADERS, body: JSON.stringify({ service: "github", mode: "deny" }),
+    });
+    expect((await tools("?teamId=perm-team")).get("github.create_issue")).toMatchObject({
+      mode: "deny", source: "team", settable: [], lockedBy: "team",
+    });
+    // The team rule stays out of the personal workspace.
+    expect((await tools()).get("github.create_issue")).toMatchObject({ mode: "allow", source: "default" });
+    const res = await fetch(`${api.baseUrl}/api/me/tool-permissions?teamId=other`, { headers: HEADERS });
     expect(res.status).toBe(404);
   });
 });

@@ -13,6 +13,11 @@
  * target in the request body (no per-row id exists in the URL to delete
  * by) — see `wire/types.ts`'s `DeletePolicyOverrideRequest` doc comment.
  *
+ * `GET /api/me/tool-permissions` reads each catalog action's effective mode
+ * for the caller, with its source and the modes the caller may set, so the
+ * Integrations panel shows what a session would do and not a raw default.
+ * Writes go through `PUT`/`DELETE .../policy-overrides`.
+ *
  * `DELETE .../grants` similarly addresses by scope (`sessionId` XOR
  * `workflowExecutionId`) + `service`/`actionId` rather than by id, and
  * soft-revokes (`revokedAt` stamp) rather than row-deleting — matching
@@ -26,12 +31,14 @@ import {
   isApprovalMode,
   isRiskLevel,
   listMyGrants,
+  listToolPermissions,
   listMyOverrides,
   revokeMyGrant,
   upsertOverride,
   validateTarget,
 } from "../policies/admin.js";
 import { validateParamMatchers } from "../policies/matchers.js";
+import { canViewTeam, getTeamInOrg } from "../services/teams.js";
 import type { ActionPolicyOverrideRow, RuntimeGrantRow } from "../schema/index.js";
 import type {
   ActionPolicyOverrideWire,
@@ -41,6 +48,7 @@ import type {
   DeletePolicyOverrideResponse,
   ListGrantsResponse,
   ListPolicyOverridesResponse,
+  ListToolPermissionsResponse,
   PutPolicyOverrideRequest,
   PutPolicyOverrideResponse,
   RuntimeGrantWire,
@@ -48,6 +56,7 @@ import type {
 
 export const mePolicyOverridesRouter = new Hono<AppEnv>();
 export const meGrantsRouter = new Hono<AppEnv>();
+export const meToolPermissionsRouter = new Hono<AppEnv>();
 
 function toOverrideWire(row: ActionPolicyOverrideRow): ActionPolicyOverrideWire {
   return {
@@ -213,5 +222,25 @@ meGrantsRouter.delete("/", async (c) => {
   if (!revoked) return c.json({ error: "grant not found" }, 404);
 
   const resp: DeleteGrantResponse = { ok: true };
+  return c.json(resp);
+});
+
+// ── GET /api/me/tool-permissions — effective mode per catalog action ─────
+
+meToolPermissionsRouter.get("/", async (c) => {
+  const { db, actionPluginByService } = c.var.providers;
+  const user = c.var.user;
+  const service = c.req.query("service");
+  const teamId = c.req.query("teamId");
+  if (teamId !== undefined && (!(await getTeamInOrg(db, user.orgId, teamId)) || !(await canViewTeam(db, teamId, user.id)))) {
+    return c.json({ error: "Team not found. Choose a team you belong to." }, 404);
+  }
+  const entries = service === undefined ? [...actionPluginByService.values()] : [actionPluginByService.get(service)];
+  const actionPlugins = entries.flatMap((entry) => (entry ? [entry.actionPlugin] : []));
+  if (service !== undefined && actionPlugins.length === 0) {
+    return c.json({ error: `No tools for service "${service}". Check the service name in /api/plugins.` }, 404);
+  }
+  const tools = await listToolPermissions(db, { orgId: user.orgId, userId: user.id, ...(teamId ? { teamId } : {}) }, actionPlugins, Date.now());
+  const resp: ListToolPermissionsResponse = { tools };
   return c.json(resp);
 });
