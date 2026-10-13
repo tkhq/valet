@@ -138,7 +138,9 @@ function formatPluginOutcome(
     case "denied-policy":
       return {
         ok: false,
-        output: "This action is blocked by org policy. Ask an administrator to allow it.",
+        output: outcome.scope === "shared_account"
+          ? "This action would use a teammate's shared account, and you cannot ask its owner for approval here. Connect your own account on the Integrations page, or ask a teammate who can use the account."
+          : "This action is blocked by org policy. Ask an administrator to allow it.",
       };
     case "denied-external-sender":
       return {
