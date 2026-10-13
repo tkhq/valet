@@ -1554,27 +1554,32 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     const promptOptions = childSendPromptOptions(ctx, req.queue === true);
     const receipt = await childSession.prompt(req.message, promptOptions);
 
-    // Only a channel turn on the delegating thread keeps automatic posts to
-    // its channel thread (`nextReplyRoute`). Otherwise the parent replies to
-    // the channel thread only when it chooses to (`reply: "manual"`).
-    const replyRoute = nextReplyRoute(watchRow.replyRoute, {
-      delegated: true, ...delegationSource({ metadata: promptOptions.metadata }),
-    }, { parentThreadId: watchRow.parentThreadId, originThreadKey: parseOriginJson(watchRow.originJson)?.threadKey });
-
     // Re-point BEFORE arming: the fresh watcher must find the row already
     // tracking its submission, and the stale watcher (if any) must find it
     // no longer tracking the old one. Clearing `dismissedAt` keeps a
     // re-opened child visible in the orchestrator's child list — a hidden
     // row must never be running.
-    await deps.db
-      .update(childWatches)
-      .set({
-        queueItemId: receipt.queueItemId,
-        settled: false,
-        dismissedAt: null,
-        ...(replyRoute !== watchRow.replyRoute ? { replyRoute } : {}),
-      })
-      .where(eq(childWatches.childSessionId, req.childSessionId));
+    await deps.db.transaction(async (tx) => {
+      // Only a channel turn on the delegating thread keeps automatic posts to
+      // its channel thread (`nextReplyRoute`). Otherwise the parent replies
+      // to the channel thread only when it chooses to (`reply: "manual"`).
+      // Read the route under a row lock: a takeover can change it while
+      // this sender wakes the child.
+      const [current] = await tx.select({ replyRoute: childWatches.replyRoute }).from(childWatches)
+        .where(eq(childWatches.childSessionId, req.childSessionId)).for("update");
+      const replyRoute = nextReplyRoute(current?.replyRoute ?? null, {
+        delegated: true, ...delegationSource({ metadata: promptOptions.metadata }),
+      }, { parentThreadId: watchRow.parentThreadId, originThreadKey: parseOriginJson(watchRow.originJson)?.threadKey });
+      await tx
+        .update(childWatches)
+        .set({
+          queueItemId: receipt.queueItemId,
+          settled: false,
+          dismissedAt: null,
+          ...(current && replyRoute !== current.replyRoute ? { replyRoute } : {}),
+        })
+        .where(eq(childWatches.childSessionId, req.childSessionId));
+    });
 
     watcher.arm({
       childSessionId: req.childSessionId,

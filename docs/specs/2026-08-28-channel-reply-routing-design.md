@@ -363,7 +363,9 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   is superseded, the watcher follows its successor and sets `reply_route`
   to `none` only when the successor has no parent delegation provenance: a
   person took over the child. Parent work sent after a takeover, from any parent
-  thread, sets the route back to `manual`. The person's input is in the
+  thread, sets the route back to `manual`. The `child_send` sender reads
+  the route under a row lock in the same transaction as its write, so a
+  takeover while it wakes the child still ends in `manual`. The person's input is in the
   child's transcript, so the parent can answer the channel thread with
   `reply_to_origin` but never posts there automatically.
   Before the watcher admits a settlement with an `origin` route, it checks

@@ -607,6 +607,27 @@ describe("delegated child completion over a channel", () => {
     expect(signals[0]?.content.origin).toEqual({ ...ORIGIN, reply: "manual" });
   });
 
+  it("restores a manual route when a person takes over while child_send wakes the child", async () => {
+    const run = await bootDelegation("child-send-takeover");
+    const { db } = api!.providers;
+    // After the sender reads the watch, a person takes over the child and
+    // the watcher stores the `none` route.
+    const markUsed = run.deps.engineHost.markSessionUsed.bind(run.deps.engineHost);
+    vi.spyOn(run.deps.engineHost, "markSessionUsed").mockImplementationOnce(async (sessionId) => {
+      await db.update(childWatches).set({ replyRoute: "none" }).where(eq(childWatches.childSessionId, "child-send-takeover"));
+      return markUsed(sessionId);
+    });
+
+    const sender = buildChildSender(run.deps, run.watcher);
+    const resumed = await sender(
+      { childSessionId: "child-send-takeover", message: "now finish the original task" },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID, origin: ORIGIN },
+    );
+    if (!resumed) throw new Error("child_send did not admit the follow-up");
+    const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-send-takeover"));
+    expect(watch).toMatchObject({ queueItemId: resumed.queueItemId, replyRoute: "manual" });
+  });
+
   it("keeps automatic replies when the parent's work replaces a person's followup before it runs", async () => {
     const run = await bootDelegation("child-unrun-followup");
     const { db, engineStore } = api!.providers;
