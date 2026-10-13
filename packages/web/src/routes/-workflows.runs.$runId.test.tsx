@@ -266,6 +266,25 @@ describe("RunDetailBody", () => {
     expect(screen.getAllByText("Scoped agent logs were not recorded for this step.")).toHaveLength(1);
   });
 
+  it("totals the steps' model spend and marks it a lower bound when any call was unpriced", () => {
+    const data = baseRun({ status: "settled", outcome: "completed" });
+    data.checkpoints = [
+      { nodeId: "draft", iteration: 0, status: "completed", createdAt: Date.now() },
+      { nodeId: "review", iteration: 0, status: "completed", createdAt: Date.now() },
+    ];
+    const step = { iteration: 0, turns: 1, totalTokens: 10, models: [] };
+    data.stepCosts = [
+      { ...step, nodeId: "draft", costUsd: 0.01, unpricedTurns: 0 },
+      { ...step, nodeId: "review", costUsd: 0.002, unpricedTurns: 1 },
+    ];
+    const { unmount } = render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.getByText("$0.0120+ model spend")).toBeTruthy();
+    unmount();
+    data.stepCosts = [{ ...step, nodeId: "draft", costUsd: 0.01, unpricedTurns: 0 }];
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.getByText("$0.0100 model spend")).toBeTruthy();
+  });
+
   it("renders checkpoints with status and a result preview", () => {
     const data = baseRun({ status: "settled", outcome: "completed" });
     data.checkpoints = [

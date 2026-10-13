@@ -9,7 +9,8 @@ function bounds(period: ResolvedUsagePeriod) {
   return { start: Math.ceil(period.startMs / HOUR) * HOUR, end: Math.floor(period.endMs / HOUR) * HOUR };
 }
 function owned(scope: UsageScope): SQL {
-  const base = sql`COALESCE(s.org_id,d.org_id) = ${scope.orgId}`;
+  // A run carries its org, as for cost, so a deleted workflow's rows keep counting.
+  const base = sql`COALESCE(s.org_id,r.org_id) = ${scope.orgId}`;
   if (scope.scope === 'team') return sql`${base} AND COALESCE(s.owner_type,r.owner_type) = 'team' AND COALESCE(s.owner_id,r.owner_id) = ${scope.teamId}`;
   if (scope.scope === 'me') return sql`${base} AND CASE WHEN s.id IS NOT NULL THEN s.user_id WHEN r.owner_type = 'user' THEN NULLIF(r.owner_id,'') END = ${scope.userId}`;
   return base;
@@ -29,8 +30,7 @@ export async function getActionToolCalls(db: AppDb, period: ResolvedUsagePeriod,
   const result = await db.execute(sql`WITH facts AS (${actionRows(period,scope)})
     SELECT COALESCE(SUM(f.tool_calls),0) AS calls FROM facts f
     JOIN workflow_runs r ON r.id=f.workflow_execution_id
-    JOIN workflow_definitions d ON d.id=r.workflow_id
-    WHERE d.org_id=${scope.orgId} ${owner}`) as { rows: { calls: unknown }[] };
+    WHERE r.org_id=${scope.orgId} ${owner}`) as { rows: { calls: unknown }[] };
   return Number(result.rows[0]?.calls ?? 0);
 }
 export async function getActionOutcomes(db: AppDb, period: ResolvedUsagePeriod, scope: UsageScope) {
@@ -39,7 +39,6 @@ export async function getActionOutcomes(db: AppDb, period: ResolvedUsagePeriod, 
       f.outcome_kind AS kind,SUM(f.outcomes) AS count
     FROM facts f LEFT JOIN agent_sessions s ON s.id=f.session_id
     LEFT JOIN workflow_runs r ON r.id=COALESCE(f.workflow_execution_id,CASE WHEN f.session_id LIKE 'wf:%' THEN split_part(f.session_id,':',2) END)
-    LEFT JOIN workflow_definitions d ON d.id=r.workflow_id
     WHERE ${owned(scope)} AND f.outcome_kind IS NOT NULL GROUP BY 1,2`) as { rows: { parent: string; kind: string; count: unknown }[] };
   return result.rows;
 }
@@ -52,7 +51,6 @@ export async function getSkillBreakdown(db: AppDb, period: ResolvedUsagePeriod, 
       SELECT h.* FROM usage_skill_hourly h
       LEFT JOIN agent_sessions s ON s.id=h.session_id
       LEFT JOIN workflow_runs r ON h.session_id LIKE 'wf:%' AND r.id=split_part(h.session_id,':',2)
-      LEFT JOIN workflow_definitions d ON d.id=r.workflow_id
       WHERE h.hour_ms >= ${b.start} AND h.hour_ms < ${b.end} AND ${owned(scope)}
     ), edges AS MATERIALIZED (
       SELECT f.*,
@@ -62,7 +60,6 @@ export async function getSkillBreakdown(db: AppDb, period: ResolvedUsagePeriod, 
       FROM usage_skill_facts f
       LEFT JOIN agent_sessions s ON s.id=f.session_id
       LEFT JOIN workflow_runs r ON f.session_id LIKE 'wf:%' AND r.id=split_part(f.session_id,':',2)
-      LEFT JOIN workflow_definitions d ON d.id=r.workflow_id
       WHERE f.created_at >= ${period.startMs} AND f.created_at < ${period.endMs}
         AND (f.created_at < ${b.start} OR f.created_at >= ${b.end}) AND ${owned(scope)}
     ), buckets AS (

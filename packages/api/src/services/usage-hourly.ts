@@ -1,6 +1,16 @@
 import { sql, type SQL } from "drizzle-orm";
 import type { ResolvedUsagePeriod } from "./usage-period.js";
 const HOUR = 3600000;
+
+/**
+ * True when `sessionId` is an engine session, the unit an active agent
+ * counts. A workflow step's billing id (`wf:...`) is one only for a session
+ * step. An LLM step's id and a Thread step's id carry spend but run in no
+ * session of their own, so they never count as agents.
+ */
+export function isAgentSession(sessionId: SQL): SQL {
+  return sql`(${sessionId} NOT LIKE 'wf:%' OR EXISTS (SELECT 1 FROM engine_sessions agent WHERE agent.id = ${sessionId}))`;
+}
 /** Complete UTC hours use summaries. The disjoint edges retain exact timestamps. */
 export function usagePeriodRows(
   period: ResolvedUsagePeriod,

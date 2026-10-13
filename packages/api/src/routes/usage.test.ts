@@ -6,7 +6,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { capAuditField } from "../policies/service.js";
+import { capAuditField, persistInvocationAudit } from "../policies/service.js";
 import { createUsageTurnExportStream, getUsageBreakdown } from "../services/usage.js";
 import {
   agentSessions,
@@ -35,6 +35,17 @@ async function seedEngineEntry(api: TestApi, id: string, sessionId: string, now:
     INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, model, queue_item_id, usage, cost, created_at)
     VALUES (${id}, ${sessionId}, 'th', 'message', 'assistant', 'claude', ${queueItemId}, ${USAGE}::text, ${COST}::text, ${now})
   `);
+}
+
+/** A session step runs in an engine session with its step's id; only such
+ * a workflow id counts as an active agent. */
+async function seedWorkflowStepSessions(api: TestApi, ids: string[], now: number): Promise<void> {
+  for (const id of ids) {
+    await api.providers.db.execute(sql`
+      INSERT INTO engine_sessions (id, owner_type, owner_id, user_id, org_id, workspace, purpose, status, created_at, updated_at)
+      VALUES (${id}, 'user', 'local-user', 'local-user', 'local-org', '/w', 'workflow', 'active', ${now}, ${now})
+    `);
+  }
 }
 
 describe("GET /api/usage/breakdown", () => {
@@ -459,6 +470,72 @@ describe("GET /api/usage/outcomes", () => {
   });
 });
 
+describe("a Thread step's action outcome", () => {
+  it("carries the step's model spend, like the turn that called the action", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const now = Date.now();
+    await db.insert(agentSessions).values({ id: "orchestrator:local-user", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now });
+    await db.execute(sql`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at)
+      VALUES ('wf-act','local-org','user','local-user','Act','{}'::jsonb,${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at)
+      VALUES ('run-act','wf-act','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now})`);
+    await db.execute(sql`INSERT INTO engine_queue_items (id, session_id, thread_id, dispatch_id, status, content, attempt_count, max_attempts, timeout_at, created_at, updated_at)
+      VALUES ('q-act', 'orchestrator:local-user', 'th', 'workflow:run-act:notify', 'settled', 'prompt', 1, 1, ${now}, ${now}, ${now})`);
+    await seedEngineEntry(api, "e-act", "orchestrator:local-user", now, "q-act");
+    // The assistant's model-directed Slack send during that turn, as the policy audit records it.
+    await persistInvocationAudit(db, {
+      invocationId: "act-slack", createdAt: now, service: "slack", actionId: "slack.send_message", status: "completed",
+      sessionId: "orchestrator:local-user", threadId: "th", queueItemId: "q-act", orgId: "local-org", userId: "local-user",
+      result: { success: true, data: { channel: "C123", ts: "1.2" } }, durationMs: 10,
+    });
+    const body = (await (await fetch(`${api.baseUrl}/api/usage/outcomes?window=7d`)).json()) as UsageOutcomesResponse;
+    expect(body.byOutcome.find((row) => row.kind === "slack_message_sent")).toMatchObject({
+      count: 1, estimatedCostUsd: 0.003, estimatedCostPerOutcomeUsd: 0.003,
+    });
+  });
+});
+
+describe("a deleted workflow's usage", () => {
+  it("keeps its outcomes, action calls, and skills with its cost, so cost per outcome holds", async () => {
+    api = await bootTestApi();
+    const db = api.providers.db;
+    const now = Date.now();
+    await db.execute(sql`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at)
+      VALUES ('wf-gone','local-org','user','local-user','Gone','{}'::jsonb,${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at)
+      VALUES ('run-gone','wf-gone','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now})`);
+    await seedEngineEntry(api, "gone-cost", "wf:run-gone:agent", now);
+    const pr = JSON.stringify({ success: true, data: { title: "Fix", html_url: "https://github.com/acme/app/pull/3" } });
+    await db.execute(sql`INSERT INTO action_invocations (invocation_id, created_at, org_id, workflow_execution_id, service, action_id, result, status, duration_ms)
+      VALUES ('gone-pr',${now},'local-org','run-gone','github','github.create_pull_request',${pr}::jsonb,'completed',10)`);
+    await db.insert(skillInvocations).values({
+      id: "gone-skill", createdAt: now, orgId: "local-org", sessionId: "wf:run-gone:agent", threadId: "th",
+      invokerUserId: "local-user", invocationEntryId: null, path: "slash_context", skillKey: "stored:triage",
+      skillName: "triage", storedSkillId: "triage", pluginName: null, origin: "local", contentSha: "sha",
+      injectedCharacters: 40, estimatedBodyTokens: 10,
+    });
+    const read = async () => {
+      const outcomes = (await (await fetch(`${api!.baseUrl}/api/usage/outcomes?window=7d`)).json()) as UsageOutcomesResponse;
+      const tools = (await (await fetch(`${api!.baseUrl}/api/usage/tool-efficiency?window=7d`)).json()) as UsageToolEfficiencyResponse;
+      const breakdown = (await (await fetch(`${api!.baseUrl}/api/usage/breakdown?window=7d`)).json()) as UsageBreakdownResponse;
+      return {
+        cost: breakdown.totalCostUsd,
+        pullRequests: outcomes.byOutcome.find((row) => row.kind === "pull_request_created"),
+        workflowActions: tools.byUseCase.find((row) => row.useCase === "workflow")?.modelFreeActions,
+        skills: breakdown.skillBreakdown.map((row) => row.skillKey),
+      };
+    };
+    const before = await read();
+    expect(before).toMatchObject({ pullRequests: { count: 1, estimatedCostUsd: 0.003 }, workflowActions: 1, skills: ["stored:triage"] });
+    expect(before.cost).toBeCloseTo(0.003, 6);
+
+    await db.execute(sql`DELETE FROM workflow_definitions WHERE id = 'wf-gone'`);
+
+    expect(await read()).toEqual(before);
+  });
+});
+
 describe("GET /api/usage/sessions", () => {
   it("lists per-session spend and marks child sessions from child_watches", async () => {
     api = await bootTestApi();
@@ -490,14 +567,17 @@ describe("GET /api/usage/sessions", () => {
 });
 
 describe("GET /api/usage/items — symmetric drill-down", () => {
-  it("drills workflow → runs and proxy → harness", async () => {
+  it("drills workflow → steps and proxy → harness", async () => {
     api = await bootTestApi();
     const now = Date.now();
     const db = api.providers.db;
-    // A workflow run owned by local-user.
+    // Two runs of one workflow owned by local-user.
     await db.execute(sql`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at) VALUES ('wf-x','local-org','user','local-user','Nightly review','{}'::jsonb,${now},${now})`);
-    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at) VALUES ('run-x','wf-x','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at) VALUES ('run-x','wf-x','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now}), ('run-y','wf-x','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now})`);
     await seedEngineEntry(api, "e-wfx", "wf:run-x:node-a", now);
+    // A foreach iteration of the same step adds to it.
+    await seedEngineEntry(api, "e-wfy", "wf:run-y:node-a:2", now);
+    await seedEngineEntry(api, "e-wfx-b", "wf:run-x:node-b", now);
     // A proxy row (codex harness).
     await db.insert(llmProxyRequests).values({
       id: "p-cx", createdAt: now, orgId: "local-org", userId: "local-user", apiKeyId: "k",
@@ -506,8 +586,15 @@ describe("GET /api/usage/items — symmetric drill-down", () => {
     });
 
     const wf = (await (await fetch(`${api.baseUrl}/api/usage/items?useCase=workflow`)).json()) as UsageDrillResponse;
-    expect(wf.items.map((i) => i.label)).toContain("Nightly review");
-    expect(wf.items[0].id).toBe("run-x");
+    const workflow = wf.items.find((i) => !i.isChild);
+    expect(workflow).toMatchObject({ id: "wf-x", label: "Nightly review", workflowId: "wf-x", runs: 2 });
+    const steps = wf.items.filter((i) => i.isChild);
+    expect(steps.map((i) => [i.label, i.parentId, i.runs, i.turns])).toEqual([
+      ["node-a", "wf-x", 2, 2],
+      ["node-b", "wf-x", 1, 1],
+    ]);
+    expect(steps[0].costUsd).toBeCloseTo(2 * steps[1].costUsd, 6);
+    expect(workflow?.costUsd).toBeCloseTo(steps[0].costUsd + steps[1].costUsd, 6);
 
     const px = (await (await fetch(`${api.baseUrl}/api/usage/items?useCase=proxy`)).json()) as UsageDrillResponse;
     expect(px.items.map((i) => i.label)).toContain("codex");
@@ -724,6 +811,67 @@ describe("GET /api/usage/export.csv", () => {
     expect(shared).toContain(",proxy,gpt,,,,10,2,0,0,12,0.01,true,,,,,");
   });
 
+  it("keeps a Thread step's channel and repositories from the session that ran the turn", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    const db = api.providers.db;
+    await db.insert(agentSessions).values({ id: "orchestrator:local-user", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now });
+    await db.execute(sql`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at) VALUES ('wf-csv','local-org','user','local-user','CSV','{}'::jsonb,${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at) VALUES ('run-csv','wf-csv','v1','{}'::jsonb,'{}'::jsonb,'user','local-user',${now},${now})`);
+    await db.execute(sql`
+      INSERT INTO engine_queue_items (id, session_id, thread_id, dispatch_id, status, content, channel,
+        attempt_count, max_attempts, timeout_at, created_at, updated_at)
+      VALUES ('q-csv-step', 'orchestrator:local-user', 'th', 'workflow:run-csv:think', 'settled', 'prompt',
+              ${JSON.stringify({ channelType: "slack", channelId: "C42" })}, 1, 1, ${now}, ${now}, ${now})
+    `);
+    await db.execute(sql`
+      INSERT INTO session_repos (session_id, full_name, clone_url, position)
+      VALUES ('orchestrator:local-user', 'acme/assistant-repo', 'https://example.test/assistant', 0)
+    `);
+    await seedEngineEntry(api, "e-csv-step", "orchestrator:local-user", now, "q-csv-step");
+
+    const lines = (await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&granularity=turn`)).text()).trim().split("\n");
+    const step = lines.find((line) => line.includes("wf:run-csv:think"));
+    expect(step).toBeDefined();
+    expect(step).toContain(",run-csv,");
+    expect(step).toMatch(/,acme\/assistant-repo,slack,C42$/);
+  });
+
+  it("exports a team Thread step's turn without the context of a member's private session", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    const db = api.providers.db;
+    await db.insert(teams).values({ id: "team-ctx", orgId: "local-org", name: "Context", createdAt: now });
+    await db.insert(teamMembers).values([
+      { teamId: "team-ctx", userId: "local-user", role: "member" },
+      { teamId: "team-ctx", userId: "test-member", role: "member" },
+    ]);
+    // The team run reports through the initiating member's personal assistant.
+    await db.insert(agentSessions).values({ id: "personal-asst", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now });
+    await db.execute(sql`INSERT INTO workflow_definitions (id, org_id, owner_type, owner_id, name, definition, created_at, updated_at) VALUES ('wf-ctx','local-org','team','team-ctx','Ctx','{}'::jsonb,${now},${now})`);
+    await db.execute(sql`INSERT INTO workflow_runs (id, workflow_id, definition_version_id, definition, params, owner_type, owner_id, created_at, updated_at) VALUES ('run-ctx','wf-ctx','v1','{}'::jsonb,'{}'::jsonb,'team','team-ctx',${now},${now})`);
+    await db.execute(sql`
+      INSERT INTO engine_queue_items (id, session_id, thread_id, dispatch_id, status, content, channel, attempt_count, max_attempts, timeout_at, created_at, updated_at)
+      VALUES ('q-ctx', 'personal-asst', 'th', 'workflow:run-ctx:think', 'settled', 'prompt',
+              ${JSON.stringify({ channelType: "slack", channelId: "DPRIVATE" })}, 1, 1, ${now}, ${now}, ${now})
+    `);
+    await db.execute(sql`INSERT INTO session_repos (session_id, full_name, clone_url, position)
+      VALUES ('personal-asst', 'acme/private-repo', 'https://example.test/private', 0)`);
+    await seedEngineEntry(api, "e-ctx", "personal-asst", now, "q-ctx");
+
+    const teamCsv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=team&teamId=team-ctx&granularity=turn`,
+      { headers: { "x-valet-test-user-id": "test-member" } })).text();
+    const row = teamCsv.trim().split("\n").find((line) => line.includes("wf:run-ctx:think"));
+    // The team's spend stays; the personal session's repository and channel do not.
+    expect(row).toBeDefined();
+    expect(teamCsv).not.toContain("acme/private-repo");
+    expect(teamCsv).not.toContain("DPRIVATE");
+
+    await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+    const orgCsv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=org&granularity=turn`)).text();
+    expect(orgCsv.trim().split("\n").find((line) => line.includes("wf:run-ctx:think"))).toMatch(/,acme\/private-repo,slack,DPRIVATE$/);
+  });
+
   it("streams every row over 100,000 without gaps or duplicates at tied timestamps", async () => {
     api = await bootTestApi();
     const now = Date.now();
@@ -832,6 +980,7 @@ describe("GET /api/usage/daily-agents", () => {
     await db.insert(workflowDefinitions).values({ id: "activity-workflow", orgId: "local-org", ownerType: "team", ownerId: "activity-a", name: "Activity workflow", definition: {}, createdAt: day, updatedAt: day });
     await api.providers.workflowStore.createRun("activity-run", { workflowId: "activity-workflow", definitionVersionId: "v1" },
       { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "activity-a" });
+    await seedWorkflowStepSessions(api, ["wf:activity-run:node", "wf:activity-run:node:1"], day);
     await seedEngineEntry(api, "activity-wf1", "wf:activity-run:node", day);
     await seedEngineEntry(api, "activity-wf2", "wf:activity-run:node", day);
     await seedEngineEntry(api, "activity-wf3", "wf:activity-run:node:1", day);
@@ -920,6 +1069,7 @@ describe("GET /api/usage/breakdown — team daily active agents", () => {
     await entry("a-future", "activity-assistant", now + 1, "future-actor");
     await entry("child-1", "activity-child", today);
     await entry("child-2", "activity-child", today + 1);
+    await seedWorkflowStepSessions(testApi, ["wf:activity-run:node", "wf:activity-run:node:1"], today);
     await entry("wf-1", "wf:activity-run:node", today);
     await entry("wf-2", "wf:activity-run:node", today + 1);
     await entry("wf-iteration", "wf:activity-run:node:1", today);

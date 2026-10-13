@@ -10,6 +10,43 @@ import { render, screen } from "@testing-library/react";
 import { CheckpointList } from "./checkpoint-list";
 
 describe("CheckpointList", () => {
+  it("shows each step's model spend, marking a lower bound when some calls were unpriced", () => {
+    render(
+      <CheckpointList
+        checkpoints={[
+          { nodeId: "draft", iteration: 0, status: "completed" },
+          { nodeId: "each", iteration: 1, status: "completed" },
+          { nodeId: "notify", iteration: 0, status: "completed" },
+        ]}
+        stepCosts={[
+          { nodeId: "draft", iteration: 0, costUsd: 0.0421, turns: 2, unpricedTurns: 0, totalTokens: 1500, models: ["claude"] },
+          { nodeId: "each", iteration: 1, costUsd: 0.005, turns: 2, unpricedTurns: 1, totalTokens: 20, models: [] },
+        ]}
+      />,
+    );
+    const [draft, each, notify] = screen.getAllByRole("listitem");
+    expect(draft.textContent).toContain("$0.0421");
+    expect(draft.textContent).toContain("1.5k tokens over 2 calls · claude");
+    expect(each.textContent).toContain("$0.0050+");
+    expect(notify.textContent).not.toContain("$");
+  });
+
+  it("keeps every status but Completed visible on a phone, where the glyph alone shows a denied step as done", () => {
+    render(
+      <CheckpointList
+        checkpoints={[
+          { nodeId: "done", iteration: 0, status: "completed" },
+          { nodeId: "blocked", iteration: 0, status: "completed", result: { policyDenied: true } },
+          { nodeId: "broken", iteration: 0, status: "failed", error: "boom" },
+        ]}
+      />,
+    );
+    // Below `sm` an `sr-only` label is hidden; only the glyph shows.
+    expect(screen.getByText("Completed").className).toContain("sr-only");
+    expect(screen.getByText("Denied").className).not.toContain("sr-only");
+    expect(screen.getByText("Failed").className).not.toContain("sr-only");
+  });
+
   it("shows a fallback line when there are no checkpoints", () => {
     render(<CheckpointList checkpoints={[]} />);
     expect(screen.getByText("No steps have started yet.")).toBeTruthy();

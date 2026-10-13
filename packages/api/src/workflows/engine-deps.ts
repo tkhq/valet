@@ -82,6 +82,7 @@ import type { OnePasswordService } from "../services/onepassword.js";
 import { isTeamMember } from "../services/teams.js";
 import { resolveWorkflowReportTarget } from "./report-target.js";
 import { definitionVersionId } from "./definition-version.js";
+import { recordLlmStepUsage } from "./step-usage.js";
 
 export interface WorkflowEngineDepsOpts {
   host: EngineHost;
@@ -479,6 +480,13 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
           ...(reasoning ? { reasoning } : {}),
         },
       );
+      // Record before the error check: a failed call can still bill tokens.
+      // Usage is accounting, so a failed write is logged and the step goes on.
+      await recordLlmStepUsage(opts.db, {
+        runId: req.runId, nodeId: req.nodeId, iteration: req.iteration, model: result.model || resolved.model.id, usage: result.usage,
+      }).catch((err: unknown) => {
+        console.error(`[workflow] Cannot record usage for step ${req.nodeId} of run ${req.runId}; Usage omits this call.`, err);
+      });
       if (result.stopReason === "error" || result.stopReason === "aborted") {
         throw new Error(`Workflow model "${req.model}" ${result.stopReason}: ${result.errorMessage || "The provider did not complete the request."}`);
       }

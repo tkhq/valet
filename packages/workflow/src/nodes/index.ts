@@ -132,6 +132,16 @@ export function iterationSuffix(iteration: number): string {
   return iteration > 0 ? `:${iteration}` : '';
 }
 
+/**
+ * The session id a step's model usage bills to: `wf:{runId}:{nodeId}`, plus
+ * the iteration suffix inside a foreach body. A session step runs in this
+ * session. An LLM step has no session, but the host records its usage under
+ * the same id, so Usage reads every step's cost from one key.
+ */
+export function workflowStepSessionId(runId: string, nodeId: string, iteration: number): string {
+  return `wf:${runId}:${nodeId}${iterationSuffix(iteration)}`;
+}
+
 export type NodeExecuteResult =
   | { status: 'completed'; result: unknown; terminate?: 'completed' | 'failed' }
   | { status: 'skipped'; result?: unknown }

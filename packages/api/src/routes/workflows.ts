@@ -67,6 +67,7 @@ import {
 } from "../workflows/schedule-service.js";
 import { buildValidateEnvironment, buildOrgValidateEnvironment } from "../workflows/validation-env.js";
 import { applyWorkflowModelPatch } from "../workflows/patch.js";
+import { workflowRunStepCosts } from "../workflows/step-cost.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import type { TeamServiceReadinessDeps } from "../workflows/team-service-readiness.js";
 import { allowWorkflowPermissions, analyzeWorkflowPermissions, revokeWorkflowPermissions } from "../workflows/permissions.js";
@@ -871,9 +872,14 @@ workflowsRouter.delete("/:id/schedules/:scheduleId", async (c) => {
 
 workflowsRouter.get("/runs/:runId", async (c) => {
   const { deps, owner } = serviceCtx(c);
-  const resp = await getWorkflowRunDetail(deps, owner, c.req.param("runId"));
+  const runId = c.req.param("runId");
+  const resp = await getWorkflowRunDetail(deps, owner, runId);
   if (!resp) return c.json({ error: "run not found" }, 404);
-  return c.json({ ...resp, conversations: await workflowRunConversations(c, c.req.param("runId")) });
+  const [conversations, stepCosts] = await Promise.all([
+    workflowRunConversations(c, runId),
+    workflowRunStepCosts(deps.db, deps.workflowStore, runId),
+  ]);
+  return c.json({ ...resp, conversations, stepCosts });
 });
 
 workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
