@@ -76,7 +76,7 @@ export function SharedThreadView({ address, guest }: {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <MessageList header={header} messages={stream.messages} threadId={threadId} agentBusy={busy}
-        pendingIds={queueState?.pendingIds} viewerId={me.data?.id} />
+        pendingIds={queueState?.pendingIds} viewerId={me.data?.id} ratings={false} />
       {pendingGate && (
         <p role="status" className="border-t border-line px-4 py-2 text-xs text-muted">
           Waiting for {guest.ownerName} to answer an approval.

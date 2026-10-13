@@ -93,6 +93,24 @@ describe("SharedThreadView", () => {
     screen.getByText("View + reply");
   });
 
+  it("renders no rating controls and never asks for the session's ratings", async () => {
+    const ratings = vi.spyOn(api, "getSessionRatings").mockResolvedValue({ session: null, entries: {} });
+    vi.spyOn(api, "listMessages").mockResolvedValue({
+      messages: [
+        { id: "m1", sessionId: "sess-1", threadId: "thread-1", role: "user", content: "Investigate the checkout errors", parts: [], createdAt: 1 },
+        { id: "m2", sessionId: "sess-1", threadId: "thread-1", role: "assistant", content: "The payment provider times out.", parts: [], createdAt: 2 },
+      ],
+      hasMore: false,
+    });
+    vi.spyOn(api, "listThreadDecisions").mockResolvedValue({ gates: [] });
+    wrap(<SharedThreadView address={address} guest={{ mode: "view", ownerName: "Ops Lead" }} />);
+
+    await screen.findByText("The payment provider times out.");
+    expect(screen.queryByRole("button", { name: "Good reply" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Bad reply" })).toBeNull();
+    expect(ratings).not.toHaveBeenCalled();
+  });
+
   it("tells a guest when the thread is no longer shared", async () => {
     vi.spyOn(api, "listMessages").mockRejectedValue(new Error("Thread not found."));
     vi.spyOn(api, "listThreadDecisions").mockResolvedValue({ gates: [] });

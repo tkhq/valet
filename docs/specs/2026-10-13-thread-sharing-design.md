@@ -12,7 +12,7 @@ The owner picks one mode in the **Share** dialog in the thread header.
 | View | Any live member of the owner's organization who has the link | Read the history, watch the thread live, see that an approval is pending |
 | View + reply | Same as View | Also send prompts, stop a running turn, and resume a stopped queue |
 
-The link is the thread address, `/threads/:threadId`. The owner opens the full thread there. A guest opens a page with only that thread: no sidebar entry, no sandbox tabs, no settings. A share never makes the thread public. A person outside the organization, and a team API key, cannot open it.
+The link is the thread address, `/threads/:threadId`. The owner opens the full thread there. A guest opens a page with only that thread: no sidebar entry, no sandbox tabs, no settings, and no reply ratings (ratings are session-addressed). A share never makes the thread public. A person outside the organization, and a team API key, cannot open it.
 
 Only the owner changes the mode. Setting it to Off revokes access on the guest's next request. A guest's live stream reads the share again before a frame or keepalive: at once after a share change in the same process, and otherwise when its last answer is five seconds old. When the share is gone, the server closes the stream with code 4040.
 
