@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
 import {
@@ -36,7 +37,7 @@ async function getOctokit(ctx: PluginActionContext, images = false): Promise<Oct
   }
   return new Octokit({ auth: token, baseUrl: resolveGithubApiUrl(), ...(images ? {
     // Supported throttle id isolates assets from unrelated writes. Do not sleep through rate limits.
-    throttle: { id: "valet-comment-images", onRateLimit: () => false, onSecondaryRateLimit: () => false },
+    throttle: { id: `valet-comment-images-${createHash("sha256").update(token).digest("hex")}`, onRateLimit: () => false, onSecondaryRateLimit: () => false },
     retry: { enabled: false },
   } : {}) });
 }
@@ -384,7 +385,12 @@ const createComment = action(Type.Object({
     const originalBody = body;
     let stored: Awaited<ReturnType<typeof storeCommentImages>> | undefined;
     const post = async (ctx: PluginActionContext): Promise<PluginActionResult> => {
-      const octokit = ordinaryOctokit ?? await getOctokit(ctx, true);
+      let octokit: Octokit;
+      try { octokit = ordinaryOctokit ?? await getOctokit(ctx, true); }
+      catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : "Cannot resolve GitHub credentials. Reconnect GitHub in Settings." };
+      }
+      if (images !== undefined) ctx.signal.throwIfAborted();
       if (body === undefined && images === undefined) {
         return { success: false, error: "The comment is empty. Supply a body or sandbox images and retry." };
       }

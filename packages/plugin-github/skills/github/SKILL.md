@@ -109,7 +109,7 @@ Images stay on `refs/valet/pr-assets/<PR number>`, outside the PR diff and defau
 Public repository images are public. Private images require a logged-in GitHub browser with repository access.
 Email, mobile push, Slack unfurls, and Valet channel views can show broken private images.
 The App needs contents write, pull requests read, and issues write permissions.
-Image operations have a 30-second deadline. On expiry, check the PR before retrying.
+Image operations have a 120-second deadline. On expiry, check the PR before retrying.
 Each alt text and caption accepts up to 1,000 characters. Body, encoded text, and reserved URL space must fit within 60,000 characters.
 Keep the assets ref while comments need the images. Ref deletion does not securely erase Git objects or cached images.
 Custom refs are invisible in the branch and tag UI. Branch and tag rulesets do not cover this namespace.

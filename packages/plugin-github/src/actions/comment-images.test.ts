@@ -7,14 +7,15 @@ import { githubPlugin } from "./actions.js";
 import { fakeActionContext } from "../test-helpers/action-context.js";
 
 const octokitOptions = vi.hoisted(() => vi.fn());
+const throttleTest = vi.hoisted(() => ({ real: false }));
 
-// Test HTTP semantics without Octokit's process-wide throttling clock.
+// Fast semantic tests skip throttle clocks. The concurrency, batch, and queue tests opt into the real limiter.
 vi.mock("octokit", async (importOriginal) => {
   const actual = await importOriginal<typeof import("octokit")>();
   return { ...actual, Octokit: class extends actual.Octokit {
     constructor(options?: ConstructorParameters<typeof actual.Octokit>[0]) {
       octokitOptions(options);
-      super({ ...options, throttle: { enabled: false }, retry: { enabled: false } });
+      super(throttleTest.real ? options : { ...options, throttle: { enabled: false }, retry: { enabled: false } });
     }
   } };
 });
@@ -29,7 +30,7 @@ const action = githubPlugin.actions.find((a) => a.id === "github.create_comment"
 if (!action) throw new Error("Missing create_comment action");
 const comment = action;
 let close: (() => Promise<void>) | undefined;
-afterEach(async () => { await close?.(); close = undefined; vi.unstubAllEnvs(); vi.useRealTimers(); });
+afterEach(async () => { await close?.(); close = undefined; vi.unstubAllEnvs(); vi.useRealTimers(); throttleTest.real = false; });
 
 async function fixture(options: {
   existing?: boolean; refStatus?: number; commentStatus?: number;
@@ -117,7 +118,7 @@ it("stores an orphan snapshot and uses SHA-pinned blob URLs", async () => {
     { path: "relative/generated.png", caption: "Same bytes" },
   ] }, context(png, "installation-token"));
   expect(result.success).toBe(true);
-  expect(octokitOptions).toHaveBeenLastCalledWith(expect.objectContaining({ throttle: expect.objectContaining({ id: "valet-comment-images" }), retry: { enabled: false } }));
+  expect(octokitOptions).toHaveBeenLastCalledWith(expect.objectContaining({ throttle: expect.objectContaining({ id: expect.stringMatching(/^valet-comment-images-[a-f0-9]{64}$/) }), retry: { enabled: false } }));
   expect(result.data).toMatchObject({ id: 123, assetsRef: "refs/valet/pr-assets/42", assetsCommit: "commit-1", imageUrls: [
     expect.stringMatching(/^https:\/\/github.com\/acme\/widgets\/blob\/commit-1\/pr-42\/[a-f0-9]{64}\.png\?raw=true$/), expect.any(String),
   ] });
@@ -211,14 +212,22 @@ it.each([false, true])("refuses an unrelated or unreadable existing assets commi
 
 
 it.each([4, 6])("publishes %s concurrent batches under enforced fast-forward semantics", async (count) => {
+  throttleTest.real = true;
   const calls = await fixture({ enforceFastForward: true });
-  const results = await Promise.all(Array.from({ length: count }, () => comment.execute({ ...args, images: [{ path: "image" }] }, context())));
+  const start = performance.now();
+  const timings: number[] = [];
+  const results = await Promise.all(Array.from({ length: count }, async () => {
+    const result = await comment.execute({ ...args, images: [{ path: "image" }] }, context(png, `concurrency-${count}`));
+    timings.push(Math.round(performance.now() - start));
+    return result;
+  }));
+  console.log(`Real throttle ${count}-way completion ms: ${timings.join(", ")}`);
   expect(results.map((result) => result.success)).toEqual(Array(count).fill(true));
   expect(calls.filter((c) => c.path.endsWith("/comments"))).toHaveLength(count);
   expect(calls.filter((c) => c.path.endsWith("/git/commits")).slice(1).some((c) => typeof c.body === "object" && c.body !== null && "parents" in c.body && Array.isArray(c.body.parents) && c.body.parents.length === 1)).toBe(true);
   expect(calls.filter((c) => c.method === "PATCH").every((c) => typeof c.body === "object" && c.body !== null && "force" in c.body && c.body.force === false)).toBe(true);
   expect(calls.filter((c) => c.path.includes("/git/ref")).every((c) => c.path.endsWith("/valet/pr-assets/42") || c.path.endsWith("/git/refs"))).toBe(true);
-});
+}, 125_000);
 
 it.each(["~~~", "```", "    indented", "---", "- x", "1. x", "# heading", "> quote", "~~strike~~", "@org/team", "https://example.com", "<img src=x>"])("renders inert caption and alt text with GFM: %s", (text) => {
   const markdown = imageCommentBody(undefined, [{ path: "one", alt: text, caption: text }, { path: "two" }], ["https://example.com/one.png", "https://example.com/two.png"]);
@@ -277,14 +286,14 @@ it("accepts ten 1000-character ASCII captions without duplicating them into alt 
 });
 
 const stalls: ("blob" | "comment")[] = ["blob", "comment"];
-it.each(stalls)("bounds the whole operation at 30 seconds when %s stalls", async (stall) => {
+it.each(stalls)("bounds the whole operation at 120 seconds when %s stalls", async (stall) => {
   const calls = await fixture({ stall });
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const pending = comment.execute({ ...args, images: [{ path: "image" }] }, context());
   await vi.waitFor(() => expect(calls.some((c) => c.path.endsWith(stall === "blob" ? "/git/blobs" : "/comments"))).toBe(true));
-  await vi.advanceTimersByTimeAsync(30_000);
+  await vi.advanceTimersByTimeAsync(120_000);
   const result = await pending;
-  expect(result.error).toContain("exceeded 30 seconds");
+  expect(result.error).toContain("exceeded 120 seconds");
   expect(result.error?.includes("omit images")).toBe(stall === "comment");
 });
 
@@ -292,7 +301,7 @@ it("bounds even an unabortable queued task and aborts its signal", async () => {
   vi.useFakeTimers();
   let signal: AbortSignal | undefined;
   const pending = withImageDeadline(context(), (ctx) => { signal = ctx.signal; return new Promise<never>(() => {}); }).catch((err: unknown) => err);
-  await vi.advanceTimersByTimeAsync(30_000);
+  await vi.advanceTimersByTimeAsync(120_000);
   const error = await pending;
   expect(error).toBeInstanceOf(Error);
   expect(signal?.aborted).toBe(true);
@@ -306,4 +315,81 @@ it.each(["```text\nlog", "~~~text\nlog", "<!-- hidden", "<details>\n<summary>Hid
   expect(html.match(/<img /g)).toHaveLength(2);
   const container = html.search(/<(?:pre|details)\b|<!--/);
   if (container >= 0) expect(html.indexOf('<img src="https://example.com/two.png"')).toBeLessThan(container);
+});
+
+
+it("completes a distinct ten-image batch through the real throttle", async () => {
+  throttleTest.real = true;
+  const calls = await fixture();
+  const ctx = context(png, "ten-image-token");
+  ctx.sandbox.readBinary = async (path) => Buffer.concat([png, Buffer.from(path)]);
+  const start = performance.now();
+  const result = await comment.execute({ ...args, images: Array.from({ length: 10 }, (_, i) => ({ path: `image-${i}` })) }, ctx);
+  console.log(`Real throttle ten-image completion ms: ${Math.round(performance.now() - start)}`);
+  expect(result.success).toBe(true);
+  expect(calls.filter((c) => c.path.endsWith("/git/blobs"))).toHaveLength(10);
+}, 125_000);
+
+it("returns the plain corrective error for missing image credentials", async () => {
+  const calls = await fixture();
+  const ctx = context();
+  ctx.credentials.get = async () => null;
+  const result = await comment.execute({ ...args, images: [{ path: "image" }] }, ctx);
+  expect(result.error).toBe("Missing GitHub access token. Connect the GitHub integration in Settings.");
+  expect(calls).toHaveLength(0);
+});
+
+it("immediately rejects an abort while a real throttled write is queued", async () => {
+  throttleTest.real = true;
+  const calls = await fixture();
+  const actual = await vi.importActual<typeof import("octokit")>("octokit");
+  const token = "queued-abort-token";
+  const { createHash } = await import("node:crypto");
+  const client = new actual.Octokit({ auth: token, baseUrl: process.env.GITHUB_API_URL,
+    throttle: { id: `valet-comment-images-${createHash("sha256").update(token).digest("hex")}`, onRateLimit: () => false, onSecondaryRateLimit: () => false }, retry: { enabled: false },
+  });
+  await client.request("POST /repos/{owner}/{repo}/git/blobs", { owner: args.owner, repo: args.repo, content: "", encoding: "base64" });
+  const ctx = context(png, token);
+  const controller = new AbortController(); ctx.signal = controller.signal;
+  const pending = comment.execute({ ...args, images: [{ path: "image" }] }, ctx);
+  await vi.waitFor(() => expect(calls.some((c) => c.path.endsWith("/pulls/42"))).toBe(true));
+  const start = performance.now(); controller.abort();
+  const result = await pending;
+  expect(performance.now() - start).toBeLessThan(250);
+  expect(result.error).toContain("cancelled");
+  // Octokit cannot cancel its queued noop reservation. When it releases, fetch must not write.
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
+});
+
+
+it("bounds stalled credential resolution before storage", async () => {
+  vi.useFakeTimers();
+  const ctx = context();
+  ctx.credentials.get = () => new Promise<never>(() => {});
+  const pending = comment.execute({ ...args, images: [{ path: "image" }] }, ctx);
+  await vi.advanceTimersByTimeAsync(120_000);
+  expect((await pending).error).toContain("exceeded 120 seconds");
+  expect(ctx.sandbox.readBinary).not.toHaveBeenCalled();
+});
+
+it("does not queue unrelated token or ordinary writes behind an image token", async () => {
+  throttleTest.real = true;
+  await fixture();
+  const actual = await vi.importActual<typeof import("octokit")>("octokit");
+  const { createHash } = await import("node:crypto");
+  const token = "isolation-token";
+  const options = { auth: token, baseUrl: process.env.GITHUB_API_URL, retry: { enabled: false },
+    throttle: { id: `valet-comment-images-${createHash("sha256").update(token).digest("hex")}`, onRateLimit: () => false, onSecondaryRateLimit: () => false },
+  };
+  const busy = new actual.Octokit(options);
+  const route = "POST /repos/{owner}/{repo}/git/blobs";
+  const params = { owner: args.owner, repo: args.repo, content: "", encoding: "base64" };
+  const queued = Promise.all(Array.from({ length: 3 }, () => busy.request(route, params)));
+  const start = performance.now();
+  const otherToken = new actual.Octokit({ ...options, throttle: { ...options.throttle, id: "valet-comment-images-other-token" } });
+  const ordinary = new actual.Octokit({ auth: token, baseUrl: process.env.GITHUB_API_URL, retry: { enabled: false } });
+  await Promise.all([otherToken.request(route, params), ordinary.request(route, params)]);
+  expect(performance.now() - start).toBeLessThan(750);
+  await queued;
 });

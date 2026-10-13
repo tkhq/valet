@@ -145,15 +145,26 @@ Each tree contains only its batch. Parent history retains prior batches. Content
 The action requires the exact `Valet-Assets: pr-<number>` trailer line on existing assets commits. Asset commits contain no `Changelog:` trailer.
 The custom ref cannot name a PR head, PR base, or default branch. No images enter the PR's own diff.
 Updates use `force: false`. Requests and delays use the session abort signal.
-Image operations have one 30-second wall-time deadline, including credential resolution, queued requests, backoff, and commenting.
+Image operations have one 120-second wall-time deadline, including credential resolution, queued requests, backoff, and commenting.
 The deadline aborts requests and returns recovery Markdown if publication completed. Check the PR after an uncertain comment or ref response.
-An abort cannot undo a completed remote write. Unabortable sandbox reads may finish locally after the deadline.
+A user abort rejects immediately, including while waiting in a throttle queue. Requests receive the combined abort signal.
+No further GitHub requests run after cancellation. An abort cannot undo a completed remote write.
+Octokit has no supported way to remove an already queued no-op slot reservation. It can consume that reservation without sending the aborted request.
+Unabortable credential or sandbox reads may finish locally after cancellation or the deadline.
 Confirmed concurrent changes or ref deletion get at most twelve attempts with jittered backoff capped at one second.
 Blobs and the batch tree are written once, not on every attempt. Each new parent requires a new commit and non-forced ref write.
-Image Octokit clients use the supported `throttle.id` value `valet-comment-images`, separate from ordinary GitHub write queues.
-Default Octokit clients share `no-id` write limiters across the API process. The assets id prevents those clients waiting behind image writes.
-Automatic Octokit retries are disabled for image operations. Rate-limit handlers return without retrying, rather than waiting past the deadline.
-Tests disable throttle clocks, use deterministic jitter, and enforce fast-forward semantics. Deadline tests use fake timers.
+Image Octokit clients use supported `throttle.id` values prefixed with `valet-comment-images-`, followed by a SHA-256 hash of the resolved token.
+Clients sharing a token share the one-write-per-second image queue. Different tokens do not wait behind each other's image writes.
+Default clients retain their `no-id` limiter. Image writes form a second write stream per token, not a new GitHub rate allowance.
+GitHub's approximate 80-content-writes-per-minute secondary limit still covers both streams. A secondary rate limit makes the call fail fast.
+Automatic Octokit retries are disabled for image operations. Rate-limit handlers return without retrying.
+The deadline remains bounded at 120 seconds, including queue waits, and preserves recovery Markdown when publication completed.
+Credentials resolve before storage. Missing tokens return the plain corrective message, without a storage/network prefix.
+Most tests disable throttle clocks. The 4-way, 6-way, ten-image, and queued-abort tests use real Octokit/Bottleneck throttling.
+Real-clock completion times were 16.034, 23.033, 28.033, and 31.034 seconds for four concurrent uploads to one PR.
+Six concurrent uploads finished at 24.032, 35.031, 44.031, 51.031, 56.032, and 59.032 seconds.
+One batch of ten distinct images completed in 13.029 seconds. All succeeded with enforced fast-forward semantics in the concurrency fixtures.
+Deadline tests use fake timers. Local contention tests use deterministic jitter, not a live GitHub rate-limit model.
 Ruleset failures keep GitHub's message and name the repository-admin fix, separately from contention exhaustion.
 
 One new comment embeds commit-pinned `github.com/<owner>/<repo>/blob/<SHA>/<path>?raw=true` URLs.
@@ -183,7 +194,7 @@ Ref deletion is not secure erasure. GitHub can retain commit URLs and cached ima
 ### Custom-ref evidence (2026-10-13)
 
 A public probe in `tkhq/valet` created orphan commit `4569db363042d494137e635981b95798ed34de1d`, pointed to only by `refs/valet/pr-assets/885-validation`.
-The probe used `git push`, not authenticated Git refs API creation. `GET /repos/tkhq/valet/git/ref/valet/pr-assets/885-validation` returned HTTP 200.
+`GET /repos/tkhq/valet/git/ref/valet/pr-assets/885-validation` returned HTTP 200.
 The [SHA-pinned image URL](https://github.com/tkhq/valet/blob/4569db363042d494137e635981b95798ed34de1d/ref-probe.png?raw=true) returned HTTP 200 and identical PNG bytes without authentication.
 The probe image also serves after deleting the ref. HTTP 200 proves rendering, not garbage-collection protection.
 Retention relies on standard reachability from `refs/*` and is not demonstrated by this probe.

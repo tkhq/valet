@@ -41,13 +41,24 @@ export function imageCommentBody(body: string | undefined, images: CommentImage[
 export async function withImageDeadline<T>(ctx: PluginActionContext, work: (ctx: PluginActionContext) => Promise<T>): Promise<T> {
   const controller = new AbortController();
   const signal = AbortSignal.any([ctx.signal, controller.signal]);
-  const timeout = new CommentImageError("Image attachment exceeded 30 seconds. Check the PR for a completed comment. Retry after other uploads finish.");
+  const timeout = new CommentImageError("Image attachment exceeded 120 seconds. Check the PR for a completed comment. Retry after other uploads finish.");
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => { controller.abort(); reject(timeout); }, 30_000);
+    timer = setTimeout(() => { controller.abort(); reject(timeout); }, 120_000);
   });
-  try { return await Promise.race([work({ ...ctx, signal }), expired]); }
-  finally { clearTimeout(timer); }
+  let rejectAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    rejectAbort = () => reject(new DOMException("Image attachment cancelled", "AbortError"));
+    ctx.signal.addEventListener("abort", rejectAbort, { once: true });
+  });
+  try {
+    ctx.signal.throwIfAborted();
+    return await Promise.race([work({ ...ctx, signal }), expired, aborted]);
+  } finally {
+    clearTimeout(timer);
+    if (rejectAbort) ctx.signal.removeEventListener("abort", rejectAbort);
+    controller.abort();
+  }
 }
 
 function statusOf(err: unknown): number | undefined {
