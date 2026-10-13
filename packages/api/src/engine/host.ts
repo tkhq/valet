@@ -3454,9 +3454,17 @@ export class EngineHost {
   ): Promise<BuildModel> {
     // Preserve the saved model when restoring an existing session.
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
+    // The carried model is read-only, so nobody can replace a retired one.
+    // If it no longer resolves, the next default applies.
+    if (!prefs.overrideId && prefs.assistantDefault) {
+      try {
+        return await this.resolveModelObject(orgId, prefs.assistantDefault);
+      } catch (err) {
+        console.warn(`[engine-host] carried assistant model ${prefs.assistantDefault} does not resolve (${String(err)}); using the next default`);
+      }
+    }
     const id =
       prefs.overrideId ??
-      prefs.assistantDefault ??
       prefs.childDefault ??
       (prefs.userId ? await this.userDefaultModel(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultModel(orgId, prefs.ownerTeamId) : undefined) ??

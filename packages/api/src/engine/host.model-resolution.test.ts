@@ -820,6 +820,18 @@ describe("EngineHost model resolution wiring", () => {
       expect(await engineHost.resolveFreshThreadSettings(session.id, { userId: "local-user", orgId: "local-org", workspace: "/tmp" })).toEqual({ model: "l", reasoning: "high" });
     });
 
+    it("uses the owner default when the carried assistant model no longer resolves", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await db.update(users).set({ defaultModel: "m" }).where(eq(users.id, "local-user"));
+      const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: "local-user" });
+      await db.execute(sql`ALTER TABLE assistants ADD COLUMN IF NOT EXISTS model text, ADD COLUMN IF NOT EXISTS reasoning text`);
+      await db.execute(sql`UPDATE assistants SET model = 'prov_gone/m1' WHERE id = ${assistant.id}`);
+      const session = await engineHost.assistantSessionFor(assistant.id, { actorUserId: "local-user", orgId: "local-org" });
+      expect(session.options.modelSpec).toBe("m");
+      expect((await engineHost.resolveFreshThreadSettings(session.id, { userId: "local-user", orgId: "local-org", workspace: "/tmp" })).model).toBe("m");
+    });
+
     it("an explicit session override wins over the personal owner default", async () => {
       api = await bootTestApi();
       const { db, engineHost } = api.providers;
