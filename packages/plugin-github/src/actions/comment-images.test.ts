@@ -1,13 +1,27 @@
 import { createServer } from "node:http";
 import { marked } from "marked";
 import { pluginCatalogTools } from "@valet/engine";
-import { imageCommentBody } from "./comment-images.js";
+import { imageCommentBody, withImageDeadline } from "./comment-images.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { githubPlugin } from "./actions.js";
 import { fakeActionContext } from "../test-helpers/action-context.js";
 
-// Octokit spaces write requests by one second, including loopback requests.
-vi.setConfig({ testTimeout: 90_000 });
+const octokitOptions = vi.hoisted(() => vi.fn());
+
+// Test HTTP semantics without Octokit's process-wide throttling clock.
+vi.mock("octokit", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("octokit")>();
+  return { ...actual, Octokit: class extends actual.Octokit {
+    constructor(options?: ConstructorParameters<typeof actual.Octokit>[0]) {
+      octokitOptions(options);
+      super({ ...options, throttle: { enabled: false }, retry: { enabled: false } });
+    }
+  } };
+});
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:crypto")>();
+  return { ...actual, randomInt: (min: number) => min };
+});
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==", "base64");
 const args = { owner: "acme", repo: "widgets", issueNumber: 42 };
@@ -15,15 +29,16 @@ const action = githubPlugin.actions.find((a) => a.id === "github.create_comment"
 if (!action) throw new Error("Missing create_comment action");
 const comment = action;
 let close: (() => Promise<void>) | undefined;
-afterEach(async () => { await close?.(); close = undefined; vi.unstubAllEnvs(); });
+afterEach(async () => { await close?.(); close = undefined; vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 async function fixture(options: {
   existing?: boolean; refStatus?: number; commentStatus?: number;
-  previousStatus?: number; unrelated?: boolean; pullStatus?: number; enforceFastForward?: boolean;
+  previousStatus?: number; unrelated?: boolean; pullStatus?: number; enforceFastForward?: boolean; deleteOnPatch?: boolean; refMessage?: string; stall?: "blob" | "comment";
 } = {}) {
   const calls: { method: string; path: string; body: unknown; auth?: string }[] = [];
   let commits = 0;
   let currentSha = options.existing ? "previous-sha" : undefined;
+  let deleteOnPatch = options.deleteOnPatch ?? false;
   const parents = new Map<string, string | undefined>();
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
@@ -35,9 +50,11 @@ async function fixture(options: {
     calls.push({ method: req.method ?? "", path, body, auth: req.headers.authorization });
     let status = 200;
     let response: object = {};
-    let message = "Repository rule violation: ref update denied";
+    let message = "Not Found";
+    if ((options.stall === "blob" && path.endsWith("/git/blobs")) || (options.stall === "comment" && path.endsWith("/comments"))) return;
     if (path.endsWith("/pulls/42")) {
       status = options.pullStatus ?? 200;
+      message = status === 403 ? "Resource not accessible by integration" : "Not Found";
       response = { base: { repo: { html_url: "https://github.com/acme/widgets" } } };
     } else if (path.endsWith("/git/blobs")) response = { sha: "blob-sha" };
     else if (path.endsWith("/git/trees")) response = { sha: "tree-sha" };
@@ -49,18 +66,20 @@ async function fixture(options: {
       const list = "parents" in payload && Array.isArray(payload.parents) ? payload.parents : [];
       parents.set(sha, typeof list[0] === "string" ? list[0] : undefined);
       response = { sha };
-    }
-    else if (path.includes("/git/commits/")) {
+    } else if (path.includes("/git/commits/")) {
       status = options.previousStatus ?? 200;
       response = { message: options.unrelated ? "Valet-Assets: pr-420" : "Attach images for PR #42\n\nValet-Assets: pr-42" };
     } else if (path.includes("/git/refs")) {
       const sha = "sha" in payload && typeof payload.sha === "string" ? payload.sha : "";
+      if (deleteOnPatch && req.method === "PATCH") { currentSha = undefined; deleteOnPatch = false; status = 422; message = "Reference does not exist"; }
       const collision = options.enforceFastForward && (req.method === "POST" ? currentSha !== undefined : parents.get(sha) !== currentSha);
-      status = options.refStatus ?? (collision ? 422 : 200);
-      if (collision) message = req.method === "POST" ? "Reference already exists" : "Update is not a fast forward";
+      if (status !== 422) status = options.refStatus ?? (collision ? 422 : 200);
+      if (options.refStatus) message = options.refMessage ?? "Repository rule violation: ref update denied";
+      if (collision && message !== "Reference does not exist") message = req.method === "POST" ? "Reference already exists" : "Update is not a fast forward";
       if (status === 200) { currentSha = sha; }
     } else if (path.endsWith("/comments")) {
       status = options.commentStatus ?? 201;
+      message = "Validation Failed: body is too long";
       response = { id: 123, html_url: "https://github.com/acme/widgets/pull/42#issuecomment-123", body };
     } else status = 404;
     res.writeHead(status, { "Content-Type": "application/json" });
@@ -70,7 +89,7 @@ async function fixture(options: {
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Missing fixture address");
   vi.stubEnv("GITHUB_API_URL", `http://127.0.0.1:${address.port}`);
-  close = () => new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+  close = () => new Promise<void>((resolve, reject) => { server.closeAllConnections(); server.close((err) => err ? reject(err) : resolve()); });
   return calls;
 }
 
@@ -98,6 +117,7 @@ it("stores an orphan snapshot and uses SHA-pinned blob URLs", async () => {
     { path: "relative/generated.png", caption: "Same bytes" },
   ] }, context(png, "installation-token"));
   expect(result.success).toBe(true);
+  expect(octokitOptions).toHaveBeenLastCalledWith(expect.objectContaining({ throttle: expect.objectContaining({ id: "valet-comment-images" }), retry: { enabled: false } }));
   expect(result.data).toMatchObject({ id: 123, assetsRef: "refs/valet/pr-assets/42", assetsCommit: "commit-1", imageUrls: [
     expect.stringMatching(/^https:\/\/github.com\/acme\/widgets\/blob\/commit-1\/pr-42\/[a-f0-9]{64}\.png\?raw=true$/), expect.any(String),
   ] });
@@ -106,7 +126,7 @@ it("stores an orphan snapshot and uses SHA-pinned blob URLs", async () => {
   expect(calls.find((c) => c.path.endsWith("/git/trees"))?.body).toEqual({ tree: [expect.objectContaining({ mode: "100644", type: "blob", sha: "blob-sha" })] });
   expect(calls.find((c) => c.path.endsWith("/git/commits"))?.body).toMatchObject({ parents: [], tree: "tree-sha", message: "Attach images for PR #42\n\nValet-Assets: pr-42" });
   expect(calls.find((c) => c.path.endsWith("/git/refs"))?.body).toEqual({ ref: "refs/valet/pr-assets/42", sha: "commit-1" });
-  expect(calls.at(-1)?.body).toMatchObject({ body: expect.stringContaining("Before\n\n![&#118;") });
+  expect(calls.at(-1)?.body).toMatchObject({ body: expect.stringContaining("Before\n\n![view &#93;") });
   expect(calls.filter((c) => c.path.endsWith("/comments"))).toHaveLength(1);
   expect(calls.every((c) => c.auth === "token installation-token")).toBe(true);
 });
@@ -120,7 +140,7 @@ it.each([
   const result = await comment.execute({ ...args, images: [{ path: "/workspace/no-extension" }] }, context(bytes));
   expect(result.success).toBe(true);
   expect(result.data).toMatchObject({ imageUrls: [expect.stringContaining(format === "jpeg" ? ".jpg?raw=true" : `.${format}?raw=true`)] });
-  expect(calls.at(-1)?.body).toMatchObject({ body: expect.stringMatching(/^!\[&#73;/) });
+  expect(calls.at(-1)?.body).toMatchObject({ body: expect.stringMatching(/^!\[Image 1/) });
 });
 
 it.each(["directory", "missing", "oversize-stat", "oversize-read", "empty", "svg", "spoofed-png", "total", "count", "long-body"])("rejects %s before remote writes", async (failure) => {
@@ -150,7 +170,7 @@ it.each([403, 404])("names the fix when GitHub denies PR access (%s)", async (st
   const result = await comment.execute({ ...args, images: [{ path: "image" }] }, context());
   expect(result.success).toBe(false);
   expect(result.error).toContain(status === 404 ? "Images work only on pull requests" : "connected user's repository role");
-  expect(result.error).toContain("Repository rule violation: ref update denied");
+  expect(result.error).toContain(status === 404 ? "Not Found" : "Resource not accessible by integration");
   expect(calls.every((c) => c.method === "GET")).toBe(true);
 });
 
@@ -198,12 +218,13 @@ it.each([4, 6])("publishes %s concurrent batches under enforced fast-forward sem
 
 it.each(["~~~", "```", "    indented", "---", "- x", "1. x", "# heading", "> quote", "~~strike~~", "@org/team", "https://example.com", "<img src=x>"])("renders inert caption and alt text with GFM: %s", (text) => {
   const markdown = imageCommentBody(undefined, [{ path: "one", alt: text, caption: text }, { path: "two" }], ["https://example.com/one.png", "https://example.com/two.png"]);
+  // marked is a GFM proxy, not GitHub's sanitizer or mention parser. Live renderer evidence is in the spec.
   const html = marked.parse(markdown, { gfm: true, async: false });
   expect(html.match(/<img /g)).toHaveLength(2);
   expect(html).not.toMatch(/<(?:a|pre|hr|ul|ol|li|h[1-6]|blockquote|del)\b/);
-  expect(markdown).not.toContain("@org/team");
+  expect(html).toContain("<code>");
   expect(html).toContain('<img src="https://example.com/two.png"');
-  const paragraph = html.match(/<p><code>((?:&#\d+;)+)<\/code><\/p>/)?.[1];
+  const paragraph = html.match(/<p><code>(.*?)<\/code><\/p>/)?.[1];
   expect(paragraph?.replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))).toBe(text);
 });
 
@@ -224,4 +245,51 @@ it("cancels in-flight storage requests with the session signal", async () => {
   const result = await comment.execute({ ...args, images: [{ path: "image" }] }, ctx);
   expect(result.success).toBe(false);
   expect(calls.some((c) => c.method !== "GET")).toBe(false);
+});
+
+
+it("recreates a ref deleted between reading and PATCH", async () => {
+  const calls = await fixture({ existing: true, deleteOnPatch: true, enforceFastForward: true });
+  expect((await comment.execute({ ...args, images: [{ path: "image" }] }, context())).success).toBe(true);
+  expect(calls.filter((c) => c.path.endsWith("/git/refs") && c.method === "POST")).toHaveLength(1);
+});
+
+it.each(["Reference name must start with refs/heads or refs/tags", "Invalid tree SHA"])("reports non-rule storage 422 accurately: %s", async (message) => {
+  await fixture({ refStatus: 422, refMessage: message });
+  const result = await comment.execute({ ...args, images: [{ path: "image" }] }, context());
+  expect(result.error).toContain(message);
+  expect(result.error).toContain("Correct the fields");
+  expect(result.error).not.toContain("repository admin");
+});
+
+it("accepts ten 1000-character ASCII captions without duplicating them into alt text", async () => {
+  await fixture();
+  const caption = "a".repeat(1000);
+  const result = await comment.execute({ ...args, images: Array.from({ length: 10 }, () => ({ path: "image", caption })) }, context());
+  expect(result.success).toBe(true);
+  expect(result.data).toMatchObject({ activityText: "Attached 10 image(s)." });
+  const body = imageCommentBody(undefined, [{ path: "image", caption }], ["https://example.test/image.png"]);
+  expect(body.match(/a{1000}/g)).toHaveLength(1);
+});
+
+const stalls: ("blob" | "comment")[] = ["blob", "comment"];
+it.each(stalls)("bounds the whole operation at 30 seconds when %s stalls", async (stall) => {
+  const calls = await fixture({ stall });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const pending = comment.execute({ ...args, images: [{ path: "image" }] }, context());
+  await vi.waitFor(() => expect(calls.some((c) => c.path.endsWith(stall === "blob" ? "/git/blobs" : "/comments"))).toBe(true));
+  await vi.advanceTimersByTimeAsync(30_000);
+  const result = await pending;
+  expect(result.error).toContain("exceeded 30 seconds");
+  expect(result.error?.includes("omit images")).toBe(stall === "comment");
+});
+
+it("bounds even an unabortable queued task and aborts its signal", async () => {
+  vi.useFakeTimers();
+  let signal: AbortSignal | undefined;
+  const pending = withImageDeadline(context(), (ctx) => { signal = ctx.signal; return new Promise<never>(() => {}); }).catch((err: unknown) => err);
+  await vi.advanceTimersByTimeAsync(30_000);
+  const error = await pending;
+  expect(error).toBeInstanceOf(Error);
+  expect(signal?.aborted).toBe(true);
 });

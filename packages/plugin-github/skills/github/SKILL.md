@@ -104,12 +104,19 @@ call_tool github:github.create_comment params={
 
 `body` is optional with images. Images appear after the body.
 Supply 1 to 10 PNG, JPEG, GIF, or WebP files, up to 10 MiB each and 20 MiB total.
-The result includes normal comment fields plus `imageUrls`, `assetsRef`, and `assetsCommit`.
+The result includes normal comment fields plus `imageUrls`, `assetsRef`, `assetsCommit`, and readable `activityText`.
 Images stay on `refs/valet/pr-assets/<PR number>`, outside the PR diff and default branch fetches.
 Public repository images are public. Private images require a logged-in GitHub browser with repository access.
 Email, mobile push, Slack unfurls, and Valet channel views can show broken private images.
 The App needs contents write, pull requests read, and issues write permissions.
+Image operations have a 30-second deadline. On expiry, check the PR before retrying.
+Each alt text and caption accepts up to 1,000 characters. Body, encoded text, and reserved URL space must fit within 60,000 characters.
 Keep the assets ref while comments need the images. Ref deletion does not securely erase Git objects or cached images.
+Custom refs are invisible in the branch and tag UI. Branch and tag rulesets do not cover this namespace.
+Owners list refs with `git ls-remote origin 'refs/valet/*'`.
+Owners delete a selected ref with `git push origin :refs/valet/pr-assets/<PR>`.
+API equivalents: `GET /repos/{owner}/{repo}/git/matching-refs/valet/pr-assets/` and `DELETE /repos/{owner}/{repo}/git/refs/valet/pr-assets/{PR}`.
+Deletion can break image retrieval. Retention relies on standard Git ref reachability, not a demonstrated garbage-collection test.
 If storage succeeds but commenting fails, the error includes recovery Markdown. Retry with that Markdown in `body`, without `images`.
 Check the PR before retrying after a lost response, because a comment might already exist.
 

@@ -23,17 +23,31 @@ function imageExtension(bytes: Uint8Array): string {
   throw new CommentImageError("Unsupported image content. Export the file as PNG, JPEG, GIF, or WebP and retry.");
 }
 
-// Encode every character before GFM parsing, including mentions and autolink punctuation.
-function inertText(text: string): string {
-  return Array.from(text.replace(/[\r\n]+/g, " "), (char) => `&#${char.codePointAt(0)};`).join("");
+// Alt text is parsed as Markdown. Encode punctuation, not letters or digits.
+function inertAlt(text: string): string {
+  return text.replace(/[\r\n]+/g, " ").replace(/[!-/:-@\[-`{-~]/g, (char) => `&#${char.codePointAt(0)};`);
 }
 
 export function imageCommentBody(body: string | undefined, images: CommentImage[], urls: string[]): string {
   return [body, ...images.map((image, i) => {
-    const alt = inertText(image.alt ?? image.caption ?? `Image ${i + 1}`);
-    const caption = image.caption ? `\n\n<p><code>${inertText(image.caption)}</code></p>` : "";
+    const alt = inertAlt(image.alt ?? `Image ${i + 1}`);
+    // HTML code content cannot open Markdown blocks, mentions, or autolinks.
+    const caption = image.caption ? `\n\n<p><code>${image.caption.replace(/[\r\n]+/g, " ").replace(/[&<>]/g, (char) => `&#${char.codePointAt(0)};`)}</code></p>` : "";
     return `![${alt}](${urls[i]})${caption}`;
   })].filter(Boolean).join("\n\n");
+}
+
+/** Race the complete image operation, including Octokit's queued writes, against one deadline. */
+export async function withImageDeadline<T>(ctx: PluginActionContext, work: (ctx: PluginActionContext) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const signal = AbortSignal.any([ctx.signal, controller.signal]);
+  const timeout = new CommentImageError("Image attachment exceeded 30 seconds. Check the PR for a completed comment. Retry after other uploads finish.");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { controller.abort(); reject(timeout); }, 30_000);
+  });
+  try { return await Promise.race([work({ ...ctx, signal }), expired]); }
+  finally { clearTimeout(timer); }
 }
 
 function statusOf(err: unknown): number | undefined {
@@ -56,7 +70,7 @@ export function imageUploadError(err: unknown, stage: "storage" | "comment" | "P
   if (status === 403) return `${detail} Check the connected user's repository role or the App's repository permissions. Grant contents write, pull requests read, and issues write as needed.`;
   if (status === 404) return `${detail} Check owner and repo. Grant repository access in Settings.`;
   if (stage === "comment" && status === 422) return `${detail} Shorten the comment or correct the fields GitHub rejected, then retry.`;
-  if (status === 409 || status === 422) return `${detail} Ask a repository admin to allow this assets ref under the reported repository rules.`;
+  if (status === 409 || status === 422) return `${detail} Correct the fields GitHub rejected. If the ref namespace is unsupported, stop and report this error to the Valet maintainer.`;
   return `${detail} Check GitHub availability and rate limits, then retry.`;
 }
 
@@ -129,6 +143,7 @@ export async function storeCommentImages(
     }
   }
   for (let attempt = 0; ; attempt++) {
+    ctx.signal.throwIfAborted();
     const parent = await assetHead();
     if (parent) {
       const { data: previous } = await octokit.request("GET /repos/{owner}/{repo}/git/commits/{commit_sha}", {
@@ -160,11 +175,12 @@ export async function storeCommentImages(
       if (![409, 422].includes(statusOf(err) ?? 0)) throw err;
       // Retry only if another writer actually changed the ref. Rules failures keep GitHub's message.
       const currentSha = await assetHead().catch(() => { throw err; });
-      if (!currentSha || currentSha === parent) throw err;
+      const deleted = parent !== undefined && currentSha === undefined && /reference does not exist/i.test(githubMessage(err));
+      if (!deleted && (!currentSha || currentSha === parent)) throw err;
       if (attempt === 11) {
         throw new CommentImageError(`Concurrent image uploads kept advancing the assets ref: ${githubMessage(err)}. Retry after other uploads finish.`);
       }
-      await delay(randomInt(250, Math.min(5000, 500 * 2 ** attempt)), undefined, { signal: ctx.signal });
+      await delay(randomInt(25, Math.min(1000, 100 * 2 ** attempt)), undefined, { signal: ctx.signal });
     }
   }
 }

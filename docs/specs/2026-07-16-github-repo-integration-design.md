@@ -134,8 +134,9 @@ The action validates the complete batch before a GitHub write:
 - Supply 1 to 10 files, each between 1 byte and 10 MiB, with at most 20 MiB total.
 - PNG, JPEG, GIF, and WebP signatures catch mistakes, not exfiltration. Extensions do not determine the type.
 - Checks do not decode images. A valid signature followed by secret data passes. Select only files safe to publish to the target repository.
-- Alt text and captions accept at most 1,000 characters each. Numeric entities protect alt text. Encoded HTML code captions prevent blocks, mentions, and autolinks.
-- Body, encoded captions, and reserved URL space must fit within 60,000 characters.
+- Alt text and captions accept at most 1,000 characters each. Alt punctuation uses numeric entities. Captions escape only HTML delimiters inside code elements.
+- Captions never become fallback alt text. Ten 1,000-character ASCII captions fit without duplicating or encoding each letter.
+- Body, encoded alt text and captions, and reserved URL space must fit within 60,000 characters. The error names this encoded limit.
 
 The action uses supported Git Data APIs: [blobs](https://docs.github.com/en/rest/git/blobs), [trees](https://docs.github.com/en/rest/git/trees), [commits](https://docs.github.com/en/rest/git/commits), and [refs](https://docs.github.com/en/rest/git/refs).
 It creates an orphan commit at `refs/valet/pr-assets/<PR number>` in the target repository. Later batches append commits there.
@@ -143,11 +144,19 @@ Each tree contains only its batch. Parent history retains prior batches. Content
 The action requires the exact `Valet-Assets: pr-<number>` trailer line on existing assets commits. Asset commits contain no `Changelog:` trailer.
 The custom ref cannot name a PR head, PR base, or default branch. No images enter the PR's own diff.
 Updates use `force: false`. Requests and delays use the session abort signal.
-Confirmed concurrent ref changes get twelve attempts with jittered exponential backoff capped at five seconds.
+Image operations have one 30-second wall-time deadline, including credential resolution, queued requests, backoff, and commenting.
+The deadline aborts requests and returns recovery Markdown if publication completed. Check the PR after an uncertain comment or ref response.
+An abort cannot undo a completed remote write. Unabortable sandbox reads may finish locally after the deadline.
+Confirmed concurrent changes or ref deletion get at most twelve attempts with jittered backoff capped at one second.
+Blobs and the batch tree are written once, not on every attempt. Each new parent requires a new commit and non-forced ref write.
+Image Octokit clients use the supported `throttle.id` value `valet-comment-images`, separate from ordinary GitHub write queues.
+Default Octokit clients share `no-id` write limiters across the API process. The assets id prevents those clients waiting behind image writes.
+Automatic Octokit retries are disabled for image operations. Rate-limit handlers return without retrying, rather than waiting past the deadline.
+Tests disable throttle clocks, use deterministic jitter, and enforce fast-forward semantics. Deadline tests use fake timers.
 Ruleset failures keep GitHub's message and name the repository-admin fix, separately from contention exhaustion.
 
 One new comment embeds commit-pinned `github.com/<owner>/<repo>/blob/<SHA>/<path>?raw=true` URLs.
-Normal comment fields remain, with `imageUrls`, `assetsRef`, and `assetsCommit` added.
+Normal comment fields remain, with `imageUrls`, `assetsRef`, `assetsCommit`, and readable `activityText` added.
 If commenting fails after storage, the error includes recovery Markdown. Engine and workflow failures expose this text, not failure data.
 Retry with that Markdown in `body`, without `images`. Check the PR before retrying a lost response because a comment might already exist.
 
@@ -161,7 +170,12 @@ External public storage risks exposing private images. The undocumented browser-
 
 The App needs `contents:write`, `pull_requests:read`, and `issues:write`, already covered by the default manifest.
 User credentials also need a suitable repository role. Token resolution and GitHub actor attribution are unchanged.
-Repository rules can block storage. Ask an admin to allow the reported assets ref before retrying.
+Branch and tag rulesets do not cover `refs/valet/*`. A rejected namespace is not a permission an admin can grant.
+Non-rule storage 422s name rejected fields and direct unsupported namespaces to the Valet maintainer. No namespace fallback runs.
+Explicit ruleset errors retain GitHub's message. PR lookup errors, comment validation errors, and user-role errors each name their own correction.
+The recorded channel activity uses `activityText`: the original body plus image count, not the encoded comment body.
+Valet ignores `refs/valet/pr-assets/*` push events in trigger verification and webhook ingress before workflow or content-sync effects.
+Whether GitHub emits these push webhooks was not verified. The guard applies if it does.
 One custom ref per PR retains binary history. No automatic cleanup runs. Owners can delete refs when comments no longer need images.
 Ref deletion is not secure erasure. GitHub can retain commit URLs and cached images. Failed publication can leave unreferenced blobs and commits.
 
@@ -170,6 +184,33 @@ Ref deletion is not secure erasure. GitHub can retain commit URLs and cached ima
 A public probe in `tkhq/valet` created orphan commit `4569db363042d494137e635981b95798ed34de1d`, pointed to only by `refs/valet/pr-assets/885-validation`.
 The probe used `git push`, not authenticated Git refs API creation. `GET /repos/tkhq/valet/git/ref/valet/pr-assets/885-validation` returned HTTP 200.
 The [SHA-pinned image URL](https://github.com/tkhq/valet/blob/4569db363042d494137e635981b95798ed34de1d/ref-probe.png?raw=true) returned HTTP 200 and identical PNG bytes without authentication.
-The probe ref was then deleted. Fixtures cover API creation and updates. Live authenticated API creation was not verified here.
+The probe image also serves after deleting the ref. HTTP 200 proves rendering, not garbage-collection protection.
+Retention relies on standard reachability from `refs/*` and is not demonstrated by this probe.
+
+Live API validation used an App installation token from the sandbox's `/api/sandbox/git-credential` path, without exposing it.
+`GET /installation/repositories` returned HTTP 200, confirming the installation-token type.
+The scratch ref was `refs/valet/pr-assets/1791925280`. Root commit: `872a8778b065a2633fe822fe34062e9a61ffd889`.
+Child commit: `8ae8bd20277fad42417bcb3ecfaf724294ce02fe`, with that root as its sole parent.
+Both `POST /repos/tkhq/valet/git/commits` calls returned HTTP 201.
+`POST /repos/tkhq/valet/git/refs` with the scratch ref and root returned HTTP 201.
+`PATCH /repos/tkhq/valet/git/refs/valet/pr-assets/1791925280` with the child and `force: false` returned HTTP 200.
+`DELETE` on that same ref endpoint returned HTTP 204. A later anonymous `GET` returned HTTP 404, confirming removal.
+
+`POST /markdown` in `gfm` mode with `context: tkhq/valet` returned HTTP 200 for 13 injection samples using minimal escaping.
+GitHub rendered 13 images and 13 code captions, with identical decoded text, no injected blocks, mention links, or URL autolinks.
+Samples included fences, indentation, lists, headings, quotes, strikethrough, `@tkhq/team`, bare URLs, HTML tags, and entities.
+The local `marked` tests are a GFM proxy, not GitHub's sanitizer or mention parser.
 Default clone/fetch refspecs fetch `refs/heads/*`, not `refs/valet/*`. Custom refs avoid branch lists, compare banners, and ordinary branch CI discovery.
 Mirror clones and explicit custom-ref fetches still fetch binaries. Automation that watches all refs may still react.
+
+
+### Owner cleanup
+
+Custom refs are invisible in the branch and tag UI. Keep them while comments need their images.
+
+1. List assets refs: `git ls-remote origin 'refs/valet/*'`.
+2. Delete a selected ref: `git push origin :refs/valet/pr-assets/<PR>`.
+
+The supported API equivalents are `GET /repos/{owner}/{repo}/git/matching-refs/valet/pr-assets/`
+and `DELETE /repos/{owner}/{repo}/git/refs/valet/pr-assets/{PR}`.
+Deletion can break future image retrieval. It does not securely erase Git objects or cached images.

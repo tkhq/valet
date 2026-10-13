@@ -194,3 +194,14 @@ describe("receiveWebhook", () => {
     expect(response.status).toBe(204);
   });
 });
+
+
+it("drops signed assets pushes before binding workflow or content-sync effects", async () => {
+  const bound = effects();
+  const { capability, bind } = webhook(bound);
+  const body = JSON.stringify({ ref: "refs/valet/pr-assets/885", repository: { full_name: "tkhq/valet" } });
+  const res = await receiveWebhook(request(body, { "x-github-event": "push", "x-github-delivery": "assets", "x-hub-signature-256": sign(body) }), capability, githubTriggerDefs);
+  expect(res.status).toBe(204);
+  expect(bind).not.toHaveBeenCalled();
+  expect(bound.emit).not.toHaveBeenCalled();
+});
