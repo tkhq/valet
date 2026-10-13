@@ -75,9 +75,12 @@ const PAGE_ITEMS = 2000;
  * only the entries of its workflow-dispatched items and of items that
  * send-now promoted, through `engine_entries_queue_item`;
  * `valet_usage_fact` decides each entry's billing, so a promoted item whose
- * source is not a workflow step keeps its fact. Each page commits with the
- * watermark it reached, so a restart resumes there, and the progress row's
- * lock serializes concurrent boots.
+ * source is not a workflow step keeps its fact. An action audited before
+ * `action_invocations.queue_item_id` existed names no turn, so its fact stays
+ * on the assistant. An item with such an action in its lifetime keeps its
+ * turns there too, so cost per outcome keeps pairing them. Each page commits
+ * with the watermark it reached, so a restart resumes there, and the progress
+ * row's lock serializes concurrent boots.
  */
 export async function backfillStepAttribution(db: PgDb): Promise<void> {
   await db.query("INSERT INTO usage_hourly_progress (source_kind, watermark) VALUES ($1, '') ON CONFLICT DO NOTHING", [PROGRESS]);
@@ -85,12 +88,14 @@ export async function backfillStepAttribution(db: PgDb): Promise<void> {
     const result = await db.query(`WITH progress AS MATERIALIZED (
       SELECT watermark FROM usage_hourly_progress WHERE source_kind = $1 FOR UPDATE
     ), page AS MATERIALIZED (
-      SELECT q.id, q.session_id, q.dispatch_id, q.metadata FROM engine_queue_items q
+      SELECT q.id, q.session_id, q.dispatch_id, q.metadata, q.created_at, q.updated_at FROM engine_queue_items q
       WHERE q.id > (SELECT watermark FROM progress) ORDER BY q.id LIMIT ${PAGE_ITEMS}
     ), targets AS (
       -- A text match, never a jsonb cast: metadata copies prompt arguments.
       SELECT id, session_id FROM page WHERE session_id NOT LIKE 'wf:%'
         AND (dispatch_id LIKE 'workflow:%' OR (dispatch_id IS NULL AND metadata LIKE '%"promotedFromItemId"%'))
+        AND NOT EXISTS (SELECT 1 FROM action_invocations a WHERE a.session_id = page.session_id
+          AND a.queue_item_id IS NULL AND COALESCE(a.started_at, a.created_at) BETWEEN page.created_at AND page.updated_at)
     ), moved AS (
       UPDATE usage_entry_facts f SET session_id = n.session_id, workflow_run_id = n.workflow_run_id
       FROM targets t JOIN engine_entries e ON e.queue_item_id = t.id AND e.session_id = t.session_id

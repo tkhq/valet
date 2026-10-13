@@ -20,7 +20,7 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { backfillStepAttribution, prepareUsageStepAttribution } from "../lib/usage-step-attribution.js";
 import { usageAnalyticsInstallSql } from "../lib/usage-analytics-migration.js";
 import { recordLlmStepUsage, stepUsageEntry } from "../workflows/step-usage.js";
-import { getDailyAgentActivity, getUsageBreakdown } from "../services/usage.js";
+import { getDailyAgentActivity, getUsageBreakdown, getUsageOutcomes } from "../services/usage.js";
 import { getMemberAgentDays } from "../services/usage-member-activity.js";
 
 const NOW = 1_700_000_000_000;
@@ -124,6 +124,24 @@ describe("usage workflow step attribution", () => {
     await db.query("UPDATE usage_entry_facts SET session_id = $1, workflow_run_id = NULL WHERE entry_id = 'e-promoted'", [ASSISTANT]);
     await prepareUsageStepAttribution(db);
     expect(await factFor(db, "e-promoted")).toEqual({ session_id: "wf:run-1:think", workflow_run_id: "run-1" });
+  });
+
+  it("leaves a Thread-step turn on the assistant when the repair cannot move its action", async () => {
+    await queueItem(db, "q-thread", "workflow:run-1:think");
+    await assistantTurn(db, "e-thread", "q-thread");
+    // A Slack send in that turn, audited before the audit named the turn's queue item.
+    await db.query(`INSERT INTO action_invocations (invocation_id, created_at, org_id, session_id, service, action_id, result, status, duration_ms)
+      VALUES ('act-old', $1, 'org-a', $2, 'slack', 'slack.send_message', '{"success":true,"data":{"channel":"C1"}}', 'completed', 5)`, [NOW, ASSISTANT]);
+    await db.query("UPDATE usage_entry_facts SET session_id = $1, workflow_run_id = NULL WHERE entry_id = 'e-thread'", [ASSISTANT]);
+    const window = { windowMs: 86_400_000, now: NOW + 3_600_000, scope: { scope: "org", orgId: "org-a" } as const };
+    const slackCost = async () => (await getUsageOutcomes(appDb, window)).byOutcome
+      .find((row) => row.kind === "slack_message_sent")?.estimatedCostUsd;
+    expect(await slackCost()).toBeCloseTo(0.003);
+
+    await prepareUsageStepAttribution(db);
+
+    expect(await factFor(db, "e-thread")).toEqual({ session_id: ASSISTANT, workflow_run_id: null });
+    expect(await slackCost()).toBeCloseTo(0.003);
   });
 
   it("names its source only through the engine's top-level key, never a nested copy", async () => {
