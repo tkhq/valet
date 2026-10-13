@@ -5,7 +5,12 @@
  * `PATCH /api/me`'s `defaultModel` (org-catalog id set, null clears).
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { eq } from "drizzle-orm";
+import { loadInstanceConfig } from "../config/instance-config.js";
+import { reconcileInstanceConfig } from "../services/config-reconcile.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { orgMembers, teamMembers, teams, users } from "../schema/index.js";
 import { setApprovedModels } from "../services/approved-models.js";
@@ -319,6 +324,43 @@ describe("PATCH /api/teams/:id", () => {
         const [row] = await api.providers.db.select().from(teams).where(eq(teams.id, "team_1"));
         expect(row?.name).toBe("Platform");
       }
+    });
+
+    it("refuses a rename while skillSources names the team, and boot reconcile still works", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      const dir = await mkdtemp(join(tmpdir(), "valet-rename-"));
+      const file = join(dir, "valet.yaml");
+      await writeFile(file, "version: 1\nskillSources:\n  - repo: owner/skills\n    team: Platform\n");
+      vi.stubEnv("VALET_CONFIG", file);
+
+      const res = await patchTeam(api, { name: "IDX" });
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe("team_rename_config_referenced");
+      expect(body.error).toMatch(/skillSources/);
+      const [row] = await api.providers.db.select().from(teams).where(eq(teams.id, "team_1"));
+      expect(row?.name).toBe("Platform");
+
+      // The next boot still finds the team by name.
+      const cfg = loadInstanceConfig(process.env);
+      if (!cfg) throw new Error("expected the instance config to load");
+      await expect(reconcileInstanceConfig({ db: api.providers.db }, cfg)).resolves.toBeUndefined();
+    });
+
+    it("renames a team that skillSources does not name, and boot reconcile still works", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      await api.providers.db.insert(teams).values({ id: "team_2", orgId: "local-org", name: "Docs", createdAt: Date.now() });
+      const dir = await mkdtemp(join(tmpdir(), "valet-rename-"));
+      const file = join(dir, "valet.yaml");
+      await writeFile(file, "version: 1\nskillSources:\n  - repo: owner/skills\n    team: Docs\n");
+      vi.stubEnv("VALET_CONFIG", file);
+
+      expect((await patchTeam(api, { name: "IDX" })).status).toBe(200);
+      const cfg = loadInstanceConfig(process.env);
+      if (!cfg) throw new Error("expected the instance config to load");
+      await expect(reconcileInstanceConfig({ db: api.providers.db }, cfg)).resolves.toBeUndefined();
     });
   });
 });

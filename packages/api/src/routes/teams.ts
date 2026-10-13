@@ -39,11 +39,14 @@ import { deleteTeamResources } from "../services/team-resource-deletion.js";
  * Rename is `PATCH /:id` with `name`. It refuses BOTH `idp` and `config`
  * teams: the reconciler identifies a declared team by name, so a rename
  * orphans the row and the next boot creates a second team beside it. Only a
- * `local` team, created in Valet, can change its name.
+ * `local` team, created in Valet, can change its name, and only while no
+ * `skillSources[].team` in the instance config names it, because the
+ * reconciler resolves that field by name and fails boot when it finds none.
  */
 import { Hono, type Context } from "hono";
 import { and, eq, inArray, ne } from "drizzle-orm";
 import { isPgUniqueViolation } from "@valet/store-postgres";
+import { loadInstanceConfig } from "../config/instance-config.js";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { channelsVisibleTo } from "./_thread-access.js";
@@ -401,6 +404,14 @@ teamsRouter.patch("/:id", async (c) => {
   if ("name" in raw) {
     if (team.origin !== "local") {
       return c.json({ error: renameRefusalMessage(team), code: "team_rename_managed" }, 409);
+    }
+    // A `local` team that `valet.yaml` skillSources[].team names is found by
+    // name at every boot. A rename would make the next boot fail.
+    if (loadInstanceConfig(process.env)?.skillSources?.some((source) => source.team === team.name)) {
+      return c.json({
+        error: `team '${team.name}' is named by skillSources in the instance config file (VALET_CONFIG). Change the team field in that file to the new name, then restart. Rename the team after the restart.`,
+        code: "team_rename_config_referenced",
+      }, 409);
     }
     const name = typeof raw.name === "string" ? raw.name.trim() : "";
     if (!name || name.length > MAX_TEAM_NAME_LENGTH) {
