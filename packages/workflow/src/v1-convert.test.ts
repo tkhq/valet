@@ -351,3 +351,23 @@ describe('readV1Paste', () => {
     if (!result.ok) expect(result.error).toContain(message);
   });
 });
+
+describe("V1 export details", () => {
+  it("reads a trigger type from the row when config has none", () => {
+    const result = convertV1Workflows({
+      workflows: [{ id: "wf1", name: "Weekly", data: { steps: [{ id: "s1", type: "agent_message", content: "Summarize" }] } }],
+      triggers: [{ name: "Monday", workflowId: "wf1", type: "schedule", config: { cron: "0 9 * * 1", timezone: "UTC", target: "workflow" } }],
+    });
+    if (!result.ok) throw new Error(result.errors.join("; "));
+    const [wf] = result.value.workflows;
+    expect(wf?.schedules).toHaveLength(1);
+    expect(wf?.checklist.join("\n")).not.toContain("unknown type");
+  });
+
+  it("names an empty send_message step as a V1 failure", () => {
+    const result = convertV1Workflows({ steps: [{ id: "s1", type: "tool", tool: "send_message", arguments: {} }] });
+    if (!result.ok) throw new Error(result.errors.join("; "));
+    expect(result.value.workflows[0]?.checklist.join("\n")).toContain("no target session or content, so it failed in V1");
+  });
+});
+
