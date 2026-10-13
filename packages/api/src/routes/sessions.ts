@@ -1200,6 +1200,17 @@ sessionsRouter.patch("/:id", async (c) => {
         409,
       );
     }
+    // Work set while the cancel ran (a timer from a turn that already
+    // settled) would survive into the new owner's session. Re-read with the
+    // gate's own filter (PR review 2, item 2).
+    const filter = nextOwner === undefined ? { leasedOnly: true } : {};
+    if (selectWork(await listBackgroundWork(engineStore, id), filter).length > 0) {
+      await stopped.sendSignals();
+      return c.json(
+        { error: workStartedError(nextOwner !== undefined ? "move the session" : "change the profile", true) },
+        409,
+      );
+    }
   }
 
   // The writes land after every validation, so a rejected model never

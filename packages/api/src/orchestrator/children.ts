@@ -1124,6 +1124,12 @@ export class ChildWatcher {
    *    sends a signal (fix wave 3, concurrency L3). An agent cancel sends
    *    none, so it costs one grace wait.
    *
+   * 4. A hold this loop saw active that is now released: its
+   *    `lease.expired` (deadline) or `lease.released` (human cancel) signal
+   *    turn is owed (PR review 2, item 3). A hold is a lease, not a wakeup,
+   *    so rule 3 never sees it. The same admission grace applies; an agent
+   *    release sends no signal and costs one grace wait.
+   *
    * A turn this loop awaits can start new work, so the loop checks again.
    * The result is the last awaited turn that was not superseded.
    */
@@ -1143,6 +1149,8 @@ export class ChildWatcher {
     const firstSeenEnded = new Map<string, number>();
     const admittedAt = (await store.getQueueItem(child, watch.queueItemId))?.createdAt ?? 0;
     const awaited = new Set<string>([watch.queueItemId]);
+    // Holds seen active, so their release signal turn is awaited (rule 4).
+    const seenHolds = new Set<string>();
     let settleResult = first;
 
     for (;;) {
@@ -1156,6 +1164,7 @@ export class ChildWatcher {
         continue;
       }
       const leases = await store.listActiveLeases(child);
+      for (const l of leases) if (l.ownerKind === "hold") seenHolds.add(l.id);
       if (leases.length > 0) {
         const bound = Math.max(...leases.map((l) => l.deadlineAt)) + 2 * watcherMs + pollMs;
         if (now <= bound) {
@@ -1199,6 +1208,25 @@ export class ChildWatcher {
         owed = true;
         const r = await thread.awaitResult(item.id);
         // A superseded turn is not a result; keep the last real one.
+        if (r.outcome !== "superseded") settleResult = r;
+      }
+      // Rule 4: every hold seen active is released by now (no active lease
+      // remains), so its expiry or release turn is owed.
+      for (const holdId of seenHolds) {
+        const item =
+          (await store.getQueueItemByDispatchId(child, `lease:${holdId}:expired`)) ??
+          (await store.getQueueItemByDispatchId(child, `lease:${holdId}:released`));
+        if (!item) {
+          const key = `lease:${holdId}`;
+          const seen = firstSeenEnded.get(key) ?? now;
+          firstSeenEnded.set(key, seen);
+          if (now - seen < graceMs) unadmitted = true;
+          continue;
+        }
+        if (awaited.has(item.id)) continue;
+        awaited.add(item.id);
+        owed = true;
+        const r = await thread.awaitResult(item.id);
         if (r.outcome !== "superseded") settleResult = r;
       }
       if (owed) continue;

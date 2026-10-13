@@ -15,6 +15,7 @@ import {
   parseJobStatus,
   pruneOldJobFilesScript,
   pollCommand,
+  replaceInvalidUtf8,
   utf8SequenceLength,
 } from "../src/jobs.js";
 import { JOBS_DIR, shQuote } from "../src/exec.js";
@@ -309,6 +310,29 @@ describe("utf8SequenceLength", () => {
   });
 });
 
+describe("replaceInvalidUtf8 keeps decoded text as long as the raw bytes (PR review 2, item 4)", () => {
+  it("replaces each invalid byte with ? so the UTF-8 length of the text equals the raw length", () => {
+    const raw = Buffer.concat([Buffer.from("line one\n"), Buffer.from([0xff, 0xfe, 0x80]), Buffer.from("tail")]);
+    const { text, deliveredBytes } = decodeUtf8HoldingTail(raw);
+    expect(text).toBe("line one\n???tail");
+    expect(deliveredBytes).toBe(raw.length);
+    expect(Buffer.byteLength(text)).toBe(deliveredBytes);
+  });
+
+  it("keeps valid multi-byte text and rejects overlongs, surrogates, and code points past U+10FFFF", () => {
+    expect(replaceInvalidUtf8(Buffer.from("é ✓ 🚀")).toString("utf8")).toBe("é ✓ 🚀");
+    const bad = Buffer.from([0xc0, 0xaf, 0xe0, 0x80, 0xaf, 0xed, 0xa0, 0x80, 0xf4, 0x90, 0x80, 0x80, 0xf5, 0x41]);
+    const fixed = replaceInvalidUtf8(bad).toString("utf8");
+    expect(Buffer.byteLength(fixed)).toBe(bad.length);
+    expect(fixed).toBe("?????????????A");
+  });
+
+  it("returns the same buffer when nothing is invalid", () => {
+    const ok = Buffer.from("plain ascii\n");
+    expect(replaceInvalidUtf8(ok)).toBe(ok);
+  });
+});
+
 describe("incompleteUtf8TailLength / decodeUtf8HoldingTail (pollJobInPod's byte-boundary fix)", () => {
   // "AB\u{1F680}CD" split mid-emoji: the reviewer's exact repro. \u{1F680}
   // (rocket) is F0 9F 9A 80 in UTF-8 — 4 bytes. Split the buffer after the
@@ -362,19 +386,18 @@ describe("incompleteUtf8TailLength / decodeUtf8HoldingTail (pollJobInPod's byte-
     expect(decodeUtf8HoldingTail(buf)).toEqual({ text: "hello", deliveredBytes: 5 });
   });
 
-  it("documents the binary-output limitation: genuinely invalid UTF-8 is delivered as-is (lossy), not held back forever", () => {
+  it("documents the binary-output limitation: genuinely invalid UTF-8 is delivered lossy, one ? per byte, not held back forever", () => {
     // A lone continuation byte (0x80) with no preceding lead byte within
     // the 3-byte scan window isn't an "incomplete tail" this function can
     // fix — it's just not valid UTF-8. Per JobPoll's `output: string`
-    // contract (matches sandbox-docker's own StringDecoder-based fidelity,
-    // which is equally lossy for non-UTF-8 bytes), this is delivered
-    // immediately and decodes to the U+FFFD replacement character rather
-    // than being held back indefinitely.
+    // contract it is delivered immediately, lossy, rather than held back
+    // indefinitely. Each invalid byte becomes `?`, so the text keeps the
+    // raw byte length (PR review 2, item 4).
     const buf = Buffer.from([0x80, 0x80, 0x80, 0x80]);
     expect(incompleteUtf8TailLength(buf)).toBe(0);
     const { text, deliveredBytes } = decodeUtf8HoldingTail(buf);
     expect(deliveredBytes).toBe(4);
-    expect(text).toBe("����");
+    expect(text).toBe("????");
   });
 });
 

@@ -1487,6 +1487,40 @@ describe("ChildWatcher", () => {
       expect((await c.settledSignal())?.body).toContain("CI is red");
     });
 
+    it("waits for a hold's expiry turn and reports it (PR review 2, item 3)", async () => {
+      const c = await armedChild("hold-expiry");
+      const now = Date.now();
+      await c.engineStore.createLease({
+        id: "ls_hold_exp", sessionId: c.watch.childSessionId, threadId: c.childThread.id, ownerKind: "hold",
+        reason: "keep for review", createdAt: now, deadlineAt: now + 3_600_000,
+      });
+
+      c.watcher.arm(c.watch);
+      // Let the loop see the hold active.
+      await new Promise((r) => setTimeout(r, 50));
+      expect(await c.settled()).toBe(false);
+
+      // The WakeWatcher releases the hold at its deadline, then admits the
+      // lease.expired signal turn as a later step.
+      await c.engineStore.releaseLease("ls_hold_exp", "deadline", Date.now());
+      await new Promise((r) => setTimeout(r, 50));
+      expect(await c.settled()).toBe(false);
+      const signalItem = "qi-hold-expiry-signal";
+      await c.engineStore.admitSubmission(c.watch.childSessionId, c.childThread.id, {
+        ...queuedItem(signalItem, c.childThread.id, "lease.expired"),
+        dispatchId: "lease:ls_hold_exp:expired",
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(await c.settled()).toBe(false);
+
+      await c.engineStore.settleUnclaimed(c.watch.childSessionId, c.childThread.id, signalItem, {
+        outcome: "failed",
+        error: "review found 2 regressions",
+      });
+      await waitFor(c.settled);
+      expect((await c.settledSignal())?.body).toContain("review found 2 regressions");
+    });
+
     it("does not wait for a timer set beyond the retention window", async () => {
       const c = await armedChild("far-timer", { retentionMs: 60_000 });
       await c.engineStore.createWakeup({

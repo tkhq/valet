@@ -171,6 +171,8 @@ export class IdleHibernationSweep {
     // the checks above, wins.
     const recheck = await this.deps.engineStore.listUnsettledSubmissions(sessionId);
     if (recheck.length > 0) return;
+    // A lease set since the first check keeps the sandbox up (PR review 2, item 1).
+    if ((await this.deps.engineStore.countActiveLeases(sessionId)) > 0) return;
     if (this.deps.engineHost.sessionLiveOrBuilding(sessionId)) return;
 
     await this.deps.engineHost.suspendSandbox(sandboxId);

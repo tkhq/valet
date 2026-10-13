@@ -500,7 +500,47 @@ export function incompleteUtf8TailLength(buf: Buffer): number {
 export function decodeUtf8HoldingTail(buf: Buffer): { text: string; deliveredBytes: number } {
   const heldBack = incompleteUtf8TailLength(buf);
   const deliveredBytes = buf.length - heldBack;
-  return { text: buf.subarray(0, deliveredBytes).toString("utf8"), deliveredBytes };
+  return { text: replaceInvalidUtf8(buf.subarray(0, deliveredBytes)).toString("utf8"), deliveredBytes };
+}
+
+/** True when `b` is a UTF-8 continuation byte in `[lo, hi]` (default 0x80..0xBF). */
+function cont(b: number | undefined, lo = 0x80, hi = 0xbf): boolean {
+  return b !== undefined && b >= lo && b <= hi;
+}
+
+/**
+ * Returns a copy of `buf` with every byte of an ill-formed UTF-8 sequence
+ * replaced by `?` (0x3F). The result decodes to text whose UTF-8 length
+ * equals `buf.length`, byte for byte. A plain decode turns one invalid byte
+ * into U+FFFD, three bytes long, so a caller that subtracts decoded byte
+ * lengths from raw offsets (the WakeWatcher's watch kernel) would count
+ * wrong and could re-read lines it already sent (PR review 2, item 4).
+ * Valid sequences follow the Unicode well-formed byte table: no overlongs,
+ * no surrogates, nothing above U+10FFFF. Pure; exported for unit testing.
+ */
+export function replaceInvalidUtf8(buf: Buffer): Buffer {
+  let out: Buffer | null = null;
+  let i = 0;
+  while (i < buf.length) {
+    const b = buf[i] ?? 0;
+    let n = 0;
+    if (b <= 0x7f) n = 1;
+    else if (b >= 0xc2 && b <= 0xdf) n = cont(buf[i + 1]) ? 2 : 0;
+    else if (b === 0xe0) n = cont(buf[i + 1], 0xa0) && cont(buf[i + 2]) ? 3 : 0;
+    else if ((b >= 0xe1 && b <= 0xec) || b === 0xee || b === 0xef) n = cont(buf[i + 1]) && cont(buf[i + 2]) ? 3 : 0;
+    else if (b === 0xed) n = cont(buf[i + 1], 0x80, 0x9f) && cont(buf[i + 2]) ? 3 : 0;
+    else if (b === 0xf0) n = cont(buf[i + 1], 0x90) && cont(buf[i + 2]) && cont(buf[i + 3]) ? 4 : 0;
+    else if (b >= 0xf1 && b <= 0xf3) n = cont(buf[i + 1]) && cont(buf[i + 2]) && cont(buf[i + 3]) ? 4 : 0;
+    else if (b === 0xf4) n = cont(buf[i + 1], 0x80, 0x8f) && cont(buf[i + 2]) && cont(buf[i + 3]) ? 4 : 0;
+    if (n > 0) {
+      i += n;
+      continue;
+    }
+    out ??= Buffer.from(buf);
+    out[i] = 0x3f;
+    i += 1;
+  }
+  return out ?? buf;
 }
 
 /**
@@ -518,11 +558,11 @@ export function decodeUtf8HoldingTail(buf: Buffer): { text: string; deliveredByt
  * poll's byte range instead of decoding it prematurely. This closes the gap
  * for split-but-valid UTF-8; it does NOT make arbitrary binary output
  * lossless — a job that emits genuinely non-UTF-8 bytes (not merely a
- * boundary artifact) will still see them come back as U+FFFD replacement
- * characters, same limitation as the docker provider, only reachable here
- * if the job's raw output itself isn't valid UTF-8 (a poll-boundary split of
+ * boundary artifact) sees each such byte come back as `?`
+ * (`replaceInvalidUtf8`), so the text stays exactly as long in bytes as
+ * the raw range `nextOffset` advanced over. A poll-boundary split of
  * *valid* UTF-8 is exactly what this function fixes and is no longer a
- * source of corruption).
+ * source of corruption.
  */
 export async function pollJobInPod(
   deps: ExecDeps,
