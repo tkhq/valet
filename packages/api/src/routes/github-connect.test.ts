@@ -1,15 +1,17 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /**
  * `/api/me/github` user App-OAuth connect flow (GitHub/repo integration
  * plan, Task 6). Route-level: real Hono app via `bootTestApi`, a fake
  * GitHub API server (`startGithubFixture`) subbed in via `GITHUB_API_URL`.
  */
+import { generateKeyPairSync } from "node:crypto";
 import { listTeamShares, shareCredential } from "../services/credential-shares.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { credentials, githubInstallations, orgs } from "../schema/index.js";
+import { credentials, githubInstallations, orgs, orgMembers, users } from "../schema/index.js";
 import { createTeam } from "../services/teams.js";
 import type {
   GetGithubOrgStatusResponse,
@@ -124,7 +126,7 @@ describe("GET /api/me/github/org-status", () => {
     });
   });
 
-  it("counts the installations, and how many of them GitHub suspended", async () => {
+  it("ignores stale installation rows when no App is configured", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const now = Date.now();
     await api.providers.db.insert(githubInstallations).values([
@@ -133,6 +135,7 @@ describe("GET /api/me/github/org-status", () => {
         orgId: "local-org",
         installationId: 601,
         accountLogin: "octo-org",
+        accountId: githubAccountId("octo-org"),
         accountType: "Organization",
         repositorySelection: "all",
         suspended: false,
@@ -145,6 +148,7 @@ describe("GET /api/me/github/org-status", () => {
         orgId: "local-org",
         installationId: 602,
         accountLogin: "octouser",
+        accountId: githubAccountId("octouser"),
         accountType: "User",
         repositorySelection: "selected",
         suspended: true,
@@ -155,8 +159,8 @@ describe("GET /api/me/github/org-status", () => {
     ]);
 
     const body = await readStatus(api.baseUrl);
-    expect(body.installationCount).toBe(2);
-    expect(body.suspendedCount).toBe(1);
+    expect(body.installationCount).toBe(0);
+    expect(body.suspendedCount).toBe(0);
   });
 
   it("answers a member, where the detail read is admin-only", async () => {
@@ -374,27 +378,24 @@ describe("GET /api/me/github/callback", () => {
     expect(stored?.metadata?.identityOnly).toBeUndefined();
   });
 
-  it("re-links a matching installation's linkedUserId after connect", async () => {
+  it("discovers a pre-existing personal installation after connect despite another member's malformed identity", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
+    await api.providers.db.insert(users).values({ id: "unavailable", name: "Unavailable", email: "unavailable@example.com" });
+    await api.providers.db.insert(orgMembers).values({ orgId: "local-org", userId: "unavailable", role: "member" });
+    await api.providers.engineCredentials.save({ type: "user", id: "unavailable" }, "github", {
+      type: "oauth2", accessToken: "bad-token", metadata: { login: "unavailable" },
+    });
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048,
+      publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" } });
     useFixture({
+      convertManifest: () => ({ body: { id: 42, slug: "valet-acme", client_id: "Iv1.client",
+        client_secret: "secret", webhook_secret: "hook", pem: privateKey, html_url: "https://github.com/apps/valet-acme" } }),
+      listInstallations: () => ({ body: [{ id: 555, account: { login: "octouser", type: "User" }, suspended_at: null }] }),
       oauthAccessToken: () => ({ body: { access_token: "connect-access-token", token_type: "bearer" } }),
-      getUser: () => ({ body: { login: "octouser", id: 99 } }),
+      getUser: (auth) => ({ body: auth === "Bearer bad-token" ? { login: 42 } : { login: "octouser", id: 99 } }),
     });
     await configureOrgApp(api.baseUrl);
-
-    const now = Date.now();
-    await api.providers.db.insert(githubInstallations).values({
-      id: "ghi_test1",
-      orgId: "local-org",
-      installationId: 555,
-      accountLogin: "octouser",
-      accountType: "User",
-      repositorySelection: "all",
-      suspended: false,
-      linkedUserId: null,
-      createdAt: now,
-      updatedAt: now,
-    });
+    expect(await api.providers.db.select().from(githubInstallations)).toEqual([]);
 
     const connectRes = await fetch(`${api.baseUrl}/api/me/github/connect`, { method: "POST", headers: HEADERS });
     const { url } = (await connectRes.json()) as PostGithubConnectResponse;
@@ -427,6 +428,7 @@ describe("DELETE /api/me/github", () => {
       orgId: "local-org",
       installationId: 556,
       accountLogin: "octouser",
+      accountId: githubAccountId("octouser"),
       accountType: "User",
       repositorySelection: "all",
       suspended: false,

@@ -1,3 +1,6 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
+import { generateKeyPairSync } from "node:crypto";
+import { saveAppConfig } from "./github-app.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -36,15 +39,20 @@ describe("checkRepoExistence", () => {
   });
 
   it("checks the clone credential when a personal token cannot read the repository", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+    await saveAppConfig(deps, "org", { appId: "1", appSlug: "test", oauthClientId: "client",
+      oauthClientSecret: "secret", webhookSecret: "hook", privateKeyPem: privateKey, htmlUrl: "https://github.com/apps/test" });
     await deps.db.insert(githubInstallations).values({
-      id: "installation", orgId: "org", installationId: 123, accountLogin: "acme",
+      id: "installation", orgId: "org", installationId: 123, accountLogin: "acme", accountId: githubAccountId("acme"),
       accountType: "Organization", repositorySelection: "all", suspended: false,
       cachedToken: encryptSecret("app-token", deps.key), cachedTokenExpiresAt: Date.now() + 3_600_000,
       createdAt: Date.now(), updatedAt: Date.now(),
     });
-    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (_url, init) =>
-      new Headers(init?.headers).get("authorization") === "Bearer app-token"
-        ? Response.json(metadata) : new Response(null, { status: 404 }));
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (url, init) =>
+      String(url).endsWith("/app") ? Response.json({ owner: { id: githubAccountId("acme"), login: "acme" } }) :
+        new Headers(init?.headers).get("authorization") === "Bearer app-token"
+          ? Response.json(metadata) : new Response(null, { status: 404 }));
     expect(await checkRepoExistence({ ...deps, fetchImpl }, request)).toEqual({
       kind: "found", fullName: metadata.full_name, cloneUrl: metadata.clone_url,
     });
@@ -56,7 +64,9 @@ describe("checkRepoExistence", () => {
     expect(await checkRepoExistence({ ...deps, fetchImpl }, {
       ...request, userId: undefined, fullName: "wrong-org/widgets", allowAnonymous: false,
     })).toEqual({ kind: "unverified" });
-    expect(fetchImpl).not.toHaveBeenCalled();
+    // A missing owner can start targeted background recovery, but no metadata read.
+    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("/repos/"))).toEqual([]);
+    expect(fetchImpl.mock.calls.filter(([url]) => String(url).includes("/app/installations"))).toHaveLength(0);
     fetchImpl.mockResolvedValue(new Response(null, { status: 404 }));
     expect(await checkRepoExistence({ ...deps, fetchImpl }, {
       ...request, userId: undefined, fullName: "wrong-org/widgets",

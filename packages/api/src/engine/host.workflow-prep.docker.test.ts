@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /**
  * Docker-gated end-to-end check that a workflow session's sandbox can
  * authenticate `git push` (2026-09-21/22 incident). A team-owned workflow's
@@ -160,6 +161,7 @@ async function bootWithApp(): Promise<TestApi> {
     orgId: ORG,
     installationId: INSTALLATION_ID,
     accountLogin: "tkhq",
+    accountId: githubAccountId("tkhq"),
     accountType: "Organization",
     repositorySelection: "all",
     suspended: false,

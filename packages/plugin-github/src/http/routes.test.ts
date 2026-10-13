@@ -17,7 +17,7 @@ function refuse(): never {
 
 function app(overrides: Partial<GithubAppCapability> = {}): GithubAppCapability {
   return {
-    status: refuse, orgName: refuse, signSetupState: refuse, checkCredential: refuse,
+    status: refuse, orgName: refuse, allowPersonalInstallations: async () => false, signSetupState: refuse, checkCredential: refuse,
     saveApp: refuse, refreshInstallations: refuse, disconnect: refuse, ...overrides,
   };
 }
@@ -69,6 +69,13 @@ describe("GitHub App setup", () => {
         },
       },
     });
+  });
+
+  it.each([true, false])("sets App visibility from personal installation policy: %s", async (allowed) => {
+    const response = await appManifest(request("https://valet.test/x", "{}"), app({
+      orgName: async () => "acme", signSetupState: () => "signed", allowPersonalInstallations: async () => allowed,
+    }), ENDPOINTS, []);
+    expect(await response.json()).toMatchObject({ manifest: { public: allowed } });
   });
 
   it("subscribes a public-mode App to every trigger event except ping", async () => {

@@ -39,13 +39,15 @@ export interface GithubFixtureHandlers {
    * GitHub refusing an app id that does not match the private key, which is
    * what `verifyAppCredential` exists to catch. */
   getApp?: () => GithubFixtureResponse;
-  /** `GET /app/installations`. Receives the request's parsed query string so
-   * multi-page fixtures can branch on `page`/`per_page`. */
+  /** `GET /app/installations/{id}`. Defaults to an ID match in the listing fixture. */
+  getAccountInstallation?: (namespace: string, login: string) => GithubFixtureResponse;
+  getInstallation?: (id: number) => GithubFixtureResponse;
+  /** `GET /app/installations`. Multi-page fixtures can branch on page/per_page. */
   listInstallations?: (query: Record<string, string>) => GithubFixtureResponse;
   /** `POST /app/installations/:id/access_tokens` */
   createInstallationToken?: (installationId: string) => GithubFixtureResponse;
   /** `GET /user` */
-  getUser?: () => GithubFixtureResponse;
+  getUser?: (authHeader?: string) => GithubFixtureResponse;
   /** `POST /login/oauth/access_token` */
   oauthAccessToken?: () => GithubFixtureResponse;
   /** `GET /user/repos` */
@@ -101,6 +103,7 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
     body: {
       id: 1,
       slug: "fixture-app",
+      owner: { login: "acme", type: "Organization" },
       node_id: "MDM6QXBwMQ==",
       client_id: "fixture-client-id",
       name: "Fixture App",
@@ -110,6 +113,8 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
       installations_count: 0,
     },
   }),
+  getAccountInstallation: () => ({ status: 404, body: {} }),
+  getInstallation: () => ({ status: 404, body: {} }),
   listInstallations: () => ({ body: [] }),
   createInstallationToken: () => ({
     body: { token: "fixture-installation-token", expires_at: new Date(Date.now() + 3600_000).toISOString() },
@@ -186,6 +191,19 @@ export function contentsBody(text: string, blobSha: string): GithubFixtureRespon
   };
 }
 
+/** Stable synthetic GitHub account IDs. Rename tests supply IDs explicitly. */
+export function githubAccountId(login: string): number {
+  if (login.toLowerCase() === "octouser") return 99;
+  let id = 100;
+  for (const char of login.toLowerCase()) id = (id * 31 + char.charCodeAt(0)) % 1_000_000_007;
+  return id + 1;
+}
+
+function accountWithId(value: unknown): unknown {
+  if (!value || typeof value !== "object" || !("login" in value) || typeof value.login !== "string" || "id" in value) return value;
+  return { ...value, id: githubAccountId(value.login) };
+}
+
 /** Starts a fake GitHub API server on port 0. Callers MUST `await close()`
  * (e.g. in `finally`/`afterEach`) — nothing else stops the listener. */
 export function startGithubFixture(overrides: GithubFixtureHandlers = {}): GithubFixture {
@@ -225,7 +243,8 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
   app.get("/app", (c) => {
     record(c, {});
     const { status, body } = handlers.getApp();
-    return c.json(body as object, status ?? 200);
+    const profile = body && typeof body === "object" && "owner" in body ? { ...body, owner: accountWithId(body.owner) } : body;
+    return c.json(profile as object, status ?? 200);
   });
 
   app.get("/app/installations", (c) => {
@@ -235,7 +254,30 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
     if (headers) {
       for (const [name, value] of Object.entries(headers)) c.header(name, value);
     }
-    return c.json(body as object, status ?? 200);
+    const installs = Array.isArray(body) ? body.map((item) =>
+      item && typeof item === "object" && "account" in item ? { ...item, account: accountWithId(item.account) } : item) : body;
+    return c.json(installs as object, status ?? 200);
+  });
+
+  app.get("/:namespace/:login/installation", (c) => {
+    const namespace = c.req.param("namespace");
+    const login = c.req.param("login");
+    record(c, { namespace, login });
+    const { status, body } = handlers.getAccountInstallation(namespace, login);
+    const profile = body && typeof body === "object" && "account" in body
+      ? { ...body, account: accountWithId(body.account) } : body;
+    return c.json(profile as object, status ?? 200);
+  });
+
+  app.get("/app/installations/:id", (c) => {
+    const id = Number(c.req.param("id"));
+    record(c, { id: String(id) });
+    const result = overrides.getInstallation ? handlers.getInstallation(id) : handlers.listInstallations({});
+    const body = Array.isArray(result.body) ? result.body.find((item) =>
+      item && typeof item === "object" && "id" in item && item.id === id) : result.body;
+    const profile = body && typeof body === "object" && "account" in body
+      ? { ...body, account: accountWithId(body.account) } : body ?? {};
+    return c.json(profile as object, result.status ?? (body ? 200 : 404));
   });
 
   app.post("/app/installations/:id/access_tokens", async (c) => {
@@ -271,8 +313,8 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
 
   app.get("/user", (c) => {
     record(c, {});
-    const { status, body } = handlers.getUser();
-    return c.json(body as object, status ?? 200);
+    const { status, body } = handlers.getUser(c.req.header("authorization"));
+    return c.json(accountWithId(body) as object, status ?? 200);
   });
 
   app.post("/login/oauth/access_token", async (c) => {

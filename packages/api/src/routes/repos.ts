@@ -16,13 +16,12 @@
  *     credential (`resolveUserApiToken`) — same health rules
  *     `services/github-tokens.ts` uses everywhere else.
  *   - `installed`: the org has at least one non-suspended
- *     `github_installations` row.
+ *     admitted `github_installations` row for this actor.
  */
+import { admittedInstallations } from "../services/github-app.js";
 import { Hono } from "hono";
-import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { githubInstallations } from "../schema/index.js";
 import { resolveUserApiToken } from "../services/github-tokens.js";
 import { githubHost } from "../repos/github-host.js";
 import type { RepoHostContext } from "../repos/host.js";
@@ -43,17 +42,16 @@ reposRouter.get("/", async (c) => {
   const [repos, userToken, installationRows] = await Promise.all([
     githubHost.listRepos(ctx),
     resolveUserApiToken(ctx.deps, user.orgId, user.id),
-    db
-      .select({ id: githubInstallations.id })
-      .from(githubInstallations)
-      .where(and(eq(githubInstallations.orgId, user.orgId), eq(githubInstallations.suspended, false)))
-      .limit(1),
+    admittedInstallations(ctx.deps, user.orgId, user.id).catch((error) => {
+      console.error("GitHub App installation status unavailable:", error);
+      return [];
+    }),
   ]);
 
   const resp: GetReposResponse = {
     repos,
     connected: userToken !== null,
-    installed: installationRows.length > 0,
+    installed: installationRows.some((row) => !row.suspended),
   };
   return c.json(resp);
 });

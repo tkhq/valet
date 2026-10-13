@@ -30,6 +30,15 @@ export class CredentialReferenceBrokenError extends Error {
 export class TeamCredentialStore implements CredentialStore {
   constructor(private readonly inner: CredentialStore) {}
 
+  withLock<T>(
+    owner: CredentialOwner, service: string,
+    operation: (store: CredentialStore) => Promise<T>,
+  ): Promise<T> {
+    return this.inner.withLock
+      ? this.inner.withLock(owner, service, operation)
+      : operation(this.inner);
+  }
+
   async get(owner: CredentialOwner, service: string): Promise<StoredCredential | null> {
     const row = await this.inner.get(owner, service);
     if (owner.type !== "team" || !row || rowSecret(row)) return row;

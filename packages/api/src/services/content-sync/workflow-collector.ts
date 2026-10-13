@@ -107,6 +107,7 @@ export interface WorkflowCollectorDeps {
    * on a deployment without one.
    */
   onePassword?: OnePasswordService;
+  github?: TeamServiceReadinessDeps["github"];
 }
 
 export class WorkflowCollector implements ContentCollector {
@@ -139,6 +140,7 @@ export class WorkflowCollector implements ContentCollector {
       this.deps.plugins,
       this.deps.credentials,
       this.deps.onePassword,
+      this.deps.github,
     );
   }
 }
@@ -194,6 +196,7 @@ class WorkflowPass implements CollectorPass {
     private readonly plugins: ValetPlugin[],
     private readonly credentials: CredentialStore,
     private readonly onePassword: OnePasswordService | undefined,
+    private readonly github: TeamServiceReadinessDeps["github"],
   ) {
     this.discovered = candidates.length;
     // A user source collects no workflows: personal workflow sync is out of
@@ -308,7 +311,7 @@ class WorkflowPass implements CollectorPass {
       let ingressPlan = parsed.plan;
       try {
         gated = await teamTriggerGate(
-          { db, credentials: this.credentials, plugins: this.plugins, onePassword: this.onePassword },
+          { db, credentials: this.credentials, plugins: this.plugins, onePassword: this.onePassword, github: this.github },
           source,
           parsed.file,
           definitions,
@@ -836,6 +839,8 @@ async function teamTriggerGate(
     definition: file.definition,
     definitions,
   });
+  const unavailable = readiness.blocked.filter((entry) => entry.transient);
+  if (unavailable.length > 0) throw new Error(unavailable.map((entry) => entry.reason).join(" "));
   const refusals = teamArmRefusals(readiness);
   if (refusals.length === 0) return null;
   // The readiness reasons are caller-neutral; the step that follows the fix

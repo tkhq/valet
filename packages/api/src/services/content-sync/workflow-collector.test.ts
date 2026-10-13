@@ -23,6 +23,7 @@ import {
 } from "../../test-helpers/github-fixture.js";
 import {
   linearInstallations,
+  githubInstallations,
   contentSources,
   eventSubscriptions,
   orgMembers,
@@ -36,6 +37,8 @@ import {
   workflowSchedules,
   workflowVersions,
 } from "../../schema/index.js";
+import { generateKeyPairSync } from "node:crypto";
+import { saveAppConfig } from "../github-app.js";
 import { addMember, removeMember } from "../teams.js";
 import { createContentSource } from "../content-sources.js";
 import { GitHubSkillRepoReader } from "../skill-repo-reader.js";
@@ -1274,6 +1277,50 @@ describe("workflow collector", () => {
     // A transient fault in the credential store is one file's problem. The
     // pass keeps going, the file is left as it was, and the sync stays
     // incomplete so the next poll checks it again without a commit.
+    it.each([401, 403, 502] as const)("preserves an armed schedule after owner-cache expiry and /app %s", async (status) => {
+      const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048,
+        privateKeyEncoding: { format: "pem", type: "pkcs8" }, publicKeyEncoding: { format: "pem", type: "spki" } });
+      await saveAppConfig({ credentials }, ORG, { appId: "1", appSlug: "test", privateKeyPem: privateKey,
+        oauthClientId: "client", oauthClientSecret: "secret", webhookSecret: "", htmlUrl: "https://github.com/apps/test" });
+      await db.insert(githubInstallations).values({ id: "install", orgId: ORG, installationId: 1,
+        accountId: 10, accountLogin: "acme", accountType: "Organization", repositorySelection: "all",
+        suspended: false, createdAt: 1, updatedAt: 1 });
+      const pinned = nightlyReport().replace("      action: list_issues", "      credential: app\n      action: list_issues");
+      const repo = { sha: "c1", files: { ".valet/workflows/report.yaml": nightlyReport(), ".valet/workflows/pinned.yaml": pinned } };
+      const f = serve(repo);
+      let clock = 1_000_000;
+      let unavailable = false;
+      const fetchImpl: typeof fetch = async (url, init) => {
+        if (String(url).endsWith("/app")) return unavailable
+          ? new Response("{}", { status, headers: status === 403 ? { "x-ratelimit-remaining": "0", "retry-after": "30" } : {} })
+          : Response.json({ owner: { id: 10, login: "acme" } });
+        return fetch(url, init);
+      };
+      const id = await teamSource();
+      const service = new ContentSyncService({ db, reader: new GitHubSkillRepoReader({ apiUrl: f.url }),
+        collectors: [new WorkflowCollector({ plugins: [], credentials,
+          github: { apiUrl: f.url, fetchImpl, now: () => clock } })] });
+      await service.syncOnce(id);
+      const armed = await db.select().from(workflowSchedules);
+      expect(armed).toHaveLength(2);
+      unavailable = true;
+      clock += 300_001;
+      if (status === 502) {
+        // A newly replaced App credential has no matching persisted authority.
+        await saveAppConfig({ credentials }, ORG, { appId: "2", appSlug: "test", privateKeyPem: privateKey,
+          oauthClientId: "client", oauthClientSecret: "secret", webhookSecret: "", htmlUrl: "https://github.com/apps/test" });
+      }
+      repo.sha = "c2";
+      repo.files[".valet/workflows/report.yaml"] += "# changed commit\n";
+      repo.files[".valet/workflows/pinned.yaml"] += "# changed commit\n";
+      const outcome = await service.syncOnce(id);
+      expect(await db.select().from(workflowSchedules)).toEqual(armed);
+      if (status !== 403) expect(outcome?.warnings.join(" ")).toContain("left this workflow as it was");
+      unavailable = false;
+      await service.syncOnce(id); // An unchanged recovery poll must not lose the existing schedule.
+      expect(await db.select().from(workflowSchedules)).toEqual(armed);
+    });
+
     it("warns and defers one file when its readiness check fails, and mirrors the rest", async () => {
       await credentials.save({ type: "team", id: TEAM }, "github", { type: "oauth2", accessToken: "ghu" });
       await credentials.save({ type: "team", id: TEAM }, "slack", { type: "bot_token", accessToken: "xoxb" });

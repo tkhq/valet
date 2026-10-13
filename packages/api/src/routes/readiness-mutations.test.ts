@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /** Readiness mutations persist a full pass at an unchanged repository head. */
 import { listTeamShares, shareCredential } from "../services/credential-shares.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -323,7 +324,7 @@ describe("readiness refresh paths", () => {
     expect((await row("github")).syncRevision).toBe(before);
     installations = [...installations, { ...installations[0], id: 456, account: { login: "other", type: "Organization" } }];
     await discover();
-    await expectDirty("github");
+    expect((await row("github")).syncRevision).toBe(before);
     await prime("github");
     installations = installations.map((installation) => ({ ...installation, suspended_at: "2026-09-10T00:00:00Z" }));
     await discover();
@@ -340,9 +341,11 @@ describe("readiness refresh paths", () => {
     await source("foreign", { orgId: "other-org" });
     await saveAppConfig({ credentials: api.providers.engineCredentials }, ORG, appConfig);
     await api.providers.db.insert(githubInstallations).values({
-      id: "installation", orgId: ORG, installationId: 123, accountLogin: "acme", accountType: "Organization",
+      id: "installation", orgId: ORG, installationId: 123, accountLogin: "acme", accountId: githubAccountId("acme"), accountType: "Organization",
       repositorySelection: "all", suspended: action === "unsuspend", createdAt: Date.now(), updatedAt: Date.now(),
     });
+    fixture = startGithubFixture();
+    vi.stubEnv("GITHUB_API_URL", fixture.url);
     const body = JSON.stringify({ action, installation: { id: 123 } });
     const response = await fetch(`${api.baseUrl}/webhooks/github-app`, {
       method: "POST", body, headers: { ...HEADERS, "x-github-event": "installation",

@@ -900,6 +900,11 @@ export function credentialSecret(credential: StoredCredential | null | undefined
 }
 
 export interface CredentialStore {
+  /** Serialize credential rotation across store clients. Callers re-read inside the lock. */
+  withLock?<T>(
+    owner: CredentialOwner, service: string,
+    operation: (store: CredentialStore) => Promise<T>,
+  ): Promise<T>;
   get(owner: CredentialOwner, service: string): Promise<StoredCredential | null>;
   save(owner: CredentialOwner, service: string, credential: StoredCredential): Promise<void>;
   delete(owner: CredentialOwner, service: string): Promise<void>;

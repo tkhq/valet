@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /**
  * `GET /api/repos` (GitHub/repo integration plan, Task 7). Route-level: real
  * Hono app via `bootTestApi`, a fake GitHub API server (`startGithubFixture`)
@@ -5,11 +6,15 @@
  * to actually call out.
  */
 import { afterEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import { generateKeyPairSync } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { githubInstallations } from "../schema/index.js";
+import { githubHost } from "../repos/github-host.js";
+import { saveAppConfig } from "../services/github-app.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { githubInstallations, orgs } from "../schema/index.js";
 import type { GetReposResponse, PostGithubAppManifestResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -65,6 +70,7 @@ async function seedInstallationRow(overrides: Partial<typeof githubInstallations
     orgId: "local-org",
     installationId: 999,
     accountLogin: "acme",
+    accountId: githubAccountId("acme"),
     accountType: "Organization",
     repositorySelection: "all",
     suspended: false,
@@ -113,6 +119,85 @@ describe("GET /api/repos", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as GetReposResponse;
     expect(body).toEqual({ repos: [], connected: false, installed: false });
+  });
+
+  it.each([401, 403, 503] as const)("keeps own-token repos visible when App lookup returns %s", async (status) => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    useFixture({ getApp: () => ({ status, body: {} }),
+      listUserRepos: () => ({ body: [rawRepo({ full_name: "personal/one" })] }),
+    });
+    await saveAppConfig({ credentials: api.providers.engineCredentials }, "local-org", {
+      appId: "42", appSlug: "fixture", privateKeyPem: TEST_PEM, oauthClientId: "client", oauthClientSecret: "secret",
+      htmlUrl: "https://github.com/apps/fixture", webhookSecret: "hook",
+    });
+    await seedInstallationRow();
+    await saveUserCredential("own-token", "personal");
+    const response = await fetch(`${api.baseUrl}/api/repos`, { headers: HEADERS });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ connected: true, installed: false,
+      repos: [{ fullName: "personal/one" }],
+    });
+  });
+
+  it("keeps own-token repos visible when App config is malformed", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    useFixture({ listUserRepos: () => ({ body: [rawRepo({ full_name: "personal/one" })] }) });
+    const saved = await fetch(`${api.baseUrl}/api/credentials/github_app`, {
+      method: "PUT", headers: HEADERS,
+      body: JSON.stringify({ scope: "org", type: "api_key", apiKey: "synthetic-malformed-config" }),
+    });
+    expect(saved.status).toBe(200);
+    await saveUserCredential("own-token", "personal");
+    const response = await fetch(`${api.baseUrl}/api/repos`, { headers: HEADERS });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ connected: true, installed: false,
+      repos: [{ fullName: "personal/one" }],
+    });
+  });
+
+  it("lists org repos and only the acting member's personal installation repos", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const f = useFixture({
+      getUser: () => ({ body: { login: "bob" } }),
+      createInstallationToken: (id) => ({ body: { token: `installation-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() } }),
+      listInstallationRepositories: () => ({ body: { repositories: [rawRepo({ full_name: "fixture/repo" })] } }),
+    });
+    await saveAppConfig({ credentials: api.providers.engineCredentials }, "local-org", {
+      appId: "42", appSlug: "fixture", privateKeyPem: TEST_PEM, oauthClientId: "client", oauthClientSecret: "secret",
+      htmlUrl: "https://github.com/apps/fixture", webhookSecret: "hook",
+    });
+    await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2", accessToken: "identity-token", metadata: { login: "bob", identityOnly: true },
+    });
+    await seedInstallationRow();
+    await seedInstallationRow({ id: "ghi_b", installationId: 998, accountLogin: "bob", accountId: githubAccountId("bob"), accountType: "User", linkedUserId: "test-member" });
+    const deps = { db: api.providers.db, credentials: api.providers.engineCredentials,
+      key: deriveSecretKey(api.providers.encryptionKey), apiUrl: f.url };
+    for (const actor of ["local-user", undefined, "test-member"]) {
+      const before = f.calls.length;
+      await githubHost.listRepos({ orgId: "local-org", userId: actor, deps });
+      const reads = f.calls.slice(before).filter((call) => call.path === "/installation/repositories");
+      expect(reads.map((call) => call.authHeader).sort()).toEqual(actor === "test-member"
+        ? ["Bearer installation-998", "Bearer installation-999"] : ["Bearer installation-999"]);
+    }
+  });
+
+  it("lists a User-owned App installation for every member with personal installs disabled", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const f = useFixture({ getApp: () => ({ body: { owner: { id: githubAccountId("acme"), login: "acme", type: "User" } } }),
+      listInstallationRepositories: () => ({ body: { repositories: [rawRepo({})] } }),
+    });
+    await saveAppConfig({ credentials: api.providers.engineCredentials }, "local-org", {
+      appId: "42", appSlug: "fixture", privateKeyPem: TEST_PEM, oauthClientId: "client", oauthClientSecret: "secret",
+      htmlUrl: "https://github.com/apps/fixture", webhookSecret: "hook",
+    });
+    await api.providers.db.update(orgs).set({ allowPersonalInstallations: false }).where(eq(orgs.id, "local-org"));
+    await seedInstallationRow({ accountType: "User", linkedUserId: null });
+    const deps = { db: api.providers.db, credentials: api.providers.engineCredentials,
+      key: deriveSecretKey(api.providers.encryptionKey), apiUrl: f.url };
+    for (const actor of ["local-user", "test-member", undefined]) {
+      expect(await githubHost.listRepos({ orgId: "local-org", userId: actor, deps })).toHaveLength(1);
+    }
   });
 
   it("unions installation + personal repos, dedupes by fullName (installation wins), sorts by updatedAt desc", async () => {
@@ -248,7 +333,7 @@ describe("GET /api/repos", () => {
     });
     await configureOrgApp(api.baseUrl);
     await seedInstallationRow();
-    await seedInstallationRow({ id: "ghi_seed_2", installationId: 998, accountLogin: "bob" });
+    await seedInstallationRow({ id: "ghi_seed_2", installationId: 998, accountLogin: "bob", accountId: githubAccountId("bob") });
     await saveUserCredential("user-secret-token", "local-user-login");
 
     const res = await fetch(`${api.baseUrl}/api/repos`, { headers: HEADERS });

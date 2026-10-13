@@ -296,7 +296,7 @@ const GITHUB_WEBHOOK_SECRET = "gh-webhook-secret";
  * A REAL PEM, because any discovery along the way mints an App JWT. */
 async function configureGithubApp(baseUrl: string): Promise<void> {
   githubFixture = startGithubFixture({
-    listInstallations: () => ({ body: [] }),
+    listInstallations: () => ({ body: [{ id: 999, account: { login: "acme", type: "Organization" } }] }),
     convertManifest: () => ({
       body: {
         id: 42,
@@ -329,6 +329,7 @@ async function configureGithubApp(baseUrl: string): Promise<void> {
 
 function prOpenedBody(repoFullName: string, prNumber: number): string {
   return JSON.stringify({
+    installation: { id: 999 },
     action: "opened",
     number: prNumber,
     pull_request: {

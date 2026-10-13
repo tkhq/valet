@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /**
  * Task 6 exit test: the pg app schema (`index.pg.ts`) + migrations
  * (`migrations/pg/0000_app.sql`) + async migration runner (`lib/drizzle-pg.ts`)
@@ -737,6 +738,7 @@ describe("pg app schema + migrations", () => {
         orgId: "org-ghi-1",
         installationId: 12345,
         accountLogin: "acme",
+        accountId: githubAccountId("acme"),
         accountType: "Organization",
         repositorySelection: "selected",
         suspended: false,
@@ -756,6 +758,7 @@ describe("pg app schema + migrations", () => {
         orgId: "org-ghi-1",
         installationId: 12345,
         accountLogin: "acme",
+        accountId: githubAccountId("acme"),
         accountType: "Organization",
         repositorySelection: "selected",
         suspended: false,
@@ -772,6 +775,7 @@ describe("pg app schema + migrations", () => {
           orgId: "org-ghi-1",
           installationId: 12345,
           accountLogin: "acme-dupe",
+          accountId: githubAccountId("acme-dupe"),
           accountType: "Organization",
           suspended: false,
           createdAt: now,
@@ -896,6 +900,7 @@ describe("pg app schema + migrations", () => {
   // that database by dropping the columns, then re-run the migrations.
   describe("column repair for in-place 0000 edits", () => {
     const REPAIRED_COLUMNS: Array<{ table: string; column: string }> = [
+      { table: "orgs", column: "github_installation_revision" },
       { table: "session_repos", column: "resolved_ref" },
       { table: "image_sources", column: "sandbox_resources" },
       { table: "skill_sources", column: "created_by" },
@@ -990,6 +995,23 @@ describe("pg app schema + migrations", () => {
       for (const { table, column } of REPAIRED_COLUMNS) {
         expect(await columnExists(table, column), `${table}.${column} repaired`).toBe(true);
       }
+    });
+
+    it("repairs the GitHub discovery fence with a zero default for existing orgs", async () => {
+      await drizzleDb.insert(orgs).values({ id: "org-fence", name: "Fence", createdAt: 1 });
+      await db.query('ALTER TABLE "orgs" DROP COLUMN "github_installation_revision"');
+      await applyAppMigrations(db);
+      const result = await db.query(
+        'SELECT "github_installation_revision" AS revision FROM "orgs" WHERE "id" = $1', ["org-fence"],
+      );
+      expect(result.rows).toHaveLength(1);
+      expect(Number(result.rows[0].revision)).toBe(0);
+      await db.query('UPDATE "orgs" SET "github_installation_revision" = 7 WHERE "id" = $1', ["org-fence"]);
+      await applyAppMigrations(db);
+      const preserved = await db.query(
+        'SELECT "github_installation_revision" AS revision FROM "orgs" WHERE "id" = $1', ["org-fence"],
+      );
+      expect(Number(preserved.rows[0].revision)).toBe(7);
     });
 
     // TKAI-244: a no-op ALTER TABLE still takes an ACCESS EXCLUSIVE lock, and

@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /**
  * The tenancy rule for skill sync: which GitHub credential a source may use.
  *
@@ -152,6 +153,7 @@ describe("resolveContentSourceCredential", () => {
       orgId: ORG,
       installationId: 999,
       accountLogin: "tkhq",
+      accountId: githubAccountId("tkhq"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -186,6 +188,7 @@ describe("resolveContentSourceCredential", () => {
       // every repository the org installed it on.
       await installApp();
       fixture = startGithubFixture({
+        getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }),
         createInstallationToken: () => ({
           body: { token: "ghs_install", expires_at: new Date(NOW + 3600_000).toISOString() },
         }),
@@ -240,7 +243,7 @@ describe("resolveContentSourceCredential", () => {
       // identity, and must not fall back to the App.
       await installApp();
       await connectGitHub("u1", "ghu_u1", "octocat");
-      fixture = startGithubFixture();
+      fixture = startGithubFixture({ getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }) });
 
       const credential = await resolveContentSourceCredential(
         deps(),
@@ -256,6 +259,7 @@ describe("resolveContentSourceCredential", () => {
       // the same way an org config source does — not kind none.
       await installApp();
       fixture = startGithubFixture({
+        getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }),
         createInstallationToken: () => ({
           body: { token: "ghs_install", expires_at: new Date(NOW + 3600_000).toISOString() },
         }),
@@ -291,6 +295,7 @@ describe("resolveContentSourceCredential", () => {
     it("drops to anonymous, not to the App, when the creator disconnects", async () => {
       await installApp();
       fixture = startGithubFixture({
+        getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }),
         createInstallationToken: () => ({
           body: { token: "ghs_install", expires_at: new Date(NOW + 3600_000).toISOString() },
         }),
@@ -386,6 +391,7 @@ describe("resolveContentSourceCredential", () => {
       await publishOrgSource();
       await installApp();
       fixture = startGithubFixture({
+        getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }),
         createInstallationToken: () => ({
           body: { token: "ghs_adopt", expires_at: new Date(NOW + 3600_000).toISOString() },
         }),
@@ -450,6 +456,7 @@ describe("resolveContentSourceCredential", () => {
       await installApp();
       await connectGitHub("u2", "ghu_u2", "hubot");
       fixture = startGithubFixture({
+        getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }),
         createInstallationToken: () => ({
           body: { token: "ghs_should_not", expires_at: new Date(NOW + 3600_000).toISOString() },
         }),
@@ -475,6 +482,7 @@ describe("resolveContentSourceCredential", () => {
       await installApp();
       await connectGitHub("u2", "ghu_u2", "hubot");
       fixture = startGithubFixture({
+        getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }),
         createInstallationToken: () => ({
           body: { token: "ghs_should_not", expires_at: new Date(NOW + 3600_000).toISOString() },
         }),
@@ -567,9 +575,21 @@ describe("resolveContentSourceCredential", () => {
   });
 
   describe("an org source", () => {
+    it("does not use the adding member's personal installation for shared content", async () => {
+      await installApp();
+      await connectGitHub("u1", "user-token", "alice");
+      await db.insert(githubInstallations).values({ id: "personal", orgId: ORG, installationId: 555,
+        accountLogin: "alice", accountId: githubAccountId("alice"), accountType: "User", linkedUserId: "u1", suspended: false, createdAt: NOW, updatedAt: NOW });
+      fixture = startGithubFixture({ getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }) });
+      expect(await resolveContentSourceCredential(deps(), sourceRow({ ownerType: "org", ownerId: ORG,
+        repoFullName: "alice/private", createdBy: "u1" }))).toEqual({ kind: "missing_app" });
+      expect(fixture.calls.filter((call) => call.path.includes("access_tokens"))).toEqual([]);
+    });
+
     it("uses the App installation token for the repository owner", async () => {
       await installApp();
       fixture = startGithubFixture({
+        getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }),
         createInstallationToken: () => ({
           body: { token: "ghs_install", expires_at: new Date(NOW + 3600_000).toISOString() },
         }),
@@ -599,7 +619,7 @@ describe("resolveContentSourceCredential", () => {
 
     it("reads anonymously when the App does not cover the repository owner", async () => {
       await installApp();
-      fixture = startGithubFixture();
+      fixture = startGithubFixture({ getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }) });
 
       const credential = await resolveContentSourceCredential(
         deps(),
@@ -621,6 +641,7 @@ describe("resolveContentSourceCredential", () => {
     it("maps a mint failure to unavailable, not missing_app", async () => {
       await installApp();
       fixture = startGithubFixture({
+        getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }),
         createInstallationToken: () => ({
           status: 500,
           body: { message: "internal error" },
@@ -637,7 +658,7 @@ describe("resolveContentSourceCredential", () => {
   });
 
   it("carries no token material in what it returns for an anonymous read", async () => {
-    fixture = startGithubFixture();
+    fixture = startGithubFixture({ getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }) });
     expect(await resolveContentSourceCredential(deps(), sourceRow({}))).toEqual({ kind: "none" });
   });
 });

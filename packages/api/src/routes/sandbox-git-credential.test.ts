@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /**
  * `POST /api/sandbox/git-credential` (GitHub/repo integration plan, Task 8).
  * Route-level: real Hono app via `bootTestApi`, a minted sandbox token for
@@ -330,6 +331,7 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
   /** An App with one installation, on `accountLogin`, that mints `INSTALLATION_TOKEN`. */
   async function installApp(accountLogin: string): Promise<void> {
     fixture = startGithubFixture({
+      getApp: () => ({ body: { owner: { login: accountLogin } } }),
       createInstallationToken: () => ({
         body: { token: INSTALLATION_TOKEN, expires_at: new Date(Date.now() + 3_600_000).toISOString() },
       }),
@@ -356,7 +358,7 @@ describe("POST /api/sandbox/git-credential for workflow sessions", () => {
       id: "ghi_77",
       orgId: ORG,
       installationId: 77,
-      accountLogin,
+      accountLogin, accountId: githubAccountId(accountLogin),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,

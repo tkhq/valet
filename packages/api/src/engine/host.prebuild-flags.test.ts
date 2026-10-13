@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /**
  * Unit coverage for `primaryGitHubRepoTarget`. Repo-backed configuration
  * reads use this guard to select a session's primary GitHub repo (TKAI-385).
@@ -191,6 +192,7 @@ describe("childSessionFor repo prebuild flags", () => {
 
   it("a repository child keeps Docker, nested Kubernetes, browser access, and resource overrides", async () => {
     fixture = startGithubFixture({
+      getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }),
       createInstallationToken: (id) => ({
         body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
       }),
@@ -216,6 +218,7 @@ describe("childSessionFor repo prebuild flags", () => {
       orgId: "local-org",
       installationId: 111,
       accountLogin: "tkhq",
+      accountId: githubAccountId("tkhq"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -286,6 +289,7 @@ describe("childSessionFor repo prebuild flags", () => {
     const movedYaml = "kubernetes: true\nresources:\n  memory: 8Gi\n";
     let branchHead = oldSha;
     fixture = startGithubFixture({
+      getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }),
       createInstallationToken: (id) => ({
         body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
       }),
@@ -304,7 +308,7 @@ describe("childSessionFor repo prebuild flags", () => {
     await saveAppConfig({ credentials: engineCredentials }, "local-org", appConfig);
     const now = Date.now();
     await db.insert(githubInstallations).values({
-      id: "ghi_mutable_flags", orgId: "local-org", installationId: 333, accountLogin: "tkhq",
+      id: "ghi_mutable_flags", orgId: "local-org", installationId: 333, accountLogin: "tkhq", accountId: githubAccountId("tkhq"),
       accountType: "Organization", repositorySelection: "all", suspended: false,
       cachedToken: null, cachedTokenExpiresAt: null, createdAt: now, updatedAt: now,
     });
@@ -386,6 +390,7 @@ describe("childSessionFor repo prebuild flags", () => {
       orgId: "local-org",
       installationId: 222,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -573,6 +578,7 @@ describe("childSessionFor repo prebuild flags", () => {
 
   it("a child of a team-owned session carries the team id and gets the repo's docker flag", async () => {
     fixture = startGithubFixture({
+      getApp: () => ({ body: { owner: { id: githubAccountId("tkhq"), login: "tkhq" } } }),
       createInstallationToken: (id) => ({
         body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
       }),
@@ -598,6 +604,7 @@ describe("childSessionFor repo prebuild flags", () => {
       orgId: "local-org",
       installationId: 222,
       accountLogin: "tkhq",
+      accountId: githubAccountId("tkhq"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,

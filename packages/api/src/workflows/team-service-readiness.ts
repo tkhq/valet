@@ -83,11 +83,15 @@ export interface TeamServiceReadinessDeps {
    * deployment has none; the vault condition then never holds. */
   onePassword?: OnePasswordService;
   env?: NodeJS.ProcessEnv;
+  /** Provider seam for current App-owner identity. */
+  github?: { apiUrl?: string; fetchImpl?: typeof fetch; now?: () => number };
 }
 
 export interface BlockedTeamService {
   service: string;
   reason: string;
+  /** Unknown readiness must defer existing triggers, not certify their removal. */
+  transient?: true;
 }
 
 /**
@@ -299,13 +303,15 @@ async function unpinnedGithubGate(
   deps: TeamServiceReadinessDeps,
   orgId: string,
   nodes: ToolNode[],
-): Promise<{ ready: true } | { ready: false; reason?: string }> {
+): Promise<{ ready: true } | { ready: false; reason?: string; transient?: true }> {
   const env = deps.env ?? process.env;
   for (const node of nodes) {
     const owner = literalRepoOwner(node.params);
-    const resolution = await installationResolvesFor({ db: deps.db, credentials: deps.credentials, env }, orgId, owner);
+    const resolution = await installationResolvesFor({ db: deps.db, credentials: deps.credentials, env, ...deps.github }, orgId, owner);
     if (resolution.ok) continue;
     switch (resolution.gap) {
+      case "app_unavailable":
+        return { ready: false, transient: true, reason: "GitHub App ownership is temporarily unavailable. Retry after GitHub recovers." };
       case "no_app":
       case "no_installations":
         return { ready: false, reason: "An admin can set up or refresh the organization GitHub App in Settings → Organization → GitHub." };
@@ -383,18 +389,22 @@ export async function teamServiceReadiness(
     if (appNodes.length > 0) {
       if (appNodes.length === forService.length) organizationProvided.push(service);
       let appReady = true;
+      let appUnavailable = false;
       for (const node of appNodes) {
         const result = await installationResolvesFor(
-          { db: deps.db, credentials: deps.credentials, env }, opts.orgId, literalRepoOwner(node.params),
+          { db: deps.db, credentials: deps.credentials, env, ...deps.github }, opts.orgId, literalRepoOwner(node.params),
           { strictOwner: true, dynamicOwner: typeof node.params.owner === "string" && node.params.owner.includes("{{") },
         );
         if (!result.ok) {
           appReady = false;
+          appUnavailable = result.gap === "app_unavailable";
           break;
         }
       }
       if (!appReady) {
-        blocked.push({ service, reason: "The organization GitHub App needs an active installation for this workflow. An admin can configure or refresh installations in Settings → Organization → GitHub." });
+        blocked.push({ service, ...(appUnavailable ? { transient: true as const } : {}), reason: appUnavailable
+          ? "GitHub App ownership is temporarily unavailable. Retry after GitHub recovers."
+          : "The organization GitHub App needs an active installation for this workflow. An admin can configure or refresh installations in Settings → Organization → GitHub." });
         continue;
       }
       if (appNodes.length === forService.length) {
@@ -463,6 +473,10 @@ export async function teamServiceReadiness(
       if (gate.ready && !userPinned) {
         organizationProvided.push(service);
         ready.push(service);
+        continue;
+      }
+      if (!gate.ready && gate.transient) {
+        blocked.push({ service, reason: gate.reason ?? "GitHub readiness is unavailable. Retry after GitHub recovers.", transient: true });
         continue;
       }
       if (!gate.ready && !userPinned) {

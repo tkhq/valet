@@ -396,6 +396,12 @@ END $cost_view$`;
  */
 
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  { describe: "GitHub installation discovery fence", probe: { kind: "column", table: "orgs", column: "github_installation_revision" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN "github_installation_revision" bigint NOT NULL DEFAULT 0' },
+  { describe: "persisted GitHub App owner", probe: { kind: "column", table: "orgs", column: "github_app_owner" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN "github_app_owner" jsonb' },
+  { describe: "GitHub installation account IDs", probe: { kind: "column", table: "github_installations", column: "account_id" },
+    sql: 'ALTER TABLE "github_installations" ADD COLUMN "account_id" bigint' },
   { describe: "identity link codes bound to a DM recipient", probe: { kind: "column", table: "identity_link_codes", column: "external_id" }, sql: 'ALTER TABLE "identity_link_codes" ADD COLUMN "external_id" text' },
   { describe: "generated file reservations", probe: { kind: "table", table: "generated_files" }, sql: `CREATE TABLE "generated_files" (
   "id" text PRIMARY KEY, "org_id" text NOT NULL, "session_id" text NOT NULL,

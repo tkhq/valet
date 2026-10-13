@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 import { seedWorkspaceAssistant } from "../test-helpers/assistant-fixture.js";
 /**
  * Unit tests for `buildActionInvoker` (plugin-system-v2 plan Task 6) — the
@@ -26,7 +27,7 @@ import { InMemorySessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgs, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { actionInvocations, actionPolicies, assistants, runtimeGrants, sessionRepos, githubInstallations, orgMembers, orgs, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { shareCredential } from "../services/credential-shares.js";
 import { shareGeneration, writeBorrowGrant } from "../services/credential-borrow.js";
 import { grantPolicyKey } from "../policies/resolution.js";
@@ -1608,6 +1609,7 @@ describe("buildActionInvoker: github service resolution", () => {
       orgId,
       installationId: 4242,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -1675,6 +1677,7 @@ describe("buildActionInvoker: github service resolution", () => {
       orgId,
       installationId: 4343,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -1743,6 +1746,7 @@ describe("buildActionInvoker: github service resolution", () => {
       orgId,
       installationId: 999,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -1784,6 +1788,7 @@ describe("buildActionInvoker: github service resolution", () => {
       orgId,
       installationId: 444,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -1827,6 +1832,7 @@ describe("buildActionInvoker: github service resolution", () => {
       orgId,
       installationId: 111,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -1935,6 +1941,7 @@ describe("buildActionInvoker: github service resolution", () => {
       orgId,
       installationId: 222,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -1944,6 +1951,48 @@ describe("buildActionInvoker: github service resolution", () => {
       updatedAt: NOW,
     });
   }
+
+  it("lets a team mint a User-owned App installation when personal installs are disabled", async () => {
+    const { appDb, credentials } = await harness();
+    await appDb.insert(orgs).values({ id: orgId, name: "Org", allowPersonalInstallations: false, createdAt: NOW });
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await appDb.insert(githubInstallations).values({ id: "owner", orgId, installationId: 222,
+      accountLogin: "alice", accountId: githubAccountId("alice"), accountType: "User", suspended: false, createdAt: NOW, updatedAt: NOW });
+    fixture = startGithubFixture({ getApp: () => ({ body: { owner: { id: githubAccountId("alice"), login: "alice", type: "User" } } }),
+      createInstallationToken: () => ({ body: { token: "owner-token", expires_at: new Date(NOW + 3600_000).toISOString() } }),
+    });
+    const invoke = buildActionInvoker({ db: appDb, credentials, actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, now: () => NOW } });
+    expect(await invoke({ service: "github", action: "create_comment", params: { owner: "alice", repo: "private" },
+      invocationId: "workflow:owner:team", credential: "app" },
+      { orgId, userId: "other-member", owner: { type: "team", id: "team_1" } })).toEqual({ ok: true, result: { token: "owner-token" } });
+  });
+
+  it.each(["linked", "other", "team"] as const)("personal installation workflow authorization: %s", async (actor) => {
+    const { appDb, credentials } = await harness();
+    await appDb.insert(orgs).values({ id: orgId, name: "Org", createdAt: NOW });
+    await appDb.insert(orgMembers).values({ orgId, userId, role: "member" });
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2", accessToken: "identity-token", metadata: { login: "alice", identityOnly: true },
+    });
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await appDb.insert(githubInstallations).values({ id: "personal", orgId, installationId: 222,
+      accountLogin: "alice", accountId: githubAccountId("alice"), accountType: "User", linkedUserId: userId, suspended: false, createdAt: NOW, updatedAt: NOW });
+    fixture = startGithubFixture({ getUser: () => ({ body: { login: "alice" } }), createInstallationToken: () => ({
+      body: { token: "personal-token", expires_at: new Date(NOW + 3600_000).toISOString() },
+    }) });
+    const invoke = buildActionInvoker({ db: appDb, credentials, actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, now: () => NOW } });
+    const actingUser = actor === "other" ? "other-member" : userId;
+    const result = await invoke({ service: "github", action: "create_comment", params: { owner: "alice", repo: "private" },
+      invocationId: `workflow:personal:${actor}`, credential: "app" },
+      { orgId, userId: actingUser, owner: { type: actor === "team" ? "team" : "user", id: actor === "team" ? "team_1" : actingUser } });
+    if (actor === "linked") expect(result).toEqual({ ok: true, result: { token: "personal-token" } });
+    else {
+      expect(result.ok).toBe(false);
+      expect(fixture.calls.filter((call) => call.path.includes("access_tokens"))).toEqual([]);
+    }
+  });
 
   it('credential "app": resolves the installation for the params owner, ignoring a healthy user credential', async () => {
     const { appDb, credentials } = await harness();
@@ -2066,6 +2115,7 @@ describe("buildActionInvoker: github service resolution", () => {
       orgId,
       installationId: 333,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,

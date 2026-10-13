@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /**
  * A `github` tool node inside a real workflow run, driven through a full
  * `bootTestApi` boot (real Hono app, real `LocalRunHost`, real
@@ -138,6 +139,7 @@ async function installAppOn(a: TestApi, accountLogin: string, installationId: nu
     orgId: ORG_ID,
     installationId,
     accountLogin,
+    accountId: githubAccountId(accountLogin),
     accountType: "Organization",
     repositorySelection: "all",
     suspended: false,

@@ -6,8 +6,8 @@
  *
  * Backed by the shared `PgQueryable` query interface (decision 4) — every
  * method here is a single statement (`save`'s `ON CONFLICT (owner_type,
- * owner_id, service) DO UPDATE` upsert is one atomic round trip; no
- * multi-statement sequence needs `transaction(fn)`).
+ * owner_id, service) DO UPDATE` upsert is one atomic round trip).
+ * `withLock` uses a transaction and a row lock for OAuth rotation.
  *
  * Secret fields (`accessToken`, `refreshToken`, `apiKey`) are encrypted at
  * rest with `src/lib/secret-crypto.ts`'s AES-256-GCM helpers (byte-identical
@@ -18,7 +18,7 @@
  * rule).
  */
 import { CREDENTIAL_INVALIDATION_SQL } from "../services/content-sync/invalidation.js";
-import { fromJsonbColumn, jsonbToParam, type PgQueryable } from "@valet/store-postgres";
+import { fromJsonbColumn, jsonbToParam, type PgDb, type PgQueryable } from "@valet/store-postgres";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import { decryptSecret, encryptSecret } from "../lib/secret-crypto.js";
 
@@ -77,12 +77,32 @@ function rawToCredentialRow(raw: Record<string, unknown>): CredentialRow {
   };
 }
 
+function isTransactional(db: PgQueryable): db is PgDb {
+  return "transaction" in db && typeof db.transaction === "function";
+}
+
 export class PgCredentialStore implements CredentialStore {
   constructor(
     private readonly db: PgQueryable,
     private readonly key: Buffer,
     private readonly clock: () => number = () => Date.now(),
   ) {}
+
+  async withLock<T>(
+    owner: CredentialOwner, service: string,
+    operation: (store: CredentialStore) => Promise<T>,
+  ): Promise<T> {
+    if (!isTransactional(this.db)) return operation(this);
+    // Operations must use only the supplied transactional store for DB access.
+    // On PGlite, accessing the outer DB here waits on this transaction itself.
+    return this.db.transaction(async (tx) => {
+      await tx.query(
+        "SELECT owner_id FROM credentials WHERE owner_type = $1 AND owner_id = $2 AND service = $3 FOR UPDATE",
+        [owner.type, owner.id, service],
+      );
+      return operation(new PgCredentialStore(tx, this.key, this.clock));
+    });
+  }
 
   private encrypt(value: string | undefined): string | null {
     return value === undefined ? null : encryptSecret(value, this.key);

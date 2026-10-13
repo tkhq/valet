@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /**
  * GH-T10 fix: the PRIMARY (live-agent) session path must resolve `github`
  * credentials through the token service, not a raw store read. The trace is
@@ -94,6 +95,7 @@ describe("EngineHost session github credential resolution", () => {
       orgId,
       installationId: 111,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -132,6 +134,7 @@ describe("EngineHost session github credential resolution", () => {
       orgId,
       installationId: 999,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -170,6 +173,7 @@ describe("EngineHost session github credential resolution", () => {
       orgId,
       installationId: 211,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,

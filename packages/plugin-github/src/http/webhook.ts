@@ -69,8 +69,8 @@ function installationId(payload: unknown): number | null {
 }
 
 /**
- * `installation` event. `created` re-reads installations from GitHub, which
- * sets the linked user. `deleted`, `suspend`, and `unsuspend` change the row
+ * `installation` event. The host discovers `created` installations before
+ * it binds effects. `deleted`, `suspend`, and `unsuspend` change the row
  * from the payload alone, because webhook delivery has a short timeout.
  * Other actions, such as `new_permissions_accepted`, do nothing.
  */
@@ -87,13 +87,6 @@ async function handleInstallationEvent(effects: GithubDeliveryEffects, payload: 
     await effects.installationSuspended(id, action === "suspend");
     return;
   }
-  if (action === "created") {
-    try {
-      await effects.discoverInstallations();
-    } catch (err) {
-      console.error("github-app webhook: discovery after installation.created failed:", err);
-    }
-  }
 }
 
 /** `installation_repositories` event: the payload carries the current
@@ -104,6 +97,14 @@ async function handleInstallationRepositoriesEvent(effects: GithubDeliveryEffect
   if (id === null) return;
   const selection = typeof payload.repository_selection === "string" ? payload.repository_selection : undefined;
   await effects.repositorySelectionChanged(id, selection);
+}
+
+function installationAccount(payload: unknown): { id: number; login: string; type: string } | undefined {
+  if (!isRecord(payload)) return undefined;
+  const account = isRecord(payload.installation) ? payload.installation.account ?? payload.account : payload.account;
+  if (!isRecord(account) || typeof account.id !== "number" || typeof account.login !== "string" ||
+      typeof account.type !== "string") return undefined;
+  return { id: account.id, login: account.login, type: account.type };
 }
 
 export async function receiveWebhook(
@@ -128,10 +129,33 @@ export async function receiveWebhook(
     return json({ error: "invalid JSON" }, 400);
   }
 
-  const effects = await delivery.bind({ installationId: installationId(payload) });
+  const effects = await delivery.bind({
+    deliveryId: request.headers["x-github-delivery"],
+    installationId: installationId(payload),
+    installationCreated: request.headers["x-github-event"] === "installation" && isRecord(payload) && payload.action === "created",
+    revocation: request.headers["x-github-event"] === "installation" && isRecord(payload) &&
+      (payload.action === "deleted" || payload.action === "suspend"),
+    targetRenamed: request.headers["x-github-event"] === "installation_target" && isRecord(payload) && payload.action === "renamed",
+    account: installationAccount(payload),
+  });
+  if (effects === "retry") return json({ error: "GitHub admission is temporarily unavailable. Redeliver manually or through the GitHub API after recovery." }, 503);
   if (!effects) return noContent();
 
   const event = request.headers["x-github-event"];
+  if (installationId(payload) === null) {
+    if (event && event !== "ping") await effects.recordUndeliverable({
+      deliveryId: request.headers["x-github-delivery"], detail: `github event ${event}: missing installation ID`,
+    });
+    return noContent();
+  }
+  if (event === "installation_target") {
+    const account = installationAccount(payload);
+    const id = installationId(payload);
+    if (account && id !== null && isRecord(payload) && payload.action === "renamed") {
+      await effects.installationRenamed?.(id, account);
+    }
+    return noContent();
+  }
   // A verified push marks every matching enabled source due. The sync runs
   // later under each source's own credential, so a push storm collapses into
   // one sync per source per tick.

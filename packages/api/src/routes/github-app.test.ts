@@ -1,3 +1,4 @@
+import { githubAccountId } from "../test-helpers/github-fixture.js";
 /**
  * `/api/org/github-app` admin routes + PUBLIC `/webhooks/github-app` sync
  * (GitHub/repo integration plan, Task 5). Route-level: real Hono app via
@@ -5,13 +6,15 @@
  * (`startGithubFixture`) subbed in via `GITHUB_API_URL` for the duration of
  * tests that need `discoverInstallations` to actually call out.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { eventDeliveries, events, eventSubscriptions, githubInstallations, contentSources } from "../schema/index.js";
+import { eventDropLog, eventDeliveries, events, eventSubscriptions, githubInstallations, contentSources, orgMembers, orgs, users } from "../schema/index.js";
+import { saveVerifiedGithubIdentity, mintInstallationToken, discoverInstallations } from "../services/github-app.js";
+import { deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
 import { createContentSource } from "../services/content-sources.js";
 import type { GetGithubAppResponse, PostGithubAppManifestResponse } from "../wire/types.js";
 
@@ -46,6 +49,7 @@ function setEnvApp(): void {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await api?.cleanup();
   api = undefined;
   await fixture?.close();
@@ -184,7 +188,7 @@ describe("POST /api/org/github-app/manifest", () => {
     // redirect_url) — without it the App can't do user connects at all.
     expect(body.manifest.callback_urls).toHaveLength(1);
     expect(body.manifest.callback_urls[0]).toContain("/api/me/github/callback");
-    expect(body.manifest.public).toBe(false);
+    expect(body.manifest.public).toBe(true);
     expect(body.manifest.default_permissions).toEqual({
       contents: "write",
       metadata: "read",
@@ -308,7 +312,7 @@ describe("GET /api/org/github-app/setup", () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { fixture: f } = await setupConfiguredOrg(api.baseUrl, {
       listInstallations: () => ({
-        body: [{ id: 111, account: { login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
+        body: [{ id: 111, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
       }),
     });
     expect(f.calls.some((c) => c.path === "/app-manifests/some-code/conversions")).toBe(true);
@@ -362,6 +366,7 @@ describe("POST /api/org/github-app/credential", () => {
   /** What GitHub's `GET /app` answers for the app behind `TEST_PEM`. */
   const APP_RECORD = {
     id: 4242,
+    owner: { id: githubAccountId("acme"), login: "acme", type: "Organization" },
     slug: "existing-app",
     node_id: "MDM6QXBwMQ==",
     client_id: "Iv1.existing",
@@ -392,7 +397,7 @@ describe("POST /api/org/github-app/credential", () => {
     const f = useFixture({
       getApp: () => ({ body: APP_RECORD }),
       listInstallations: () => ({
-        body: [{ id: 111, account: { login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
+        body: [{ id: 111, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
       }),
     });
 
@@ -564,6 +569,7 @@ describe("POST /api/org/github-app/credential", () => {
       orgId: "local-org",
       installationId: 999,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -571,7 +577,7 @@ describe("POST /api/org/github-app/credential", () => {
       updatedAt: now,
     });
 
-    const payload = { action: "suspend", installation: { id: 999, account: { login: "acme", type: "Organization" } } };
+    const payload = { action: "suspend", installation: { id: 999, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" } } };
     const wrong = signWebhookBody(JSON.stringify(payload), "some-other-secret");
     expect((await postWebhook(api.baseUrl, "installation", payload, wrong)).status).toBe(403);
 
@@ -595,12 +601,12 @@ describe("POST /api/org/github-app/refresh", () => {
     let installations: unknown[] = [];
     await setupConfiguredOrg(api.baseUrl, { listInstallations: () => ({ body: installations }) });
 
-    installations = [{ id: 222, account: { login: "beta", type: "User" }, repository_selection: "selected", suspended_at: null }];
+    installations = [{ id: 222, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" }, repository_selection: "selected", suspended_at: null }];
     const res = await fetch(`${api.baseUrl}/api/org/github-app/refresh`, { method: "POST", headers: HEADERS });
     expect(res.status).toBe(200);
     const body = (await res.json()) as GetGithubAppResponse;
     expect(body.installations).toHaveLength(1);
-    expect(body.installations[0].accountLogin).toBe("beta");
+    expect(body.installations[0].accountLogin).toBe("acme");
   });
 });
 
@@ -615,7 +621,7 @@ describe("DELETE /api/org/github-app", () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     await setupConfiguredOrg(api.baseUrl, {
       listInstallations: () => ({
-        body: [{ id: 111, account: { login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
+        body: [{ id: 111, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
       }),
     });
 
@@ -668,14 +674,14 @@ describe("GITHUB_APP_* env fallback (admin routes)", () => {
     setEnvApp();
     useFixture({
       listInstallations: () => ({
-        body: [{ id: 888, account: { login: "envco", type: "Organization" }, repository_selection: "all", suspended_at: null }],
+        body: [{ id: 888, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
       }),
     });
     const res = await fetch(`${api.baseUrl}/api/org/github-app/refresh`, { method: "POST", headers: HEADERS });
     expect(res.status).toBe(200);
     const body = (await res.json()) as GetGithubAppResponse;
     expect(body.installations).toHaveLength(1);
-    expect(body.installations[0].accountLogin).toBe("envco");
+    expect(body.installations[0].accountLogin).toBe("acme");
   });
 
   it("DELETE removes installation rows but cannot remove the env config (still configured)", async () => {
@@ -698,6 +704,7 @@ describe("POST /webhooks/github-app", () => {
       orgId: "local-org",
       installationId: 999,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -710,7 +717,7 @@ describe("POST /webhooks/github-app", () => {
   it("403s on a bad signature", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
-    const payload = { action: "suspend", installation: { id: 999, account: { login: "acme", type: "Organization" } } };
+    const payload = { action: "suspend", installation: { id: 999, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" } } };
     const badSig = signWebhookBody(JSON.stringify(payload), `${webhookSecret}-wrong`);
     const res = await postWebhook(api.baseUrl, "installation", payload, badSig);
     expect(res.status).toBe(403);
@@ -741,7 +748,7 @@ describe("POST /webhooks/github-app", () => {
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
     await seedInstallationRow();
 
-    const suspendPayload = { action: "suspend", installation: { id: 999, account: { login: "acme", type: "Organization" } } };
+    const suspendPayload = { action: "suspend", installation: { id: 999, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" } } };
     const suspendSig = signWebhookBody(JSON.stringify(suspendPayload), webhookSecret);
     const suspendRes = await postWebhook(api.baseUrl, "installation", suspendPayload, suspendSig);
     expect(suspendRes.status).toBe(204);
@@ -749,7 +756,7 @@ describe("POST /webhooks/github-app", () => {
     let [row] = await api.providers.db.select().from(githubInstallations).where(eq(githubInstallations.id, "ghi_seed"));
     expect(row.suspended).toBe(true);
 
-    const unsuspendPayload = { action: "unsuspend", installation: { id: 999, account: { login: "acme", type: "Organization" } } };
+    const unsuspendPayload = { action: "unsuspend", installation: { id: 999, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" } } };
     const unsuspendSig = signWebhookBody(JSON.stringify(unsuspendPayload), webhookSecret);
     const unsuspendRes = await postWebhook(api.baseUrl, "installation", unsuspendPayload, unsuspendSig);
     expect(unsuspendRes.status).toBe(204);
@@ -763,7 +770,7 @@ describe("POST /webhooks/github-app", () => {
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
     await seedInstallationRow();
 
-    const payload = { action: "deleted", installation: { id: 999, account: { login: "acme", type: "Organization" } } };
+    const payload = { action: "deleted", installation: { id: 999, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" } } };
     const sig = signWebhookBody(JSON.stringify(payload), webhookSecret);
     const res = await postWebhook(api.baseUrl, "installation", payload, sig);
     expect(res.status).toBe(204);
@@ -780,7 +787,7 @@ describe("POST /webhooks/github-app", () => {
     const payload = {
       action: "added",
       repository_selection: "selected",
-      installation: { id: 999, account: { login: "acme", type: "Organization" } },
+      installation: { id: 999, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" } },
     };
     const sig = signWebhookBody(JSON.stringify(payload), webhookSecret);
     const res = await postWebhook(api.baseUrl, "installation_repositories", payload, sig);
@@ -791,22 +798,501 @@ describe("POST /webhooks/github-app", () => {
     expect(row.updatedAt).toBeGreaterThan(1_000);
   });
 
+  it("backfills a legacy owner row before webhook admission", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      getInstallation: () => ({ body: { id: 999,
+        account: { id: githubAccountId("acme"), login: "acme", type: "Organization" },
+      } }),
+    });
+    await seedInstallationRow({ accountId: null });
+    const now = Date.now();
+    await api.providers.db.insert(eventSubscriptions).values({
+      id: "sub_legacy", orgId: "local-org", ownerType: "org", ownerId: "local-org", name: "PRs",
+      eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "orchestrator" },
+      enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+    expect((await postForwardedWebhook(api.baseUrl, "pull_request", PR_OPENED_PAYLOAD, webhookSecret, "legacy-delivery")).status).toBe(204);
+    expect(await api.providers.db.select().from(events)).toHaveLength(1);
+    expect(await api.providers.db.select().from(githubInstallations)).toMatchObject([{ accountId: githubAccountId("acme") }]);
+  });
+
+  it.each(["owner", "member"])("targets a signed %s creation even when paged listing omits it", async (kind) => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const account = kind === "owner"
+      ? { id: githubAccountId("acme"), login: "acme", type: "Organization" }
+      : { id: 20, login: "alice", type: "User" };
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      listInstallations: () => ({ body: [] }),
+      getInstallation: () => ({ body: { id: 555, account } }),
+      getUser: () => ({ body: { id: account.id, login: account.login } }),
+    });
+    if (kind === "member") {
+      await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+        type: "oauth2", accessToken: "member-token", metadata: { login: "alice" },
+      });
+      // Legacy connections have only login metadata; admission must verify the exact token live.
+    }
+    const before = fixture!.calls.filter((call) => call.path === "/app/installations").length;
+    const payload = { action: "created", installation: { id: 555, account } };
+    expect((await postWebhook(api.baseUrl, "installation", payload, signWebhookBody(JSON.stringify(payload), webhookSecret))).status).toBe(204);
+    expect(await api.providers.db.select().from(githubInstallations)).toMatchObject([{ accountId: account.id, installationId: 555 }]);
+    expect(fixture!.calls.filter((call) => call.path === "/app/installations")).toHaveLength(before);
+    expect(fixture!.calls.filter((call) => call.path === "/app/installations/555")).toHaveLength(1);
+  });
+
+  it("recovers a missed creation on the next signed event with a targeted lookup", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    let outage = true;
+    const account = { id: githubAccountId("acme"), login: "acme", type: "Organization" };
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      getInstallation: () => outage ? { status: 502, body: {} } : { body: { id: 777, account } },
+    });
+    const now = Date.now();
+    await api.providers.db.insert(eventSubscriptions).values({ id: "sub_recover", orgId: "local-org", ownerType: "org", ownerId: "local-org",
+      name: "Recovered PRs", eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "orchestrator" },
+      enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now });
+    const created = { action: "created", installation: { id: 777, account } };
+    expect((await postForwardedWebhook(api.baseUrl, "installation", created, webhookSecret, "missed-created")).status).toBe(503);
+    expect(await api.providers.db.select().from(githubInstallations)).toEqual([]);
+    outage = false;
+    const pr = { ...PR_OPENED_PAYLOAD, installation: { id: 777 } };
+    expect((await postForwardedWebhook(api.baseUrl, "pull_request", pr, webhookSecret, "recovered-pr")).status).toBe(204);
+    expect(await api.providers.db.select().from(githubInstallations)).toMatchObject([{ installationId: 777, accountId: account.id }]);
+    expect(await api.providers.db.select().from(events)).toHaveLength(1);
+    expect(await api.providers.db.select().from(eventDropLog)).toMatchObject([{ conversationKey: "missed-created" }]);
+    expect(fixture!.calls.filter((call) => call.path === "/app/installations")).toHaveLength(1); // Setup only.
+  });
+
+  it.each([401, 403, "expired", 502, "secondary", 404, 408, 422] as const)("classifies member identity failure %s for admission and discovery", async (failure) => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      getUser: () => ({ status: failure === "expired" ? 200 : failure === "secondary" ? 403 : failure,
+        body: failure === 403 ? { message: "Bad credentials" } : failure === "secondary"
+          ? { message: "You have exceeded a secondary rate limit. Please wait before you try again." }
+          : { id: 20, login: "alice" },
+      }),
+      listInstallations: () => ({ body: [{ id: 555, account: { id: 20, login: "alice", type: "User" } }] }),
+    });
+    await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2", accessToken: "bad-token", ...(failure === "expired" ? { expiresAt: Date.now() - 1 } : {}), metadata: { login: "alice" },
+    });
+    await seedInstallationRow({ installationId: 555, accountId: 20, accountType: "User", accountLogin: "alice", linkedUserId: "test-member" });
+    const transient = ![401, 403, "expired"].includes(failure);
+    const pr = { ...PR_OPENED_PAYLOAD, installation: { id: 555 } };
+    expect((await postForwardedWebhook(api.baseUrl, "pull_request", pr, webhookSecret, `identity-${failure}`)).status).toBe(transient ? 503 : 204);
+    const { discoverInstallations } = await import("../services/github-app.js");
+    await discoverInstallations({ db: api.providers.db, credentials: api.providers.engineCredentials,
+      key: deriveSecretKey(api.providers.encryptionKey), apiUrl: fixture!.url }, "local-org");
+    expect(await api.providers.db.select().from(githubInstallations)).toHaveLength(transient ? 1 : 0);
+    const [drop] = await api.providers.db.select().from(eventDropLog);
+    expect(drop.conversationKey).toBe(`identity-${failure}`);
+    expect(drop.detail.includes("Redeliver")).toBe(transient);
+    if (failure === "expired") expect(fixture!.calls.filter((call) => call.path === "/user")).toHaveLength(0);
+  });
+
+  it.each(["suspend", "deleted"])("revocation %s wins over discovery blocked on member identity", async (mode) => {
+    const action = mode === "suspend" ? "suspend" : "deleted";
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    let listPersonal = false;
+    const installation = { id: 555, account: { id: 20, login: "alice", type: "User" }, suspended_at: null };
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      getUser: () => ({ body: { id: 20, login: "alice" } }),
+      listInstallations: () => ({ body: listPersonal ? [installation] : [] }),
+    });
+    await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2", accessToken: "member-token", metadata: { login: "alice" },
+    });
+    await seedInstallationRow({ installationId: 555, accountId: 20,
+      accountType: "User", accountLogin: "alice", linkedUserId: "test-member" });
+    listPersonal = true;
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const d = { db: api.providers.db, credentials: api.providers.engineCredentials,
+      key: deriveSecretKey(api.providers.encryptionKey), apiUrl: fixture!.url,
+      fetchImpl: (async (url, init) => {
+        if (String(url).endsWith("/user")) { entered(); await blocked; }
+        return fetch(url, init);
+      }) as typeof fetch,
+    };
+    const discovery = discoverInstallations(d, "local-org");
+    await started;
+    try {
+      const payload = { action, installation: { id: 555 } };
+      expect((await postWebhook(api.baseUrl, "installation", payload, signWebhookBody(JSON.stringify(payload), webhookSecret))).status).toBe(204);
+      const rows = await api.providers.db.select().from(githubInstallations);
+      if (action === "deleted") expect(rows).toEqual([]);
+      else expect(rows).toMatchObject([{ suspended: true }]);
+    } finally { release(); }
+    expect(await discovery).toBe("stale");
+    const rows = await api.providers.db.select().from(githubInstallations);
+    if (action === "deleted") expect(rows).toEqual([]);
+    else expect(rows).toMatchObject([{ suspended: true }]);
+    expect(await mintInstallationToken(d, "local-org", "alice", "test-member")).toBeNull();
+  });
+
+  it("stranger revocations perform no mutation or fence bump", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    const transaction = vi.spyOn(api.providers.db, "transaction");
+    for (let i = 0; i < 12; i++) {
+      const payload = { action: i % 2 ? "suspend" : "deleted", installation: { id: 10_000 + i } };
+      expect((await postForwardedWebhook(api.baseUrl, "installation", payload, webhookSecret, `stranger-revoke-${i}`)).status).toBe(204);
+    }
+    expect(transaction).not.toHaveBeenCalled(); // The org FOR UPDATE lock and all mutation writes live inside this transaction.
+    expect(await api.providers.db.select({ revision: orgs.githubInstallationRevision }).from(orgs)).toEqual([{ revision: 0 }]);
+    expect(await api.providers.db.select().from(githubInstallations)).toEqual([]);
+    expect(await api.providers.db.select().from(eventDropLog)).toEqual([]);
+  });
+
+  it.each(["creation", "recovery", "refresh", "stranger stream"])("discovery boundary handles %s without empty-success loss", async (kind) => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const account = { id: githubAccountId("acme"), login: "acme", type: "Organization" };
+    let listTarget = false;
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      getInstallation: () => ({ body: { id: 777, account } }),
+      listInstallations: () => ({ body: listTarget ? [{ id: 777, account }] : [] }),
+    });
+    if (kind !== "stranger stream") await seedInstallationRow();
+    listTarget = true;
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const nativeFetch = globalThis.fetch;
+    let lookups = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const targeted = String(url) === `${fixture!.url}/app/installations/777`;
+      const listing = kind === "refresh" && String(url).startsWith(`${fixture!.url}/app/installations?`);
+      if (targeted || listing) {
+        lookups++;
+        if (lookups === (kind === "recovery" ? 2 : 1)) { entered(); await blocked; }
+      }
+      return nativeFetch(url, init);
+    });
+    const transaction = vi.spyOn(api.providers.db, "transaction");
+    const created = { action: "created", installation: { id: 777, account } };
+    const pr = { ...PR_OPENED_PAYLOAD, installation: { id: 777 } };
+    const pending = kind === "refresh"
+      ? fetch(`${api.baseUrl}/api/org/github-app/refresh`, { method: "POST", headers: HEADERS })
+      : postForwardedWebhook(api.baseUrl, kind === "recovery" ? "pull_request" : "installation",
+        kind === "recovery" ? pr : created, webhookSecret, `boundary-${kind}`);
+    await started;
+    try {
+      if (kind === "stranger stream") {
+        for (let i = 0; i < 12; i++) {
+          const payload = { action: i % 2 ? "suspend" : "deleted", installation: { id: 10_000 + i } };
+          expect((await postForwardedWebhook(api.baseUrl, "installation", payload, webhookSecret, `stream-${i}`)).status).toBe(204);
+        }
+        expect(transaction).not.toHaveBeenCalled();
+      } else {
+        const payload = { action: "deleted", installation: { id: 999 } };
+        expect((await postForwardedWebhook(api.baseUrl, "installation", payload, webhookSecret, "held-delete")).status).toBe(204);
+      }
+    } finally { release(); }
+    const response = await pending;
+    expect(response.status).toBe(kind === "stranger stream" ? 204 : kind === "refresh" ? 502 : 503);
+    const installations = await api.providers.db.select().from(githubInstallations);
+    if (kind === "stranger stream") {
+      expect(installations).toMatchObject([{ installationId: 777 }]);
+      expect(await api.providers.db.select().from(eventDropLog)).toEqual([]);
+    } else {
+      expect(installations).toEqual([]);
+      if (kind !== "refresh") expect(await api.providers.db.select().from(eventDropLog)).toMatchObject([{ conversationKey: `boundary-${kind}` }]);
+    }
+    if (kind === "recovery") {
+      expect((await postForwardedWebhook(api.baseUrl, "pull_request", pr, webhookSecret, "recovery-cached")).status).toBe(503);
+      expect(lookups).toBe(2); // Cached unavailable, never cached admitted.
+      expect(await api.providers.db.select().from(events)).toEqual([]);
+    }
+  });
+
+  it("retains a legacy null-ID personal row during outage without granting mint authority", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    let listPersonal = false;
+    let outage = true;
+    const installation = { id: 555, account: { id: 20, login: "alice", type: "User" } };
+    await setupConfiguredOrg(api.baseUrl, {
+      getUser: () => outage ? { status: 502, body: {} } : { body: { id: 20, login: "alice" } },
+      listInstallations: () => ({ body: listPersonal ? [installation] : [] }),
+    });
+    await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2", accessToken: "member-token", metadata: { login: "alice" },
+    });
+    const d = { db: api.providers.db, credentials: api.providers.engineCredentials,
+      key: deriveSecretKey(api.providers.encryptionKey), apiUrl: fixture!.url };
+    const cachedToken = encryptSecret("legacy-cached-token", d.key);
+    await seedInstallationRow({ installationId: 555, accountId: null, accountType: "User", accountLogin: "alice",
+      linkedUserId: "test-member", cachedToken, cachedTokenExpiresAt: Date.now() + 3600_000 });
+    listPersonal = true;
+    expect(await discoverInstallations(d, "local-org")).toEqual([]);
+    expect(await api.providers.db.select().from(githubInstallations)).toMatchObject([{
+      accountId: null, linkedUserId: "test-member", cachedToken,
+    }]);
+    expect(await mintInstallationToken(d, "local-org", "alice", "test-member")).toBeNull();
+    expect(fixture!.calls.some((call) => call.path.includes("access_tokens"))).toBe(false);
+    outage = false;
+    expect(await discoverInstallations(d, "local-org")).toMatchObject([{ accountId: 20, linkedUserId: "test-member" }]);
+    expect(await mintInstallationToken(d, "local-org", "alice", "test-member")).toBe("legacy-cached-token");
+  });
+
+  it("a signed rename cannot replace a stale linked member's verified identity", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    await api.providers.db.insert(users).values({ id: "test-member", name: "Member", email: "rename-member@example.com" }).onConflictDoNothing();
+    await api.providers.db.insert(orgMembers).values({ orgId: "local-org", userId: "test-member", role: "member" }).onConflictDoNothing();
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      getUser: () => ({ body: { id: 30, login: "member-30" } }),
+    });
+    await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "api_key", accessToken: "token-30", metadata: { login: "member-30" },
+    });
+    const d = { db: api.providers.db, credentials: api.providers.engineCredentials,
+      key: deriveSecretKey(api.providers.encryptionKey), apiUrl: fixture!.url };
+    expect(await saveVerifiedGithubIdentity(d, "test-member", { id: 30, login: "member-30" }, "token-30")).toBe(true);
+    await seedInstallationRow({ installationId: 555, accountId: 20, accountLogin: "old-20", accountType: "User", linkedUserId: "test-member" });
+    const before = await api.providers.engineCredentials.get({ type: "user", id: "test-member" }, "github");
+    const payload = { action: "renamed", installation: { id: 555, account: { id: 20, login: "new-20", type: "User" } } };
+    const userCalls = fixture!.calls.filter((call) => call.path === "/user").length;
+    expect((await postWebhook(api.baseUrl, "installation_target", payload, signWebhookBody(JSON.stringify(payload), webhookSecret))).status).toBe(204);
+    expect(await api.providers.engineCredentials.get({ type: "user", id: "test-member" }, "github")).toEqual(before);
+    expect(fixture!.calls.filter((call) => call.path === "/user")).toHaveLength(userCalls);
+    expect(await mintInstallationToken(d, "local-org", "new-20", "test-member")).toBeNull();
+    expect(await api.providers.db.select().from(githubInstallations)).toMatchObject([{ accountId: 20, accountLogin: "new-20" }]);
+  });
+
+  it("returns retryable failure when webhook ownership cannot be established", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    let outage = false;
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      getApp: () => outage ? { status: 401, body: {} } : { body: { owner: { id: githubAccountId("acme"), login: "acme" } } },
+    });
+    await seedInstallationRow();
+    // Change config binding to bypass the in-process owner cache.
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "github_app", {
+      type: "service_account", apiKey: TEST_PEM, accessToken: "secret", refreshToken: webhookSecret,
+      metadata: { appId: "99", appSlug: "fixture", oauthClientId: "client", htmlUrl: "https://github.com/apps/fixture" },
+    });
+    outage = true;
+    expect((await postForwardedWebhook(api.baseUrl, "pull_request", PR_OPENED_PAYLOAD, webhookSecret, "owner-outage")).status).toBe(503);
+    expect(await api.providers.db.select().from(eventDropLog)).toMatchObject([{
+      reason: "event_not_ingestable", conversationKey: "owner-outage",
+      detail: expect.stringContaining("Redeliver manually or through the GitHub API"),
+    }]);
+    expect(await api.providers.db.select().from(events)).toEqual([]);
+  });
+
+  it("suppresses drop records when 70 unheld IDs exhaust the recovery budget", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      getInstallation: () => ({ status: 502, body: {} }),
+    });
+    for (let i = 0; i < 70; i++) {
+      const pr = { ...PR_OPENED_PAYLOAD, installation: { id: 10_000 + i } };
+      expect((await postForwardedWebhook(api.baseUrl, "pull_request", pr, webhookSecret, `budget-${i}`)).status).toBe(503);
+    }
+    const drops = await api.providers.db.select().from(eventDropLog);
+    expect(drops).toHaveLength(64);
+    expect(drops.some((drop) => Number(drop.conversationKey?.split("-")[1]) >= 64)).toBe(false);
+    expect(fixture!.calls.filter((call) => /^\/app\/installations\//.test(call.path))).toHaveLength(64);
+    expect(await api.providers.db.select().from(githubInstallations)).toEqual([]);
+  });
+
+  it("records only one unheld retry during a cached lookup outage", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      getInstallation: () => ({ status: 502, body: {} }),
+    });
+    const pr = { ...PR_OPENED_PAYLOAD, installation: { id: 777 } };
+    const responses = await Promise.all(Array.from({ length: 5 }, (_, i) =>
+      postForwardedWebhook(api!.baseUrl, "pull_request", pr, webhookSecret, `outage-${i}`)));
+    expect(responses.map((response) => response.status)).toEqual(Array(5).fill(503));
+    expect(await api.providers.db.select().from(eventDropLog)).toHaveLength(1);
+    expect(fixture!.calls.filter((call) => call.path === "/app/installations/777")).toHaveLength(1);
+  });
+
+  it("records every retry delivery for a held installation", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      getUser: () => ({ status: 502, body: {} }),
+    });
+    await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2", accessToken: "member-token", metadata: { login: "alice" },
+    });
+    await seedInstallationRow({ installationId: 555, accountId: 20, accountType: "User", accountLogin: "alice", linkedUserId: "test-member" });
+    for (let i = 0; i < 5; i++) {
+      const pr = { ...PR_OPENED_PAYLOAD, installation: { id: 555 } };
+      expect((await postForwardedWebhook(api.baseUrl, "pull_request", pr, webhookSecret, `held-${i}`)).status).toBe(503);
+    }
+    expect(await api.providers.db.select().from(eventDropLog)).toHaveLength(5);
+  });
+
+  it("does not grow drop logs for signed stranger-installation deliveries", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    for (let i = 0; i < 25; i++) {
+      const account = { id: 10_000 + i, login: `stranger-${i}`, type: "User" };
+      const payload = { action: "created", installation: { id: 10_000 + i, account } };
+      expect((await postForwardedWebhook(api.baseUrl, "installation", payload, webhookSecret, `stranger-${i}`)).status).toBe(204);
+      const push = { ...PR_OPENED_PAYLOAD, installation: { id: 10_000 + i } };
+      expect((await postForwardedWebhook(api.baseUrl, "pull_request", push, webhookSecret, `stranger-pr-${i}`)).status).toBe(204);
+    }
+    expect(await api.providers.db.select().from(eventDropLog)).toEqual([]);
+    expect(await api.providers.db.select().from(githubInstallations)).toEqual([]);
+  });
+
   it("upserts a new row via discovery on installation.created", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
       listInstallations: () => ({
-        body: [{ id: 555, account: { login: "newco", type: "Organization" }, repository_selection: "all", suspended_at: null }],
+        body: [{ id: 555, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
       }),
     });
 
-    const payload = { action: "created", installation: { id: 555, account: { login: "newco", type: "Organization" } } };
+    const payload = { action: "created", installation: { id: 555, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" } } };
     const sig = signWebhookBody(JSON.stringify(payload), webhookSecret);
     const res = await postWebhook(api.baseUrl, "installation", payload, sig);
     expect(res.status).toBe(204);
 
     const getRes = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
     const body = (await getRes.json()) as GetGithubAppResponse;
-    expect(body.installations.some((i) => i.accountLogin === "newco")).toBe(true);
+    expect(body.installations.some((i) => i.accountLogin === "acme")).toBe(true);
+  });
+
+  it("syncs owner and healthy member installations when another member verification fails", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    for (const login of ["alice", "bob"]) {
+      await api.providers.db.insert(users).values({ id: login, name: login, email: `${login}@example.com` });
+      await api.providers.db.insert(orgMembers).values({ orgId: "local-org", userId: login, role: "member" });
+      await api.providers.engineCredentials.save({ type: "user", id: login }, "github", {
+        type: "oauth2", accessToken: `${login}-token`, metadata: { login },
+      });
+    }
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      getUser: (auth) => ({ body: auth === "Bearer alice-token" ? { login: 42 } : { login: "bob" } }),
+      listInstallations: () => ({ body: [
+        { id: 1, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" } },
+        { id: 2, account: { login: "alice", type: "User" } },
+        { id: 3, account: { login: "bob", type: "User" } },
+      ] }),
+    });
+    const payload = { action: "created", installation: { id: 3 } };
+    expect((await postWebhook(api.baseUrl, "installation", payload, signWebhookBody(JSON.stringify(payload), webhookSecret))).status).toBe(204);
+    expect((await api.providers.db.select().from(githubInstallations)).map((row) => row.installationId).sort()).toEqual([1, 3]);
+  });
+
+  it("admits a User-owned App webhook with personal installations disabled", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    await api.providers.db.update(orgs).set({ allowPersonalInstallations: false }).where(eq(orgs.id, "local-org"));
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      getApp: () => ({ body: { owner: { id: githubAccountId("acme"), login: "acme", type: "User" } } }),
+      listInstallations: () => ({ body: [{ id: 555, account: { login: "acme", type: "User" } }] }),
+    });
+    const payload = { action: "suspend", installation: { id: 555 } };
+    expect((await postWebhook(api.baseUrl, "installation", payload, signWebhookBody(JSON.stringify(payload), webhookSecret))).status).toBe(204);
+    expect(await api.providers.db.select().from(githubInstallations)).toMatchObject([{ installationId: 555, suspended: true }]);
+  });
+
+  it.each(["none", "membership", "toggle", "identity"])("personal webhook admission: %s", async (revocation) => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    await api.providers.db.insert(users).values({ id: "test-member", name: "Member", email: "personal@example.com" }).onConflictDoNothing();
+    await api.providers.db.insert(orgMembers).values({ orgId: "local-org", userId: "test-member", role: "member" }).onConflictDoNothing();
+    await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2", accessToken: "member-token", metadata: { login: "alice" },
+    });
+    let profileId = 20;
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      getUser: () => ({ body: { id: profileId, login: "alice" } }),
+      listInstallations: () => ({ body: [{ id: 555, account: { id: 20, login: "alice", type: "User" } }] }),
+    });
+    if (revocation === "membership") await api.providers.db.delete(orgMembers).where(eq(orgMembers.userId, "test-member"));
+    if (revocation === "toggle") await api.providers.db.update(orgs).set({ allowPersonalInstallations: false });
+    if (revocation === "identity") {
+      profileId = 21;
+      await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+        type: "oauth2", accessToken: "other-token", metadata: { login: "alice", githubUserId: 20, githubIdentityProof: "forged" },
+      });
+    }
+    const now = Date.now();
+    await api.providers.db.insert(eventSubscriptions).values({
+      id: "sub_personal", orgId: "local-org", ownerType: "org", ownerId: "local-org",
+      name: "Personal PRs", eventKeys: ["github.pull_request.opened"], filters: [],
+      target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+    const payload = { ...PR_OPENED_PAYLOAD, installation: { id: 555 } };
+    expect((await postForwardedWebhook(api.baseUrl, "pull_request", payload, webhookSecret, `personal-${revocation}`)).status).toBe(204);
+    const rows = await api.providers.db.select().from(events);
+    expect(rows).toHaveLength(revocation === "none" ? 1 : 0);
+    const drops = await api.providers.db.select().from(eventDropLog);
+    if (revocation !== "none") expect(drops).toMatchObject([{
+      reason: "event_not_ingestable", conversationKey: `personal-${revocation}`,
+    }]);
+    const status = await fetch(`${api.baseUrl}/api/me/github/org-status`);
+    expect(await status.json()).toMatchObject({ installationCount: revocation === "none" ? 1 : 0 });
+    if (revocation !== "membership") {
+      const repos = await fetch(`${api.baseUrl}/api/repos`, { headers: MEMBER_HEADERS });
+      expect(await repos.json()).toMatchObject({ installed: revocation === "none" });
+    }
+  });
+
+  it.each(["deleted", "suspend"])("applies %s after personal policy revocation without an owner lookup", async (action) => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedInstallationRow({ accountType: "User", accountLogin: "alice", accountId: 20, linkedUserId: "test-member" });
+    await api.providers.db.update(orgs).set({ allowPersonalInstallations: false });
+    const before = fixture!.calls.length;
+    const payload = { action, installation: { id: 999 } };
+    expect((await postWebhook(api.baseUrl, "installation", payload, signWebhookBody(JSON.stringify(payload), webhookSecret))).status).toBe(204);
+    expect(fixture!.calls.length).toBe(before);
+    const rows = await api.providers.db.select().from(githubInstallations);
+    if (action === "deleted") expect(rows).toEqual([]);
+    else expect(rows).toMatchObject([{ suspended: true }]);
+  });
+
+  it("applies installation_target rename by immutable account ID", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedInstallationRow();
+    const payload = { action: "renamed", installation: { id: 999 },
+      account: { id: githubAccountId("acme"), login: "new-acme", type: "Organization" } };
+    expect((await postWebhook(api.baseUrl, "installation_target", payload, signWebhookBody(JSON.stringify(payload), webhookSecret))).status).toBe(204);
+    expect(await api.providers.db.select().from(githubInstallations)).toMatchObject([{ accountLogin: "new-acme" }]);
+  });
+
+  it("ignores a stranger's installation.created and all later trigger deliveries", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, {
+      listInstallations: () => ({ body: [{ id: 555, account: { login: "stranger", type: "User" } }] }),
+    });
+    const before = fixture!.calls.filter((call) => call.path.includes("/app/installations")).length;
+    const created = { action: "created", installation: { id: 555, account: { id: 987, login: "stranger", type: "User" } } };
+    expect((await postWebhook(api.baseUrl, "installation", created, signWebhookBody(JSON.stringify(created), webhookSecret))).status).toBe(204);
+    expect(await api.providers.db.select().from(githubInstallations)).toEqual([]);
+    const now = Date.now();
+    await api.providers.db.insert(eventSubscriptions).values({
+      id: "sub_stranger", orgId: "local-org", ownerType: "org", ownerId: "local-org", name: "PRs",
+      eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "orchestrator" },
+      enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+    const pr = { ...PR_OPENED_PAYLOAD, installation: { id: 555 } };
+    expect((await postForwardedWebhook(api.baseUrl, "pull_request", pr, webhookSecret, "stranger-delivery")).status).toBe(204);
+    expect(await api.providers.db.select().from(events)).toEqual([]);
+    expect(await api.providers.db.select().from(eventDeliveries)).toEqual([]);
+  });
+
+  it("drops a stale installation row for another organization before trigger dispatch", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedInstallationRow({ accountLogin: "other-org", accountId: githubAccountId("other-org") });
+    const now = Date.now();
+    await api.providers.db.insert(eventSubscriptions).values({
+      id: "sub_other", orgId: "local-org", ownerType: "org", ownerId: "local-org", name: "PRs",
+      eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "orchestrator" },
+      enabled: true, createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+    expect((await postForwardedWebhook(api.baseUrl, "pull_request", PR_OPENED_PAYLOAD, webhookSecret, "other-org-delivery")).status).toBe(204);
+    expect(await api.providers.db.select().from(events)).toEqual([]);
   });
 
   // A push marks every matching enabled source due, whoever owns it, and
@@ -836,7 +1322,9 @@ describe("POST /webhooks/github-app", () => {
     const later = Date.now() + 3_600_000;
     await api.providers.db.update(contentSources).set({ nextAttemptAt: later });
 
+    await seedInstallationRow();
     const payload = {
+      installation: { id: 999 },
       ref: "refs/heads/main",
       repository: { full_name: "tkhq/skills", default_branch: "main" },
     };
@@ -884,6 +1372,7 @@ describe("POST /webhooks/github-app", () => {
   }
 
   const PR_OPENED_PAYLOAD = {
+    installation: { id: 999 },
     action: "opened",
     pull_request: { number: 7, title: "Add thing" },
     repository: { full_name: "acme/widgets" },
@@ -893,6 +1382,7 @@ describe("POST /webhooks/github-app", () => {
   it("forwards a pull_request webhook into the event pipeline: events row + matched pending delivery", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedInstallationRow();
 
     const now = Date.now();
     await api.providers.db.insert(eventSubscriptions).values({
@@ -952,6 +1442,7 @@ describe("POST /webhooks/github-app", () => {
   it("dedupes a redelivered webhook (same x-github-delivery -> one events row, one delivery)", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedInstallationRow();
 
     const now = Date.now();
     await api.providers.db.insert(eventSubscriptions).values({
@@ -986,11 +1477,13 @@ describe("POST /webhooks/github-app", () => {
   it("routes by installation row and verifies with the env secret when only the env fallback is configured", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     setEnvApp();
+    useFixture();
     await api.providers.db.insert(githubInstallations).values({
       id: "ghi_env",
       orgId: "local-org",
       installationId: 999,
       accountLogin: "acme",
+      accountId: githubAccountId("acme"),
       accountType: "Organization",
       repositorySelection: "all",
       suspended: false,
@@ -998,7 +1491,7 @@ describe("POST /webhooks/github-app", () => {
       updatedAt: Date.now(),
     });
 
-    const payload = { action: "suspend", installation: { id: 999, account: { login: "acme", type: "Organization" } } };
+    const payload = { action: "suspend", installation: { id: 999, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" } } };
     const badSig = signWebhookBody(JSON.stringify(payload), "wrong-secret");
     expect((await postWebhook(api.baseUrl, "installation", payload, badSig)).status).toBe(403);
 
@@ -1014,16 +1507,16 @@ describe("POST /webhooks/github-app", () => {
     setEnvApp();
     useFixture({
       listInstallations: () => ({
-        body: [{ id: 555, account: { login: "newco", type: "Organization" }, repository_selection: "all", suspended_at: null }],
+        body: [{ id: 555, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
       }),
     });
 
-    const payload = { action: "created", installation: { id: 555, account: { login: "newco", type: "Organization" } } };
+    const payload = { action: "created", installation: { id: 555, account: { id: githubAccountId("acme"), login: "acme", type: "Organization" } } };
     const sig = signWebhookBody(JSON.stringify(payload), ENV_APP.GITHUB_APP_WEBHOOK_SECRET);
     expect((await postWebhook(api.baseUrl, "installation", payload, sig)).status).toBe(204);
 
     const rows = await api.providers.db.select().from(githubInstallations).where(eq(githubInstallations.orgId, "local-org"));
-    expect(rows.some((r) => r.accountLogin === "newco")).toBe(true);
+    expect(rows.some((r) => r.accountLogin === "acme")).toBe(true);
   });
 
   it("413s a body over the 1 MiB cap", async () => {

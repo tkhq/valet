@@ -8,6 +8,8 @@ CREATE TABLE "orgs" (
 	"allow_public_artifacts" boolean NOT NULL DEFAULT false,
 	"allow_anonymous_image_bakes" boolean NOT NULL DEFAULT false,
 	"allow_personal_installations" boolean NOT NULL DEFAULT true,
+	"github_app_owner" jsonb,
+	"github_installation_revision" bigint NOT NULL DEFAULT 0,
 	"model_tiers" jsonb,
 	"approved_models" jsonb,
 	"reasoning_settings" jsonb
@@ -977,6 +979,7 @@ CREATE TABLE "github_installations" (
 	"org_id" text NOT NULL,
 	"installation_id" bigint NOT NULL,
 	"account_login" text NOT NULL,
+	"account_id" bigint,
 	"account_type" text NOT NULL,
 	"repository_selection" text,
 	"suspended" boolean DEFAULT false NOT NULL,

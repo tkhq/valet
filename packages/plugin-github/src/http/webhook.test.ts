@@ -30,13 +30,12 @@ function effects() {
     installationRemoved: vi.fn<Effects["installationRemoved"]>(async () => {}),
     installationSuspended: vi.fn<Effects["installationSuspended"]>(async () => {}),
     repositorySelectionChanged: vi.fn<Effects["repositorySelectionChanged"]>(async () => {}),
-    discoverInstallations: vi.fn<Effects["discoverInstallations"]>(async () => {}),
     emit: vi.fn<Effects["emit"]>(async () => {}),
     recordUndeliverable: vi.fn<Effects["recordUndeliverable"]>(async () => {}),
   } satisfies Effects;
 }
 
-function webhook(bound: Effects | null, secret = SECRET) {
+function webhook(bound: Effects | "retry" | null, secret = SECRET) {
   const bind = vi.fn<GithubWebhookDelivery["bind"]>(async () => bound);
   const capability: GithubWebhookCapability = { openDelivery: async () => ({ webhookSecret: secret, bind }) };
   return { capability, bind };
@@ -90,6 +89,17 @@ describe("receiveWebhook", () => {
     }
   });
 
+  it("returns 503 when verified delivery admission needs a retry", async () => {
+    const { capability, bind } = webhook("retry");
+    const body = JSON.stringify({ installation: { id: 42 } });
+    const response = await receiveWebhook(request(body, {
+      "x-github-event": "push", "x-hub-signature-256": sign(body), "x-github-delivery": "retry-delivery",
+    }), capability, githubTriggerDefs);
+    expect(response.status).toBe(503);
+    expect(bind).toHaveBeenCalledWith(expect.objectContaining({ deliveryId: "retry-delivery" }));
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining("Redeliver manually") });
+  });
+
   it("binds with the verified installation ID and applies installation actions", async () => {
     const bound = effects();
     const { capability, bind } = webhook(bound);
@@ -102,19 +112,18 @@ describe("receiveWebhook", () => {
       );
       expect(response.status).toBe(204);
     }
-    expect(bind).toHaveBeenCalledWith({ installationId: 42 });
+    expect(bind).toHaveBeenCalledWith(expect.objectContaining({ installationId: 42, installationCreated: true }));
+    expect(bind).toHaveBeenCalledWith(expect.objectContaining({ installationId: 42, installationCreated: false }));
     expect(bound.installationRemoved).toHaveBeenCalledWith(42);
     expect(bound.installationSuspended.mock.calls).toEqual([[42, true], [42, false]]);
-    expect(bound.discoverInstallations).toHaveBeenCalledOnce();
     expect(bound.emit).not.toHaveBeenCalled();
   });
 
   it("keeps acknowledging when best-effort effects fail", async () => {
     const bound = effects();
     bound.contentPushed.mockRejectedValueOnce(new Error("sync down"));
-    bound.discoverInstallations.mockRejectedValueOnce(new Error("GitHub down"));
     const { capability } = webhook(bound);
-    const push = JSON.stringify({ ref: "refs/heads/main", repository: { full_name: "acme/app" } });
+    const push = JSON.stringify({ installation: { id: 7 }, ref: "refs/heads/main", repository: { full_name: "acme/app" } });
     const created = JSON.stringify({ action: "created", installation: { id: 7 } });
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -129,7 +138,7 @@ describe("receiveWebhook", () => {
   it("emits a matching trigger event and records events no trigger can ingest", async () => {
     const bound = effects();
     const { capability } = webhook(bound);
-    const pr = JSON.stringify({ action: "closed", pull_request: { html_url: "https://github.com/acme/app/pull/1", state: "closed", merged: true } });
+    const pr = JSON.stringify({ installation: { id: 7 }, action: "closed", pull_request: { html_url: "https://github.com/acme/app/pull/1", state: "closed", merged: true } });
     await receiveWebhook(
       request(pr, { "x-github-event": "pull_request", "x-github-delivery": "d-1", "x-hub-signature-256": sign(pr) }),
       capability,
@@ -153,6 +162,20 @@ describe("receiveWebhook", () => {
       [{ deliveryId: undefined, detail: "github event pull_request: missing x-github-delivery header" }],
       [{ deliveryId: "d-2", detail: "github event unknown_family: no registered TriggerDef (github.unknown_family)" }],
     ]);
+  });
+
+  it("records events without installation IDs instead of silently dropping them", async () => {
+    const bound = effects();
+    const { capability } = webhook(bound);
+    const body = JSON.stringify({ action: "opened" });
+    await receiveWebhook(request(body, {
+      "x-github-event": "pull_request", "x-github-delivery": "missing-install",
+      "x-hub-signature-256": sign(body),
+    }), capability, githubTriggerDefs);
+    expect(bound.emit).not.toHaveBeenCalled();
+    expect(bound.recordUndeliverable).toHaveBeenCalledWith({
+      deliveryId: "missing-install", detail: "github event pull_request: missing installation ID",
+    });
   });
 
   it("acknowledges a verified delivery with no organization to receive it", async () => {
