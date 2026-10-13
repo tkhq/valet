@@ -12,12 +12,14 @@ import { NodeForm } from "./node-forms/registry";
 export interface InspectorProps {
   readOnly?: boolean;
   node: WorkflowNode;
+  /** The models this step called in the workflow's last run. */
+  lastRunModels?: string[];
   onChange: (patch: Record<string, unknown>) => void;
   onRemove: () => void;
   onDuplicate: () => void;
 }
 
-export function Inspector({ node, onChange, onRemove, onDuplicate, readOnly = false }: InspectorProps) {
+export function Inspector({ node, lastRunModels, onChange, onRemove, onDuplicate, readOnly = false }: InspectorProps) {
   return (
     <fieldset disabled={readOnly} className="flex h-full min-w-0 flex-col" data-testid="inspector">
       <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
@@ -36,7 +38,7 @@ export function Inspector({ node, onChange, onRemove, onDuplicate, readOnly = fa
         </div>
       </div>
       <div className="flex-1 overflow-y-auto p-3">
-        <NodeForm key={node.id} node={node} onChange={onChange} />
+        <NodeForm key={node.id} node={node} onChange={onChange} lastRunModels={lastRunModels} />
       </div>
     </fieldset>
   );

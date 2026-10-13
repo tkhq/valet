@@ -2165,12 +2165,26 @@ export interface WorkflowStepCost {
   models: string[];
 }
 
+/**
+ * A step that called different models than in the previous run with the
+ * same steps. Nobody edited the steps between the two runs, so the platform
+ * changed the model: a size tier remap or a new default.
+ */
+export interface WorkflowModelChange {
+  nodeId: string;
+  previous: string[];
+  current: string[];
+}
+
 export interface WorkflowRunDetail {
   /** Run-owned histories, excluding the human conversation that started the run. */
   conversations?: WorkflowRunConversation[];
   /** Model spend per step, from the usage projection. Steps with no model
    * calls are absent. */
   stepCosts?: WorkflowStepCost[];
+  /** Steps whose models changed since the previous run with the same steps.
+   * Empty for a first run and for a run after an edit. */
+  modelChanges?: WorkflowModelChange[];
   run: WorkflowRunSummary & {
     waitingOn: unknown[];
     definition: unknown;

@@ -68,6 +68,7 @@ import { buildValidateEnvironment, buildOrgValidateEnvironment } from "../workfl
 import { workflowRequestContext } from "../workflows/request-context.js";
 import { applyWorkflowModelPatch } from "../workflows/patch.js";
 import { workflowRunStepCosts } from "../workflows/step-cost.js";
+import { workflowRunModelChanges } from "../workflows/model-drift.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import type { TeamServiceReadinessDeps } from "../workflows/team-service-readiness.js";
 import { allowWorkflowPermissions, analyzeWorkflowPermissions, revokeWorkflowPermissions } from "../workflows/permissions.js";
@@ -858,7 +859,8 @@ workflowsRouter.get("/runs/:runId", async (c) => {
     workflowRunConversations(c, runId),
     workflowRunStepCosts(deps.db, deps.workflowStore, runId),
   ]);
-  return c.json({ ...resp, conversations, stepCosts });
+  const modelChanges = await workflowRunModelChanges(deps.db, deps.workflowStore, resp.run, stepCosts);
+  return c.json({ ...resp, conversations, stepCosts, modelChanges });
 });
 
 workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {

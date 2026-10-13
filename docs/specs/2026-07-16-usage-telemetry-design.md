@@ -384,6 +384,14 @@ Usage → Breakdown → Workflows lists one row per workflow, linked to its page
 
 Child sessions that a session step spawns keep their own ids and do not roll up into the step.
 
+### Model changes between runs (2026-10-13)
+
+The platform can change the model a step runs on with no edit to the workflow. An admin can remap a size tier, or a default can change. A workflow that worked can then give worse results. Pinning a concrete model at save would block such remaps, and a run fails when a pinned model retires, so Valet shows the change instead (`workflows/model-drift.ts`).
+
+`GET /api/workflows/runs/:runId` also returns `modelChanges`. The route finds the previous run of the same workflow whose steps are the same (`sameWorkflowSteps`), among the 20 runs before it. It then compares the models of each step in the two runs' `stepCosts`, over all iterations, and lists each step whose model set differs. A first run, or a run after an edit to the steps, has no previous run to compare, so it lists nothing. A step that called no model in either run is not compared. A `workflow` step is not compared either: its models come from the runs it started, and their workflow can change apart from this one. A run with no model calls skips the lookup.
+
+The Steps list shows each step's models below its name. A step whose models changed carries a warning badge on its first row, and a banner at the top of the run page counts the changed steps. In the editor, the session and LLM step forms show the models the step called in the newest settled run. The run detail route supplies them, so the editor needs no new endpoint. When the run used one model, and exactly one approved catalog model has that id, "Pin this model" writes the catalog id into the step's draft. The person then saves the draft as usual.
+
 ## Member labels (2026-10-14)
 
 Unattended work runs as its workspace principal. A team's schedules, event subscriptions, and team API keys act as `team:{teamId}`. Org-owned work acts as `org:{orgId}`. That id becomes the session user or the prompt author, so a By member row can belong to a team instead of a person.

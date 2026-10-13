@@ -12,6 +12,7 @@ import {
   useAllowWorkflowPermissions,
   useRevokeWorkflowPermissions,
   useCopyWorkflow,
+  useRunDetail,
   useStartRun,
   useUpdateWorkflow,
   useWorkflow,
@@ -210,6 +211,17 @@ function WorkflowEditorPane({
     }
     return map;
   }, [permissions]);
+
+  // The models each step called in the newest settled run, for the step
+  // forms. Run detail carries them per step and iteration.
+  const lastRun = useRunDetail(runsQuery.data?.runs.find((run) => run.status === "settled")?.runId ?? "");
+  const lastRunModels = useMemo(() => {
+    const models = new Map<string, string[]>();
+    for (const cost of lastRun.data?.stepCosts ?? []) {
+      models.set(cost.nodeId, [...new Set([...(models.get(cost.nodeId) ?? []), ...cost.models])].sort());
+    }
+    return models;
+  }, [lastRun.data]);
 
   // The header badge counts ACTIONS, not nodes — pre-approving writes one
   // override per action, and two nodes calling the same action are one
@@ -485,6 +497,7 @@ function WorkflowEditorPane({
             saving={update.isPending}
             readOnly={mirrored}
             gateByNodeId={gateByNodeId}
+            lastRunModels={lastRunModels}
             assistant={
               <WorkflowAssistantPanel
                 assistant={assistant}
