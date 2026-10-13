@@ -312,7 +312,7 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     orgRole = "member";
     openTeam();
     // The model label names the tier unset falls to: Small with no org default tier.
-    expect(screen.getByText("Organization default (Small)")).toBeTruthy();
+    expect(screen.getByText("Small (Organization default)")).toBeTruthy();
     expect(screen.getByText("Organization default")).toBeTruthy();
   });
 

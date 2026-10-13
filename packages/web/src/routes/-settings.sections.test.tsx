@@ -275,7 +275,7 @@ describe("ThreadDefaultsPage", () => {
     fireEvent.focus(input);
 
     // Personal threads do not inherit team defaults.
-    fireEvent.click(within(screen.getByRole("listbox")).getByText("Valet default (Small)"));
+    fireEvent.click(within(screen.getByRole("listbox")).getByText("Small (Valet default)"));
     expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: null });
   });
 
@@ -302,7 +302,7 @@ describe("ThreadDefaultsPage", () => {
     orgData = { callerRole: "member", features: { organizations: true } };
     tiersData = { ...tiersData, defaultTier: "m" };
     render(<ThreadDefaultsPage />);
-    expect(screen.getByLabelText("Default model").getAttribute("placeholder")).toBe("Organization default (Medium)");
+    expect(screen.getByLabelText("Default model").getAttribute("placeholder")).toBe("Medium (Organization default)");
   });
 
   it("does not offer current-thread inheritance for new conversations", () => {

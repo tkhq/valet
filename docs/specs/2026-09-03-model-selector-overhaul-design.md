@@ -206,7 +206,7 @@ teams set an expensive concrete model as the team default to avoid that.
 When the column is null, the cascade is unchanged. A child passes
 `childDefault: "s"`, so delegated work stays on `s` whatever the org
 default tier is. The personal and team pickers label their clear state
-with the tier it falls to, for example "Organization default (Medium)".
+with the tier it falls to, for example "Medium (Organization default)".
 
 `resolveModelSpec` already resolves tier tokens and persists the token as
 the canonical id, so the fallback works exactly like an explicit tier pick:
