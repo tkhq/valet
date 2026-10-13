@@ -14,7 +14,7 @@
  * test (vitest.setup.ts), so `vi.stubEnv` sits on top of a clean base.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -804,6 +804,20 @@ describe("EngineHost model resolution wiring", () => {
       expect(session.options.modelSpec).toBe("l");
       expect(session.options.sampling?.reasoning).toBe("high");
       expect(await engineHost.resolveFreshThreadSettings(session.id, { userId: "test-member", orgId: "local-org", workspace: "/tmp" })).toEqual({ model: "l", reasoning: "high" });
+    });
+
+    it("keeps the model and reasoning an upgraded assistant carried", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await db.update(users).set({ defaultModel: "m", defaultReasoning: "low" }).where(eq(users.id, "local-user"));
+      const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: "local-user" });
+      // An upgraded database still holds the columns a fresh schema no longer has.
+      await db.execute(sql`ALTER TABLE assistants ADD COLUMN IF NOT EXISTS model text, ADD COLUMN IF NOT EXISTS reasoning text`);
+      await db.execute(sql`UPDATE assistants SET model = 'l', reasoning = 'high' WHERE id = ${assistant.id}`);
+      const session = await engineHost.assistantSessionFor(assistant.id, { actorUserId: "local-user", orgId: "local-org" });
+      expect(session.options.modelSpec).toBe("l");
+      expect(session.options.sampling?.reasoning).toBe("high");
+      expect(await engineHost.resolveFreshThreadSettings(session.id, { userId: "local-user", orgId: "local-org", workspace: "/tmp" })).toEqual({ model: "l", reasoning: "high" });
     });
 
     it("an explicit session override wins over the personal owner default", async () => {
