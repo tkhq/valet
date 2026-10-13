@@ -80,7 +80,7 @@ function ServerRow({ server }: { server: OrgMcpServerWire }) {
         {server.enabled && server.connected === false && <Badge>Not connected</Badge>}
       </div>
       {server.description && <p className="text-xs text-muted">{server.description}</p>}
-      <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 text-xs">
+      <dl className="grid grid-cols-[3.5rem_1fr] gap-x-3 gap-y-0.5 text-xs">
         <dt className="text-muted">URL</dt>
         <dd className="break-all font-mono text-ink">{server.url}</dd>
         <dt className="text-muted">Tools</dt>
