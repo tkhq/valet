@@ -107,10 +107,11 @@ Settings matches the thread UI:
 Integrations becomes a list, like Claude's Connectors page. It follows the
 switcher.
 
-- Three groups. **Connected** holds a plugin with a service that the caller
+- Two groups. **Connected** holds a plugin with a service that the caller
   connected or the organization provides. **Available** holds a plugin the
-  caller can still connect. **Built in** holds a plugin that needs no
-  account, so built-in tools do not crowd the Connected group.
+  caller can still connect. A built-in plugin needs no account, so the page
+  does not list it (2026-10-13); its panel still opens from a `?service=`
+  link, such as a skill's integration row.
 - A row is one line: the mark, the name, a text status pill, the account it
   uses, and a permission summary such as "12 tools · 3 ask · 1 off" (2026-10-13).
   The pill reads Connected, a health state (Expired, Refresh failed, Sign-in

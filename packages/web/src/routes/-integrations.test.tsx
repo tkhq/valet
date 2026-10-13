@@ -383,7 +383,7 @@ describe("IntegrationsPage", () => {
     expect(screen.queryByRole("link", { name: "Install on personal account" })).toBeNull();
   });
 
-  it("lists connected services first, one row each, then the rest, then built-ins", () => {
+  it("lists connected services first, one row each, then the rest, and no built-ins", () => {
     render(<IntegrationsPage />);
     const rowNames = (label: string) =>
       within(screen.getByRole("list", { name: label }))
@@ -392,7 +392,8 @@ describe("IntegrationsPage", () => {
     expect(rowNames("Connected")).toEqual(["Slack"]);
     // Your own 1Password token sits with the services, under Available until set.
     expect(rowNames("Available")).toEqual(["GitHub", "Typefully", "1Password"]);
-    expect(rowNames("Built in")).toEqual(["DeepWiki"]);
+    expect(screen.queryByRole("list", { name: "Built in" })).toBeNull();
+    expect(screen.queryByText("DeepWiki")).toBeNull();
   });
 
   it("lists connectable services only, with friendly names and honest reach meta", () => {
@@ -401,8 +402,9 @@ describe("IntegrationsPage", () => {
     // Friendly names, not raw ids.
     expect(screen.getByText("GitHub")).toBeTruthy();
     expect(screen.getByText("Typefully")).toBeTruthy();
-    expect(screen.getByText("DeepWiki")).toBeTruthy();
     expect(screen.queryByText("github")).toBeNull();
+    // A built-in plugin needs no account, so the page does not list it.
+    expect(screen.queryByText("DeepWiki")).toBeNull();
 
     // Content-only plugins are not listed at all. They need no credential
     // and offer no action, so their row was one nobody could use.
@@ -476,7 +478,9 @@ describe("IntegrationsPage", () => {
           version: "0.0.0",
           actionCount: 0,
           dynamic: true as const,
-          services: [],
+          services: [
+            { service: "pylon", type: "oauth2" as const, configKeys: ["accessToken"], connected: false, connect: "oauth" as const, dynamic: true as const, actions: [] },
+          ],
         },
         {
           // Multi-word slug, no wire displayName: every word capitalizes,
@@ -485,7 +489,9 @@ describe("IntegrationsPage", () => {
           version: "0.0.0",
           actionCount: 0,
           dynamic: true as const,
-          services: [],
+          services: [
+            { service: "pager-duty", type: "oauth2" as const, configKeys: ["accessToken"], connected: false, connect: "oauth" as const, dynamic: true as const, actions: [] },
+          ],
         },
       ],
     };
@@ -1384,11 +1390,11 @@ describe("IntegrationsPage — the search box", () => {
   });
 
   it("matches the description, not just the name", () => {
-    // "knowledge base" appears only in deepwiki's description.
-    searchParams = { q: "knowledge base" };
+    // "webhooks" appears only in GitHub's description.
+    searchParams = { q: "webhooks" };
     render(<IntegrationsPage />);
 
-    expect(screen.getByText("DeepWiki")).toBeTruthy();
+    expect(screen.getByText("GitHub")).toBeTruthy();
     expect(screen.queryByText("Slack")).toBeNull();
   });
 

@@ -23,10 +23,10 @@ import { pluginTools } from "~/components/integrations/tool-permissions";
 
 /**
  * `/integrations` — the services a person can connect, as grouped lists in
- * the settings visual idiom: Connected first, then Available, then Built in
- * (settings-redesign spec, "Integrations"). Content-only plugins
- * are not listed: they need no credential and offer no action, so a row for
- * one was a row nobody could use. OAuth connect for services declaring
+ * the settings visual idiom: Connected first, then Available
+ * (settings-redesign spec, "Integrations"). Built-in plugins, which need no
+ * account, and content-only plugins are not listed: there is nothing to
+ * connect. A built-in plugin's panel still opens from a `?service=` link. OAuth connect for services declaring
  * `oauth` metadata redirects
  * to `/api/credentials/:service/connect` and lands back here with
  * `?connected=` or `?error=`; manual token entry remains the fallback for
@@ -158,7 +158,6 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
     .sort((a, b) => pluginDisplayName(a).localeCompare(pluginDisplayName(b)));
   const connected = services.filter((plugin) => integrationGroup(plugin) === "connected");
   const available = services.filter((plugin) => integrationGroup(plugin) === "available");
-  const builtin = services.filter((plugin) => integrationGroup(plugin) === "builtin");
   const searching = query.trim().length > 0;
   // Rows keep the search when they open a panel; closing it keeps it too.
   const rowSearch: Record<string, string> = searching ? { q: query } : {};
@@ -236,7 +235,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
 
           {!isLoading && !error && showSearch && (
             <div className="space-y-10">
-              {searching && services.length === 0 && !onePassword && (
+              {searching && connected.length + available.length === 0 && !onePassword && (
                 <div className="text-sm text-muted">No integrations match your search.</div>
               )}
 
@@ -257,15 +256,6 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                       <IntegrationRow key={plugin.name} plugin={plugin} tools={toolsFor(plugin)} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
                     ))}
                     {onePassword === "available" && <PersonalOnePasswordRow connected={false} />}
-                  </IntegrationList>
-                </Section>
-              )}
-              {builtin.length > 0 && (
-                <Section title="Built in" description="Ready to use. These need no account.">
-                  <IntegrationList label="Built in">
-                    {builtin.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} tools={toolsFor(plugin)} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
-                    ))}
                   </IntegrationList>
                 </Section>
               )}
