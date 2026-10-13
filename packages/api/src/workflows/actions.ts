@@ -19,6 +19,7 @@ import { WorkflowCursorError, type WorkflowDefinition, type WorkflowEdge } from 
 import type { Static, TSchema } from "typebox";
 import { Type } from "typebox";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
+import { previewWorkflow } from "../routes/workflow-preview.js";
 import {
   appendRemovedEdgeHint,
   applyWorkflowModelPatch,
@@ -1061,6 +1062,43 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           messages: transcript.messages,
         },
       };
+      },
+    });
+
+  const previewWorkflowAction = action(
+    Type.Object({
+      workflow_id: Type.String(),
+      input: Type.Optional(Type.Record(Type.String(), Type.Unknown(), {
+        description: "Sample trigger fields. They override the last run's trigger data.",
+      })),
+      sample: Type.Optional(Type.Union([Type.Literal("last_run"), Type.Literal("none")], {
+        description: "last_run (default) reads node results from the newest run. none uses only `input`.",
+      })),
+      node_id: Type.Optional(Type.String({ description: "Return only this step. Omit for every step." })),
+    }),
+  )({
+    id: "workflows.preview_workflow",
+    name: "Preview workflow",
+    description:
+      "Dry-run the saved workflow with no side effects. Only trigger, set, if and stop steps run " +
+      "(fidelity 'executed'). Every other step is described from its shape and never called " +
+      "(fidelity 'described'). Each step lists its resolved template fields, the `unresolved` " +
+      "paths that render to nothing, its output paths and warnings. Use it before a real run " +
+      "to catch template and structure errors.",
+    riskLevel: "low",
+    execute: async ({ workflow_id, input, sample, node_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const outcome = await previewWorkflow(getDeps(), owner, workflow_id, { input, sample, nodeId: node_id });
+      if (outcome.ok) return { success: true, data: { workflowId: workflow_id, ...outcome.response } };
+      switch (outcome.reason) {
+        case "not_found":
+          return { success: false, error: `workflow not found: ${workflow_id}` };
+        case "invalid_definition":
+          return { success: false, error: formatLintErrors(outcome.errors) };
+        case "unknown_node":
+          return { success: false, error: outcome.message };
+      }
     },
   });
 
@@ -1477,6 +1515,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       getRun,
       getNodeResult,
       getNodeTranscript,
+      previewWorkflowAction,
       listRuns,
       cancelRun,
       resolveApproval,

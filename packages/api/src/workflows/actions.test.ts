@@ -69,6 +69,7 @@ describe("workflowsActionPlugin", () => {
       "workflows.list_triggers",
       "workflows.list_workflows",
       "workflows.patch_workflow",
+      "workflows.preview_workflow",
       "workflows.propose_schedule",
       "workflows.propose_trigger",
       "workflows.request_workflow_deletion",
@@ -102,6 +103,7 @@ describe("workflowsActionPlugin", () => {
     expect(byId.get("workflows.get_permissions")).toBe("low");
     expect(byId.get("workflows.get_run")).toBe("low");
     expect(byId.get("workflows.get_node_transcript")).toBe("low");
+    expect(byId.get("workflows.preview_workflow")).toBe("low");
     expect(byId.get("workflows.save_workflow")).toBe("medium");
     expect(byId.get("workflows.start_run")).toBe("medium");
     expect(byId.get("workflows.delete_workflow")).toBe("medium");

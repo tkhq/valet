@@ -17,6 +17,8 @@ import {
   orderNodes,
   staticShape,
 } from "./workflow-preview.js";
+import type { PluginAction, PluginActionContext } from "@valet/engine";
+import { workflowsActionPlugin } from "../workflows/actions.js";
 import type { CreateWorkflowResponse, PreviewWorkflowResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -585,6 +587,65 @@ describe("POST /api/workflows/:id/preview — the editor's correction loop", () 
     expect(saveRes.status).toBe(400);
     const saveBody = (await saveRes.json()) as { error: string; errors: string[] };
     expect(saveBody.errors).toEqual(previewBody.errors);
+  });
+});
+
+/** The agent's action, wired to the same providers the route reads. */
+function previewAction(testApi: TestApi): { action: PluginAction; ctx: PluginActionContext } {
+  const { providers } = testApi;
+  const plugin = workflowsActionPlugin(() => ({
+    db: providers.db,
+    workflowStore: providers.workflowStore,
+    workflowRunHost: providers.workflowRunHost,
+    credentials: providers.engineCredentials,
+    engineStore: providers.engineStore,
+    actionPluginByService: providers.actionPluginByService,
+  }));
+  const action = plugin.actions.find((a) => a.id === "workflows.preview_workflow");
+  if (!action) throw new Error("missing preview_workflow action");
+  // The action reads only host-stamped identity; sandbox and credential methods are unused.
+  const ctx = { orgId: "local-org", userId: "local-user", actionId: action.id, service: "workflows" } as PluginActionContext;
+  return { action, ctx };
+}
+
+describe("workflows.preview_workflow", () => {
+  it("returns the route's preview for the same workflow and input", async () => {
+    api = await bootTestApi();
+    const { action, ctx } = previewAction(api);
+    const cases = [
+      { definition: PURE_DEFINITION, input: { email: "a@example.com" } },
+      { definition: EFFECTFUL_DEFINITION, input: { topic: "caching" } },
+    ];
+
+    for (const { definition, input } of cases) {
+      const created = await createWorkflow(api.baseUrl, definition);
+      // A workflow with no run gets a synthetic trigger stamped with the
+      // current time. Hold the clock so both previews stamp the same value.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-13T12:00:00Z"));
+      try {
+        const routeBody = await preview(api.baseUrl, created.id, { input });
+        const result = await action.execute({ workflow_id: created.id, input }, ctx);
+        expect(result.error).toBeUndefined();
+        // The route's reply went through JSON, so the action's must too.
+        const { workflowId, ...actionBody } = JSON.parse(JSON.stringify(result.data)) as PreviewWorkflowResponse & { workflowId: string };
+        expect(workflowId).toBe(created.id);
+        expect(actionBody).toEqual(routeBody);
+        expect(routeBody.nodes).toHaveLength(definition.nodes.length);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  });
+
+  it("names the corrective action for a node id the definition does not hold", async () => {
+    api = await bootTestApi();
+    const { action, ctx } = previewAction(api);
+    const created = await createWorkflow(api.baseUrl, PURE_DEFINITION);
+
+    const result = await action.execute({ workflow_id: created.id, node_id: "nope" }, ctx);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("omit nodeId");
   });
 });
 

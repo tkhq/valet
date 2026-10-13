@@ -1,6 +1,7 @@
 /**
  * `POST /api/workflows/:id/preview` — what each node would receive, before
- * the workflow runs.
+ * the workflow runs. The assistant's `workflows.preview_workflow` action
+ * calls the same {@link previewWorkflow}.
  *
  * The dag/v1 template language has no undefined. `{{nodes.draft.result.text}}`
  * renders as `null` in a single-expression field and as `""` inside mixed
@@ -55,6 +56,7 @@ import {
   ownedDefinitionRow,
   validateDefinitionInput,
   type WorkflowOwner,
+  type WorkflowServiceDeps,
 } from "../workflows/service.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import type {
@@ -804,43 +806,44 @@ export function orderNodes(definition: WorkflowDefinition): WorkflowNode[] {
   return [...ordered, ...remaining.values()];
 }
 
-// ── Route ───────────────────────────────────────────────────────────────────
+// ── Preview ─────────────────────────────────────────────────────────────────
 
-workflowPreviewRouter.post("/:id/preview", async (c) => {
-  const { db, workflowStore, actionPluginByService } = c.var.providers;
-  const owner: WorkflowOwner = { userId: c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal };
-  const workflowId = c.req.param("id");
+export type PreviewWorkflowDeps = Pick<WorkflowServiceDeps, "db" | "workflowStore" | "actionPluginByService">;
 
-  let body: PreviewWorkflowRequest;
-  try {
-    body = (await c.req.json()) as PreviewWorkflowRequest;
-  } catch {
-    // An empty body is a legitimate preview: the stored definition against
-    // the last run, with no sample input.
-    body = {};
-  }
+export type PreviewWorkflowOutcome =
+  | { ok: true; response: PreviewWorkflowResponse }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "invalid_definition"; errors: string[] }
+  | { ok: false; reason: "unknown_node"; message: string };
 
-  const row = await ownedDefinitionRow(db, owner, workflowId);
-  if (!row) return c.json({ error: "workflow not found" }, 404);
+/**
+ * One preview, for any caller. The route below and the agent's
+ * `workflows.preview_workflow` action both call this, so a person and the
+ * assistant read the same answer for the same definition.
+ */
+export async function previewWorkflow(
+  deps: PreviewWorkflowDeps,
+  owner: WorkflowOwner,
+  workflowId: string,
+  body: PreviewWorkflowRequest,
+): Promise<PreviewWorkflowOutcome> {
+  const row = await ownedDefinitionRow(deps.db, owner, workflowId);
+  if (!row) return { ok: false, reason: "not_found" };
 
   const source = body.definition ?? row.definition;
-  const validation = validateDefinitionInput(source, buildValidateEnvironment(actionPluginByService));
-  if (!validation.ok) {
-    return c.json(
-      { error: "invalid workflow definition", errors: validation.errors },
-      400,
-    );
-  }
+  const validation = validateDefinitionInput(source, buildValidateEnvironment(deps.actionPluginByService));
+  if (!validation.ok) return { ok: false, reason: "invalid_definition", errors: validation.errors };
   const definition = validation.definition;
 
   if (body.nodeId !== undefined && !definition.nodes.some((n) => n.id === body.nodeId)) {
-    return c.json(
-      { error: `no node "${body.nodeId}" in this definition. Send a node id from the definition, or omit nodeId to preview every node.` },
-      400,
-    );
+    return {
+      ok: false,
+      reason: "unknown_node",
+      message: `no node "${body.nodeId}" in this definition. Send a node id from the definition, or omit nodeId to preview every node.`,
+    };
   }
 
-  const sample = await buildSample(workflowStore, workflowId, definition, body);
+  const sample = await buildSample(deps.workflowStore, workflowId, definition, body);
   const context = toTemplateContext(sample);
 
   // A throwaway store, discarded with the request. The executors below need
@@ -883,7 +886,33 @@ workflowPreviewRouter.post("/:id/preview", async (c) => {
     },
     nodes,
   };
-  return c.json(response);
+  return { ok: true, response };
+}
+
+// ── Route ───────────────────────────────────────────────────────────────────
+
+workflowPreviewRouter.post("/:id/preview", async (c) => {
+  const owner: WorkflowOwner = { userId: c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal };
+
+  let body: PreviewWorkflowRequest;
+  try {
+    body = (await c.req.json()) as PreviewWorkflowRequest;
+  } catch {
+    // An empty body is a legitimate preview: the stored definition against
+    // the last run, with no sample input.
+    body = {};
+  }
+
+  const outcome = await previewWorkflow(c.var.providers, owner, c.req.param("id"), body);
+  if (outcome.ok) return c.json(outcome.response);
+  switch (outcome.reason) {
+    case "not_found":
+      return c.json({ error: "workflow not found" }, 404);
+    case "invalid_definition":
+      return c.json({ error: "invalid workflow definition", errors: outcome.errors }, 400);
+    case "unknown_node":
+      return c.json({ error: outcome.message }, 400);
+  }
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

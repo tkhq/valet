@@ -140,6 +140,7 @@ For list-shaped output, abstain with an empty array and gate on `if` with `lengt
 - Debug a surprising node with `get_node_result` — it returns the checkpoint result verbatim, the same value templates read via `nodes.<id>.result` (oversized results come back as `{ truncated: true, jsonPrefix }`).
 - To learn WHY a session or orchestrator step produced its result, read `get_node_transcript`: the prompt it received with templates filled in, its replies, each tool call with its result or error, and any format-repair prompt. `get_run` marks a step with `repairAttempted` and `schemaError` when its first reply failed the output schema. Page back with `before`.
 - A run is finished when `status: "settled"`; report the `outcome`.
+- To test a workflow, first state 2 to 4 concrete checks that the result must pass. Then call `preview_workflow` to find template and structure errors. It runs only `trigger`, `set`, `if` and `stop` steps and describes the other steps, so it has no side effects. Start a real run only after the person agrees, because a real run posts messages and calls integrations. Read the result in the `workflow.settled` report and with `get_node_result`. Fix the workflow and run it again, at most 3 times. End the test with each check marked passed or failed.
 
 
 ### Team workflow deletion
