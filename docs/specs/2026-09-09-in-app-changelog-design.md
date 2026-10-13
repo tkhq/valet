@@ -96,10 +96,12 @@ All controls have visible keyboard focus. Search and selects use the same solid 
 Mobile controls and source links have touch targets of at least 44 by 44 pixels.
 Release cards and entry groups use consistent gutters. The first entry keeps the same vertical padding as later entries.
 Unread checkpoints and entries use rounded `New` badges with the palette accent wash, primary text color, and solid palette-accent border. Unread rows do not change background or gutter width.
-Descriptions use the primary text color. Small secondary text mixes 80% palette muted with 20% palette ink for readable contrast.
+Descriptions use the primary text color. Small secondary text and search placeholders mix 80% palette muted with 20% palette ink for readable contrast.
+Mixed-color utilities declare the `color:` type so class merging preserves font size and line height and removes competing muted colors.
 The copy button uses palette text and accent hover colors in both themes. Global palette tokens do not change.
 Loading and errors have accessible status messages. The loading spinner is decorative and hidden from assistive technology.
 One mounted live region shows and announces the no-match message without a duplicate hidden copy.
+The region mounts empty and receives its text on the next task, including when a direct URL has no matches.
 The latest-known build notice uses an information icon, accent wash, and solid accent edge. Empty states retain the release-card spacing.
 Filtering, sorting, pagination, source links, and read-state storage do not change.
 

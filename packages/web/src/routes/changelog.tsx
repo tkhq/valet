@@ -66,7 +66,7 @@ const CATEGORY: Record<ChangelogCategory, { label: string }> = {
 };
 
 // Mix palette tokens locally so small text stays readable without changing other pages.
-const secondaryTextClass = "text-[color-mix(in_oklch,var(--muted),var(--ink)_20%)]";
+const secondaryTextClass = "text-[color:color-mix(in_oklch,var(--muted),var(--ink)_20%)]";
 const newBadgeClass = "shrink-0 rounded-full border border-moss bg-moss-wash px-2.5 text-ink tracking-normal dark:bg-moss-wash dark:text-ink";
 const focusClass = "rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss focus-visible:ring-offset-2 focus-visible:ring-offset-paper";
 const selectClass = "h-12 w-full min-w-0 rounded-xl border border-line bg-paper px-3 text-base text-ink sm:h-11 sm:rounded sm:text-sm focus-visible:border-moss focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss";
@@ -100,6 +100,7 @@ export function ChangelogPage() {
   const { copied, copy } = useCopyToClipboard();
   const checkpoints = changelog.data?.manifest.checkpoints ?? [];
   const runningSha = changelog.data?.artifact.sha;
+  const [emptyStatusReady, setEmptyStatusReady] = useState(false);
   const [seenWhenOpened, setSeenWhenOpened] = useState<ChangelogReadState | null>();
   const openingSnapshot = useRef<ChangelogReadState | null | undefined>(undefined);
   const search = readChangelogSearch(useSearch({ strict: false }));
@@ -140,6 +141,16 @@ export function ChangelogPage() {
     // which invalid page must be replaced.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [changelog.isPending, currentPage, requestedPage]);
+
+  useEffect(() => {
+    if (changelog.isPending || changelog.isError) {
+      setEmptyStatusReady(false);
+      return;
+    }
+    // Register the empty live region before adding text, including on a direct no-match URL.
+    const timer = window.setTimeout(() => setEmptyStatusReady(true), 0);
+    return () => window.clearTimeout(timer);
+  }, [changelog.isPending, changelog.isError]);
 
   if (changelog.isPending) {
     return (
@@ -208,7 +219,7 @@ export function ChangelogPage() {
                   go({ q: value.trim().length === 0 ? undefined : value, page: undefined })
                 }
                 placeholder="Search changes…"
-                className="h-12 bg-paper placeholder:text-[color-mix(in_oklch,var(--muted),var(--ink)_20%)] focus-visible:border-moss focus-visible:ring-moss max-sm:focus-visible:ring-2 max-sm:focus-visible:ring-moss sm:h-11"
+                className="h-12 bg-paper placeholder:text-[color:color-mix(in_oklch,var(--muted),var(--ink)_20%)] focus-visible:border-moss focus-visible:ring-moss max-sm:focus-visible:ring-2 max-sm:focus-visible:ring-moss sm:h-11"
               />
             </div>
             <div className="min-w-0 space-y-2">
@@ -248,11 +259,11 @@ export function ChangelogPage() {
         <div
           role="status"
           aria-atomic="true"
-          className={checkpoints.length > 0 && visibleCheckpoints.length === 0
+          className={emptyStatusReady && checkpoints.length > 0 && visibleCheckpoints.length === 0
             ? cn(cardClass, "mt-8 px-4 py-10 text-center")
             : "sr-only"}
         >
-          {checkpoints.length > 0 && visibleCheckpoints.length === 0 && (
+          {emptyStatusReady && checkpoints.length > 0 && visibleCheckpoints.length === 0 && (
             <>
               <p className="text-sm font-medium text-ink">No changes match these filters.</p>
               <p className={cn("mt-2 text-sm leading-6", secondaryTextClass)}>Change the type filter or search terms.</p>

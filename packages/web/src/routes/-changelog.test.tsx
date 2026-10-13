@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cn } from "~/lib/cn";
 import { SEARCH_DEBOUNCE_MS } from "~/components/search-input";
 import type { ChangelogEntry, GetChangelogResponse } from "@valet/api/wire";
 
@@ -141,7 +142,7 @@ describe("ChangelogPage", () => {
     expect(screen.queryAllByText("New")).toHaveLength(0);
   });
 
-  it("restores filters and search from a shared URL", () => {
+  it("restores filters and search from a shared URL", async () => {
     searchParams = { category: "fix" };
     const view = render(<ChangelogPage />);
     expect(screen.getByText("Repair login")).toBeTruthy();
@@ -149,7 +150,7 @@ describe("ChangelogPage", () => {
 
     searchParams = { q: "missing" };
     view.rerender(<ChangelogPage />);
-    expect(screen.getByText("No changes match these filters.")).toBeTruthy();
+    expect(await screen.findByText("No changes match these filters.")).toBeTruthy();
   });
 
   it("writes control changes to the URL and resets the page", async () => {
@@ -298,14 +299,14 @@ describe("ChangelogPage", () => {
     expect(screen.getByRole("alert").textContent).toBe("Could not load the changelog. Reload the page to try again.");
   });
 
-  it("keeps filters available for no matches and handles an empty manifest", () => {
+  it("keeps filters available for no matches and handles an empty manifest", async () => {
     const view = render(<ChangelogPage />);
     const status = screen.getByRole("status");
     expect(status.textContent?.trim()).toBe("");
     searchParams = { q: "missing" };
     view.rerender(<ChangelogPage />);
     expect(screen.getByRole("status")).toBe(status);
-    expect(status.textContent).toContain("No changes match these filters.");
+    await waitFor(() => expect(status.textContent).toContain("No changes match these filters."));
     expect(screen.getAllByText("No changes match these filters.")).toHaveLength(1);
     expect(status.className).not.toContain("sr-only");
     expect(screen.getByRole("group", { name: "Changelog filters" })).toBeTruthy();
@@ -314,6 +315,61 @@ describe("ChangelogPage", () => {
     view.rerender(<ChangelogPage />);
     expect(screen.getByText("No release checkpoints are available for this build.")).toBeTruthy();
     expect(screen.queryByRole("group", { name: "Changelog filters" })).toBeNull();
+  });
+
+  it("registers an empty live region before a direct no-match URL populates it", () => {
+    vi.useFakeTimers();
+    try {
+      searchParams = { q: "missing" };
+      render(<StrictMode><ChangelogPage /></StrictMode>);
+      const status = screen.getByRole("status");
+      expect(status.textContent?.trim()).toBe("");
+      expect(screen.queryByText("No changes match these filters.")).toBeNull();
+      act(() => vi.runOnlyPendingTimers());
+      expect(screen.getByRole("status")).toBe(status);
+      expect(within(status).getByText("No changes match these filters.")).toBeTruthy();
+      expect(screen.getAllByText("No changes match these filters.")).toHaveLength(1);
+      expect(navigate).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("merges the mixed color without removing font size or line height", () => {
+    const color = "text-[color:color-mix(in_oklch,var(--muted),var(--ink)_20%)]";
+    for (const size of ["text-xs", "text-sm"]) {
+      expect(cn(size, "leading-6 text-muted", color)).toBe(`${size} leading-6 ${color}`);
+    }
+    data.manifest.checkpoints[0].entries[0].authoredAt = "2026-09-09T10:00:00Z";
+    render(<ChangelogPage />);
+    const subtitle = screen.getByText("Changes in rolling builds and released versions.");
+    const running = screen.getByText("Running commit").parentElement;
+    const category = screen.getByRole("heading", { level: 3, name: "Features" });
+    const releaseDate = screen.getByRole("region", { name: "1.0.0" }).querySelector("time");
+    const row = screen.getByText("Repair login").closest("li");
+    const metadata = row?.querySelector("time")?.parentElement;
+    for (const [element, size] of [
+      [subtitle, "text-sm"], [running, "text-xs"], [category, "text-xs"],
+      [releaseDate, "text-sm"], [metadata, "text-xs"],
+    ] as const) {
+      expect(element?.classList.contains(size)).toBe(true);
+      expect(element?.classList.contains(color)).toBe(true);
+      expect(element?.classList.contains("text-muted")).toBe(false);
+    }
+    expect(subtitle.classList.contains("leading-6")).toBe(true);
+    const filters = screen.getByRole("group", { name: "Changelog filters" });
+    const labels = filters.querySelectorAll("label");
+    expect(labels).toHaveLength(3);
+    for (const label of labels) {
+      expect(label.classList.contains("text-xs")).toBe(true);
+      expect(label.classList.contains(color)).toBe(true);
+      expect(label.classList.contains("text-muted")).toBe(false);
+    }
+    const search = screen.getByLabelText("Search changes");
+    expect(search.classList.contains(`placeholder:${color}`)).toBe(true);
+    expect(search.classList.contains("placeholder:text-muted")).toBe(false);
+    expect(search.classList.contains("text-sm")).toBe(true);
+    expect(search.classList.contains("max-sm:text-base")).toBe(true);
   });
 
   it("distinguishes latest-known build information from releases", () => {
