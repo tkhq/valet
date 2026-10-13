@@ -493,3 +493,20 @@ A preview repeats sample values: a step's output, its observed example, and each
 A preview reads the workflow's five newest runs. It takes its sample from the newest one that the caller can read and that completed a step. It skips each run that fails `canReadWorkflowRun`, the check that `get_run` and `get_node_result` use. A team run started from a private thread or a private Slack channel belongs to that audience, so its trigger payload and step results never become another viewer's sample. If no run qualifies, the preview uses only the sample input. The route and the action both apply this rule, because both call `previewWorkflow()`.
 
 Outside a test, the editor still does not run a workflow unless the person asks. A test mode that holds outbound actions for review is a follow-up.
+
+### Import from V1 (2026-10-13)
+
+A person moved each V1 workflow by hand: they gave the agent the V1 logs and rebuilt the graph, which took 30 to 60 minutes per workflow. "Import from V1" in the Automation menu replaces that step. The person pastes the JSON that V1's `GET /api/workflows` and `GET /api/triggers` return, one after the other. No new route reads V1.
+
+`convertV1Workflows` (`packages/workflow/src/v1-convert.ts`) is a pure function. It accepts the two list responses, one `{ workflow }` response, a workflow row, a bare `{ steps }` object, trigger rows, or an array of these. It follows what the V1 runner did (`packages/runner/src/workflow-engine.ts`), not what the step types suggest:
+
+- V1 sent every `agent_message` in a run to one shared session, and `bash` ran in the same sandbox. A run of consecutive `agent_message`, `bash` and `tool: bash` steps becomes one `session` node. Its prompt lists the steps in order, and a command becomes an instruction to run it.
+- `approval` becomes `approval`. `tool: spawn_session` becomes a `session` node with the task as its prompt.
+- `conditional` with `{ variable, equals }` becomes an `if` node on `trigger.data.<variable>`, with `true` and `false` edges. The variable is declared in the trigger's `dataSchema`, so a manual run asks for it. A constant condition keeps only the branch V1 always ran.
+- `parallel` fans out from the previous node and joins at the next one.
+- A workflow-target schedule becomes a schedule on the new workflow. An orchestrator-target schedule keeps its prompt and becomes an orchestrator schedule. A manual trigger needs nothing.
+- V1 rendered no templates, so a `{{ }}` in a message stays literal text in the prompt.
+
+Each item that needs a decision becomes a checklist line, never a silent drop: webhook triggers, `send_message`, `run_workflow`, conditions that read an `outputVariable`, repository context and models on `spawn_session`, steps V1 ran in id order, and the `agent`, `loop` and `subworkflow` steps and unknown tools that did nothing in V1. Every definition must pass `validateWorkflowDefinition`; a conversion that does not pass is refused as a bug.
+
+The dialog shows each workflow, its schedules and its checklist before it creates anything. On confirm, it calls `POST /api/workflows`, then `POST /api/workflows/schedules`. It then sends the checklist as the first message of the workflow's editor conversation, so the editor assistant finishes the items. If a call fails part way, the error names what Valet already created.
