@@ -54,15 +54,15 @@ describe("OnePasswordPanel", () => {
     settingsData = { orgTokenConnected: false, personalTokenConnected: false };
   });
 
-  // The personal token moved to You · Connected accounts: setting one needs
+  // The personal token is on personal Integrations: setting one needs
   // no organization permission, so a member never has to open this page to
   // finish their own setup (TKAI-487).
   it("carries the organization token alone, and points at the personal one", () => {
     render(<OnePasswordPanel />);
     expect(screen.getByRole("group", { name: "Organization token" })).toBeTruthy();
     expect(screen.queryByRole("group", { name: "Personal token" })).toBeNull();
-    expect(screen.getByRole("link", { name: "Connected accounts" }).getAttribute("href")).toBe(
-      "/settings/connected-accounts",
+    expect(screen.getByRole("link", { name: "Integrations" }).getAttribute("href")).toBe(
+      "/integrations?workspace=user",
     );
   });
 

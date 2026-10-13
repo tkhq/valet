@@ -7,8 +7,8 @@ import { errorText } from "~/lib/error-text";
 import { CardHeading, IntegrationCard, IntegrationList } from "./integration-card";
 import { displayName } from "./display-name";
 
-/** `onepassword` is the personal service-account token itself, managed in
- * Settings → Connected accounts, not a service credential. */
+/** `onepassword` is the personal service-account token itself, which has
+ * its own 1Password row on Integrations, not a service credential. */
 const RESERVED = new Set(["onepassword"]);
 
 /** The caller's credentials that no listed plugin service covers, such as

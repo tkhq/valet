@@ -5,7 +5,7 @@ import { Spinner, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { SearchInput } from "~/components/search-input";
 import { Section } from "~/components/settings/section";
-import { hasVisibleSurface, IntegrationDetail, IntegrationRow, integrationGroup, isService } from "~/components/integrations/integration-row";
+import { hasPanel, IntegrationDetail, IntegrationRow, integrationGroup } from "~/components/integrations/integration-row";
 import { Dialog, DialogContent, DialogTitle } from "~/components/primitives";
 import { IntegrationList } from "~/components/integrations/integration-card";
 import { OrphanCredentials } from "~/components/integrations/orphan-credentials";
@@ -16,6 +16,10 @@ import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { TeamIntegrations } from "~/components/integrations/team-integrations";
 import { IntegrationLimitNotice } from "~/components/integrations/integration-limit-notice";
 import { useListOwner } from "~/lib/use-list-owner";
+import { useOnePasswordSettings } from "~/api/onepassword";
+import { PersonalOnePasswordRow } from "~/components/integrations/onepassword-setup";
+import { useMyToolPermissions } from "~/api/policies";
+import { pluginTools } from "~/components/integrations/tool-permissions";
 
 /**
  * `/integrations` — the services a person can connect, as grouped lists in
@@ -27,6 +31,11 @@ import { useListOwner } from "~/lib/use-list-owner";
  * to `/api/credentials/:service/connect` and lands back here with
  * `?connected=` or `?error=`; manual token entry remains the fallback for
  * everything else.
+ *
+ * Integrations is the one home for connections. A Slack or Telegram panel
+ * pairs your chat account, the GitHub panel holds your GitHub connection,
+ * and your own 1Password token is a row of its own, in Connected once set.
+ * `/settings/connected-accounts` redirects here.
  *
  * The search box narrows the tiles IN the browser, unlike the catalog
  * search on `/skills`: `usePlugins` holds the whole plugin set, so a
@@ -137,11 +146,12 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
   const pushedPanel = useRef(false);
   const query = search.q ?? "";
 
-  // `hasVisibleSurface` drops plugins whose every service is unconfigured,
-  // unconnected, and unfixable by this caller — nothing on such a tile could
-  // work, and nothing on it would tell the reader what to do. An org admin
-  // keeps the tile, because the API tells them which setting is missing.
-  const reachable = plugins.filter(isService).filter(hasVisibleSurface);
+  // `hasPanel` drops content-only plugins, and plugins whose every service is
+  // unconfigured, unconnected, and unfixable by this caller — nothing on such
+  // a tile could work, and nothing on it would tell the reader what to do. An
+  // org admin keeps the tile, because the API tells them which setting is
+  // missing. The skill page lists its integrations with the same predicate.
+  const reachable = plugins.filter(hasPanel);
   // A tile answers the query by its display name, raw name, or description.
   const services = reachable
     .filter((plugin) => matchesNeedle(query, [pluginDisplayName(plugin), plugin.name, plugin.description]))
@@ -154,6 +164,14 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
   const rowSearch: Record<string, string> = searching ? { q: query } : {};
   const detail = search.service ? reachable.find((plugin) => plugin.name === search.service) : undefined;
   const showSearch = reachable.length > 0 || searching;
+  // Your own 1Password token: a row in Connected once set, else in Available.
+  const onePasswordQ = useOnePasswordSettings();
+  // Each row summarizes its tools' effective modes from one query.
+  const toolsQ = useMyToolPermissions();
+  const toolsFor = (plugin: (typeof plugins)[number]) => toolsQ.data && pluginTools(plugin, toolsQ.data.tools);
+  const onePassword = onePasswordQ.data && matchesNeedle(query, ["1Password", "onepassword"])
+    ? onePasswordQ.data.personalTokenConnected ? "connected" : "available"
+    : undefined;
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -218,25 +236,27 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
 
           {!isLoading && !error && showSearch && (
             <div className="space-y-10">
-              {searching && services.length === 0 && (
+              {searching && services.length === 0 && !onePassword && (
                 <div className="text-sm text-muted">No integrations match your search.</div>
               )}
 
-              {connected.length > 0 && (
+              {(connected.length > 0 || onePassword === "connected") && (
                 <Section title="Connected" description="Services your assistant can reach now.">
                   <IntegrationList label="Connected">
                     {connected.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
+                      <IntegrationRow key={plugin.name} plugin={plugin} tools={toolsFor(plugin)} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
                     ))}
+                    {onePassword === "connected" && <PersonalOnePasswordRow connected />}
                   </IntegrationList>
                 </Section>
               )}
-              {available.length > 0 && (
+              {(available.length > 0 || onePassword === "available") && (
                 <Section title="Available" description="Connect a service to let your assistant use it.">
                   <IntegrationList label="Available">
                     {available.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
+                      <IntegrationRow key={plugin.name} plugin={plugin} tools={toolsFor(plugin)} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
                     ))}
+                    {onePassword === "available" && <PersonalOnePasswordRow connected={false} />}
                   </IntegrationList>
                 </Section>
               )}
@@ -244,7 +264,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                 <Section title="Built in" description="Ready to use. These need no account.">
                   <IntegrationList label="Built in">
                     {builtin.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
+                      <IntegrationRow key={plugin.name} plugin={plugin} tools={toolsFor(plugin)} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
                     ))}
                   </IntegrationList>
                 </Section>

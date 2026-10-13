@@ -2,13 +2,14 @@
  * Rows and the detail panel for `/integrations` (settings-redesign spec,
  * "Integrations").
  *
- * A row is one line: the brand mark, the name, a badge only when the
- * connection needs attention, one line of description, and what the row
- * offers (Connect, Set up, or the organization's). The row opens the
- * detail panel, which holds everything else: who owns the connection, its
- * reach (tool count / "tools load on connect" / "no key needed"), the
- * account, repair notes, the connect and disconnect controls, and the
- * tools. A page of twenty services stays one screen tall.
+ * A row is one line: the brand mark, the name, a text status pill
+ * (Connected, Expired, Needs setup), the account it uses with a permission
+ * summary ("12 tools · 3 ask · 1 off"), and what the row offers (Connect or
+ * Reconnect). An unconnected row shows its description in place of the
+ * account. The row opens the detail panel, which holds everything else: who
+ * owns the connection, its reach, repair notes, the connect and disconnect
+ * controls, and each tool's permission. A page of twenty services stays one
+ * screen tall.
  *
  * A connected service also shows what its credential is worth: the account
  * it belongs to, and — when the token expired, failed to refresh, or
@@ -35,7 +36,7 @@
  */
 import { IntegrationDetails } from "./integration-details";
 import { useState } from "react";
-import type { PluginServiceSummary, PluginSummary } from "@valet/api/wire";
+import type { PluginServiceSummary, PluginSummary, ToolPermissionWire } from "@valet/api/wire";
 import { Badge, Button, ConfirmDialog } from "~/components/primitives";
 import { useCredentials, useDisconnectCredential } from "~/api/integrations";
 import { errorText } from "~/lib/error-text";
@@ -48,6 +49,7 @@ import { displayName, pluginDisplayName } from "./display-name";
 import { GithubOrgAppLine } from "./github-org-app-line";
 import { IdentityLinkBlock, useServiceIdentityLink } from "./identity-link-block";
 import { healthBadge, healthNote, needsReauth, serviceHealth } from "./service-health";
+import { permissionSummary } from "./tool-permissions";
 
 
 /** True when the plugin belongs in the Services group (something the assistant reaches out to). */
@@ -85,6 +87,11 @@ export function integrationGroup(plugin: PluginSummary): "connected" | "availabl
 /** True when the plugin has anything left to show in the Services list. */
 export function hasVisibleSurface(plugin: PluginSummary): boolean {
   return plugin.services.length === 0 || plugin.services.some(isVisibleService);
+}
+
+/** True when `/integrations` lists the plugin, so its `?service=` opens a panel. */
+export function hasPanel(plugin: PluginSummary): boolean {
+  return isService(plugin) && hasVisibleSurface(plugin);
 }
 
 function reachMeta(plugin: PluginSummary): string | null {
@@ -138,22 +145,40 @@ function orgNoteFor(service: PluginServiceSummary): React.ReactNode {
 
 // ── Rows ─────────────────────────────────────────────────────────────────
 
-/** What a row shows on its right: the attention badge, or what it offers. */
-function rowState(plugin: PluginSummary): { badge?: { label: string; variant: "warning" | "danger" }; offer?: string } {
+interface RowState {
+  /** The status in words, so no state is color alone. */
+  pill?: { label: string; variant: "success" | "warning" | "danger" };
+  /** The account the connection uses: a login, or the organization. */
+  account?: string;
+  /** What a click on the row leads to. */
+  offer?: "Connect" | "Reconnect";
+}
+
+/** What a row says about its connection. */
+function rowState(plugin: PluginSummary): RowState {
   const services = plugin.services.filter(isVisibleService);
   if (services.length === 0) return {};
   // A leftover credential on a service nobody configured cannot be used or
-  // reconnected. The panel says why; the row must not read as healthy.
-  if (services.some((service) => service.connected && service.connect === "unconfigured")) {
-    return { badge: { label: "Not configured", variant: "warning" } };
+  // reconnected, and a service nobody configured cannot be connected. The
+  // panel says what to set and where.
+  if (
+    services.some((service) => service.connected && service.connect === "unconfigured") ||
+    services.every((service) => service.connect === "unconfigured")
+  ) {
+    return { pill: { label: "Needs setup", variant: "warning" } };
   }
+  const login = services.find((service) => service.connected && service.health?.login)?.health?.login;
   for (const service of services) {
-    const badge = healthBadge(serviceHealth(service));
-    if (badge && badge.variant !== "success") return { badge: { label: badge.label, variant: badge.variant } };
+    const health = serviceHealth(service);
+    const badge = healthBadge(health);
+    if (badge && badge.variant !== "success") {
+      return { pill: { label: badge.label, variant: badge.variant }, account: login, offer: needsReauth(health) ? "Reconnect" : undefined };
+    }
   }
-  if (services.some((service) => service.connected)) return {};
-  if (services.some((service) => service.connect === "org")) return { offer: "Organization" };
-  if (services.every((service) => service.connect === "unconfigured")) return { offer: "Set up" };
+  if (services.some((service) => service.connected)) return { pill: { label: "Connected", variant: "success" }, account: login };
+  if (services.some((service) => service.connect === "org")) {
+    return { pill: { label: "Connected", variant: "success" }, account: "Your organization" };
+  }
   return { offer: "Connect" };
 }
 
@@ -161,14 +186,24 @@ function rowState(plugin: PluginSummary): { badge?: { label: string; variant: "w
  * One integration as one line. The row is a link to its own detail panel
  * (`?service=`), so the panel is linkable and Back closes it.
  */
-export function IntegrationRow({ plugin, search, onOpen }: {
+export function IntegrationRow({ plugin, search, onOpen, tools }: {
   plugin: PluginSummary;
   search: Record<string, string>;
   /** Runs when a plain click opens the panel in this tab. */
   onOpen?: () => void;
+  /** The plugin's tools with their effective modes, for the summary. Absent
+   * where the caller's own permissions do not apply, as in a team workspace. */
+  tools?: ToolPermissionWire[];
 }) {
   const title = pluginDisplayName(plugin);
   const state = rowState(plugin);
+  const toolSummary = tools ? permissionSummary(tools) : null;
+  // A connection row names its account and what its tools may do. An
+  // unconnected row has neither yet, so its description says what it is. A
+  // built-in row needs no account and shows its tools when it has any.
+  const meta = state.pill
+    ? [state.account, toolSummary ?? reachMeta(plugin)].filter(Boolean).join(" · ")
+    : plugin.services.length === 0 ? toolSummary : null;
   return (
     <li>
       {/* py-2 around the compact row's 32px makes a 48px touch target. */}
@@ -185,11 +220,12 @@ export function IntegrationRow({ plugin, search, onOpen }: {
           compact
           title={title}
           slug={iconSlug(plugin)}
-          description={plugin.description}
+          state={state.pill && <Badge variant={state.pill.variant}>{state.pill.label}</Badge>}
+          description={meta || plugin.description}
+          phoneNote={meta || undefined}
           right={
             <span className="flex items-center gap-2 text-xs">
-              {state.badge && <Badge variant={state.badge.variant}>{state.badge.label}</Badge>}
-              {state.offer && <span className={state.offer === "Connect" ? "text-moss" : "text-muted"}>{state.offer}</span>}
+              {state.offer && <span className="text-moss">{state.offer}</span>}
               <ChevronRight className="h-4 w-4 text-muted" aria-hidden />
             </span>
           }

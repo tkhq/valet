@@ -19,6 +19,7 @@ import type {
   ListPluginsResponse,
   OrgResponse,
   PluginServiceSummary,
+  ToolPermissionWire,
 } from "@valet/api/wire";
 
 vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog: [] } }) }));
@@ -228,7 +229,7 @@ vi.mock("~/api/repos", () => ({
 vi.mock("~/api/integrations", () => ({
   usePlugins: () => ({ data: currentPluginsData, isLoading: false, error: null }),
   useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
-  useConnectCredential: () => ({ mutateAsync: connectMutateAsync, isPending: false, error: null }),
+  useConnectCredential: () => ({ mutateAsync: connectMutateAsync, isPending: false, error: null, reset: vi.fn() }),
   useDisconnectCredential: () => ({
     mutate: disconnectMutate,
     mutateAsync: disconnectMutateAsync,
@@ -240,12 +241,13 @@ vi.mock("~/api/integrations", () => ({
   useRevokeDelegation: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
 }));
 
+let personalTokenConnected = false;
 vi.mock("~/api/onepassword", () => ({
   useOnePasswordSettings: () => ({
     data: {
       allowPersonal: false,
       orgTokenConnected: false,
-      personalTokenConnected: false,
+      personalTokenConnected,
     },
     isLoading: false,
     error: null,
@@ -264,6 +266,7 @@ const deliverLinkMutateAsync = vi.fn();
 const unlinkIdentityMutate = vi.fn();
 
 const verifyLinkMutate = vi.fn();
+const setLinkNotifyMutate = vi.fn();
 
 vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
@@ -280,8 +283,19 @@ vi.mock("~/api/queries", async (importOriginal) => {
       error: null,
     }),
     useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkIdentityMutate, isPending: false , reset: vi.fn() }),
+    useSetLinkNotify: (_provider: string) => ({ mutate: setLinkNotifyMutate, isPending: false, error: null }),
   };
 });
+
+// The rows' summaries and the panel's tool controls read these.
+let toolPermissions: ToolPermissionWire[] = [];
+let setToolModesError: Error | null = null;
+const setToolModes = vi.fn();
+vi.mock("~/api/policies", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/api/policies")>()),
+  useMyToolPermissions: () => ({ data: { tools: toolPermissions }, isLoading: false, error: null }),
+  useSetMyToolModes: () => ({ mutate: setToolModes, error: setToolModesError }),
+}));
 
 import { IntegrationsPage } from "./integrations";
 
@@ -303,6 +317,19 @@ function org(callerRole: "admin" | "member", organizations = true): OrgResponse 
     allowPublicArtifacts: false,
     plugins: [],
     callerRole,
+  };
+}
+
+function tool(overrides: Partial<ToolPermissionWire> & Pick<ToolPermissionWire, "service" | "actionId">): ToolPermissionWire {
+  return {
+    name: overrides.actionId,
+    description: `Does ${overrides.actionId}.`,
+    riskLevel: "low",
+    mode: "allow",
+    source: "default",
+    overridden: false,
+    settable: ["allow", "require_approval", "deny"],
+    ...overrides,
   };
 }
 
@@ -352,7 +379,8 @@ describe("IntegrationsPage", () => {
         .getAllByRole("listitem")
         .map((row) => row.querySelector(".font-medium")?.textContent);
     expect(rowNames("Connected")).toEqual(["Slack"]);
-    expect(rowNames("Available")).toEqual(["GitHub", "Typefully"]);
+    // Your own 1Password token sits with the services, under Available until set.
+    expect(rowNames("Available")).toEqual(["GitHub", "Typefully", "1Password"]);
     expect(rowNames("Built in")).toEqual(["DeepWiki"]);
   });
 
@@ -386,10 +414,24 @@ describe("IntegrationsPage", () => {
     expect(screen.getByText("no key needed")).toBeTruthy(); // dynamic, no credential
   });
 
-  it("keeps rows one line: a healthy connection carries no badge, and the row opens its panel", () => {
+  it("keeps rows one line: a status pill, the account, a permission summary, and the row opens its panel", () => {
+    toolPermissions = [
+      tool({ service: "slack", actionId: "slack.read", mode: "allow" }),
+      tool({ service: "slack", actionId: "slack.post", mode: "require_approval" }),
+      tool({ service: "slack", actionId: "slack.delete", mode: "deny" }),
+      tool({ service: "github", actionId: "github.read", mode: "allow" }),
+    ];
     render(<IntegrationsPage />);
-    expect(screen.queryByText("Connected", { selector: "[class*='badge'], span:not(h2 *)" })).toBeNull();
-    fireEvent.click(screen.getByRole("link", { name: /Slack/ }));
+    const row = screen.getByRole("link", { name: /Slack/ });
+    expect(within(row).getByText("Connected")).toBeTruthy();
+    // The account is unknown here, so the summary stands alone.
+    expect(within(row).getAllByText("3 tools · 1 ask · 1 off").length).toBeGreaterThan(0);
+    // An unconnected row offers Connect and keeps its description.
+    const github = screen.getByRole("link", { name: /GitHub/ });
+    expect(within(github).getByText("Connect")).toBeTruthy();
+    expect(within(github).queryByText("Connected")).toBeNull();
+    toolPermissions = [];
+    fireEvent.click(row);
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Disconnect Slack" })).toBeTruthy();
   });
@@ -598,8 +640,9 @@ describe("brand marks", () => {
       (section) => section.querySelector("h2")?.textContent === "Available",
     );
     const paths = [...(services?.querySelectorAll("[data-brand-mark] svg path") ?? [])].map((p) => p.getAttribute("d"));
-    expect(paths).toHaveLength(3);
-    expect(new Set(paths).size).toBe(3);
+    // Three services and your own 1Password row.
+    expect(paths).toHaveLength(4);
+    expect(new Set(paths).size).toBe(4);
   });
 });
 
@@ -631,8 +674,10 @@ describe("connection health", () => {
   it("names the connected account", () => {
     currentPluginsData = connectedGmail({ login: "someone@example.com" });
     openIntegration("gmail");
-    expect(screen.getByText(/someone@example.com/)).toBeTruthy();
-    expect(screen.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
+    // The row names the account too; this reads the panel.
+    const panel = within(screen.getByRole("dialog"));
+    expect(panel.getByText(/someone@example.com/)).toBeTruthy();
+    expect(panel.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Reconnect Gmail" })).toBeNull();
   });
 
@@ -666,7 +711,7 @@ describe("connection health", () => {
   it("keeps the plain Connected badge when the wire reports no health", () => {
     currentPluginsData = connectedGmail(undefined);
     openIntegration("gmail");
-    expect(screen.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
+    expect(within(screen.getByRole("dialog")).getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Reconnect Gmail" })).toBeNull();
   });
 });
@@ -809,7 +854,7 @@ describe("the organisation's GitHub App", () => {
     openIntegration("github");
     // Two connections, two badges. "Connected" is this user's credential;
     // the App carries its own label and never borrows that one.
-    expect(screen.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
+    expect(within(screen.getByRole("dialog")).getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
     expect(screen.getByText("Org App installed")).toBeTruthy();
   });
 
@@ -988,7 +1033,8 @@ describe("an unconfigured service an org admin can fix", () => {
     currentPluginsData = calendarPlugins({ missingEnv: bothUnset });
     render(<IntegrationsPage />);
 
-    expect(screen.queryByRole("button", { name: /Connect/ })).toBeNull();
+    // Only your own 1Password row offers a connect here.
+    expect(screen.queryAllByRole("button", { name: /Connect/ }).map((button) => button.textContent)).toEqual(["Connect 1Password"]);
     expect(screen.queryByRole("button", { name: /Disconnect/ })).toBeNull();
   });
 
@@ -1149,11 +1195,13 @@ describe("IntegrationsPage — org-provided pairing", () => {
     expect(screen.getByText(/expires in 10 minutes/)).toBeTruthy();
   });
 
-  it("a linked account reads as linked, with a confirm-gated Unlink", () => {
-    identityLinksData = { links: [slackLink({ linked: true, externalId: "U0123ABCD" })] };
+  it("a linked account reads as linked, with the attention ping and a confirm-gated Unlink", () => {
+    identityLinksData = { links: [slackLink({ linked: true, externalId: "U0123ABCD", notifyAttention: false })] };
     openIntegration("slack");
 
     expect(screen.getByText("U0123ABCD")).toBeTruthy();
+    fireEvent.click(screen.getByRole("switch", { name: "Notify on Slack when your assistant needs you" }));
+    expect(setLinkNotifyMutate).toHaveBeenCalledWith({ notifyAttention: true });
     expect(screen.queryByRole("button", { name: "Link Slack account" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Unlink Slack" }));
@@ -1161,6 +1209,12 @@ describe("IntegrationsPage — org-provided pairing", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Unlink" }));
     expect(unlinkIdentityMutate).toHaveBeenCalled();
+  });
+
+  it("offers Sign in with Slack beside the DM options", () => {
+    identityLinksData = { links: [slackLink({ oauthService: "slack-user" })] };
+    openIntegration("slack");
+    expect(screen.getByRole("button", { name: "Sign in with Slack" })).toBeTruthy();
   });
 
   it("falls back to the generic org note when the provider declares no identity link", () => {
@@ -1361,12 +1415,108 @@ describe("IntegrationsPage — the search box", () => {
     expect(screen.queryByRole("heading", { name: "1Password" })).toBeNull();
   });
 
-  // 1Password moved to Organization · 1Password, beside GitHub and Slack.
-  // This page answers "what can the assistant reach"; a token form and a
-  // credential table are provider setup, which is what the settings rail is
-  // for.
-  it("does not carry the 1Password panel", () => {
+  // Connected accounts moved here: your own token is a row like a service.
+  // The organization token stays on Organization · 1Password.
+  it("lists your own 1Password token as a row, in Connected once set", () => {
+    personalTokenConnected = true;
     render(<IntegrationsPage />);
+    const row = within(screen.getByRole("list", { name: "Connected" })).getByRole("group", { name: "1Password" });
+    expect(within(row).getByText("Connected")).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Remove token" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "1Password" })).toBeNull();
+    personalTokenConnected = false;
+  });
+});
+
+describe("IntegrationsPage — tool permissions in the panel", () => {
+  function githubTools(): ToolPermissionWire[] {
+    return [
+      tool({ service: "github", actionId: "github.get_issue", name: "Get issue", riskLevel: "low" }),
+      tool({ service: "github", actionId: "github.list_repos", name: "List repositories", riskLevel: "low", mode: "deny", source: "personal", overridden: true }),
+      tool({ service: "github", actionId: "github.create_issue", name: "Create issue", riskLevel: "medium" }),
+      tool({
+        service: "github", actionId: "github.delete_repo", name: "Delete repository", riskLevel: "critical",
+        mode: "require_approval", source: "org", settable: ["require_approval", "deny"], lockedBy: "org",
+      }),
+    ];
+  }
+
+  beforeEach(() => {
+    currentPluginsData = githubPluginsData;
+    currentOrgStatus = undefined;
+    toolPermissions = githubTools();
+    setToolModesError = null;
+    setToolModes.mockReset();
+  });
+
+  function toolRow(name: string): HTMLElement {
+    const row = within(screen.getByRole("dialog")).getByText(name).closest("li");
+    if (!(row instanceof HTMLElement)) throw new Error(`no row for ${name}`);
+    return row;
+  }
+
+  function pressed(row: HTMLElement): string | undefined {
+    return within(row).getAllByRole("button").find((button) => button.getAttribute("aria-pressed") === "true")?.textContent ?? undefined;
+  }
+
+  it("groups tools by risk and shows each tool's effective value", () => {
+    openIntegration("github");
+    const panel = within(screen.getByRole("dialog"));
+    expect(panel.getByRole("region", { name: "Read tools" })).toBeTruthy();
+    expect(panel.getByRole("region", { name: "Write tools" })).toBeTruthy();
+    expect(panel.getByRole("region", { name: "High risk tools" })).toBeTruthy();
+    expect(pressed(toolRow("Get issue"))).toBe("Allow");
+    expect(pressed(toolRow("List repositories"))).toBe("Off");
+    expect(pressed(toolRow("Delete repository"))).toBe("Ask first");
+    expect(panel.queryByText("Approval required")).toBeNull();
+  });
+
+  it("tags an untouched tool Default and a personal choice Custom with Reset", () => {
+    openIntegration("github");
+    expect(within(toolRow("Get issue")).getByText("Default")).toBeTruthy();
+    expect(within(toolRow("Get issue")).queryByRole("button", { name: /Reset/ })).toBeNull();
+    const custom = toolRow("List repositories");
+    expect(within(custom).getByText("Custom")).toBeTruthy();
+    fireEvent.click(within(custom).getByRole("button", { name: "Reset List repositories" }));
+    expect(setToolModes).toHaveBeenCalledWith({ actionIds: ["github.list_repos"], mode: null });
+  });
+
+  it("writes Ask first for one tool, and ignores a click on the current value", () => {
+    openIntegration("github");
+    const row = toolRow("Get issue");
+    fireEvent.click(within(row).getByRole("button", { name: "Allow" }));
+    expect(setToolModes).not.toHaveBeenCalled();
+    fireEvent.click(within(row).getByRole("button", { name: "Ask first" }));
+    expect(setToolModes).toHaveBeenCalledWith({ actionIds: ["github.get_issue"], mode: "require_approval" });
+  });
+
+  it("locks the modes an organization rule forbids, and says who set them", () => {
+    openIntegration("github");
+    const row = toolRow("Delete repository");
+    expect(within(row).getByText("Organization")).toBeTruthy();
+    expect(within(row).getByText("Set by your organization")).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Allow" }).hasAttribute("disabled")).toBe(true);
+    expect(within(row).getByRole("button", { name: "Off" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("sets every tool in a group that is not on that value yet", () => {
+    openIntegration("github");
+    const read = within(screen.getByRole("dialog")).getByRole("group", { name: "Set all Read tools" });
+    fireEvent.click(within(read).getByRole("button", { name: "Off" }));
+    expect(setToolModes).toHaveBeenCalledWith({ actionIds: ["github.get_issue"], mode: "deny" });
+  });
+
+  it("resets every personal choice from the panel header, and offers no Allow for all tools", () => {
+    openIntegration("github");
+    const panel = within(screen.getByRole("dialog"));
+    fireEvent.click(panel.getByRole("button", { name: "Reset all to defaults" }));
+    expect(setToolModes).toHaveBeenCalledWith({ actionIds: ["github.list_repos"], mode: null });
+    expect(panel.queryByRole("group", { name: /Set all GitHub/ })).toBeNull();
+  });
+
+  it("shows the API's refusal", () => {
+    setToolModesError = new ApiError(400, "PUT /me/policy-overrides → 400", { error: "cannot set override mode \"allow\"; ask an org admin" });
+    openIntegration("github");
+    expect(within(screen.getByRole("dialog")).getByRole("alert").textContent).toContain("ask an org admin");
   });
 });

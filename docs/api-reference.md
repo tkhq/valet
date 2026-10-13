@@ -75,6 +75,7 @@ Wire event types are listed in
 | `/api/me/github` | — | GitHub App user-OAuth connect. Alias of `/api/plugins/github/http/connection` |
 | `/api/plugins/:name/http/*` | varies | Authenticated routes that a plugin declares |
 | `/api/me/identity-links` | GET / DELETE | Chat identity links (e.g. Telegram) + link codes |
+| `/api/me/tool-permissions` | GET | Effective mode, source, and settable modes per catalog action |
 | `/api/repos` | GET | Repos available for session binding |
 
 ## User & org

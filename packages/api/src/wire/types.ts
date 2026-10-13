@@ -4286,12 +4286,6 @@ export interface PostGithubAppCredentialRequest {
 // from the org-level App setup above. `GET /callback` has no wire response
 // type of its own (always a 302 redirect, or a 400/409/502 error body).
 
-export interface PostGithubConnectRequest {
-  /** The callback destination for an Integrations reconnect. The API accepts
-   * only `"integrations"`; other values use the existing destination. */
-  postAuthDestination?: "integrations";
-}
-
 export interface PostGithubConnectResponse {
   /** `{github}/login/oauth/authorize?...` — where the browser should
    * navigate to start the App-OAuth authorize flow. */
@@ -5069,6 +5063,40 @@ export interface DeletePolicyOverrideRequest {
 
 export interface DeletePolicyOverrideResponse {
   ok: true;
+}
+
+/** Where a tool's effective mode comes from. `default` is the engine's
+ *  risk default and `plugin` the plugin's own default. `org` and `team` are
+ *  admin rules, `personal` is one of the caller's overrides, and `grant` is
+ *  a live approval. */
+export type ToolPermissionSource = "default" | "plugin" | "org" | "team" | "personal" | "grant";
+
+/** One catalog action as the caller's assistant would meet it now. */
+export interface ToolPermissionWire {
+  /** The action plugin's service, as `/api/plugins` `actionServices[].service`. */
+  service: string;
+  /** The fully-qualified action id, as `PluginActionSummary.id`. */
+  actionId: string;
+  name: string;
+  description: string;
+  riskLevel: RiskLevelWire;
+  /** The effective mode, from the same resolver a session call uses (no
+   *  params, no session grants). */
+  mode: ApprovalModeWire;
+  source: ToolPermissionSource;
+  /** The caller has an override on this exact action, so
+   *  `DELETE /api/me/policy-overrides` with `{ actionId }` resets it. */
+  overridden: boolean;
+  /** The modes `PUT /api/me/policy-overrides` would accept and apply for this
+   *  action. A missing mode is fixed by `lockedBy`. Empty in a team
+   *  workspace, where personal overrides do not apply. */
+  settable: ApprovalModeWire[];
+  lockedBy?: "org" | "team";
+}
+
+/** GET /api/me/tool-permissions[?service=][&teamId=] */
+export interface ListToolPermissionsResponse {
+  tools: ToolPermissionWire[];
 }
 
 export interface RuntimeGrantWire {

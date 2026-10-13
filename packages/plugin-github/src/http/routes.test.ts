@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { validatePluginHttpRoutes, type PluginHttpRequest } from "@valet/engine";
 import type { GithubAppCapability, GithubConnectionCapability, GithubEndpoints } from "./capabilities.js";
-import { appCredential, appManifest, appSetup, connectCallback, connectStart, githubHttpRoutes } from "./index.js";
+import { appCredential, appManifest, appSetup, connectCallback, githubHttpRoutes } from "./index.js";
 
 const ENDPOINTS: GithubEndpoints = { githubUrl: "https://github.test", githubApiUrl: "https://api.github.test", publicUrl: null };
 
@@ -147,13 +147,5 @@ describe("GitHub user connection", () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error });
     expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  it("signs only the allow-listed post-auth destination", async () => {
-    const signConnectState = vi.fn<GithubConnectionCapability["signConnectState"]>(() => "signed");
-    const bound = connection({ oauthClientId: async () => "Iv1.c", signConnectState });
-    await connectStart(request("https://valet.test/x", JSON.stringify({ postAuthDestination: "https://evil.test" })), bound, ENDPOINTS);
-    await connectStart(request("https://valet.test/x", JSON.stringify({ postAuthDestination: "integrations" })), bound, ENDPOINTS);
-    expect(signConnectState.mock.calls).toEqual([[undefined], ["integrations"]]);
   });
 });

@@ -6,7 +6,12 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import type { CredentialSummary, PluginServiceSummary, PluginSummary } from "@valet/api/wire";
+import type {
+  CredentialSummary,
+  PluginServiceSummary,
+  PluginSummary,
+  ToolPermissionWire,
+} from "@valet/api/wire";
 
 const disconnectMutate = vi.fn();
 let disconnectPending = false;
@@ -52,6 +57,16 @@ vi.mock("~/api/queries", () => ({
 }));
 
 vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog: [] } }) }));
+
+// The rows' summaries and the panel's tool controls read these.
+let toolPermissions: ToolPermissionWire[] = [];
+let setToolModesError: Error | null = null;
+const setToolModes = vi.fn();
+vi.mock("~/api/policies", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/api/policies")>()),
+  useMyToolPermissions: () => ({ data: { tools: toolPermissions }, isLoading: false, error: null }),
+  useSetMyToolModes: () => ({ mutate: setToolModes, error: setToolModesError }),
+}));
 
 import { IntegrationDetail } from "./integration-row";
 

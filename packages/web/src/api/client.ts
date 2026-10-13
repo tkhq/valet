@@ -110,6 +110,7 @@ import type {
   ListWorkflowActionRequiredResponse,
   ListOrgPoliciesResponse,
   ListPolicyOverridesResponse,
+  ListToolPermissionsResponse,
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
   GetModelTiersResponse,
@@ -180,7 +181,6 @@ import type {
   PostGithubAppCredentialRequest,
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
-  PostGithubConnectRequest,
   PostGithubConnectResponse,
   OpenrouterRegistryResponse,
   PreviewOrgPolicyRequest,
@@ -1392,7 +1392,7 @@ export const api = {
     ),
 
   // per-user GitHub App-OAuth connection (GitHub/repo integration plan, Task 6)
-  connectGithub: (body?: PostGithubConnectRequest) => request<PostGithubConnectResponse>("POST", "/me/github/connect", body),
+  connectGithub: () => request<PostGithubConnectResponse>("POST", "/me/github/connect"),
   disconnectGithub: () => request<undefined>("DELETE", "/me/github"),
   // The org App's state, readable by a member — `getGithubApp` above is the
   // admin-only detail read, so connect surfaces use this instead.
@@ -1472,6 +1472,7 @@ export const api = {
 
   // per-user policy overrides + runtime grants (action-policies plan, Task 4/5)
   listMyPolicyOverrides: () => request<ListPolicyOverridesResponse>("GET", "/me/policy-overrides"),
+  listMyToolPermissions: () => request<ListToolPermissionsResponse>("GET", "/me/tool-permissions"),
   putMyPolicyOverride: (body: PutPolicyOverrideRequest) =>
     request<PutPolicyOverrideResponse>("PUT", "/me/policy-overrides", body),
   deleteMyPolicyOverride: (body: DeletePolicyOverrideRequest) =>

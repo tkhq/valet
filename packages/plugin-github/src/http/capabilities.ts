@@ -95,13 +95,11 @@ export interface GithubSetupGrant {
   saveApp(input: GithubAppConfigInput): Promise<void>;
 }
 
-export type GithubPostAuthDestination = "integrations";
-
 export interface GithubConnectionCapability {
   /** The OAuth client ID of the caller organization's App. Null when no App exists. */
   oauthClientId(): Promise<string | null>;
   /** Signs a 15-minute connect state for the caller and return origin. */
-  signConnectState(postAuthDestination?: GithubPostAuthDestination): string;
+  signConnectState(): string;
   orgStatus(): Promise<GithubOrgStatus>;
   openCallback(state: string): GithubCallbackOpening;
   /** Removes the caller's GitHub credential, its team shares, and installation links. */
@@ -116,7 +114,6 @@ export type GithubCallbackOpening =
 
 export interface GithubCallbackGrant {
   returnTo: string;
-  postAuthDestination?: GithubPostAuthDestination;
   /** The App OAuth client of the organization the state names. Null when no App exists. */
   oauthClient(): Promise<{ clientId: string; clientSecret: string } | null>;
   /** Saves the caller's credential, refreshes readiness, and relinks installations. */

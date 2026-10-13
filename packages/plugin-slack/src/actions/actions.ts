@@ -414,7 +414,7 @@ const dmOwner = action(Type.Object({
       return { success: false, error: "This run has no personal Slack recipient. Use slack.dm_user with the intended recipient’s Slack user ID." };
     }
     const ownerSlackId = ownerSlackUserId(cred);
-    if (!ownerSlackId) return { success: false, error: 'Owner has not linked their Slack identity. Ask them to link Slack in Settings → Connected accounts.' };
+    if (!ownerSlackId) return { success: false, error: 'Owner has not linked their Slack identity. Ask them to link Slack in Integrations → Slack.' };
     return openAndSendDM(token, ownerSlackId, p.text, ctx, p);
   },
 });
@@ -585,7 +585,7 @@ const listChannels = action(Type.Object({
     const accessNote = sharedOwner
       ? wantAll ? 'scope="all" lists public channels only. Use scope="joined" for private channels where the bot is a member.' : 'Private channels are included where the connected bot is a member. Team and organization runs use bot membership, not a person’s private access. Direct messages remain restricted.'
       : !ownerSlackId
-        ? 'Private channels are excluded because the personal owner has no linked Slack identity. Link Slack in Settings → Connected accounts. Then use scope="joined".'
+        ? 'Private channels are excluded because the personal owner has no linked Slack identity. Link Slack in Integrations → Slack. Then use scope="joined".'
         : wantAll
           ? 'scope="all" lists public channels only. Use scope="joined" to find private channels where both the bot and personal owner are members.'
           : 'Private channels are included only when the linked personal owner is a member. An absent channel is not proof that the bot needs an invitation.';

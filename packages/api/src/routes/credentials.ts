@@ -683,7 +683,7 @@ credentialsRouter.post("/:service/delegate", async (c) => {
         {
           error:
             `Your GitHub connection cannot be shared: ${health.reason}. ` +
-            "Connect GitHub in Settings → Connected accounts, then share it with the team.",
+            "Connect GitHub in Integrations → GitHub, then share it with the team.",
         },
         400,
       );

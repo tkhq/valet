@@ -10,7 +10,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
-import type { ActionPlugin, ApprovalMode, RiskLevel, ValetPlugin } from "@valet/engine";
+import type { ActionPlugin, ApprovalMode, PolicyProvenanceSource, RiskLevel, ValetPlugin } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
   agentSessions, workflowRuns, workflowDefinitions,
@@ -23,6 +23,8 @@ import {
   type ActionPolicyRow,
   type RuntimeGrantRow,
 } from "../schema/index.js";
+import type { ToolPermissionSource, ToolPermissionWire } from "../wire/types.js";
+import { qualifiedActionId } from "../plugins/action-id.js";
 import { type ParamMatcher } from "./matchers.js";
 import { grantPolicyKey, resolvePolicyDecision, type PolicyResolutionRows } from "./resolution.js";
 import { loadPolicyRows } from "./service.js";
@@ -327,35 +329,48 @@ async function validateActionIdOverrideBounds(
     };
   }
   // Org policy alone: no userId/sessionId scope, so `loadPolicyRows` returns
-  // empty grants/overrides. Strip `paramMatchers` so a matcher-scoped org
-  // policy is treated as "might match" instead of silently dropping out when
-  // we resolve with `params: undefined` (C1).
-  const loaded = await loadPolicyRows(db, { orgId });
+  // empty grants/overrides.
+  const blocked = orgBlocksAllow(await loadPolicyRows(db, { orgId }), { ...found, actionId }, now);
+  if (blocked) {
+    return {
+      ok: false,
+      error: `cannot set override mode "allow": org policy for action "${actionId}" currently resolves "${blocked.mode}" (appliesIn: "${blocked.appliesIn}")`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * The org decision that stops a personal `allow` override on one catalog
+ * action, or `undefined` when nothing does. Pure, so a read can ask it for
+ * every action over one row load. Only the org rows in `rows` count.
+ *
+ * `paramMatchers` are stripped first (C1): resolution runs with
+ * `params: undefined`, and a matcher-scoped org row must count as "might
+ * match" rather than drop out. Both `appliesIn` contexts are checked,
+ * because an override applies to session and workflow calls alike.
+ */
+export function orgBlocksAllow(
+  rows: PolicyResolutionRows,
+  action: { service: string; actionId: string; riskLevel: RiskLevel; pluginDefault: ApprovalMode | undefined },
+  now: number,
+): { mode: ApprovalMode; appliesIn: "session" | "workflow" } | undefined {
   const matcherBlind: PolicyResolutionRows = {
-    ...loaded,
-    policies: loaded.policies.map((p) => (p.paramMatchers.length > 0 ? { ...p, paramMatchers: [] } : p)),
+    policies: rows.policies
+      .filter((p) => p.principalType === "org")
+      .map((p) => (p.paramMatchers.length > 0 ? { ...p, paramMatchers: [] } : p)),
+    grants: [],
+    overrides: [],
   };
   for (const appliesIn of ["session", "workflow"] as const) {
     const decision = resolvePolicyDecision(
       matcherBlind,
-      {
-        service: found.service,
-        actionId,
-        riskLevel: found.riskLevel,
-        params: undefined,
-        appliesIn,
-        now,
-      },
-      found.pluginDefault,
+      { service: action.service, actionId: action.actionId, riskLevel: action.riskLevel, params: undefined, appliesIn, now },
+      action.pluginDefault,
     );
-    if (decision.provenance.source === "org_policy" && (decision.mode === "deny" || decision.mode === "require_approval")) {
-      return {
-        ok: false,
-        error: `cannot set override mode "allow": org policy for action "${actionId}" currently resolves "${decision.mode}" (appliesIn: "${appliesIn}")`,
-      };
-    }
+    if (decision.provenance.source === "org_policy" && decision.mode !== "allow") return { mode: decision.mode, appliesIn };
   }
-  return { ok: true };
+  return undefined;
 }
 
 /**
@@ -469,6 +484,72 @@ export async function validateOverrideBounds(
   // Unreachable when `target` already passed `validateTarget` — every call
   // site validates first. Defensive fallback rather than a type assertion.
   throw new Error("target must have exactly one of service, actionId, riskLevel set");
+}
+
+// ── Effective tool permissions (GET /api/me/tool-permissions) ───────
+
+const SOURCE: Record<PolicyProvenanceSource, ToolPermissionSource> = {
+  risk_default: "default",
+  plugin_default: "plugin",
+  org_policy: "org",
+  team_policy: "team",
+  override: "personal",
+  runtime_grant: "grant",
+  workflow_grant: "grant",
+  // The two below come from the session resolver only, never from the pure core.
+  resolver_error: "default",
+  shared_account: "team",
+};
+
+/**
+ * Each action's effective mode for the caller, computed by
+ * `resolvePolicyDecision` over one row load, the way a session call with no
+ * params resolves it. `settable` applies the write-time rules of
+ * `upsertOverride`: `allow` only where `orgBlocksAllow` finds nothing, and
+ * nothing but `deny` under an effective org deny, which no override
+ * outranks. With `teamId`, the rows are the team's and no personal
+ * override applies, so nothing is settable.
+ */
+export async function listToolPermissions(
+  db: AppQueryable,
+  scope: { orgId: string; userId: string; teamId?: string },
+  actionPlugins: ActionPlugin[],
+  now: number,
+): Promise<ToolPermissionWire[]> {
+  const rows = await loadPolicyRows(db, scope);
+  return actionPlugins.flatMap((actionPlugin) =>
+    actionPlugin.actions.map((action): ToolPermissionWire => {
+      const target = {
+        service: actionPlugin.service,
+        actionId: qualifiedActionId(actionPlugin.service, action),
+        riskLevel: action.riskLevel,
+        pluginDefault: actionPlugin.defaultApprovalMode,
+      };
+      const decision = resolvePolicyDecision(
+        rows,
+        { ...target, params: undefined, appliesIn: "session", now },
+        target.pluginDefault,
+      );
+      const source = SOURCE[decision.provenance.source];
+      const orgDeny = decision.mode === "deny" && (source === "org" || source === "team");
+      const blocked = orgBlocksAllow(rows, target, now);
+      const settable: ApprovalMode[] = scope.teamId
+        ? []
+        : orgDeny ? ["deny"] : blocked ? ["require_approval", "deny"] : ["allow", "require_approval", "deny"];
+      return {
+        service: target.service,
+        actionId: target.actionId,
+        name: action.name,
+        description: action.description,
+        riskLevel: action.riskLevel,
+        mode: decision.mode,
+        source,
+        overridden: rows.overrides.some((row) => row.actionId === target.actionId),
+        settable,
+        ...(orgDeny ? { lockedBy: source === "team" ? "team" as const : "org" as const } : blocked ? { lockedBy: "org" as const } : {}),
+      };
+    }),
+  );
 }
 
 // ── action_policy_overrides upsert/delete-by-target ─────────────────

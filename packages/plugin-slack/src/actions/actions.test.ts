@@ -163,7 +163,7 @@ describe('slack actions', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(result).toEqual({
       success: false,
-      error: 'Owner has not linked their Slack identity. Ask them to link Slack in Settings → Connected accounts.',
+      error: 'Owner has not linked their Slack identity. Ask them to link Slack in Integrations → Slack.',
     });
   });
 
@@ -280,7 +280,7 @@ describe('slack actions', () => {
 
     expect(result).toEqual({
       success: false,
-      error: 'Owner has not linked their Slack identity. Link Slack in Settings → Connected accounts.',
+      error: 'Owner has not linked their Slack identity. Link Slack in Integrations → Slack.',
     });
   });
 

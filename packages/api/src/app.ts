@@ -81,7 +81,7 @@ import { browserRouter } from "./routes/browser.js";
 import { profilePicturesPublicRouter, profilePicturesRouter } from "./routes/profile-pictures.js";
 import { teamPoliciesRouter } from "./routes/team-policies.js";
 import { policiesRouter, actionLogRouter } from "./routes/policies.js";
-import { mePolicyOverridesRouter, meGrantsRouter } from "./routes/me-policies.js";
+import { mePolicyOverridesRouter, meGrantsRouter, meToolPermissionsRouter } from "./routes/me-policies.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { registerProxyGateway } from "./routes/proxy-gateway.js";
@@ -399,6 +399,7 @@ export function createApp(
   // rather than before it.
   app.route("/api/me/policy-overrides", mePolicyOverridesRouter);
   app.route("/api/me/grants", meGrantsRouter);
+  app.route("/api/me/tool-permissions", meToolPermissionsRouter);
   app.route("/api/org/sources", sourcesRouter);
   app.route("/api/repos", reposRouter);
   app.route("/api/sandbox", sandboxGitCredentialRouter);

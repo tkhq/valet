@@ -1540,7 +1540,7 @@ describe("team credential scope (TKAI-205)", () => {
     });
     expect(share.status).toBe(400);
     const { error } = (await share.json()) as { error: string };
-    expect(error).toContain("Connect GitHub in Settings → Connected accounts");
+    expect(error).toContain("Connect GitHub in Integrations → GitHub");
     expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "github")).toBeNull();
 
     await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {

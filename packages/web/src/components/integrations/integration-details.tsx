@@ -1,7 +1,11 @@
 import type { PluginSummary } from "@valet/api/wire";
 import { displayName } from "./display-name";
+import { ToolPermissions } from "./tool-permissions";
 
-/** Manifest capabilities, separate from the account's connection and access checks. */
+/** Manifest capabilities, separate from the account's connection and access
+ * checks. In the detail panel each tool carries its effective permission
+ * (`ToolPermissions`); the collapsed list on a team setup row names the
+ * tools only. */
 export function IntegrationDetails({ plugin, expanded = false }: {
   plugin: PluginSummary;
   /** In the detail panel the list is the content, so it shows open with a heading. */
@@ -10,15 +14,18 @@ export function IntegrationDetails({ plugin, expanded = false }: {
   const services = plugin.actionServices ?? plugin.services.map((service) => ({
     service: service.service, actions: service.actions, dynamic: service.dynamic,
   }));
+  const dynamicNote = services.some((service) => service.dynamic) && <p className="text-xs text-muted">
+    {services.some((service) => service.actions.length > 0) ? "More tools may be discovered when connected." : "Tools are discovered when connected."}
+  </p>;
   const body = <div className="mt-3 space-y-4">
       <p className="text-xs text-muted">Tools that use an account need a usable connection and access to the requested files or resources.</p>
-      {services.map((service) => <div key={service.service}>
+      {expanded ? <div>
+        <ToolPermissions plugin={plugin} />
+        {dynamicNote}
+      </div> : services.map((service) => <div key={service.service}>
         <h4 className="text-xs font-medium text-ink">{displayName(service.service)} tools</h4>
         {service.actions.length > 0 ? <ul className="mt-2 max-h-64 space-y-2 overflow-y-auto pr-2 text-xs">
-          {service.actions.map((action) => <li key={action.id} className="flex items-start justify-between gap-3">
-            <span className="min-w-0 break-words">{action.name}</span>
-            {action.requiresApproval && <span className="shrink-0 text-muted">Approval required</span>}
-          </li>)}
+          {service.actions.map((action) => <li key={action.id} className="min-w-0 break-words">{action.name}</li>)}
         </ul> : <p className="mt-1 text-xs text-muted">{service.dynamic ? "Tools are discovered when connected." : "No tools declared for this service."}</p>}
         {service.dynamic && service.actions.length > 0 && <p className="mt-2 text-xs text-muted">More tools may be discovered when connected.</p>}
       </div>)}

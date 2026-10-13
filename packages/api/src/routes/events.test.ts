@@ -1785,7 +1785,7 @@ describe("mention scoping (slack.app_mention)", () => {
     const res = await postSubscription(a.baseUrl, MENTION_BODY);
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("Connected accounts");
+    expect(body.error).toContain("Integrations → Slack");
   });
 
   it("refuses creation without a channel filter unless anyChannel is set", async () => {

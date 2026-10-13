@@ -282,7 +282,7 @@ function NewReviewCard() {
                   Type any public repo as owner/repo or a GitHub URL.{" "}
                   {scope.teamId === undefined ? (
                     <>
-                      <a href="/settings/connected-accounts" className="text-moss underline">Connect GitHub</a>{" "}
+                      <a href="/integrations?service=github&workspace=user" className="text-moss underline">Connect GitHub</a>{" "}
                       to list your organization&apos;s repositories.
                     </>
                   ) : orgQ.data?.callerRole === "admin" ? (

@@ -172,9 +172,7 @@ function DecisionPane({
     if (path === "manual") return onEnterToken();
     if (path === "github") {
       try {
-        const res = await connectGithub.mutateAsync(
-          service.connected ? { postAuthDestination: "integrations" } : undefined,
-        );
+        const res = await connectGithub.mutateAsync();
         window.location.href = res.url;
       } catch {
         // Surfaced below via connectGithub.error.
@@ -266,14 +264,8 @@ function DecisionPane({
       <p className="flex items-start gap-2 border-t border-line pt-4 text-xs leading-relaxed text-muted">
         <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
         <span>
-          Valet encrypts this token before it saves it. To remove it later, go to{" "}
-          <a
-            href="/settings/connected-accounts"
-            className="text-ink underline underline-offset-2"
-          >
-            Connected accounts
-          </a>
-          .
+          Valet encrypts this token before it saves it. To remove it later, select Disconnect on
+          this integration.
         </span>
       </p>
     </div>

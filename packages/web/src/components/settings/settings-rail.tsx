@@ -7,7 +7,6 @@ import {
   ChevronDown,
   Cpu,
   KeyRound,
-  Link2,
   Shield,
   ShieldCheck,
   SlidersHorizontal,
@@ -147,7 +146,6 @@ const ACCOUNT_ITEMS: RailItem[] = [
   { to: "/settings/profile", label: "Profile", icon: User, active: exact("/settings/profile") },
   { to: "/settings/preferences", label: "Preferences", icon: SlidersHorizontal, active: exact("/settings/preferences") },
   { to: "/settings/notifications", label: "Notifications", icon: Bell, active: exact("/settings/notifications") },
-  { to: "/settings/connected-accounts", label: "Connected accounts", icon: Link2, active: exact("/settings/connected-accounts") },
 ];
 
 const PERSONAL_ITEMS: RailItem[] = [
