@@ -27,6 +27,11 @@ A study of the agents-dev approvals on 2026-10-12 found:
 | `serves_goal` on the same cases, with workspace policy text | 15/19 | 19/19 |
 | `outcome_match` on a call with a wrong target or wrong content | 26/40 | 39/40 |
 | `outcome_match` on a correct call that the user agreed to | 12/12 | 9/12 |
+
+- A larger benchmark of 1,096 cases added wallet actions and adversarial prompt injection, scored on nine decision models. Two results change this design:
+  - **Lookalike targets pass most models.** When one character of a correct call's target was replaced with a Unicode lookalike, for example a Cyrillic "е" in a channel name, Clef Flash still allowed 93% of the calls it had allowed before. Other models allowed 14% to 97%. A deterministic check catches all of them.
+  - **Delegated targets defeat intent signals.** When the user tells the assistant to take the target from fetched data ("use the address on the invoice"), a poisoned source looks like a correct call. Nothing in the conversation is wrong, so no signal can detect it.
+- Injection that the user's own words contradict rarely worked. The leading models blocked all 79 single-shot attack cases, and fake chat-template turns, answer priming, and filler padding moved 0% to 5% of their decisions. The exception was one model, which 6,000 tokens of filler pushed to allow 21% of the unsafe calls it had blocked.
 - **The gate record has gaps.** Until 2026-10-05, Valet did not consistently write the `decision_gate` open event to `engine_events`; the snapshot exists only in the `engine_entries` row. 214 early rows in `engine_decision_gates` have `status = resolved` and no `resolution`.
 - Many "user" messages before a gate were automation prompts, from workflows and the security loop. They carry no human intent.
 
@@ -58,6 +63,16 @@ A study of the agents-dev approvals on 2026-10-12 found:
 `outcome_match` quality depends on the model. One model missed a third of the calls with wrong details. The other model caught almost all of them, but it scored some correct destructive calls as mismatches. For destructive actions, the model therefore also extracts the target the user named into a structured field, and code compares that field with the call's parameters.
 
 **Fact.** A deterministic value that needs no model: who initiated the turn, the action's effect class (read-only, reversible, or destructive), the resource's sensitivity, and whether the extracted target matches the parameters.
+
+Three target facts are required for actions that send, delete, transfer, sign, or change access:
+
+| Fact | Rule |
+|---|---|
+| `target_exact` | The call's target matches, byte for byte, a target that a verified human typed or that a known resource list contains. |
+| `target_confusable` | The target contains characters outside the expected script, invisible characters, or bidirectional controls, or its Unicode confusable skeleton matches a different known resource. |
+| `target_provenance` | The target came from a verified record, such as the address book, the vendor registry, or the workspace's channel list, and not only from fetched content. |
+
+A call fails the policy when `target_confusable` is true, regardless of the signals. When the target came only from fetched content and has no verified provenance, the call goes to a person, even if the signals say the user asked for it. Wallet recipients, token spenders, and new signers always need `target_provenance`.
 
 **Tier.** Each action class has one of three tiers:
 
@@ -143,6 +158,8 @@ When a verified human authorizes a class of action for the current task, Valet d
 Snapshots and decision records hold conversation text and parameters. They have the same retention and access rules as `engine_entries`. Exports for training stay inside Turnkey-controlled hosts and follow the Governed Decisions dataset rules.
 
 ## Open questions
+
+- Which verified records each integration exposes for `target_provenance`, and how a person adds a new target to them.
 
 - The exact threshold for each tier change, and who signs off on it.
 - The length of the undo window for outcome records, per action class.
