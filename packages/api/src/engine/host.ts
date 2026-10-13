@@ -152,7 +152,7 @@ import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { limitPlugins, loadIntegrationLimit } from "../assistants/integration-limit.js";
-import { effectivePersonality, loadLegacyAssistantProfile } from "../assistants/legacy-profile.js";
+import { effectivePersonality, loadLegacyAssistantModel, loadLegacyAssistantProfile } from "../assistants/legacy-profile.js";
 import { listSkillSourcesFor } from "../services/skills.js";
 import { skillTelemetrySink } from "../services/skill-telemetry.js";
 import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
@@ -2687,14 +2687,17 @@ export class EngineHost {
     // first is not its owner, so their personal default must not persist
     // onto every other member — only a user-principal assistant reads the
     // actor's own default (TKAI-255 review round).
+    const legacyModel = await loadLegacyAssistantModel(db, assistant.id);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.orgId, {
       userId: principal.type === "user" ? principal.id : undefined,
       overrideId,
       ownerTeamId: principal.type === "team" ? principal.id : undefined,
+      assistantDefault: legacyModel.model,
     });
     const reasoning = await this.resolveReasoningForBuild(existing, meta.orgId, {
       userId: principal.type === "user" ? principal.id : undefined,
       ownerTeamId: principal.type === "team" ? principal.id : undefined,
+      assistantDefault: legacyModel.reasoning,
     });
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
     // `principal`, not `meta.actorUserId`: an assistant session belongs to
@@ -3419,7 +3422,7 @@ export class EngineHost {
    * `overrideId` and the user default — that persisted value already
    * reflects whatever `setModel` (or the original create-time model) set.
    * Only on create does the preference cascade apply (TKAI-255):
-   * `overrideId ?? childDefault ?? userDefault ?? teamDefault ?? opts.defaultModelId ?? "s"`
+   * `overrideId ?? assistantDefault ?? childDefault ?? userDefault ?? teamDefault ?? opts.defaultModelId ?? "s"`
    * — most-specific wins. Org model preferences are gone (superseded by the
    * per-tier ordered target lists): the final fallback is the tier token
    * `"s"`, which `resolveModelSpec` resolves through the org's tier map
@@ -3433,6 +3436,10 @@ export class EngineHost {
    *   touch a shared session must not freeze their personal preference
    *   onto everyone (the resolved model persists, restore-no-clobber).
    * - `ownerTeamId` opts into the team tier for team-owned sessions.
+   * - `assistantDefault` is the model the workspace's assistant carried
+   *   before the workspace runtime (`loadLegacyAssistantModel`). It belongs
+   *   to the assistant, not to whoever woke it, so a shared assistant may
+   *   pass it. It outranks every default tier, as it did before the upgrade.
    */
   private async resolveModelForBuild(
     existing: SessionData | null,
@@ -3442,10 +3449,20 @@ export class EngineHost {
       overrideId?: string;
       ownerTeamId?: string;
       childDefault?: string;
+      assistantDefault?: string;
     },
   ): Promise<BuildModel> {
     // Preserve the saved model when restoring an existing session.
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
+    // The carried model is read-only, so nobody can replace a retired one.
+    // If it no longer resolves, the next default applies.
+    if (!prefs.overrideId && prefs.assistantDefault) {
+      try {
+        return await this.resolveModelObject(orgId, prefs.assistantDefault);
+      } catch (err) {
+        console.warn(`[engine-host] carried assistant model ${prefs.assistantDefault} does not resolve (${String(err)}); using the next default`);
+      }
+    }
     const id =
       prefs.overrideId ??
       prefs.childDefault ??
@@ -3500,7 +3517,7 @@ export class EngineHost {
    * on shutdown). So on restore (`existing` present), the *persisted* value
    * always wins outright over every cascade tier. Only on create does the
    * preference cascade apply:
-   * `userDefault ?? teamDefault ?? orgDefault ?? undefined`
+   * `assistantDefault ?? userDefault ?? teamDefault ?? orgDefault ?? undefined`
    * — most-specific wins — and the resolved level (if any) is clamped to the
    * org's cap (`clampToMax`). A cascade-resolved value that isn't a known
    * level (a stale/invalid column) is treated as unset rather than thrown.
@@ -3512,13 +3529,14 @@ export class EngineHost {
   private async resolveReasoningForBuild(
     existing: SessionData | null,
     orgId: string,
-    prefs: { userId?: string; ownerTeamId?: string },
+    prefs: { userId?: string; ownerTeamId?: string; assistantDefault?: string },
   ): Promise<ReasoningLevel | undefined> {
     if (existing?.reasoning) {
       return isReasoningLevel(existing.reasoning) ? existing.reasoning : undefined;
     }
     const settings = this.opts.db ? await getOrgReasoningSettings(this.opts.db, orgId) : {};
     const level =
+      prefs.assistantDefault ??
       (prefs.userId ? await this.userDefaultReasoning(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultReasoning(orgId, prefs.ownerTeamId) : undefined) ??
       settings.default;
@@ -3571,13 +3589,16 @@ export class EngineHost {
     const ownerTeamId = assistant
       ? (isTeamAssistant ? assistant.ownerId : undefined)
       : meta.ownerTeamId;
+    const legacyModel = assistant && this.opts.db ? await loadLegacyAssistantModel(this.opts.db, assistant.id) : {};
     const { spec } = await this.resolveModelForBuild(null, meta.orgId, {
       userId,
       ownerTeamId,
+      assistantDefault: legacyModel.model,
     });
     const reasoning = await this.resolveReasoningForBuild(null, meta.orgId, {
       userId,
       ownerTeamId,
+      assistantDefault: legacyModel.reasoning,
     });
     return {
       model: spec,

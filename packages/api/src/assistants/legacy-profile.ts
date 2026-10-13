@@ -107,6 +107,30 @@ export async function loadLegacyAssistantProfile(
 }
 
 /**
+ * The model and reasoning level an assistant carried before the workspace
+ * runtime. The runtime dropped both columns from the schema and stopped
+ * applying them, so a workspace that had pinned a model, and every workflow
+ * that ran on it, moved to the owner's defaults on upgrade. An upgraded
+ * database still holds the values. A new session or thread of the assistant
+ * starts on them again, ahead of the owner's defaults, as before the
+ * upgrade. Read-only, like the profile: nothing writes a new value.
+ */
+export async function loadLegacyAssistantModel(
+  db: AppDb,
+  assistantId: string,
+): Promise<{ model?: string; reasoning?: string }> {
+  const result = await db.execute(sql`SELECT p->>'model' AS model, p->>'reasoning' AS reasoning
+    FROM (SELECT to_jsonb(a) AS p FROM assistants a WHERE a.id = ${assistantId} LIMIT 1) live`) as {
+    rows: Array<{ model: unknown; reasoning: unknown }>;
+  };
+  const row = result.rows[0];
+  return {
+    ...(typeof row?.model === "string" && row.model ? { model: row.model } : {}),
+    ...(typeof row?.reasoning === "string" && row.reasoning ? { reasoning: row.reasoning } : {}),
+  };
+}
+
+/**
  * The personality text for the prompt, from the `assistant/personality.md`
  * memory file and the carried-over column.
  *
