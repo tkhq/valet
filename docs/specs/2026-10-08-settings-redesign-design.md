@@ -172,10 +172,11 @@ The filters, search, the Catalog and Sources tabs, and New skill stay.
 A plugin skill's page lists the integrations it uses as Integrations rows
 (2026-10-13), each a link to `/integrations?service=<plugin>`. Skill metadata
 declares no tools, so the list is the reverse of a panel's Related skills: the
-plugin that ships the skill, and any plugin that lists it. In the personal
-workspace the rows carry your tool summary. A stored or repository skill
-declares no integrations and keeps its note. A skill has no permissions of its
-own.
+plugin that ships the skill, and any plugin that lists it, when Integrations
+has a panel for it (`hasPanel`). The rows carry your tool summary. Team
+Integrations has no panels, so a team workspace gets one link to the page. A
+stored or repository skill declares no integrations and keeps its note. A
+skill has no permissions of its own.
 
 ## Testing
 

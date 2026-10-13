@@ -5,7 +5,7 @@ import { Spinner, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { SearchInput } from "~/components/search-input";
 import { Section } from "~/components/settings/section";
-import { hasVisibleSurface, IntegrationDetail, IntegrationRow, integrationGroup, isService } from "~/components/integrations/integration-row";
+import { hasPanel, IntegrationDetail, IntegrationRow, integrationGroup } from "~/components/integrations/integration-row";
 import { Dialog, DialogContent, DialogTitle } from "~/components/primitives";
 import { IntegrationList } from "~/components/integrations/integration-card";
 import { OrphanCredentials } from "~/components/integrations/orphan-credentials";
@@ -146,11 +146,12 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
   const pushedPanel = useRef(false);
   const query = search.q ?? "";
 
-  // `hasVisibleSurface` drops plugins whose every service is unconfigured,
-  // unconnected, and unfixable by this caller — nothing on such a tile could
-  // work, and nothing on it would tell the reader what to do. An org admin
-  // keeps the tile, because the API tells them which setting is missing.
-  const reachable = plugins.filter(isService).filter(hasVisibleSurface);
+  // `hasPanel` drops content-only plugins, and plugins whose every service is
+  // unconfigured, unconnected, and unfixable by this caller — nothing on such
+  // a tile could work, and nothing on it would tell the reader what to do. An
+  // org admin keeps the tile, because the API tells them which setting is
+  // missing. The skill page lists its integrations with the same predicate.
+  const reachable = plugins.filter(hasPanel);
   // A tile answers the query by its display name, raw name, or description.
   const services = reachable
     .filter((plugin) => matchesNeedle(query, [pluginDisplayName(plugin), plugin.name, plugin.description]))

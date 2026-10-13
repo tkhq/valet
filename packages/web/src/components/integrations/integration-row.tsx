@@ -89,6 +89,11 @@ export function hasVisibleSurface(plugin: PluginSummary): boolean {
   return plugin.services.length === 0 || plugin.services.some(isVisibleService);
 }
 
+/** True when `/integrations` lists the plugin, so its `?service=` opens a panel. */
+export function hasPanel(plugin: PluginSummary): boolean {
+  return isService(plugin) && hasVisibleSurface(plugin);
+}
+
 function reachMeta(plugin: PluginSummary): string | null {
   if (plugin.actionCount > 0) {
     return `${plugin.actionCount} tool${plugin.actionCount === 1 ? "" : "s"}`;

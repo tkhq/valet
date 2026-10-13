@@ -30,12 +30,6 @@ describe("SkillUsage", () => {
     expect(open).toHaveBeenCalledExactlyOnceWith('Use the "drive" skill to help me with [describe your task].');
     expect(screen.getByText(/Nothing is sent until you send it/)).toBeTruthy();
   });
-  it("requests only the active team's connection metadata", () => {
-    teamId = "team-1";
-    render(<SkillUsage skill={skill} />);
-    expect(query).toHaveBeenCalledWith("team-1");
-    expect(screen.getByText(/current team workspace/)).toBeTruthy();
-  });
   it("reports unavailable status without claiming disconnected", () => {
     error = new Error("offline");
     render(<SkillUsage skill={skill} />);
@@ -59,14 +53,27 @@ describe("SkillUsage", () => {
     expect(screen.getByText("Refresh failed")).toBeTruthy();
     expect(screen.getAllByText("1 tool · 1 ask").length).toBeGreaterThan(0);
   });
-  it("leaves your own tool summary out of a team workspace", () => {
+  it("sends a team workspace to its Integrations page, which opens no panel", () => {
     teamId = "team-1";
     data = { plugins: [{ name: "gmail", version: "1", actionCount: 1, services: [], actionServices: [{ service: "gmail", actions: [] }], skills: [{ name: "drive" }] }] };
-    tools = [{ service: "gmail", actionId: "gmail.send", name: "Send", description: "", riskLevel: "medium",
-      mode: "require_approval", source: "default", overridden: false, settable: ["allow", "require_approval", "deny"] }];
     render(<SkillUsage skill={skill} />);
-    expect(screen.getByRole("link").getAttribute("href")).toBe("/integrations?service=gmail");
-    expect(screen.queryByText(/1 tool/)).toBeNull();
+    expect(screen.getByText(/current team workspace/)).toBeTruthy();
+    expect(screen.getByRole("link").getAttribute("href")).toBe("/integrations");
+    expect(query).not.toHaveBeenCalled();
+  });
+  it("lists no row for a content-only plugin, which Integrations does not list", () => {
+    data = { plugins: [{ name: "google-workspace", version: "1", actionCount: 0, services: [] }] };
+    render(<SkillUsage skill={skill} />);
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.getByText(/No integration to open for this skill/)).toBeTruthy();
+  });
+  it("lists no row for a service this member cannot connect or fix", () => {
+    data = { plugins: [{ name: "google-workspace", version: "1", actionCount: 0, services: [
+      { service: "google-drive", type: "oauth2", connect: "unconfigured", configKeys: [], connected: false, actions: [] },
+    ] }] };
+    render(<SkillUsage skill={skill} />);
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.getByText(/No integration to open for this skill/)).toBeTruthy();
   });
   it("does not fetch connections or try a shadowed stored skill", () => {
     render(<SkillUsage skill={{ name: "drive", origin: "local", id: "s1", ownerType: "team", ownerId: "team-1", shadowed: true, takesArgs: false, updatedAt: 0 }} />);
