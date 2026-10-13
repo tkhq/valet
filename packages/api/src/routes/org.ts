@@ -41,9 +41,11 @@ import {
   setPluginEntitlement,
 } from "../services/plugin-entitlements.js";
 import type { EngineHost } from "../engine/host.js";
+import { configMcpDisplayName } from "../plugins/config-mcp.js";
 import type { PluginEntitlementMode } from "@valet/shared";
 import type {
   OrgDirectoryResponse,
+  OrgMcpServersResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
   OrgPluginWire,
@@ -395,4 +397,33 @@ orgRouter.patch("/plugins/:name", async (c) => {
     enabledForCaller,
   };
   return c.json(resp);
+});
+
+// ── Config-declared MCP servers ──────────────────────────────────────────
+//
+// `GET /api/org/mcp-servers` → any member reads the instance config's
+// `mcpServers` list. Read-only: the operator changes servers in the config
+// file. Not tied to the `organizations` gate, for the same reason as
+// `/plugins`: a single-org deployment still runs these servers.
+
+orgRouter.get("/mcp-servers", async (c) => {
+  const { configMcpServers, engineCredentials } = c.var.providers;
+  const user = c.var.user;
+  const connected = new Set(
+    (await engineCredentials.list({ type: "user", id: user.id })).map((cred) => cred.service),
+  );
+  const body: OrgMcpServersResponse = {
+    servers: configMcpServers.map((entry) => ({
+      name: entry.name,
+      displayName: configMcpDisplayName(entry),
+      url: entry.url,
+      auth: entry.auth,
+      scopes: entry.scopes ?? [],
+      description: entry.description ?? null,
+      riskLevel: entry.riskLevel ?? "medium",
+      enabled: entry.enabled !== false,
+      connected: entry.auth === "oauth" || entry.auth === "api_key" ? connected.has(entry.name) : null,
+    })),
+  };
+  return c.json(body);
 });

@@ -517,6 +517,14 @@ Rules:
   assumed, because an unannotated tool would otherwise surface as
   `critical`. The mapping lives in `deriveRiskLevel`
   (`packages/sdk/src/mcp/action-plugin.ts`).
+- `GET /api/org/mcp-servers` lists every entry read-only to any org
+  member, in file order and with disabled entries included. Organization
+  settings shows it as "MCP servers". The wire carries `name`,
+  `displayName`, `url`, `auth`, `scopes`, `description`, `riskLevel`,
+  `enabled`, and the caller's own `connected` state for `oauth` and
+  `api_key` entries (`null` for `none` and `bearer`). It leaves out
+  `tokenEnv` and `authQueryParam`. To change a server, edit the config
+  file; this surface has no write path.
 
 ## Tool policies
 

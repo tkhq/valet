@@ -27,6 +27,7 @@ import type { ContentSyncService } from "../services/content-sync/service.js";
 import type { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import type { AutoTitleHost } from "../sessions/auto-title-host.js";
+import type { McpServerDecl } from "../config/instance-config.js";
 
 /**
  * The full set of capabilities the API needs at runtime. Built once at boot,
@@ -114,6 +115,9 @@ export interface Providers {
   // Assembled plugin set (plugin-system-v2 plan Task 4) — bundled registry +
   // node_modules scan (or a test override), deduped and service-indexed.
   plugins: ValetPlugin[];
+  /** The instance config's `mcpServers` entries as declared, disabled ones
+   * included. `GET /api/org/mcp-servers` lists them read-only. */
+  configMcpServers: readonly McpServerDecl[];
   actionPluginByService: Map<string, { plugin: ValetPlugin; actionPlugin: ActionPlugin }>;
 
   /** TTL-cached resolved tool counts for connected dynamic services

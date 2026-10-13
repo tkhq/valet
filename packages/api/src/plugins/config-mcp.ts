@@ -54,9 +54,7 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
     staticToken = token;
   }
 
-  // The connect UI shows this as the card title, so a missing displayName
-  // must still read like a product name, not a slug.
-  const displayName = entry.displayName ?? titleCaseSlug(entry.name);
+  const displayName = configMcpDisplayName(entry);
 
   const credentials: CredentialDeclaration[] = [];
   if (entry.auth === "oauth") {
@@ -98,6 +96,15 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
   };
   if (credentials.length > 0) plugin.credentials = credentials;
   return plugin;
+}
+
+/**
+ * The name the connect UI shows as the card title, and the org MCP server
+ * list shows too. A missing displayName must still read like a product name,
+ * not a slug.
+ */
+export function configMcpDisplayName(entry: Pick<McpServerDecl, "name" | "displayName">): string {
+  return entry.displayName ?? titleCaseSlug(entry.name);
 }
 
 /** "grafana-cloud" → "Grafana Cloud" — the fallback when the entry names no

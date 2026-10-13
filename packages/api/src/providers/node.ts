@@ -903,6 +903,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     eventDispatcher,
     contentSync,
     plugins,
+    configMcpServers: opts.instanceConfig?.mcpServers ?? [],
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
     prebuildService,

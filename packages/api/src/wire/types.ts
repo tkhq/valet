@@ -3949,6 +3949,35 @@ export interface OrgPluginsResponse {
   plugins: OrgPluginWire[];
 }
 
+/**
+ * One MCP server declared in the instance config (`valet.yaml` `mcpServers`).
+ * Read-only: the operator edits the config file, not this surface. The wire
+ * leaves out `tokenEnv` and `authQueryParam`, which say where a token lives.
+ *  - `displayName` — the configured name, or the title-cased `name` the
+ *    connect UI also shows.
+ *  - `riskLevel` — the configured risk, or the `medium` default.
+ *  - `enabled` — false when the entry sets `enabled: false`; the API did not
+ *    load it.
+ *  - `connected` — the caller's own credential for an `oauth` or `api_key`
+ *    entry. `null` for `none` and `bearer`, which have no per-user credential.
+ */
+export interface OrgMcpServerWire {
+  name: string;
+  displayName: string;
+  url: string;
+  auth: "none" | "oauth" | "api_key" | "bearer";
+  scopes: string[];
+  description: string | null;
+  riskLevel: "low" | "medium" | "high" | "critical";
+  enabled: boolean;
+  connected: boolean | null;
+}
+
+/** `GET /api/org/mcp-servers` — any member reads. Config order. */
+export interface OrgMcpServersResponse {
+  servers: OrgMcpServerWire[];
+}
+
 /** `PATCH /api/org/plugins/:name` body — org admin only. `teamIds` is required
  * for `teams` mode and ignored otherwise. */
 export interface PatchOrgPluginRequest {
