@@ -163,7 +163,16 @@ export async function receiveWebhook(
     const deliveryId = request.headers["x-github-delivery"];
     const def = triggers.find((trigger) => trigger.service === "github" && trigger.id === `github.${event}`);
     if (def && deliveryId) {
-      await effects.emit(def.toEvent({ eventType: event, deliveryId, payload }));
+      // The App's webhook secret signs every installation's deliveries, so
+      // the signature does not prove the event belongs to this organization.
+      if (await effects.installationServesOrg()) {
+        await effects.emit(def.toEvent({ eventType: event, deliveryId, payload }));
+      } else {
+        await effects.recordUndeliverable({
+          deliveryId,
+          detail: `github event ${event}: installation ${installationId(payload) ?? "none"} does not serve this organization`,
+        });
+      }
     } else {
       // Record the gap so operators can see events this deployment cannot ingest.
       await effects.recordUndeliverable({

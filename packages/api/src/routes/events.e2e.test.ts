@@ -21,7 +21,7 @@ import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { eventDeliveries, events, linearInstallations, workflowRuns } from "../schema/index.js";
+import { eventDeliveries, events, githubInstallations, linearInstallations, workflowRuns } from "../schema/index.js";
 import type {
   CreateEventSubscriptionResponse,
   CreateWorkflowResponse,
@@ -296,6 +296,7 @@ const GITHUB_WEBHOOK_SECRET = "gh-webhook-secret";
  * A REAL PEM, because any discovery along the way mints an App JWT. */
 async function configureGithubApp(baseUrl: string): Promise<void> {
   githubFixture = startGithubFixture({
+    getApp: () => ({ body: { id: 42, slug: "valet-acme", owner: { login: "acme", id: 1, type: "Organization" } } }),
     listInstallations: () => ({ body: [] }),
     convertManifest: () => ({
       body: {
@@ -327,10 +328,14 @@ async function configureGithubApp(baseUrl: string): Promise<void> {
   expect(setupRes.status).toBe(302);
 }
 
-function prOpenedBody(repoFullName: string, prNumber: number): string {
+/** The installation on the App owner's account, `acme`. */
+const ORG_INSTALLATION_ID = 4040;
+
+function prOpenedBody(repoFullName: string, prNumber: number, installationId = ORG_INSTALLATION_ID): string {
   return JSON.stringify({
     action: "opened",
     number: prNumber,
+    installation: { id: installationId },
     pull_request: {
       number: prNumber,
       title: "Add the thing",
@@ -360,6 +365,13 @@ describe("event system e2e: signed GitHub webhook → subscription match → wor
   it("starts a workflow run from a pull_request delivery; a filtered-out repo starts nothing", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     await configureGithubApp(api.baseUrl);
+    const now = Date.now();
+    for (const [installationId, accountLogin] of [[ORG_INSTALLATION_ID, "acme"], [5050, "outsider-org"]] as const) {
+      await api.providers.db.insert(githubInstallations).values({
+        id: `ghi_${installationId}`, orgId: "local-org", installationId, accountLogin, accountType: "Organization",
+        suspended: false, createdAt: now, updatedAt: now,
+      });
+    }
 
     // ── Workflow definition via the API ─────────────────────────────────
     const wfRes = await fetch(`${api.baseUrl}/api/workflows`, {
@@ -439,6 +451,10 @@ describe("event system e2e: signed GitHub webhook → subscription match → wor
     // subscription asked for.
     const negRes = await postGithubDelivery(api.baseUrl, prOpenedBody("acme/other", 8), "gh-del-2");
     expect(negRes.status).toBe(204);
+
+    // ── Negative: an outsider's installation of the public App starts nothing ─
+    const outsiderRes = await postGithubDelivery(api.baseUrl, prOpenedBody("acme/widgets", 9, 5050), "gh-del-3");
+    expect(outsiderRes.status).toBe(204);
 
     const allEvents = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
     expect(allEvents).toHaveLength(1);

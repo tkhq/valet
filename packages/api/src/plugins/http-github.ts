@@ -64,6 +64,7 @@ import { githubAppInstallUrl, resolveGithubApiUrl, resolveGithubUrl } from "../s
 import {
   buildAppConfig,
   discoverInstallations,
+  installationServesOrg,
   loadAppConfig,
   loadAppConfigWithSource,
   reconcileUserInstallations,
@@ -71,6 +72,7 @@ import {
   saveAppConfig,
   syncAppWebhookUrl,
   verifyAppCredential,
+  type GithubAppConfig,
   type GithubAppDeps,
 } from "../services/github-app.js";
 import { invalidateWorkflowSources } from "../services/content-sync/invalidation.js";
@@ -487,14 +489,19 @@ function webhookCapability(providers: Providers): GithubWebhookCapability {
         webhookSecret: config.webhookSecret,
         bind: async ({ installationId }) => {
           const orgId = ownerOrgId ?? (await resolveEnvFallbackOrgId(db, installationId));
-          return orgId ? deliveryEffects(providers, orgId) : null;
+          return orgId ? deliveryEffects(providers, orgId, config, installationId) : null;
         },
       };
     },
   };
 }
 
-function deliveryEffects(providers: Providers, orgId: string): GithubDeliveryEffects {
+function deliveryEffects(
+  providers: Providers,
+  orgId: string,
+  config: GithubAppConfig,
+  installationId: number | null,
+): GithubDeliveryEffects {
   const { db } = providers;
   /** Changes one installation row under the organization row lock. */
   const changeInstallation = async (installationId: number, suspended: boolean | null): Promise<void> => {
@@ -526,6 +533,9 @@ function deliveryEffects(providers: Providers, orgId: string): GithubDeliveryEff
     discoverInstallations: async () => {
       await discoverInstallations(appDeps(providers), orgId);
     },
+    installationServesOrg: async () =>
+      installationId !== null
+      && installationServesOrg({ db, apiUrl: resolveGithubApiUrl(process.env) }, config, orgId, installationId),
     emit: async (event) => {
       await ingestEvent(
         { db, plugins: providers.plugins, onIngest: providers.eventDispatcher.nudge },

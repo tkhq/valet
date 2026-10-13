@@ -364,20 +364,24 @@ export interface VerifiedApp {
   htmlUrl?: string;
   oauthClientId?: string;
   installationsCount?: number;
+  /** The login of the account that owns the App. */
+  ownerLogin?: string;
 }
 
 export type AppCredentialCheck = { ok: true; app: VerifiedApp } | { ok: false; error: string };
 
 function parseAppResponse(payload: unknown): VerifiedApp | null {
   if (!isRecord(payload)) return null;
-  const { id, slug, html_url: htmlUrl, client_id: clientId, installations_count: count } = payload;
+  const { id, slug, html_url: htmlUrl, client_id: clientId, installations_count: count, owner } = payload;
   if (typeof id !== "number" && typeof id !== "string") return null;
+  const ownerLogin = isRecord(owner) ? owner.login : undefined;
   return {
     appId: String(id),
     ...(typeof slug === "string" ? { appSlug: slug } : {}),
     ...(typeof htmlUrl === "string" ? { htmlUrl } : {}),
     ...(typeof clientId === "string" ? { oauthClientId: clientId } : {}),
     ...(typeof count === "number" ? { installationsCount: count } : {}),
+    ...(typeof ownerLogin === "string" ? { ownerLogin } : {}),
   };
 }
 
@@ -495,6 +499,42 @@ const PERSONAL_ACCOUNT_TYPE = "User";
 function linkedUserFor(inst: ParsedInstallation, linkedByGithubId: Map<string, string>): string | null {
   if (inst.accountType !== PERSONAL_ACCOUNT_TYPE || inst.accountId === null) return null;
   return linkedByGithubId.get(inst.accountId) ?? null;
+}
+
+/** App owner logins by App id, read once per process. After an App transfer
+ * or an owner rename, the owner's events drop until a restart. */
+const appOwnerLogins = new Map<string, string>();
+
+/**
+ * True when events from the installation may start the organization's
+ * subscriptions: the installation on the App owner's account, or a personal
+ * installation linked to a member. Anybody can install the public App, and
+ * discovery records every installation, so a row alone proves nothing.
+ */
+export async function installationServesOrg(
+  deps: Pick<GithubAppDeps, "db" | "apiUrl" | "fetchImpl">,
+  config: Pick<GithubAppConfig, "appId" | "privateKeyPem">,
+  orgId: string,
+  installationId: number,
+): Promise<boolean> {
+  const [row] = await deps.db
+    .select({
+      accountLogin: githubInstallations.accountLogin,
+      accountType: githubInstallations.accountType,
+      linkedUserId: githubInstallations.linkedUserId,
+    })
+    .from(githubInstallations)
+    .where(and(eq(githubInstallations.orgId, orgId), eq(githubInstallations.installationId, installationId)))
+    .limit(1);
+  if (!row) return false;
+  if (row.accountType === PERSONAL_ACCOUNT_TYPE && row.linkedUserId !== null) return true;
+  let owner = appOwnerLogins.get(config.appId);
+  if (!owner) {
+    const check = await verifyAppCredential(deps, config);
+    owner = check.ok ? check.app.ownerLogin : undefined;
+    if (owner) appOwnerLogins.set(config.appId, owner);
+  }
+  return owner !== undefined && owner.toLowerCase() === row.accountLogin.toLowerCase();
 }
 
 const MAX_INSTALLATION_PAGES = 10;

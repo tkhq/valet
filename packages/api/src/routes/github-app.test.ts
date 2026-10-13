@@ -87,6 +87,7 @@ async function setupConfiguredOrg(
   overrides: Parameters<typeof startGithubFixture>[0] = {},
 ): Promise<{ webhookSecret: string; fixture: GithubFixture }> {
   const f = useFixture({
+    getApp: () => ({ body: { id: 42, slug: "valet-acme", owner: { login: "acme", id: 1, type: "Organization" } } }),
     listInstallations: () => ({ body: [] }),
     convertManifest: () => ({
       body: {
@@ -909,6 +910,7 @@ describe("POST /webhooks/github-app", () => {
 
   const PR_OPENED_PAYLOAD = {
     action: "opened",
+    installation: { id: 999 },
     pull_request: { number: 7, title: "Add thing" },
     repository: { full_name: "acme/widgets" },
     sender: { id: 1234, login: "octocat" },
@@ -917,6 +919,7 @@ describe("POST /webhooks/github-app", () => {
   it("forwards a pull_request webhook into the event pipeline: events row + matched pending delivery", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedInstallationRow();
 
     const now = Date.now();
     await api.providers.db.insert(eventSubscriptions).values({
@@ -959,9 +962,38 @@ describe("POST /webhooks/github-app", () => {
     expect(["pending", "delivered"]).toContain(deliveryRows[0].status);
   });
 
+  // Anybody can install the public App, and the App's webhook secret signs
+  // every installation's deliveries. Only the App owner's installation and a
+  // member's linked personal installation reach the organization's subscriptions.
+  it("forwards events only from the org installation and members' linked personal installations", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    const now = Date.now();
+    await api.providers.db.insert(eventSubscriptions).values({
+      id: "sub_gh", orgId: "local-org", ownerType: "org", ownerId: "local-org", name: "Every PR",
+      eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "orchestrator" }, enabled: true,
+      createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+    await seedInstallationRow();
+    await seedInstallationRow({ id: "ghi_member", installationId: 1001, accountLogin: "member", accountType: "User", linkedUserId: "local-user" });
+    await seedInstallationRow({ id: "ghi_outsider", installationId: 1002, accountLogin: "outsider", accountType: "User" });
+    await seedInstallationRow({ id: "ghi_outsider_org", installationId: 1003, accountLogin: "outsider-org" });
+
+    const deliver = (id: number) => postForwardedWebhook(
+      api!.baseUrl, "pull_request", { ...PR_OPENED_PAYLOAD, installation: { id } }, webhookSecret, `gh-inst-${id}`,
+    );
+    for (const id of [1002, 1003, 1004]) expect((await deliver(id)).status).toBe(204);
+    expect(await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"))).toEqual([]);
+
+    for (const id of [999, 1001]) expect((await deliver(id)).status).toBe(204);
+    const forwarded = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
+    expect(forwarded.map((row) => row.dedupeKey).sort()).toEqual(["gh-inst-1001", "gh-inst-999"]);
+  });
+
   it("drops forwarded events with no matching subscription (nothing stored)", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedInstallationRow();
 
     const res = await postForwardedWebhook(api.baseUrl, "pull_request", PR_OPENED_PAYLOAD, webhookSecret, "gh-del-2");
     // The route still acks (204): the event verified, it just matched no
@@ -976,6 +1008,7 @@ describe("POST /webhooks/github-app", () => {
   it("dedupes a redelivered webhook (same x-github-delivery -> one events row, one delivery)", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedInstallationRow();
 
     const now = Date.now();
     await api.providers.db.insert(eventSubscriptions).values({

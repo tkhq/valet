@@ -176,6 +176,10 @@ export interface GithubDeliveryEffects {
   repositorySelectionChanged(installationId: number, repositorySelection: string | undefined): Promise<void>;
   /** Re-reads installations from GitHub. */
   discoverInstallations(): Promise<void>;
+  /** True when the delivery's installation is the organization's own or a
+   * member's personal installation. Anybody can install the public App, so
+   * no other installation's events may reach subscriptions. */
+  installationServesOrg(): Promise<boolean>;
   /** Persists the event and starts subscription dispatch. */
   emit(event: NormalizedEvent): Promise<void>;
   /** Records a verified delivery that no trigger can ingest. */
