@@ -294,7 +294,9 @@ async function handleOutcome<TDispatched, TSettled>(
 /**
  * Give the model the same output contract that settlement will validate.
  * The extractor reads the last fenced json block, so the prose stays in
- * `response` for later steps that template it.
+ * `response` for later steps that template it. The contract states format
+ * only: an instruction to report failure instead made a verifying step
+ * replace its formatted result with a failure note.
  */
 export function withOutputSchemaPrompt(prompt: string, schema: Record<string, unknown> | undefined): string {
   if (schema === undefined) return prompt;
@@ -304,8 +306,6 @@ export function withOutputSchemaPrompt(prompt: string, schema: Record<string, un
     'Workflow output contract:',
     'Write your normal response. End it with one fenced ```json block that matches this schema:',
     JSON.stringify(schema),
-    'Use facts from the requested work. Do not invent empty arrays or default values to satisfy the schema.',
-    'If the work fails, report the failure truthfully instead of returning a fabricated successful result.',
   ].join('\n');
 }
 
@@ -321,8 +321,6 @@ function buildRepairPrompt(schema: Record<string, unknown>, validationError: str
     `Validation error: ${errorText}`,
     '',
     'Reuse prior successful tool results. Do not repeat actions with side effects during format repair.',
-    'Do not invent empty arrays or default values to hide failed or incomplete inspection.',
-    'If the work failed, report that failure truthfully instead of fabricating a successful result.',
     'Otherwise respond with ONLY the corrected JSON, matching the schema exactly.',
   ].join('\n');
 }

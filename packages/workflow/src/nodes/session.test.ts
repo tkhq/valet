@@ -304,6 +304,7 @@ describe('executeSession: schema step keeps its prose response', () => {
     expect(primary).toContain(JSON.stringify(outputSchema));
     expect(primary).not.toMatch(/ONLY JSON/i);
     expect(primary).toContain('End it with one fenced ```json block');
+    expect(primary).not.toMatch(/report (the|that) failure|Do not invent/);
   });
 
   it('keeps the prose in response and the parsed block in output', async () => {
@@ -381,7 +382,7 @@ describe('executeSession: schema validation failure triggers exactly one repair'
     expect(repairText).toContain('missing value');
     expect(repairText).toContain('Reuse prior successful tool results');
     expect(repairText).toContain('Do not repeat actions with side effects');
-    expect(repairText).toContain('Do not invent empty arrays');
+    expect(repairText).not.toMatch(/report (the|that) failure|Do not invent/);
     const primary = calls.find((call) => call.kind === 'prompt' && call.dispatchId === 'workflow:run-7:s');
     expect(String(primary?.text)).toContain(JSON.stringify(outputSchema));
     expect(String(primary?.text)).toContain('End it with one fenced ```json block');

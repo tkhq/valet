@@ -297,10 +297,11 @@ describe('executeThread: schema validation failure triggers exactly one repair',
     expect(repairText).toContain('missing value');
     expect(repairText).toContain('Reuse prior successful tool results');
     expect(repairText).toContain('Do not repeat actions with side effects');
-    expect(repairText).toContain('Do not invent empty arrays');
+    expect(repairText).not.toMatch(/report (the|that) failure|Do not invent/);
     const primary = calls.find((call) => call.kind === 'promptOrchestrator' && call.dispatchId === 'workflow:run-6:o');
     expect(String(primary?.prompt)).toContain(JSON.stringify(outputSchema));
     expect(String(primary?.prompt)).toContain('End it with one fenced ```json block');
+    expect(String(primary?.prompt)).not.toMatch(/report (the|that) failure|Do not invent/);
     expect(String(primary?.prompt)).not.toMatch(/ONLY JSON/i);
 
     const byNode = new Map((await store.getCheckpoints('run-6')).map((cp) => [cp.nodeId, cp]));
