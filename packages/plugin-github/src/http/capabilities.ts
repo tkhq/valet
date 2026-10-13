@@ -43,6 +43,15 @@ export interface GithubOrgStatus {
   installationCount: number;
   suspendedCount: number;
   personalInstallUrl?: string;
+  /** The caller's own personal installations: rows bound to the caller. */
+  personalInstallations?: GithubPersonalInstallation[];
+}
+
+/** A personal installation, as its owner sees it. */
+export interface GithubPersonalInstallation {
+  accountLogin: string;
+  repositorySelection: string | null;
+  suspended: boolean;
 }
 
 /** Parts of an App credential. The host fills the page URL and empty secrets. */
@@ -116,7 +125,8 @@ export interface GithubCallbackGrant {
   returnTo: string;
   /** The App OAuth client of the organization the state names. Null when no App exists. */
   oauthClient(): Promise<{ clientId: string; clientSecret: string } | null>;
-  /** Saves the caller's credential, refreshes readiness, and relinks installations. */
+  /** Saves the caller's credential, refreshes readiness, and links the
+   * caller's own personal installations. */
   saveConnection(connection: GithubUserConnection): Promise<void>;
 }
 
@@ -125,6 +135,9 @@ export interface GithubUserConnection {
   refreshToken?: string;
   expiresAt?: number;
   login: string;
+  /** GitHub's numeric account id from `GET /user`, as a string. The host
+   * links a personal installation to the member with this id. */
+  githubId?: string;
 }
 
 export interface GithubWebhookCapability {
@@ -160,6 +173,10 @@ export interface GithubDeliveryEffects {
   repositorySelectionChanged(installationId: number, repositorySelection: string | undefined): Promise<void>;
   /** Re-reads installations from GitHub. */
   discoverInstallations(): Promise<void>;
+  /** True when the delivery's installation is the organization's own or a
+   * member's personal installation. Anybody can install the public App, so
+   * no other installation's events may reach subscriptions. */
+  installationServesOrg(): Promise<boolean>;
   /** Persists the event and starts subscription dispatch. */
   emit(event: NormalizedEvent): Promise<void>;
   /** Records a verified delivery that no trigger can ingest. */

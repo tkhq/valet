@@ -3,7 +3,8 @@
  *
  * One line: a badge naming the App's state, the state in words, and either
  * a personal-install link, a link to the page that owns the App, or the
- * sentence for somebody who cannot open that page. `github-org-app.ts` holds the copy and the reason
+ * sentence for somebody who cannot open that page. A second line names the
+ * caller's own personal installations, when there are any. `github-org-app.ts` holds the copy and the reason
  * the two halves are described as separate connections.
  *
  * The line renders nothing until the status arrives. A card that guesses at
@@ -29,31 +30,41 @@ export function GithubOrgAppLine() {
   const canOpenAppPage =
     orgQ.data?.features.organizations === true && orgQ.data.callerRole === "admin";
 
+  const own = statusQ.data.personalInstallations ?? [];
+
   return (
-    <p className="text-xs leading-relaxed text-muted">
-      <Badge variant={summary.badge.variant} className="mr-1.5">
-        {summary.badge.label}
-      </Badge>
-      {summary.note}{" "}
-      {statusQ.data.personalInstallUrl ? (
-        <a
-          href={statusQ.data.personalInstallUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="whitespace-nowrap text-ink underline underline-offset-2"
-        >
-          Install on personal account
-        </a>
-      ) : canOpenAppPage ? (
-        <a
-          href="/settings/organization/github"
-          className="whitespace-nowrap text-ink underline underline-offset-2"
-        >
-          {summary.adminAction}
-        </a>
-      ) : (
-        summary.memberAction
+    <>
+      <p className="text-xs leading-relaxed text-muted">
+        <Badge variant={summary.badge.variant} className="mr-1.5">
+          {summary.badge.label}
+        </Badge>
+        {summary.note}{" "}
+        {statusQ.data.personalInstallUrl ? (
+          <a
+            href={statusQ.data.personalInstallUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="whitespace-nowrap text-ink underline underline-offset-2"
+          >
+            Install on personal account
+          </a>
+        ) : canOpenAppPage ? (
+          <a
+            href="/settings/organization/github"
+            className="whitespace-nowrap text-ink underline underline-offset-2"
+          >
+            {summary.adminAction}
+          </a>
+        ) : (
+          summary.memberAction
+        )}
+      </p>
+      {own.length > 0 && (
+        <p className="text-xs leading-relaxed text-muted">
+          Installed on your account:{" "}
+          {own.map((inst) => `${inst.accountLogin}${inst.suspended ? " (suspended)" : ""}`).join(", ")}
+        </p>
       )}
-    </p>
+    </>
   );
 }

@@ -5,14 +5,18 @@
  */
 import { listTeamShares, shareCredential } from "../services/credential-shares.js";
 import { afterEach, describe, expect, it } from "vitest";
+import { generateKeyPairSync } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { credentials, githubInstallations, orgs } from "../schema/index.js";
 import { createTeam } from "../services/teams.js";
+import { resolveGitHubToken } from "../services/github-tokens.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type {
   GetGithubOrgStatusResponse,
+  GetReposResponse,
   ListCredentialsResponse,
   PostGithubAppManifestResponse,
   PostGithubConnectResponse,
@@ -120,7 +124,6 @@ describe("GET /api/me/github/org-status", () => {
       configured: true,
       installationCount: 0,
       suspendedCount: 0,
-      personalInstallUrl: `${fixture?.url}/apps/fixture-app/installations/new`,
     });
   });
 
@@ -172,10 +175,19 @@ describe("GET /api/me/github/org-status", () => {
     expect(adminRead.status).toBe(403);
   });
 
-  it("gives members a personal install URL without app details", async () => {
+  it("gives a member a personal install URL without app details once they connected GitHub", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     useFixture();
     await configureOrgApp(api.baseUrl);
+
+    // As in the legacy stack, the link waits for the connection that lets
+    // the installation link to the member.
+    expect(await readStatus(api.baseUrl, MEMBER_HEADERS)).not.toHaveProperty("personalInstallUrl");
+    await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2",
+      accessToken: "connect-access-token",
+      metadata: { login: "octomember", githubId: "4242" },
+    });
 
     const res = await fetch(`${api.baseUrl}/api/me/github/org-status`, { headers: MEMBER_HEADERS });
     const body: unknown = await res.json();
@@ -195,6 +207,11 @@ describe("GET /api/me/github/org-status", () => {
       .update(orgs)
       .set({ allowPersonalInstallations: false })
       .where(eq(orgs.id, "local-org"));
+    await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2",
+      accessToken: "connect-access-token",
+      metadata: { login: "octomember", githubId: "4242" },
+    });
 
     expect(await readStatus(api.baseUrl, MEMBER_HEADERS)).toEqual({
       configured: true,
@@ -279,7 +296,7 @@ describe("GET /api/me/github/callback", () => {
       type: "oauth2",
       accessToken: "connect-access-token",
       refreshToken: "connect-refresh-token",
-      metadata: { login: "octouser" },
+      metadata: { login: "octouser", githubId: "99" },
     });
     expect(stored?.metadata?.identityOnly).toBeUndefined();
     expect(stored?.expiresAt).toBeGreaterThan(beforeMs + 28800 * 1000 - 5000);
@@ -370,41 +387,81 @@ describe("GET /api/me/github/callback", () => {
     expect(stored?.metadata?.identityOnly).toBeUndefined();
   });
 
-  it("re-links a matching installation's linkedUserId after connect", async () => {
+  // The legacy flow end to end: a member installs the public App on their
+  // personal account, the webhook never arrives (manual webhook mode), and
+  // the member connects GitHub. The connect reads `GET /user/installations`,
+  // records the member's own installation, and links it to them. The member
+  // then lists the personal repository and gets an installation token for it.
+  it("records and links the member's own personal installation at connect, then serves its repos", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
-    useFixture({
-      oauthAccessToken: () => ({ body: { access_token: "connect-access-token", token_type: "bearer" } }),
-      getUser: () => ({ body: { login: "octouser", id: 99 } }),
+    const { privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    const orgInstall = { id: 999, account: { login: "acme", id: 1, type: "Organization" }, repository_selection: "all", suspended_at: null };
+    const personal = { id: 555, account: { login: "octomember", id: 4242, type: "User" }, repository_selection: "all", suspended_at: null };
+    const stranger = { id: 556, account: { login: "someone-else", id: 5151, type: "User" }, repository_selection: "all", suspended_at: null };
+    const repo = (owner: string, name: string) => ({
+      id: name.length, name, full_name: `${owner}/${name}`, owner: { login: owner }, private: true, default_branch: "main",
+      html_url: `https://github.com/${owner}/${name}`, clone_url: `https://github.com/${owner}/${name}.git`,
+    });
+    const f = useFixture({
+      convertManifest: () => ({
+        body: {
+          id: 42, slug: "fixture-app", client_id: "fixture-client-id", client_secret: "fixture-client-secret",
+          webhook_secret: "fixture-webhook-secret", pem: privateKey, html_url: "https://github.com/apps/fixture-app",
+        },
+      }),
+      listInstallations: () => ({ body: [orgInstall] }),
+      oauthAccessToken: () => ({ body: { access_token: "member-oauth-token", token_type: "bearer" } }),
+      getUser: () => ({ body: { login: "octomember", id: 4242 } }),
+      listUserInstallations: () => ({ body: { total_count: 3, installations: [orgInstall, personal, stranger] } }),
+      createInstallationToken: (installationId) => ({
+        body: { token: `inst-${installationId}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
+      }),
+      listInstallationRepositories: (authHeader) => ({
+        body: {
+          total_count: 1,
+          repositories: [authHeader === "Bearer inst-555" ? repo("octomember", "dotfiles") : repo("acme", "app")],
+        },
+      }),
     });
     await configureOrgApp(api.baseUrl);
 
-    const now = Date.now();
-    await api.providers.db.insert(githubInstallations).values({
-      id: "ghi_test1",
-      orgId: "local-org",
-      installationId: 555,
-      accountLogin: "octouser",
-      accountType: "User",
-      repositorySelection: "all",
-      suspended: false,
-      linkedUserId: null,
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    const connectRes = await fetch(`${api.baseUrl}/api/me/github/connect`, { method: "POST", headers: HEADERS });
+    const connectRes = await fetch(`${api.baseUrl}/api/me/github/connect`, { method: "POST", headers: MEMBER_HEADERS });
     const { url } = (await connectRes.json()) as PostGithubConnectResponse;
     const state = new URL(url).searchParams.get("state");
-    await fetch(`${api.baseUrl}/api/me/github/callback?code=abc&state=${encodeURIComponent(state ?? "")}`, {
-      headers: HEADERS,
+    const callbackRes = await fetch(`${api.baseUrl}/api/me/github/callback?code=abc&state=${encodeURIComponent(state ?? "")}`, {
+      headers: MEMBER_HEADERS,
       redirect: "manual",
     });
+    expect(callbackRes.status).toBe(302);
+    expect(f.calls.find((call) => call.path === "/user/installations")?.authHeader).toBe("Bearer member-oauth-token");
 
-    const [row] = await api.providers.db
-      .select()
-      .from(githubInstallations)
-      .where(eq(githubInstallations.installationId, 555));
-    expect(row?.linkedUserId).toBe("local-user");
+    const rows = await api.providers.db.select().from(githubInstallations).where(eq(githubInstallations.orgId, "local-org"));
+    expect(Object.fromEntries(rows.map((row) => [row.installationId, row.linkedUserId]))).toEqual({ 999: null, 555: "test-member" });
+
+    // org-status names the member's own installation and keeps the link.
+    const status = await fetch(`${api.baseUrl}/api/me/github/org-status`, { headers: MEMBER_HEADERS });
+    expect(await status.json()).toEqual({
+      configured: true,
+      installationCount: 2,
+      suspendedCount: 0,
+      personalInstallUrl: `${f.url}/apps/fixture-app/installations/new`,
+      personalInstallations: [{ accountLogin: "octomember", repositorySelection: "all", suspended: false }],
+    });
+
+    const reposRes = await fetch(`${api.baseUrl}/api/repos`, { headers: MEMBER_HEADERS });
+    const repos = (await reposRes.json()) as GetReposResponse;
+    expect(repos.repos.map((r) => r.fullName).sort()).toEqual(["acme/app", "octomember/dotfiles"]);
+
+    const { db, engineCredentials, encryptionKey } = api.providers;
+    const token = await resolveGitHubToken(
+      { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey), apiUrl: f.url, githubUrl: f.url },
+      { orgId: "local-org", userId: "test-member", purpose: "git", repo: { owner: "octomember", name: "dotfiles" } },
+    );
+    expect(token).toEqual({ token: "inst-555", source: "installation" });
   });
 });
 

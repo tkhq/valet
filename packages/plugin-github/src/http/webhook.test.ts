@@ -23,8 +23,9 @@ function sign(body: string, secret = SECRET): string {
 
 type Effects = GithubDeliveryEffects;
 
-function effects() {
+function effects(servesOrg = true) {
   return {
+    installationServesOrg: vi.fn<Effects["installationServesOrg"]>(async () => servesOrg),
     contentPushed: vi.fn<Effects["contentPushed"]>(async () => {}),
     pullRequestChanged: vi.fn<Effects["pullRequestChanged"]>(async () => {}),
     installationRemoved: vi.fn<Effects["installationRemoved"]>(async () => {}),
@@ -153,6 +154,33 @@ describe("receiveWebhook", () => {
       [{ deliveryId: undefined, detail: "github event pull_request: missing x-github-delivery header" }],
       [{ deliveryId: "d-2", detail: "github event unknown_family: no registered TriggerDef (github.unknown_family)" }],
     ]);
+  });
+
+  // Anybody can install the public App. A pull request on an outsider's
+  // installation must not start the organization's subscriptions.
+  it("drops a trigger event from an installation that does not serve the organization", async () => {
+    const bound = effects(false);
+    const { capability } = webhook(bound);
+    const pr = JSON.stringify({ action: "opened", installation: { id: 777 }, pull_request: { html_url: "https://github.com/outsider/app/pull/1", state: "open" } });
+    const response = await receiveWebhook(
+      request(pr, { "x-github-event": "pull_request", "x-github-delivery": "d-1", "x-hub-signature-256": sign(pr) }),
+      capability,
+      githubTriggerDefs,
+    );
+    expect(response.status).toBe(204);
+    expect(bound.emit).not.toHaveBeenCalled();
+    expect(bound.recordUndeliverable.mock.calls).toEqual([
+      [{ deliveryId: "d-1", detail: "github event pull_request: installation 777 does not serve this organization" }],
+    ]);
+
+    // Installation events still apply, so discovery sees the installation.
+    const created = JSON.stringify({ action: "created", installation: { id: 777 } });
+    await receiveWebhook(
+      request(created, { "x-github-event": "installation", "x-hub-signature-256": sign(created) }),
+      capability,
+      githubTriggerDefs,
+    );
+    expect(bound.discoverInstallations).toHaveBeenCalledOnce();
   });
 
   it("acknowledges a verified delivery with no organization to receive it", async () => {

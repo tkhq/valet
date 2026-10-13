@@ -367,6 +367,17 @@ describe("IntegrationsPage", () => {
     expect(link.getAttribute("rel")).toBe("noreferrer");
   });
 
+  it("names the member's own personal installations", () => {
+    currentOrgStatus = {
+      configured: true,
+      installationCount: 2,
+      suspendedCount: 0,
+      personalInstallations: [{ accountLogin: "octouser", repositorySelection: "all", suspended: false }],
+    };
+    openIntegration("github");
+    expect(screen.getByText("Installed on your account: octouser")).toBeTruthy();
+  });
+
   it("does not link to the personal GitHub installation page when the API omits it", () => {
     render(<IntegrationsPage />);
     expect(screen.queryByRole("link", { name: "Install on personal account" })).toBeNull();

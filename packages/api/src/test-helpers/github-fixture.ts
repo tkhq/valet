@@ -50,8 +50,13 @@ export interface GithubFixtureHandlers {
   oauthAccessToken?: () => GithubFixtureResponse;
   /** `GET /user/repos` */
   listUserRepos?: () => GithubFixtureResponse;
-  /** `GET /installation/repositories` */
-  listInstallationRepositories?: () => GithubFixtureResponse;
+  /** `GET /installation/repositories`. Receives the `authorization` header,
+   * so a fixture with several installations can answer per installation
+   * token. */
+  listInstallationRepositories?: (authHeader: string | undefined) => GithubFixtureResponse;
+  /** `GET /user/installations`, read with a user's OAuth token. GitHub
+   * wraps the array in `{ installations }`. */
+  listUserInstallations?: (authHeader: string | undefined) => GithubFixtureResponse;
   /** `POST /app-manifests/:code/conversions` */
   convertManifest?: (code: string) => GithubFixtureResponse;
   /** `GET /app/hook/config` — the App's OWN webhook config. */
@@ -118,6 +123,7 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   oauthAccessToken: () => ({ body: { access_token: "fixture-oauth-token", token_type: "bearer", scope: "" } }),
   listUserRepos: () => ({ body: [] }),
   listInstallationRepositories: () => ({ body: { total_count: 0, repositories: [] } }),
+  listUserInstallations: () => ({ body: { total_count: 0, installations: [] } }),
   convertManifest: () => ({
     body: {
       id: 1,
@@ -295,7 +301,16 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
 
   app.get("/installation/repositories", (c) => {
     record(c, {});
-    const { status, body } = handlers.listInstallationRepositories();
+    const { status, body } = handlers.listInstallationRepositories(c.req.header("authorization"));
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/user/installations", (c) => {
+    record(c, {});
+    const { status, body, headers } = handlers.listUserInstallations(c.req.header("authorization"));
+    if (headers) {
+      for (const [name, value] of Object.entries(headers)) c.header(name, value);
+    }
     return c.json(body as object, status ?? 200);
   });
 
