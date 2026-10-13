@@ -1781,8 +1781,7 @@ export interface CreateTeamResponse {
 /** `PATCH /api/teams/:id` — team settings. `defaultModel: null` clears the
  * override back to the cascade's next tier. */
 export interface PatchTeamRequest {
-  /** New team name. Refused for a team declared in the config file or
-   * mirrored from the identity provider. */
+  /** New team name. Refused for a team declared in the config file. */
   name?: string;
   slackHomeChannelId?: string | null;
   defaultModel?: string | null;

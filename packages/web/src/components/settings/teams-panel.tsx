@@ -302,7 +302,7 @@ function TeamRow({
 
       {open && (
         <div className={page ? "mt-6 space-y-10" : "ml-6 mt-3 space-y-8 border-l border-line pl-4"}>
-          {canMutate && team.origin === "local" && <TeamName key={team.id} team={team} />}
+          {canMutate && !declared && <TeamName key={team.id} team={team} />}
           <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} onSelfRemoved={leavePage} />
           <TeamDefaults team={team} canMutate={canMutate} />
           <TeamSlack key={team.id} team={team} canMutate={canMutate} />
@@ -689,8 +689,8 @@ function AddMemberPicker({
   );
 }
 
-/** Rename. Shown only for a team created in Valet: the API refuses a team
- * declared in the config file or mirrored from the identity provider. */
+/** Rename. Hidden for a team declared in the config file, which the API
+ * refuses: the config reconciler matches a declared team by name. */
 function TeamName({ team }: { team: TeamSummary }) {
   const [name, setName] = useState(team.name);
   const patch = usePatchTeam();

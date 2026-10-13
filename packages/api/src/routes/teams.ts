@@ -36,9 +36,10 @@ import { deleteTeamResources } from "../services/team-resource-deletion.js";
  * A delete is different: the next boot recreates the team empty, which reads
  * as data loss, so the route refuses it and names the file instead.
  *
- * A rename (`PATCH` with `name`) is refused for BOTH `idp` and `config`:
- * the reconciler identifies a declared team by name, so a rename orphans
- * the row and the next boot creates a second team beside it.
+ * A rename (`PATCH` with `name`) is refused for a `config` team: the
+ * reconciler identifies a declared team by name, so a rename orphans the
+ * row and the next boot creates a second team beside it. An `idp` team can
+ * be renamed: the team sync matches a mirror by its group path, not its name.
  */
 import { Hono, type Context } from "hono";
 import { and, eq, inArray, ne } from "drizzle-orm";
@@ -378,9 +379,8 @@ teamsRouter.patch("/:id", async (c) => {
   if ("name" in raw) {
     const name = typeof raw.name === "string" ? raw.name.trim() : "";
     if (!name) return c.json({ error: "Send a team name that is not empty." }, 400);
-    if (team.origin !== "local" && name !== team.name) {
-      const where = team.origin === "config" ? "in the instance config file" : "in your identity provider";
-      return c.json({ error: `This team is managed ${where}. Rename it there.`, code: "team_name_managed" }, 409);
+    if (team.origin === "config" && name !== team.name) {
+      return c.json({ error: "This team is declared in the instance config file. Rename it there, then restart.", code: "team_name_managed" }, 409);
     }
     const [taken] = await db.select({ id: teams.id }).from(teams)
       .where(and(eq(teams.orgId, user.orgId), eq(teams.name, name), ne(teams.id, id))).limit(1);

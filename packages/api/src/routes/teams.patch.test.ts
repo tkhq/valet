@@ -82,12 +82,13 @@ describe("PATCH /api/teams/:id", () => {
     expect(((await cleared.json()) as PatchTeamResponse).team.slackHomeChannelId).toBeNull();
   });
 
-  it("team admin renames a team; members, taken names, and managed teams are refused", async () => {
+  it("team admin renames a team; members, taken names, and declared teams are refused", async () => {
     api = await bootTestApi();
     await seedTeam(api);
     await api.providers.db.insert(teams).values([
       { id: "other-team", orgId: "local-org", name: "Other", createdAt: 1 },
       { id: "declared-team", orgId: "local-org", name: "Declared", origin: "config", createdAt: 2 },
+      { id: "mirror-team", orgId: "local-org", name: "Mirror", origin: "idp", externalId: "/mirror", createdAt: 3 },
     ]);
 
     expect((await patchTeam(api, { name: "Infra" }, "test-member")).status).toBe(404);
@@ -107,6 +108,14 @@ describe("PATCH /api/teams/:id", () => {
     });
     expect(declared.status).toBe(409);
     expect(((await declared.json()) as { error: string }).error).toContain("instance config file");
+
+    // The team sync matches a mirror by group path, so a mirror can be renamed.
+    const mirror = await fetch(`${api.baseUrl}/api/teams/mirror-team`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Mirror renamed" }),
+    });
+    expect(mirror.status).toBe(200);
   });
 
   it("team admin sets the default model; GET /api/teams reflects it", async () => {
