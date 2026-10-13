@@ -37,6 +37,8 @@ import {
   buildOverheardDigest,
   deriveQueueState,
   formatSenderLine,
+  attributedAuthor,
+  type AuthorAttribution,
   isOverheardDigestMeta,
   isSignalContent,
   MAX_PENDING_PER_THREAD,
@@ -2151,14 +2153,15 @@ export class Thread {
   }
 
   /**
-   * Whether user messages carry a `[from: …]` sender line in the LLM
-   * transcript. On when the session is shared (team/org-owned) — several
-   * people prompt the same thread there, and the model cannot differentiate
-   * them from the text alone. Personal sessions have one author; the line
-   * would be noise.
+   * Which user messages carry a `[from: …]` sender line in the LLM
+   * transcript. Every authored message on a team or org session: several
+   * people prompt the same thread there, and the model cannot tell them
+   * apart from the text alone. On a personal session, only a message from
+   * someone other than the owner, such as a reply in a shared thread. The
+   * owner's own line would be noise.
    */
-  private get attributeAuthors(): boolean {
-    return this.session.owner.type !== "user";
+  private get attributeAuthors(): AuthorAttribution {
+    return this.session.owner.type !== "user" || { ownerId: this.session.owner.id };
   }
 
   setMode(mode: QueueMode): void {
@@ -3947,7 +3950,7 @@ export class Thread {
     // this entry on reload — same gate (shared owner, non-signal), same
     // render function — or the hot and cold transcripts diverge.
     const sender =
-      this.attributeAuthors && !isSignalContent(item.content) ? item.author : undefined;
+      isSignalContent(item.content) ? undefined : attributedAuthor(this.attributeAuthors, item.author);
     try {
       // A role can replace the queue-item model. Publish the replacement
       // after the overlay applies and before the main agent run.
@@ -6400,7 +6403,7 @@ export function entriesToAgentMessages(
      * team/org sessions, where prompts come from different people). Signal
      * entries are exempt — their envelope already names the sender.
      */
-    attributeAuthors?: boolean;
+    attributeAuthors?: AuthorAttribution;
     /**
      * This thread's key. When set and a compaction is active, the
      * <previous-context> wrapper tells the model the covered entries are
@@ -6467,7 +6470,7 @@ export function entriesToAgentMessages(
           : e.signal
           ? renderSignalEnvelope(e.signal, e.content)
           : renderReplyContext(e.content, e.metadata);
-      const sender = opts?.attributeAuthors && !e.signal ? e.author : undefined;
+      const sender = e.signal ? undefined : attributedAuthor(opts?.attributeAuthors, e.author);
       const contentBlocks = userContentBlocks(text, e.attachments, sender);
       out.push({
         role: "user",

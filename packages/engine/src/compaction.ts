@@ -1,6 +1,6 @@
 import { completeSimple, isContextOverflow } from "@earendil-works/pi-ai/compat";
 import type { Message, Model } from "@earendil-works/pi-ai/compat";
-import { formatSenderLine } from "./submission.js";
+import { attributedAuthor, formatSenderLine, type AuthorAttribution } from "./submission.js";
 import type { CompactionConfig, SessionEntry } from "./types.js";
 
 /**
@@ -306,7 +306,7 @@ export function walkTranscriptDag(
  */
 export function estimateSummaryEntryTokens(
   entry: SessionEntry,
-  opts?: { toolOutputMaxChars?: number; attributeAuthors?: boolean },
+  opts?: { toolOutputMaxChars?: number; attributeAuthors?: AuthorAttribution },
 ): number {
   const messages = entriesToSummaryMessages([entry], {
     toolOutputMaxChars: opts?.toolOutputMaxChars ?? DEFAULTS.toolOutputMaxChars,
@@ -769,13 +769,13 @@ export interface SummarizeOptions {
   /** Optional abort signal. */
   signal?: AbortSignal;
   /**
-   * Render each user entry's `author` as a `[from: …]` line for the
-   * summarizer (shared team/org sessions). Covered entries survive only
+   * Render user entries' `author` as a `[from: …]` line for the summarizer
+   * (`AuthorAttribution`). Covered entries survive only
    * through the summary, so an anonymous summarizer input loses
    * who-said-what permanently. Same gate the live transcript uses
    * (`Thread.attributeAuthors`).
    */
-  attributeAuthors?: boolean;
+  attributeAuthors?: AuthorAttribution;
 }
 
 export interface SummarizeResult {
@@ -923,7 +923,7 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
  */
 export function entriesToSummaryMessages(
   entries: readonly SessionEntry[],
-  opts: { toolOutputMaxChars: number; attributeAuthors?: boolean },
+  opts: { toolOutputMaxChars: number; attributeAuthors?: AuthorAttribution },
 ): Message[] {
   const out: Message[] = [];
   // Every text field fed to the summarizer is capped. Tool results and args
@@ -945,8 +945,7 @@ export function entriesToSummaryMessages(
       // Same sender-line rule as `entriesToAgentMessages`: shared sessions
       // only, and signal entries are exempt (their envelope names the
       // sender). Without it the summary loses who asked for what.
-      const senderLine =
-        opts.attributeAuthors && !e.signal ? formatSenderLine(e.author) : undefined;
+      const senderLine = e.signal ? undefined : formatSenderLine(attributedAuthor(opts.attributeAuthors, e.author));
       const content = capProse(e.content);
       out.push({
         role: "user",

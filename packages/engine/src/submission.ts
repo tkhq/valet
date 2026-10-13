@@ -209,6 +209,25 @@ export function namespaceInternalDispatchId(senderSessionId: string, dispatchId:
  * model cannot tell from a real one. `||` (not `??`) so an empty-string
  * name still falls through to email/id.
  */
+/**
+ * Which user entries carry a `[from: …]` sender line in the transcript.
+ * `true` marks every authored entry: on a team or org session several people
+ * prompt one thread. `{ ownerId }` marks only entries from someone other than
+ * the owner: on a personal session the owner's own prompts need no label, and
+ * a person who replies in a shared thread does. Signal entries are exempt in
+ * every case, because their envelope names the sender.
+ */
+export type AuthorAttribution = boolean | { ownerId: string };
+
+/** The author to name on a user entry, or undefined for none. */
+export function attributedAuthor(
+  attribution: AuthorAttribution | undefined,
+  author: PromptAuthor | undefined,
+): PromptAuthor | undefined {
+  if (!author || !attribution) return undefined;
+  return attribution === true || author.id !== attribution.ownerId ? author : undefined;
+}
+
 export function formatSenderLine(sender: PromptAuthor | undefined): string | undefined {
   if (!sender) return undefined;
   const name = sanitizeSenderLabel(sender.name);
