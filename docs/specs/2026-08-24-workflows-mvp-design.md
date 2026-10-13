@@ -477,3 +477,15 @@ A schedule, an event, or a webhook starts a team run with no acting user. The te
 The membership gate now applies only when a person acts. The gate reads the acting user id: the turn's author when it has one, and the tool context's own user id when it does not. When that value is the assistant's own team principal id, the call authorizes through the session's server-derived owner. Every other value names a person, and a person's turn always carries an author. A person who left the team keeps no reach through the same assistant: their turn carries their user id, and the membership read still refuses it.
 
 One submitter sets no author and is not a person: an internal signal (`packages/api/src/orchestrator/signals.ts`). A signal therefore reads as a machine turn. The edge rules in `authorizeEdge` bound what that reaches. They admit a parent-to-child or child-to-parent edge, and an org-owned assistant to a user-owned one in the same organization. They deny a user-owned assistant an edge to a team-owned one, and to another user-owned one.
+
+### Testing a workflow from the editor (2026-10-13)
+
+The editor has a **Test** button next to **Run**. Test does not start a run. It puts a test request in the editor conversation's composer and keeps the person in the editor. The editor guidance (`editor-thread-context.ts`) and the workflows skill define the procedure:
+
+1. State two to four concrete checks that the result must pass.
+2. Call `workflows.preview_workflow`. It uses the same `previewWorkflow()` function as `POST /api/workflows/:id/preview`. It runs only `trigger`, `set`, `if`, and `stop` steps and describes the other steps, so it has no side effects.
+3. Start a real run only after the person agrees. A real run posts messages and calls integrations. Only high-risk actions pause at an approval gate.
+4. Read the result in the `workflow.settled` report and with `get_node_result`. Fix the workflow and run it again, at most three times.
+5. End with each check marked passed or failed.
+
+Outside a test, the editor still does not run a workflow unless the person asks. A test mode that holds outbound actions for review is a follow-up.
