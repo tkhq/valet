@@ -291,14 +291,18 @@ async function handleOutcome<TDispatched, TSettled>(
   };
 }
 
-/** Give the model the same output contract that settlement will validate. */
+/**
+ * Give the model the same output contract that settlement will validate.
+ * The extractor reads the last fenced json block, so the prose stays in
+ * `response` for later steps that template it.
+ */
 export function withOutputSchemaPrompt(prompt: string, schema: Record<string, unknown> | undefined): string {
   if (schema === undefined) return prompt;
   return [
     prompt,
     '',
     'Workflow output contract:',
-    'Return ONLY JSON matching this schema as your final response:',
+    'Write your normal response. End it with one fenced ```json block that matches this schema:',
     JSON.stringify(schema),
     'Use facts from the requested work. Do not invent empty arrays or default values to satisfy the schema.',
     'If the work fails, report the failure truthfully instead of returning a fabricated successful result.',
