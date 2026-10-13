@@ -61,14 +61,14 @@ function extractCandidate(text: string): string | undefined {
   const trimmed = text.trim();
   if (trimmed.length === 0) return undefined;
 
-  // The line match is used only when it parses. Otherwise the original
-  // match applies, so a reply that parsed before still parses.
+  // The original match wins whenever it parses, so every reply that parsed
+  // before reads the same. The line match is only a fallback, for a code
+  // fence inside a JSON string that cut the original match short.
+  const lastMatch = lastFencedBlock(trimmed, FENCED_JSON_RE)?.trim();
+  if (lastMatch !== undefined && parses(lastMatch)) return lastMatch;
   const lineMatch = lastFencedBlock(trimmed, LINE_FENCED_JSON_RE)?.trim();
   if (lineMatch !== undefined && parses(lineMatch)) return lineMatch;
-  const lastMatch = lastFencedBlock(trimmed, FENCED_JSON_RE);
-  if (lastMatch !== undefined) {
-    return lastMatch.trim();
-  }
+  if (lastMatch !== undefined) return lastMatch;
 
   return trimmed;
 }

@@ -47,6 +47,13 @@ describe("extractStructuredOutput", () => {
     }
   });
 
+  it("reads the last block when it is written on one line after a multiline block", () => {
+    const text = ["```json", '{"answer":"stale"}', "```", 'Final: ```json {"answer":"final"}```'].join("\n");
+    const { output, error } = extractStructuredOutput(text, Type.Object({ answer: Type.String() }));
+    expect(error).toBeUndefined();
+    expect(output).toEqual({ answer: "final" });
+  });
+
   it("still reads a fenced block written on one line", () => {
     const { output, error } = extractStructuredOutput('Result: ```json {"answer": 3}```', schema);
     expect(error).toBeUndefined();
