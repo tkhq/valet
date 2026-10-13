@@ -23,6 +23,11 @@ export const TIER_TOKENS = ["xs", "s", "m", "l", "xl"] as const;
 export type SizeTier = (typeof TIER_TOKENS)[number];
 export const TIER_SET: ReadonlySet<string> = new Set(TIER_TOKENS);
 
+/** Narrows an unknown value to a tier token. */
+export function isSizeTier(value: unknown): value is SizeTier {
+  return typeof value === "string" && TIER_SET.has(value);
+}
+
 /** Tier → ordered list of concrete namespaced model specs. */
 export type TierMap = Record<SizeTier, string[]>;
 
@@ -70,6 +75,25 @@ export async function getOrgTierMap(db: AppQueryable, orgId: string, proposedApp
  */
 export async function setOrgTierMap(db: AppQueryable, orgId: string, tierMap: TierMap): Promise<void> {
   await db.update(orgs).set({ modelTiers: tierMap }).where(eq(orgs.id, orgId));
+}
+
+/**
+ * The org's default tier for new sessions (`orgs.default_tier`), or null
+ * when unset. A stored value that is not a tier token reads as null.
+ */
+export async function getOrgDefaultTier(db: AppQueryable, orgId: string): Promise<SizeTier | null> {
+  const rows = await db
+    .select({ defaultTier: orgs.defaultTier })
+    .from(orgs)
+    .where(eq(orgs.id, orgId))
+    .limit(1);
+  const tier = rows[0]?.defaultTier;
+  return isSizeTier(tier) ? tier : null;
+}
+
+/** Persist the org's default tier. Null clears it. */
+export async function setOrgDefaultTier(db: AppQueryable, orgId: string, tier: SizeTier | null): Promise<void> {
+  await db.update(orgs).set({ defaultTier: tier }).where(eq(orgs.id, orgId));
 }
 
 /** The known kinds the catalog synthesizes from a deployment env key alone. */

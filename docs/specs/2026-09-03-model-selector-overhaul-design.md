@@ -196,7 +196,17 @@ drops the `orgPreferredModel` tier and its final fallback becomes the `s`
 tier token:
 
 `existing?.model → overrideId → assistantDefault → childDefault →
-userDefault → teamDefault → opts.defaultModelId → "s"`.
+userDefault → teamDefault → orgDefaultTier → opts.defaultModelId → "s"`.
+
+`orgDefaultTier` is `orgs.default_tier`, a tier token that an org admin
+sets as "Default tier for new threads" on the org Models page
+(`PATCH /api/org/model-tiers` with `defaultTier`, null clears it). Without
+it, an orchestrator with no personal or team default ran on `s`, and
+teams set an expensive concrete model as the team default to avoid that.
+When the column is null, the cascade is unchanged. A child passes
+`childDefault: "s"`, so delegated work stays on `s` whatever the org
+default tier is. The personal and team pickers label their clear state
+with the tier it falls to, for example "Organization default (Medium)".
 
 `resolveModelSpec` already resolves tier tokens and persists the token as
 the canonical id, so the fallback works exactly like an explicit tier pick:

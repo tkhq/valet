@@ -104,7 +104,7 @@ import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { clampToMax, getOrgReasoningSettings, type ReasoningLevel } from "../services/reasoning.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
-import { TIER_SET } from "../services/model-tiers.js";
+import { getOrgDefaultTier, TIER_SET } from "../services/model-tiers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   agentSessions,
@@ -3392,7 +3392,7 @@ export class EngineHost {
    * `teams.default_model` for the team that owns the session being built,
    * filtered through the same active-provider walk `firstActivePreference`
    * applies elsewhere — a team default whose provider was later disabled
-   * falls through to the cascade's next tier (`opts.defaultModelId ?? "s"`)
+   * falls through to the cascade's next tier (the org default tier, then `"s"`)
    * instead of failing every member's session build (members did not pick
    * it and cannot clear it). `undefined` when unset, inactive, or the host
    * has no `db`. Consulted only for team-owned sessions (TKAI-255) — a
@@ -3426,13 +3426,16 @@ export class EngineHost {
    * `overrideId` and the user default — that persisted value already
    * reflects whatever `setModel` (or the original create-time model) set.
    * Only on create does the preference cascade apply (TKAI-255):
-   * `overrideId ?? assistantDefault ?? childDefault ?? userDefault ?? teamDefault ?? opts.defaultModelId ?? "s"`
+   * `overrideId ?? assistantDefault ?? childDefault ?? userDefault ?? teamDefault ?? orgDefaultTier ?? opts.defaultModelId ?? "s"`
    * — most-specific wins. Org model preferences are gone (superseded by the
-   * per-tier ordered target lists): the final fallback is the tier token
-   * `"s"`, which `resolveModelSpec` resolves through the org's tier map
-   * (`resolveTier` walks that tier's ordered list for the first active
-   * provider), so an org remap of `s` reaches every session that bottoms
-   * out at this fallback. The tiers are opt-in via `prefs`:
+   * per-tier ordered target lists). `orgDefaultTier` is the admin-set tier
+   * token in `orgs.default_tier`; when it is unset, the final fallback is
+   * the tier token `"s"`. `resolveModelSpec` resolves either token through
+   * the org's tier map (`resolveTier` walks that tier's ordered list for
+   * the first active provider), so an org remap of a tier reaches every
+   * session that bottoms out at it. A child sets `childDefault: "s"`, so
+   * the org default tier never reaches delegated work. The tiers are
+   * opt-in via `prefs`:
    *
    * - `userId` names the person whose personal default may apply. Callers
    *   building a SHARED principal-owned session (team/org assistant, a
@@ -3472,6 +3475,7 @@ export class EngineHost {
       prefs.childDefault ??
       (prefs.userId ? await this.userDefaultModel(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultModel(orgId, prefs.ownerTeamId) : undefined) ??
+      (this.opts.db ? await getOrgDefaultTier(this.opts.db, orgId) : null) ??
       this.opts.defaultModelId ??
       "s";
     return this.resolveModelObject(orgId, id);

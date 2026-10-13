@@ -1,13 +1,24 @@
 /**
- * `GET /api/org/model-tiers`  — returns the effective tier map (stored or defaults).
- * `PATCH /api/org/model-tiers` — updates `orgs.model_tiers`. Org-admin gated.
+ * `GET /api/org/model-tiers`  — returns the effective tier map (stored or
+ *   defaults) and the org default tier.
+ * `PATCH /api/org/model-tiers` — updates `orgs.model_tiers` and
+ *   `orgs.default_tier`. Org-admin gated.
  *
  * Each spec in a tier's list must exist in the org catalog and be approved.
+ * `defaultTier` takes a tier token, or null to clear it.
  */
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
-import { getOrgTierMap, setOrgTierMap, TIER_TOKENS, type TierMap } from "../services/model-tiers.js";
+import {
+  getOrgDefaultTier,
+  getOrgTierMap,
+  isSizeTier,
+  setOrgDefaultTier,
+  setOrgTierMap,
+  TIER_TOKENS,
+  type TierMap,
+} from "../services/model-tiers.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import { getApprovedModels, isApproved, lockOrgModelPolicy } from "../services/approved-models.js";
 import type { GetModelTiersResponse, PatchModelTiersRequest } from "../wire/types.js";
@@ -36,7 +47,8 @@ modelTiersRouter.get("/", async (c) => {
   const user = c.var.user;
   const { db } = c.var.providers;
   const tierMap = await getOrgTierMap(db, user.orgId);
-  return c.json<GetModelTiersResponse>(tierMap);
+  const defaultTier = await getOrgDefaultTier(db, user.orgId);
+  return c.json<GetModelTiersResponse>({ ...tierMap, defaultTier });
 });
 
 modelTiersRouter.patch("/", async (c) => {
@@ -53,12 +65,17 @@ modelTiersRouter.patch("/", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
-  // Validate: only known tier keys, each value an array of strings.
+  // Validate: only known tier keys and `defaultTier`, each tier value an
+  // array of strings.
   const unknownKeys = Object.keys(raw).filter(
-    (k) => !(TIER_TOKENS as readonly string[]).includes(k),
+    (k) => k !== "defaultTier" && !(TIER_TOKENS as readonly string[]).includes(k),
   );
   if (unknownKeys.length > 0) {
     return c.json({ error: `unknown tier(s): ${unknownKeys.join(", ")}. Valid tiers: ${TIER_TOKENS.join(", ")}` }, 400);
+  }
+  const defaultTier = raw.defaultTier;
+  if (defaultTier !== undefined && defaultTier !== null && !isSizeTier(defaultTier)) {
+    return c.json({ error: `defaultTier must be one of ${TIER_TOKENS.join(", ")}, or null to clear it.` }, 400);
   }
 
   // Validate and narrow to PatchModelTiersRequest.
@@ -77,9 +94,10 @@ modelTiersRouter.patch("/", async (c) => {
   }
   const patch = validated as PatchModelTiersRequest;
 
-  // Validate every spec against the org catalog.
-  const catalog = await buildOrgCatalog(db, engineCredentials, user.orgId);
-  const validIds = catalogValidIds(catalog);
+  // Validate every spec against the org catalog. A body with only
+  // `defaultTier` leaves the stored tier map alone, so it skips this.
+  const changesTiers = TIER_TOKENS.some((tier) => tier in validated);
+  const validIds = changesTiers ? catalogValidIds(await buildOrgCatalog(db, engineCredentials, user.orgId)) : null;
 
   const result = await db.transaction(async (tx) => {
     await lockOrgModelPolicy(tx, user.orgId);
@@ -92,20 +110,23 @@ modelTiersRouter.patch("/", async (c) => {
       if (replacement) merged[tier] = replacement;
     }
 
-    for (const tier of TIER_TOKENS) {
-      for (const spec of merged[tier]) {
-        if (!validIds.has(spec)) {
-          return { error: `unknown model spec "${spec}" in tier "${tier}". Pick a model from the model list (GET /api/models).` };
+    if (validIds) {
+      for (const tier of TIER_TOKENS) {
+        for (const spec of merged[tier]) {
+          if (!validIds.has(spec)) {
+            return { error: `unknown model spec "${spec}" in tier "${tier}". Pick a model from the model list (GET /api/models).` };
+          }
         }
       }
+
+      const approvalErr = tierTargetsNotApproved(merged, await getApprovedModels(tx, user.orgId));
+      if (approvalErr) return { error: approvalErr };
+
+      await setOrgTierMap(tx, user.orgId, merged);
     }
-
-    const approvalErr = tierTargetsNotApproved(merged, await getApprovedModels(tx, user.orgId));
-    if (approvalErr) return { error: approvalErr };
-
-    await setOrgTierMap(tx, user.orgId, merged);
-    return { tierMap: merged };
+    if (defaultTier !== undefined) await setOrgDefaultTier(tx, user.orgId, defaultTier);
+    return { tierMap: merged, defaultTier: await getOrgDefaultTier(tx, user.orgId) };
   });
   if ("error" in result) return c.json({ error: result.error }, 400);
-  return c.json<GetModelTiersResponse>(result.tierMap);
+  return c.json<GetModelTiersResponse>({ ...result.tierMap, defaultTier: result.defaultTier });
 });
