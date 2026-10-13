@@ -67,6 +67,15 @@ describe("failedNodeSummary", () => {
     expect(summary).toBe(`recent_errors: ${error}`);
   });
 
+  it("stops building the summary at the budget when many rows fail with large errors", () => {
+    const rows = Array.from({ length: 250 }, (_, i) =>
+      checkpoint({ nodeId: "body", iteration: i + 1, status: "failed", error: "x".repeat(1 << 20) }));
+    const summary = failedNodeSummary(rows);
+    expect(summary.startsWith("body[1]: x")).toBe(true);
+    expect(summary.endsWith("…\n\nOpen the run to see the rest.")).toBe(true);
+    expect(summary.length).toBeLessThan(3_100);
+  });
+
   it("cuts only a summary longer than one Slack section, and points to the run", () => {
     const summary = failedNodeSummary([checkpoint({ nodeId: "n", status: "failed", error: "x".repeat(5_000) })]);
     expect(summary.endsWith("…\n\nOpen the run to see the rest.")).toBe(true);

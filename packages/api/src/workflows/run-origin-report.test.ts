@@ -13,7 +13,7 @@ const checkpoint = (nodeId: string, status: NodeCheckpoint["status"], extra: Par
 
 it("says what a settled run did", () => {
   expect(runReport("Triage", "run-1", "failed", [checkpoint("fetch", "failed", { error: "GitHub 404" })]))
-    .toContain('Workflow "Triage" failed. fetch: GitHub 404.');
+    .toContain('Workflow "Triage" failed. fetch: GitHub 404');
   expect(runReport("Triage", "run-1", "cancelled", [])).toContain('Workflow "Triage" was cancelled.');
   const done = runReport("Triage", "run-1", "completed", [
     checkpoint("start", "completed"),

@@ -114,12 +114,20 @@ export function failedNodeSummary(checkpoints: NodeCheckpoint[]): string {
   const failed = checkpoints.filter((cp) => cp.status === "failed");
   if (failed.length === 0) return "Open the run to see why it stopped.";
 
-  const summary = failed.map((cp) => {
+  // Build only up to the budget: a batch can fail on hundreds of rows, each
+  // carrying a whole response body.
+  let summary = "";
+  for (const cp of failed) {
     const label = cp.iteration > 0 ? `${cp.nodeId}[${cp.iteration}]` : cp.nodeId;
-    return `${label}: ${cp.error ?? "no error recorded"}`;
-  }).join("\n");
-  if (summary.length <= SUMMARY_CHARS) return summary;
-  return `${summary.slice(0, SUMMARY_CHARS)}…\n\nOpen the run to see the rest.`;
+    const line = `${summary ? "\n" : ""}${label}: `;
+    const error = cp.error ?? "no error recorded";
+    const room = SUMMARY_CHARS - summary.length - line.length;
+    if (error.length > room) {
+      return `${summary}${room > 0 ? `${line}${error.slice(0, room)}` : ""}…\n\nOpen the run to see the rest.`;
+    }
+    summary += `${line}${error}`;
+  }
+  return summary;
 }
 
 export interface RunOriginReportDeps {
