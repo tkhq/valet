@@ -23,9 +23,9 @@ The thread shows a "Shared" mark to everyone: a badge in the owner's header, an 
 A guest's prompt runs in the owner's session, in the shared thread:
 
 - The prompt carries the guest as its author (`MessageEntry.author`). The UI shows the guest's name. The model sees a `[from: …]` sender line on that prompt (`AuthorAttribution` in `packages/engine/src/submission.ts`). The owner's own prompts in a personal session still carry no sender line.
-- Tools use the owner's connected accounts. A personal session resolves credentials from its owner (`EngineHost.buildCredentialResolver`), whoever wrote the turn.
+- Plugin actions use the owner's connected accounts. A personal session resolves credentials from its owner (`EngineHost.buildCredentialResolver`), whoever wrote the turn.
 - The owner's permission settings apply. `loadPolicyRows` reads the personal overrides of the session's owner, not of the turn's author. The owner's session grants ("allow for this session") do not cover a guest's turn, so an "Ask first" action asks the owner again.
-- A guest's turn cannot read the owner's other threads or memory. `thread_read`, `list_threads`, and the `mem_*` tools set `ToolDef.ownerOnly`, and the engine refuses such a tool when a personal session runs a turn from someone other than its owner. The owner's own turns are unchanged.
+- A guest's turn cannot use the owner's workspace. When a personal session runs a turn from someone other than its owner, the engine refuses the tools that it refuses for a sender with no Valet account: sandbox, file, artifact, and child tools. It also refuses `ToolDef.ownerOnly` tools, which read the owner's other threads or memory (`thread_read`, `list_threads`, and `mem_*`). Policy-checked plugin actions still run, and their approvals go to the owner. The owner's own turns are unchanged.
 - The audit record (`action_invocations.user_id`) names the guest as the actor. Its session is the owner's, so the record reads as "the guest, acting in the owner's session".
 - Approvals go to the owner only. The attention router already sends a personal session's approvals to its owner. A guest sees that an approval is pending but gets 403 on resolve and withdraw.
 

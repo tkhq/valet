@@ -293,6 +293,37 @@ describe("tools on a reply from another member in a shared personal thread", () 
     expect(both.split("[not_available]")).toHaveLength(guestTurn.split("[not_available]").length);
     faux.unregister();
   });
+
+  it("refuses the owner's sandbox, and runs it for the owner", async () => {
+    const faux = registerFauxProvider({ provider: "shared-thread-guest-sandbox" });
+    const turn = (n: number) => [
+      fauxAssistantMessage([
+        fauxToolCall("read", { path: "/secret.txt" }, { id: `read${n}` }),
+        fauxToolCall("bash", { command: "cat /secret.txt" }, { id: `bash${n}` }),
+      ], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ];
+    faux.setResponses([...turn(1), ...turn(2)]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "owner", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    await session.sandbox.writeFile("/secret.txt", "owner-only-content");
+    const idle = () => events.filter((e) => e.event.type === "status" && e.event.status === "idle").length;
+
+    await session.prompt("show me the secret file", { author: { id: "guest", name: "Guest" } });
+    await waitFor(() => idle() >= 1);
+    const guestTurn = JSON.stringify(await session.readEntries("web:default"));
+    expect(guestTurn).toContain("[not_available] read");
+    expect(guestTurn).toContain("[not_available] bash");
+    expect(guestTurn).not.toContain("owner-only-content");
+
+    const idleBefore = idle();
+    await session.prompt("show me the secret file", { author: { id: "owner" } });
+    await waitFor(() => idle() > idleBefore);
+    await waitForAsync(async () => JSON.stringify(await session.readEntries("web:default")).includes("owner-only-content"));
+    const both = JSON.stringify(await session.readEntries("web:default"));
+    expect(both.split("[not_available]")).toHaveLength(guestTurn.split("[not_available]").length);
+    faux.unregister();
+  });
 });
 
 describe("decision gates: opened after an earlier tool call", () => {

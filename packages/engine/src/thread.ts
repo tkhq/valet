@@ -6577,8 +6577,10 @@ export function toolOutcome(result: unknown): { outcome?: ToolResult["outcome"] 
 const EXTERNAL_SENDER_READS = new Set(["list_tools", "list_threads", "thread_read"]);
 
 /** A member other than the owner wrote this turn in a personal session: a
- * reply in a shared thread. It runs with the owner's accounts, but the
- * owner's other threads and memory stay private (`ToolDef.ownerOnly`). */
+ * reply in a shared thread. Policy-checked plugin actions run with the
+ * owner's accounts and ask the owner. The tools a sender with no Valet
+ * account may not run, and the owner's other threads and memory
+ * (`ToolDef.ownerOnly`), stay the owner's. */
 function guestTurn(ctx: ToolContext): boolean {
   return ctx.owner?.type === "user" && ctx.userId !== ctx.owner.id;
 }
@@ -6592,8 +6594,8 @@ function refuseOutsideAuthors(def: ToolDef): ToolDef {
       if (actsAsWorkspace && ctx.externalSender) {
         return Promise.resolve({ text: `[not_available] ${def.name} acts as the workspace, and this message came from someone with no Valet account. Answer in words, or ask a teammate with a Valet account to do it.` });
       }
-      if (def.ownerOnly && guestTurn(ctx)) {
-        return Promise.resolve({ text: `[not_available] ${def.name} reads the owner's other threads or memory, and this message came from a member replying in a shared thread. Answer from this thread, or ask the owner to do it.` });
+      if (guestTurn(ctx)) {
+        return Promise.resolve({ text: `[not_available] ${def.name} acts as the owner's workspace, and this message came from a member replying in a shared thread. Answer from this thread, or ask the owner to do it.` });
       }
       return def.execute(args, ctx);
     },
