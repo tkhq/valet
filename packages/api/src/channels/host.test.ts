@@ -187,6 +187,10 @@ describe("ChannelHost.handleUpdate", () => {
   });
 
   afterEach(async () => {
+    // A started host polls the database for child replies until it stops.
+    // Unit files share one database per worker, so a host left running here
+    // would claim the next file's replies.
+    await host.stop();
     await engineHost.destroyAll();
     faux.unregister();
     vi.unstubAllEnvs();

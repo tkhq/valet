@@ -1992,6 +1992,8 @@ export interface SessionStore {
   /** Settled queue items whose updatedAt is strictly before `cutoff`. Used by the event-retention prune. */
   listSettledSubmissionsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]>;
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
+  /** Resolve idempotent admission after a caller loses the returned receipt. */
+  getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null>;
   /**
    * Max last-touched timestamp across the session's queue items, or null when
    * the session has no items. Reads the `updatedAt` column: it is stamped on
@@ -2869,7 +2871,8 @@ export type ChildStatusReader = (
  */
 export type ChildSender = (
   req: { childSessionId: string; message: string; queue?: boolean },
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
+  /** `origin`: the sending turn's channel origin, absent for a web or other non-channel turn. */
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin },
 ) => Promise<{ queueItemId: string } | null>;
 
 /**

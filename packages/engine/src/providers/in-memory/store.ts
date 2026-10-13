@@ -515,6 +515,13 @@ export class InMemorySessionStore implements SessionStore {
     return item ? { ...item } : null;
   }
 
+  async getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null> {
+    const row = this.rows.get(sessionId);
+    const id = row?.dispatchIndex.get(dispatchId);
+    const item = id ? row?.queueItems.get(id) : undefined;
+    return item ? { ...item } : null;
+  }
+
   async latestActivityAt(sessionId: string): Promise<number | null> {
     const r = this.rows.get(sessionId);
     if (!r || r.queueItems.size === 0) return null;

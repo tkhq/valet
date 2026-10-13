@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq, and, sql } from "drizzle-orm";
 import type {
+  ChannelOrigin,
   QueueItem,
   Sandbox,
   SandboxCapabilities,
@@ -27,6 +28,9 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   buildChildReader,
   buildChildSender,
+  childSendPromptOptions,
+  isParentDelegation,
+  parentDelegationMetadata,
   buildChildSpawner,
   buildChildStatusReader,
   ChildWatcher,
@@ -39,7 +43,7 @@ import {
   CHILD_RESULT_MAX_CHARS,
 } from "./children.js";
 import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, DEFAULT_ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
-import { agentSessions, bakes, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos, teams, teamMembers } from "../schema/index.js";
+import { agentSessions, bakes, childReplyDeliveries, childWatches, eventDropLog, imageSources, sandboxTokens, sessionRepos, teams, teamMembers } from "../schema/index.js";
 import { PendingCapError, ValidationError as EngineValidationError } from "@valet/engine";
 import { SignalEdgeDeniedError } from "./signals.js";
 import { shareCredential } from "../services/credential-shares.js";
@@ -207,6 +211,10 @@ describe("buildChildSpawner", () => {
     );
     expect(result.childSessionId).toMatch(/^child_/);
     expect(result.queueItemId).toBeTruthy();
+    // The spawned work carries parent delegation provenance, so a later
+    // promotion of it is not mistaken for a person taking over.
+    const spawnedItem = await api.providers.engineStore.getQueueItem(result.childSessionId, result.queueItemId);
+    expect(isParentDelegation(spawnedItem)).toBe(true);
 
     const child = api.providers.engineHost.liveSession(result.childSessionId);
     expect(child).not.toBeNull();
@@ -1164,7 +1172,7 @@ describe("ChildWatcher", () => {
     },
   );
 
-  it("child.settled inherits the channel route as manual across a rearm", async () => {
+  it.each([undefined, "auto", "manual"] satisfies ChannelOrigin["reply"][])("child.settled preserves reply policy %s across a rearm", async (reply) => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
@@ -1194,7 +1202,7 @@ describe("ChildWatcher", () => {
 
     // The row a spawn from a Slack-addressed turn writes: origin captured at
     // spawn time, durable so the boot rearm() path inherits it too.
-    const origin = { channelType: "slack", threadKey: "slack:C1:1.2" };
+    const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", ...(reply !== undefined ? { reply } : {}) };
     await db.insert(childWatches).values({
       childSessionId: "child-o",
       queueItemId: itemId,
@@ -1204,7 +1212,12 @@ describe("ChildWatcher", () => {
       orgId: "local-org",
       settled: false,
       createdAt: Date.now(),
-      originJson: JSON.stringify(origin),
+      originJson: JSON.stringify(origin), replyRoute: "origin",
+    });
+
+    await db.insert(agentSessions).values({
+      id: "child-o", userId: "local-user", orgId: "local-org", workspace: "/tmp", status: "active",
+      ownerType: "user", ownerId: "local-user", createdAt: Date.now(), updatedAt: Date.now(),
     });
 
     // rearm() reads the row back — the restart path must not lose the origin.
@@ -1225,7 +1238,25 @@ describe("ChildWatcher", () => {
         (i.content as SignalContent).signalType === "child.settled",
     );
     expect(settledSignals).toHaveLength(1);
-    expect((settledSignals[0]?.content as SignalContent).origin).toEqual({ ...origin, reply: "manual" });
+    const content = settledSignals[0]?.content;
+    if (typeof content !== "object" || content === null || !("kind" in content) || content.kind !== "signal") {
+      throw new Error("Expected a child settlement signal");
+    }
+    expect(content.origin).toEqual(origin);
+    const deliveries = await db.select().from(childReplyDeliveries);
+    expect(deliveries).toHaveLength(reply === "manual" ? 0 : 1);
+    if (reply !== "manual") {
+      expect(deliveries[0]?.queueItemId).toBe(settledSignals[0]?.id);
+      // Simulate death after admission, before saving its receipt and settling the watch.
+      await db.update(childReplyDeliveries).set({ queueItemId: null });
+      await db.update(childWatches).set({ settled: false }).where(eq(childWatches.childSessionId, "child-o"));
+      await new ChildWatcher(deps).rearm();
+      await waitFor(async () => {
+        const [row] = await db.select().from(childReplyDeliveries);
+        return row?.queueItemId === settledSignals[0]?.id;
+      });
+      expect(await engineStore.listUnsettledSubmissions("parent-o")).toHaveLength(1);
+    }
   });
 
   it("leaves an un-diagnosable (retryable) failure UNSETTLED after exhausting in-process retries, relying on rearm() as the backstop", async () => {
@@ -1423,6 +1454,52 @@ describe("ChildWatcher", () => {
     // cached session for debugging. The idle sweep owns the reclaim.
     await new Promise((r) => setTimeout(r, 100));
     expect(engineHost.liveSession("child-real-denial")).not.toBeNull();
+  });
+
+  it("fails the automatic reply intent when the parent can never receive the settlement", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const child = await engineHost.childSessionFor("child-denied-reply", {
+      parentSessionId: "parent-does-not-exist",
+      parentThreadId: "th-does-not-exist",
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+    const itemId = "qi-denied-reply";
+    await engineStore.admitSubmission("child-denied-reply", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-denied-reply", childThread.id, itemId, { outcome: "completed" });
+
+    const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" };
+    const watch = {
+      childSessionId: "child-denied-reply",
+      queueItemId: itemId,
+      parentSessionId: "parent-does-not-exist",
+      parentThreadId: "th-does-not-exist",
+      actorUserId: "local-user",
+      orgId: "local-org",
+    };
+    await db.insert(childWatches).values({ ...watch, settled: false, createdAt: Date.now(), originJson: JSON.stringify(origin), replyRoute: "origin" });
+
+    watcher.arm({ ...watch, origin });
+    await waitFor(async () => {
+      const [row] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-denied-reply"));
+      return row?.settled === true;
+    });
+
+    // The intent was written before admission. With no parent update to
+    // post, it must end failed now, not wait out the admission window.
+    const [intent] = await db.select().from(childReplyDeliveries);
+    expect(intent?.id).toBe(`child-denied-reply:settled:child-denied-reply:${itemId}`);
+    expect(intent?.queueItemId).toBeNull();
+    expect(intent?.completedAt).toBeNull();
+    expect(intent?.failedAt).not.toBeNull();
+    expect(intent?.lastError).toContain("parent-does-not-exist");
   });
 
   it("tears down the child's sandbox and evicts its cached session on settle, keeping session data", async () => {
@@ -2206,7 +2283,11 @@ describe("buildChildSender", () => {
     const childThread = child.thread("web:default");
     await child.pause();
 
-    await engineStore.admitSubmission(opts.childId, childThread.id, queuedItem(opts.queueItemId, childThread.id, "original task"));
+    // Stamped as the real spawner stamps the delegated work.
+    await engineStore.admitSubmission(opts.childId, childThread.id, {
+      ...queuedItem(opts.queueItemId, childThread.id, "original task"),
+      metadata: parentDelegationMetadata(opts.parentId, parentThread.id),
+    });
     if (opts.settled) {
       await engineStore.settleUnclaimed(opts.childId, childThread.id, opts.queueItemId, { outcome: "completed" });
     }
@@ -2407,7 +2488,7 @@ describe("buildChildSender", () => {
     expect(rows[0]?.queueItemId).toBe(res?.queueItemId);
   });
 
-  it("re-opens a settled child: the send un-settles the watch and its next settlement reaches the parent", async () => {
+  it.each([undefined, "auto", "manual"] satisfies ChannelOrigin["reply"][])("re-opens a settled child from another thread with a manual reply (stored policy %s)", async (reply) => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
@@ -2420,15 +2501,17 @@ describe("buildChildSender", () => {
       queueItemId: "qi-done",
     });
 
+    const origin: ChannelOrigin = { channelType: "slack", threadKey: "slack:C1:1.2", ...(reply !== undefined ? { reply } : {}) };
     // The user dismissed the settled child; a re-open must resurface it.
     await db
       .update(childWatches)
-      .set({ dismissedAt: Date.now() })
+      .set({ dismissedAt: Date.now(), originJson: JSON.stringify(origin), replyRoute: "origin" })
       .where(eq(childWatches.childSessionId, "child-again"));
 
     const sender = buildChildSender(deps, watcher);
     // Send from a DIFFERENT thread than the spawn origin: the durable edge
-    // (and the settlement signal) must stay with the spawning thread.
+    // (and the settlement signal) must stay with the spawning thread, but
+    // the channel thread no longer gets an automatic post.
     const res = await sender(
       { childSessionId: "child-again", message: "one more thing: add tests" },
       { parentSessionId: "parent-again", parentThreadId: "th-elsewhere", actorUserId: "local-user" },
@@ -2451,9 +2534,14 @@ describe("buildChildSender", () => {
     expect(signals).toHaveLength(1);
     expect(signals[0]?.dispatchId).toBe(`child-again:settled:child-again:${res?.queueItemId}`);
     expect(signals[0]?.threadId).toBe(parentThread.id);
+    const content = signals[0]?.content;
+    if (typeof content !== "object" || content === null || !("kind" in content) || content.kind !== "signal") {
+      throw new Error("Expected a child settlement signal");
+    }
+    expect(content.origin).toEqual({ ...origin, reply: "manual" });
   });
 
-  it("self-heals a steer whose sender died before the re-point: the watch follows the successor", async () => {
+  it.each([true, false])("follows a successor across rearm with human takeover %s", async (humanTakeover) => {
     api = await bootTestApi();
     const deps = childrenDeps(api);
     const watcher = new ChildWatcher(deps);
@@ -2465,6 +2553,8 @@ describe("buildChildSender", () => {
       settled: false,
       queueItemId: "qi-heal-orig",
     });
+    await db.update(childWatches).set({ originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }), replyRoute: "origin" })
+      .where(eq(childWatches.childSessionId, "child-heal"));
     watcher.arm({
       childSessionId: "child-heal",
       queueItemId: "qi-heal-orig",
@@ -2478,10 +2568,10 @@ describe("buildChildSender", () => {
     // shape (also the shape of a user steering the child directly).
     const child = engineHost.liveSession("child-heal");
     expect(child).not.toBeNull();
-    const receipt = await child!.prompt("changed my mind — do it differently", {
-      author: { id: "local-user" },
-      queueMode: "steer",
-    });
+    // A person's steer, or the parent's own child_send with the real sender's options.
+    const receipt = await child!.prompt("changed my mind — do it differently", humanTakeover
+      ? { author: { id: "local-user" }, queueMode: "steer" }
+      : childSendPromptOptions({ parentSessionId: "parent-heal", parentThreadId: parentThread.id, actorUserId: "local-user", origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" } }, false));
 
     // The stale watcher wakes on the superseded original and must move the
     // watch to the successor instead of going silent (or reporting it).
@@ -2490,6 +2580,8 @@ describe("buildChildSender", () => {
       return r[0]?.queueItemId === receipt.queueItemId;
     });
     expect(settledSignalsOf(await engineStore.listUnsettledSubmissions("parent-heal"))).toHaveLength(0);
+
+    await new ChildWatcher(deps).rearm();
 
     // The successor settles: exactly one signal, for the successor.
     await engineStore.settleUnclaimed("child-heal", childThread.id, receipt.queueItemId, { outcome: "completed" });
@@ -2503,6 +2595,107 @@ describe("buildChildSender", () => {
     expect(signals[0]?.dispatchId).toBe(`child-heal:settled:child-heal:${receipt.queueItemId}`);
     const content = signals[0]?.content as SignalContent;
     expect(content.attributes?.outcome).toBe("completed");
+    expect(content.origin).toEqual(humanTakeover ? undefined : { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" });
+    const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-heal"));
+    // The channel provenance never changes. Only the reply route records the takeover.
+    expect(watch?.originJson).toBe(JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }));
+    expect(watch?.replyRoute).toBe(humanTakeover ? "none" : "origin");
+    expect(await db.select().from(childReplyDeliveries)).toHaveLength(humanTakeover ? 0 : 1);
+    // A rebuilt child is still a channel-started child with a shared transcript.
+    engineHost.evictCache("child-heal");
+    const rebuilt = await engineHost.sessionFor("child-heal", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    expect(rebuilt.options.sharedTranscript).toBe(true);
+  });
+
+  it.each([
+    { route: "no channel origin", origin: null, replyRoute: null, repaired: true },
+    { route: "a manual origin", origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "manual" }, replyRoute: null, repaired: true },
+    { route: "a taken-over automatic origin", origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }, replyRoute: "none", repaired: true },
+    { route: "a pending automatic reply", origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }, replyRoute: "origin", repaired: false },
+    { route: "a legacy automatic origin", origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }, replyRoute: null, repaired: true },
+  ] satisfies Array<{ route: string; origin: ChannelOrigin | null; replyRoute: string | null; repaired: boolean }>)(
+    "child_status repairs a stale unsettled watch with $route only when no automatic reply waits on it",
+    async ({ origin, replyRoute, repaired }) => {
+      api = await bootTestApi();
+      const deps = childrenDeps(api);
+      const { db } = api.providers;
+      await seedChild(api, { childId: "child-repair", parentId: "parent-repair", settled: true, queueItemId: "qi-repair" });
+      // The watcher gave up in-process, so the row stayed unsettled.
+      await db.update(childWatches).set({ settled: false, originJson: origin ? JSON.stringify(origin) : null, replyRoute })
+        .where(eq(childWatches.childSessionId, "child-repair"));
+
+      expect((await resolveChildSettlement(deps, "child-repair", "parent-repair"))?.settled).toBe(true);
+      const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-repair"));
+      // A pending automatic reply needs the watcher's rearm to admit it, so
+      // the row stays unsettled. Anything else frees the active-child slot.
+      expect(watch?.settled).toBe(repaired);
+    },
+  );
+
+  it("ends reply intents for moved watches on rearm, using a landed admission when there is one", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const { engineStore, db } = api.providers;
+    const { parentThread } = await seedChild(api, { childId: "child-orphan", parentId: "parent-orphan", settled: false, queueItemId: "qi-later" });
+    const intent = (childItemId: string) => ({
+      id: `child-orphan:settled:child-orphan:${childItemId}`, orgId: "local-org", sessionId: "parent-orphan",
+      threadId: parentThread.id, childSessionId: "child-orphan", childQueueItemId: childItemId, nextAttemptAt: 0, createdAt: 0,
+    });
+    // Two earlier child submissions wrote intents, then the process stopped
+    // and the watch moved to later work. One admission had landed.
+    await db.insert(childReplyDeliveries).values([intent("qi-lost"), intent("qi-landed")]);
+    const now = Date.now();
+    await engineStore.admitSubmission("parent-orphan", parentThread.id, {
+      id: "qi-parent-landed", threadId: parentThread.id, dispatchId: intent("qi-landed").id, content: "child settled",
+      status: "queued", attemptCount: 0, maxAttempts: 10, timeoutAt: now + 3_600_000, createdAt: now, updatedAt: now,
+    });
+
+    await new ChildWatcher(deps).rearm();
+    const rows = await db.select().from(childReplyDeliveries);
+    const byItem = new Map(rows.map((row) => [row.childQueueItemId, row]));
+    expect(byItem.get("qi-landed")).toMatchObject({ queueItemId: "qi-parent-landed", completedAt: null });
+    expect(byItem.get("qi-lost")).toMatchObject({ queueItemId: null, failedAt: null });
+    expect(byItem.get("qi-lost")?.completedAt).not.toBeNull();
+  });
+
+  it("re-opens a failed reply intent when it admits the parent update", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineStore, db } = api.providers;
+
+    const { parentThread, childThread } = await seedChild(api, {
+      childId: "child-revive", parentId: "parent-revive", settled: false, queueItemId: "qi-revive",
+    });
+    await db.update(childWatches).set({ originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }), replyRoute: "origin" })
+      .where(eq(childWatches.childSessionId, "child-revive"));
+    // An earlier attempt wrote the intent, and the dispatcher failed it
+    // before any parent update was admitted.
+    const replyId = "child-revive:settled:child-revive:qi-revive";
+    await db.insert(childReplyDeliveries).values({
+      id: replyId, orgId: "local-org", sessionId: "parent-revive", threadId: parentThread.id,
+      childSessionId: "child-revive", childQueueItemId: "qi-revive",
+      nextAttemptAt: 0, createdAt: 0, attempts: 10, failedAt: 1, lastError: "earlier failure",
+    });
+    await db.insert(eventDropLog).values({
+      id: `child-reply:${replyId}`, orgId: "local-org", reason: "child_reply_failed", detail: "earlier failure", createdAt: 1,
+    });
+
+    await engineStore.settleUnclaimed("child-revive", childThread.id, "qi-revive", { outcome: "completed" });
+    watcher.arm({
+      childSessionId: "child-revive", queueItemId: "qi-revive", parentSessionId: "parent-revive",
+      parentThreadId: parentThread.id, actorUserId: "local-user", orgId: "local-org",
+    });
+    await waitFor(async () => {
+      const [row] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-revive"));
+      return row?.settled === true;
+    });
+
+    // The parent update now exists, so the reply must be delivered.
+    const [signal] = settledSignalsOf(await engineStore.listUnsettledSubmissions("parent-revive"));
+    const [intent] = await db.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, replyId));
+    expect(intent).toMatchObject({ queueItemId: signal?.id, failedAt: null, attempts: 0, lastError: null, completedAt: null });
+    expect(await db.select().from(eventDropLog).where(eq(eventDropLog.id, `child-reply:${replyId}`))).toHaveLength(0);
   });
 
   it("re-opening a settled child pays the child cap: the 11th active child is rejected", async () => {
