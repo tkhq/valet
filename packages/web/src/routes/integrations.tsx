@@ -18,6 +18,8 @@ import { IntegrationLimitNotice } from "~/components/integrations/integration-li
 import { useListOwner } from "~/lib/use-list-owner";
 import { useOnePasswordSettings } from "~/api/onepassword";
 import { PersonalOnePasswordRow } from "~/components/integrations/onepassword-setup";
+import { useMyToolPermissions } from "~/api/policies";
+import { pluginTools } from "~/components/integrations/tool-permissions";
 
 /**
  * `/integrations` — the services a person can connect, as grouped lists in
@@ -163,6 +165,9 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
   const showSearch = reachable.length > 0 || searching;
   // Your own 1Password token: a row in Connected once set, else in Available.
   const onePasswordQ = useOnePasswordSettings();
+  // Each row summarizes its tools' effective modes from one query.
+  const toolsQ = useMyToolPermissions();
+  const toolsFor = (plugin: (typeof plugins)[number]) => toolsQ.data && pluginTools(plugin, toolsQ.data.tools);
   const onePassword = onePasswordQ.data && matchesNeedle(query, ["1Password", "onepassword"])
     ? onePasswordQ.data.personalTokenConnected ? "connected" : "available"
     : undefined;
@@ -238,7 +243,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                 <Section title="Connected" description="Services your assistant can reach now.">
                   <IntegrationList label="Connected">
                     {connected.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
+                      <IntegrationRow key={plugin.name} plugin={plugin} tools={toolsFor(plugin)} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
                     ))}
                     {onePassword === "connected" && <PersonalOnePasswordRow connected />}
                   </IntegrationList>
@@ -248,7 +253,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                 <Section title="Available" description="Connect a service to let your assistant use it.">
                   <IntegrationList label="Available">
                     {available.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
+                      <IntegrationRow key={plugin.name} plugin={plugin} tools={toolsFor(plugin)} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
                     ))}
                     {onePassword === "available" && <PersonalOnePasswordRow connected={false} />}
                   </IntegrationList>
@@ -258,7 +263,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
                 <Section title="Built in" description="Ready to use. These need no account.">
                   <IntegrationList label="Built in">
                     {builtin.map((plugin) => (
-                      <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
+                      <IntegrationRow key={plugin.name} plugin={plugin} tools={toolsFor(plugin)} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
                     ))}
                   </IntegrationList>
                 </Section>

@@ -110,6 +110,7 @@ import type {
   ListWorkflowActionRequiredResponse,
   ListOrgPoliciesResponse,
   ListPolicyOverridesResponse,
+  ListToolPermissionsResponse,
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
   GetModelTiersResponse,
@@ -1471,6 +1472,7 @@ export const api = {
 
   // per-user policy overrides + runtime grants (action-policies plan, Task 4/5)
   listMyPolicyOverrides: () => request<ListPolicyOverridesResponse>("GET", "/me/policy-overrides"),
+  listMyToolPermissions: () => request<ListToolPermissionsResponse>("GET", "/me/tool-permissions"),
   putMyPolicyOverride: (body: PutPolicyOverrideRequest) =>
     request<PutPolicyOverrideResponse>("PUT", "/me/policy-overrides", body),
   deleteMyPolicyOverride: (body: DeletePolicyOverrideRequest) =>

@@ -111,17 +111,32 @@ switcher.
   connected or the organization provides. **Available** holds a plugin the
   caller can still connect. **Built in** holds a plugin that needs no
   account, so built-in tools do not crowd the Connected group.
-- A row is one line: the mark, the name, and the description (hidden below
-  `sm`). On the right it shows a badge only when the connection needs
-  attention (Expired, Refresh failed, Sign-in only, or Not configured for a
-  leftover credential on an unconfigured service). An unconnected row shows
-  what it offers instead: Connect, Set up (an org admin can configure it), or
-  Organization (the organization provides it). A healthy connection shows no
-  badge. The name truncates before the badge does.
+- A row is one line: the mark, the name, a text status pill, the account it
+  uses, and a permission summary such as "12 tools · 3 ask · 1 off" (2026-10-13).
+  The pill reads Connected, a health state (Expired, Refresh failed, Sign-in
+  only), or Needs setup for a service nobody configured. A broken connection
+  also offers Reconnect, and an unconnected row offers Connect and shows its
+  description in place of the account. The organization's own connection
+  names "Your organization" as its account. Below `sm` the account and
+  summary move to a line under the row. The name truncates before the pill
+  does.
 - A row is a link to `?service=<plugin>`, which opens the plugin's details
   in a modal panel: who owns the connection (Your account, or Managed by your
   organization), its reach, the account, pairing, repair notes, the controls,
-  and the tools. A link can open the panel. Closing a panel that a row click
+  and the tools.
+- The panel groups the tools by risk: Read (low), Write (medium), and High
+  risk (high and critical). Each tool shows its name, one line of
+  description, and an Allow / Ask first / Off control that holds the
+  effective value from `GET /api/me/tool-permissions`. An untouched tool is
+  tagged Default, an org or team rule names its owner, and your own choice is
+  tagged Custom with a Reset. A mode that an org or team rule forbids is
+  disabled, and the tool says "Set by your organization" (or team). Each group
+  has a Set all, and the panel has "Reset all to defaults". No control allows
+  every tool at once. A change writes through `PUT` or `DELETE
+  /api/me/policy-overrides` (Allow is `allow`, Ask first is
+  `require_approval`, Off is `deny`). The control changes at once, rolls back
+  if the write fails, and shows the API's error text. The team view keeps a
+  plain tool list. A link can open the panel. Closing a panel that a row click
   opened goes back to the list entry, so open and close cycles add no history.
   Closing a panel that a link opened replaces its entry. Either way the list
   keeps `?q=`, and Back does not reopen the panel. An unknown `?service=`
@@ -177,6 +192,10 @@ The filters, search, the Catalog and Sources tabs, and New skill stay.
   row.
 - `-settings.connected-accounts.test.tsx`: the redirect replaces its entry
   and keeps the connect result.
+- `-integrations.test.tsx` also covers the row summary and the panel's tool
+  controls: the risk groups, Default against Custom, Reset, Set all, Reset
+  all, the locked state, and the API error. `api/policies.test.tsx` covers
+  the optimistic write and its rollback.
   `-integrations-workspace.test.tsx` covers the team view.
 - `-skills.index.test.tsx` and `-skills.stored.test.tsx`: one list and the
   scope badges.

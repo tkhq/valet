@@ -26,6 +26,8 @@ import type {
   ListGrantsResponse,
   ListOrgPoliciesResponse,
   ListPolicyOverridesResponse,
+  ListToolPermissionsResponse,
+  ApprovalModeWire,
   PatchOrgPolicyRequest,
   PatchOrgPolicyResponse,
   PutPolicyOverrideRequest,
@@ -41,6 +43,7 @@ export const qkPolicies = {
   actionLog: (filters: ActionLogFilterState) => ["policies", "action-log", filters] as const,
   myOverrides: () => ["policies", "me", "overrides"] as const,
   myGrants: () => ["policies", "me", "grants"] as const,
+  myTools: () => ["policies", "me", "tools"] as const,
 };
 
 export interface ActionLogFilterState {
@@ -139,6 +142,7 @@ export function usePutMyPolicyOverride() {
     mutationFn: (body) => api.putMyPolicyOverride(body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkPolicies.myOverrides() });
+      qc.invalidateQueries({ queryKey: qkPolicies.myTools() });
     },
   });
 }
@@ -148,6 +152,57 @@ export function useDeleteMyPolicyOverride() {
   return useMutation<DeletePolicyOverrideResponse, Error, DeletePolicyOverrideRequest>({
     mutationFn: (body) => api.deleteMyPolicyOverride(body),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkPolicies.myOverrides() });
+      qc.invalidateQueries({ queryKey: qkPolicies.myTools() });
+    },
+  });
+}
+
+// ── My tool permissions (Integrations panel) ─────────────────────────────
+
+/** Every catalog action's effective mode for the caller. One query feeds the
+ *  Integrations rows' summaries and the detail panel's controls. */
+export function useMyToolPermissions() {
+  return useQuery<ListToolPermissionsResponse>({
+    queryKey: qkPolicies.myTools(),
+    queryFn: () => api.listMyToolPermissions(),
+  });
+}
+
+interface SetToolModes {
+  actionIds: string[];
+  /** `null` deletes the caller's override on each action (Reset). */
+  mode: ApprovalModeWire | null;
+}
+
+/**
+ * Sets or resets the caller's override on one or more actions. The cache
+ * changes at once and rolls back when a write fails; the settled refetch
+ * then shows what the server holds, including a reset's default.
+ */
+export function useSetMyToolModes() {
+  const qc = useQueryClient();
+  return useMutation<void, Error, SetToolModes, { previous?: ListToolPermissionsResponse }>({
+    mutationFn: async ({ actionIds, mode }) => {
+      await Promise.all(actionIds.map((actionId) =>
+        mode === null ? api.deleteMyPolicyOverride({ actionId }) : api.putMyPolicyOverride({ actionId, mode })));
+    },
+    onMutate: async ({ actionIds, mode }) => {
+      await qc.cancelQueries({ queryKey: qkPolicies.myTools() });
+      const previous = qc.getQueryData<ListToolPermissionsResponse>(qkPolicies.myTools());
+      const ids = new Set(actionIds);
+      qc.setQueryData<ListToolPermissionsResponse>(qkPolicies.myTools(), (data) => data && {
+        tools: data.tools.map((tool) => !ids.has(tool.actionId) ? tool
+          : mode === null ? { ...tool, overridden: false }
+            : { ...tool, mode, source: "personal", overridden: true }),
+      });
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous) qc.setQueryData(qkPolicies.myTools(), context.previous);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: qkPolicies.myTools() });
       qc.invalidateQueries({ queryKey: qkPolicies.myOverrides() });
     },
   });

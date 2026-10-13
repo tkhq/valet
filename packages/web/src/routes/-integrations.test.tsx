@@ -19,6 +19,7 @@ import type {
   ListPluginsResponse,
   OrgResponse,
   PluginServiceSummary,
+  ToolPermissionWire,
 } from "@valet/api/wire";
 
 vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog: [] } }) }));
@@ -286,6 +287,16 @@ vi.mock("~/api/queries", async (importOriginal) => {
   };
 });
 
+// The rows' summaries and the panel's tool controls read these.
+let toolPermissions: ToolPermissionWire[] = [];
+let setToolModesError: Error | null = null;
+const setToolModes = vi.fn();
+vi.mock("~/api/policies", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/api/policies")>()),
+  useMyToolPermissions: () => ({ data: { tools: toolPermissions }, isLoading: false, error: null }),
+  useSetMyToolModes: () => ({ mutate: setToolModes, error: setToolModesError }),
+}));
+
 import { IntegrationsPage } from "./integrations";
 
 // File-level, so a describe that sets a search query cannot leak it into
@@ -306,6 +317,19 @@ function org(callerRole: "admin" | "member", organizations = true): OrgResponse 
     allowPublicArtifacts: false,
     plugins: [],
     callerRole,
+  };
+}
+
+function tool(overrides: Partial<ToolPermissionWire> & Pick<ToolPermissionWire, "service" | "actionId">): ToolPermissionWire {
+  return {
+    name: overrides.actionId,
+    description: `Does ${overrides.actionId}.`,
+    riskLevel: "low",
+    mode: "allow",
+    source: "default",
+    overridden: false,
+    settable: ["allow", "require_approval", "deny"],
+    ...overrides,
   };
 }
 
@@ -390,10 +414,24 @@ describe("IntegrationsPage", () => {
     expect(screen.getByText("no key needed")).toBeTruthy(); // dynamic, no credential
   });
 
-  it("keeps rows one line: a healthy connection carries no badge, and the row opens its panel", () => {
+  it("keeps rows one line: a status pill, the account, a permission summary, and the row opens its panel", () => {
+    toolPermissions = [
+      tool({ service: "slack", actionId: "slack.read", mode: "allow" }),
+      tool({ service: "slack", actionId: "slack.post", mode: "require_approval" }),
+      tool({ service: "slack", actionId: "slack.delete", mode: "deny" }),
+      tool({ service: "github", actionId: "github.read", mode: "allow" }),
+    ];
     render(<IntegrationsPage />);
-    expect(screen.queryByText("Connected", { selector: "[class*='badge'], span:not(h2 *)" })).toBeNull();
-    fireEvent.click(screen.getByRole("link", { name: /Slack/ }));
+    const row = screen.getByRole("link", { name: /Slack/ });
+    expect(within(row).getByText("Connected")).toBeTruthy();
+    // The account is unknown here, so the summary stands alone.
+    expect(within(row).getAllByText("3 tools · 1 ask · 1 off").length).toBeGreaterThan(0);
+    // An unconnected row offers Connect and keeps its description.
+    const github = screen.getByRole("link", { name: /GitHub/ });
+    expect(within(github).getByText("Connect")).toBeTruthy();
+    expect(within(github).queryByText("Connected")).toBeNull();
+    toolPermissions = [];
+    fireEvent.click(row);
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Disconnect Slack" })).toBeTruthy();
   });
@@ -636,8 +674,10 @@ describe("connection health", () => {
   it("names the connected account", () => {
     currentPluginsData = connectedGmail({ login: "someone@example.com" });
     openIntegration("gmail");
-    expect(screen.getByText(/someone@example.com/)).toBeTruthy();
-    expect(screen.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
+    // The row names the account too; this reads the panel.
+    const panel = within(screen.getByRole("dialog"));
+    expect(panel.getByText(/someone@example.com/)).toBeTruthy();
+    expect(panel.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Reconnect Gmail" })).toBeNull();
   });
 
@@ -671,7 +711,7 @@ describe("connection health", () => {
   it("keeps the plain Connected badge when the wire reports no health", () => {
     currentPluginsData = connectedGmail(undefined);
     openIntegration("gmail");
-    expect(screen.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
+    expect(within(screen.getByRole("dialog")).getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Reconnect Gmail" })).toBeNull();
   });
 });
@@ -814,7 +854,7 @@ describe("the organisation's GitHub App", () => {
     openIntegration("github");
     // Two connections, two badges. "Connected" is this user's credential;
     // the App carries its own label and never borrows that one.
-    expect(screen.getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
+    expect(within(screen.getByRole("dialog")).getByText("Connected", { selector: ":not(h2)" })).toBeTruthy();
     expect(screen.getByText("Org App installed")).toBeTruthy();
   });
 
@@ -1385,5 +1425,98 @@ describe("IntegrationsPage — the search box", () => {
     expect(within(row).getByRole("button", { name: "Remove token" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "1Password" })).toBeNull();
     personalTokenConnected = false;
+  });
+});
+
+describe("IntegrationsPage — tool permissions in the panel", () => {
+  function githubTools(): ToolPermissionWire[] {
+    return [
+      tool({ service: "github", actionId: "github.get_issue", name: "Get issue", riskLevel: "low" }),
+      tool({ service: "github", actionId: "github.list_repos", name: "List repositories", riskLevel: "low", mode: "deny", source: "personal", overridden: true }),
+      tool({ service: "github", actionId: "github.create_issue", name: "Create issue", riskLevel: "medium" }),
+      tool({
+        service: "github", actionId: "github.delete_repo", name: "Delete repository", riskLevel: "critical",
+        mode: "require_approval", source: "org", settable: ["require_approval", "deny"], lockedBy: "org",
+      }),
+    ];
+  }
+
+  beforeEach(() => {
+    currentPluginsData = githubPluginsData;
+    currentOrgStatus = undefined;
+    toolPermissions = githubTools();
+    setToolModesError = null;
+    setToolModes.mockReset();
+  });
+
+  function toolRow(name: string): HTMLElement {
+    const row = within(screen.getByRole("dialog")).getByText(name).closest("li");
+    if (!(row instanceof HTMLElement)) throw new Error(`no row for ${name}`);
+    return row;
+  }
+
+  function pressed(row: HTMLElement): string | undefined {
+    return within(row).getAllByRole("button").find((button) => button.getAttribute("aria-pressed") === "true")?.textContent ?? undefined;
+  }
+
+  it("groups tools by risk and shows each tool's effective value", () => {
+    openIntegration("github");
+    const panel = within(screen.getByRole("dialog"));
+    expect(panel.getByRole("region", { name: "Read tools" })).toBeTruthy();
+    expect(panel.getByRole("region", { name: "Write tools" })).toBeTruthy();
+    expect(panel.getByRole("region", { name: "High risk tools" })).toBeTruthy();
+    expect(pressed(toolRow("Get issue"))).toBe("Allow");
+    expect(pressed(toolRow("List repositories"))).toBe("Off");
+    expect(pressed(toolRow("Delete repository"))).toBe("Ask first");
+    expect(panel.queryByText("Approval required")).toBeNull();
+  });
+
+  it("tags an untouched tool Default and a personal choice Custom with Reset", () => {
+    openIntegration("github");
+    expect(within(toolRow("Get issue")).getByText("Default")).toBeTruthy();
+    expect(within(toolRow("Get issue")).queryByRole("button", { name: /Reset/ })).toBeNull();
+    const custom = toolRow("List repositories");
+    expect(within(custom).getByText("Custom")).toBeTruthy();
+    fireEvent.click(within(custom).getByRole("button", { name: "Reset List repositories" }));
+    expect(setToolModes).toHaveBeenCalledWith({ actionIds: ["github.list_repos"], mode: null });
+  });
+
+  it("writes Ask first for one tool, and ignores a click on the current value", () => {
+    openIntegration("github");
+    const row = toolRow("Get issue");
+    fireEvent.click(within(row).getByRole("button", { name: "Allow" }));
+    expect(setToolModes).not.toHaveBeenCalled();
+    fireEvent.click(within(row).getByRole("button", { name: "Ask first" }));
+    expect(setToolModes).toHaveBeenCalledWith({ actionIds: ["github.get_issue"], mode: "require_approval" });
+  });
+
+  it("locks the modes an organization rule forbids, and says who set them", () => {
+    openIntegration("github");
+    const row = toolRow("Delete repository");
+    expect(within(row).getByText("Organization")).toBeTruthy();
+    expect(within(row).getByText("Set by your organization")).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Allow" }).hasAttribute("disabled")).toBe(true);
+    expect(within(row).getByRole("button", { name: "Off" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("sets every tool in a group that is not on that value yet", () => {
+    openIntegration("github");
+    const read = within(screen.getByRole("dialog")).getByRole("group", { name: "Set all Read tools" });
+    fireEvent.click(within(read).getByRole("button", { name: "Off" }));
+    expect(setToolModes).toHaveBeenCalledWith({ actionIds: ["github.get_issue"], mode: "deny" });
+  });
+
+  it("resets every personal choice from the panel header, and offers no Allow for all tools", () => {
+    openIntegration("github");
+    const panel = within(screen.getByRole("dialog"));
+    fireEvent.click(panel.getByRole("button", { name: "Reset all to defaults" }));
+    expect(setToolModes).toHaveBeenCalledWith({ actionIds: ["github.list_repos"], mode: null });
+    expect(panel.queryByRole("group", { name: /Set all GitHub/ })).toBeNull();
+  });
+
+  it("shows the API's refusal", () => {
+    setToolModesError = new ApiError(400, "PUT /me/policy-overrides → 400", { error: "cannot set override mode \"allow\"; ask an org admin" });
+    openIntegration("github");
+    expect(within(screen.getByRole("dialog")).getByRole("alert").textContent).toContain("ask an org admin");
   });
 });
