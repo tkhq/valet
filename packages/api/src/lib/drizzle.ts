@@ -580,6 +580,11 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "last_user_activity_at" bigint',
   },
   {
+    describe: "session_threads.share_mode column",
+    probe: { kind: "column", table: "session_threads", column: "share_mode" },
+    sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "share_mode" text',
+  },
+  {
     describe: "session_repos.resolved_ref column",
     probe: { kind: "column", table: "session_repos", column: "resolved_ref" },
     sql: 'ALTER TABLE "session_repos" ADD COLUMN IF NOT EXISTS "resolved_ref" text',

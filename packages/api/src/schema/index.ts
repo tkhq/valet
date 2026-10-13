@@ -440,6 +440,9 @@ export const sessionThreads = pgTable(
     // Display-state only: an archived thread leaves the default sidebar
     // list. The engine thread and its history are untouched.
     archivedAt: bigint("archived_at", { mode: "number" }),
+    // Who else in the org may open this personal thread by its link:
+    // null (only the owner), "view", or "reply" (`services/thread-share.ts`).
+    shareMode: text("share_mode", { enum: ["view", "reply"] }),
   },
   (t) => [index("session_threads_session").on(t.sessionId)],
 );

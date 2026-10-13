@@ -888,6 +888,29 @@ export interface ThreadSummary {
   /** The channel this thread talks in: its Slack channel, or the newest pull
    * request it opened. Absent for a thread with no channel. */
   channel?: ThreadChannel;
+  /** Set when the owner shares this personal thread with the organization. */
+  share?: ThreadShareMode;
+}
+
+/**
+ * How other members of the organization may open a shared personal thread by
+ * its link: "view" lets them watch it, "reply" also lets them send prompts.
+ * The thread still runs as its owner (docs/specs/2026-10-13-thread-sharing-design.md).
+ */
+export type ThreadShareMode = "view" | "reply";
+
+/** `GET /api/threads/:threadId` — where a thread lives and how the caller reaches it. */
+export interface ThreadAddress {
+  id: string;
+  sessionId: string;
+  title: string | null;
+  createdAt: number;
+  archivedAt: number | null;
+  /** The thread's share, when it has one. */
+  share?: ThreadShareMode;
+  /** Present when the caller opens the thread through its share, not as its
+   * owner or a member of its workspace. */
+  guest?: { mode: ThreadShareMode; ownerName: string };
 }
 
 /** A channel as a thread names it. */
@@ -1019,6 +1042,9 @@ export interface PatchThreadRequest {
   archived?: boolean;
   /** New title. The server trims it and rejects more than 200 characters. */
   title?: string | null;
+  /** Share a personal thread with the organization, or "off" to stop. Only
+   * the owner can change it. */
+  share?: ThreadShareMode | "off";
 }
 
 export type PatchThreadResponse = ThreadSummary;

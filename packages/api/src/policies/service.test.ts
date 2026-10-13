@@ -495,6 +495,23 @@ describe("loadPolicyRows", () => {
 });
 
 
+describe("personal policy ownership", () => {
+  it("applies the owner's overrides to another member's turn in the owner's session", async () => {
+    // A member who replies in the owner's shared thread runs under the
+    // owner's permission settings, never their own.
+    await db.insert(agentSessions).values({ id: SESSION, userId: ADMIN, orgId: ORG, workspace: "test", ownerType: "user", ownerId: ADMIN, createdAt: 1, updatedAt: 1 });
+    await db.insert(actionPolicyOverrides).values([
+      { id: "owner-ask", orgId: ORG, userId: ADMIN, service: "gmail", mode: "require_approval", createdAt: 1, updatedAt: 1 },
+      { id: "replier-allow", orgId: ORG, userId: MEMBER, service: "gmail", mode: "allow", createdAt: 1, updatedAt: 1 },
+    ]);
+    const rows = await loadPolicyRows(db, { orgId: ORG, userId: MEMBER, sessionId: SESSION });
+    expect(rows.overrides.map((row) => row.id)).toEqual(["owner-ask"]);
+    const decision = await resolveActionPolicy(db, { service: "gmail", actionId: "gmail.send_email", riskLevel: "low", params: {},
+      userId: MEMBER, orgId: ORG, sessionId: SESSION, appliesIn: "session", pluginDefault: undefined, now: 2 });
+    expect(decision).toMatchObject({ mode: "require_approval", provenance: { source: "override" } });
+  });
+});
+
 describe("team policy ownership", () => {
   async function seedTeamRule() {
     await db.insert(actionPolicies).values({ id: "team-rule", orgId: ORG, principalType: "team", principalId: "team-a", service: "gmail", mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });

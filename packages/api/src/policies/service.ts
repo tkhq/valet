@@ -110,11 +110,15 @@ export interface PolicyRowScope {
  */
 export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): Promise<PolicyResolutionRows> {
   // Session ownership comes from the durable row, never the acting member.
+  // A personal session follows its owner's permission settings, also on a
+  // turn another member sent from a shared thread (`services/thread-share.ts`).
   let teamId = scope.teamId;
+  let userId = scope.userId;
   if (scope.sessionId) {
     const [session] = await db.select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
       .from(agentSessions).where(and(eq(agentSessions.id, scope.sessionId), eq(agentSessions.orgId, scope.orgId))).limit(1);
     if (session) teamId = session.ownerType === "team" ? session.ownerId ?? undefined : undefined;
+    if (session?.ownerType === "user" && session.ownerId) userId = session.ownerId;
   }
   const principalFilter = teamId
     ? or(and(eq(actionPolicies.principalType, "org"), eq(actionPolicies.principalId, scope.orgId)), and(eq(actionPolicies.principalType, "team"), eq(actionPolicies.principalId, teamId)))
@@ -166,11 +170,11 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
   }
 
   let overrides: ActionPolicyOverrideRow[] = [];
-  if (scope.userId && !teamId) {
+  if (userId && !teamId) {
     const rows = await db
       .select()
       .from(actionPolicyOverrides)
-      .where(and(eq(actionPolicyOverrides.orgId, scope.orgId), eq(actionPolicyOverrides.userId, scope.userId)));
+      .where(and(eq(actionPolicyOverrides.orgId, scope.orgId), eq(actionPolicyOverrides.userId, userId)));
     overrides = rows.map((r) => ({
       id: r.id,
       service: r.service,
@@ -196,7 +200,7 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
       eq(workflowDefinitions.ownerId, workflowActionGrants.ownerId)))
     .where(and(eq(workflowActionGrants.orgId, scope.orgId), eq(workflowActionGrants.workflowId, workflowId),
       eq(workflowActionGrants.ownerType, teamId ? "team" : "user"),
-      eq(workflowActionGrants.ownerId, teamId ?? scope.userId ?? ""))) : [];
+      eq(workflowActionGrants.ownerId, teamId ?? userId ?? ""))) : [];
   return { policies, grants, overrides, workflowGrants };
 }
 
