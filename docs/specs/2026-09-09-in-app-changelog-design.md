@@ -92,9 +92,9 @@ The client stores the newest displayed checkpoint ID and the visible unreleased 
 Filters have visible labels and padded gutters. They stack on phones, use two columns on tablets, and share one row on wide screens.
 All controls have visible keyboard focus. Mobile controls and source links have touch targets of at least 44 pixels.
 Release cards and entry groups use consistent gutters. The first entry keeps the same vertical padding as later entries.
-Unread checkpoints and entries use rounded `New` badges with the palette accent wash. Unread rows do not change background or gutter width.
-Descriptions use the primary text color. Secondary text uses a lighter neutral token in dark mode for contrast.
-Loading, errors, and no search matches have accessible status messages. Empty states retain the release-card spacing.
+Unread checkpoints and entries use rounded `New` badges with the palette accent wash and primary text color. Unread rows do not change background or gutter width.
+Descriptions use the primary text color. Secondary text follows the palette muted token.
+Loading and errors have accessible status messages. A mounted live region announces when filters have no matches. Empty states retain the release-card spacing.
 Filtering, sorting, pagination, source links, and read-state storage do not change.
 
 Only application tags reachable from the build commit define changelog checkpoints. Legacy tags on other branches are excluded.

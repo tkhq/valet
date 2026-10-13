@@ -149,7 +149,7 @@ describe("ChangelogPage", () => {
 
     searchParams = { q: "missing" };
     view.rerender(<ChangelogPage />);
-    expect(screen.getByText("No changes match these filters.")).toBeTruthy();
+    expect(screen.getByText("No changes match these filters.", { selector: "p:not([role])" })).toBeTruthy();
   });
 
   it("writes control changes to the URL and resets the page", async () => {
@@ -296,9 +296,13 @@ describe("ChangelogPage", () => {
   });
 
   it("keeps filters available for no matches and handles an empty manifest", () => {
-    searchParams = { q: "missing" };
     const view = render(<ChangelogPage />);
-    expect(screen.getByRole("status").textContent).toContain("No changes match these filters.");
+    const status = screen.getByRole("status");
+    expect(status.textContent?.trim()).toBe("");
+    searchParams = { q: "missing" };
+    view.rerender(<ChangelogPage />);
+    expect(screen.getByRole("status")).toBe(status);
+    expect(status.textContent).toContain("No changes match these filters.");
     expect(screen.getByRole("group", { name: "Changelog filters" })).toBeTruthy();
 
     data.manifest.checkpoints = [];

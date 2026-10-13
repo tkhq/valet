@@ -65,8 +65,8 @@ const CATEGORY: Record<ChangelogCategory, { label: string }> = {
   security: { label: "Security" },
 };
 
-const secondaryTextClass = "text-muted dark:text-neutral-400";
-const newBadgeClass = "shrink-0 rounded-full bg-moss-wash px-2.5 text-moss tracking-normal dark:bg-moss-wash dark:text-moss";
+const secondaryTextClass = "text-muted";
+const newBadgeClass = "shrink-0 rounded-full bg-moss-wash px-2.5 text-ink tracking-normal dark:bg-moss-wash dark:text-ink";
 const focusClass = "rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss focus-visible:ring-offset-2 focus-visible:ring-offset-paper";
 const selectClass = "h-12 w-full min-w-0 rounded-xl border border-line bg-paper px-3 text-base text-ink sm:h-11 sm:rounded sm:text-sm focus-visible:border-moss focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss";
 
@@ -246,10 +246,13 @@ export function ChangelogPage() {
           </div>
         )}
 
+        <p role="status" className="sr-only">
+          {checkpoints.length > 0 && visibleCheckpoints.length === 0 ? "No changes match these filters." : ""}
+        </p>
         {checkpoints.length === 0 ? (
           <p className={cn(cardClass, "mt-8 px-4 py-10 text-center text-sm", secondaryTextClass)}>No release checkpoints are available for this build.</p>
         ) : visibleCheckpoints.length === 0 ? (
-          <div role="status" className={cn(cardClass, "mt-8 px-4 py-10 text-center")}>
+          <div className={cn(cardClass, "mt-8 px-4 py-10 text-center")}>
             <p className="text-sm font-medium text-ink">No changes match these filters.</p>
             <p className={cn("mt-2 text-sm leading-6", secondaryTextClass)}>Change the type filter or search terms.</p>
           </div>
