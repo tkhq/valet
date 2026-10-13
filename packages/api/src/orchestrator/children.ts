@@ -324,23 +324,32 @@ function settlementOrigin(originJson: string | null, replyRoute: string | null):
 }
 
 /**
- * True when a person, not the parent, gave the child input that ran before
- * `itemId` on the same thread: a prompt while it was idle, a followup, or a
- * steer. A submission without parent delegation provenance counts, except a
- * signal from another session. It counts only if it ran: a run claims the
- * submission and writes it into the transcript. A followup that later work
- * replaced before it started never reached the transcript. The check reads
- * durable queue items and entries, so it covers every way input can reach
- * the child.
+ * True when input that the automatic route does not cover ran before
+ * `itemId` on the same thread. That is input from a person (a prompt while
+ * the child was idle, a followup, or a steer), or parent work that would not
+ * keep the route (`nextReplyRoute`), such as work from a private parent
+ * thread. A signal from another session does not count. Input counts only if
+ * it ran: a run claims the submission and writes it into the transcript. A
+ * followup that later work replaced before it started never reached the
+ * transcript. The check reads durable queue items and entries, so it covers
+ * every way input can reach the child, including parent work whose sender
+ * failed to store its route.
  */
-async function personInputBefore(store: SessionStore, childSessionId: string, itemId: string): Promise<boolean> {
+async function privateInputBefore(
+  store: SessionStore,
+  childSessionId: string,
+  itemId: string,
+  watch: { parentThreadId: string; originThreadKey?: string },
+): Promise<boolean> {
   const item = await store.getQueueItem(childSessionId, itemId);
   if (!item) return false;
+  const keepsRoute = (other: { metadata?: Record<string, unknown> }) => isParentDelegation(other)
+    && nextReplyRoute("origin", { delegated: true, ...delegationSource(other) }, watch) === "origin";
   const candidates = [
     ...(await store.listUnsettledSubmissions(childSessionId)),
     ...(await store.listSettledSubmissionsBefore(childSessionId, Number.MAX_SAFE_INTEGER)),
   ].filter((other) => other.id !== item.id && other.threadId === item.threadId
-    && other.createdAt < item.createdAt && !isParentDelegation(other) && !isSignalSubmission(other));
+    && other.createdAt < item.createdAt && !keepsRoute(other) && !isSignalSubmission(other));
   for (const other of candidates) {
     if (other.attemptCount > 0) return true;
     const entries = await store.getEntries(childSessionId, other.threadId, { queueItemId: other.id, limit: 1 });
@@ -903,10 +912,11 @@ export class ChildWatcher {
           )
         : undefined;
 
-    // A person's input in this result's transcript downgrades an automatic
+    // Private input in this result's transcript downgrades an automatic
     // route to manual for good. Parent work never restores `origin`.
     let replyRoute = row.replyRoute;
-    if (replyRoute === "origin" && await personInputBefore(this.deps.engineStore, watch.childSessionId, watch.queueItemId)) {
+    if (replyRoute === "origin" && await privateInputBefore(this.deps.engineStore, watch.childSessionId, watch.queueItemId,
+      { parentThreadId: watch.parentThreadId, originThreadKey: parseOriginJson(row.originJson)?.threadKey })) {
       replyRoute = "manual" satisfies ChildReplyRoute;
       await this.deps.db.update(childWatches).set({ replyRoute })
         .where(and(eq(childWatches.childSessionId, watch.childSessionId), eq(childWatches.replyRoute, "origin")));

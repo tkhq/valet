@@ -479,6 +479,48 @@ describe("delegated child completion over a channel", () => {
     expect(watch?.replyRoute).toBe("manual");
   });
 
+  it("does not post automatically after private parent work ran while the watch stayed settled", async () => {
+    const run = await bootDelegation("child-private-ran");
+    const { db, engineStore } = api!.providers;
+    await engineStore.settleUnclaimed("child-private-ran", run.childThreadId, run.queueItemId, { outcome: "completed" });
+    await parentUpdateSettled(run, "child-private-ran", run.queueItemId);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+
+    // A private parent thread sent work, and the child admitted and ran it.
+    // The sender then failed to move the watch, so the watch kept its
+    // settled item and its automatic route.
+    const privateWork = await run.child.prompt("use the private numbers I gave you",
+      childSendPromptOptions({ parentSessionId: run.parentId, parentThreadId: "th-private", actorUserId: USER_ID }, false));
+    await engineStore.appendEntries("child-private-ran", run.childThreadId, [{
+      type: "message", id: `entry-${privateWork.queueItemId}`, sessionId: "child-private-ran", threadId: run.childThreadId,
+      parentId: null, createdAt: Date.now(), role: "user", content: "use the private numbers I gave you",
+      queueItemId: privateWork.queueItemId,
+    }]);
+    await engineStore.settleUnclaimed("child-private-ran", run.childThreadId, privateWork.queueItemId, { outcome: "completed" });
+
+    // The delegating channel turn sends more work. Its result can carry the
+    // private input, so it must not post to the channel thread on its own.
+    const sender = buildChildSender(run.deps, run.watcher);
+    const resumed = await sender(
+      { childSessionId: "child-private-ran", message: "now finish up" },
+      { parentSessionId: run.parentId, parentThreadId: run.parentThread.id, actorUserId: USER_ID, origin: ORIGIN },
+    );
+    if (!resumed) throw new Error("child_send did not admit the follow-up");
+    await engineStore.settleUnclaimed("child-private-ran", run.childThreadId, resumed.queueItemId, { outcome: "completed" });
+    const signals = await vi.waitFor(async () => {
+      const found = await childSettledSignals(run.parentId);
+      if (found.length < 2) throw new Error("the resumed settlement is not admitted yet");
+      return found;
+    }, { timeout: 30_000, interval: 20 });
+    await run.parentThread.awaitResult(signals[1]!.id);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+    expect(signals[1]?.content.origin).toEqual({ ...ORIGIN, reply: "manual" });
+    const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-private-ran"));
+    expect(watch?.replyRoute).toBe("manual");
+  });
+
   it("keeps automatic replies when the parent's work replaces a person's followup before it runs", async () => {
     const run = await bootDelegation("child-unrun-followup");
     const { db, engineStore } = api!.providers;
