@@ -25,11 +25,13 @@ export function workflowEditorThreadContext(thread: { key: string }): string | u
 }
 
 /** A run with no conversation origin reports on its own thread
- * (`workflowRunThreadKey`), and no person watches that thread. A run started
- * from a conversation reports there, so its key never matches. */
+ * (`workflowRunThreadKey`). A person may watch it from the run page, or
+ * nobody may, so a question is allowed but a guess is stated instead when
+ * it is safe. A run started from a conversation reports there, so its key
+ * never matches. */
 export function workflowRunThreadContext(thread: { key: string }): string | undefined {
   if (!/^(?:signal|slack-events:[^:]+):workflow:[A-Za-z0-9_-]+$/.test(thread.key)) return undefined;
-  return "No one is watching this run. Do not call ask_question. State your assumptions in the result.";
+  return "A person may not be watching this run. Call ask_question only when a guess could send, change, or delete something in the wrong place. Otherwise, state your assumptions in the result.";
 }
 
 /** The thread context an assistant session gives each of its threads. */

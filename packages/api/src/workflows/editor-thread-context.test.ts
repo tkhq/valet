@@ -25,17 +25,18 @@ describe("workflow editor context", () => {
 });
 
 describe("workflow run thread context", () => {
-  it("tells an unattended run not to ask, on both run thread key shapes", () => {
+  it("tells a run to state assumptions and ask only before a risky guess, on both run thread key shapes", () => {
     for (const key of [workflowRunThreadKey("wfrun_abc"), workflowRunThreadKey("wfrun_evt_1-2", "C0123")]) {
       const context = workflowThreadContext({ key });
-      expect(context).toContain("No one is watching this run. Do not call ask_question.");
+      expect(context).toContain("Call ask_question only when a guess could send, change, or delete something in the wrong place.");
+      expect(context).not.toContain("Do not call ask_question");
       expect(context).not.toContain("visual editor");
     }
   });
-  it("leaves interactive threads and the editor without the unattended line", () => {
+  it("leaves interactive threads and the editor without the run line", () => {
     for (const key of ["web:123", "slack:C0123:1700000000.000100", "slack-events:C0123", workflowConversationKey("wf_demo", "user-1")]) {
       expect(workflowRunThreadContext({ key })).toBeUndefined();
-      expect(workflowThreadContext({ key }) ?? "").not.toContain("No one is watching");
+      expect(workflowThreadContext({ key }) ?? "").not.toContain("may not be watching this run");
     }
     expect(workflowThreadContext({ key: "workflow:wf_demo" })).toContain("visual editor for workflow wf_demo");
   });
