@@ -795,7 +795,7 @@ describe("teams routes", () => {
       });
     });
 
-    it("still refuses a rename while allowing Valet-local defaults", async () => {
+    it("refuses a rename with a conflict while allowing Valet-local defaults", async () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
       try {
         api = await bootTestApi();
@@ -805,7 +805,7 @@ describe("teams routes", () => {
           headers: HEADERS,
           body: JSON.stringify({ name: "renamed" }),
         });
-        expect(rename.status).toBe(400);
+        expect(rename.status).toBe(409);
 
         const defaults = await fetch(`${api.baseUrl}/api/teams/${teamId}`, {
           method: "PATCH",

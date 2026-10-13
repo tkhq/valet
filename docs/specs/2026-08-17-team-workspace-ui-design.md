@@ -232,6 +232,14 @@ Existing team-admin, org-admin, member, and managed-team restrictions apply. Thi
 Switching workspace remounts the settings content, discarding drafts and confirmation dialogs before a different team can become their target.
 Unavailable teams show a recovery message instead of another team's controls.
 
+### Rename a team
+
+A team admin or an org admin can rename a team on the team's General tab. The Name field is the first section. Save sends `PATCH /api/teams/:id` with only `name`. The panel shows the new name in team lists, the team settings title, and the browser title after the teams query refreshes.
+
+Only a team created in Valet (`origin: "local"`) can change its name. The API answers a `config` or `idp` team with 409 `team_rename_managed`, because startup reconciliation finds a declared team by name and a rename would leave a second team beside the old row. The web panel hides the Name field for those teams.
+
+The API trims the name and answers 400 for an empty name or a name over 80 characters. A name that another team in the same org uses answers 409 `team_name_conflict`. Team API keys and plain members cannot rename: the route keeps its existing gate, so a key gets 403 and a member gets 404.
+
 ### Team integration empty state
 
 An empty team credential list does not mean the team has no integrations.

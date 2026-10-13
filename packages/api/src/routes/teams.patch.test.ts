@@ -5,6 +5,7 @@
  * `PATCH /api/me`'s `defaultModel` (org-catalog id set, null clears).
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { orgMembers, teamMembers, teams, users } from "../schema/index.js";
 import { setApprovedModels } from "../services/approved-models.js";
@@ -167,7 +168,7 @@ describe("PATCH /api/teams/:id", () => {
     api = await bootTestApi();
     await seedTeam(api);
 
-    const res = await patchTeam(api, { name: "Renamed" }, "test-lead");
+    const res = await patchTeam(api, { orgId: "other-org" }, "test-lead");
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/unknown field/);
@@ -250,5 +251,74 @@ describe("PATCH /api/teams/:id", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  describe("rename", () => {
+    it("lets a team admin and an org admin rename; the list shows the new name and other settings stay", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      await api.providers.db.update(teams).set({ defaultReasoning: "low" }).where(eq(teams.id, "team_1"));
+
+      const lead = await patchTeam(api, { name: "  IDX  " }, "test-lead");
+      expect(lead.status).toBe(200);
+      const leadBody = (await lead.json()) as PatchTeamResponse;
+      expect(leadBody.team.name).toBe("IDX");
+      expect(leadBody.team.defaultReasoning).toBe("low");
+
+      const admin = await patchTeam(api, { name: "Releases" });
+      expect(admin.status).toBe(200);
+
+      const list = (await (await fetch(`${api.baseUrl}/api/teams`)).json()) as ListTeamsResponse;
+      expect(list.teams.map((t) => t.name)).toEqual(["Releases"]);
+    });
+
+    it("404s a plain member and does not rename", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      expect((await patchTeam(api, { name: "IDX" }, "test-member")).status).toBe(404);
+      const [row] = await api.providers.db.select().from(teams).where(eq(teams.id, "team_1"));
+      expect(row?.name).toBe("Platform");
+    });
+
+    it("400s an empty, blank, non-string, or overlong name", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      for (const name of ["", "   ", 7, null, "x".repeat(81)]) {
+        const res = await patchTeam(api, { name });
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as { error: string }).error).toMatch(/team name/);
+      }
+    });
+
+    it("409s a duplicate name in the same org, and allows the same name in another org", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      await api.providers.db.insert(teams).values([
+        { id: "team_2", orgId: "local-org", name: "IDX", createdAt: Date.now() },
+        { id: "team_3", orgId: "other-org", name: "Elsewhere", createdAt: Date.now() },
+      ]);
+      const res = await patchTeam(api, { name: "IDX" });
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe("team_name_conflict");
+      expect(body.error).toMatch(/Choose another name/);
+      const [row] = await api.providers.db.select().from(teams).where(eq(teams.id, "team_1"));
+      expect(row?.name).toBe("Platform");
+      // Another org's team named "Elsewhere" does not block a local rename.
+      expect((await patchTeam(api, { name: "Elsewhere" })).status).toBe(200);
+    });
+
+    it("409s a rename of a config or idp team and keeps the name", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      for (const origin of ["config", "idp"] as const) {
+        await api.providers.db.update(teams).set({ origin, externalId: origin === "idp" ? "/platform" : null }).where(eq(teams.id, "team_1"));
+        const res = await patchTeam(api, { name: "IDX" });
+        expect(res.status).toBe(409);
+        expect(((await res.json()) as { code: string }).code).toBe("team_rename_managed");
+        const [row] = await api.providers.db.select().from(teams).where(eq(teams.id, "team_1"));
+        expect(row?.name).toBe("Platform");
+      }
+    });
   });
 });

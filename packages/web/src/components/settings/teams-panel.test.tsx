@@ -191,6 +191,7 @@ vi.mock("~/api/integrations", () => ({
   }),
 }));
 
+import { ApiError } from "~/api/client";
 import { TeamsPanel } from "./teams-panel";
 
 const orgMembers: OrgDirectoryUserWire[] = [
@@ -821,6 +822,82 @@ describe("TeamsPanel — team settings page", () => {
   });
 });
 
+
+describe("TeamsPanel rename", () => {
+  beforeEach(() => {
+    callerRole = "admin";
+    orgRole = "member";
+    origin = "local";
+    patchTeamMutate.mockClear();
+  });
+  afterEach(() => {
+    origin = "local";
+  });
+
+  it("team admin renames: trims the name and sends only name", async () => {
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    const input = screen.getByRole("textbox", { name: "Team name" });
+    expect((input as HTMLInputElement).value).toBe("Platform");
+    expect((screen.getByRole("button", { name: "Save team name" }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.clear(input);
+    await userEvent.type(input, "  IDX ");
+    await userEvent.click(screen.getByRole("button", { name: "Save team name" }));
+    expect(patchTeamMutate).toHaveBeenCalledWith({ id: "team_1", body: { name: "IDX" } }, expect.anything());
+  });
+
+  it("org admin who is not on the team can rename", () => {
+    callerRole = null;
+    orgRole = "admin";
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    expect(screen.getByRole("textbox", { name: "Team name" })).toBeTruthy();
+  });
+
+  it("rejects a blank name locally without calling the API", async () => {
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    const input = screen.getByRole("textbox", { name: "Team name" });
+    await userEvent.clear(input);
+    await userEvent.type(input, "   ");
+    await userEvent.click(screen.getByRole("button", { name: "Save team name" }));
+    expect(screen.getByText("Enter a team name.")).toBeTruthy();
+    expect(patchTeamMutate).not.toHaveBeenCalled();
+  });
+
+  it("shows the server's conflict message", async () => {
+    patchTeamMutate.mockImplementationOnce((_vars, opts: { onError: (e: Error) => void }) =>
+      opts.onError(new ApiError(409, "A team named 'IDX' already exists in this organization. Choose another name.", {
+        error: "A team named 'IDX' already exists in this organization. Choose another name.",
+      })));
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    const input = screen.getByRole("textbox", { name: "Team name" });
+    await userEvent.clear(input);
+    await userEvent.type(input, "IDX");
+    await userEvent.click(screen.getByRole("button", { name: "Save team name" }));
+    expect(await screen.findByText(/Choose another name/)).toBeTruthy();
+  });
+
+  it("hides the control from a plain member and from config and idp teams", () => {
+    callerRole = "member";
+    const { unmount } = render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    expect(screen.queryByRole("textbox", { name: "Team name" })).toBeNull();
+    unmount();
+    callerRole = "admin";
+    for (const managed of ["config", "idp"] as const) {
+      origin = managed;
+      const view = render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+      expect(screen.queryByRole("textbox", { name: "Team name" })).toBeNull();
+      view.unmount();
+    }
+  });
+
+  it("shows the new name in the team list after the teams query updates", () => {
+    const { rerender } = render(<TeamsPanel orgMembers={orgMembers} />);
+    expect(screen.getByText("Platform")).toBeTruthy();
+    selectedTeamsOverride = [{ ...teamsData().teams[0]!, name: "IDX", origin: "local" }];
+    rerender(<TeamsPanel orgMembers={orgMembers} />);
+    expect(screen.getByText("IDX")).toBeTruthy();
+    selectedTeamsOverride = undefined;
+  });
+});
 
 describe("TeamsPanel selected workspace", () => {
   function team(id: string, name: string, role: "admin" | "member" = "admin"): TeamSummary {

@@ -1781,6 +1781,8 @@ export interface CreateTeamResponse {
 /** `PATCH /api/teams/:id` — team settings. `defaultModel: null` clears the
  * override back to the cascade's next tier. */
 export interface PatchTeamRequest {
+  /** New team name. Allowed for `local` teams only; `config` and `idp` teams 409. */
+  name?: string;
   slackHomeChannelId?: string | null;
   defaultModel?: string | null;
   /** Team's default reasoning/thinking level, or null to clear. */
