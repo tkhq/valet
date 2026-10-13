@@ -558,6 +558,55 @@ describe("delegated child completion over a channel", () => {
     expect(watch?.replyRoute).toBe("manual");
   });
 
+  it("does not post automatically when a person sends their followup now and then the delegated work", async () => {
+    const run = await bootDelegation("child-promote-twice");
+    const { db, engineStore } = api!.providers;
+    const [childRow] = await db.select().from(agentSessions).where(eq(agentSessions.id, "child-promote-twice"));
+    if (!childRow) throw new Error("child session row missing");
+    const sendNow = async (promoteItemId: string) => {
+      const promoted = await submitSessionPrompt(api!.providers, childRow, "", {
+        threadId: run.childThreadId, promoteItemId, author: { id: USER_ID },
+      });
+      if (!promoted?.messageId) throw new Error(`${promoteItemId} was not promoted`);
+      return promoted.messageId;
+    };
+    const ran = (queueItemId: string, content: string) => engineStore.appendEntries("child-promote-twice", run.childThreadId, [{
+      type: "message", id: `entry-${queueItemId}`, sessionId: "child-promote-twice", threadId: run.childThreadId,
+      parentId: null, createdAt: Date.now(), role: "user", content, queueItemId,
+    }]);
+
+    // A person queues private input behind the delegated work and sends it now. It runs first.
+    const followup = await submitSessionPrompt(api!.providers, childRow, "Use the private numbers I pasted", {
+      threadId: run.childThreadId, queueMode: "followup", author: { id: USER_ID },
+    });
+    if (!followup?.messageId) throw new Error("the followup was not admitted");
+    const privateItem = await sendNow(followup.messageId);
+    await ran(privateItem, "Use the private numbers I pasted");
+    await engineStore.settleUnclaimed("child-promote-twice", run.childThreadId, privateItem, { outcome: "completed" });
+
+    // Then the person sends the delegated work now. Both promotions take
+    // the same queue timestamp, so only the transcript shows the order.
+    const delegated = await sendNow(run.queueItemId);
+    expect((await engineStore.getQueueItem("child-promote-twice", delegated))?.createdAt)
+      .toBe((await engineStore.getQueueItem("child-promote-twice", privateItem))?.createdAt);
+    await vi.waitFor(async () => {
+      const [watch] = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-promote-twice"));
+      expect(watch?.queueItemId).toBe(delegated);
+    }, { timeout: 30_000, interval: 20 });
+    await ran(delegated, "delegated work");
+    await engineStore.settleUnclaimed("child-promote-twice", run.childThreadId, delegated, { outcome: "completed" });
+
+    const signals = await vi.waitFor(async () => {
+      const found = await childSettledSignals(run.parentId);
+      if (found.length < 1) throw new Error("the settlement is not admitted yet");
+      return found;
+    }, { timeout: 30_000, interval: 20 });
+    await run.parentThread.awaitResult(signals[0]!.id);
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(0);
+    expect(signals[0]?.content.origin).toEqual({ ...ORIGIN, reply: "manual" });
+  });
+
   it("keeps automatic replies when the parent's work replaces a person's followup before it runs", async () => {
     const run = await bootDelegation("child-unrun-followup");
     const { db, engineStore } = api!.providers;

@@ -324,16 +324,17 @@ function settlementOrigin(originJson: string | null, replyRoute: string | null):
 }
 
 /**
- * True when input that the automatic route does not cover ran before
- * `itemId` on the same thread. That is input from a person (a prompt while
- * the child was idle, a followup, or a steer), or parent work that would not
- * keep the route (`nextReplyRoute`), such as work from a private parent
- * thread. A signal from another session does not count. Input counts only if
- * it ran: a run claims the submission and writes it into the transcript. A
- * followup that later work replaced before it started never reached the
- * transcript. The check reads durable queue items and entries, so it covers
- * every way input can reach the child, including parent work whose sender
- * failed to store its route.
+ * True when input that the automatic route does not cover is in the child's
+ * transcript before `itemId`'s own entries. That is input from a person (a
+ * prompt while the child was idle, a followup, or a steer), or parent work
+ * that would not keep the route (`nextReplyRoute`), such as work from a
+ * private parent thread. A signal from another session does not count.
+ * The transcript is the execution order: a run writes its submission there.
+ * A followup that later work replaced before it started never reached it.
+ * Queue `createdAt` is not the execution order, because a promotion takes
+ * a timestamp ahead of the queued items. The check reads durable entries
+ * and queue items, so it covers every way input can reach the child,
+ * including parent work whose sender failed to store its route.
  */
 async function privateInputBefore(
   store: SessionStore,
@@ -343,19 +344,18 @@ async function privateInputBefore(
 ): Promise<boolean> {
   const item = await store.getQueueItem(childSessionId, itemId);
   if (!item) return false;
+  const ranBefore = new Set<string>();
+  for (const entry of await store.getEntries(childSessionId, item.threadId)) {
+    if (entry.queueItemId === item.id) break;
+    if (entry.queueItemId !== undefined) ranBefore.add(entry.queueItemId);
+  }
+  if (ranBefore.size === 0) return false;
   const keepsRoute = (other: { metadata?: Record<string, unknown> }) => isParentDelegation(other)
     && nextReplyRoute("origin", { delegated: true, ...delegationSource(other) }, watch) === "origin";
-  const candidates = [
+  return [
     ...(await store.listUnsettledSubmissions(childSessionId)),
     ...(await store.listSettledSubmissionsBefore(childSessionId, Number.MAX_SAFE_INTEGER)),
-  ].filter((other) => other.id !== item.id && other.threadId === item.threadId
-    && other.createdAt < item.createdAt && !keepsRoute(other) && !isSignalSubmission(other));
-  for (const other of candidates) {
-    if (other.attemptCount > 0) return true;
-    const entries = await store.getEntries(childSessionId, other.threadId, { queueItemId: other.id, limit: 1 });
-    if (entries.length > 0) return true;
-  }
-  return false;
+  ].some((other) => ranBefore.has(other.id) && !keepsRoute(other) && !isSignalSubmission(other));
 }
 
 function isSignalSubmission(item: { content: unknown }): boolean {

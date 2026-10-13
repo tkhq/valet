@@ -372,9 +372,12 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   followup, or a steer. A submission without parent delegation provenance
   counts, except a signal. Parent work counts too when it would not keep
   the route, for example work from a private parent thread whose sender
-  failed to store the `manual` route after admission. It counts only if it ran: a run claims the
-  submission and writes it into the transcript, so a followup that later
-  work replaced before it started does not count. If one exists, the
+  failed to store the `manual` route after admission. It counts only if its
+  entries come before the settled work's entries in the child's transcript.
+  A run writes its submission into the transcript, so a followup that later
+  work replaced before it started does not count. The check uses transcript
+  order, not queue `createdAt`, because two promotions can get the same
+  timestamp. If one exists, the
   watcher sets `reply_route` to
   `manual` for good, because the result can carry that input. A followup
   queued behind the delegated work does not affect that work's result. It does not read `author`, because a
