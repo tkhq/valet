@@ -36,15 +36,23 @@ export function extractStructuredOutput(text: string, schema: TSchema): { output
 }
 
 const FENCED_JSON_RE = /```json\s*\n?([\s\S]*?)```/g;
+// A closing fence on its own line. Valid JSON cannot hold a raw line break
+// inside a string, so a ``` inside a string value cannot end this block.
+const LINE_FENCED_JSON_RE = /```json[ \t]*\n([\s\S]*?)\n[ \t]*```/g;
+
+function lastFencedBlock(text: string, re: RegExp): string | undefined {
+  let lastMatch: string | undefined;
+  for (const match of text.matchAll(re)) {
+    lastMatch = match[1];
+  }
+  return lastMatch;
+}
 
 function extractCandidate(text: string): string | undefined {
   const trimmed = text.trim();
   if (trimmed.length === 0) return undefined;
 
-  let lastMatch: string | undefined;
-  for (const match of trimmed.matchAll(FENCED_JSON_RE)) {
-    lastMatch = match[1];
-  }
+  const lastMatch = lastFencedBlock(trimmed, LINE_FENCED_JSON_RE) ?? lastFencedBlock(trimmed, FENCED_JSON_RE);
   if (lastMatch !== undefined) {
     return lastMatch.trim();
   }

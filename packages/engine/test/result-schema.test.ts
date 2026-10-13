@@ -21,6 +21,24 @@ describe("extractStructuredOutput", () => {
     expect(output).toEqual({ answer: 2 });
   });
 
+  it("keeps a code fence inside a JSON string value", () => {
+    const text = [
+      "Ran the checks.",
+      "```json",
+      JSON.stringify({ summary: "Run:\n```bash\npnpm test\n```" }),
+      "```",
+    ].join("\n");
+    const { output, error } = extractStructuredOutput(text, Type.Object({ summary: Type.String() }));
+    expect(error).toBeUndefined();
+    expect(output).toEqual({ summary: "Run:\n```bash\npnpm test\n```" });
+  });
+
+  it("still reads a fenced block written on one line", () => {
+    const { output, error } = extractStructuredOutput('Result: ```json {"answer": 3}```', schema);
+    expect(error).toBeUndefined();
+    expect(output).toEqual({ answer: 3 });
+  });
+
   it("prefers the fenced block over surrounding prose", () => {
     const text = 'The answer, as JSON, is:\n```json\n{"answer": 7}\n```\nHope that helps!';
     const { output, error } = extractStructuredOutput(text, schema);
