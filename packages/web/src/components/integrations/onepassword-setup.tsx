@@ -11,11 +11,12 @@ import {
   Input,
 } from "~/components/primitives";
 import { FieldRow } from "~/components/settings/field-row";
+import { CardHeading, IntegrationCard } from "./integration-card";
 
 /**
  * The 1Password token controls, shared by the two pages that carry a token:
- * You · Connected accounts holds your own, and Organization · 1Password holds
- * the one the whole org shares. Both reach the same setup dialog, so the
+ * Integrations holds your own, and Organization · 1Password holds the one
+ * the whole org shares. Both reach the same setup dialog, so the
  * instructions are written once and a reader meets them wherever they start.
  */
 
@@ -193,54 +194,90 @@ export function OnePasswordSetupDialog({
  * the setup dialog or remove what is there.
  */
 export function OnePasswordTokenRow({
-  scope,
-  connected,
   label,
   hint,
-  removeNote,
-}: {
+  ...controls
+}: OnePasswordTokenControlsProps & { hint: string }) {
+  return (
+    <FieldRow label={label} hint={hint}>
+      <OnePasswordTokenControls label={label} {...controls} />
+    </FieldRow>
+  );
+}
+
+const REMOVE_PERSONAL_TOKEN_NOTE =
+  "This token is yours alone. Credentials that read their secret through it stop resolving for " +
+  "you, and other members and the organization token are not affected. You can connect a new " +
+  "token here.";
+
+/**
+ * Your own token as a row on personal Integrations. A personal service
+ * account token needs no organization permission, so a member never opens
+ * an Organization page to set one up (TKAI-487).
+ */
+export function PersonalOnePasswordRow({ connected }: { connected: boolean }) {
+  return (
+    <IntegrationCard>
+      <CardHeading
+        compact
+        title="1Password"
+        slug="onepassword"
+        description="Lets an agent read a credential from your vaults instead of you pasting it."
+        right={
+          <OnePasswordTokenControls
+            scope="personal"
+            connected={connected}
+            label="1Password"
+            removeNote={REMOVE_PERSONAL_TOKEN_NOTE}
+          />
+        }
+      />
+    </IntegrationCard>
+  );
+}
+
+interface OnePasswordTokenControlsProps {
   scope: OnePasswordTokenScope;
   connected: boolean;
   label: string;
-  hint: string;
   removeNote: string;
-}) {
+}
+
+function OnePasswordTokenControls({ scope, connected, label, removeNote }: OnePasswordTokenControlsProps) {
   const disconnect = useDisconnectCredential();
   const [setupOpen, setSetupOpen] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
 
   return (
     <>
-      <FieldRow label={label} hint={hint}>
-        <div className="flex flex-wrap items-center gap-2" role="group" aria-label={label}>
-          {connected ? (
-            <>
-              <Badge variant="success">Connected</Badge>
-              <Button type="button" variant="ghost" size="sm" onClick={() => setSetupOpen(true)}>
-                Replace
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={disconnect.isPending}
-                onClick={() => {
-                  // Radix fires no `onOpenChange(true)` here, so the stale
-                  // refusal is cleared on open.
-                  disconnect.reset();
-                  setConfirmRemove(true);
-                }}
-              >
-                {disconnect.isPending ? "Removing…" : "Remove token"}
-              </Button>
-            </>
-          ) : (
-            <Button type="button" size="sm" onClick={() => setSetupOpen(true)}>
-              Connect 1Password
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label={label}>
+        {connected ? (
+          <>
+            <Badge variant="success">Connected</Badge>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setSetupOpen(true)}>
+              Replace
             </Button>
-          )}
-        </div>
-      </FieldRow>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={disconnect.isPending}
+              onClick={() => {
+                // Radix fires no `onOpenChange(true)` here, so the stale
+                // refusal is cleared on open.
+                disconnect.reset();
+                setConfirmRemove(true);
+              }}
+            >
+              {disconnect.isPending ? "Removing…" : "Remove token"}
+            </Button>
+          </>
+        ) : (
+          <Button type="button" size="sm" onClick={() => setSetupOpen(true)}>
+            Connect 1Password
+          </Button>
+        )}
+      </div>
 
       <OnePasswordSetupDialog scope={scope} open={setupOpen} onOpenChange={setSetupOpen} />
 

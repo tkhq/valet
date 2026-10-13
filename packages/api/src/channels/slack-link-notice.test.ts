@@ -22,7 +22,7 @@ describe("private Slack account-link notices", () => {
     await maybeNotifyUnlinkedSlackSender(args);
     expect(args.transport.sendPrivateNotice).toHaveBeenCalledExactlyOnceWith("C1", "U1", SLACK_LINK_NOTICE);
     expect(SLACK_LINK_NOTICE).toContain("sign up");
-    expect(SLACK_LINK_NOTICE).toContain("Connected accounts");
+    expect(SLACK_LINK_NOTICE).toContain("Integrations → Slack");
     const [receipt] = await args.db.select().from(eventReceipts);
     expect(receipt.stages).toEqual(expect.arrayContaining([expect.objectContaining({ stage: "account_link_notice", outcome: "sent" })]));
   });

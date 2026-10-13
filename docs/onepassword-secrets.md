@@ -62,7 +62,7 @@ In Valet, a token lives on the page that owns it.
 
 | Token | Where it lives | Who can change it | What it covers |
 | --- | --- | --- | --- |
-| Personal | Settings → You → Connected accounts | You, always | Your own vaults, for sessions you own |
+| Personal | Integrations → 1Password | You, always | Your own vaults, for sessions you own |
 | Organization | Settings → Organization → 1Password | An org admin | Vaults the whole org shares |
 | Team | Settings → Organization → Teams | A team admin | Vaults one team shares |
 

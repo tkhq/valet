@@ -41,7 +41,7 @@ on these pages, not the switcher's.
 
 | Group | Items | Scope |
 |---|---|---|
-| Account | Profile, Preferences, Notifications, Connected accounts | you |
+| Account | Profile, Preferences, Notifications | you |
 | Personal workspace | API keys and proxy, Agent access, Policies | your personal workspace |
 | Your teams | one item per team you belong to | that team |
 | Organization | General, Models and usage, Apps and plugins, Security and audit | the organization (admins) |
@@ -83,12 +83,22 @@ Settings matches the thread UI:
 
 ### 4. One place per thing
 
-- Connected accounts keeps identity linking (Slack, Telegram), GitHub, and the
-  personal 1Password token. Its second credential list is removed. Integrations
-  owns service connections, and Connected accounts links to it with
-  `?workspace=user`, so the link opens your personal Integrations whatever the
-  switcher holds. On Integrations the switcher navigates with the workspace it
-  chose, so the parameter cannot hold the page on Personal.
+- Integrations is the one home for connections (2026-10-13). Account →
+  Connected accounts is removed, and its parts moved to Integrations: the
+  Slack and Telegram identity links go to their detail panels, GitHub was
+  already there, and your 1Password token becomes a row. A link from a personal
+  page opens Integrations with `?workspace=user`, so it shows your personal
+  Integrations whatever the switcher holds. On Integrations the switcher
+  navigates with the workspace it chose, so the parameter cannot hold the page
+  on Personal.
+- `/settings/connected-accounts` stays as a redirect to
+  `/integrations?workspace=user` for old links, emails, and OAuth returns. It
+  keeps `?connected=`, `?error=`, and `?detail=`, and maps an older GitHub
+  return's `?github=connected` to `?connected=github`. Every OAuth connect now
+  lands on `/integrations`. The credential connect ignores the old `landing`
+  parameter, and the GitHub App connect takes no destination.
+- User-facing copy names the place to act as "Integrations → <service>", for
+  example "Link Slack in Integrations → Slack".
 - The unconfigured-channel copy names Settings → Organization, where the bot
   token lives.
 
@@ -117,10 +127,18 @@ switcher.
   keeps `?q=`, and Back does not reopen the panel. An unknown `?service=`
   opens nothing. Disconnect on a credential that stores a 1Password reference
   says that the 1Password item is not deleted.
+- A Slack or Telegram panel holds your identity link: the pairing flows,
+  "Sign in with Slack" when the deployment can run the slack-user OAuth
+  connect, and, once linked, the account, Notify on attention, and Unlink.
+- Your own 1Password service account token is a row in Connected once set,
+  and in Available until then, with its controls in line. The organization
+  token stays on Organization · 1Password. Listing a member's own GitHub App
+  installations needs a member-readable field that no endpoint has yet, so
+  the GitHub panel keeps the personal install link only.
 - A saved credential that no listed service covers, for example one left by
   a removed plugin, gets a row with Revoke under **Other saved credentials**.
-  The removed Connected accounts list was the only Revoke control for such a
-  credential, so Integrations keeps one.
+  The removed Connected accounts credential list was the only Revoke control
+  for such a credential, so Integrations keeps one.
 - The team view lists the team's connections under Connected and the
   services the team can still connect under Available, with the team's
   1Password row in the group that matches its state. It uses the same parts
@@ -154,7 +172,11 @@ The filters, search, the Catalog and Sources tabs, and New skill stay.
 - `workspace-scope-pinned.test.tsx`: a pinned scope and the tab title.
 - `-integrations.test.tsx` and `-integrations.router.test.tsx`: the three
   groups, the row states and offers, the panel as a URL (Back, `?q=`, an
-  unknown service), `?workspace=user`, and Other saved credentials.
+  unknown service), `?workspace=user`, Other saved credentials, the Slack
+  pairing with Notify on attention and Sign in with Slack, and the 1Password
+  row.
+- `-settings.connected-accounts.test.tsx`: the redirect replaces its entry
+  and keeps the connect result.
   `-integrations-workspace.test.tsx` covers the team view.
 - `-skills.index.test.tsx` and `-skills.stored.test.tsx`: one list and the
   scope badges.

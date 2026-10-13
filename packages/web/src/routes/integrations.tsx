@@ -16,6 +16,8 @@ import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { TeamIntegrations } from "~/components/integrations/team-integrations";
 import { IntegrationLimitNotice } from "~/components/integrations/integration-limit-notice";
 import { useListOwner } from "~/lib/use-list-owner";
+import { useOnePasswordSettings } from "~/api/onepassword";
+import { PersonalOnePasswordRow } from "~/components/integrations/onepassword-setup";
 
 /**
  * `/integrations` — the services a person can connect, as grouped lists in
@@ -27,6 +29,11 @@ import { useListOwner } from "~/lib/use-list-owner";
  * to `/api/credentials/:service/connect` and lands back here with
  * `?connected=` or `?error=`; manual token entry remains the fallback for
  * everything else.
+ *
+ * Integrations is the one home for connections. A Slack or Telegram panel
+ * pairs your chat account, the GitHub panel holds your GitHub connection,
+ * and your own 1Password token is a row of its own, in Connected once set.
+ * `/settings/connected-accounts` redirects here.
  *
  * The search box narrows the tiles IN the browser, unlike the catalog
  * search on `/skills`: `usePlugins` holds the whole plugin set, so a
@@ -154,6 +161,11 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
   const rowSearch: Record<string, string> = searching ? { q: query } : {};
   const detail = search.service ? reachable.find((plugin) => plugin.name === search.service) : undefined;
   const showSearch = reachable.length > 0 || searching;
+  // Your own 1Password token: a row in Connected once set, else in Available.
+  const onePasswordQ = useOnePasswordSettings();
+  const onePassword = onePasswordQ.data && matchesNeedle(query, ["1Password", "onepassword"])
+    ? onePasswordQ.data.personalTokenConnected ? "connected" : "available"
+    : undefined;
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -218,25 +230,27 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
 
           {!isLoading && !error && showSearch && (
             <div className="space-y-10">
-              {searching && services.length === 0 && (
+              {searching && services.length === 0 && !onePassword && (
                 <div className="text-sm text-muted">No integrations match your search.</div>
               )}
 
-              {connected.length > 0 && (
+              {(connected.length > 0 || onePassword === "connected") && (
                 <Section title="Connected" description="Services your assistant can reach now.">
                   <IntegrationList label="Connected">
                     {connected.map((plugin) => (
                       <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
                     ))}
+                    {onePassword === "connected" && <PersonalOnePasswordRow connected />}
                   </IntegrationList>
                 </Section>
               )}
-              {available.length > 0 && (
+              {(available.length > 0 || onePassword === "available") && (
                 <Section title="Available" description="Connect a service to let your assistant use it.">
                   <IntegrationList label="Available">
                     {available.map((plugin) => (
                       <IntegrationRow key={plugin.name} plugin={plugin} search={rowSearch} onOpen={() => { pushedPanel.current = true; }} />
                     ))}
+                    {onePassword === "available" && <PersonalOnePasswordRow connected={false} />}
                   </IntegrationList>
                 </Section>
               )}

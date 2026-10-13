@@ -1142,12 +1142,12 @@ Read the reference.
     // The message a person reads when nothing is connected must name the
     // screen that fixes it, and must NOT tell them to publish the repository.
     expect(outcome?.error).toContain("no GitHub credential");
-    expect(outcome?.error).toContain("Connected accounts");
+    expect(outcome?.error).toContain("Integrations → GitHub");
     expect(outcome?.error).not.toContain("make the repository public");
     const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
     expect(row?.status).toBe("error");
     expect(row?.attempts).toBe(1);
-    expect(row?.lastError).toContain("Connected accounts");
+    expect(row?.lastError).toContain("Integrations → GitHub");
     expect(row?.nextAttemptAt).toBeGreaterThan(Date.now());
     expect(row?.lastSha).toBeNull();
   });
@@ -1180,7 +1180,7 @@ Read the reference.
 
       expect(outcome?.status).toBe("error");
       expect(outcome?.error).toContain("no GitHub credential");
-      expect(outcome?.error).toContain("Connected accounts");
+      expect(outcome?.error).toContain("Integrations → GitHub");
       expect(outcome?.error).not.toContain("make the repository public");
       expect(await db.select().from(skills)).toEqual([]);
       expect(f.calls[0]?.authHeader).toBeUndefined();

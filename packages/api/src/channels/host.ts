@@ -1413,7 +1413,7 @@ export class ChannelHost {
     const consumed = code ? await consumeLinkCode(this.deps.db, channelType, code) : null;
     if (!consumed) {
       await transport?.send(event.conversationKey, {
-        markdown: "That link code is invalid or expired — get a fresh one from Settings → Connected accounts.",
+        markdown: "That link code is invalid or expired. Get a new one from Integrations in the Valet web app.",
       });
       return;
     }
@@ -1475,7 +1475,7 @@ export class ChannelHost {
     if (last !== undefined && now - last < UNLINKED_REPLY_COOLDOWN_MS) return;
     this.unlinkedReplyAt.set(conversationKey, now);
     await transport?.send(conversationKey, {
-      markdown: "Link your Valet account to chat here: open Settings → Connected accounts in the web app.",
+      markdown: "Link your Valet account to chat here: open Integrations in the Valet web app.",
     });
   }
 

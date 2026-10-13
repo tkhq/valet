@@ -700,7 +700,7 @@ function ReplyStep({
       {slackUnlinked && target.orchestrator !== "team" && (
         <p className="text-xs text-danger-500">
           Your Slack account is not linked, so this rule cannot fire for you yet. Link it in
-          Settings → Connected accounts, then create the rule.
+          Integrations → Slack, then create the rule.
         </p>
       )}
 

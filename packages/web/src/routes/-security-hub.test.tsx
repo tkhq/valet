@@ -349,11 +349,11 @@ describe("SecurityIndexPage", () => {
 
 
 describe("GitHub connection recovery", () => {
-  it("keeps personal GitHub setup in personal connected accounts", () => {
+  it("keeps personal GitHub setup on personal Integrations", () => {
     reposData.connected = false;
     renderPage();
     expect(screen.getByRole("link", { name: "Connect GitHub" }).getAttribute("href"))
-      .toBe("/settings/connected-accounts");
+      .toBe("/integrations?service=github&workspace=user");
   });
 
   it("takes team org admins directly to GitHub App settings", () => {

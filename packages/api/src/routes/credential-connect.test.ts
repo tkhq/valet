@@ -208,25 +208,25 @@ describe("GET /api/credentials/oauth/callback", () => {
     return new URL(res.headers.get("location") ?? "");
   }
 
-  // "Sign in with Slack" starts on Settings → Connected accounts, so a
-  // successful connect returns there. A failure still lands on /integrations,
-  // which renders the error.
-  it("lands a successful connect on Connected accounts when asked", async () => {
+  // Integrations holds every connection, so an old link that still asks
+  // for Connected accounts lands there too.
+  it("lands a connect on Integrations even when an old link names Connected accounts", async () => {
     api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
     const state = (await startConnect(api.baseUrl, "linear", "?landing=connected-accounts")).searchParams.get("state") ?? "";
 
     const ok = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`, { redirect: "manual" });
-    expect(ok.headers.get("location")).toBe("/settings/connected-accounts?connected=linear");
+    expect(ok.headers.get("location")).toBe("/integrations?connected=linear");
 
     const state2 = (await startConnect(api.baseUrl, "linear", "?landing=connected-accounts")).searchParams.get("state") ?? "";
     const failed = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?error=access_denied&state=${encodeURIComponent(state2)}`, { redirect: "manual" });
     expect(failed.headers.get("location")).toBe("/integrations?error=access_denied");
   });
 
-  it("refuses a landing page it does not name", async () => {
+  it("ignores a landing parameter, so a link cannot steer the callback", async () => {
     api = await bootTestApi({ plugins: [mcpPlugin(fake.url)] });
-    const res = await fetch(`${api.baseUrl}/api/credentials/linear/connect?landing=https://evil.example`, { redirect: "manual" });
-    expect(res.status).toBe(400);
+    const state = (await startConnect(api.baseUrl, "linear", "?landing=https://evil.example")).searchParams.get("state") ?? "";
+    const ok = await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=code-1&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    expect(ok.headers.get("location")).toBe("/integrations?connected=linear");
   });
 
   it("mcp mode: exchanges the code with the stored PKCE verifier and persists the credential", async () => {

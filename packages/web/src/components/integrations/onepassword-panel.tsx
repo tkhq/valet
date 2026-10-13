@@ -14,8 +14,8 @@ import {
  * the controls, so nobody has to guess whether one is connected.
  *
  * Your OWN token is not here. It is a personal credential, so it sits with
- * the rest of them on You · Connected accounts. Both pages open the same
- * setup dialog, so the instructions read the same wherever you start.
+ * your other connections on Integrations. Both pages open the same setup
+ * dialog, so the instructions read the same wherever you start.
  */
 
 const REMOVE_ORG_TOKEN_NOTE =
@@ -36,9 +36,9 @@ export function OnePasswordPanel() {
         <ServiceIcon slug="1password" label="1Password" />
         <p className="text-sm text-muted">
           The organization token reads vaults every member's runtimes can use. Your own token
-          lives on{" "}
-          <a className="text-moss underline" href="/settings/connected-accounts">
-            Connected accounts
+          is on{" "}
+          <a className="text-moss underline" href="/integrations?workspace=user">
+            Integrations
           </a>
           .
         </p>

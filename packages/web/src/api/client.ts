@@ -180,7 +180,6 @@ import type {
   PostGithubAppCredentialRequest,
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
-  PostGithubConnectRequest,
   PostGithubConnectResponse,
   OpenrouterRegistryResponse,
   PreviewOrgPolicyRequest,
@@ -1392,7 +1391,7 @@ export const api = {
     ),
 
   // per-user GitHub App-OAuth connection (GitHub/repo integration plan, Task 6)
-  connectGithub: (body?: PostGithubConnectRequest) => request<PostGithubConnectResponse>("POST", "/me/github/connect", body),
+  connectGithub: () => request<PostGithubConnectResponse>("POST", "/me/github/connect"),
   disconnectGithub: () => request<undefined>("DELETE", "/me/github"),
   // The org App's state, readable by a member — `getGithubApp` above is the
   // admin-only detail read, so connect surfaces use this instead.

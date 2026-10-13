@@ -228,7 +228,7 @@ vi.mock("~/api/repos", () => ({
 vi.mock("~/api/integrations", () => ({
   usePlugins: () => ({ data: currentPluginsData, isLoading: false, error: null }),
   useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
-  useConnectCredential: () => ({ mutateAsync: connectMutateAsync, isPending: false, error: null }),
+  useConnectCredential: () => ({ mutateAsync: connectMutateAsync, isPending: false, error: null, reset: vi.fn() }),
   useDisconnectCredential: () => ({
     mutate: disconnectMutate,
     mutateAsync: disconnectMutateAsync,
@@ -240,12 +240,13 @@ vi.mock("~/api/integrations", () => ({
   useRevokeDelegation: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
 }));
 
+let personalTokenConnected = false;
 vi.mock("~/api/onepassword", () => ({
   useOnePasswordSettings: () => ({
     data: {
       allowPersonal: false,
       orgTokenConnected: false,
-      personalTokenConnected: false,
+      personalTokenConnected,
     },
     isLoading: false,
     error: null,
@@ -264,6 +265,7 @@ const deliverLinkMutateAsync = vi.fn();
 const unlinkIdentityMutate = vi.fn();
 
 const verifyLinkMutate = vi.fn();
+const setLinkNotifyMutate = vi.fn();
 
 vi.mock("~/api/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/queries")>();
@@ -280,6 +282,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
       error: null,
     }),
     useUnlinkIdentity: (_provider: string) => ({ mutate: unlinkIdentityMutate, isPending: false , reset: vi.fn() }),
+    useSetLinkNotify: (_provider: string) => ({ mutate: setLinkNotifyMutate, isPending: false, error: null }),
   };
 });
 
@@ -352,7 +355,8 @@ describe("IntegrationsPage", () => {
         .getAllByRole("listitem")
         .map((row) => row.querySelector(".font-medium")?.textContent);
     expect(rowNames("Connected")).toEqual(["Slack"]);
-    expect(rowNames("Available")).toEqual(["GitHub", "Typefully"]);
+    // Your own 1Password token sits with the services, under Available until set.
+    expect(rowNames("Available")).toEqual(["GitHub", "Typefully", "1Password"]);
     expect(rowNames("Built in")).toEqual(["DeepWiki"]);
   });
 
@@ -598,8 +602,9 @@ describe("brand marks", () => {
       (section) => section.querySelector("h2")?.textContent === "Available",
     );
     const paths = [...(services?.querySelectorAll("[data-brand-mark] svg path") ?? [])].map((p) => p.getAttribute("d"));
-    expect(paths).toHaveLength(3);
-    expect(new Set(paths).size).toBe(3);
+    // Three services and your own 1Password row.
+    expect(paths).toHaveLength(4);
+    expect(new Set(paths).size).toBe(4);
   });
 });
 
@@ -988,7 +993,8 @@ describe("an unconfigured service an org admin can fix", () => {
     currentPluginsData = calendarPlugins({ missingEnv: bothUnset });
     render(<IntegrationsPage />);
 
-    expect(screen.queryByRole("button", { name: /Connect/ })).toBeNull();
+    // Only your own 1Password row offers a connect here.
+    expect(screen.queryAllByRole("button", { name: /Connect/ }).map((button) => button.textContent)).toEqual(["Connect 1Password"]);
     expect(screen.queryByRole("button", { name: /Disconnect/ })).toBeNull();
   });
 
@@ -1149,11 +1155,13 @@ describe("IntegrationsPage — org-provided pairing", () => {
     expect(screen.getByText(/expires in 10 minutes/)).toBeTruthy();
   });
 
-  it("a linked account reads as linked, with a confirm-gated Unlink", () => {
-    identityLinksData = { links: [slackLink({ linked: true, externalId: "U0123ABCD" })] };
+  it("a linked account reads as linked, with the attention ping and a confirm-gated Unlink", () => {
+    identityLinksData = { links: [slackLink({ linked: true, externalId: "U0123ABCD", notifyAttention: false })] };
     openIntegration("slack");
 
     expect(screen.getByText("U0123ABCD")).toBeTruthy();
+    fireEvent.click(screen.getByRole("switch", { name: "Notify on Slack when your assistant needs you" }));
+    expect(setLinkNotifyMutate).toHaveBeenCalledWith({ notifyAttention: true });
     expect(screen.queryByRole("button", { name: "Link Slack account" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Unlink Slack" }));
@@ -1161,6 +1169,12 @@ describe("IntegrationsPage — org-provided pairing", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Unlink" }));
     expect(unlinkIdentityMutate).toHaveBeenCalled();
+  });
+
+  it("offers Sign in with Slack beside the DM options", () => {
+    identityLinksData = { links: [slackLink({ oauthService: "slack-user" })] };
+    openIntegration("slack");
+    expect(screen.getByRole("button", { name: "Sign in with Slack" })).toBeTruthy();
   });
 
   it("falls back to the generic org note when the provider declares no identity link", () => {
@@ -1361,12 +1375,15 @@ describe("IntegrationsPage — the search box", () => {
     expect(screen.queryByRole("heading", { name: "1Password" })).toBeNull();
   });
 
-  // 1Password moved to Organization · 1Password, beside GitHub and Slack.
-  // This page answers "what can the assistant reach"; a token form and a
-  // credential table are provider setup, which is what the settings rail is
-  // for.
-  it("does not carry the 1Password panel", () => {
+  // Connected accounts moved here: your own token is a row like a service.
+  // The organization token stays on Organization · 1Password.
+  it("lists your own 1Password token as a row, in Connected once set", () => {
+    personalTokenConnected = true;
     render(<IntegrationsPage />);
+    const row = within(screen.getByRole("list", { name: "Connected" })).getByRole("group", { name: "1Password" });
+    expect(within(row).getByText("Connected")).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Remove token" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "1Password" })).toBeNull();
+    personalTokenConnected = false;
   });
 });

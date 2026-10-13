@@ -49,7 +49,6 @@ import {
   type GithubDeliveryEffects,
   type GithubEndpoints,
   type GithubOrgStatus,
-  type GithubPostAuthDestination,
   type GithubSetupCapability,
   type GithubWebhookCapability,
 } from "@valet/plugin-github/http";
@@ -137,7 +136,7 @@ export const githubHttpBindings: Readonly<Record<string, PluginHttpBinding>> = {
   },
   connect: {
     method: "POST", path: "/connection/connect", auth: "user",
-    bind: (context) => connectStart(context.request, connection(context), endpoints()),
+    bind: (context) => connectStart(connection(context), endpoints()),
   },
   "org-status": {
     method: "GET", path: "/connection/org-status", auth: "user",
@@ -314,14 +313,13 @@ interface ConnectState {
   userId: string;
   orgId: string;
   returnTo: string;
-  postAuthDestination?: GithubPostAuthDestination;
 }
 
 function verifyConnectState(state: string, key: Buffer): ConnectState | null {
   const now = Date.now();
   return verifyState<ConnectState>("github-connect", state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, orgId, nonce, exp, returnTo, postAuthDestination } = payload;
+    const { userId, orgId, nonce, exp, returnTo } = payload;
     if (typeof userId !== "string" || typeof orgId !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (exp < now) return null;
@@ -329,7 +327,6 @@ function verifyConnectState(state: string, key: Buffer): ConnectState | null {
       userId,
       orgId,
       returnTo: typeof returnTo === "string" ? returnTo : "",
-      ...(postAuthDestination === "integrations" ? { postAuthDestination } : {}),
     };
   });
 }
@@ -340,7 +337,7 @@ function connectionCapability(
   const { userId, orgId } = caller;
   return {
     oauthClientId: async () => (await loadAppConfig(appDeps(providers), orgId))?.oauthClientId ?? null,
-    signConnectState: (postAuthDestination) => {
+    signConnectState: () => {
       const returnTo = returnOrigin(request);
       return signState(
         "github-connect",
@@ -350,7 +347,6 @@ function connectionCapability(
           nonce: randomBytes(16).toString("hex"),
           exp: Date.now() + STATE_TTL_MS,
           ...(returnTo ? { returnTo } : {}),
-          ...(postAuthDestination ? { postAuthDestination } : {}),
         },
         stateKey(providers),
       );
@@ -386,7 +382,6 @@ function connectionCapability(
         status: "open",
         grant: {
           returnTo: verified.returnTo,
-          ...(verified.postAuthDestination ? { postAuthDestination: verified.postAuthDestination } : {}),
           oauthClient: async () => {
             const config = await loadAppConfig(appDeps(providers), verified.orgId);
             return config ? { clientId: config.oauthClientId, clientSecret: config.oauthClientSecret } : null;

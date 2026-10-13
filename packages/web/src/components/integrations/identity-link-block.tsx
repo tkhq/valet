@@ -1,6 +1,6 @@
 /**
- * Account pairing: link a provider account to the Valet user. Settings →
- * Connected accounts and the org-provided Integrations tile both render it.
+ * Account pairing: link a provider account to the Valet user. The
+ * org-provided Integrations panel renders it, for Slack and Telegram.
  * Two ways in when the provider can DM (`codeDelivery`), as in v1:
  *
  *   DM me on <title> → `POST /api/me/identity-links/:provider/deliver`. The
@@ -14,8 +14,9 @@
  *                      that account. For users whose provider email differs
  *                      from their Valet email. Requires `memberSearch`.
  *
- * With `offerOAuth`, "Sign in with <title>" starts the provider's OAuth
- * connect, which links the account with no code.
+ * When the deployment can run the provider's OAuth connect
+ * (`link.oauthService`), "Sign in with <title>" links the account with no
+ * code. Once linked, the block offers the attention ping and Unlink.
  *
  * The show-code flow (`POST .../start`: the card shows the code and the
  * provider's delivery instructions) is never a third button. It is the single "Link account" flow for
@@ -33,12 +34,13 @@ import type {
   LinkMemberEntry,
   StartIdentityLinkResponse,
 } from "@valet/api/wire";
-import { Button, ConfirmDialog, Input } from "~/components/primitives";
+import { Button, ConfirmDialog, Input, Switch } from "~/components/primitives";
 import { CopyButton } from "~/components/session/tool-renderers/tool-shell";
 import {
   useDeliverIdentityLink,
   useIdentityLinks,
   useLinkMembers,
+  useSetLinkNotify,
   useStartIdentityLink,
   useUnlinkIdentity,
   useVerifyIdentityLink,
@@ -231,21 +233,7 @@ function MemberSearch({
   );
 }
 
-/**
- * `offerOAuth` adds "Sign in with <title>" when the deployment can run the
- * provider's OAuth connect (`link.oauthService`), which links the account
- * with no code. Settings turns it on. The Integrations page leaves it off
- * because that service already has its own tile there.
- */
-export function IdentityLinkBlock({
-  link,
-  title,
-  offerOAuth = false,
-}: {
-  link: IdentityLinkStatus;
-  title: string;
-  offerOAuth?: boolean;
-}) {
+export function IdentityLinkBlock({ link, title }: { link: IdentityLinkStatus; title: string }) {
   const [pendingLink, setPendingLink] = useState<StartIdentityLinkResponse | null>(null);
   const [delivery, setDelivery] = useState<DeliverIdentityLinkResponse | null>(null);
   const [searching, setSearching] = useState(false);
@@ -255,6 +243,7 @@ export function IdentityLinkBlock({
   const startLink = useStartIdentityLink();
   const deliver = useDeliverIdentityLink();
   const unlink = useUnlinkIdentity(link.provider);
+  const setNotify = useSetLinkNotify(link.provider);
 
   // A code is out — poll so the tile flips to "Linked" as soon as the user
   // completes the flow in the provider app.
@@ -284,10 +273,23 @@ export function IdentityLinkBlock({
       `pinging you there when a thread needs you. To undo this, link the account ` +
       `again with a new code.`;
     return (
-      <div className="space-y-1">
+      <div className="space-y-2">
         <p className="text-xs leading-relaxed text-muted">
           Linked as <span className="font-mono text-ink">{link.externalId}</span>.
         </p>
+        <label className="flex min-h-11 items-center justify-between gap-3 text-xs text-ink sm:min-h-0">
+          <span>
+            Notify on attention
+            <span className="block text-muted">Ping you on {title} when your assistant needs you.</span>
+          </span>
+          <Switch
+            checked={link.notifyAttention ?? false}
+            disabled={setNotify.isPending}
+            onCheckedChange={(next) => setNotify.mutate({ notifyAttention: next })}
+            aria-label={`Notify on ${title} when your assistant needs you`}
+          />
+        </label>
+        {setNotify.error && <p className="text-xs text-danger-500">{errorText(setNotify.error)}</p>}
         <Button
           variant="ghost"
           size="sm"
@@ -367,7 +369,7 @@ export function IdentityLinkBlock({
   }
 
   const busy = startLink.isPending || deliver.isPending;
-  const oauthService = offerOAuth ? link.oauthService : undefined;
+  const oauthService = link.oauthService;
 
   return (
     <div className="space-y-2">
@@ -395,7 +397,7 @@ export function IdentityLinkBlock({
               size="sm"
               disabled={busy}
               onClick={() => {
-                window.location.href = `/api/credentials/${encodeURIComponent(oauthService)}/connect?landing=connected-accounts`;
+                window.location.href = `/api/credentials/${encodeURIComponent(oauthService)}/connect`;
               }}
             >
               Sign in with {title}
