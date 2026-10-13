@@ -127,6 +127,7 @@ For list-shaped output, abstain with an empty array and gate on `if` with `lengt
 
 ## Working practices
 
+- Before you create a workflow, restate the plan in two or three lines: what starts it, what each step does, and where the result goes. If a gap would change the build, such as which event, channel, repo, or account to use, call `ask_question` once with the plan as `detail` and the likely answers as `options`. Otherwise, build it and list what you assumed.
 - `save_workflow` runs a full linter over the definition: field shapes per node type (with did-you-mean hints), template syntax, `nodes.<id>` references and segments, edge semantics, reachability, model ids, tool service/actions, and tool `params` keys against the action's own parameter schema (missing required parameters and unknown parameter names, with did-you-mean hints; templated values are never type-checked). On error it returns a bulleted list — fix each item and retry; never save around validation.
 - Fields live FLAT on the node (`model`, `prompt`, `values`, …) — never nested under a `config` object.
 - Node ids containing `-` need bracket form in templates: `nodes["my-id"].result`.

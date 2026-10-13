@@ -2,7 +2,7 @@ import { assistantMemoryNamespace } from "../services/memory-scope.js";
 import { assistantExecutions } from "../schema/index.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
-import { workflowEditorThreadContext } from "../workflows/editor-thread-context.js";
+import { workflowThreadContext } from "../workflows/editor-thread-context.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import { and, eq } from "drizzle-orm";
 import { mkdir } from "node:fs/promises";
@@ -2803,7 +2803,7 @@ export class EngineHost {
         readOnlyReason: "This legacy team conversation is read-only. Start a new conversation to use an isolated working directory.",
       } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
-      threadSystemContext: workflowEditorThreadContext,
+      threadSystemContext: workflowThreadContext,
       // A team or org orchestrator is shared, so no one timezone applies.
       ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
       tools: [...buildMemoryTools(), ...extras.tools],

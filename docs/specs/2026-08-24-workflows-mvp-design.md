@@ -453,7 +453,7 @@ Backspace then removes only the selected edge.
 
 ### Workflow assistant threads (2026-09-14)
 
-An unattended run reports on its own thread in the selected assistant. The key is `signal:workflow:{runId}`. A run started from an assistant conversation reports in that conversation instead.
+An unattended run reports on its own thread in the selected assistant. The key is `signal:workflow:{runId}`. A run started from an assistant conversation reports in that conversation instead. No one watches an unattended run's thread, so the host adds one line to its system context (`workflowRunThreadContext`): do not call ask_question, and state assumptions in the result. In the workflow editor conversation a person is present, so the assistant restates the plan, asks once about a gap that changes the build, and lists what it assumed.
 
 One thread per workflow definition was tried first and reverted. A thread is the engine's unit of serial execution and of abort. On a shared thread, one run's approval gate holds every other run of the same workflow until a person answers it or it expires, and the thread's Stop button cancels all of them. Separate threads let runs of one workflow proceed at the same time, and keep Stop on one run.
 

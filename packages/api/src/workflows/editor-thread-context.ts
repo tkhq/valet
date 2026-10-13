@@ -13,10 +13,26 @@ export function workflowEditorThreadContext(thread: { key: string }): string | u
   return [
     `This conversation is the visual editor for workflow ${match[1]}. Read that workflow before answering questions or making changes.`,
     "If it still has a placeholder name such as \"Untitled workflow\" and only start and stop steps, the person is creating it: give it a name that says what it does, based on their request.",
-    "Clarify missing inputs, then use patch_workflow to build its steps incrementally so the person can review the canvas.",
+    "Before the first step, restate the plan in two or three lines: what starts it, what each step does, and where the result goes.",
+    "If a gap would change the build, such as which event, channel, repo, or account to use, call ask_question once with the plan as `detail` and the likely answers as `options`.",
+    "Otherwise, build it and list what you assumed.",
+    "Use patch_workflow to build its steps incrementally so the person can review the canvas.",
     "Use propose_trigger or propose_schedule for automation so the person can review the saved configuration before enabling it.",
     "Do not run it or enable schedules or event subscriptions unless the person explicitly asks.",
     "In replies, call the workflow by its name. Do not show its wf_ id.",
     "The workflow tools enforce the current owner's permissions.",
   ].join(" ");
+}
+
+/** A run with no conversation origin reports on its own thread
+ * (`workflowRunThreadKey`), and no person watches that thread. A run started
+ * from a conversation reports there, so its key never matches. */
+export function workflowRunThreadContext(thread: { key: string }): string | undefined {
+  if (!/^(?:signal|slack-events:[^:]+):workflow:[A-Za-z0-9_-]+$/.test(thread.key)) return undefined;
+  return "No one is watching this run. Do not call ask_question. State your assumptions in the result.";
+}
+
+/** The thread context an assistant session gives each of its threads. */
+export function workflowThreadContext(thread: { key: string }): string | undefined {
+  return workflowEditorThreadContext(thread) ?? workflowRunThreadContext(thread);
 }
