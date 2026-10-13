@@ -72,7 +72,7 @@ function githubMessage(err: unknown): string {
 
 export function imageUploadError(err: unknown, stage: "storage" | "comment" | "PR lookup" = "storage"): string {
   if (err instanceof CommentImageError) return err.message;
-  if (err instanceof Error && err.name === "AbortError") return "Image attachment was cancelled. Retry from an active session if the images are still needed.";
+  if (err instanceof Error && ["AbortError", "TimeoutError"].includes(err.name)) return "Image attachment was cancelled. Retry from an active session if the images are still needed.";
   const status = statusOf(err);
   const detail = `GitHub ${stage} failed (${status ?? "network error"}): ${githubMessage(err)}.`;
   if (status === 401) return `${detail} Reconnect GitHub in Settings and retry.`;

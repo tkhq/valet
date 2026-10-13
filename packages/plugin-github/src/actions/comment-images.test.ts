@@ -250,14 +250,15 @@ it("names the session requirement when a workflow has no sandbox", async () => {
   expect(calls).toHaveLength(0);
 });
 
-it("cancels in-flight storage requests with the session signal", async () => {
+it.each(["AbortError", "TimeoutError"])("reports a pre-aborted session signal correctively: %s", async (name) => {
   const calls = await fixture();
   const ctx = context();
   const controller = new AbortController();
-  controller.abort(); ctx.signal = controller.signal;
+  controller.abort(new DOMException("Session ended", name)); ctx.signal = controller.signal;
   const result = await comment.execute({ ...args, images: [{ path: "image" }] }, ctx);
   expect(result.success).toBe(false);
-  expect(calls.some((c) => c.method !== "GET")).toBe(false);
+  expect(result.error).toBe("Image attachment was cancelled. Retry from an active session if the images are still needed.");
+  expect(calls).toHaveLength(0);
 });
 
 

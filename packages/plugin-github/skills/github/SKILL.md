@@ -110,6 +110,7 @@ Public repository images are public. Private images require a logged-in GitHub b
 Email, mobile push, Slack unfurls, and Valet channel views can show broken private images.
 The App needs contents write, pull requests read, and issues write permissions.
 Image operations have a 120-second deadline. On expiry, check the PR before retrying.
+A single token (often the org's App installation token) supports roughly 50 to 60 image writes per 120 seconds, and interleaved heavy bursts time out together (8 of 9 ten-image batches timed out in review), with same-token upload serialization a possible follow-up, not implemented here.
 Each alt text and caption accepts up to 1,000 characters. Body, encoded text, and reserved URL space must fit within 60,000 characters.
 Keep the assets ref while comments need the images. Ref deletion does not securely erase Git objects or cached images.
 Custom refs are invisible in the branch and tag UI. Branch and tag rulesets do not cover this namespace.

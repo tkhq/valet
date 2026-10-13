@@ -155,6 +155,7 @@ Confirmed concurrent changes or ref deletion get at most twelve attempts with ji
 Blobs and the batch tree are written once, not on every attempt. Each new parent requires a new commit and non-forced ref write.
 Image Octokit clients use supported `throttle.id` values prefixed with `valet-comment-images-`, followed by a SHA-256 hash of the resolved token.
 Clients sharing a token share the one-write-per-second image queue. Different tokens do not wait behind each other's image writes.
+A single token (often the org's App installation token) supports roughly 50 to 60 image writes per 120 seconds, and interleaved heavy bursts time out together (8 of 9 ten-image batches timed out in review), with same-token upload serialization a possible follow-up, not implemented here.
 Default clients retain their `no-id` limiter. Image writes form a second write stream per token, not a new GitHub rate allowance.
 GitHub's approximate 80-content-writes-per-minute secondary limit still covers both streams. A secondary rate limit makes the call fail fast.
 Automatic Octokit retries are disabled for image operations. Rate-limit handlers return without retrying.
