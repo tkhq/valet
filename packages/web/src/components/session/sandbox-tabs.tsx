@@ -54,7 +54,7 @@ export function SandboxTabs({
   return (
     <div className={cn("flex min-h-0 flex-col", showsPane ? "flex-1" : "shrink-0")}>
       <div className="flex shrink-0 items-center border-b border-line px-3 sm:px-4">
-        <div role="tablist" aria-label="Thread view" className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <div role="tablist" aria-label="Thread view" className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden">
           {tabs.map((t) => (
             <button
               key={t.id}

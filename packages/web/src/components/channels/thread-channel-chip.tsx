@@ -13,7 +13,7 @@ export function ThreadChannelChip({ channel, owner }: { channel: ThreadChannel; 
   const name = channels.data?.channels.find((candidate) => candidate.key === channel.key)?.name
     ?? (channel.provider === "slack" ? "Slack channel" : channel.key.replace(/^github:/, ""));
   return (
-    <span className="hidden min-w-0 items-center gap-2 text-xs sm:flex">
+    <span className="hidden min-w-0 max-w-48 items-center gap-2 text-xs sm:flex lg:max-w-72">
       <Link to="/channel" search={{ key: channel.key }} title="Open this channel in Valet"
         className="inline-flex min-w-0 items-center gap-1.5 rounded-md border border-line px-2 py-0.5 text-muted hover:bg-ink-wash hover:text-ink">
         <ChannelIcon provider={channel.provider} className="h-3.5 w-3.5" />

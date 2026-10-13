@@ -425,9 +425,9 @@ export function UsagePage() {
               }`}
             />
           </label>
-          {/* One group, so the range wraps as a unit on a narrow screen. */}
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="text-sm text-muted">
+          {/* One row that shrinks its inputs, so the range never splits. */}
+          <div className="flex min-w-0 items-center gap-2 max-sm:w-full">
+            <label className="min-w-0 flex-1 text-sm text-muted sm:flex-none">
               <span className="sr-only">Custom start date</span>
               <input
                 type="date"
@@ -435,11 +435,11 @@ export function UsagePage() {
                 max={todayUtc}
                 value={customStart}
                 onChange={(event) => setCustomStart(event.target.value)}
-                className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+                className="min-h-11 w-full min-w-0 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
               />
             </label>
             <span className="text-sm text-muted">to</span>
-            <label className="text-sm text-muted">
+            <label className="min-w-0 flex-1 text-sm text-muted sm:flex-none">
               <span className="sr-only">Custom end date</span>
               <input
                 type="date"
@@ -448,25 +448,25 @@ export function UsagePage() {
                 max={todayUtc}
                 value={customEnd}
                 onChange={(event) => setCustomEnd(event.target.value)}
-                className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+                className="min-h-11 w-full min-w-0 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
               />
             </label>
-            <button
-              type="button"
-              disabled={!customStart || !customEnd || customStart > customEnd}
-              onClick={applyCustomPeriod}
-              aria-pressed={customPeriodApplied}
-              className={`min-h-11 rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:py-1 ${
-                customPeriodApplied
-                  ? "border-moss bg-moss-wash font-medium text-moss"
-                  : customPeriodPending
-                    ? "border-amber-500 bg-amber-500/10 font-medium text-amber-800 dark:text-amber-300"
-                    : "border-line text-muted hover:border-ink hover:text-ink"
-              }`}
-            >
-              Apply dates
-            </button>
           </div>
+          <button
+            type="button"
+            disabled={!customStart || !customEnd || customStart > customEnd}
+            onClick={applyCustomPeriod}
+            aria-pressed={customPeriodApplied}
+            className={`min-h-11 rounded border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:py-1 ${
+              customPeriodApplied
+                ? "border-moss bg-moss-wash font-medium text-moss"
+                : customPeriodPending
+                  ? "border-amber-500 bg-amber-500/10 font-medium text-amber-800 dark:text-amber-300"
+                  : "border-line text-muted hover:border-ink hover:text-ink"
+            }`}
+          >
+            Apply dates
+          </button>
           {personalWorkspace && isOrgAdmin && (
             <FilterChips
               label="Whose usage"
