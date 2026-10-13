@@ -106,7 +106,12 @@ export function Composer({
   beforeSend,
   submissionLock,
   onSent,
+  guest = false,
 }: {
+  /** The sender opens a shared thread as a guest: no file or image intake
+   * (uploads land in the owner's working directory) and no slash commands
+   * (commands change the owner's thread). */
+  guest?: boolean;
   submissionLock?: { current: boolean };
   beforeSend?: (text: string) => Promise<{ text: string; threadId: string }>;
   onSent?: () => void;
@@ -186,7 +191,7 @@ export function Composer({
   // sends text unchanged.
   const commandQuery = /^\/(\S*)$/.exec(text)?.[1] ?? null;
   const argMatch = /^\/(\S+) (\S*)$/.exec(text);
-  const { data: commandsData } = useCommands(sessionId);
+  const { data: commandsData } = useCommands(sessionId, !guest);
   const allCommands = commandsData?.commands ?? [];
   // Per-browser last-used ranking for the command popup. Loaded once per
   // mount; `submit` records each sent slash command and refreshes it.
@@ -351,7 +356,7 @@ export function Composer({
 
   /** True while the composer refuses new files. */
   const intakeBlocked =
-    (!IMAGE_ATTACHMENTS_ENABLED && !FILE_UPLOADS_ENABLED) || send.isPending || !threadId;
+    guest || (!IMAGE_ATTACHMENTS_ENABLED && !FILE_UPLOADS_ENABLED) || send.isPending || !threadId;
 
   /**
    * Take files from a paste, a drop, or the picker. Refused files leave a
@@ -928,7 +933,7 @@ export function Composer({
             disabled={preparing || send.isPending || !threadId}
           />
           <div className={cn("flex shrink-0 items-center gap-2", expanded && "px-1 pb-1 pt-1")}>
-            {(IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
+            {!guest && (IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
               <>
                 <input
                   ref={fileInputRef}
