@@ -112,13 +112,18 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
   // Session ownership comes from the durable row, never the acting member.
   // A personal session follows its owner's permission settings, also on a
   // turn another member sent from a shared thread (`services/thread-share.ts`).
+  // That turn is not covered by the owner's session grants: it asks again.
   let teamId = scope.teamId;
   let userId = scope.userId;
+  let sessionGrants = !scope.externalSender;
   if (scope.sessionId) {
     const [session] = await db.select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
       .from(agentSessions).where(and(eq(agentSessions.id, scope.sessionId), eq(agentSessions.orgId, scope.orgId))).limit(1);
     if (session) teamId = session.ownerType === "team" ? session.ownerId ?? undefined : undefined;
-    if (session?.ownerType === "user" && session.ownerId) userId = session.ownerId;
+    if (session?.ownerType === "user" && session.ownerId) {
+      if (scope.userId && scope.userId !== session.ownerId) sessionGrants = false;
+      userId = session.ownerId;
+    }
   }
   const principalFilter = teamId
     ? or(and(eq(actionPolicies.principalType, "org"), eq(actionPolicies.principalId, scope.orgId)), and(eq(actionPolicies.principalType, "team"), eq(actionPolicies.principalId, teamId)))
@@ -143,7 +148,7 @@ export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): P
   }));
 
   let grants: RuntimeGrantRow[] = [];
-  if (scope.sessionId && !scope.externalSender) {
+  if (scope.sessionId && sessionGrants) {
     const rows = await db
       .select()
       .from(runtimeGrants)

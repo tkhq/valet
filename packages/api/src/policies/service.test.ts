@@ -510,6 +510,15 @@ describe("personal policy ownership", () => {
       userId: MEMBER, orgId: ORG, sessionId: SESSION, appliesIn: "session", pluginDefault: undefined, now: 2 });
     expect(decision).toMatchObject({ mode: "require_approval", provenance: { source: "override" } });
   });
+
+  it("leaves the owner's session grants out of another member's turn", async () => {
+    // An approval the owner gave for the session covers the owner's turns.
+    // A reply in the shared thread asks the owner again.
+    await db.insert(agentSessions).values({ id: SESSION, userId: ADMIN, orgId: ORG, workspace: "test", ownerType: "user", ownerId: ADMIN, createdAt: 1, updatedAt: 1 });
+    await writeSessionGrant(db, SESSION, { orgId: ORG, service: "github", actionId: "create_issue", grantedBy: ADMIN, now: 1 });
+    expect((await loadPolicyRows(db, { orgId: ORG, userId: ADMIN, sessionId: SESSION })).grants).toHaveLength(1);
+    expect((await loadPolicyRows(db, { orgId: ORG, userId: MEMBER, sessionId: SESSION })).grants).toEqual([]);
+  });
 });
 
 describe("team policy ownership", () => {

@@ -24,7 +24,8 @@ A guest's prompt runs in the owner's session, in the shared thread:
 
 - The prompt carries the guest as its author (`MessageEntry.author`). The UI shows the guest's name. The model sees a `[from: …]` sender line on that prompt (`AuthorAttribution` in `packages/engine/src/submission.ts`). The owner's own prompts in a personal session still carry no sender line.
 - Tools use the owner's connected accounts. A personal session resolves credentials from its owner (`EngineHost.buildCredentialResolver`), whoever wrote the turn.
-- The owner's permission settings apply. `loadPolicyRows` reads the personal overrides of the session's owner, not of the turn's author.
+- The owner's permission settings apply. `loadPolicyRows` reads the personal overrides of the session's owner, not of the turn's author. The owner's session grants ("allow for this session") do not cover a guest's turn, so an "Ask first" action asks the owner again.
+- A guest's turn cannot read the owner's other threads or memory. `thread_read`, `list_threads`, and the `mem_*` tools set `ToolDef.ownerOnly`, and the engine refuses such a tool when a personal session runs a turn from someone other than its owner. The owner's own turns are unchanged.
 - The audit record (`action_invocations.user_id`) names the guest as the actor. Its session is the owner's, so the record reads as "the guest, acting in the owner's session".
 - Approvals go to the owner only. The attention router already sends a personal session's approvals to its owner. A guest sees that an approval is pending but gets 403 on resolve and withdraw.
 
@@ -52,6 +53,7 @@ Artifacts need no change. A personal artifact is visible to its organization by 
 ## Known limits
 
 - A guest cannot open a child session that the shared thread started. The child card links to a page that returns 404.
+- The orchestrator's system prompt holds a memory snapshot (pinned files, recent journals, and the index). It is fixed when the thread starts, so a guest's turn can still see it.
 - A guest's stream does not replay events from before the page loaded. History loads over REST, and pending approvals load from `GET /api/threads/:id/decisions`.
 - The recheck of a guest stream is per process. If the API runs on more than one process, a revoke made on another process reaches the stream within five seconds.
 

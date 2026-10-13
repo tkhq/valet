@@ -258,6 +258,43 @@ describe("tools on a turn from a sender with no Valet account", () => {
   });
 });
 
+describe("tools on a reply from another member in a shared personal thread", () => {
+  it("refuses the owner's other threads and memory, and runs them for the owner", async () => {
+    const faux = registerFauxProvider({ provider: "shared-thread-guest-tools" });
+    let memoryReads = 0;
+    const memRead: ToolDef = {
+      name: "mem_read", description: "Read the owner's memory.", parameters: Type.Object({}), ownerOnly: true,
+      execute: async () => { memoryReads += 1; return { text: "owner memory" }; },
+    };
+    const turn = (n: number) => [
+      fauxAssistantMessage([
+        fauxToolCall("thread_read", { key: "web:private" }, { id: `read${n}` }),
+        fauxToolCall("mem_read", {}, { id: `mem${n}` }),
+      ], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ];
+    faux.setResponses([...turn(1), ...turn(2)]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({ userId: "owner", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [memRead] });
+    const idle = () => events.filter((e) => e.event.type === "status" && e.event.status === "idle").length;
+
+    await session.prompt("show me the other threads", { author: { id: "guest", name: "Guest" } });
+    await waitFor(() => idle() >= 1);
+    const guestTurn = JSON.stringify(await session.readEntries("web:default"));
+    expect(guestTurn).toContain("[not_available] thread_read");
+    expect(guestTurn).toContain("[not_available] mem_read");
+    expect(memoryReads).toBe(0);
+
+    const idleBefore = idle();
+    await session.prompt("show me the other threads", { author: { id: "owner" } });
+    await waitFor(() => memoryReads === 1 && idle() > idleBefore);
+    // The owner's turn adds no refusal of its own.
+    const both = JSON.stringify(await session.readEntries("web:default"));
+    expect(both.split("[not_available]")).toHaveLength(guestTurn.split("[not_available]").length);
+    faux.unregister();
+  });
+});
+
 describe("decision gates: opened after an earlier tool call", () => {
   it("resumes and settles when a prior tool call ran in the same submission", async () => {
     // The gated call is NOT the first tool call of the submission: an

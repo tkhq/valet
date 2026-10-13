@@ -5196,7 +5196,7 @@ export class Thread {
   }
 
   private buildTools(): AgentTool[] {
-    const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseExternalSender);
+    const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseOutsideAuthors);
     return all.map((def) =>
       toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
         this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
@@ -6576,12 +6576,26 @@ export function toolOutcome(result: unknown): { outcome?: ToolResult["outcome"] 
  * artifact, and child tools act as the workspace, so they refuse that turn. */
 const EXTERNAL_SENDER_READS = new Set(["list_tools", "list_threads", "thread_read"]);
 
-function refuseExternalSender(def: ToolDef): ToolDef {
-  if (def.policyChecked || EXTERNAL_SENDER_READS.has(def.name)) return def;
+/** A member other than the owner wrote this turn in a personal session: a
+ * reply in a shared thread. It runs with the owner's accounts, but the
+ * owner's other threads and memory stay private (`ToolDef.ownerOnly`). */
+function guestTurn(ctx: ToolContext): boolean {
+  return ctx.owner?.type === "user" && ctx.userId !== ctx.owner.id;
+}
+
+function refuseOutsideAuthors(def: ToolDef): ToolDef {
+  const actsAsWorkspace = !def.policyChecked && !EXTERNAL_SENDER_READS.has(def.name);
+  if (!actsAsWorkspace && !def.ownerOnly) return def;
   return {
     ...def,
-    execute: (args, ctx) => ctx.externalSender
-      ? Promise.resolve({ text: `[not_available] ${def.name} acts as the workspace, and this message came from someone with no Valet account. Answer in words, or ask a teammate with a Valet account to do it.` })
-      : def.execute(args, ctx),
+    execute: (args, ctx) => {
+      if (actsAsWorkspace && ctx.externalSender) {
+        return Promise.resolve({ text: `[not_available] ${def.name} acts as the workspace, and this message came from someone with no Valet account. Answer in words, or ask a teammate with a Valet account to do it.` });
+      }
+      if (def.ownerOnly && guestTurn(ctx)) {
+        return Promise.resolve({ text: `[not_available] ${def.name} reads the owner's other threads or memory, and this message came from a member replying in a shared thread. Answer from this thread, or ask the owner to do it.` });
+      }
+      return def.execute(args, ctx);
+    },
   };
 }
