@@ -49,6 +49,7 @@ import {
   SLACK_MAX_BLOCKS,
   SLACK_SECTION_FIELD_LIMIT,
   SLACK_TEXT_LIMIT,
+  TABLE_FALLBACK_SKIP_ERRORS,
 } from "../message-chunking.js";
 import { SKIP_SUBTYPES } from "../subtypes.js";
 import { SlackApi, SlackApiError, SLACK_MARKDOWN_TEXT_LIMIT } from "./api.js";
@@ -804,8 +805,9 @@ export class SlackTransport implements ChannelTransport {
    * Provider error responses are safe to retry because Slack rejected them.
    * Network errors and malformed success responses remain single-attempt.
    *
-   * If Slack rejects a generated table block, `fallbackBlocks` (its Markdown
-   * rendering) is posted instead. Each attempt applies both retries, so the
+   * If Slack rejects a message with a generated table block, `fallbackBlocks`
+   * (its Markdown rendering) is posted instead, unless the error is in
+   * `TABLE_FALLBACK_SKIP_ERRORS`. Each attempt applies both retries, so the
    * fallback also follows a retry without the identity, which can be the
    * first request that reaches block validation.
    */
@@ -817,17 +819,13 @@ export class SlackTransport implements ChannelTransport {
       return await this.api.postMessage(opts);
     } catch (err) {
       if (!(err instanceof SlackApiError) || err.method !== "chat.postMessage") throw err;
-      if (fallbackBlocks && err.detail === "invalid_blocks") {
+      const providerRejected =
+        err.providerRejected && err.status !== undefined && err.status >= 200 && err.status < 300;
+      if (fallbackBlocks && providerRejected && !TABLE_FALLBACK_SKIP_ERRORS.has(err.detail)) {
         return this.postMessageAs({ ...opts, blocks: fallbackBlocks });
       }
       const hadOverride = opts.username !== undefined || opts.iconUrl !== undefined;
-      if (
-        hadOverride &&
-        err.providerRejected &&
-        err.status !== undefined &&
-        err.status >= 200 &&
-        err.status < 300
-      ) {
+      if (hadOverride && providerRejected) {
         const { username: _u, iconUrl: _i, ...rest } = opts;
         return this.postMessageAs(rest, fallbackBlocks);
       }

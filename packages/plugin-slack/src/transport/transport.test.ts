@@ -1260,6 +1260,27 @@ describe("discrete sends", () => {
     expect(posts[1].body.blocks).toEqual([{ type: 'markdown', text: markdown }]);
   });
 
+  it.each(["invalid_arguments", "msg_blocks_too_long"])(
+    "retries a table message in Markdown when Slack rejects it with %s", async (error) => {
+      const transport = makeTransport();
+      const markdown = '| PR | Related |\n| --- | --- |\n| a | b<br>c |';
+      fake.failNext("chat.postMessage", error);
+      const ref = await transport.send(KEY, { markdown, sender: { displayName: "Ledger" } });
+      const posts = fake.calls.filter((call) => call.method === "chat.postMessage");
+      expect(posts).toHaveLength(2);
+      expect(posts[1].body).toMatchObject({ channel: CHANNEL, thread_ts: THREAD_TS, username: "Ledger", blocks: [{ type: "markdown", text: markdown }] });
+      expect(ref.messageId).toBeTruthy();
+    },
+  );
+
+  it("does not retry a table message in Markdown after an auth error", async () => {
+    const transport = makeTransport();
+    const markdown = '| PR | Related |\n| --- | --- |\n| a | b<br>c |';
+    fake.failNext("chat.postMessage", "not_in_channel");
+    await expect(transport.send(KEY, { markdown })).rejects.toThrow("not_in_channel");
+    expect(fake.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(1);
+  });
+
   it("sends the Markdown fallback before retrying without the sender identity", async () => {
     const transport = makeTransport();
     const markdown = '| PR | Related |\n| --- | --- |\n| a | b<br>c |';

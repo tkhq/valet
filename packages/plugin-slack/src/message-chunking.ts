@@ -14,7 +14,7 @@ import { containsSlackSpans, linkGitHubReferencesInMarkdown, markdownToSlackMrkd
 import { isTableDelimiterRow, tablesToLabeledRows } from "./table-format.js";
 import { tablesToTableBlocks } from "./table-blocks.js";
 
-export { hasTableBlock } from "./table-blocks.js";
+export { hasTableBlock, TABLE_FALLBACK_SKIP_ERRORS } from "./table-blocks.js";
 
 export interface ContentBlockOptions extends MarkdownToSlackMrkdwnOptions {
   /** Render pipe tables as native `table` blocks. Defaults to true. */

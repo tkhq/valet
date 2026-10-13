@@ -1226,6 +1226,35 @@ describe('slack actions', () => {
     },
   );
 
+  it.each(['invalid_arguments', 'msg_blocks_too_long'])(
+    'send_message retries a table message in Markdown when Slack rejects it with %s', async (error) => {
+      mockGuardAllowsPublicChannel(fetchMock);
+      fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { blocks?: { type: string }[] } : {};
+        if (body.blocks?.some((block) => block.type === 'table')) return jsonResponse(200, { ok: false, error });
+        return jsonResponse(200, { ok: true, ts: '200.001', channel: 'C1' });
+      });
+      const text = '| PR | Related |\n|---|---|\n| a | b<br>c |';
+      const result = await action('slack.send_message').execute(
+        { channel: 'C1', thread_ts: '100.001', text },
+        pluginCtx({ resolveOutboundSender: async () => ({ displayName: 'Ledger' }) }),
+      );
+      expect(result).toMatchObject({ success: true, data: { ts: '200.001' } });
+      const posts = fetchMock.mock.calls.slice(1).map(([, init]) => JSON.parse((init as RequestInit).body as string) as Record<string, unknown>);
+      expect(posts).toHaveLength(2);
+      expect(posts[1]).toMatchObject({ channel: 'C1', thread_ts: '100.001', username: 'Ledger', blocks: [{ type: 'markdown', text }] });
+    },
+  );
+
+  it('send_message does not retry a table message in Markdown after an auth error', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockImplementation(async () => jsonResponse(200, { ok: false, error: 'not_in_channel' }));
+    const text = '| PR | Related |\n|---|---|\n| a | b<br>c |';
+    const result = await action('slack.send_message').execute({ channel: 'C1', text }, pluginCtx());
+    expect(result.success).toBe(false);
+    expect(fetchMock.mock.calls.slice(1)).toHaveLength(1);
+  });
+
   it.each(['slack.send_message', 'slack.update_message', 'slack.dm_user'])(
     '%s falls back to Markdown only once when Slack rejects every attempt', async (name) => {
       if (name === 'slack.dm_user') {

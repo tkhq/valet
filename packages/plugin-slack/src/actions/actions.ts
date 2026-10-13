@@ -23,7 +23,7 @@ import { authorizeSlackFile } from "./file-access.js";
 import { slackFetch, slackGet } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
 import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
-import { buildContentBlocks, hasTableBlock, needsContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
+import { buildContentBlocks, hasTableBlock, needsContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS, TABLE_FALLBACK_SKIP_ERRORS } from "../message-chunking.js";
 import { SlackApi, SlackApiError } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
 import { markdownToSlackMrkdwn } from "../transport/format.js";
@@ -78,9 +78,9 @@ async function actionIdentity(ctx: PluginActionContext): Promise<{ username?: st
 /**
  * Post with the current assistant identity. If Slack rejects cosmetic override
  * fields, retry once without them so the message body still lands. If Slack
- * rejects a generated native table block on any attempt, post the same
- * content once more with `fallbackBlocks`, its Markdown rendering, instead
- * of losing it.
+ * rejects a message with a generated native table block on any attempt, post
+ * the same content once more with `fallbackBlocks`, its Markdown rendering,
+ * instead of losing it. Errors in `TABLE_FALLBACK_SKIP_ERRORS` skip this retry.
  */
 async function postActionMessage(
   token: string,
@@ -115,7 +115,12 @@ async function postActionMessage(
   let sent = body;
   const postWithFallback = async (identity: boolean) => {
     const result = await post(identity ? withIdentity(sent) : sent);
-    if (!fallbackBlocks || sent.blocks === fallbackBlocks || result.data.error !== 'invalid_blocks') return result;
+    if (
+      !fallbackBlocks ||
+      sent.blocks === fallbackBlocks ||
+      !result.providerRejected ||
+      TABLE_FALLBACK_SKIP_ERRORS.has(result.data.error ?? '')
+    ) return result;
     sent = { ...body, blocks: fallbackBlocks };
     return post(identity ? withIdentity(sent) : sent);
   };
@@ -1336,8 +1341,8 @@ const updateMessage = action(Type.Object({
     let res = await slackFetch('chat.update', token, body);
     if (!res.ok) return slackError(res);
     let data = (await res.json()) as UpdateData;
-    if (!data.ok && data.error === 'invalid_blocks' && fallbackBlocks) {
-      // Slack rejected the generated table block; edit with its Markdown rendering.
+    if (!data.ok && fallbackBlocks && !TABLE_FALLBACK_SKIP_ERRORS.has(data.error ?? '')) {
+      // Slack rejected the edit with the generated table block; edit with its Markdown rendering.
       res = await slackFetch('chat.update', token, { ...body, blocks: fallbackBlocks });
       if (!res.ok) return slackError(res);
       data = (await res.json()) as UpdateData;

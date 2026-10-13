@@ -245,6 +245,19 @@ export function tablesToTableBlocks(text: string, maxBlocks: number): Block[] | 
   return blocks;
 }
 
+/**
+ * Slack errors that a Markdown retry of a table message cannot fix: rate
+ * limits, auth, scope, and channel access. Any other rejection of a message
+ * with a native table block retries once with the Markdown rendering, as
+ * Slack accepted that rendering before native tables.
+ */
+export const TABLE_FALLBACK_SKIP_ERRORS: ReadonlySet<string> = new Set([
+  'ratelimited', 'rate_limited',
+  'not_authed', 'invalid_auth', 'account_inactive', 'token_revoked', 'token_expired', 'missing_scope',
+  'not_in_channel', 'channel_not_found', 'is_archived', 'restricted_action',
+  'cant_update_message', 'message_not_found', 'edit_window_closed',
+]);
+
 /** True when a generated payload carries a native table block. */
 export function hasTableBlock(blocks: Block[] | undefined): boolean {
   return blocks?.some((block) => block.type === 'table') ?? false;
