@@ -1254,6 +1254,20 @@ describe("pluginCatalogTools: dynamic actions (resolveActions)", () => {
     expect(reason).not.toContain("requires permitted account access");
   });
 
+  // A team's policy check that throws failed every service with a bare
+  // "error" and no log, so the cause stayed invisible.
+  it("team discovery keeps the cause when the policy check throws", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const [list] = pluginCatalogTools({ plugins: [makeDynamicPlugin("remote", vi.fn(async () => []))] });
+    const result = await list.execute({ service: "remote" }, makeCtx({ owner: { type: "team", id: "team" },
+      policyResolver: { resolve: async () => { throw new Error("invalid regular expression: /(/"); } } }));
+    const payload = decode(result.text) as { warnings?: Array<{ service: string; reason: string }> };
+    const reason = payload.warnings?.find((w) => w.service === "remote")?.reason;
+    expect(reason).toContain("Could not check this team's action policies (invalid regular expression: /(/)");
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
   it("list_tools merges resolveActions results with static actions", async () => {
     const { plugin: staticPlugin } = makeMockPlugin();
     const dynamicAction: PluginAction = {

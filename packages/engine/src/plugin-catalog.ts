@@ -712,10 +712,14 @@ export async function invokeAction(
   let decision: PolicyDecision;
   try {
     decision = await resolver.resolve(input);
-  } catch {
+  } catch (err) {
+    // Log and keep the cause: without it, every team action fails with no
+    // trace of why the policy check threw.
+    const cause = err instanceof Error ? err.message : String(err);
+    console.error(`[policy] resolve failed for ${policyActionId} in ${ctx.sessionId}:`, err);
     // A failed read cannot establish whether the team has an absolute deny.
     if (ctx.owner?.type === "team") {
-      return { kind: "error", message: "Could not check this team's action policies. Retry the action when policy checks are available." };
+      return { kind: "error", message: `Could not check this team's action policies (${cause.slice(0, 300)}). Retry the action when policy checks are available.` };
     }
     // Fail closed but keep a human in the loop — degrade to an approval
     // gate rather than hard-deny on a transient resolver/store error.
