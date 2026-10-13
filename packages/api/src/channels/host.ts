@@ -58,7 +58,7 @@ import { attentionHref } from "../orchestrator/attention-wiring.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
 import { activeChildWatch } from "../orchestrator/children.js";
 import { writeDropLog } from "../orchestrator/signals.js";
-import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
+import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import { teams, agentSessions, users, workflowDefinitions } from "../schema/index.js";
 import { ingestChannelFile, type IngestedChannelFile } from "../services/channel-file-ingest.js";
 import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
@@ -1815,6 +1815,18 @@ export class ChannelHost {
       await transport?.answerCallback?.(gateCallback.callbackId, "Only an org admin can choose Always allow — resolve it on the web.");
       await this.dropLog(orgId, "unauthorized", event.conversationKey, "always_allow requires org admin");
       return;
+    }
+    if (gateCallback.actionId === GATE_ACTION_ALWAYS_ALLOW_OWNER && sessionOrgId) {
+      const owner = sessionRow ?? (workflow?.ok ? workflow.owner : undefined);
+      const refusal = await ownerAlwaysAllowRefusal(this.deps.db, {
+        orgId: sessionOrgId, sessionId: mapped.sessionId,
+        ...(owner?.ownerType === "team" ? { teamId: owner.ownerId ?? undefined } : { userId: owner?.ownerId ?? undefined }),
+      }, userId);
+      if (refusal) {
+        await transport?.answerCallback?.(gateCallback.callbackId, refusal);
+        await this.dropLog(orgId, "unauthorized", event.conversationKey, "always_allow_owner refused");
+        return;
+      }
     }
     // A gate asking to use a member's shared account answers to that member alone.
     const stored = await this.deps.engineStore.getDecisionGate(mapped.sessionId, mapped.gateId);

@@ -131,6 +131,38 @@ it("lets current team members reach an existing workflow agent gate without an a
   expect((await fetch(base)).status).toBe(404);
 });
 
+describe("POST /decisions/:gateId/resolve — always_allow_owner", () => {
+  it("lets the session's owner choose it and refuses a team member who is not a team admin", async () => {
+    api = await bootTestApi();
+    const p = api.providers;
+    const now = Date.now();
+    const body = JSON.stringify({ actionId: "always_allow_owner" });
+    const member = { "x-valet-test-user-id": "test-member", "Content-Type": "application/json" };
+    // The owner of a personal session passes the check and reaches the gate lookup.
+    const own = await createSession(api.baseUrl, { "x-valet-test-user-id": "test-member" });
+    const ownRes = await fetch(`${api.baseUrl}/api/sessions/${own}/decisions/nonexistent-gate/resolve`, { method: "POST", headers: member, body });
+    expect(ownRes.status).toBe(404);
+    expect(await ownRes.json()).toEqual({ error: "gate not pending" });
+
+    // A team workflow step has no app session row; the run's team owns it.
+    await p.db.insert(teams).values({ id: "owner-team", orgId: "local-org", name: "Owner team", createdAt: now });
+    await p.db.insert(teamMembers).values({ teamId: "owner-team", userId: "test-member", role: "member" });
+    await p.db.insert(workflowDefinitions).values({ id: "owner-workflow", orgId: "local-org", ownerType: "team", ownerId: "owner-team", name: "Owner workflow", definition: {}, createdAt: now, updatedAt: now });
+    await p.workflowStore.createRun("owner-run", { workflowId: "owner-workflow", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "owner-team" });
+    const sessionId = "wf:owner-run:notify";
+    await ensureWorkflowSession({ db: p.db, store: p.workflowStore, engineStore: p.engineStore,
+      host: p.engineHost, actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials }, sessionId);
+    const url = `${api.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/decisions/nonexistent-gate/resolve`;
+    const refused = await fetch(url, { method: "POST", headers: member, body });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: "Only a team admin can always allow this for the team. Approve it once, or ask a team admin." });
+    // An org admin holds team authority, so the check passes.
+    const admin = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body });
+    expect(admin.status).toBe(404);
+  });
+});
+
 describe("POST /decisions/:gateId/resolve — answer types", () => {
   it("refuses a non-text answer before it can resolve a gate", async () => {
     api = await bootTestApi();

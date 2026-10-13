@@ -58,7 +58,7 @@ import type {
 } from "../wire/types.js";
 import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
+import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { answersGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
 import { runVisible, spawnedFromVisibleThread, threadsVisibleTo, viewerOf } from "./_thread-access.js";
@@ -1499,6 +1499,18 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
     if (!(await canApplyAlwaysAllow(c.var.providers.db, session.orgId, c.var.user.id))) {
       return c.json({ error: "org admin required for always_allow" }, 403);
     }
+  }
+  // The owner's lasting allow follows the same rule: refuse it here, before
+  // the engine consumes the gate, when the caller may not set it.
+  if (body.actionId === GATE_ACTION_ALWAYS_ALLOW_OWNER) {
+    if (c.var.principal.type === "team") {
+      return c.json({ error: "A team API key cannot always allow an action. Sign in to apply it." }, 403);
+    }
+    const refusal = await ownerAlwaysAllowRefusal(c.var.providers.db, {
+      orgId: session.orgId, sessionId,
+      ...(session.ownerType === "team" ? { teamId: session.ownerId } : { userId: session.ownerId }),
+    }, c.var.user.id);
+    if (refusal) return c.json({ error: refusal }, 403);
   }
 
   // Confirm the gate is actually pending in this session before resolving.
