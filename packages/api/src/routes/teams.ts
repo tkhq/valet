@@ -4,7 +4,7 @@ import { deleteTeamResources } from "../services/team-resource-deletion.js";
  *
  *   GET    /api/teams                       → list teams the caller belongs to
  *   POST   /api/teams                       → create a team (caller auto-admitted as admin)
- *   PATCH  /api/teams/:id                   → update team settings (default model, TKAI-255)
+ *   PATCH  /api/teams/:id                   → update team settings (name, default model, TKAI-255)
  *   DELETE /api/teams/:id                   → delete a team (409s while a team-owned run is unsettled)
  *   POST   /api/teams/:id/members           → add/update a member
  *   PATCH  /api/teams/:id/members/:userId   → change a member's role
@@ -36,13 +36,17 @@ import { deleteTeamResources } from "../services/team-resource-deletion.js";
  * A delete is different: the next boot recreates the team empty, which reads
  * as data loss, so the route refuses it and names the file instead.
  *
- * There is no rename route today. Whoever adds one must refuse BOTH `idp`
- * and `config`: the reconciler identifies a declared team by name, so a
- * rename orphans the row and the next boot creates a second team beside it.
+ * Rename is `PATCH /:id` with `name`. It refuses BOTH `idp` and `config`
+ * teams: the reconciler identifies a declared team by name, so a rename
+ * orphans the row and the next boot creates a second team beside it. Only a
+ * `local` team, created in Valet, can change its name, and only while no
+ * `skillSources[].team` in the instance config names it, because the
+ * reconciler resolves that field by name and fails boot when it finds none.
  */
 import { Hono, type Context } from "hono";
 import { and, eq, inArray, ne } from "drizzle-orm";
 import { isPgUniqueViolation } from "@valet/store-postgres";
+import { loadInstanceConfig } from "../config/instance-config.js";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { channelsVisibleTo } from "./_thread-access.js";
@@ -172,6 +176,27 @@ function configManagedDeleteRefusal(row: TeamRow): { error: string; code: string
   if (row.origin !== "config") return null;
   const err = new ConfigManagedTeamError(row.name);
   return { error: err.message, code: err.code };
+}
+
+function renameRefusalMessage(row: TeamRow): string {
+  return row.origin === "config"
+    ? `team '${row.name}' is declared in the instance config file (VALET_CONFIG). Rename it in the teams: list in that file, then restart.`
+    : `team '${row.name}' mirrors an identity provider group. Rename the group in the identity provider.`;
+}
+
+function nameConflictMessage(name: string): string {
+  return `A team named '${name}' already exists in this organization. Choose another name.`;
+}
+
+async function teamNameTaken(
+  db: AppEnv["Variables"]["providers"]["db"],
+  orgId: string,
+  name: string,
+  exceptTeamId: string,
+): Promise<boolean> {
+  const [taken] = await db.select({ id: teams.id }).from(teams)
+    .where(and(eq(teams.orgId, orgId), eq(teams.name, name), ne(teams.id, exceptTeamId))).limit(1);
+  return taken !== undefined;
 }
 
 /** Maps service errors to the route's JSON error response. Rethrows unknowns. */
@@ -332,7 +357,8 @@ teamsRouter.post("/", async (c) => {
 
 // ── Update ────────────────────────────────────────────────────────────────
 
-const PATCH_TEAM_FIELDS = new Set(["defaultModel", "defaultReasoning", "slackHomeChannelId"]);
+const PATCH_TEAM_FIELDS = new Set(["name", "defaultModel", "defaultReasoning", "slackHomeChannelId"]);
+const MAX_TEAM_NAME_LENGTH = 80;
 
 /**
  * Team settings (TKAI-255). Strict whitelist, same shape as `PATCH /api/me`:
@@ -366,7 +392,7 @@ teamsRouter.patch("/:id", async (c) => {
   const unknownFields = Object.keys(raw).filter((k) => !PATCH_TEAM_FIELDS.has(k));
   if (unknownFields.length > 0) {
     return c.json(
-      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only defaultModel, defaultReasoning, or slackHomeChannelId.` },
+      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only name, defaultModel, defaultReasoning, or slackHomeChannelId.` },
       400,
     );
   }
@@ -374,7 +400,36 @@ teamsRouter.patch("/:id", async (c) => {
   // `team` from `loadTeamInOrg` above is fresh within this request; the
   // write branch swaps it for the UPDATE's own returned row, so no re-read.
   let fresh: TeamRow = team;
-  const update: { defaultModel?: string | null; defaultReasoning?: string | null; slackHomeChannelId?: string | null } = {};
+  const update: { name?: string; defaultModel?: string | null; defaultReasoning?: string | null; slackHomeChannelId?: string | null } = {};
+  if ("name" in raw) {
+    if (team.origin !== "local") {
+      return c.json({ error: renameRefusalMessage(team), code: "team_rename_managed" }, 409);
+    }
+    // A `local` team that `valet.yaml` skillSources[].team names is found by
+    // name at every boot. A rename would make the next boot fail.
+    if (loadInstanceConfig(process.env)?.skillSources?.some((source) => source.team === team.name)) {
+      return c.json({
+        error:
+          `team '${team.name}' is named by skillSources in the instance config file (VALET_CONFIG). ` +
+          `Do not put the new name in the file first: startup fails until the team has that name. ` +
+          `To rename: 1. Comment out the whole skillSources key in the file, then restart. ` +
+          `Valet then leaves the config-managed sources and their synced skills in place. ` +
+          `2. Rename the team. 3. Restore skillSources with the new team name, then restart. ` +
+          `Do not delete a single entry: the next restart removes that source and its synced skills.`,
+        code: "team_rename_config_referenced",
+      }, 409);
+    }
+    const name = typeof raw.name === "string" ? raw.name.trim() : "";
+    if (!name || name.length > MAX_TEAM_NAME_LENGTH) {
+      return c.json({ error: `Enter a team name of 1 to ${MAX_TEAM_NAME_LENGTH} characters.` }, 400);
+    }
+    if (name !== team.name) {
+      if (await teamNameTaken(db, user.orgId, name, id)) {
+        return c.json({ error: nameConflictMessage(name), code: "team_name_conflict" }, 409);
+      }
+      update.name = name;
+    }
+  }
   if ("slackHomeChannelId" in raw) {
     const channel = raw.slackHomeChannelId;
     if (channel !== null && (typeof channel !== "string" || !/^[CG][A-Z0-9]{2,}$/.test(channel))) {
@@ -432,6 +487,10 @@ teamsRouter.patch("/:id", async (c) => {
     try {
       updated = await db.update(teams).set(update).where(eq(teams.id, id)).returning();
     } catch (err) {
+      // Another team took this name after the check above.
+      if (update.name && (await teamNameTaken(db, user.orgId, update.name, id))) {
+        return c.json({ error: nameConflictMessage(update.name), code: "team_name_conflict" }, 409);
+      }
       // Another team saved this home channel after the check above.
       if (update.slackHomeChannelId && isPgUniqueViolation(err)) {
         return c.json({ error: "Another team already uses this channel as its home channel. Choose another channel." }, 409);

@@ -5,8 +5,14 @@
  * `PATCH /api/me`'s `defaultModel` (org-catalog id set, null clears).
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { eq, like } from "drizzle-orm";
+import { loadInstanceConfig } from "../config/instance-config.js";
+import { reconcileInstanceConfig } from "../services/config-reconcile.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { orgMembers, teamMembers, teams, users } from "../schema/index.js";
+import { contentSources, orgMembers, teamMembers, teams, users } from "../schema/index.js";
 import { setApprovedModels } from "../services/approved-models.js";
 import { setOrgReasoningSettings } from "../services/reasoning.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
@@ -167,7 +173,7 @@ describe("PATCH /api/teams/:id", () => {
     api = await bootTestApi();
     await seedTeam(api);
 
-    const res = await patchTeam(api, { name: "Renamed" }, "test-lead");
+    const res = await patchTeam(api, { orgId: "other-org" }, "test-lead");
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/unknown field/);
@@ -250,5 +256,143 @@ describe("PATCH /api/teams/:id", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  describe("rename", () => {
+    it("lets a team admin and an org admin rename; the list shows the new name and other settings stay", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      await api.providers.db.update(teams).set({ defaultReasoning: "low" }).where(eq(teams.id, "team_1"));
+
+      const lead = await patchTeam(api, { name: "  IDX  " }, "test-lead");
+      expect(lead.status).toBe(200);
+      const leadBody = (await lead.json()) as PatchTeamResponse;
+      expect(leadBody.team.name).toBe("IDX");
+      expect(leadBody.team.defaultReasoning).toBe("low");
+
+      const admin = await patchTeam(api, { name: "Releases" });
+      expect(admin.status).toBe(200);
+
+      const list = (await (await fetch(`${api.baseUrl}/api/teams`)).json()) as ListTeamsResponse;
+      expect(list.teams.map((t) => t.name)).toEqual(["Releases"]);
+    });
+
+    it("404s a plain member and does not rename", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      expect((await patchTeam(api, { name: "IDX" }, "test-member")).status).toBe(404);
+      const [row] = await api.providers.db.select().from(teams).where(eq(teams.id, "team_1"));
+      expect(row?.name).toBe("Platform");
+    });
+
+    it("400s an empty, blank, non-string, or overlong name", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      for (const name of ["", "   ", 7, null, "x".repeat(81)]) {
+        const res = await patchTeam(api, { name });
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as { error: string }).error).toMatch(/team name/);
+      }
+    });
+
+    it("409s a duplicate name in the same org, and allows the same name in another org", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      await api.providers.db.insert(teams).values([
+        { id: "team_2", orgId: "local-org", name: "IDX", createdAt: Date.now() },
+        { id: "team_3", orgId: "other-org", name: "Elsewhere", createdAt: Date.now() },
+      ]);
+      const res = await patchTeam(api, { name: "IDX" });
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe("team_name_conflict");
+      expect(body.error).toMatch(/Choose another name/);
+      const [row] = await api.providers.db.select().from(teams).where(eq(teams.id, "team_1"));
+      expect(row?.name).toBe("Platform");
+      // Another org's team named "Elsewhere" does not block a local rename.
+      expect((await patchTeam(api, { name: "Elsewhere" })).status).toBe(200);
+    });
+
+    it("409s a rename of a config or idp team and keeps the name", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      for (const origin of ["config", "idp"] as const) {
+        await api.providers.db.update(teams).set({ origin, externalId: origin === "idp" ? "/platform" : null }).where(eq(teams.id, "team_1"));
+        const res = await patchTeam(api, { name: "IDX" });
+        expect(res.status).toBe(409);
+        expect(((await res.json()) as { code: string }).code).toBe("team_rename_managed");
+        const [row] = await api.providers.db.select().from(teams).where(eq(teams.id, "team_1"));
+        expect(row?.name).toBe("Platform");
+      }
+    });
+
+    it("refuses a rename while skillSources names the team, and boot reconcile still works", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      const dir = await mkdtemp(join(tmpdir(), "valet-rename-"));
+      const file = join(dir, "valet.yaml");
+      await writeFile(file, "version: 1\nskillSources:\n  - repo: owner/skills\n    team: Platform\n");
+      vi.stubEnv("VALET_CONFIG", file);
+
+      const res = await patchTeam(api, { name: "IDX" });
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe("team_rename_config_referenced");
+      expect(body.error).toMatch(/Comment out the whole skillSources key/);
+      expect(body.error).toMatch(/Restore skillSources with the new team name/);
+      expect(body.error).not.toMatch(/change the team field/i);
+      const [row] = await api.providers.db.select().from(teams).where(eq(teams.id, "team_1"));
+      expect(row?.name).toBe("Platform");
+
+      // The next boot still finds the team by name.
+      const cfg = loadInstanceConfig(process.env);
+      if (!cfg) throw new Error("expected the instance config to load");
+      await expect(reconcileInstanceConfig({ db: api.providers.db }, cfg)).resolves.toBeUndefined();
+    });
+
+    it("renames a team that skillSources does not name, and boot reconcile still works", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      await api.providers.db.insert(teams).values({ id: "team_2", orgId: "local-org", name: "Docs", createdAt: Date.now() });
+      const dir = await mkdtemp(join(tmpdir(), "valet-rename-"));
+      const file = join(dir, "valet.yaml");
+      await writeFile(file, "version: 1\nskillSources:\n  - repo: owner/skills\n    team: Docs\n");
+      vi.stubEnv("VALET_CONFIG", file);
+
+      expect((await patchTeam(api, { name: "IDX" })).status).toBe(200);
+      const cfg = loadInstanceConfig(process.env);
+      if (!cfg) throw new Error("expected the instance config to load");
+      await expect(reconcileInstanceConfig({ db: api.providers.db }, cfg)).resolves.toBeUndefined();
+    });
+
+    it("documented procedure keeps the synced source; a one-step name replacement fails boot", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      const db = api.providers.db;
+      const declare = (team: string) => ({ version: 1 as const, skillSources: [{ repo: "owner/skills", team }] });
+      const sourceRows = () => db.select().from(contentSources).where(like(contentSources.id, "skillsrc_cfg_%"));
+
+      await reconcileInstanceConfig({ db }, declare("Platform"));
+      const [before] = await sourceRows();
+      if (!before) throw new Error("expected a config-managed source");
+      expect(before.ownerId).toBe("team_1");
+      await db.update(contentSources).set({ lastSha: "synced-sha" }).where(eq(contentSources.id, before.id));
+
+      // Unsafe: the file names the new team before the rename. Boot fails and writes nothing.
+      await expect(reconcileInstanceConfig({ db }, declare("IDX"))).rejects.toThrow(/does not exist/);
+      expect(await sourceRows()).toHaveLength(1);
+
+      // Step 1: the file has no skillSources key. Reconcile leaves the managed source alone.
+      await reconcileInstanceConfig({ db }, { version: 1 });
+      expect(await sourceRows()).toHaveLength(1);
+      // Step 2: rename. No config names the team now.
+      expect((await patchTeam(api, { name: "IDX" })).status).toBe(200);
+      // Step 3: restore the key with the new name. The id comes from the team id, so the row survives.
+      await reconcileInstanceConfig({ db }, declare("IDX"));
+      const after = await sourceRows();
+      expect(after).toHaveLength(1);
+      expect(after[0]?.id).toBe(before.id);
+      expect(after[0]?.lastSha).toBe("synced-sha");
+    });
   });
 });

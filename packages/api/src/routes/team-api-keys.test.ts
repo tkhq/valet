@@ -101,6 +101,21 @@ function createTeamKey(baseUrl: string, cookie: string, teamId: string): Promise
 }
 
 describe("team API keys", () => {
+  it("a team key cannot rename its team", async () => {
+    api = await bootTestApi({ auth: true });
+    const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");
+    const teamId = await createTeam(api.baseUrl, cookie, "Platform");
+    const created = (await (await createTeamKey(api.baseUrl, cookie, teamId)).json()) as CreateTeamApiKeyResponse;
+    const res = await fetch(`${api.baseUrl}/api/teams/${teamId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "x-api-key": created.key },
+      body: JSON.stringify({ name: "IDX" }),
+    });
+    expect(res.status).toBe(403);
+    const [row] = await api.providers.db.select().from(teams).where(eq(teams.id, teamId));
+    expect(row?.name).toBe("Platform");
+  });
+
   it("a team key starts a team-owned session; a personal key cannot", async () => {
     api = await bootTestApi({ auth: true });
     const cookie = await signUp(api.baseUrl, "admin@nowhere.test", "First Admin");

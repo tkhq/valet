@@ -302,6 +302,7 @@ function TeamRow({
 
       {open && (
         <div className={page ? "mt-6 space-y-10" : "ml-6 mt-3 space-y-8 border-l border-line pl-4"}>
+          {canMutate && team.origin === "local" && <TeamName key={`${team.id}:${team.name}`} team={team} />}
           <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} onSelfRemoved={leavePage} />
           <TeamDefaults team={team} canMutate={canMutate} />
           <TeamSlack key={team.id} team={team} canMutate={canMutate} />
@@ -338,6 +339,56 @@ function TeamRow({
   );
 }
 
+
+/**
+ * Renames a team created in Valet. The API refuses `config` and `idp` teams
+ * (the reconciler matches them by name), so only `local` teams show this.
+ * Keyed by id and name: after a save, the field remounts on the saved name.
+ */
+function TeamName({ team }: { team: TeamSummary }) {
+  const patchTeam = usePatchTeam();
+  const [name, setName] = useState(team.name);
+  const [error, setError] = useState<string | null>(null);
+  const trimmed = name.trim();
+  const dirty = trimmed !== team.name;
+
+  function save() {
+    if (!trimmed) {
+      setError("Enter a team name.");
+      return;
+    }
+    if (!dirty) return;
+    setError(null);
+    patchTeam.mutate(
+      { id: team.id, body: { name: trimmed } },
+      { onError: (err) => setError(errorText(err)) },
+    );
+  }
+
+  return (
+    <SubSection title="Name" description="Change the name shown in team lists and workspace titles.">
+      <div className="flex gap-2">
+        <Input
+          value={name}
+          onChange={(e) => {
+            setName(e.target.value);
+            if (error) setError(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") save();
+          }}
+          aria-label="Team name"
+          maxLength={80}
+          className="flex-1"
+        />
+        <Button type="button" onClick={save} disabled={!dirty || patchTeam.isPending} aria-label="Save team name">
+          {patchTeam.isPending ? "Saving…" : "Save"}
+        </Button>
+      </div>
+      {error && <p className="mt-1.5 text-xs text-danger-500">{error}</p>}
+    </SubSection>
+  );
+}
 
 /**
  * The team default model and reasoning level (TKAI-255; reasoning added
