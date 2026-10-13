@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SEARCH_DEBOUNCE_MS } from "~/components/search-input";
@@ -51,11 +52,12 @@ function setPagedData(): void {
 }
 
 let changelogPending = false;
+let changelogError = false;
 let searchParams: Record<string, unknown> = {};
 const navigate = vi.fn();
 
 vi.mock("~/api/changelog", () => ({
-  useChangelog: () => ({ data: changelogPending ? undefined : data, isPending: changelogPending, isError: false }),
+  useChangelog: () => ({ data: changelogPending ? undefined : data, isPending: changelogPending, isError: changelogError }),
 }));
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "user-1" } }),
@@ -79,6 +81,7 @@ describe("ChangelogPage", () => {
     window.localStorage.clear();
     data = makeData();
     changelogPending = false;
+    changelogError = false;
     searchParams = {};
     navigate.mockReset();
   });
@@ -198,7 +201,7 @@ describe("ChangelogPage", () => {
     expect(screen.getByRole("heading", { level: 2, name: "1.0.0" })).toBeTruthy();
   });
 
-  it("highlights only newly added unreleased entries until the next visit under StrictMode", async () => {
+  it("marks only newly added unreleased entries until the next visit under StrictMode", async () => {
     data.manifest.checkpoints.unshift({
       kind: "unreleased",
       id: "unreleased@def123456789",
@@ -221,9 +224,11 @@ describe("ChangelogPage", () => {
       </StrictMode>,
     );
     const newEntry = screen.getByText("Added after visit").closest("li");
-    expect(newEntry?.className).toContain("border-accent-500");
-    expect(within(newEntry as HTMLElement).getByText("New")).toBeTruthy();
-    expect(screen.getByText("Already seen").closest("li")?.className).not.toContain("border-accent-500");
+    if (!newEntry) throw new Error("The new entry must render in a list row.");
+    expect(within(newEntry).getByText("New")).toBeTruthy();
+    const seenEntry = screen.getByText("Already seen").closest("li");
+    if (!seenEntry) throw new Error("The seen entry must render in a list row.");
+    expect(within(seenEntry).queryByText("New")).toBeNull();
 
     searchParams = { q: "Added after" };
     firstVisit.rerender(
@@ -231,7 +236,9 @@ describe("ChangelogPage", () => {
         <ChangelogPage />
       </StrictMode>,
     );
-    expect(screen.getByText("Added after visit").closest("li")?.className).toContain("border-accent-500");
+    const filteredEntry = screen.getByText("Added after visit").closest("li");
+    if (!filteredEntry) throw new Error("The filtered entry must render in a list row.");
+    expect(within(filteredEntry).getByText("New")).toBeTruthy();
 
     await waitFor(() => {
       expect(JSON.parse(window.localStorage.getItem("valet:changelog-seen:user-1") ?? "")).toMatchObject({
@@ -242,8 +249,62 @@ describe("ChangelogPage", () => {
     firstVisit.unmount();
 
     render(<ChangelogPage />);
-    expect(screen.getByText("Added after visit").closest("li")?.className).not.toContain("border-accent-500");
     expect(screen.queryAllByText("New")).toHaveLength(0);
+  });
+
+  it("labels the filters and keeps them in keyboard order", async () => {
+    const user = userEvent.setup();
+    render(<ChangelogPage />);
+
+    const filters = screen.getByRole("group", { name: "Changelog filters" });
+    const search = within(filters).getByLabelText("Search changes");
+    const category = within(filters).getByLabelText("Change type");
+    const sort = within(filters).getByLabelText("Sort releases");
+    expect(category).toBe(screen.getByRole("combobox", { name: "Filter by change type" }));
+    expect(sort).toBe(screen.getByRole("combobox", { name: "Sort releases" }));
+    search.focus();
+    await user.tab();
+    expect(document.activeElement).toBe(category);
+    await user.tab();
+    expect(document.activeElement).toBe(sort);
+  });
+
+  it("keeps long entry text, timestamps, and source links available", () => {
+    const entry = change("LongTitle".repeat(30), "feature", "long123456789");
+    entry.description = "A long description with all details preserved. ".repeat(20);
+    entry.authoredAt = "2026-09-09T10:00:00Z";
+    data.manifest.checkpoints[0].entries = [entry];
+    render(<ChangelogPage />);
+
+    const row = screen.getByRole("heading", { level: 4, name: entry.title }).closest("li");
+    if (!row) throw new Error("The long entry must render in a list row.");
+    expect(within(row).getByText(entry.description.trim()).textContent).toBe(entry.description);
+    expect(row.querySelector("time")?.getAttribute("datetime")).toBe(entry.authoredAt);
+    expect(within(row).getByRole("link", { name: "PR #42" }).getAttribute("href")).toContain("/pull/42");
+    expect(within(row).getByRole("link", { name: "Commit long123456789" }).getAttribute("href")).toContain("/commit/long123456789");
+  });
+
+  it("announces loading and load errors", () => {
+    changelogPending = true;
+    const view = render(<ChangelogPage />);
+    expect(screen.getByRole("status").textContent).toContain("Loading changelog");
+
+    changelogPending = false;
+    changelogError = true;
+    view.rerender(<ChangelogPage />);
+    expect(screen.getByRole("alert").textContent).toBe("Could not load the changelog. Reload the page to try again.");
+  });
+
+  it("keeps filters available for no matches and handles an empty manifest", () => {
+    searchParams = { q: "missing" };
+    const view = render(<ChangelogPage />);
+    expect(screen.getByRole("status").textContent).toContain("No changes match these filters.");
+    expect(screen.getByRole("group", { name: "Changelog filters" })).toBeTruthy();
+
+    data.manifest.checkpoints = [];
+    view.rerender(<ChangelogPage />);
+    expect(screen.getByText("No release checkpoints are available for this build.")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Changelog filters" })).toBeNull();
   });
 
   it("shows an unreleased build with its links and empty state", () => {

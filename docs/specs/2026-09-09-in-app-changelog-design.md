@@ -83,9 +83,19 @@ The `/changelog` page defaults to newest-first checkpoint order. Users can rever
 
 Each checkpoint groups entries by change type. Features appear first. Improvements, fixes, and security changes follow in that order. Each group sorts entries by commit author time, newest first. Equal timestamps sort by commit SHA ascending. Missing or invalid timestamps sort after dated entries by SHA. The page paginates whole checkpoints and does not split one checkpoint across pages. The URL stores the type, search, sort, and page state. A filter, search, or sort change resets the page to the first valid page.
 
-The page labels an unreleased checkpoint `Unreleased`. It keeps the build time, build SHA, build link, pull request links, and commit links available. Entry rows use a compact horizontal layout on wide screens and stack source links on narrow screens.
+The page labels an unreleased checkpoint `Unreleased`. It keeps the build time, build SHA, build link, pull request links, and commit links available. Release cards separate the version, date, and source links. Entry rows keep source links and timestamps below the text. Long text wraps without truncation.
 
-The client stores the newest displayed checkpoint ID and the visible unreleased entry commit SHAs in local storage. The key includes the user ID. The page snapshots unread checkpoints and entries before it updates storage. A replaced unreleased ID marks only the new unreleased checkpoint unread. In a previously seen unreleased checkpoint, only entries absent from the snapshot show a row accent and a `New` badge. A legacy rolling checkpoint ID uses its build SHA to locate the matching entry. Entries newer than that entry show the accent and badge. If the SHA is absent, the client does not mark entries new. Promotion recognizes a released checkpoint with the same SHA as already seen.
+The client stores the newest displayed checkpoint ID and the visible unreleased entry commit SHAs in local storage. The key includes the user ID. The page snapshots unread checkpoints and entries before it updates storage. A replaced unreleased ID marks only the new unreleased checkpoint unread. In a previously seen unreleased checkpoint, only entries absent from the snapshot show a `New` badge. A legacy rolling checkpoint ID uses its build SHA to locate the matching entry. Entries newer than that entry show the badge. If the SHA is absent, the client does not mark entries new. Promotion recognizes a released checkpoint with the same SHA as already seen.
+
+### Page presentation
+
+Filters have visible labels and padded gutters. They stack on phones, use two columns on tablets, and share one row on wide screens.
+All controls have visible keyboard focus. Mobile controls and source links have touch targets of at least 44 pixels.
+Release cards and entry groups use consistent gutters. The first entry keeps the same vertical padding as later entries.
+Unread checkpoints and entries use rounded `New` badges with the palette accent wash. Unread rows do not change background or gutter width.
+Descriptions use the primary text color. Secondary text uses a lighter neutral token in dark mode for contrast.
+Loading, errors, and no search matches have accessible status messages. Empty states retain the release-card spacing.
+Filtering, sorting, pagination, source links, and read-state storage do not change.
 
 Only application tags reachable from the build commit define changelog checkpoints. Legacy tags on other branches are excluded.
 The first application checkpoint includes the complete first-parent history. Until then, builds show this history as Unreleased.
