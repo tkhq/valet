@@ -44,10 +44,9 @@ export interface RunSettledAttentionDeps {
   access?: AttentionDeps["access"];
 }
 
-/** How many failed nodes the body names before it counts the rest. */
-const NAMED_FAILURES = 2;
-/** Per-node error budget in the body. A tool error can carry a whole response. */
-const ERROR_CHARS = 200;
+/** Budget for the failed nodes and their errors: one Slack text section.
+ * A tool error can carry a whole response, so a longer summary is cut. */
+const SUMMARY_CHARS = 3_000;
 
 /**
  * Builds the `onRunSettled` handler `LocalRunHost` drives. Contained by
@@ -105,25 +104,22 @@ async function workflowName(db: AppDb, workflowId: string): Promise<string> {
 }
 
 /**
- * Names the nodes that failed, so the reader knows what broke before
- * opening the run. `foreach` body rows carry a non-zero iteration and are
- * labelled with it — the same node id can fail on several items.
+ * Each failed node with its whole error, one per line, so the reader can
+ * act from the notification without opening the run. `foreach` body rows
+ * carry a non-zero iteration and are labelled with it: the same node id can
+ * fail on several items. Only a summary over `SUMMARY_CHARS` is cut, and
+ * then it points to the run for the rest.
  */
 export function failedNodeSummary(checkpoints: NodeCheckpoint[]): string {
   const failed = checkpoints.filter((cp) => cp.status === "failed");
   if (failed.length === 0) return "Open the run to see why it stopped.";
 
-  const named = failed.slice(0, NAMED_FAILURES).map((cp) => {
+  const summary = failed.map((cp) => {
     const label = cp.iteration > 0 ? `${cp.nodeId}[${cp.iteration}]` : cp.nodeId;
-    return `${label}: ${truncate(cp.error ?? "no error recorded")}`;
-  });
-  const rest = failed.length - named.length;
-  const more = rest > 0 ? ` (+${rest} more)` : "";
-  return `${named.join("; ")}${more}. Open the run to see the full error.`;
-}
-
-function truncate(text: string): string {
-  return text.length <= ERROR_CHARS ? text : `${text.slice(0, ERROR_CHARS)}…`;
+    return `${label}: ${cp.error ?? "no error recorded"}`;
+  }).join("\n");
+  if (summary.length <= SUMMARY_CHARS) return summary;
+  return `${summary.slice(0, SUMMARY_CHARS)}…\n\nOpen the run to see the rest.`;
 }
 
 export interface RunOriginReportDeps {
