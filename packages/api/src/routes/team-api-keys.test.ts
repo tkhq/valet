@@ -205,7 +205,10 @@ describe("team API keys", () => {
     expect(refusal.error).toContain("team admin");
     expect(refusal.error).toContain("organization admin");
     expect(refusal.error).toContain("Ask an admin");
-    expect(refusal.error).toContain("Personal");
+    // Settings pin each page's scope, so the switcher cannot make a team's
+    // tab personal. The refusal names the personal page instead.
+    expect(refusal.error).toContain("Personal workspace → API keys and proxy");
+    expect(refusal.error).not.toContain("switcher");
     // The same discriminator the delete path on this resource sends.
     expect(refusal.code).toBe("team_admin_required");
     expect(refusal.teamId).toBe(teamId);

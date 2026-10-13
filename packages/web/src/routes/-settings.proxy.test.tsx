@@ -190,7 +190,9 @@ describe("shared personal and team onboarding", () => {
     expect(screen.getByRole("heading", { name: /Step 3.*Configure your tool/ })).toBeTruthy();
     expect(screen.getByRole("heading", { name: /Step 4.*Run it/ })).toBeTruthy();
     expect(screen.getByText('codex exec "hello"')).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Settings → API keys" }).getAttribute("href")).toBe("/settings/api-keys");
+    // The key list is the API keys section on the same page or team tab.
+    expect(screen.getByText(`You can revoke keys anytime in the API keys section on this ${scope === "team" ? "tab" : "page"}.`)).toBeTruthy();
+    expect(screen.queryByRole("link", { name: /API keys/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Create another key" }));
     expect(container.textContent).not.toContain("vlt_new_key");
     expect(screen.getByRole("button", { name: "Create proxy key" })).toBeTruthy();
@@ -352,8 +354,12 @@ describe("who may create a proxy key", () => {
     // Who can do it, and the two actions open to the reader.
     expect(help?.textContent).toContain("Only a team admin or an organization admin can create a shared key for this team.");
     expect(help?.textContent).toContain("Ask an admin of this team to create the key.");
-    expect(help?.textContent).toContain("set the workspace switcher to Personal");
-    expect(screen.getByRole("link", { name: "Settings → API keys" }).getAttribute("href")).toBe("/settings/api-keys");
+    // Team settings pin the team, so the switcher cannot reach a personal
+    // key from here: the copy names the personal page and links it.
+    expect(help?.textContent).not.toContain("switcher");
+    expect(help?.textContent).toContain("To create your own key, open Personal workspace → API keys and proxy.");
+    expect(screen.getByRole("link", { name: "Personal workspace → API keys and proxy" }).getAttribute("href")).toBe("/settings/api-keys");
+    expect(help?.textContent).toContain("Team key names are in the API keys section on this tab.");
   });
 
   it("tells a blocked member that pass-through mode needs their own provider key", () => {

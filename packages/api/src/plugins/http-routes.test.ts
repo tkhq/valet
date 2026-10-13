@@ -2,11 +2,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 import type { AppEnv } from '../env.js';
 import { eq } from 'drizzle-orm';
-import type { PluginHttpRequest, PluginHttpCaller, ValetPlugin } from '@valet/engine';
+import type { PluginHttpRequest, PluginHttpCaller, PluginHttpRoute, ValetPlugin } from '@valet/engine';
 import { bootTestApi, type TestApi } from '../integration/_setup.js';
 import type { CreateTeamResponse, CreateTeamApiKeyResponse } from '../wire/types.js';
 import { orgMembers } from '../schema/index.js';
-import { mountPluginHttpRoutes, readPluginBody } from './http-routes.js';
+import githubPlugin from '@valet/plugin-github/plugin';
+import linearPlugin from '@valet/plugin-linear/plugin';
+import slackPlugin from '@valet/plugin-slack/plugin';
+import { internalToken } from '../lib/internal-auth.js';
+import type { RequestPrincipal } from '../lib/request-principal.js';
+import { compatibilityRouteIssue, mountPluginHttpRoutes, readPluginBody } from './http-routes.js';
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -44,7 +49,7 @@ describe('plugin route mounting', () => {
 
   it('does not treat inherited object properties as legacy route aliases', async () => {
     const app = new Hono<AppEnv>();
-    mountPluginHttpRoutes(app, [{ name: 'linear', version: '1', httpRoutes: [{
+    mountPluginHttpRoutes(app, [{ ...linearPlugin, httpRoutes: [...(linearPlugin.httpRoutes ?? []), {
       id: 'constructor', method: 'GET', path: '/status', auth: 'public', maxBodyBytes: 0,
       handle: () => new Response('ok'),
     }] }], 'public');
@@ -52,14 +57,57 @@ describe('plugin route mounting', () => {
     expect((await app.request('/webhooks/events/linear')).status).toBe(404);
   });
 
-  it('refuses host bindings and compatibility URLs with a different method or authentication', () => {
+  it.each([
+    { bundled: githubPlugin, id: 'callback' },
+    { bundled: githubPlugin, id: 'webhook' },
+    { bundled: slackPlugin, id: 'app' },
+    { bundled: linearPlugin, id: 'events' },
+  ])('refuses to boot when $bundled.name renames route $id, which the host still binds or aliases', ({ bundled, id }) => {
+    const renamed: ValetPlugin = {
+      ...bundled,
+      httpRoutes: bundled.httpRoutes?.map((route) => (route.id === id ? { ...route, id: `${id}-renamed` } : route)),
+    };
+    for (const phase of ['public', 'authenticated'] as const) {
+      expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [renamed], phase)).toThrow(
+        `Plugin ${bundled.name} declares no HTTP route for host route ID(s) ${id}.`,
+      );
+    }
+  });
+
+  it('boots the bundled plugins, whose routes cover every host binding and compatibility URL', () => {
+    for (const phase of ['public', 'authenticated'] as const) {
+      expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [githubPlugin, slackPlugin, linearPlugin], phase)).not.toThrow();
+    }
+  });
+
+  it('refuses a compatibility URL for an unbound route with a different method or authentication', () => {
+    const handle = () => new Response('ok');
+    expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'linear', version: '1', httpRoutes: [{
+      id: 'events', method: 'POST', path: '/events', auth: 'public', maxBodyBytes: 0, handle,
+    }] }], 'public')).toThrow('Compatibility route POST /webhooks/events/linear requires signature authentication.');
+  });
+
+  it('refuses Slack bindings with a different method, path, or authentication', () => {
     const handle = () => new Response('ok');
     expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'slack', version: '1', httpRoutes: [{
       id: 'events', method: 'POST', path: '/events', auth: 'org-admin', maxBodyBytes: 0, handle,
-    }] }], 'authenticated')).toThrow('Host binding for slack route events requires public authentication.');
+    }] }], 'authenticated')).toThrow('Declare slack route events as POST /events with public authentication.');
     expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'slack', version: '1', httpRoutes: [{
       id: 'app', method: 'POST', path: '/app', auth: 'org-admin', maxBodyBytes: 0, handle,
-    }] }], 'authenticated')).toThrow('Compatibility route GET /api/org/slack requires org-admin authentication.');
+    }] }], 'authenticated')).toThrow('Declare slack route app as GET /app with org-admin authentication.');
+    expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'slack', version: '1', httpRoutes: [{
+      id: 'events', method: 'POST', path: '/other', auth: 'public', maxBodyBytes: 0, handle,
+    }] }], 'public')).toThrow('Declare slack route events as POST /events with public authentication.');
+  });
+
+  it('refuses GitHub bindings with a different method or authentication', () => {
+    const handle = () => new Response('ok');
+    expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'github', version: '1', httpRoutes: [{
+      id: 'webhook', method: 'POST', path: '/webhook', auth: 'user', maxBodyBytes: 0, handle,
+    }] }], 'authenticated')).toThrow('Declare github route webhook as POST /webhook with public authentication.');
+    expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'github', version: '1', httpRoutes: [{
+      id: 'app-status', method: 'POST', path: '/app', auth: 'org-admin', maxBodyBytes: 0, handle,
+    }] }], 'authenticated')).toThrow('Declare github route app-status as GET /app with org-admin authentication.');
   });
 
   it('mounts public handlers without authentication and refuses anonymous protected handlers', async () => {
@@ -108,6 +156,104 @@ describe('plugin route mounting', () => {
     await api.providers.db.delete(orgMembers).where(eq(orgMembers.userId, 'local-user'));
     expect((await fetch(`${url}/items/one`, request)).status).toBe(403);
     expect(handle).not.toHaveBeenCalled();
+  });
+});
+
+describe('host-bound routes', () => {
+  const declared = { id: 'connection-save', method: 'PUT', path: '/connection', auth: 'org-admin', maxBodyBytes: 0 } as const;
+
+  it('refuses a bound route ID with a different method, path, or authentication', () => {
+    const changed: PluginHttpRoute[] = [
+      { ...declared, method: 'POST', handle: () => new Response() },
+      { ...declared, path: '/other', handle: () => new Response() },
+      { ...declared, auth: 'user', handle: () => new Response() },
+    ];
+    for (const route of changed) {
+      expect(() => mountPluginHttpRoutes(new Hono<AppEnv>(), [{ name: 'linear', version: '1', httpRoutes: [route] }], 'authenticated'))
+        .toThrow('Declare linear route connection-save as PUT /connection with org-admin authentication.');
+    }
+  });
+
+  it('serves bound routes from the host and never calls the declared handler', async () => {
+    const declaredHandler = vi.fn(() => new Response('plugin'));
+    // Every bound route ID stays declared, so the mount accepts the plugin.
+    const httpRoutes = linearPlugin.httpRoutes?.map((route) => (route.auth === 'signature' ? route : { ...route, handle: declaredHandler }));
+    api = await bootTestApi({ plugins: [{ ...linearPlugin, httpRoutes }] });
+    const response = await fetch(`${api.baseUrl}/api/plugins/linear/http/connection`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ configured: false, connected: false, ready: false });
+    expect(declaredHandler).not.toHaveBeenCalled();
+  });
+});
+
+describe('compatibility URLs', () => {
+  const route: PluginHttpRoute = {
+    id: 'item', method: 'POST', path: '/items/:id', auth: 'user', maxBodyBytes: 0, handle: () => new Response(),
+  };
+
+  it.each([
+    ['a different parameter name', '/api/legacy/:itemId', 'Compatibility route /api/legacy/:itemId must use the path parameters of /items/:id.'],
+    ['a missing parameter', '/api/legacy', 'Compatibility route /api/legacy must use the path parameters of /items/:id.'],
+    ['a path outside /api/', '/legacy/:id', 'Compatibility route /legacy/:id must stay under /api/ for authentication.'],
+  ])('refuses an authenticated alias with %s', (_case, path, issue) => {
+    expect(compatibilityRouteIssue(route, { path, method: 'POST', auth: 'user' })).toBe(issue);
+  });
+
+  it('accepts an authenticated alias that repeats the parameter names', () => {
+    expect(compatibilityRouteIssue(route, { path: '/api/legacy/:id/items', method: 'POST', auth: 'user' })).toBeUndefined();
+  });
+});
+
+describe('binding refusals and session authorization', () => {
+  const declaredHandler = vi.fn(() => new Response('plugin'));
+  const security: ValetPlugin = { name: 'security', version: '1', httpRoutes: [
+    { id: 'finding-issue', method: 'POST', path: '/sessions/:id/findings/:findingId/issues', auth: 'user', maxBodyBytes: 1024, handle: declaredHandler },
+    { id: 'issue-digest', method: 'POST', path: '/sessions/:id/issues/digest', auth: 'user', maxBodyBytes: 1024, handle: declaredHandler },
+  ] };
+  const URLS = ['/api/sessions/s_missing/security/issues/digest', '/api/plugins/security/http/sessions/s_missing/issues/digest'];
+
+  async function mounted(principal: RequestPrincipal | undefined) {
+    api = await bootTestApi();
+    const { providers } = api;
+    const app = new Hono<AppEnv>();
+    app.use('*', async (c, next) => {
+      c.set('providers', providers);
+      if (principal) {
+        c.set('principal', principal);
+        c.set('user', { id: 'local-user', email: 'local@dev', role: 'admin', orgId: 'local-org' });
+      }
+      await next();
+    });
+    mountPluginHttpRoutes(app, [security], 'authenticated');
+    return app;
+  }
+
+  it.each([
+    ['a team key', { type: 'team', id: 'team_1' } as const, {}, 403,
+      'A team API key cannot file issues. Sign in and file them from the session.'],
+    ['the internal token', undefined, { 'x-valet-internal': internalToken() }, 403,
+      'This is a human action. Sign in and call it as a user — the internal token is refused here.'],
+    ['no identity', undefined, {}, 401, 'Sign in to use this plugin route.'],
+  ])('refuses %s with the binding refusal body on both URLs', async (_case, principal, headers, status, error) => {
+    const app = await mounted(principal);
+    declaredHandler.mockClear();
+    for (const url of URLS) {
+      const response = await app.request(url, { method: 'POST', headers, body: '{}' });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({ error });
+    }
+    expect(declaredHandler).not.toHaveBeenCalled();
+  });
+
+  it('answers 404 for a session the caller cannot view, before the plugin runs', async () => {
+    const app = await mounted({ type: 'user', id: 'local-user' });
+    declaredHandler.mockClear();
+    for (const url of URLS) {
+      const response = await app.request(url, { method: 'POST', body: '{}' });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: 'session not found' });
+    }
+    expect(declaredHandler).not.toHaveBeenCalled();
   });
 });
 

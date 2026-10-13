@@ -6,6 +6,7 @@
  * and which mutation it fires, not that TanStack Query itself resolves
  * anything.
  */
+import type { ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type {
@@ -20,23 +21,15 @@ const deliverMutateAsync = vi.fn();
 const setNotifyMutate = vi.fn();
 const unlinkMutate = vi.fn();
 const connectGithubMutateAsync = vi.fn();
-// Both disconnect mutations run their caller's `onSuccess`, which is how the
-// page closes each confirm dialog.
+// The GitHub disconnect mutation runs its caller's `onSuccess`, which is how the
+// page closes its confirm dialog.
 const disconnectGithubMutate = vi.fn(
   (_vars?: undefined, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.(),
-);
-const disconnectCredentialMutate = vi.fn(
-  (_vars: { service: string }, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.(),
 );
 let disconnectGithubState: { isPending: boolean; error: Error | null } = {
   isPending: false,
   error: null,
 };
-let disconnectCredentialState: {
-  isPending: boolean;
-  error: Error | null;
-  variables?: { service: string };
-} = { isPending: false, error: null };
 // A real React Query `reset()` clears the mutation's error, and the page
 // leans on that to open the disconnect dialog clean. A stub that only counts
 // calls would let a dialog full of the previous attempt's refusal pass.
@@ -54,6 +47,9 @@ let githubAppData: GetGithubAppResponse | undefined;
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
+  Link: ({ to, search, children, className }: { to: string; search?: Record<string, string>; children: ReactNode; className?: string }) => (
+    <a href={search ? `${to}?${new URLSearchParams(search)}` : to} className={className}>{children}</a>
+  ),
 }));
 
 // importOriginal keeps the module's other exports real (see vitest.config.ts).
@@ -102,11 +98,8 @@ vi.mock("~/api/integrations", () => ({
     isLoading: credentialsLoading,
     error: credentialsError ? new Error("boom") : null,
   }),
-  useDisconnectCredential: () => ({
-    mutate: disconnectCredentialMutate,
-    ...disconnectCredentialState,
-    reset: vi.fn(),
-  }),
+  // The 1Password row removes its token through this mutation.
+  useDisconnectCredential: () => ({ mutate: vi.fn(), isPending: false, error: null, reset: vi.fn() }),
 }));
 
 // importOriginal keeps the module's other exports real (see vitest.config.ts).
@@ -159,7 +152,6 @@ describe("ConnectedAccountsPage", () => {
     credentialsError = false;
     githubAppData = undefined;
     disconnectGithubState = { isPending: false, error: null };
-    disconnectCredentialState = { isPending: false, error: null };
     // Still stubbed so the tests below can assert the page NEVER reaches for
     // the native dialog, which browser automation accepts for free.
     vi.stubGlobal("confirm", vi.fn(() => true));
@@ -190,7 +182,7 @@ describe("ConnectedAccountsPage", () => {
     render(<ConnectedAccountsPage />);
     expect(
       screen.getByText(
-        "Telegram isn't configured for this organization yet. An admin can add a bot token under Integrations.",
+        "Telegram isn't configured for this organization yet. An admin can connect it in Settings → Organization.",
       ),
     ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Link Telegram account" })).toBeNull();
@@ -500,133 +492,13 @@ describe("ConnectedAccountsPage", () => {
     });
   });
 
-  describe("Credentials list", () => {
-    it("shows a quiet empty state with no credentials", () => {
-      render(<ConnectedAccountsPage />);
-      expect(screen.getByText("No other services connected.")).toBeTruthy();
-    });
-
-    it("lists non-GitHub credentials with type and a revoke button, excluding GitHub (shown above)", () => {
-      credentialsData = {
-        credentials: [
-          { service: "github", type: "oauth2", connectedAt: "2026-01-01T00:00:00Z", login: "octocat" },
-          { service: "linear", type: "api_key", connectedAt: "2026-01-02T00:00:00Z" },
-        ],
-      };
-      render(<ConnectedAccountsPage />);
-      expect(screen.getByText("linear")).toBeTruthy();
-      expect(screen.queryByText("No other services connected.")).toBeNull();
-      // Only one Disconnect/Revoke control for github (from the row above);
-      // linear gets its own Revoke button in the generic list.
-      expect(screen.getByRole("button", { name: "Revoke linear" })).toBeTruthy();
-    });
-
-    it("revoke asks in-page and calls nothing until confirmed", async () => {
-      renderCredentials([linearCred]);
-
-      fireEvent.click(screen.getByRole("button", { name: "Revoke linear" }));
-
-      expect(disconnectCredentialMutate).not.toHaveBeenCalled();
-      expect(confirm).not.toHaveBeenCalled();
-      const dialog = await screen.findByRole("dialog");
-      expect(within(dialog).getByText("Revoke linear?")).toBeTruthy();
-      expect(within(dialog).getByText(/Connect linear again to restore access/)).toBeTruthy();
-    });
-
-    it("revoke calls the delete-credential mutation once confirmed", async () => {
-      renderCredentials([linearCred]);
-
-      fireEvent.click(screen.getByRole("button", { name: "Revoke linear" }));
-      const dialog = await screen.findByRole("dialog");
-      fireEvent.click(within(dialog).getByRole("button", { name: "Revoke" }));
-
-      expect(disconnectCredentialMutate).toHaveBeenCalledTimes(1);
-      expect(disconnectCredentialMutate.mock.calls[0]?.[0]).toEqual({ service: "linear" });
-      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    });
-
-    it("revoke calls nothing when cancelled", async () => {
-      renderCredentials([linearCred]);
-
-      fireEvent.click(screen.getByRole("button", { name: "Revoke linear" }));
-      const dialog = await screen.findByRole("dialog");
-      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-
-      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-      expect(disconnectCredentialMutate).not.toHaveBeenCalled();
-    });
-
-    it("one row's revoke opens one dialog, for that row only", async () => {
-      renderCredentials([linearCred, notionCred]);
-
-      fireEvent.click(screen.getByRole("button", { name: "Revoke notion" }));
-
-      const dialogs = await screen.findAllByRole("dialog");
-      expect(dialogs).toHaveLength(1);
-      expect(within(dialogs[0]!).getByText("Revoke notion?")).toBeTruthy();
-      expect(within(dialogs[0]!).queryByText("Revoke linear?")).toBeNull();
-
-      fireEvent.click(within(dialogs[0]!).getByRole("button", { name: "Revoke" }));
-      expect(disconnectCredentialMutate.mock.calls[0]?.[0]).toEqual({ service: "notion" });
-    });
-
-    it("revoke says the 1Password item survives on a reference-backed row", async () => {
-      renderCredentials([{ ...linearCred, onepasswordRef: "op://Vault One/Item One/credential" }]);
-
-      fireEvent.click(screen.getByRole("button", { name: "Revoke linear" }));
-
-      const dialog = await screen.findByRole("dialog");
-      expect(within(dialog).getByText(/The item in 1Password is not deleted/)).toBeTruthy();
-    });
-
-    it("revoke shows the server's refusal in the dialog", async () => {
-      disconnectCredentialState = {
-        isPending: false,
-        error: new ApiError(409, "DELETE /credentials/linear → 409", {
-          error: "A team workflow uses this credential. Remove the delegation, then revoke.",
-        }),
-        variables: { service: "linear" },
-      };
-      renderCredentials([linearCred, notionCred]);
-
-      fireEvent.click(screen.getByRole("button", { name: "Revoke linear" }));
-
-      const dialog = await screen.findByRole("dialog");
-      expect(
-        within(dialog).getByText(
-          "A team workflow uses this credential. Remove the delegation, then revoke.",
-        ),
-      ).toBeTruthy();
-
-      // linear's failure is linear's: notion's dialog opens clean.
-      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-      fireEvent.click(screen.getByRole("button", { name: "Revoke notion" }));
-      const next = await screen.findByRole("dialog");
-      expect(
-        within(next).queryByText(
-          "A team workflow uses this credential. Remove the delegation, then revoke.",
-        ),
-      ).toBeNull();
-    });
-
-    it("shows the 1Password reference badge on a reference-backed row, no paste-token affordance", () => {
-      credentialsData = {
-        credentials: [
-          {
-            service: "linear",
-            type: "api_key",
-            connectedAt: "2026-01-02T00:00:00Z",
-            onepasswordRef: "op://Vault One/Item One/credential",
-          },
-        ],
-      };
-      render(<ConnectedAccountsPage />);
-      expect(screen.getByText("op://Vault One/Item One/credential")).toBeTruthy();
-      // Deletion still works via the normal Revoke control — no separate
-      // "edit"/"paste new token" affordance for a reference-backed row.
-      expect(screen.getByRole("button", { name: "Revoke linear" })).toBeTruthy();
-    });
+  it("sends service connections to personal Integrations instead of listing them", () => {
+    renderCredentials([linearCred, notionCred]);
+    // Account settings are yours, so the link opens your own Integrations
+    // whatever the switcher holds.
+    expect(screen.getByRole("link", { name: "Open Integrations" }).getAttribute("href")).toBe("/integrations?workspace=user");
+    expect(screen.queryByText("Other credentials")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Revoke/ })).toBeNull();
   });
 
   describe("multi-provider cards", () => {

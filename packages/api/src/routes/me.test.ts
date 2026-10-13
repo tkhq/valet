@@ -92,6 +92,98 @@ describe("PATCH /api/me", () => {
     expect(body.error).toContain("Select keep_current or use_defaults");
   });
 
+  it("stores a valid IANA timezone, returns it on GET, and clears it with null", async () => {
+    api = await bootTestApi();
+    const baseUrl = api.baseUrl;
+    const patch = (body: unknown) =>
+      fetch(`${baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    const set = await patch({ timezone: "America/Los_Angeles" });
+    expect(set.status).toBe(200);
+    expect(((await set.json()) as MeResponse).timezone).toBe("America/Los_Angeles");
+    const get = await fetch(`${api.baseUrl}/api/me`);
+    expect(((await get.json()) as MeResponse).timezone).toBe("America/Los_Angeles");
+
+    const cleared = await patch({ timezone: null });
+    expect(((await cleared.json()) as MeResponse).timezone).toBeNull();
+  });
+
+  it.each(["Mars/Olympus", "EST", "+05:00", "", 42])("rejects invalid timezone %j", async (timezone) => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timezone }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("valid IANA name");
+  });
+
+  it("applies the browser reportedTimezone once, then never again", async () => {
+    api = await bootTestApi();
+    const baseUrl = api.baseUrl;
+    const patch = (body: unknown) =>
+      fetch(`${baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    const before = (await (await fetch(`${baseUrl}/api/me`)).json()) as MeResponse;
+    expect(before).toMatchObject({ timezone: null, timezoneReportDone: false });
+
+    const reported = (await (await patch({ reportedTimezone: "America/New_York" })).json()) as MeResponse;
+    expect(reported).toMatchObject({ timezone: "America/New_York", timezoneReportDone: true });
+
+    // A clear is the user's choice: a later report must not undo it.
+    const cleared = (await (await patch({ timezone: null })).json()) as MeResponse;
+    expect(cleared).toMatchObject({ timezone: null, timezoneReportDone: true });
+    const again = (await (await patch({ reportedTimezone: "America/Chicago" })).json()) as MeResponse;
+    expect(again).toMatchObject({ timezone: null, timezoneReportDone: true });
+  });
+
+  it("does not let a report replace a timezone the user set", async () => {
+    api = await bootTestApi();
+    const baseUrl = api.baseUrl;
+    const patch = (body: unknown) =>
+      fetch(`${baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    await patch({ timezone: "Europe/Paris" });
+    const res = (await (await patch({ reportedTimezone: "America/New_York" })).json()) as MeResponse;
+    expect(res.timezone).toBe("Europe/Paris");
+  });
+
+  it("clearing before any report keeps it cleared", async () => {
+    api = await bootTestApi();
+    const baseUrl = api.baseUrl;
+    const patch = (body: unknown) =>
+      fetch(`${baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    await patch({ timezone: null });
+    const res = (await (await patch({ reportedTimezone: "America/New_York" })).json()) as MeResponse;
+    expect(res).toMatchObject({ timezone: null, timezoneReportDone: true });
+  });
+
+  it("rejects an invalid reportedTimezone", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reportedTimezone: "Mars/Olympus" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
   it("updates name and round-trips it on GET", async () => {
     api = await bootTestApi();
 

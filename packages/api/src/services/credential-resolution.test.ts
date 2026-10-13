@@ -177,7 +177,7 @@ describe("resolveUserCredentialRead", () => {
 
   // The containment rule. A plain org row is machinery, not a shared secret:
   // an org-owned `linear` row carries `metadata.webhookSecret`
-  // (`routes/linear-connect.ts`), so a service nobody declared org-provided
+  // (`plugins/http-linear-connection.ts`), so a service nobody declared org-provided
   // must not hand its whole row to a member's session.
   it("user-row miss does NOT reach a plain org row under reference-only", async () => {
     const credentials = fakeCredentialStore();

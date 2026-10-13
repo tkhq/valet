@@ -50,6 +50,7 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import { credentials, githubInstallations, orgs, type GithubInstallationRow } from "../schema/index.js";
 import { decryptSecret, encryptSecret } from "../lib/secret-crypto.js";
 import { resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
+import { GITHUB_APP_WEBHOOK_PATH, parsePrivateKeyPem } from "@valet/plugin-github/http";
 
 const GITHUB_APP_SERVICE = "github_app";
 const CACHED_TOKEN_MARGIN_MS = 5 * 60 * 1000;
@@ -110,17 +111,11 @@ const ENV_REQUIRED_VARS = [
 ] as const;
 const ENV_ALL_VARS = [...ENV_REQUIRED_VARS, "GITHUB_APP_WEBHOOK_SECRET"] as const;
 
-/** Accepts the private key as a raw PEM or as base64-encoded PEM (the
- * friendly shape for one-line delivery — an environment variable synced from
- * a secrets manager, or a copy that went through a base64 round trip).
- * `null` when the value is neither shape. The caller writes the error,
- * because the corrective action must name the field the reader can see: an
- * environment variable on one path, a form field on the other. */
-export function parsePrivateKeyPem(raw: string): string | null {
-  if (raw.trimStart().startsWith("-----BEGIN")) return raw;
-  const decoded = Buffer.from(raw, "base64").toString("utf8");
-  return decoded.trimStart().startsWith("-----BEGIN") ? decoded : null;
-}
+/** Accepts a raw or base64-encoded PEM. The GitHub plugin owns the parser,
+ * because its credential route validates the same field. The caller writes
+ * the error, because the corrective action names a different field on each
+ * path: an environment variable or a form field. */
+export { parsePrivateKeyPem };
 
 /** Parts a caller supplies to `buildAppConfig`. The two secrets are optional
  * because an app works without them: the OAuth client secret is needed only
@@ -630,11 +625,10 @@ export async function discoverInstallations(deps: GithubAppDeps, orgId: string):
 // stop with no error anywhere. These functions assert this instance's public
 // URL on the App it owns, at boot and after the manifest flow.
 
-/** Path the public webhook router is mounted at (see `app.ts`). The manifest
- * flow and `syncAppWebhookUrl` both build the delivery URL from this
- * constant, so the URL Valet asks for and the URL Valet serves cannot
- * disagree. */
-export const GITHUB_APP_WEBHOOK_PATH = "/webhooks/github-app";
+/** The legacy webhook alias the host keeps for the GitHub plugin. The
+ * manifest and `syncAppWebhookUrl` both use this constant, so the URL Valet
+ * asks for and the URL Valet serves cannot disagree. */
+export { GITHUB_APP_WEBHOOK_PATH };
 
 function hookConfigUrl(deps: Pick<GithubAppDeps, "apiUrl">): string {
   return `${githubApiUrl(deps)}/app/hook/config`;
@@ -706,7 +700,7 @@ async function writeHookConfigUrl(
  * GitHub outage, a revoked private key, or a 4xx must not stop the API from
  * starting or stop the manifest flow from completing. Every failure is
  * logged and swallowed, the same as the best-effort `discoverInstallations`
- * call in `routes/github-app.ts`.
+ * call in `plugins/http-github.ts`.
  *
  * @param publicUrl This instance's public base URL — `publicUrlFromEnv`.
  */

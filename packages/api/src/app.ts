@@ -74,9 +74,6 @@ import { modelTiersRouter } from "./routes/model-tiers.js";
 import { approvedModelsRouter } from "./routes/approved-models.js";
 import { orgReasoningRouter } from "./routes/org-reasoning.js";
 import { llmProvidersRouter } from "./routes/llm-providers.js";
-import { githubAppRouter, githubAppWebhookRouter } from "./routes/github-app.js";
-import { githubConnectRouter } from "./routes/github-connect.js";
-import { linearConnectRouter } from "./routes/linear-connect.js";
 import { reposRouter } from "./routes/repos.js";
 import { sourcesRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
@@ -196,8 +193,9 @@ export function createApp(
       : async () => ({ valid: false, key: null }),
   });
 
-  // Public plugin routes include signed event ingress and host-owned
-  // compatibility URLs. They mount BEFORE `buildAuthMiddleware`, and before
+  // Public plugin routes include signed event ingress, the GitHub App
+  // webhook, and host-owned compatibility URLs such as
+  // `/webhooks/github-app`. They mount BEFORE `buildAuthMiddleware`, and before
   // `channelsRouter`: Slack's compatibility URL `/api/channels/slack/webhook`
   // must beat `channelsRouter`'s `/:channelType/webhook`. Authenticated
   // plugin routes mount below the normal authentication middleware.
@@ -209,13 +207,6 @@ export function createApp(
   // logged-in Valet user. Mounting BEFORE `buildAuthMiddleware` is what
   // makes this route public — do not move it below that line.
   app.route("/api/channels", channelsRouter);
-
-  // PUBLIC GitHub App webhook ingress — same reasoning as `channelsRouter`
-  // above: the caller is GitHub, not a logged-in Valet user; verification
-  // is HMAC-signature-level (`X-Hub-Signature-256`) inside the router
-  // itself, not the auth gate below. Mounted BEFORE `buildAuthMiddleware`
-  // for the same reason `channelsRouter` is.
-  app.route("/webhooks/github-app", githubAppWebhookRouter);
 
   app.post("/webhooks/events/:service", (c) => c.json({ error: "unknown service" }, 404));
 
@@ -329,6 +320,9 @@ export function createApp(
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
   app.use("/api/*", refuseTeamKeyOutsideScope());
   app.use("/api/*", refuseAgentAuthority());
+  // Plugin routes mount before the core routers. Host aliases here serve
+  // `/api/me/github/*`, `/api/org/github-app/*`, `/api/org/slack`, and
+  // `/api/org/linear` from the GitHub, Slack, and Linear plugins.
   mountPluginHttpRoutes(app, providers.plugins, "authenticated");
 
   app.route("/api/threads", threadsRouter);
@@ -386,9 +380,6 @@ export function createApp(
   // a catch-all route that could shadow /api/me/identity-links.
   app.route("/api/me/agent-access", agentAccessRouter);
   app.route("/api/me/identity-links", identityLinksRouter);
-  // Mounted BEFORE /api/me for the same defensive-ordering reason as
-  // identityLinksRouter above.
-  app.route("/api/me/github", githubConnectRouter);
   app.route("/api/me", meRouter);
   app.route("/api/product-announcements", productAnnouncementsRouter);
   app.route("/api/models", modelsRouter);
@@ -404,14 +395,12 @@ export function createApp(
   app.route("/api/org/policies", policiesRouter);
   app.route("/api/teams", teamPoliciesRouter);
   app.route("/api/org/action-log", actionLogRouter);
-  // Same defensive-ordering note as identityLinksRouter/githubConnectRouter
-  // above: meRouter has no wildcard route today, so there's no real
-  // collision — mounted after /api/me for readability (grouped with the
-  // other policy routes) rather than before it.
+  // Same defensive-ordering note as identityLinksRouter above: meRouter
+  // has no wildcard route today, so there's no real collision — mounted
+  // after /api/me for readability (grouped with the other policy routes)
+  // rather than before it.
   app.route("/api/me/policy-overrides", mePolicyOverridesRouter);
   app.route("/api/me/grants", meGrantsRouter);
-  app.route("/api/org/github-app", githubAppRouter);
-  app.route("/api/org/linear", linearConnectRouter);
   app.route("/api/org/sources", sourcesRouter);
   app.route("/api/repos", reposRouter);
   app.route("/api/sandbox", sandboxGitCredentialRouter);

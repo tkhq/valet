@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 import { githubPlugin } from "./actions/actions.js";
 import { githubFilterOptionResolvers } from "./filter-options.js";
+import { githubHttpRoutes } from "./http/index.js";
 import { githubTemplates } from "./templates.js";
 import { githubTriggerDefs } from "./triggers.js";
 
@@ -17,6 +18,7 @@ const plugin: ValetPlugin = {
   filterOptionResolvers: githubFilterOptionResolvers,
   skills: [loadSkillFromMarkdown(skillMd, "plugin", "github")],
   templates: githubTemplates,
+  httpRoutes: githubHttpRoutes,
   credentials: [
     {
       type: "oauth2",

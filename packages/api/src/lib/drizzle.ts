@@ -1668,6 +1668,18 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: `ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "new_thread_behavior" text NOT NULL DEFAULT 'keep_current'`,
   },
   {
+    // User IANA timezone (TKAI-584). Null = unknown.
+    describe: "user.timezone column",
+    probe: { kind: "column", table: "user", column: "timezone" },
+    sql: 'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "timezone" text',
+  },
+  {
+    // Marks that the browser timezone was auto-reported or the user chose (TKAI-584).
+    describe: "user.timezone_report_done column",
+    probe: { kind: "column", table: "user", column: "timezone_report_done" },
+    sql: 'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "timezone_report_done" boolean NOT NULL DEFAULT false',
+  },
+  {
     // Team default reasoning level (model selector overhaul).
     // Null = inherit.
     describe: "teams.default_reasoning column",

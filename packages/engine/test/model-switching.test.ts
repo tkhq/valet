@@ -795,7 +795,7 @@ Role-only instructions.
       { type: "model_state", threadId: thread.id, queueItemId: null, model: null },
     ]);
     expect(rolePrompt).toMatch(
-      /^Base instructions\.\n\n## Runtime model[\s\S]*Temporary override: role model; expires when this turn ends\n\nRole-only instructions\.\n$/,
+      /^Base instructions\.\n\n## Thread started[\s\S]*?\n\n## Runtime model[\s\S]*Temporary override: role model; expires when this turn ends\n\nRole-only instructions\.\n$/,
     );
     expect(rolePrompt).toContain(`Active selection: ${HAIKU}`);
     expect(rolePrompt).toContain("Temporary override: role model; expires when this turn ends");
@@ -809,7 +809,7 @@ Role-only instructions.
       ),
     );
     expect(nextRun?.provider).toBe(baseFaux.getModel().provider);
-    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Runtime model\n/);
+    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Thread started[\s\S]*?\n\n## Runtime model\n/);
     expect(nextRun?.systemPrompt).not.toContain("Role-only instructions.");
     expect(nextRun?.systemPrompt).toContain("Temporary override: none");
   });
@@ -908,7 +908,7 @@ Role-only instructions.
       ),
     );
     expect(nextRun?.provider).toBe(baseFaux.getModel().provider);
-    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Runtime model\n/);
+    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Thread started[\s\S]*?\n\n## Runtime model\n/);
     expect(nextRun?.systemPrompt).not.toContain("Role-only instructions.");
     expect(nextRun?.systemPrompt).toContain("Temporary override: none");
   });
@@ -1002,7 +1002,7 @@ Role-only instructions.
       ),
     );
     expect(nextRun?.provider).toBe(baseFaux.getModel().provider);
-    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Runtime model\n/);
+    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Thread started[\s\S]*?\n\n## Runtime model\n/);
     expect(nextRun?.systemPrompt).not.toContain("Role-only instructions.");
     expect(nextRun?.systemPrompt).toContain("Temporary override: none");
   });

@@ -67,7 +67,7 @@ import type {
   ToolDef,
   WriteFence,
 } from "./types.js";
-import { credentialSecret } from "./types.js";
+import { credentialSecret, THREAD_USER_TIMEZONE_KEY } from "./types.js";
 
 
 function submissionsByThread(items: readonly QueueItem[]): Map<string, QueueItem[]> {
@@ -291,6 +291,8 @@ export class Session {
    * `null` result) doesn't re-exec the scan on every turn.
    */
   private repoInstructionsLoaded = false;
+  /** Last known user timezone (TKAI-584). Stamped into each new thread. */
+  private latestUserTimezone: string | undefined;
   private destroyed = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -321,6 +323,7 @@ export class Session {
     this.policySandbox = policySandbox ?? null;
     this.builtinTools = options.builtinTools ?? builtinTools;
     this.principal = options.owner ?? { type: "user", id: options.userId };
+    this.latestUserTimezone = options.userTimezone;
     this.parentSessionId = options.parentSessionId;
     this.parentThreadId = options.parentThreadId;
     for (const role of options.roles ?? []) this.roles.set(role.name, role);
@@ -796,7 +799,19 @@ export class Session {
   }
 
   async ensureDefaultThread(): Promise<Thread> {
+    if (!this.threadsByKey.has("web:default")) await this.refreshUserTimezone();
     return this.thread("web:default");
+  }
+
+  /** Read the user's current timezone before a thread is created. A failure keeps the last value. */
+  private async refreshUserTimezone(): Promise<void> {
+    const resolve = this.options.resolveUserTimezone;
+    if (!resolve) return;
+    try {
+      this.latestUserTimezone = await resolve();
+    } catch {
+      // Keep the last known value. An unknown timezone is a valid prompt state.
+    }
   }
 
   private buildThreadData(key: string, initial?: ThreadInitialSettings): ThreadData {
@@ -814,11 +829,20 @@ export class Session {
       model: initial?.model ?? this.options.modelSpec ?? this.options.model.id,
       reasoning:
         initial?.reasoning === null ? THREAD_REASONING_DISABLED : initial?.reasoning,
+      // Stamped with `createdAt` and never rewritten: a later timezone change
+      // must not alter this thread's prompt (TKAI-584).
+      metadata: { [THREAD_USER_TIMEZONE_KEY]: this.latestUserTimezone ?? null },
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
   }
 
+  /**
+   * Get or create a thread synchronously. A new thread stamps the last known
+   * user timezone and cannot call `resolveUserTimezone`. Callers that create
+   * threads should use `createThread` or `ensureDefaultThread`, which read the
+   * current value first (TKAI-584).
+   */
   thread(key?: string): Thread {
     const k = key ?? "web:default";
     const existing = this.threadsByKey.get(k);
@@ -846,6 +870,7 @@ export class Session {
   }
 
   private async createKeyedThread(key: string, initial?: ThreadInitialSettings): Promise<Thread> {
+    await this.refreshUserTimezone();
     let data = this.buildThreadData(key, initial);
     try {
       await this.providers.store.saveThread(this.id, data);

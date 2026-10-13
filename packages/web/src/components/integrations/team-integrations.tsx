@@ -1,11 +1,13 @@
 import { useMe, useOrgDirectory, useTeams } from "~/api/settings";
 import { ErrorRow, LoadingRow, pageClass } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 import { IntegrationLimitNotice } from "./integration-limit-notice";
 import { Section } from "~/components/settings/section";
 import { TeamConnectionSetup } from "./team-connection-setup";
 import { TeamCredentials } from "./team-credentials";
 import { PullFromPersonal } from "./pull-from-personal";
 import { TeamOnePasswordToken } from "~/components/settings/team-onepassword-token";
+import { useTeamOnePasswordStatus } from "~/api/onepassword";
 
 /** Team summaries come from the member-visible endpoint, never the personal catalog. */
 export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: string }) {
@@ -16,14 +18,20 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
   const loading = teamsQ.isLoading || meQ.isLoading;
   const failed = teamsQ.error || meQ.error;
   const canMutate = meQ.data?.orgRole === "admin" || team?.callerRole === "admin";
+  // The team's own 1Password service account is what makes op:// references
+  // and valet-secrets work for its sessions. It sits with the connections
+  // once connected, and under Available until then (or while unknown).
+  const onePasswordConnected = useTeamOnePasswordStatus(teamId).data?.tokenConnected === true;
+  const onePassword = team && <TeamOnePasswordToken key={teamId} teamId={teamId} teamName={team.name} canMutate={canMutate} />;
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className={pageClass}>
-        <h1 className="font-display text-2xl text-ink">Integrations</h1>
+      <div className={cn(pageClass, "max-w-3xl")}>
+        <h1 className="text-2xl font-medium text-ink">Integrations</h1>
+        {team && <p className="mt-1 text-sm text-muted">{team.name} workspace</p>}
         {notice && <p role="status" className="mt-4 text-sm text-ink">{notice}</p>}
         <IntegrationLimitNotice owner={{ ownerType: "team", ownerId: teamId }} canClear={canMutate} />
-        <div className="mt-10 space-y-6">
+        <div className="mt-8 space-y-10">
           {loading && <LoadingRow label="Loading team integrations…" />}
           {!loading && failed && (
             <ErrorRow>Could not load team integrations. Reload the page to try again.</ErrorRow>
@@ -32,10 +40,13 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
             <ErrorRow>This team is unavailable. Select another workspace or ask a team admin to restore your access.</ErrorRow>
           )}
           {!loading && !failed && team && (
-            <Section title={team.name} description="Connections stored on this team or shared by its members.">
-              <div className="space-y-8 pt-4">
+            <>
+              <Section
+                title="Connected"
+                description="Team actions use the acting member's own account first, then the team connection. Using another member's account asks them first."
+              >
                 {!canMutate && (
-                  <p className="text-sm text-muted">Only team or organization admins can remove team connections.</p>
+                  <p className="pb-3 text-sm text-muted">Only team or organization admins can remove team connections.</p>
                 )}
                 {directoryQ.isLoading && <LoadingRow label="Loading member names…" />}
                 {directoryQ.error && (
@@ -46,23 +57,18 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                   team={team}
                   orgMembers={directoryQ.error ? [] : directoryQ.data?.users ?? []}
                   canMutate={canMutate}
-                />
-                {/* The team's own 1Password service account sits with the other
-                    connections: it is what makes op:// references and
-                    valet-secrets work for this team's sessions. */}
-                <TeamConnectionSetup teamId={teamId} canManage={canMutate}>
-                  <TeamOnePasswordToken key={teamId} teamId={teamId} teamName={team.name} canMutate={canMutate} />
-                </TeamConnectionSetup>
-
-                <div className="flex flex-wrap items-center gap-3">
+                >
+                  {onePasswordConnected && onePassword}
+                </TeamCredentials>
+                <div className="flex flex-wrap items-center gap-3 pt-3">
                   <PullFromPersonal teamId={teamId} teamName={team.name} />
-                  <p className="text-sm text-muted">
-                    Shares one of your own connections with this team. You can also do it from
-                    Personal.
-                  </p>
+                  <p className="text-sm text-muted">Shares one of your own connections with this team.</p>
                 </div>
-              </div>
-            </Section>
+              </Section>
+              <TeamConnectionSetup teamId={teamId} canManage={canMutate}>
+                {!onePasswordConnected && onePassword}
+              </TeamConnectionSetup>
+            </>
           )}
         </div>
       </div>

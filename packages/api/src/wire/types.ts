@@ -3402,6 +3402,10 @@ export interface MeResponse {
   defaultReasoning: string | null;
   /** Controls the model and thinking settings for a new thread. */
   newThreadBehavior: NewThreadBehavior;
+  /** IANA timezone, or null when not known. */
+  timezone: string | null;
+  /** True once the timezone was set, cleared, or auto-reported. The web client then stops auto-reporting. */
+  timezoneReportDone: boolean;
 }
 
 /**
@@ -3429,6 +3433,13 @@ export interface PatchMeRequest {
   defaultReasoning?: string | null;
   /** Controls the model and thinking settings for a new thread. */
   newThreadBehavior?: NewThreadBehavior;
+  /** IANA timezone name, or null to clear. Invalid names 400. */
+  timezone?: string | null;
+  /**
+   * Browser timezone from the web client. The server applies it only if the
+   * timezone is empty and no report or user choice was recorded yet.
+   */
+  reportedTimezone?: string;
 }
 
 export type PatchMeResponse = MeResponse;

@@ -254,12 +254,10 @@ function KeyDisplay({ apiKey, settingsQuery, onCreateAnother, team = false }: Ke
           </code>
           <CopyButton text={key} />
         </div>
+        {/* The panel renders under the API keys section of the same page:
+            `/settings/api-keys`, or a team's API keys and proxy tab. */}
         <p className="text-xs text-muted">
-          You can revoke keys anytime in{" "}
-          <Link to="/settings/api-keys" className="text-moss underline-offset-2 hover:underline">
-            Settings → API keys
-          </Link>
-          .
+          You can revoke keys anytime in the API keys section on this {team ? "tab" : "page"}.
         </p>
       </div>
 
@@ -380,12 +378,17 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
           {blocked && (
             <div id={blockedHelpId} className="mb-4 space-y-2 text-sm text-muted">
               <p>Only a team admin or an organization admin can create a shared key for this team. Ask an admin of this team to create the key.</p>
-              {settingsQuery.data?.mode === "passthrough" ? (
-                <p>This gateway runs in pass-through mode. To create your own key, set the workspace switcher to Personal. This page then makes a personal proxy key, and you must also supply your own provider key with it.</p>
-              ) : (
-                <p>To create your own key, set the workspace switcher to Personal. This page then makes a personal proxy key.</p>
-              )}
-              <p>Team key names are in <Link to="/settings/api-keys" className="underline">Settings → API keys</Link>. A stored secret cannot be read again.</p>
+              {/* Team settings pin the team's scope, so the switcher cannot
+                  make this tab personal. The personal page can. */}
+              <p>
+                {settingsQuery.data?.mode === "passthrough" && "This gateway runs in pass-through mode. "}
+                To create your own key, open{" "}
+                <Link to="/settings/api-keys" className="underline">Personal workspace → API keys and proxy</Link>.
+                {settingsQuery.data?.mode === "passthrough"
+                  ? " That page makes a personal proxy key, and you must also supply your own provider key with it."
+                  : " That page makes a personal proxy key."}
+              </p>
+              <p>Team key names are in the API keys section on this tab. A stored secret cannot be read again.</p>
             </div>
           )}
           {creation.error && (

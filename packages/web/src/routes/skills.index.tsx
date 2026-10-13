@@ -21,6 +21,7 @@ import {
   pushCursor,
 } from "~/lib/cursor-stack";
 import { textParam } from "~/lib/search-params";
+import { cn } from "~/lib/cn";
 
 /** The catalog and source management keep independent URL state. */
 interface SkillsSearch {
@@ -88,10 +89,10 @@ export function SkillsIndexPage() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className={pageClass}>
+      <div className={cn(pageClass, "max-w-3xl")}>
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div className="flex min-w-0 flex-wrap items-baseline gap-3">
-            <h1 className="font-display text-2xl text-ink">Skills</h1>
+            <h1 className="text-2xl font-medium text-ink">Skills</h1>
             <WorkspaceClause />
           </div>
           <Button size="sm" className="shrink-0" asChild>

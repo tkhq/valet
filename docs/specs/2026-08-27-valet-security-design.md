@@ -566,6 +566,8 @@ The issue body is generated from the finding alone: severity, title, evidence, b
 
 Issue filing and export are human-driven REST actions only. No agent tool files issues or exports findings (Decision 10): content derived from hostile code leaves Valet only on a human's click.
 
+The Security plugin serves both filing routes through the plugin route mount (`packages/plugin-security/src/http.ts`). The API keeps the session URLs as aliases. Before the plugin runs, the API refuses team API keys and the internal token, checks organization membership and `canViewSession`, and binds a filing capability for the session's engagement. The filing service, the link table, and the action invoker stay in the API. See [the Security adoption plan](../plans/2026-10-09-security-plugin-adoption.md).
+
 ### Data and events
 
 Data over REST (`GET /api/sessions/:id/security` for engagement + cells, `/security/findings` for findings with filters and cursor, `POST /security/findings/:findingId/status` for human review, `POST /security/findings/:findingId/issues` and `POST /security/issues/digest` for filing, `GET /security/export` for export); live updates over `security.cell.updated` / `security.finding.updated` wire events on the session WebSocket via the engine `host_event` seam, with query polling as the fallback until that seam lands.

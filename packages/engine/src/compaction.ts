@@ -54,6 +54,29 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
+/** Live-context placeholder for a pruned tool result. The stored result text stays in the entry. */
+export const ELIDED_TOOL_OUTPUT = "[output elided to save context]";
+
+/**
+ * Estimate a persisted tool result. Image blocks carry base64 data that a
+ * provider bills per image, not per character; counting their text would put
+ * one 2 MB preview at ~500k tokens and force a prune or compaction every turn.
+ */
+export function estimateToolResultTokens(result: unknown): number {
+  if (result === undefined) return 0;
+  if (typeof result === "string") return estimateTokens(result);
+  if (result && typeof result === "object" && "content" in result && Array.isArray(result.content)) {
+    let total = 0;
+    for (const block of result.content) {
+      if (block && typeof block === "object" && "type" in block && block.type === "image") total += IMAGE_TOKEN_ESTIMATE;
+      else if (block && typeof block === "object" && "text" in block && typeof block.text === "string") total += estimateTokens(block.text);
+      else total += estimateTokens(JSON.stringify(block));
+    }
+    return total;
+  }
+  return estimateTokens(JSON.stringify(result));
+}
+
 export function estimateEntryTokens(entry: SessionEntry): number {
   if (entry.type === "message") {
     let total = estimateTokens(entry.content);
@@ -63,7 +86,7 @@ export function estimateEntryTokens(entry: SessionEntry): number {
       else if (part.type === "tool_call") {
         if (part.args) total += estimateTokens(JSON.stringify(part.args));
         if (part.result !== undefined && !part.elided) {
-          total += estimateTokens(typeof part.result === "string" ? part.result : JSON.stringify(part.result));
+          total += estimateToolResultTokens(part.result);
         }
         if (part.error) total += estimateTokens(part.error);
       }
@@ -567,13 +590,7 @@ export function planPrune(opts: PruneOptions): PruneResult {
       if (part.status !== "completed") continue;
       if (part.elided) continue;
       if (protectedTools.has(part.toolName)) continue;
-      const resultText =
-        part.result === undefined
-          ? ""
-          : typeof part.result === "string"
-          ? part.result
-          : JSON.stringify(part.result);
-      const size = estimateTokens(resultText);
+      const size = estimateToolResultTokens(part.result);
       cumulative += size;
       if (cumulative <= protectTokens) continue;
       // Past the protection window — mark this tool result for elision.
@@ -957,7 +974,7 @@ export function entriesToSummaryMessages(
           if (raw !== undefined) {
             resultStr = capTool(raw);
           } else if (p.elided) {
-            resultStr = "[output elided to save context]";
+            resultStr = ELIDED_TOOL_OUTPUT;
           }
           blocks.push({
             type: "text",

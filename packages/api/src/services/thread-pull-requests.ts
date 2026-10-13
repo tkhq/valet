@@ -6,6 +6,10 @@ import type { ThreadPullRequest } from "../wire/types.js";
 import { resolveGithubApiUrl, resolveGithubUrl } from "./github-env.js";
 import { resolveGitHubToken, type GitHubTokenDeps } from "./github-tokens.js";
 import { recordTerminalPullRequestWrite } from "./channel-messages.js";
+import { pullRequestWebhookState } from "@valet/plugin-github/http";
+
+/** The GitHub plugin owns pull request payload parsing for its webhook. */
+export { pullRequestWebhookState };
 
 export const PULL_REQUEST_RECHECK_MS = 10 * 60_000;
 const RECHECK_BATCH = 5;
@@ -70,16 +74,6 @@ export async function setPullRequestState(
 ): Promise<void> {
   await db.update(threadPullRequests).set({ state, updatedAt: at, checkedAt: at })
     .where(and(eq(threadPullRequests.url, url), sql`${threadPullRequests.sessionId} IN (SELECT id FROM agent_sessions WHERE org_id = ${orgId})`));
-}
-
-/** The pull request state named by a GitHub `pull_request` webhook payload, if any. */
-export function pullRequestWebhookState(payload: unknown): { url: string; state: ThreadPullRequest["state"] } | null {
-  if (typeof payload !== "object" || payload === null || !("pull_request" in payload)) return null;
-  const pr = payload.pull_request;
-  if (typeof pr !== "object" || pr === null || !("html_url" in pr) || typeof pr.html_url !== "string") return null;
-  const merged = "merged" in pr && pr.merged === true;
-  const closed = "state" in pr && pr.state === "closed";
-  return { url: pr.html_url, state: merged ? "merged" : closed ? "closed" : "open" };
 }
 
 /**

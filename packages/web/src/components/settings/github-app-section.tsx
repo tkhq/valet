@@ -4,11 +4,10 @@ import type {
   GithubAppInstallationSummary,
   PostGithubAppManifestResponse,
 } from "@valet/api/wire";
-import { Badge, Button, ConfirmDialog, Input, Spinner, Switch, Textarea, cardClass } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Input, Spinner, Switch, Textarea } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { livePollInterval } from "~/lib/live-poll";
 import { relativeTime } from "~/lib/relative-time";
-import { cn } from "~/lib/cn";
 import {
   qkSettings,
   useOrg,
@@ -149,7 +148,7 @@ function NotConfiguredCard({ webhookMode }: { webhookMode: "public" | "manual" }
 
   return (
     <div className="max-w-2xl space-y-4">
-      <div className={cn(cardClass)}>
+      <div className="-mx-4">
         {/* Header */}
         <div className="flex items-start gap-3 border-b border-line px-6 py-5">
           <span
@@ -403,7 +402,7 @@ function ExistingAppCard() {
 
   if (!open) {
     return (
-      <div className={cn(cardClass, "px-5 py-4")}>
+      <div className="-mx-4 px-5 py-4">
         <button
           type="button"
           onClick={() => setOpen(true)}
@@ -420,7 +419,7 @@ function ExistingAppCard() {
   }
 
   return (
-    <div className={cn(cardClass)}>
+    <div className="-mx-4">
       <div className="border-b border-line px-6 py-5">
         <div className="font-display text-base text-ink">Connect an App you already have</div>
         <p className="mt-0.5 text-sm leading-relaxed text-muted">

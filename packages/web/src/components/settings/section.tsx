@@ -1,11 +1,18 @@
-import type { ReactNode } from "react";
+import { createContext, useContext, type ReactNode } from "react";
 
 /**
- * A settings section: display-face heading, optional one-line description,
- * and a hairline-separated stack of children (typically `FieldRow`s). No
- * card box — the spec is explicit that the settings surface reads as open
- * stacks, not boxes-in-a-void (the enable-organizations card is the one
- * deliberate exception, built in Task 6).
+ * The label of the route tab a page sits under, when it sits under one
+ * (`LinkTabs` in the team and organization layouts). A section titled the
+ * same as that tab keeps its heading for screen readers only, so the page
+ * does not print the tab's name twice.
+ */
+export const ActiveTabLabel = createContext<string | undefined>(undefined);
+
+/**
+ * A settings section: a heading, an optional one-line description, and its
+ * rows (typically `FieldRow`s) in one soft rounded group divided by
+ * hairlines — the same grouped-row look as the thread UI's context panel
+ * (settings-redesign spec, "Visual language"). No boxed cards inside it.
  */
 export function Section({
   title,
@@ -16,13 +23,18 @@ export function Section({
   description?: string;
   children: ReactNode;
 }) {
+  const tab = useContext(ActiveTabLabel);
   return (
-    <section className="space-y-4">
+    <section className="space-y-3">
       <div className="space-y-1">
-        <h2 className="font-display text-xl text-ink">{title}</h2>
+        <h2 className={tab !== undefined && title === tab ? "sr-only" : "text-lg font-medium text-ink"}>{title}</h2>
         {description && <p className="text-sm text-muted">{description}</p>}
       </div>
-      <div className="divide-y divide-line border-t border-line">{children}</div>
+      {/* The group pads its own top and bottom, so a child with no padding
+          of its own (a note, a form) does not touch the rounded edge. A row
+          with its own padding trims it at the ends to keep the same inset.
+          A group whose rows all render nothing is hidden, not an empty box. */}
+      <div className="divide-y divide-line rounded-2xl bg-ink-wash px-4 py-3 empty:hidden">{children}</div>
     </section>
   );
 }

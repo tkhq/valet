@@ -70,7 +70,7 @@ Authenticated. Finds the service's `CredentialDeclaration` across loaded plugin 
 - **mcp mode**: `ensureMcpOAuthClient(service, serverUrl)` (below), `generatePkceChallenge()`, then 302 to `buildAuthorizationUrl({...})` with the declaration's scopes.
 - **authorization_code mode**: resolve `process.env[clientIdEnv]`/`[clientSecretEnv]`; 503 `{ error: "oauth not configured", missing: [...] }` if absent. Build authorize URL with `client_id`, `redirect_uri`, `response_type=code`, `scope`, `state`, plus `extraAuthParams`.
 
-`state` is HMAC-signed via `lib/oauth-state.ts` (same key derivation as every other flow), payload `{ u: userId, s: service, v?: codeVerifier, exp }` with the standard 15-minute TTL. The PKCE verifier rides inside the signed state — fully stateless between start and callback, nothing persisted. (The verifier is not secret from the user it belongs to; the HMAC prevents tampering and the code exchange happens server-side.)
+`state` is HMAC-signed via `lib/oauth-state.ts` with the `integration-connect` purpose key, so a GitHub setup or connect state never verifies here (2026-10-09). Payload `{ u: userId, s: service, v?: codeVerifier, exp }` with the standard 15-minute TTL. The PKCE verifier rides inside the signed state — fully stateless between start and callback, nothing persisted. (The verifier is not secret from the user it belongs to; the HMAC prevents tampering and the code exchange happens server-side.)
 
 Redirect URI is a single shared callback for all services: `${baseUrl}/api/credentials/oauth/callback`, where `baseUrl` is the same origin resolution the GitHub flows use (`BETTER_AUTH_URL` / `VALET_PUBLIC_URL` fallback chain — reuse the existing helper).
 

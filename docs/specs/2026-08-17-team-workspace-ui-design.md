@@ -219,6 +219,8 @@ The team credential list and its removal dialog use the shared integration displ
 
 ### Selected team settings (TKAI-397)
 
+> **Superseded 2026-10-08** by `2026-10-08-settings-redesign-design.md`: the rail lists every scope at once and no longer follows the workspace switcher. Team settings live at `/settings/teams/$teamId`.
+
 In a team workspace, Settings replaces the You group with Team. General opens the selected team's existing controls.
 The Team rail also keeps API keys at `/settings/api-keys`, using its existing workspace-aware controls.
 Profile, appearance, and other personal-only settings are omitted in team scope. Direct personal settings URLs redirect before their forms mount.

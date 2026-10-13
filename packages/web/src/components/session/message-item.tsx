@@ -432,32 +432,38 @@ function ToolCallBlock({ part }: { part: Extract<MessagePart, { kind: "tool_call
     ? renderer.formatSummary?.(part.args, part.result, part.status, part.toolName)
     : undefined;
   const Body = renderer.Body;
+  const Preview = renderer.Preview;
 
   return (
-    <ToolShell
-      toolName={part.toolName}
-      category={renderer.category}
-      Icon={renderer.Icon}
-      target={target}
-      summary={summary}
-      status={part.status}
-    >
-      {live ? (
-        <Body
-          args={part.args}
-          result={part.result}
-          status={part.status}
-          error={part.error}
-          toolName={part.toolName}
-        />
-      ) : (
-        // Args are still streaming and this renderer didn't opt in — hold
-        // the body until the call is complete, like before streaming existed.
-        <ToolBody className="text-[11px] text-muted italic font-mono">
-          receiving arguments…
-        </ToolBody>
-      )}
-    </ToolShell>
+    <>
+      <ToolShell
+        toolName={part.toolName}
+        category={renderer.category}
+        Icon={renderer.Icon}
+        target={target}
+        summary={summary}
+        status={part.status}
+      >
+        {live ? (
+          <Body
+            args={part.args}
+            result={part.result}
+            status={part.status}
+            error={part.error}
+            toolName={part.toolName}
+          />
+        ) : (
+          // Args are still streaming and this renderer didn't opt in — hold
+          // the body until the call is complete, like before streaming existed.
+          <ToolBody className="text-[11px] text-muted italic font-mono">
+            receiving arguments…
+          </ToolBody>
+        )}
+      </ToolShell>
+      {Preview ? (
+        <Preview args={part.args} result={part.result} status={part.status} error={part.error} toolName={part.toolName} />
+      ) : null}
+    </>
   );
 }
 

@@ -490,6 +490,10 @@ async function computeResult(
   // context present); also the org scope for the outcome-stamp UPDATE.
   const auditOrgId = auditKey(req, ctx) ? ctx.orgId : undefined;
   const auditId = auditKey(req, ctx) ?? "";
+  // Policy and audit see the effective parameters, schema defaults applied, the
+  // same as the session path, so an omitted field cannot bypass a matcher on
+  // its default. Invalid params keep their raw shape and fail below.
+  const prepared = prepareActionArgs(action.parameters, req.params);
   const denial = await enforceWorkflowPolicy(
     opts,
     req,
@@ -498,10 +502,10 @@ async function computeResult(
     entry.actionPlugin.defaultApprovalMode,
     policyActionId,
     audit,
+    prepared.ok ? prepared.args : req.params,
   );
   if (denial) return denial;
 
-  const prepared = prepareActionArgs(action.parameters, req.params);
   if (!prepared.ok) {
     if (auditOrgId) {
       await updateInvocationOutcome(opts.db, auditId, auditOrgId, {
@@ -618,6 +622,8 @@ async function enforceWorkflowPolicy(
   pluginDefault: ApprovalMode | undefined,
   policyActionId: string,
   audit: AuditTrack,
+  /** The effective parameters: schema defaults applied when the params validate. */
+  params: Record<string, unknown> | undefined,
 ): Promise<WorkflowInvokeActionResult | null> {
   const key = auditKey(req, ctx);
   if (!ctx.orgId || !key) return null;
@@ -644,7 +650,7 @@ async function enforceWorkflowPolicy(
       service: req.service,
       actionId: policyActionId,
       riskLevel,
-      params: req.params,
+      params,
       ...scope,
       pluginDefault,
       now,
@@ -672,7 +678,7 @@ async function enforceWorkflowPolicy(
         caller: ctx.external?.client,
         userId: ctx.userId,
         orgId: ctx.orgId,
-        params: req.params,
+        params,
         createdAt: now,
       });
       return null;
@@ -696,7 +702,7 @@ async function enforceWorkflowPolicy(
       caller: ctx.external?.client,
       userId: ctx.userId,
       orgId: ctx.orgId,
-      params: req.params,
+      params,
       createdAt: now,
     });
     return null;
@@ -718,7 +724,7 @@ async function enforceWorkflowPolicy(
       caller: ctx.external?.client,
       userId: ctx.userId,
       orgId: ctx.orgId,
-      params: req.params,
+      params,
       createdAt: now,
     });
     return { ok: false, error: `${req.service}.${req.action} is blocked by ${decision.provenance.source === "team_policy" ? "team" : "org"} policy` };
@@ -742,7 +748,7 @@ async function enforceWorkflowPolicy(
       caller: ctx.external?.client,
       userId: ctx.userId,
       orgId: ctx.orgId,
-      params: req.params,
+      params,
       createdAt: now,
     });
     return null;
@@ -766,7 +772,7 @@ async function enforceWorkflowPolicy(
     caller: ctx.external?.client,
     userId: ctx.userId,
     orgId: ctx.orgId,
-    params: req.params,
+    params,
     createdAt: now,
   });
   return { ok: false, requiresApproval: true, riskLevel, provenance: decision.provenance.source };
@@ -838,6 +844,9 @@ export async function externalActionMode(
   params?: Record<string, unknown>,
 ): Promise<ApprovalMode> {
   const entry = opts.actionPluginByService.get(service);
+  // Preview what execution decides: schema defaults applied, as `invoke` does.
+  // Without params the answer is for any params, so nothing is defaulted.
+  const prepared = params === undefined ? undefined : prepareActionArgs(action.parameters, params);
   const decision = await resolveActionPolicy(opts.db, {
     orgId: ctx.orgId,
     teamId: ctx.owner.type === "team" ? ctx.owner.id : undefined,
@@ -845,7 +854,7 @@ export async function externalActionMode(
     service,
     actionId: qualifiedActionId(service, action),
     riskLevel: action.riskLevel,
-    params,
+    params: prepared?.ok ? prepared.args : params,
     appliesIn: "session",
     pluginDefault: entry?.actionPlugin.defaultApprovalMode,
     now: (opts.clock ?? Date.now)(),

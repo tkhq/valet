@@ -14,7 +14,7 @@
  *   - spend chart renders day bars;
  *   - Download CSV control points at /api/usage/export.csv with correct query;
  *   - proxy request log has bounded page navigation and never renders raw content;
- *   - Settings → Proxy callout link renders;
+ *   - the key setup callout links Personal workspace → API keys and proxy;
  *   - disabled-gateway notice renders.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -954,7 +954,7 @@ describe("UsagePage — team workspace scope", () => {
   it("hides the personal-only proxy surfaces (request log, key setup)", () => {
     render(<UsagePage />);
     expect(screen.queryByText(/request log/)).toBeNull();
-    expect(document.querySelector("a[href='/settings/proxy']")).toBeNull();
+    expect(document.querySelector("a[href='/settings/api-keys']")).toBeNull();
   });
 
   it("names the team in the subtitle", () => {
@@ -1011,13 +1011,12 @@ describe("UsagePage — expanded drill rows across the me/org toggle", () => {
   });
 });
 
-describe("UsagePage — Settings → Proxy link", () => {
-  it("renders Settings → Proxy callout link", () => {
+describe("UsagePage — key setup link", () => {
+  it("links the personal API keys and proxy page by its rail name", () => {
     render(<UsagePage />);
     fireEvent.click(screen.getByRole("button", { name: "activity" }));
-    const link = document.querySelector("a[href='/settings/proxy']");
-    expect(link).toBeTruthy();
-    expect(link!.textContent).toMatch(/Settings.*Proxy|Settings → Proxy/);
+    const link = screen.getByRole("link", { name: "Personal workspace → API keys and proxy" });
+    expect(link.getAttribute("href")).toBe("/settings/api-keys");
   });
 });
 

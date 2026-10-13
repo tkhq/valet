@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import githubPlugin from "@valet/plugin-github/plugin";
 import { contentSources, credentials, githubInstallations, teams, teamMembers, teamJoinEligibilities } from "../schema/index.js";
 import { addMember, createTeam, removeMember } from "../services/teams.js";
 import { refreshTeamJoinEligibility } from "../services/team-join-eligibility.js";
@@ -33,7 +34,7 @@ let api: TestApi;
 let fixture: GithubFixture | undefined;
 
 beforeEach(async () => {
-  api = await bootTestApi();
+  api = await bootTestApi({ plugins: [githubPlugin] });
   await api.providers.contentSync.stop();
 });
 afterEach(async () => {

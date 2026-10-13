@@ -21,3 +21,4 @@ export * from "./status-dot.js";
 export * from "./work-row.js";
 export * from "./filter-chips.js";
 export * from "./page.js";
+export * from "./link-tabs.js";

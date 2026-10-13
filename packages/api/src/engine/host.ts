@@ -152,12 +152,13 @@ import {
   securityDeclaredMcpPlugins,
 } from "./security-provisioning.js";
 import { egressHostInScope } from "@valet/plugin-security";
+import { isValidTimezone } from "../lib/timezone.js";
 import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
 import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { limitPlugins, loadIntegrationLimit } from "../assistants/integration-limit.js";
-import { effectivePersonality, loadLegacyAssistantProfile } from "../assistants/legacy-profile.js";
+import { effectivePersonality, loadLegacyAssistantModel, loadLegacyAssistantProfile } from "../assistants/legacy-profile.js";
 import { listSkillSourcesFor } from "../services/skills.js";
 import { skillTelemetrySink } from "../services/skill-telemetry.js";
 import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
@@ -1295,6 +1296,8 @@ export class EngineHost {
     const sessionRoles = personaCell
       ? [...extras.roles, ...securityRolesForCell(personaCell.persona, personaRepoRoleMarkdown)]
       : extras.roles;
+    // A team conversation has many participants, so no one timezone applies.
+    const timezoneOptions = await this.userTimezoneOptions(principal.type === "user" ? meta.userId : undefined);
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -1327,6 +1330,7 @@ export class EngineHost {
             ...this.wakeupsOptions(sessionId, () => builtSession),
             ...this.leaseOptions(sessionId),
             ...this.threadAccessOptions(),
+            ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
           },
         })
@@ -1360,6 +1364,7 @@ export class EngineHost {
           ...this.wakeupsOptions(sessionId, () => builtSession),
           ...this.leaseOptions(sessionId),
           ...this.threadAccessOptions(),
+          ...timezoneOptions,
             ...(this.opts.db ? { skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId) } : {}),
         });
 
@@ -1894,6 +1899,28 @@ export class EngineHost {
 
   browserPolicy() {
     return this.opts.db ? createBrowserPolicy(this.opts.db, this.opts.engineStore, this.opts.blobs) : undefined;
+  }
+
+  /**
+   * Timezone options for a session (TKAI-584). `userTimezone` is the value
+   * stored now. `resolveUserTimezone` re-reads it whenever the session creates
+   * a thread, so a new thread sees a changed value. A thread stamps the value
+   * at creation and never re-reads it, so a live prompt stays fixed. An absent
+   * user yields `{}`, and the prompt then says the timezone is unknown.
+   */
+  private async userTimezoneOptions(userId: string | undefined): Promise<{
+    userTimezone?: string;
+    resolveUserTimezone?: () => Promise<string | undefined>;
+  }> {
+    const db = this.opts.db;
+    if (!userId || !db) return {};
+    const read = async (): Promise<string | undefined> => {
+      const rows = await db.select({ timezone: users.timezone }).from(users).where(eq(users.id, userId)).limit(1);
+      const timezone = rows[0]?.timezone;
+      return timezone && isValidTimezone(timezone) ? timezone : undefined;
+    };
+    const userTimezone = await read();
+    return { ...(userTimezone ? { userTimezone } : {}), resolveUserTimezone: read };
   }
 
   /** Team runtime threads read only what their audience may see
@@ -2829,14 +2856,17 @@ export class EngineHost {
     // first is not its owner, so their personal default must not persist
     // onto every other member — only a user-principal assistant reads the
     // actor's own default (TKAI-255 review round).
+    const legacyModel = await loadLegacyAssistantModel(db, assistant.id);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.orgId, {
       userId: principal.type === "user" ? principal.id : undefined,
       overrideId,
       ownerTeamId: principal.type === "team" ? principal.id : undefined,
+      assistantDefault: legacyModel.model,
     });
     const reasoning = await this.resolveReasoningForBuild(existing, meta.orgId, {
       userId: principal.type === "user" ? principal.id : undefined,
       ownerTeamId: principal.type === "team" ? principal.id : undefined,
+      assistantDefault: legacyModel.reasoning,
     });
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
     // `principal`, not `meta.actorUserId`: an assistant session belongs to
@@ -2941,6 +2971,8 @@ export class EngineHost {
       } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       threadSystemContext: workflowEditorThreadContext,
+      // A team or org orchestrator is shared, so no one timezone applies.
+      ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
       tools: [...buildMemoryTools(), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,
@@ -3561,7 +3593,7 @@ export class EngineHost {
    * `overrideId` and the user default — that persisted value already
    * reflects whatever `setModel` (or the original create-time model) set.
    * Only on create does the preference cascade apply (TKAI-255):
-   * `overrideId ?? childDefault ?? userDefault ?? teamDefault ?? opts.defaultModelId ?? "s"`
+   * `overrideId ?? assistantDefault ?? childDefault ?? userDefault ?? teamDefault ?? opts.defaultModelId ?? "s"`
    * — most-specific wins. Org model preferences are gone (superseded by the
    * per-tier ordered target lists): the final fallback is the tier token
    * `"s"`, which `resolveModelSpec` resolves through the org's tier map
@@ -3575,6 +3607,10 @@ export class EngineHost {
    *   touch a shared session must not freeze their personal preference
    *   onto everyone (the resolved model persists, restore-no-clobber).
    * - `ownerTeamId` opts into the team tier for team-owned sessions.
+   * - `assistantDefault` is the model the workspace's assistant carried
+   *   before the workspace runtime (`loadLegacyAssistantModel`). It belongs
+   *   to the assistant, not to whoever woke it, so a shared assistant may
+   *   pass it. It outranks every default tier, as it did before the upgrade.
    */
   private async resolveModelForBuild(
     existing: SessionData | null,
@@ -3584,10 +3620,20 @@ export class EngineHost {
       overrideId?: string;
       ownerTeamId?: string;
       childDefault?: string;
+      assistantDefault?: string;
     },
   ): Promise<BuildModel> {
     // Preserve the saved model when restoring an existing session.
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
+    // The carried model is read-only, so nobody can replace a retired one.
+    // If it no longer resolves, the next default applies.
+    if (!prefs.overrideId && prefs.assistantDefault) {
+      try {
+        return await this.resolveModelObject(orgId, prefs.assistantDefault);
+      } catch (err) {
+        console.warn(`[engine-host] carried assistant model ${prefs.assistantDefault} does not resolve (${String(err)}); using the next default`);
+      }
+    }
     const id =
       prefs.overrideId ??
       prefs.childDefault ??
@@ -3642,7 +3688,7 @@ export class EngineHost {
    * on shutdown). So on restore (`existing` present), the *persisted* value
    * always wins outright over every cascade tier. Only on create does the
    * preference cascade apply:
-   * `userDefault ?? teamDefault ?? orgDefault ?? undefined`
+   * `assistantDefault ?? userDefault ?? teamDefault ?? orgDefault ?? undefined`
    * — most-specific wins — and the resolved level (if any) is clamped to the
    * org's cap (`clampToMax`). A cascade-resolved value that isn't a known
    * level (a stale/invalid column) is treated as unset rather than thrown.
@@ -3654,13 +3700,14 @@ export class EngineHost {
   private async resolveReasoningForBuild(
     existing: SessionData | null,
     orgId: string,
-    prefs: { userId?: string; ownerTeamId?: string },
+    prefs: { userId?: string; ownerTeamId?: string; assistantDefault?: string },
   ): Promise<ReasoningLevel | undefined> {
     if (existing?.reasoning) {
       return isReasoningLevel(existing.reasoning) ? existing.reasoning : undefined;
     }
     const settings = this.opts.db ? await getOrgReasoningSettings(this.opts.db, orgId) : {};
     const level =
+      prefs.assistantDefault ??
       (prefs.userId ? await this.userDefaultReasoning(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultReasoning(orgId, prefs.ownerTeamId) : undefined) ??
       settings.default;
@@ -3713,13 +3760,16 @@ export class EngineHost {
     const ownerTeamId = assistant
       ? (isTeamAssistant ? assistant.ownerId : undefined)
       : meta.ownerTeamId;
+    const legacyModel = assistant && this.opts.db ? await loadLegacyAssistantModel(this.opts.db, assistant.id) : {};
     const { spec } = await this.resolveModelForBuild(null, meta.orgId, {
       userId,
       ownerTeamId,
+      assistantDefault: legacyModel.model,
     });
     const reasoning = await this.resolveReasoningForBuild(null, meta.orgId, {
       userId,
       ownerTeamId,
+      assistantDefault: legacyModel.reasoning,
     });
     return {
       model: spec,
@@ -3971,6 +4021,7 @@ export class EngineHost {
       orgId: opts.orgId,
       workspace: opts.workspace,
       purpose: "child" as const,
+      ...(await this.userTimezoneOptions(opts.actorUserId)),
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
@@ -4172,6 +4223,7 @@ export class EngineHost {
       orgId: opts.orgId,
       workspace,
       purpose: "workflow" as const,
+      ...(await this.userTimezoneOptions(opts.actorUserId)),
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(specProvider ? { specProvider } : {}),
       ...(policyResolver ? { policyResolver } : {}),

@@ -5,8 +5,8 @@ import type {
   PluginAction,
   PluginActionContext,
   PluginActionResult,
-  ToolAttachment,
 } from "@valet/engine";
+import { executeImage, imageParameters } from "./images.js";
 
 /**
  * Base URL is a module-level seam so tests can point actions at a mock
@@ -91,141 +91,24 @@ async function writeSandboxFile(ctx: PluginActionContext, path: string, data: Ui
   await ctx.sandbox.writeBinary(path, data);
 }
 
-const SIZE = Type.Optional(
-  Type.Union(
-    [
-      Type.Literal("1024x1024"),
-      Type.Literal("1536x1024"),
-      Type.Literal("1024x1536"),
-      Type.Literal("auto"),
-    ],
-    { description: 'Output size. Default "auto".' },
-  ),
-);
-
-const QUALITY = Type.Optional(
-  Type.Union(
-    [Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("auto")],
-    { description: 'Rendering quality. Default "auto".' },
-  ),
-);
-
-interface ImageResponse {
-  data?: Array<{ b64_json?: string; revised_prompt?: string }>;
-}
-
-/** Decode the first image of an images-API response, write it to the sandbox,
- * and shape the shared success result for generate/edit. */
-async function saveImageResult(
-  ctx: PluginActionContext,
-  res: Response,
-  outputPath: string,
-): Promise<PluginActionResult> {
-  const body = (await res.json()) as ImageResponse;
-  const b64 = body.data?.[0]?.b64_json;
-  if (!b64) {
-    return {
-      success: false,
-      error: "OpenAI returned no image data. Retry the request; if it persists, simplify the prompt.",
-    };
-  }
-  const bytes = new Uint8Array(Buffer.from(b64, "base64"));
-  await writeSandboxFile(ctx, outputPath, bytes);
-  const attachment: ToolAttachment = {
-    type: "image",
-    data: bytes,
-    mimeType: "image/png",
-    name: outputPath.slice(outputPath.lastIndexOf("/") + 1),
-  };
-  return {
-    success: true,
-    data: {
-      path: outputPath,
-      bytes: bytes.byteLength,
-      ...(body.data?.[0]?.revised_prompt ? { revised_prompt: body.data[0].revised_prompt } : {}),
-    },
-    attachments: [attachment],
-  };
-}
-
-const generateImage = action(
-  Type.Object({
-    prompt: Type.String({ description: "What to draw. Be specific about style, subject, and composition." }),
-    size: SIZE,
-    quality: QUALITY,
-    output_path: Type.Optional(
-      Type.String({ description: "Sandbox path for the PNG. Default /workspace/generated-images/<timestamp>-<slug>.png" }),
-    ),
-  }),
-)({
+const generateImage = action(Type.Object(imageParameters))({
   id: "openai.generate_image",
   name: "Generate Image",
-  description: "Generate an image with OpenAI gpt-image-1, save it in the sandbox, and return it for viewing.",
+  description: "Generate an image with a selectable OpenAI image model, save it in the sandbox, and show it inline. Uses the direct Images API.",
   riskLevel: "low",
-  execute: async (args, ctx) => {
-    const key = await getApiKey(ctx);
-    const res = await fetch(`${OPENAI_API_URL}/v1/images/generations`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        model: "gpt-image-1",
-        prompt: args.prompt,
-        size: args.size ?? "auto",
-        quality: args.quality ?? "auto",
-      }),
-      signal: ctx.signal,
-    });
-    if (!res.ok) return apiError("Image generation", res);
-    const outputPath = args.output_path ?? defaultPath("generated-images", args.prompt, "png");
-    return saveImageResult(ctx, res, outputPath);
-  },
+  execute: async (args, ctx) => executeImage(args, ctx, await getApiKey(ctx), OPENAI_API_URL, "generate"),
 });
 
-const editImage = action(
-  Type.Object({
-    image_path: Type.String({ description: "Sandbox path of the image to edit (PNG, JPEG, or WebP)." }),
-    prompt: Type.String({ description: "The change to make to the image." }),
-    size: SIZE,
-    quality: QUALITY,
-    output_path: Type.Optional(
-      Type.String({ description: "Sandbox path for the edited PNG. Default /workspace/generated-images/<timestamp>-<slug>.png" }),
-    ),
-  }),
-)({
+const editImage = action(Type.Object({
+  ...imageParameters,
+  image_path: Type.String({ description: "Sandbox path of the source PNG, JPEG, or WebP image to edit." }),
+}))({
   id: "openai.edit_image",
   name: "Edit Image",
-  description: "Edit an existing sandbox image with OpenAI gpt-image-1 and save the result in the sandbox.",
+  description: "Edit a sandbox image with a selectable OpenAI image model, save the result, and show it inline. Uses the direct Images API.",
   riskLevel: "low",
-  execute: async (args, ctx) => {
-    const key = await getApiKey(ctx);
-    const source = await readSandboxFile(ctx, args.image_path, "image");
-    const form = new FormData();
-    form.append("model", "gpt-image-1");
-    form.append("prompt", args.prompt);
-    form.append("size", args.size ?? "auto");
-    form.append("quality", args.quality ?? "auto");
-    form.append(
-      "image",
-      new Blob([source as BlobPart], { type: mimeFromPath(args.image_path) }),
-      args.image_path.slice(args.image_path.lastIndexOf("/") + 1),
-    );
-    const res = await fetch(`${OPENAI_API_URL}/v1/images/edits`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${key}` },
-      body: form,
-      signal: ctx.signal,
-    });
-    if (!res.ok) return apiError("Image edit", res);
-    const outputPath = args.output_path ?? defaultPath("generated-images", args.prompt, "png");
-    return saveImageResult(ctx, res, outputPath);
-  },
+  execute: async (args, ctx) => executeImage(args, ctx, await getApiKey(ctx), OPENAI_API_URL, "edit"),
 });
-
-function mimeFromPath(path: string): string {
-  if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
-  if (path.endsWith(".webp")) return "image/webp";
-  return "image/png";
-}
 
 const transcribeAudio = action(
   Type.Object({

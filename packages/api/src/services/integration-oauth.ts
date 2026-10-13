@@ -25,7 +25,7 @@ export interface McpClientRow {
   tokenEndpoint: string;
 }
 
-/** The GitHub service keeps its dedicated App flow (routes/github-connect.ts). */
+/** The GitHub service keeps its dedicated App flow (the GitHub plugin's connection routes). */
 export const OAUTH_EXCLUDED_SERVICES = new Set(["github"]);
 
 export function findOAuthDeclaration(

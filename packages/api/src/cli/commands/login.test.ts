@@ -22,6 +22,8 @@ const ME: MeResponse = {
   defaultModel: null,
   defaultReasoning: null,
   newThreadBehavior: "keep_current",
+    timezone: null,
+    timezoneReportDone: false,
 };
 
 let dir: string;

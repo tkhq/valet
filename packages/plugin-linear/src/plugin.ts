@@ -1,5 +1,6 @@
 import { mcpActionPlugin } from '@valet/sdk/mcp';
 import type { ValetPlugin } from '@valet/engine';
+import { linearConnectionRoutes } from './connection.js';
 import { LINEAR_TEAMS_SOURCE, makeLinearTeamsResolver } from './filter-options.js';
 import { linearHttpRoutes } from './http.js';
 import { linearTemplates } from './templates.js';
@@ -17,7 +18,7 @@ const plugin: ValetPlugin = {
     }),
   ],
   triggers: linearTriggerDefs,
-  httpRoutes: linearHttpRoutes,
+  httpRoutes: [...linearHttpRoutes, ...linearConnectionRoutes],
   templates: linearTemplates,
   filterOptionResolvers: {
     [LINEAR_TEAMS_SOURCE]: makeLinearTeamsResolver(),

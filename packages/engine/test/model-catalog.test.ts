@@ -3,7 +3,7 @@ import * as builtinCatalog from "@earendil-works/pi-ai/providers/all";
 import { getSupportedThinkingLevels, type TranscriptContext } from "@earendil-works/pi-ai";
 import { streamSimple as streamOpenAI } from "@earendil-works/pi-ai/api/openai-responses";
 import { streamSimple as streamAnthropic } from "@earendil-works/pi-ai/api/anthropic-messages";
-import { bundledModel, bundledModels } from "../src/model-catalog.js";
+import { bundledModel, bundledModels, supportsNativeImageGeneration } from "../src/model-catalog.js";
 
 vi.mock("@earendil-works/pi-ai/providers/all", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@earendil-works/pi-ai/providers/all")>();
@@ -118,4 +118,16 @@ describe("bundled model catalog", () => {
     expect(bundledModel("openai", "unknown-model")).toBeUndefined();
     expect(bundledModel("anthropic", "gpt-6-astra")).toBeUndefined();
   });
+});
+
+it.each(["gpt-6.1-sol", "gpt-6-astra", "gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano"])("explicitly enables native images for %s", (id) => {
+  expect(supportsNativeImageGeneration({ id, provider: "openai", api: "openai-responses" })).toBe(true);
+});
+it.each([
+  { id: "gpt-unknown", provider: "openai", api: "openai-responses" },
+  { id: "gpt-6.1-sol", provider: "custom", api: "openai-responses" },
+  { id: "gpt-6.1-sol", provider: "openai", api: "openai-completions" },
+  { id: "claude-sonnet-5-5", provider: "anthropic", api: "anthropic-messages" },
+])("uses the plugin fallback for %j", (model) => {
+  expect(supportsNativeImageGeneration(model)).toBe(false);
 });

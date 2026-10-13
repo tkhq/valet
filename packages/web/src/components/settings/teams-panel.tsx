@@ -1,7 +1,7 @@
 import { AutomationWizard } from "~/components/events/automation-wizard";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import type { OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
-import { Bot, ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
+import { ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { ApiError } from "~/api/client";
 import {
@@ -89,13 +89,15 @@ const DELETE_TEAM_NOTE =
 export function TeamsPanel({
   orgMembers,
   teamId,
-  showAssistantLink = false,
+  page = false,
 }: {
   orgMembers: OrgDirectoryUserWire[];
   /** Pin the panel to the selected workspace, without team creation. */
   teamId?: string;
-  /** Show the assistant link only when this panel has the active team scope. */
-  showAssistantLink?: boolean;
+  /** The team's own settings page (`/settings/teams/$teamId`), which already
+   * names the team and links its threads: the row drops its collapsible
+   * header and stays open. */
+  page?: boolean;
 }) {
   const teamsQ = useTeams();
   const meQ = useMe();
@@ -122,15 +124,15 @@ export function TeamsPanel({
       )}
 
       {ready && teamsQ.data && teams.length > 0 && (
-        <div className="divide-y divide-line border-t border-line">
+        <div className={page ? undefined : "divide-y divide-line border-t border-line"}>
           {teams.map((team) => (
             <TeamRow
               key={team.id}
               team={team}
               orgMembers={orgMembers}
               canMutate={orgAdmin || team.callerRole === "admin"}
-              showAssistantLink={showAssistantLink}
-              open={expanded === team.id}
+              page={page}
+              open={page || expanded === team.id}
               onToggle={() => setExpanded((cur) => (cur === team.id ? null : team.id))}
             />
           ))}
@@ -193,26 +195,38 @@ function TeamRow({
   team,
   orgMembers,
   canMutate,
-  showAssistantLink,
+  page,
   open,
   onToggle,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
-  showAssistantLink: boolean;
+  page: boolean;
   open: boolean;
   onToggle: () => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deletionRequest, setDeletionRequest] = useState<string | null>(null);
   const deleteTeam = useDeleteTeam();
+  const navigate = useNavigate();
+  // On the team's own page, a team the caller deleted or left would read as
+  // "not a member" there. Profile is the settings landing page. Replace, so
+  // Back does not return to the gone team.
+  const leavePage = page ? () => void navigate({ to: "/settings/profile", replace: true }) : undefined;
   const idpBacked = team.origin === "idp";
   const declared = team.origin === "config";
 
   return (
-    <div className="py-3">
+    <div className={page ? undefined : "py-3"}>
       <div className="flex flex-wrap items-center gap-3">
+        {page ? (
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            {idpBacked && <Badge variant="neutral">Identity provider</Badge>}
+            {declared && <Badge variant="neutral" title={CONFIG_MANAGED_NOTE}>Declared in valet.yaml</Badge>}
+            <span className="text-xs text-muted">Created {formatDate(team.createdAt)}</span>
+          </div>
+        ) : (
         <button
           type="button"
           onClick={onToggle}
@@ -241,16 +255,11 @@ function TeamRow({
             {team.memberCount} {team.memberCount === 1 ? "member" : "members"}
           </span>
         </button>
-        <span className="hidden shrink-0 text-xs text-muted sm:block">
-          Created {formatDate(team.createdAt)}
-        </span>
-        {showAssistantLink && (
-          <Button asChild variant="ghost" size="sm" className="shrink-0 gap-1.5">
-            <Link to="/chat" search={{ workspace: team.id }}>
-              <Bot className="h-3.5 w-3.5" aria-hidden />
-              Threads
-            </Link>
-          </Button>
+        )}
+        {!page && (
+          <span className="hidden shrink-0 text-xs text-muted sm:block">
+            Created {formatDate(team.createdAt)}
+          </span>
         )}
         {/* Two gates, both required. `canMutate` is authorization; origin is
             provenance — the API refuses a delete on a mirrored team and on a
@@ -292,8 +301,8 @@ function TeamRow({
       </div>
 
       {open && (
-        <div className="ml-6 mt-3 space-y-8 border-l border-line pl-4">
-          <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} />
+        <div className={page ? "mt-6 space-y-10" : "ml-6 mt-3 space-y-8 border-l border-line pl-4"}>
+          <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} onSelfRemoved={leavePage} />
           <TeamDefaults team={team} canMutate={canMutate} />
           <TeamSlack key={team.id} team={team} canMutate={canMutate} />
           <SubSection title="Connections">
@@ -318,7 +327,12 @@ function TeamRow({
         pendingLabel="Deleting…"
         pending={deleteTeam.isPending}
         error={deleteTeam.error != null ? errorText(deleteTeam.error) : undefined}
-        onConfirm={() => deleteTeam.mutate(team.id, { onSuccess: () => setConfirmDelete(false) })}
+        onConfirm={() => deleteTeam.mutate(team.id, {
+          onSuccess: () => {
+            setConfirmDelete(false);
+            leavePage?.();
+          },
+        })}
       />
     </div>
   );
@@ -403,11 +417,15 @@ function TeamMembers({
   team,
   orgMembers,
   canMutate,
+  onSelfRemoved,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
+  /** Runs once the caller removes their own membership. */
+  onSelfRemoved?: () => void;
 }) {
+  const meQ = useMe();
   const teamId = team.id;
   const teamName = team.name;
   const declared = team.origin === "config";
@@ -466,7 +484,10 @@ function TeamMembers({
                     variant="ghost"
                     size="icon"
                     aria-label={`Remove ${name} from ${teamName}`}
-                    onClick={() => removeMember.mutate({ teamId, userId: member.userId })}
+                    onClick={() => removeMember.mutate(
+                      { teamId, userId: member.userId },
+                      { onSuccess: () => { if (member.userId === meQ.data?.id) onSelfRemoved?.(); } },
+                    )}
                   >
                     <X className="h-3.5 w-3.5" aria-hidden />
                   </Button>

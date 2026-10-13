@@ -6,6 +6,9 @@ import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earen
 import {
   pluginCatalogTools,
   buildPluginCatalog,
+  actionRunsUngated,
+  resolveUngatedAction,
+  recordHostedActionInvocation,
   invokeAction,
   pinnedToolName,
   prepareActionArgs,
@@ -55,6 +58,109 @@ it("scopes live availability reads for actions and filtered discovery", async ()
     "one.run", {}, makeCtx(), "run");
   expect(result.kind).toBe("ok");
   expect(resolveServiceAvailability).toHaveBeenLastCalledWith("one");
+});
+
+it("hides duplicate generation for native models but keeps sandbox-file editing", async () => {
+  const plugin: ActionPlugin = { service: "openai", actions: ["generate_image", "edit_image"].map((name) => ({
+    id: `openai.${name}`, name, description: name, riskLevel: "low", parameters: Type.Object({}),
+    execute: async () => ({ success: true }),
+  })) };
+  const [list] = pluginCatalogTools({ plugins: [plugin] });
+  const native = await list.execute({ service: "openai" }, makeCtx({ nativeImageGeneration: true }));
+  expect(native.text).not.toContain("openai.generate_image");
+  expect(native.text).toContain("openai.edit_image");
+  expect((await list.execute({ service: "openai" }, makeCtx())).text).toContain("openai.generate_image");
+  expect((await invokeAction(buildPluginCatalog([plugin]), "openai.generate_image", {}, makeCtx({ nativeImageGeneration: true }), "generate")).kind).toBe("unknown");
+});
+
+it("resolves policy on defaulted parameters, so an omitted field cannot bypass a matcher", async () => {
+  let executed = 0;
+  const plugin: ActionPlugin = { service: "openai", actions: [{
+    id: "openai.generate_image", name: "Generate Image", description: "Generate", riskLevel: "low",
+    parameters: Type.Object({ prompt: Type.String(), model: Type.Optional(Type.String({ default: "gpt-image-2.5-sunburst" })) }),
+    execute: async () => { executed++; return { success: true }; },
+  }] };
+  const records: PolicyInvocationRecord[] = [];
+  const resolver: PolicyResolver = {
+    resolve: async (input) => input.params?.model === "gpt-image-2.5-sunburst"
+      ? { mode: "deny", provenance: { baseMode: "deny", source: "org_policy" } }
+      : { mode: "allow", provenance: { baseMode: "allow", source: "risk_default" } },
+    onInvocation: async (record) => { records.push(record); },
+  };
+  const catalog = buildPluginCatalog([plugin]);
+  expect((await invokeAction(catalog, "openai.generate_image", { prompt: "fox" }, makeCtx({ policyResolver: resolver }), "generate")).kind).toBe("denied-policy");
+  expect(executed).toBe(0);
+  expect((await invokeAction(catalog, "openai.generate_image", { prompt: "fox", model: "gpt-image-2.5-flare" }, makeCtx({ policyResolver: resolver }), "generate")).kind).toBe("ok");
+  expect(executed).toBe(1);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(records[0]?.params).toEqual({ prompt: "fox", model: "gpt-image-2.5-sunburst" });
+});
+
+describe("actionRunsUngated", () => {
+  const plugin: ActionPlugin = { service: "openai", actions: [{
+    id: "openai.generate_image", name: "Generate Image", description: "Generate", riskLevel: "low", parameters: Type.Object({}),
+    execute: async () => ({ success: true }),
+  }, {
+    id: "openai.delete_everything", name: "Delete", description: "Delete", riskLevel: "critical", parameters: Type.Object({}),
+    execute: async () => ({ success: true }),
+  }] };
+  const decision = (mode: "allow" | "deny" | "require_approval"): PolicyResolver => ({
+    resolve: async () => ({ mode, provenance: { baseMode: mode, source: "team_policy" } }),
+  });
+
+  it("answers from risk level when no resolver is configured", async () => {
+    const catalog = buildPluginCatalog([plugin]);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx())).toBe(true);
+    expect(await actionRunsUngated(catalog, "openai.delete_everything", makeCtx())).toBe(false);
+    expect(await actionRunsUngated(catalog, "openai.missing", makeCtx())).toBe(false);
+    expect(await actionRunsUngated(buildPluginCatalog([]), "openai.generate_image", makeCtx())).toBe(false);
+  });
+
+  it("follows the resolver decision and fails closed on resolver errors", async () => {
+    const catalog = buildPluginCatalog([plugin]);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: decision("allow") }))).toBe(true);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: decision("deny") }))).toBe(false);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: decision("require_approval") }))).toBe(false);
+    const failing: PolicyResolver = { resolve: async () => { throw new Error("policy store unavailable"); } };
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: failing }))).toBe(false);
+    const resolve = vi.fn(async () => ({ mode: "allow" as const, provenance: { baseMode: "allow" as const, source: "risk_default" as const } }));
+    await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ policyResolver: { resolve }, owner: { type: "team", id: "team-a" } }), { model: "sunburst" });
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ teamId: "team-a", service: "openai", actionId: "openai.generate_image", riskLevel: "low", appliesIn: "session", params: { model: "sunburst" }, partialParams: true }));
+  });
+
+  it("audits a hosted execution as the plugin action with the grant's provenance", async () => {
+    const catalog = buildPluginCatalog([plugin]);
+    const records: PolicyInvocationRecord[] = [];
+    const resolver: PolicyResolver = {
+      resolve: async () => ({ mode: "allow", provenance: { baseMode: "allow", source: "org_policy", matchedPolicyId: "pol-1" } }),
+      onInvocation: async (record) => { records.push(record); },
+    };
+    const ctx = makeCtx({ policyResolver: resolver, queueItemId: "q-1" });
+    const grant = await resolveUngatedAction(catalog, "openai.generate_image", ctx, { model: "sunburst" });
+    if (!grant) throw new Error("expected a grant");
+    expect(records).toHaveLength(0);
+    recordHostedActionInvocation(ctx, grant, { path: "generated-images/a.png" }, "Generated an image");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(records).toEqual([expect.objectContaining({
+      service: "openai", actionId: "openai.generate_image", toolId: "openai.generate_image", riskLevel: "low", status: "completed", resolvedMode: "allow",
+      provenance: { baseMode: "allow", source: "org_policy", matchedPolicyId: "pol-1" }, params: { model: "sunburst", path: "generated-images/a.png" },
+      queueItemId: "q-1", summary: "Generated an image", resumeKey: expect.stringMatching(/^openai\.generate_image:/),
+    })]);
+    // Without a resolver there is no audit port, and no grant is denied by that absence.
+    recordHostedActionInvocation(makeCtx(), grant, {}, "none");
+    expect(await resolveUngatedAction(catalog, "openai.generate_image", makeCtx(), {})).toMatchObject({ decision: { mode: "allow", provenance: { source: "risk_default" } } });
+  });
+
+  it("refuses external senders and unavailable services", async () => {
+    const catalog = buildPluginCatalog([plugin]);
+    expect(await actionRunsUngated(catalog, "openai.generate_image", makeCtx({ externalSender: true, policyResolver: decision("allow") }))).toBe(false);
+    const unavailable = buildPluginCatalog([plugin], undefined, { serviceAvailability: [{
+      service: "openai", state: "disabled_by_org", reason: "the organization disabled this service", fix: "Ask an organization administrator to enable openai.",
+    }] });
+    expect(await actionRunsUngated(unavailable, "openai.generate_image", makeCtx({ policyResolver: decision("allow") }))).toBe(false);
+    const failing = buildPluginCatalog([{ ...plugin, requiresCredential: true }], undefined, { resolveServiceAvailability: async () => { throw new Error("availability store down"); } });
+    expect(await actionRunsUngated(failing, "openai.generate_image", makeCtx({ policyResolver: decision("allow") }))).toBe(false);
+  });
 });
 
 function makeMockPlugin(): {
@@ -1972,16 +2078,15 @@ describe("pinned tool: the model's summary", () => {
     // The action receives schema defaults: `name` was not sent, so
     // `prepareActionArgs` supplied it.
     expect(calls).toEqual([{ workflow_id: "wf-1", name: "untitled" }]);
-    // The audit record does NOT carry those defaults. `invokeAction` builds
-    // the record from the arguments as received, and `prepareActionArgs` runs
-    // afterwards inside `executeAction`, so the record answers "what was
-    // asked for" rather than "what ran". That is the shared behaviour of
-    // every path — `call_tool` and the slash-command path record the same
-    // way — so the pinned tool matching it is the point.
+    // The audit record carries the same defaults: `invokeAction` resolves
+    // policy on the effective arguments (defaults applied), so the record
+    // answers "what ran" and a matcher on a default value applies to an
+    // omitted field. `call_tool`, the slash-command path, and the pinned
+    // tool all record the same way.
     //
     // What this test actually guards is the summary: it must reach neither
     // the action's arguments nor the audit params.
-    expect(records[0]?.params).toEqual({ workflow_id: "wf-1" });
+    expect(records[0]?.params).toEqual({ workflow_id: "wf-1", name: "untitled" });
   });
 
   it("falls back to the derived summary when the model sends a blank one", async () => {

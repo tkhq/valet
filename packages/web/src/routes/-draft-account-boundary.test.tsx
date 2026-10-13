@@ -9,6 +9,7 @@ const identity = vi.hoisted(() => ({ data: { orgId: "org", id: "alice" }, isFetc
 vi.mock("~/api/settings", async (original) => ({
   ...await original<typeof import("~/api/settings")>(),
   useMe: () => identity,
+  usePatchMe: () => ({ mutate: vi.fn() }),
 }));
 
 function Draft() {

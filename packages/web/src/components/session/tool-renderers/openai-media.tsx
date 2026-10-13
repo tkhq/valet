@@ -1,13 +1,13 @@
 /**
  * Chat renderer for the plugin-openai media actions. They reach the LLM
  * through the plugin catalog, so on the wire they are `call_tool`
- * invocations with `args.tool_id = "openai.*"` — this renderer claims that
- * subset via the args-aware `matches` form (same pattern as workflow.tsx).
+ * invocations with `args.tool_id = "openai.*"`, or pinned `openai__*` tools.
+ * Both paths use the same action result contract.
  *
  * The persisted tool result is pi-agent-core's AgentToolResult plus the
  * engine's flattened `text` (thread.ts `tool_execution_end`): the image
- * actions' PNG arrives as a base64 `{ type: "image", data, mimeType }`
- * content block, so the Body can render it inline with no extra fetch.
+ * actions' image arrives as a base64 `{ type: "image", data, mimeType }`
+ * content block. The Preview renders it outside the collapsible tool card.
  */
 import { Sparkles } from "lucide-react";
 import { resultText, structuredResult, type ToolRenderer, type ToolRendererProps } from "./types";
@@ -20,19 +20,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function isOpenaiCallTool(toolName: string, args?: unknown): boolean {
+  if (toolName === "openai_native_image" || toolName.startsWith("openai__")) return true;
   if (toolName !== "call_tool") return false;
   const toolId = isRecord(args) ? args.tool_id : undefined;
   return typeof toolId === "string" && toolId.startsWith(OPENAI_TOOL_PREFIX);
 }
 
 /** The `openai.<action>` id of this call, "" when args are still streaming. */
-export function openaiActionId(args: unknown): string {
+export function openaiActionId(args: unknown, toolName = "call_tool"): string {
+  if (toolName === "openai_native_image") return "openai.native_image";
+  if (toolName.startsWith("openai__")) return toolName.replace("__", ".");
   const toolId = isRecord(args) ? args.tool_id : undefined;
   return typeof toolId === "string" ? toolId : "";
 }
 
-/** The action's own parameters, nested under call_tool's `params`. */
-export function openaiParams(args: unknown): Record<string, unknown> {
+/** Parameters are nested for call_tool and direct for pinned tools. */
+export function openaiParams(args: unknown, toolName = "call_tool"): Record<string, unknown> {
+  if (toolName.startsWith("openai__")) return isRecord(args) ? args : {};
   const params = isRecord(args) ? args.params : undefined;
   return isRecord(params) ? params : {};
 }
@@ -48,8 +52,9 @@ export function imageDataUrl(result: unknown): string | undefined {
     if (!isRecord(block) || block.type !== "image") continue;
     const data = block.data;
     const mimeType = block.mimeType;
-    if (typeof data === "string" && data.length > 0) {
-      return `data:${typeof mimeType === "string" ? mimeType : "image/png"};base64,${data}`;
+    if (typeof data === "string" && data.length > 0 && typeof mimeType === "string" &&
+      ["image/png", "image/jpeg", "image/webp"].includes(mimeType)) {
+      return `data:${mimeType};base64,${data}`;
     }
   }
   return undefined;
@@ -61,9 +66,9 @@ export function openaiResultData(result: unknown): Record<string, unknown> {
   return isRecord(parsed) ? parsed : {};
 }
 
-function formatTarget(args: unknown): string | undefined {
-  const action = openaiActionId(args);
-  const params = openaiParams(args);
+function formatTarget(args: unknown, toolName: string): string | undefined {
+  const action = openaiActionId(args, toolName);
+  const params = openaiParams(args, toolName);
   const short = (value: unknown): string | undefined =>
     typeof value === "string" && value.length > 0
       ? value.length > 64
@@ -83,22 +88,46 @@ function formatTarget(args: unknown): string | undefined {
   }
 }
 
-function formatSummary(args: unknown, result: unknown): string | undefined {
+function formatSummary(args: unknown, result: unknown, _status: ToolRendererProps["status"], toolName: string): string | undefined {
   const data = openaiResultData(result);
-  if (openaiActionId(args) === "openai.transcribe_audio") {
+  if (openaiActionId(args, toolName) === "openai.transcribe_audio") {
     const text = data.text;
     return typeof text === "string" && text.length > 0 ? `${text.length} chars` : undefined;
   }
   return typeof data.path === "string" ? data.path.split("/").pop() : undefined;
 }
 
-function Body({ args, result, status, error }: ToolRendererProps) {
+function Preview({ args, result, status, error, toolName }: ToolRendererProps) {
+  if (status !== "completed" || error) return null;
+  const action = openaiActionId(args, toolName);
+  if (action !== "openai.generate_image" && action !== "openai.edit_image" && action !== "openai.native_image") return null;
+  const imageUrl = imageDataUrl(result);
+  const data = openaiResultData(result);
+  if (!imageUrl && typeof data.path !== "string") return null;
+  const prompt = openaiParams(args, toolName).prompt;
+  return (
+    <figure className="space-y-2">
+      {imageUrl ? <img
+        src={imageUrl}
+        alt={typeof prompt === "string" ? prompt : "generated image"}
+        className="max-h-96 max-w-full rounded border border-line object-contain"
+      /> : null}
+      {typeof data.warning === "string" ? <p className="text-xs text-muted">{data.warning}</p> : null}
+      {typeof data.stream_warning === "string" ? <p className="text-xs text-muted">{data.stream_warning}</p> : null}
+      {typeof data.path === "string" ? (
+        <figcaption className="break-all font-mono text-xs text-muted">{data.path}</figcaption>
+      ) : null}
+    </figure>
+  );
+}
+
+function Body({ args, result, status, error, toolName }: ToolRendererProps) {
   if (status === "running" || status === "streaming") {
     return <ToolBody>Working…</ToolBody>;
   }
   const text = error ?? resultText(result);
   const data = openaiResultData(result);
-  const action = openaiActionId(args);
+  const action = openaiActionId(args, toolName);
   const imageUrl = imageDataUrl(result);
   const transcript = action === "openai.transcribe_audio" && typeof data.text === "string" ? data.text : undefined;
 
@@ -111,13 +140,6 @@ function Body({ args, result, status, error }: ToolRendererProps) {
   }
   return (
     <ToolBody className="space-y-2">
-      {imageUrl ? (
-        <img
-          src={imageUrl}
-          alt={typeof openaiParams(args).prompt === "string" ? String(openaiParams(args).prompt) : "generated image"}
-          className="max-h-96 max-w-full rounded border border-neutral-200 dark:border-neutral-800"
-        />
-      ) : null}
       {transcript !== undefined ? (
         <TruncatedText text={transcript} />
       ) : null}
@@ -138,4 +160,5 @@ export const openaiMediaRenderer: ToolRenderer = {
   formatTarget,
   formatSummary,
   Body,
+  Preview,
 };

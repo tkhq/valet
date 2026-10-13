@@ -312,7 +312,7 @@ describe("attempt-fenced EventStream appends (decision 12)", () => {
       ),
     );
     expect(baseCalls).toBe(1);
-    expect(nextPromptSystem).toMatch(/^Baseline prompt\.\n\n## Runtime model\n/);
+    expect(nextPromptSystem).toMatch(/^Baseline prompt\.\n\n## Thread started[\s\S]*?\n\n## Runtime model\n/);
     expect(nextPromptSystem).toContain(`Current provider: ${base.getModel().provider}`);
     expect(nextPromptSystem).toContain("Temporary override: none");
     expect(await thread.currentModelState()).toBeNull();

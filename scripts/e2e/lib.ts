@@ -85,6 +85,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/auth.e2e.test.ts",
   "src/integration/auto-title.test.ts",
   "src/integration/memory-routes.test.ts",
+  "src/integration/thread-timezone.test.ts",
   "src/integration/memory-tree.test.ts",
   "src/integration/sessions-list-filter.test.ts",
   "src/integration/sessions-run-state.test.ts",
@@ -107,6 +108,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/plugin-entitlements.test.ts",
   "src/integration/profile-pictures.test.ts",
   "src/integration/workflow-avatar.test.ts",
+  "src/integration/openai-images.test.ts",
   // Wakeups acceptance runs keyless: a faux model and a scripted virtual sandbox.
   "src/integration/wakeups-acceptance.test.ts",
   // Valet Security integration suites run keyless: the virtual sandbox
@@ -124,6 +126,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/security-comments.test.ts",
   "src/integration/security-coverage.test.ts",
   "src/integration/security-finding-location.test.ts",
+  "src/integration/security-issue-routes.test.ts",
   "src/integration/security-report.test.ts",
   "src/integration/security-needs.test.ts",
   "src/integration/security-setup.test.ts",

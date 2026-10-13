@@ -110,6 +110,13 @@ export function WorkspaceSwitcher({
                 void navigate({ to: "/workflows", search: { workspace: o.key } });
                 return;
               }
+              if (pathname === "/integrations") {
+                // A link may name the workspace (`?workspace=user` from
+                // Connected accounts), and the URL outranks the stored key.
+                // Name the new one, or the page snaps back to the old.
+                void navigate({ to: "/integrations", search: { workspace: o.key } });
+                return;
+              }
               onSelect(o.key);
               if (!navigateOnSelect) return;
               void navigate({

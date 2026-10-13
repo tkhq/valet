@@ -146,7 +146,7 @@ describe("SkillsIndexPage", () => {
     addSource.mockReset();
   });
 
-  it("lists every skill in one grid, with no per-plugin sections", () => {
+  it("lists every skill in one list, with no per-plugin sections", () => {
     const { container } = render(<SkillsIndexPage />);
 
     // Most plugins ship exactly one skill, so a section per plugin left a
@@ -154,7 +154,7 @@ describe("SkillsIndexPage", () => {
     expect(screen.queryByRole("heading", { name: "Google Workspace" })).toBeNull();
     // Router `Link`s render `to`, not `href`, so they carry no link role.
     // Counted inside the grid: the header carries links of its own.
-    expect(container.querySelectorAll(".grid a").length).toBe(5);
+    expect(container.querySelectorAll(`ul[aria-label="Skills"] a`).length).toBe(5);
   });
 
   it("lists the repositories of the workspace in view, as the skills below do", () => {
@@ -235,7 +235,7 @@ describe("SkillsIndexPage", () => {
     const { container } = render(<SkillsIndexPage />);
     // Query inside the grid so the scope-filter dropdown's <option>s do not
     // count. Four plugin skills → four Plugin badges; one personal stored.
-    const grid = container.querySelector(".grid");
+    const grid = container.querySelector(`ul[aria-label="Skills"]`);
     const badges = (label: string) =>
       Array.from(grid?.querySelectorAll("span") ?? []).filter((el) => el.textContent === label);
     expect(badges("Plugin").length).toBe(4);

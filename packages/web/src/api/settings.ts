@@ -282,7 +282,16 @@ export function usePatchMe() {
     onMutate: async (body) => {
       await qc.cancelQueries({ queryKey: qkSettings.me() });
       const previous = qc.getQueryData<MeResponse>(qkSettings.me());
-      if (previous) qc.setQueryData<MeResponse>(qkSettings.me(), { ...previous, ...body });
+      if (previous) {
+        const { reportedTimezone: _reported, ...visible } = body;
+        // A timezone set or clear is a user choice. Mark it now so the
+        // auto-report cannot fire from the optimistic value (TKAI-584).
+        qc.setQueryData<MeResponse>(qkSettings.me(), {
+          ...previous,
+          ...visible,
+          ...("timezone" in body ? { timezoneReportDone: true } : {}),
+        });
+      }
       return { previous };
     },
     onError: (_error, _body, context) => {

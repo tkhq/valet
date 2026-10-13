@@ -49,3 +49,11 @@ export function bundledPricingModel(provider: string, modelId: string): Model<Ap
 export function bundledModel(provider: string, modelId: string): Model<Api> | undefined {
   return bundledMetadata(provider).find((model) => model.id === modelId);
 }
+
+// Official OpenAI model pages and image-generation guide verified 2026-10-09.
+const NATIVE_IMAGE_MODELS = new Set(["gpt-6.1-sol", "gpt-6-astra", "gpt-5.5", "gpt-5.4-mini", "gpt-5.4-nano"]);
+
+/** Unknown models and other providers always use the plugin fallback. */
+export function supportsNativeImageGeneration(model: { provider: string; api: string; id: string }): boolean {
+  return model.provider === "openai" && model.api === "openai-responses" && NATIVE_IMAGE_MODELS.has(model.id);
+}

@@ -2,13 +2,15 @@ import type { PluginSummary } from "@valet/api/wire";
 import { displayName } from "./display-name";
 
 /** Manifest capabilities, separate from the account's connection and access checks. */
-export function IntegrationDetails({ plugin }: { plugin: PluginSummary }) {
+export function IntegrationDetails({ plugin, expanded = false }: {
+  plugin: PluginSummary;
+  /** In the detail panel the list is the content, so it shows open with a heading. */
+  expanded?: boolean;
+}) {
   const services = plugin.actionServices ?? plugin.services.map((service) => ({
     service: service.service, actions: service.actions, dynamic: service.dynamic,
   }));
-  return <details className="mt-4 min-w-0 border-t border-line pt-3 text-sm">
-    <summary className="cursor-pointer py-1 text-muted">Tools and skills</summary>
-    <div className="mt-3 space-y-4">
+  const body = <div className="mt-3 space-y-4">
       <p className="text-xs text-muted">Tools that use an account need a usable connection and access to the requested files or resources.</p>
       {services.map((service) => <div key={service.service}>
         <h4 className="text-xs font-medium text-ink">{displayName(service.service)} tools</h4>
@@ -36,6 +38,12 @@ export function IntegrationDetails({ plugin }: { plugin: PluginSummary }) {
           </li>)}
         </ul> : <p className="mt-1 text-xs text-muted">{plugin.skills ? "This plugin does not include a skill." : "Skill details are unavailable. Open Skills to browse installed playbooks."}</p>}
       </div>
-    </div>
+    </div>;
+  return expanded ? <section aria-label="Tools and skills" className="mt-5 min-w-0 border-t border-line pt-4 text-sm">
+    <h3 className="text-sm font-medium text-ink">Tools and skills</h3>
+    {body}
+  </section> : <details className="mt-2 min-w-0 pl-12 text-sm">
+    <summary className="cursor-pointer py-1 text-xs text-muted hover:text-ink">Tools and skills</summary>
+    {body}
   </details>;
 }

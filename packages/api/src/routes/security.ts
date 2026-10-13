@@ -28,13 +28,13 @@
  *                                                 → verified/refuted (review cells only)
  *
  * Human triage routes (M6 — Decision 10: human-only, the internal token is
- * REFUSED on all four):
+ * REFUSED on each):
  *   POST /api/sessions/:id/security/findings/:findingId/status
  *                                                 → human verify/refute (canAdministerSession)
  *   GET  /api/sessions/:id/security/export        → md | sarif | json (canViewSession)
- *   POST /api/sessions/:id/security/findings/:findingId/issues
- *                                                 → file one GitHub/Linear issue (canViewSession)
- *   POST /api/sessions/:id/security/issues/digest → one digest issue (canViewSession)
+ * Issue filing (`findings/:findingId/issues` and `issues/digest`) moved to
+ * the Security plugin. The host keeps both URLs as aliases
+ * (plugins/http-security.ts, docs/plans/2026-10-09-security-plugin-adoption.md).
  *
  * Dual auth, the memory-routes ladder: a valid `x-valet-internal` token is
  * the `sec_*` engine tools' path; otherwise the caller is the session user.
@@ -70,7 +70,6 @@ import { and, asc, count, desc, eq, inArray } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { randomUUID } from "node:crypto";
 import { resolveApiTokenOrNull, resolveChangedFiles, resolveRefSha } from "../bakes/source-service.js";
-import { publicUrlFromEnv } from "../channels/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -84,7 +83,6 @@ import {
   ChildLimitError,
   resolveChildSettlement,
 } from "../orchestrator/children.js";
-import { buildActionInvoker } from "../plugins/action-invoker.js";
 import { persistInvocationAudit } from "../policies/service.js";
 import {
   agentSessions,
@@ -118,14 +116,7 @@ import {
   buildSarif,
   type SecurityExportInput,
 } from "../services/security-export.js";
-import {
-  fileDigestIssue,
-  fileFindingIssue,
-  IssueRequestError,
-  MissingIntegrationError,
-  type IssueProvider,
-  type SecurityIssuesDeps,
-} from "../services/security-issues.js";
+import { SECURITY_HUMAN_ONLY as HUMAN_ONLY } from "../plugins/http-security.js";
 import { seedSecurityReview } from "../services/security-seed.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
 import type {
@@ -141,11 +132,9 @@ import type {
   SecurityCloseResponse,
   SecurityCompleteCellResponse,
   SecurityCoverageWire,
-  SecurityDigestIssueResponse,
   SecurityDispatchResponse,
   SecurityEngagementWire,
   SecurityFailCellResponse,
-  SecurityFileIssueResponse,
   SecurityFindingCommentWire,
   SecurityFindingLinkWire,
   SecurityFindingWire,
@@ -2259,11 +2248,10 @@ securityRouter.get("/:id/security/needs", async (c) => {
 //
 // Decision 10 (spec §Filing issues, threat 11): review, export, and issue
 // filing are HUMAN actions. A valid internal token — the runner's and the
-// personas' path — is refused outright on all four routes, so content
-// derived from hostile code leaves Valet only on a person's click.
-
-const HUMAN_ONLY =
-  "This is a human action. Sign in and call it as a user — the internal token is refused here.";
+// personas' path — is refused outright on these routes, so content derived
+// from hostile code leaves Valet only on a person's click. The Security
+// plugin serves issue filing; the host refuses the internal token there with
+// the same message (plugins/http-security.ts).
 
 type HumanAccess = "view" | "administer";
 
@@ -2680,184 +2668,4 @@ securityRouter.get("/:id/security/export", async (c) => {
     `attachment; filename="valet-security-${result.engagement.id}.${meta.ext}"`,
   );
   return c.body(payload);
-});
-
-/** The invoker seam issue filing rides (Decision 11): the SAME
- * `buildActionInvoker` a workflow tool node dispatches through, scoped to
- * the acting user's credentials. `webBaseUrl` prefers the configured public
- * URL (the channels' rule); dev and tests fall back to the request origin. */
-function buildIssuesDeps(c: Context<AppEnv>): SecurityIssuesDeps {
-  const { db, engineCredentials, actionPluginByService, plugins, encryptionKey } = c.var.providers;
-  const invokeAction = buildActionInvoker({
-    db,
-    credentials: engineCredentials,
-    actionPluginByService,
-    plugins,
-    githubTokenDeps: { key: deriveSecretKey(encryptionKey) },
-  });
-  const webBaseUrl = publicUrlFromEnv(process.env) ?? new URL(c.req.url).origin;
-  return { db, invokeAction, webBaseUrl };
-}
-
-/** Filing failures → HTTP: corrective 400s for a missing integration or a
- * bad request shape; 502 for a provider-side failure. */
-function issueError(c: Context<AppEnv>, err: unknown): Response {
-  if (err instanceof MissingIntegrationError || err instanceof IssueRequestError) {
-    return c.json({ error: err.message }, 400);
-  }
-  return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
-}
-
-function parseIssueProvider(value: unknown): IssueProvider | null {
-  return value === "github" || value === "linear" ? value : null;
-}
-
-/**
- * POST /:id/security/findings/:findingId/issues { provider, repo?, teamId? }
- * — file ONE issue for ONE finding (spec §Filing issues). Idempotent by the
- * `(finding, provider)` unique index: a repeat answers 200 with the
- * existing link and `created: false`.
- */
-securityRouter.post("/:id/security/findings/:findingId/issues", async (c) => {
-  const sessionId = c.req.param("id");
-  const findingId = c.req.param("findingId");
-  // Issue filing resolves GitHub or Linear from the acting user's own rows.
-  // For a team key that user is the minting admin, kept for audit only, so
-  // filing would spend a credential nobody chose to use. Refuse up front.
-  if (requirePrincipal(c)?.type === "team") {
-    return c.json(
-      { error: "A team API key cannot file issues. Sign in and file them from the session." },
-      403,
-    );
-  }
-  // View-gated (spec §Filing issues): the named check is canViewSession,
-  // inside resolveHumanSession.
-  const resolved = await resolveHumanSession(c, sessionId, "view");
-  if ("failure" in resolved) return resolved.failure;
-  const { user } = resolved.ok;
-
-  const loaded = await loadEngagementOr404(c, sessionId);
-  if ("failure" in loaded) return loaded.failure;
-  const { result } = loaded;
-  const { db } = c.var.providers;
-
-  const body = await readJsonBody(c);
-  const provider = parseIssueProvider(body.provider);
-  if (!provider) return c.json({ error: "provider must be 'github' or 'linear'." }, 400);
-  if (body.repo !== undefined && typeof body.repo !== "string") {
-    return c.json({ error: "repo must be an owner/name string." }, 400);
-  }
-  if (body.teamId !== undefined && typeof body.teamId !== "string") {
-    return c.json({ error: "teamId must be a Linear team id string." }, 400);
-  }
-
-  // Scoped to THIS engagement: a finding id from another engagement is not
-  // reachable here.
-  const findingRows = await db
-    .select()
-    .from(securityFindings)
-    .where(
-      and(eq(securityFindings.engagementId, result.engagement.id), eq(securityFindings.id, findingId)),
-    )
-    .limit(1);
-  const finding = findingRows[0];
-  if (!finding) {
-    return c.json({ error: `No finding ${findingId} in this engagement.` }, 404);
-  }
-
-  try {
-    const filed = await fileFindingIssue(buildIssuesDeps(c), {
-      engagement: result.engagement,
-      finding,
-      provider,
-      actor: { userId: user.id, orgId: user.orgId },
-      repo: typeof body.repo === "string" ? body.repo : undefined,
-      teamId: typeof body.teamId === "string" ? body.teamId : undefined,
-    });
-    const response: SecurityFileIssueResponse = {
-      link: linkToWire(filed.link),
-      created: filed.created,
-    };
-    return c.json(response);
-  } catch (err) {
-    return issueError(c, err);
-  }
-});
-
-/**
- * POST /:id/security/issues/digest { provider, findingIds, repo?, teamId? }
- * — ONE digest issue from many findings (spec §Filing issues: a tracker
- * flooded with forty auto-filed tickets is worse than no integration).
- * Writes no link rows.
- */
-securityRouter.post("/:id/security/issues/digest", async (c) => {
-  const sessionId = c.req.param("id");
-  // Issue filing resolves GitHub or Linear from the acting user's own rows.
-  // For a team key that user is the minting admin, kept for audit only, so
-  // filing would spend a credential nobody chose to use. Refuse up front.
-  if (requirePrincipal(c)?.type === "team") {
-    return c.json(
-      { error: "A team API key cannot file issues. Sign in and file them from the session." },
-      403,
-    );
-  }
-  // View-gated (spec §Filing issues): the named check is canViewSession,
-  // inside resolveHumanSession.
-  const resolved = await resolveHumanSession(c, sessionId, "view");
-  if ("failure" in resolved) return resolved.failure;
-  const { user } = resolved.ok;
-
-  const loaded = await loadEngagementOr404(c, sessionId);
-  if ("failure" in loaded) return loaded.failure;
-  const { result } = loaded;
-  const { db } = c.var.providers;
-
-  const body = await readJsonBody(c);
-  const provider = parseIssueProvider(body.provider);
-  if (!provider) return c.json({ error: "provider must be 'github' or 'linear'." }, 400);
-  if (
-    !Array.isArray(body.findingIds) ||
-    body.findingIds.length === 0 ||
-    !body.findingIds.every((id): id is string => typeof id === "string")
-  ) {
-    return c.json({ error: "Send { findingIds } with at least one finding id." }, 400);
-  }
-  if (body.repo !== undefined && typeof body.repo !== "string") {
-    return c.json({ error: "repo must be an owner/name string." }, 400);
-  }
-  if (body.teamId !== undefined && typeof body.teamId !== "string") {
-    return c.json({ error: "teamId must be a Linear team id string." }, 400);
-  }
-
-  const requestedIds = [...new Set(body.findingIds)];
-  const findings = await db
-    .select()
-    .from(securityFindings)
-    .where(
-      and(
-        eq(securityFindings.engagementId, result.engagement.id),
-        inArray(securityFindings.id, requestedIds),
-      ),
-    );
-  if (findings.length !== requestedIds.length) {
-    return c.json(
-      { error: "Every finding in { findingIds } must belong to this engagement." },
-      400,
-    );
-  }
-
-  try {
-    const digest = await fileDigestIssue(buildIssuesDeps(c), {
-      engagement: result.engagement,
-      findings,
-      provider,
-      actor: { userId: user.id, orgId: user.orgId },
-      repo: typeof body.repo === "string" ? body.repo : undefined,
-      teamId: typeof body.teamId === "string" ? body.teamId : undefined,
-    });
-    const response: SecurityDigestIssueResponse = { url: digest.url };
-    return c.json(response);
-  } catch (err) {
-    return issueError(c, err);
-  }
 });

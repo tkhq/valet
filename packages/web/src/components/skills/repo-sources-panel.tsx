@@ -41,7 +41,7 @@
  */
 import { useState, type FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
-import { Button, Input, Spinner, cardClass } from "~/components/primitives";
+import { Button, Input, Spinner } from "~/components/primitives";
 import { Pager } from "~/components/pager";
 import { relativeTime } from "~/lib/relative-time";
 import { errorText } from "~/lib/error-text";
@@ -57,7 +57,6 @@ import {
   type SkillSourceSummary,
 } from "~/api/skill-sources";
 import { ScopeBadge, scopeForOwnerType } from "./scope-badge";
-import { cn } from "~/lib/cn";
 
 /** The one owner a panel pins its listing to. */
 export interface SourcesOwner {
@@ -144,7 +143,7 @@ export function RepoSourcesPanel({
   }
 
   return (
-    <section className={cn(cardClass)}>
+    <section className="rounded-2xl bg-ink-wash">
       <div className="px-4 py-3">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-sm font-medium text-ink">Repositories</h2>

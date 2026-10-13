@@ -2,15 +2,17 @@ import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
 import type { AgentContext, AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
-import { isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
+import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
 // utils and is only re-exported from the package root. Provider fallback
 // adds billing/quota and network failures to this transient taxonomy.
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
+import { NativeImageBridge, NATIVE_IMAGE_RESULT_TOOL, NATIVE_IMAGE_PLUGIN_ACTION, NATIVE_IMAGE_EDIT_ACTION, NATIVE_IMAGE_TOOL_PARAMS } from "./native-images.js";
+import { recordHostedActionInvocation, resolveUngatedAction, type HostedActionGrant } from "./plugin-catalog.js";
 import { bundledModel } from "./model-catalog.js";
-import { appendRuntimeModelContext } from "./model-context.js";
+import { appendRuntimeModelContext, threadStartedSection } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, ImageContent, JsonObject, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
@@ -80,6 +82,7 @@ import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
   applyPrune,
+  ELIDED_TOOL_OUTPUT,
   estimateContextTokens,
   estimateLiveContextTokens,
   estimateTokens,
@@ -138,6 +141,7 @@ import type {
   ToolResult,
   WriteFence,
 } from "./types.js";
+import { THREAD_USER_TIMEZONE_KEY } from "./types.js";
 
 /** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
 const MAX_MERGE_DELEGATION_DEPTH = 5;
@@ -577,6 +581,9 @@ export class Thread {
    */
   private turnApiKey?: string;
   private readonly threadCreatedAt: number;
+  /** Creation-time user timezone from persisted thread state (TKAI-584). */
+  private readonly threadUserTimezone: string | undefined;
+  private readonly threadMetadata: Record<string, unknown> | undefined;
   /** Durable leaf used to link each new entry into the active transcript path. */
   private activeLeafEntryId: string | undefined;
 
@@ -597,6 +604,9 @@ export class Thread {
     this.reasoningDisabled = data.reasoning === THREAD_REASONING_DISABLED;
     this.paused = data.paused ?? false;
     this.threadCreatedAt = data.createdAt || Date.now();
+    this.threadMetadata = data.metadata;
+    const persistedTimezone = data.metadata?.[THREAD_USER_TIMEZONE_KEY];
+    this.threadUserTimezone = typeof persistedTimezone === "string" ? persistedTimezone : undefined;
     this.activeLeafEntryId = data.activeLeafEntryId;
     this.lastRequestModel = session.options.model;
     this.agent = this.buildAgent();
@@ -2167,6 +2177,7 @@ export class Thread {
       model: this.modelOverride,
       reasoning: this.reasoningDisabled ? THREAD_REASONING_DISABLED : this.reasoningOverride,
       summary: undefined,
+      metadata: this.threadMetadata,
       createdAt: this.threadCreatedAt,
       updatedAt: Date.now(),
     };
@@ -3795,6 +3806,8 @@ export class Thread {
     this.aborted = false;
     this.credentialError = undefined;
     this.turnAgentError = undefined;
+    this.nativeImages.beginTurn();
+    this.nativeImageGrant = undefined;
     // Per-turn: the next turn may hold a transcript compaction can help.
     this.turnCompactionBlocked = false;
     this.currentAssistantMessageId = undefined;
@@ -4220,6 +4233,8 @@ export class Thread {
     let fallbackExhausted = false;
 
     for (;;) {
+      // Guard only the failed request, not later requests after persisted receipts.
+      if (this.nativeImages.savedInRequest) return;
       const last = this.agent.state.messages[this.agent.state.messages.length - 1];
       if (!last || last.role !== "assistant" || last.stopReason !== "error") return;
       const error = last.errorMessage ?? "";
@@ -4921,7 +4936,7 @@ export class Thread {
     for (const m of this.agent.state.messages) {
       if (m.role !== "toolResult") continue;
       if (!elidedCallIds.has(m.toolCallId)) continue;
-      m.content = [{ type: "text", text: "[output elided to save context]" }];
+      m.content = [{ type: "text", text: ELIDED_TOOL_OUTPUT }];
     }
   }
 
@@ -4941,6 +4956,94 @@ export class Thread {
           ? "role model"
           : this.runningItem?.model !== undefined ? "submission model" : undefined,
     });
+  }
+
+  private readonly nativeImages = new NativeImageBridge();
+  /** The turn's grant for hosted generation; each saved image is audited against it. */
+  private nativeImageGrant: HostedActionGrant | undefined;
+
+  /**
+   * Native generation spends the chat provider's key, so it is offered only
+   * when the plugin actions it replaces would run now without a gate: the
+   * OpenAI plugin is registered, its service is available, and policy
+   * resolves to allow for the hosted tool's parameters. The hosted tool both
+   * generates and edits images in context, so generation and editing must
+   * both be allowed. A deny or approval policy keeps the plugin actions
+   * visible instead, and `invokeAction` applies and audits them as usual.
+   */
+  private async nativeImageGenerationPermitted(signal: AbortSignal | undefined): Promise<boolean> {
+    if (this.runningItem?.author?.externalSender) return false;
+    const catalog = this.session.options.pluginCatalog;
+    if (!catalog) return false;
+    const ctx = this.buildToolContext({
+      signal: signal ?? new AbortController().signal,
+      toolCallId: "native-image-policy",
+      toolName: NATIVE_IMAGE_RESULT_TOOL,
+      toolArgs: {},
+    });
+    const [generate, edit] = await Promise.all([
+      resolveUngatedAction(catalog, NATIVE_IMAGE_PLUGIN_ACTION, ctx, { ...NATIVE_IMAGE_TOOL_PARAMS }),
+      resolveUngatedAction(catalog, NATIVE_IMAGE_EDIT_ACTION, ctx, { ...NATIVE_IMAGE_TOOL_PARAMS }),
+    ]);
+    this.nativeImageGrant = generate && edit ? generate : undefined;
+    return this.nativeImageGrant !== undefined;
+  }
+
+  /** The assistant entry a native image checkpoint appended before message_end. Its parentId is the DAG link to keep. */
+  private checkpointEntry: MessageEntry | undefined;
+
+  /**
+   * Persist a saved native image before the stream ends. The entry carries the
+   * receipt tool call with its path, so a crash before the terminal event
+   * resumes this turn with the saved original in context instead of paying
+   * for the image again. message_end replaces the entry with the full message.
+   */
+  private async checkpointNativeImage(receipt: { path: string; image_id: string; callId: string }): Promise<void> {
+    const messageId = this.currentAssistantMessageId;
+    if (!messageId) return;
+    const part: MessagePart = {
+      type: "tool_call",
+      callId: receipt.callId,
+      toolName: NATIVE_IMAGE_RESULT_TOOL,
+      status: "running",
+      args: { path: receipt.path, image_id: receipt.image_id },
+    };
+    this.currentToolCalls.set(receipt.callId, part);
+    this.currentAssistantParts.push(part);
+    const entry: MessageEntry = {
+      id: messageId,
+      sessionId: this.session.id,
+      threadId: this.id,
+      parentId: null,
+      type: "message",
+      role: "assistant",
+      content: "",
+      parts: [...this.currentAssistantParts],
+      model: this.agent.state.model.id,
+      queueItemId: this.runningItem?.id,
+      createdAt: Date.now(),
+    };
+    if (this.checkpointEntry?.id === messageId) {
+      entry.parentId = this.checkpointEntry.parentId;
+      await this.fencedWrite(() => this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence));
+    } else {
+      // appendEntry assigns the parent and advances the leaf; later replacements must keep that parent.
+      await this.fencedWrite(() => this.appendEntry(entry, this.fence));
+    }
+    this.checkpointEntry = entry;
+  }
+
+  /** Hosted spend appears in the action audit like a plugin invocation would. */
+  private recordNativeImage(receipt: { path: string; image_id: string }): void {
+    const grant = this.nativeImageGrant;
+    if (!grant) return;
+    const ctx = this.buildToolContext({
+      signal: new AbortController().signal,
+      toolCallId: "native-image-audit",
+      toolName: NATIVE_IMAGE_RESULT_TOOL,
+      toolArgs: { ...receipt },
+    });
+    recordHostedActionInvocation(ctx, grant, { ...receipt }, `Generated an image with ${NATIVE_IMAGE_TOOL_PARAMS.model} through the session model`);
   }
 
   private buildAgent(): Agent {
@@ -4987,7 +5090,7 @@ export class Thread {
                 : message,
             ),
         };
-        return streamSimple(model, transcript, {
+        return this.nativeImages.stream(model, transcript, {
           ...options,
           maxRetries: options?.maxRetries ?? TURN_STREAM_MAX_RETRIES,
           maxRetryDelayMs: options?.maxRetryDelayMs ?? TURN_STREAM_MAX_RETRY_DELAY_MS,
@@ -5017,6 +5120,14 @@ export class Thread {
             this.reasoningDisabled ? undefined : this.session.options.sampling?.reasoning,
           ),
           samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
+        }, this.session.sandbox, {
+          permitted: () => this.nativeImageGenerationPermitted(options?.signal),
+          // Never start or wait for a sandbox on a text turn (orchestrators are sandbox-less by default).
+          sandboxReady: () => this.session.attachment.state === "ready",
+          saved: async (receipt) => {
+            await this.checkpointNativeImage(receipt);
+            this.recordNativeImage({ path: receipt.path, image_id: receipt.image_id });
+          },
         });
       },
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
@@ -5064,7 +5175,11 @@ export class Thread {
    */
   private buildBaseSystemPrompt(): string {
     const threadContext = this.session.options.threadSystemContext?.({ id: this.id, key: this.key });
-    const base = [this.session.options.systemPrompt, threadContext].filter(Boolean).join("\n\n");
+    // TKAI-584: fixed at thread creation (persisted `createdAt`), so the text
+    // is byte-identical on every call and across restarts. It sits in the
+    // stable prefix; a per-call clock would break the prompt cache.
+    const threadStarted = threadStartedSection(this.threadCreatedAt, this.threadUserTimezone);
+    const base = [this.session.options.systemPrompt, threadContext, threadStarted].filter(Boolean).join("\n\n");
     const fragments = this.session.options.systemContext ?? [];
     if (fragments.length === 0) return base;
     const sorted = [...fragments].sort((a, b) => {
@@ -5078,7 +5193,7 @@ export class Thread {
   }
 
   private buildTools(): AgentTool[] {
-    const all: ToolDef[] = [...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseExternalSender);
+    const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseExternalSender);
     return all.map((def) =>
       toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
         this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
@@ -5105,6 +5220,8 @@ export class Thread {
     return {
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
+      // Only while the hosted tool was actually offered: a replayed approval after a restart must reach the plugin action.
+      nativeImageGeneration: this.nativeImages.offered,
       userId: actorId,
       ...(this.runningItem?.author && !this.runningItem.author.externalSender &&
         runningContent !== undefined && !isSignalContent(runningContent) &&
@@ -5299,6 +5416,8 @@ export class Thread {
             });
           }
         } else if (ev.type === "toolcall_end") {
+          // A native image receipt was checkpointed when its file was saved; keep that part.
+          if (this.currentToolCalls.has(ev.toolCall.id)) break;
           const part: MessagePart = {
             type: "tool_call",
             callId: ev.toolCall.id,
@@ -5336,7 +5455,16 @@ export class Thread {
           // Compose parts: leading text + tool calls (already tracked)
           const parts: MessagePart[] = [];
           if (text) parts.push({ type: "text", text });
-          for (const p of this.currentAssistantParts) parts.push(p);
+          for (const p of this.currentAssistantParts) {
+            // A call the stream removed from the final message (a truncated call after a
+            // saved image) never runs. Settle its part, or it stays "running" forever.
+            if (p.type === "tool_call" && p.status === "running"
+              && !event.message.content.some((block) => block.type === "toolCall" && block.id === p.callId)) {
+              p.status = "error";
+              p.error = "The response ended before this call completed. It did not run.";
+            }
+            parts.push(p);
+          }
 
           // "length" maps to end_turn: a length-terminated turn still ended
           // with usable output (Task 6 resolves result text from the last
@@ -5363,9 +5491,19 @@ export class Thread {
             stopReason,
             createdAt: Date.now(),
           };
-          await this.fencedWrite(() =>
-            this.appendEntry(entry, this.fence),
-          );
+          if (this.checkpointEntry?.id === entry.id) {
+            // The native image checkpoint already appended this entry. Replace it with the
+            // full message, keeping the DAG parent appendEntry assigned to the checkpoint.
+            entry.parentId = this.checkpointEntry.parentId;
+            await this.fencedWrite(() =>
+              this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
+            );
+          } else {
+            await this.fencedWrite(() =>
+              this.appendEntry(entry, this.fence),
+            );
+          }
+          this.checkpointEntry = undefined;
           // Hold a reference so tool_execution_end can re-persist as each
           // tool completes (`parts` is shared by reference; mutating a
           // tool_call's status flows through to this entry's parts array).
@@ -6400,7 +6538,7 @@ export function entriesToAgentMessages(
               text: isError
                 ? p.error ?? "tool call failed"
                 : p.elided
-                  ? "[output elided to save context]"
+                  ? ELIDED_TOOL_OUTPUT
                   : toolResultText(p.result),
             },
             ...(!isError && !p.elided ? toolResultImages(p.result) : []),

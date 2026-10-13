@@ -1,13 +1,14 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Navigate, createFileRoute } from "@tanstack/react-router";
 import { useMe, usePatchMe, useOrg } from "~/api/settings";
 import { FieldRow } from "~/components/settings/field-row";
 import { ModelCombobox } from "~/components/settings/model-combobox";
 import { ReasoningSelect } from "~/components/settings/reasoning-select";
 import { Section } from "~/components/settings/section";
 
-/** Personal defaults for new threads. */
+/** Personal defaults for new threads. Rendered on Preferences; the old path
+ * redirects there. */
 export const Route = createFileRoute("/settings/threads")({
-  component: ThreadDefaultsPage,
+  component: () => <Navigate to="/settings/preferences" replace />,
 });
 
 export function ThreadDefaultsPage() {

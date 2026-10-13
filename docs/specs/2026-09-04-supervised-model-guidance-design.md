@@ -18,6 +18,8 @@ Agents also lack an automatic statement of the model that executes each call.
 ## Runtime context
 
 The engine appends a compact `Runtime model` section to the outbound system prompt for each agent model call.
+
+The stable prompt prefix carries a fixed `Thread started` block (TKAI-584). It shows the persisted thread creation time as UTC to the minute, the weekday, and the user local time. The thread stamps the user timezone into its metadata when it is created, with `createdAt`, and never rewrites it. A later timezone change leaves existing threads alone, and new threads use the new value. If the timezone is not known, the block says so. The block never changes between calls or across restarts, so it does not break the prompt cache. It says the time is the thread start, not now, and tells the agent to run `date -u` when it has a shell tool. The memory snapshot header gives the date the snapshot was built, which is a different date. The host passes `userTimezone` and `resolveUserTimezone` from `users.timezone` for personal sessions. The web client reports the browser timezone once per account (`users.timezone_report_done`), so a clear in Settings stays cleared.
 It reports the assigned model selection, active selection, actual provider and model ID, and any temporary override scope.
 The assigned selection comes from the submission model, thread pin, or session default, in that order.
 The engine captures it when the turn resolves its model. A later user pin change affects the next turn.

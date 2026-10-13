@@ -1,11 +1,10 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { CredentialSummary, OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 import { useCredentials, useDisconnectCredential, useRevokeDelegation } from "~/api/integrations";
-import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow, cardClass } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { CardHeading } from "./integration-card";
 import { displayName } from "./display-name";
-import { cn } from "~/lib/cn";
 
 /**
  * The verb for a removal control. A share is a member's own account, so
@@ -46,11 +45,14 @@ export function TeamCredentials({
   orgMembers,
   canMutate,
   cards = false,
+  children,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
   cards?: boolean;
+  /** Connected team rows that own their controls, such as 1Password, listed first. */
+  children?: ReactNode;
 }) {
   const credsQ = useCredentials("team", { teamId: team.id });
   const disconnect = useDisconnectCredential();
@@ -79,23 +81,23 @@ export function TeamCredentials({
 
   return (
     <div>
-      {cards && <h4 className="text-xs font-medium uppercase tracking-wide text-muted">Team connections</h4>}
       {credsQ.isLoading && <LoadingRow label="Loading credentials…" className="py-2 text-xs" />}
       {credsQ.error && <ErrorRow>Could not load credentials. Reload the page.</ErrorRow>}
-      {rows.length > 0 && (
+      {!cards && rows.length > 0 && (
         <p className="mt-1 text-xs text-muted">
           Team actions use the acting member's own account first, then the team connection. Using another member's account asks them first.
         </p>
       )}
-      {!credsQ.isLoading && !credsQ.error && rows.length === 0 && (
+      {!credsQ.isLoading && !credsQ.error && rows.length === 0 && !children && (
         <EmptyRow>
           No connections added to this team yet. Connect an account for this team.
         </EmptyRow>
       )}
-      <ul className={cards ? "grid gap-3 pt-4 sm:grid-cols-2" : "mt-1 space-y-3"}>
+      <ul aria-label="Team connections" className={cards ? "divide-y divide-line" : "mt-1 space-y-3"}>
+        {children}
         {byService(rows).map((group) => (
-          <li key={group.service}>
-            <div className={cards ? cn(cardClass, "flex h-full flex-col p-5") : "py-2"}>
+          <li key={group.service} className={cards ? "py-3.5 first:pt-0.5 last:pb-0.5" : undefined}>
+            <div className={cards ? undefined : "py-2"}>
               <CardHeading
                 title={group.service === "linear" ? "Linear MCP" : displayName(group.service)}
                 slug={group.service}

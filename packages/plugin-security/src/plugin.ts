@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadRoleFromMarkdown, loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
+import { securityHttpRoutes } from "./http.js";
 import { BUNDLED_PERSONAS } from "./lib/personas.js";
 
 // Ships the security engagement content: the runner skill (the cell loop a
@@ -27,6 +28,9 @@ const plugin: ValetPlugin = {
   // One RoleSpec per bundled persona. The host attaches ONLY the role whose
   // name matches a claimed cell's persona (see engine/host.ts).
   roles: BUNDLED_PERSONAS.map((p) => loadRoleFromMarkdown(p.roleMarkdown, "plugin", p.id)),
+  // Issue filing. The other Security routes stay in the API until the route
+  // mount can authorize internal tool callers and team API keys.
+  httpRoutes: securityHttpRoutes,
 };
 
 export default plugin;
