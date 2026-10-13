@@ -126,7 +126,7 @@ it("stores an orphan snapshot and uses SHA-pinned blob URLs", async () => {
   expect(calls.find((c) => c.path.endsWith("/git/trees"))?.body).toEqual({ tree: [expect.objectContaining({ mode: "100644", type: "blob", sha: "blob-sha" })] });
   expect(calls.find((c) => c.path.endsWith("/git/commits"))?.body).toMatchObject({ parents: [], tree: "tree-sha", message: "Attach images for PR #42\n\nValet-Assets: pr-42" });
   expect(calls.find((c) => c.path.endsWith("/git/refs"))?.body).toEqual({ ref: "refs/valet/pr-assets/42", sha: "commit-1" });
-  expect(calls.at(-1)?.body).toMatchObject({ body: expect.stringContaining("Before\n\n![view &#93;") });
+  expect(calls.at(-1)?.body).toMatchObject({ body: expect.stringMatching(/^!\[view &#93;[\s\S]*\n\nBefore$/) });
   expect(calls.filter((c) => c.path.endsWith("/comments"))).toHaveLength(1);
   expect(calls.every((c) => c.auth === "token installation-token")).toBe(true);
 });
@@ -175,15 +175,19 @@ it.each([403, 404])("names the fix when GitHub denies PR access (%s)", async (st
 });
 
 it("exposes recovery Markdown through the actual engine call_tool failure text", async () => {
-  await fixture({ commentStatus: 422 });
+  const calls = await fixture({ commentStatus: 422 });
+  const originalBody = "Deployment warning: do not roll back.\n```text\nlog";
   const tool = pluginCatalogTools({ plugins: [githubPlugin] }).find((t) => t.name === "call_tool");
   if (!tool) throw new Error("Missing call_tool");
   const ctx = context();
   ctx.policyResolver = { resolve: async () => ({ mode: "allow", provenance: { source: "risk_default", baseMode: "allow" } }) };
-  const result = await tool.execute({ tool_id: "github.create_comment", params: { ...args, images: [{ path: "image" }] }, summary: "Attach images" }, ctx);
+  const result = await tool.execute({ tool_id: "github.create_comment", params: { ...args, body: originalBody, images: [{ path: "image" }] }, summary: "Attach images" }, ctx);
   expect(result.ok).toBe(false);
   expect(result.text).toContain("Shorten the comment");
   expect(result.text).toContain("omit images");
+  const recovery = result.text.split("omit images to avoid another upload:\n\n")[1];
+  expect(calls.at(-1)?.body).toEqual({ body: recovery });
+  expect(recovery?.endsWith(originalBody)).toBe(true);
   expect(result.text).toMatch(/!\[.*\]\(https:\/\/github.com\/acme\/widgets\/blob\/commit-1\/pr-42\/[a-f0-9]{64}\.png\?raw=true\)/);
 });
 
@@ -292,4 +296,14 @@ it("bounds even an unabortable queued task and aborts its signal", async () => {
   const error = await pending;
   expect(error).toBeInstanceOf(Error);
   expect(signal?.aborted).toBe(true);
+});
+
+
+it.each(["```text\nlog", "~~~text\nlog", "<!-- hidden", "<details>\n<summary>Hidden</summary>\nlog"])("renders images before an open body container: %s", (body) => {
+  const markdown = imageCommentBody(body, [{ path: "one", caption: "Visible caption" }, { path: "two" }], ["https://example.com/one.png", "https://example.com/two.png"]);
+  expect(markdown.endsWith(`\n\n${body}`)).toBe(true);
+  const html = marked.parse(markdown, { gfm: true, async: false });
+  expect(html.match(/<img /g)).toHaveLength(2);
+  const container = html.search(/<(?:pre|details)\b|<!--/);
+  if (container >= 0) expect(html.indexOf('<img src="https://example.com/two.png"')).toBeLessThan(container);
 });

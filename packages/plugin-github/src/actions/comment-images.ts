@@ -29,12 +29,12 @@ function inertAlt(text: string): string {
 }
 
 export function imageCommentBody(body: string | undefined, images: CommentImage[], urls: string[]): string {
-  return [body, ...images.map((image, i) => {
+  return [...images.map((image, i) => {
     const alt = inertAlt(image.alt ?? `Image ${i + 1}`);
     // HTML code content cannot open Markdown blocks, mentions, or autolinks.
     const caption = image.caption ? `\n\n<p><code>${image.caption.replace(/[\r\n]+/g, " ").replace(/[&<>]/g, (char) => `&#${char.codePointAt(0)};`)}</code></p>` : "";
     return `![${alt}](${urls[i]})${caption}`;
-  })].filter(Boolean).join("\n\n");
+  }), body].filter(Boolean).join("\n\n");
 }
 
 /** Race the complete image operation, including Octokit's queued writes, against one deadline. */

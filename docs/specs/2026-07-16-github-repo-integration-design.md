@@ -126,7 +126,8 @@ This section restores the legacy stack's personal-installation behavior. Its one
 
 `github.create_comment` accepts optional `images: [{ path, alt?, caption? }]` for any supported sandbox images, without a capture step.
 Reads use the sandbox port (`sandbox.stat` and `sandbox.readBinary`), as `slack.reply_file_to_origin` does.
-Images follow the optional `body`. Calls without `images` keep the existing issue-comment endpoint, request, and result.
+Images precede the optional `body`, so open Markdown or HTML containers cannot swallow them, without parsing or changing the body.
+Calls without `images` keep the existing issue-comment endpoint, request, and result.
 Image calls require a PR number in `issueNumber`. Plain issues accept body-only comments. Standalone workflow actions need a session sandbox for images.
 
 The action validates the complete batch before a GitHub write:
@@ -157,7 +158,7 @@ Ruleset failures keep GitHub's message and name the repository-admin fix, separa
 
 One new comment embeds commit-pinned `github.com/<owner>/<repo>/blob/<SHA>/<path>?raw=true` URLs.
 Normal comment fields remain, with `imageUrls`, `assetsRef`, `assetsCommit`, and readable `activityText` added.
-If commenting fails after storage, the error includes recovery Markdown. Engine and workflow failures expose this text, not failure data.
+If commenting fails after storage, the error includes recovery Markdown with all images and the original body. Engine and workflow failures expose this text, not failure data.
 Retry with that Markdown in `body`, without `images`. Check the PR before retrying a lost response because a comment might already exist.
 
 Public image URLs are public. Private images require a logged-in GitHub browser with repository access.
@@ -200,6 +201,9 @@ Both `POST /repos/tkhq/valet/git/commits` calls returned HTTP 201.
 GitHub rendered 13 images and 13 code captions, with identical decoded text, no injected blocks, mention links, or URL autolinks.
 Samples included fences, indentation, lists, headings, quotes, strikethrough, `@tkhq/team`, bare URLs, HTML tags, and entities.
 The local `marked` tests are a GFM proxy, not GitHub's sanitizer or mention parser.
+A later live `POST /markdown` probe used the actual `imageCommentBody` output for four open body containers.
+Unclosed backtick and tilde fences, an HTML comment, and a details block each returned HTTP 200 with both images and the caption visible.
+The rendered images preceded the body and were outside code and details containers. GitHub's Camo URLs were checked through `data-canonical-src`.
 Default clone/fetch refspecs fetch `refs/heads/*`, not `refs/valet/*`. Custom refs avoid branch lists, compare banners, and ordinary branch CI discovery.
 Mirror clones and explicit custom-ref fetches still fetch binaries. Automation that watches all refs may still react.
 

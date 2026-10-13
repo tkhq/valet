@@ -102,7 +102,7 @@ call_tool github:github.create_comment params={
 } summary="Post PR comment with images"
 ```
 
-`body` is optional with images. Images appear after the body.
+`body` is optional with images. Images appear before the body so open Markdown or HTML containers cannot hide them.
 Supply 1 to 10 PNG, JPEG, GIF, or WebP files, up to 10 MiB each and 20 MiB total.
 The result includes normal comment fields plus `imageUrls`, `assetsRef`, `assetsCommit`, and readable `activityText`.
 Images stay on `refs/valet/pr-assets/<PR number>`, outside the PR diff and default branch fetches.
