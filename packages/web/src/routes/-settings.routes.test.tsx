@@ -251,7 +251,7 @@ describe("Organization tabs", () => {
     await mount("/settings/organization/linear");
     const tabs = await within(content()).findByRole("navigation", { name: "Apps and plugins" });
     expect(within(tabs).getAllByRole("link").map((link) => link.textContent)).toEqual([
-      "Plugins", "GitHub", "Slack", "Linear", "1Password", "Library",
+      "Plugins", "MCP servers", "GitHub", "Slack", "Linear", "1Password", "Library",
     ]);
     expect(within(tabs).getByRole("link", { name: "Linear" }).getAttribute("aria-current")).toBe("page");
     expect(within(tabs).getByRole("link", { name: "Slack" }).getAttribute("aria-current")).toBeNull();

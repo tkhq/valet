@@ -37,6 +37,7 @@ import type {
   OrgDirectoryResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
+  OrgMcpServersResponse,
   OrgResponse,
   OrgSettingsResponse,
   PatchLlmProviderRequest,
@@ -93,6 +94,7 @@ export const qkSettings = {
   orgMembers: () => ["settings", "org", "members"] as const,
   orgDirectory: () => ["settings", "org", "directory"] as const,
   orgPlugins: () => ["settings", "org", "plugins"] as const,
+  orgMcpServers: () => ["settings", "org", "mcp-servers"] as const,
   models: () => ["settings", "models"] as const,
   llmProviders: () => ["settings", "llmProviders"] as const,
   openrouterRegistry: () => ["settings", "openrouterRegistry"] as const,
@@ -168,6 +170,15 @@ export function useOrgPlugins(opts?: Partial<UseQueryOptions<OrgPluginsResponse>
   return useQuery<OrgPluginsResponse>({
     queryKey: qkSettings.orgPlugins(),
     queryFn: () => api.getOrgPlugins(),
+    staleTime: 60_000,
+    ...opts,
+  });
+}
+
+export function useOrgMcpServers(opts?: Partial<UseQueryOptions<OrgMcpServersResponse>>) {
+  return useQuery<OrgMcpServersResponse>({
+    queryKey: qkSettings.orgMcpServers(),
+    queryFn: () => api.getOrgMcpServers(),
     staleTime: 60_000,
     ...opts,
   });

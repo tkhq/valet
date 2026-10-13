@@ -154,6 +154,7 @@ import type {
   OrgDirectoryResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
+  OrgMcpServersResponse,
   OrgResponse,
   PatchLlmProviderRequest,
   PatchLlmProviderResponse,
@@ -785,6 +786,9 @@ export const api = {
   // org plugin entitlements (plugin-entitlements design). `getOrgPlugins` is
   // member-readable; `patchOrgPlugin` is org-admin-only (403 otherwise).
   getOrgPlugins: () => request<OrgPluginsResponse>("GET", "/org/plugins"),
+  // Config-declared MCP servers (instance config `mcpServers`). Member-readable,
+  // read-only: the operator edits the config file.
+  getOrgMcpServers: () => request<OrgMcpServersResponse>("GET", "/org/mcp-servers"),
   patchOrgPlugin: (name: string, body: PatchOrgPluginRequest) =>
     request<PatchOrgPluginResponse>("PATCH", `/org/plugins/${encodeURIComponent(name)}`, body),
   getMemoryDoc: (path: string, owner?: OwnerFilter) =>

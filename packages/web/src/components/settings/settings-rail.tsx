@@ -75,6 +75,7 @@ export const ORG_SECTIONS: ReadonlyArray<{ label: string; icon: LucideIcon; rout
     icon: Blocks,
     routes: [
       { to: "/settings/organization/plugins", label: "Plugins" },
+      { to: "/settings/organization/mcp-servers", label: "MCP servers" },
       { to: "/settings/organization/github", label: "GitHub" },
       { to: "/settings/organization/slack", label: "Slack" },
       { to: "/settings/organization/linear", label: "Linear" },
