@@ -8,11 +8,11 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq } from "drizzle-orm";
+import { eq, like } from "drizzle-orm";
 import { loadInstanceConfig } from "../config/instance-config.js";
 import { reconcileInstanceConfig } from "../services/config-reconcile.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { orgMembers, teamMembers, teams, users } from "../schema/index.js";
+import { contentSources, orgMembers, teamMembers, teams, users } from "../schema/index.js";
 import { setApprovedModels } from "../services/approved-models.js";
 import { setOrgReasoningSettings } from "../services/reasoning.js";
 import { resetThreadAccessCache } from "../services/thread-access.js";
@@ -338,7 +338,9 @@ describe("PATCH /api/teams/:id", () => {
       expect(res.status).toBe(409);
       const body = (await res.json()) as { error: string; code: string };
       expect(body.code).toBe("team_rename_config_referenced");
-      expect(body.error).toMatch(/skillSources/);
+      expect(body.error).toMatch(/Comment out the whole skillSources key/);
+      expect(body.error).toMatch(/Restore skillSources with the new team name/);
+      expect(body.error).not.toMatch(/change the team field/i);
       const [row] = await api.providers.db.select().from(teams).where(eq(teams.id, "team_1"));
       expect(row?.name).toBe("Platform");
 
@@ -361,6 +363,36 @@ describe("PATCH /api/teams/:id", () => {
       const cfg = loadInstanceConfig(process.env);
       if (!cfg) throw new Error("expected the instance config to load");
       await expect(reconcileInstanceConfig({ db: api.providers.db }, cfg)).resolves.toBeUndefined();
+    });
+
+    it("documented procedure keeps the synced source; a one-step name replacement fails boot", async () => {
+      api = await bootTestApi();
+      await seedTeam(api);
+      const db = api.providers.db;
+      const declare = (team: string) => ({ version: 1 as const, skillSources: [{ repo: "owner/skills", team }] });
+      const sourceRows = () => db.select().from(contentSources).where(like(contentSources.id, "skillsrc_cfg_%"));
+
+      await reconcileInstanceConfig({ db }, declare("Platform"));
+      const [before] = await sourceRows();
+      if (!before) throw new Error("expected a config-managed source");
+      expect(before.ownerId).toBe("team_1");
+      await db.update(contentSources).set({ lastSha: "synced-sha" }).where(eq(contentSources.id, before.id));
+
+      // Unsafe: the file names the new team before the rename. Boot fails and writes nothing.
+      await expect(reconcileInstanceConfig({ db }, declare("IDX"))).rejects.toThrow(/does not exist/);
+      expect(await sourceRows()).toHaveLength(1);
+
+      // Step 1: the file has no skillSources key. Reconcile leaves the managed source alone.
+      await reconcileInstanceConfig({ db }, { version: 1 });
+      expect(await sourceRows()).toHaveLength(1);
+      // Step 2: rename. No config names the team now.
+      expect((await patchTeam(api, { name: "IDX" })).status).toBe(200);
+      // Step 3: restore the key with the new name. The id comes from the team id, so the row survives.
+      await reconcileInstanceConfig({ db }, declare("IDX"));
+      const after = await sourceRows();
+      expect(after).toHaveLength(1);
+      expect(after[0]?.id).toBe(before.id);
+      expect(after[0]?.lastSha).toBe("synced-sha");
     });
   });
 });

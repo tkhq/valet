@@ -409,7 +409,13 @@ teamsRouter.patch("/:id", async (c) => {
     // name at every boot. A rename would make the next boot fail.
     if (loadInstanceConfig(process.env)?.skillSources?.some((source) => source.team === team.name)) {
       return c.json({
-        error: `team '${team.name}' is named by skillSources in the instance config file (VALET_CONFIG). Change the team field in that file to the new name, then restart. Rename the team after the restart.`,
+        error:
+          `team '${team.name}' is named by skillSources in the instance config file (VALET_CONFIG). ` +
+          `Do not put the new name in the file first: startup fails until the team has that name. ` +
+          `To rename: 1. Comment out the whole skillSources key in the file, then restart. ` +
+          `Valet then leaves the config-managed sources and their synced skills in place. ` +
+          `2. Rename the team. 3. Restore skillSources with the new team name, then restart. ` +
+          `Do not delete a single entry: the next restart removes that source and its synced skills.`,
         code: "team_rename_config_referenced",
       }, 409);
     }
