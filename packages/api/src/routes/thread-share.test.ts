@@ -4,7 +4,9 @@
  * thread by its link, to watch it or to watch and reply. The thread keeps
  * running as its owner, and nothing else of the owner's workspace opens.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { WebSocket } from "ws";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -210,5 +212,39 @@ describe("thread sharing", () => {
     expect(await until(() => guest.closes.length > 0)).toBe(true);
     expect(guest.closes[0]).toBe(4040);
     expect(guest.frames.some((f) => f.type === "error" && f.code === "after-revoke")).toBe(false);
+  });
+});
+
+describe("a personal runtime a guest wakes", () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it("keeps author-less turns as the owner, and refuses the guest's turn", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "fixture-key");
+    const faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    try {
+      const booted = await bootTestApi({ plugins: [] });
+      api = booted;
+      const { db, engineHost } = booted.providers;
+      // A guest's reply is the first request that reaches the cold runtime.
+      const { session } = await ensureDefaultAssistantSession({ db, engineHost }, { type: "user", id: "local-user" }, { actorUserId: MEMBER, orgId: "local-org" });
+      const bash = (id: string) => [
+        fauxAssistantMessage([fauxToolCall("bash", { command: "echo workspace-tool-ran" }, { id })], { stopReason: "toolUse" }),
+        fauxAssistantMessage("done"),
+      ];
+      const transcript = async () => JSON.stringify(await session.readEntries("web:default"));
+
+      // An author-less turn, such as a signal or a schedule, acts for the owner.
+      faux.setResponses(bash("owner-bash"));
+      await session.prompt("run the scheduled check");
+      // The bash output, not the command: JSON escapes its trailing newline.
+      await vi.waitFor(async () => expect(await transcript()).toMatch(/workspace-tool-ran\\n|\[not_available\]/));
+      expect(await transcript()).not.toContain("[not_available]");
+
+      faux.setResponses(bash("guest-bash"));
+      await session.prompt("run it for me", { author: { id: MEMBER, name: "Member" } });
+      await vi.waitFor(async () => expect(await transcript()).toContain("[not_available] bash"));
+    } finally {
+      faux.unregister();
+    }
   });
 });
