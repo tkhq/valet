@@ -6,14 +6,14 @@
  * single-tier `PatchModelTiersRequest`.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ModelInfo, WireTierMap } from "@valet/api/wire";
+import type { GetModelTiersResponse, ModelInfo } from "@valet/api/wire";
 
 const patchMutate = vi.fn();
 
 let modelsData: { models: ModelInfo[] } = { models: [] };
-let tiersData: WireTierMap = { xs: [], s: [], m: [], l: [], xl: [] };
+let tiersData: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
 
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
@@ -128,5 +128,25 @@ describe("ModelTiersSection", () => {
     const typeahead = searchInputs[0].closest(".space-y-1") as HTMLElement;
     expect(within(typeahead).queryByText(/Opus 4\.7/)).toBeNull();
     expect(within(typeahead).getByText(/Sonnet 4\.5/)).toBeTruthy();
+  });
+
+  describe("default tier for new threads", () => {
+    it("shows Small and its model when the org has no default tier", () => {
+      render(<ModelTiersSection />);
+      expect(screen.getByRole("button", { name: "Default tier for new threads: Small · Sonnet 4.5" })).toBeTruthy();
+    });
+
+    it("shows the stored default tier", () => {
+      tiersData = { ...tiersData, defaultTier: "xs" };
+      render(<ModelTiersSection />);
+      expect(screen.getByRole("button", { name: "Default tier for new threads: Extra Small · Haiku 4.5" })).toBeTruthy();
+    });
+
+    it("picking a tier patches only defaultTier", () => {
+      render(<ModelTiersSection />);
+      fireEvent.keyDown(screen.getByRole("button", { name: /^Default tier for new threads/ }), { key: "Enter" });
+      fireEvent.click(screen.getByText("Extra Small · Haiku 4.5"));
+      expect(patchMutate).toHaveBeenCalledWith({ defaultTier: "xs" }, expect.anything());
+    });
   });
 });

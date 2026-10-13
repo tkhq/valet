@@ -1,11 +1,12 @@
 import { ArrowDown, ArrowUp, X } from "lucide-react";
 import { useState } from "react";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, SelectMenu, Spinner } from "~/components/primitives";
+import { FieldRow } from "~/components/settings/field-row";
 import { Section } from "~/components/settings/section";
 import { AddModelTypeahead } from "~/components/settings/add-model-typeahead";
 import { useModelTiers, useModels, usePatchModelTiers } from "~/api/settings";
 import { apiErrorMessage } from "~/api/policies";
-import { SIZE_TIERS, TIER_LABELS, type SizeTier } from "~/lib/model-tiers";
+import { fallbackTier, SIZE_TIERS, TIER_LABELS, tierSubtitle, type SizeTier } from "~/lib/model-tiers";
 import type { PatchModelTiersRequest } from "@valet/api/wire";
 
 /** One-tier `PatchModelTiersRequest` — a computed `{ [tier]: next }` object
@@ -32,7 +33,8 @@ function tierPatch(tier: SizeTier, next: string[]): PatchModelTiersRequest {
  * engine resolves at run time (`GET`/`PATCH /api/org/model-tiers`, always
  * five tiers). Uses the up/down/remove row pattern and `AddModelTypeahead`
  * per tier; these targets are the org's fallback chain now that org model
- * preferences are gone.
+ * preferences are gone. A select above the tiers sets the org default tier
+ * for new threads that no personal or team default covers.
  */
 export function ModelTiersSection() {
   const modelsQ = useModels();
@@ -51,6 +53,19 @@ export function ModelTiersSection() {
     });
   }
 
+  function saveDefaultTier(tier: SizeTier) {
+    if (tier === fallbackTier(tiers)) return;
+    setSaveError(null);
+    patchTiers.mutate({ defaultTier: tier }, {
+      onError: (err) => setSaveError(apiErrorMessage(err)),
+    });
+  }
+
+  function tierOptionLabel(tier: SizeTier): string {
+    const model = tierSubtitle(tier, tiers, catalog);
+    return model ? `${TIER_LABELS[tier]} · ${model}` : TIER_LABELS[tier];
+  }
+
   return (
     <Section
       title="Model tiers"
@@ -65,6 +80,20 @@ export function ModelTiersSection() {
         <p className="py-4 text-sm text-danger-500">Failed to load model tiers.</p>
       )}
       {saveError && <p className="text-xs text-danger-500">{saveError}</p>}
+
+      {modelsQ.data && tiers && (
+        <FieldRow
+          label="Default tier for new threads"
+          hint="New threads use this tier when no personal or team default applies. Delegated work stays on Small."
+        >
+          <SelectMenu
+            value={fallbackTier(tiers)}
+            options={SIZE_TIERS.map((tier) => ({ value: tier, label: tierOptionLabel(tier) }))}
+            onChange={saveDefaultTier}
+            ariaLabel={`Default tier for new threads: ${tierOptionLabel(fallbackTier(tiers))}`}
+          />
+        </FieldRow>
+      )}
 
       {modelsQ.data && tiers && (
         <div className="divide-y divide-line">

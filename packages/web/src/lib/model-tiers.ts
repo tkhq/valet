@@ -24,6 +24,18 @@ export function isSizeTier(id: string | null | undefined): id is SizeTier {
   return !!id && (SIZE_TIERS as readonly string[]).includes(id);
 }
 
+/** The tier a new thread uses when no personal or team default applies:
+ * the org default tier, or Small when the org has none. */
+export function fallbackTier(tierMap: GetModelTiersResponse | undefined): SizeTier {
+  return tierMap?.defaultTier ?? "s";
+}
+
+/** Clear-state label for a default-model control, such as
+ * "Organization default (Medium)". Only `source` while the tier map loads. */
+export function fallbackLabel(source: string, tierMap: GetModelTiersResponse | undefined): string {
+  return tierMap ? `${source} (${TIER_LABELS[fallbackTier(tierMap)]})` : source;
+}
+
 /** Human label for a tier id, or the id unchanged when it isn't a known tier. */
 export function tierLabel(id: string): string {
   return isSizeTier(id) ? TIER_LABELS[id] : id;

@@ -307,11 +307,13 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     expect(screen.queryByText("custom_1/llama-3")).toBeNull();
   });
 
-  it("plain member with no team override reads 'Organization default' for both model and reasoning", () => {
+  it("plain member with no team override reads the org fallback for model and reasoning", () => {
     callerRole = "member";
     orgRole = "member";
     openTeam();
-    expect(screen.getAllByText("Organization default")).toHaveLength(2);
+    // The model label names the tier unset falls to: Small with no org default tier.
+    expect(screen.getByText("Organization default (Small)")).toBeTruthy();
+    expect(screen.getByText("Organization default")).toBeTruthy();
   });
 
   it("team admin picks a reasoning level → PATCH with the level", () => {
