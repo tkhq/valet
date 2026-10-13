@@ -122,56 +122,54 @@ This section restores the legacy stack's personal-installation behavior. Its one
 - **The webhook forwards events only from installations that serve the org.** A public App lets anybody install it, the App's webhook secret signs every installation's deliveries, and discovery records every installation. So a signature or a row proves nothing. Before the webhook forwards an event to subscriptions, `installationServesOrg` admits the installation on the App owner's account (the `owner.login` from `GET /app`, kept per App id until restart) and a `User` installation linked to a member. The webhook drops every other event and writes it to the drop log. This includes an installation on another GitHub organization, even if a member installed it. Installation events still apply, so discovery stays current. Push and pull request state updates are not gated, because each acts only on the repository that the delivery names.
 - **Token resolution and repo listing are unchanged.** Resolution still matches the repo owner against every installation of the org (decision 2), so a member's personal repository resolves through that member's personal installation. Like the legacy stack, once the App is public any member can use any installation, personal ones included.
 
-
 ## PR comment images (2026-10-13)
 
-`github.create_comment` accepts optional `images: [{ path, alt?, caption? }]`.
-Each path names any supported image file in the sandbox. No capture step is required.
-The action reads files through `sandbox.stat` and `sandbox.readBinary`, as Slack file uploads do.
-It appends image Markdown after `body`. Without `body`, the comment contains only the images and captions.
-Calls without `images` keep the existing issue-comment endpoint, request, and result.
-Image calls require a PR number in `issueNumber`. Regular issues still accept body-only comments.
+`github.create_comment` accepts optional `images: [{ path, alt?, caption? }]` for any supported sandbox images, without a capture step.
+Reads use the sandbox port (`sandbox.stat` and `sandbox.readBinary`), as `slack.reply_file_to_origin` does.
+Images follow the optional `body`. Calls without `images` keep the existing issue-comment endpoint, request, and result.
+Image calls require a PR number in `issueNumber`. Plain issues accept body-only comments. Standalone workflow actions need a session sandbox for images.
 
-The action validates the entire batch before a GitHub write:
+The action validates the complete batch before a GitHub write:
 
 - Supply 1 to 10 files, each between 1 byte and 10 MiB, with at most 20 MiB total.
-- PNG, JPEG, GIF, and WebP signatures are accepted. Extensions do not determine the type.
-- Signature checks do not decode images or certify that all image data is valid.
-- Alt text and captions are plain text, with at most 1,000 characters each.
-- The body, escaped captions, and reserved URL space must fit within 60,000 characters.
+- PNG, JPEG, GIF, and WebP signatures catch mistakes, not exfiltration. Extensions do not determine the type.
+- Checks do not decode images. A valid signature followed by secret data passes. Select only files safe to publish to the target repository.
+- Alt text and captions accept at most 1,000 characters each. Numeric entities protect alt text. Encoded HTML code captions prevent blocks, mentions, and autolinks.
+- Body, encoded captions, and reserved URL space must fit within 60,000 characters.
 
-The action uses supported [blobs](https://docs.github.com/en/rest/git/blobs), [trees](https://docs.github.com/en/rest/git/trees),
-[commits](https://docs.github.com/en/rest/git/commits), and [refs](https://docs.github.com/en/rest/git/refs) APIs to store images.
-It creates an orphan commit on `valet-pr-assets-<PR number>` in the PR's base repository.
-Later batches append commits on that branch. Each tree contains only the current batch.
-Prior batches remain reachable through parent history. Content hashes deduplicate identical files in a batch.
-The action refuses a matching PR head, PR base, default branch, or unrelated existing assets branch.
-It never writes the PR head or base. Images therefore do not enter the PR's own diff.
-Ref updates use `force: false`. Concurrent ref conflicts get at most three attempts.
+The action uses supported Git Data APIs: [blobs](https://docs.github.com/en/rest/git/blobs), [trees](https://docs.github.com/en/rest/git/trees), [commits](https://docs.github.com/en/rest/git/commits), and [refs](https://docs.github.com/en/rest/git/refs).
+It creates an orphan commit at `refs/valet/pr-assets/<PR number>` in the target repository. Later batches append commits there.
+Each tree contains only its batch. Parent history retains prior batches. Content hashes deduplicate identical files within a batch.
+The action requires the exact `Valet-Assets: pr-<number>` trailer line on existing assets commits. Asset commits contain no `Changelog:` trailer.
+The custom ref cannot name a PR head, PR base, or default branch. No images enter the PR's own diff.
+Updates use `force: false`. Requests and delays use the session abort signal.
+Confirmed concurrent ref changes get twelve attempts with jittered exponential backoff capped at five seconds.
+Ruleset failures keep GitHub's message and name the repository-admin fix, separately from contention exhaustion.
 
 One new comment embeds commit-pinned `github.com/<owner>/<repo>/blob/<SHA>/<path>?raw=true` URLs.
-The result retains the normal comment fields and adds `imageUrls`, `assetsBranch`, and `assetsCommit`.
-If the comment fails after storage, failure data retains those fields.
-Retry with the returned URLs in `body`, without `images`, to avoid another upload.
-A lost comment response can still leave a posted comment. Check the PR before retrying.
+Normal comment fields remain, with `imageUrls`, `assetsRef`, and `assetsCommit` added.
+If commenting fails after storage, the error includes recovery Markdown. Engine and workflow failures expose this text, not failure data.
+Retry with that Markdown in `body`, without `images`. Check the PR before retrying a lost response because a comment might already exist.
 
-Public image URLs are public. Private images require repository access in GitHub.
-Same-repository blob URLs use the viewer's GitHub access, unlike anonymous `raw.githubusercontent.com` URLs.
-This private-rendering behavior has [reported evidence](https://github.com/juangadm/pre-post/issues/4), not a live private-repository test in this change.
-Do not put credentials or temporary raw download tokens in comments.
-[Release assets](https://docs.github.com/en/rest/releases/assets) need contents write permission and add release and tag clutter.
-Public release downloads can serve images. Private downloads need authenticated access, so anonymous Markdown fetches are not reliable.
-Deleting a release asset permits direct cleanup, but this storage model was rejected for those rendering and clutter costs.
-External public storage was rejected because it could expose private repository images.
-The undocumented, browser-session attachment endpoint is not used.
+Public image URLs are public. Private images require a logged-in GitHub browser with repository access.
+Email, mobile push, Slack unfurls, and Valet channel views can show broken private images. The tool cannot authenticate external image fetches.
+Same-repository blob URLs have [reported private-rendering evidence](https://github.com/juangadm/pre-post/issues/4), not live private verification here.
+Do not embed credentials or temporary raw download tokens in comments.
+[Release assets](https://docs.github.com/en/rest/releases/assets) need contents write and add release/tag clutter. Deleting assets provides direct cleanup.
+Public release downloads can serve images, but private downloads need authentication. Unreliable private Markdown rendering and clutter caused their rejection.
+External public storage risks exposing private images. The undocumented browser-session attachment endpoint is not used.
 
-The App needs `contents:write`, `pull_requests:read`, and `issues:write` for this path.
-The existing default manifest already includes these permissions or higher levels.
-Repository branch rules can still block storage. Grant access to the assets branch before retrying.
-Token resolution is unchanged. GitHub attributes writes to the resolved user or App bot.
-The v2 action does not add personal co-author trailers or an on-behalf-of suffix.
+The App needs `contents:write`, `pull_requests:read`, and `issues:write`, already covered by the default manifest.
+User credentials also need a suitable repository role. Token resolution and GitHub actor attribution are unchanged.
+Repository rules can block storage. Ask an admin to allow the reported assets ref before retrying.
+One custom ref per PR retains binary history. No automatic cleanup runs. Owners can delete refs when comments no longer need images.
+Ref deletion is not secure erasure. GitHub can retain commit URLs and cached images. Failed publication can leave unreferenced blobs and commits.
 
-Storage adds one branch per PR and retained binary history. No automatic cleanup runs.
-Keep the branch while comments need the images. Repository owners can delete it after those comments are no longer needed.
-Branch deletion is not secure erasure of Git objects. GitHub can retain commit URLs and cached images.
-Blobs or commits can remain unreferenced if a write fails before ref publication.
+### Custom-ref evidence (2026-10-13)
+
+A public probe in `tkhq/valet` created orphan commit `4569db363042d494137e635981b95798ed34de1d`, pointed to only by `refs/valet/pr-assets/885-validation`.
+The probe used `git push`, not authenticated Git refs API creation. `GET /repos/tkhq/valet/git/ref/valet/pr-assets/885-validation` returned HTTP 200.
+The [SHA-pinned image URL](https://github.com/tkhq/valet/blob/4569db363042d494137e635981b95798ed34de1d/ref-probe.png?raw=true) returned HTTP 200 and identical PNG bytes without authentication.
+The probe ref was then deleted. Fixtures cover API creation and updates. Live authenticated API creation was not verified here.
+Default clone/fetch refspecs fetch `refs/heads/*`, not `refs/valet/*`. Custom refs avoid branch lists, compare banners, and ordinary branch CI discovery.
+Mirror clones and explicit custom-ref fetches still fetch binaries. Automation that watches all refs may still react.

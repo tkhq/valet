@@ -369,7 +369,7 @@ const createComment = action(Type.Object({
       path: Type.String({ minLength: 1, description: "Sandbox image file path (PNG, JPEG, GIF, or WebP)." }),
       alt: Type.Optional(Type.String({ maxLength: 1000, description: "Plain-text image description." })),
       caption: Type.Optional(Type.String({ maxLength: 1000, description: "Plain-text caption below the image." })),
-    }), { minItems: 1, maxItems: 10, description: "PR images, appended after the body. Maximum 10 MiB each and 20 MiB total. Stored on an isolated assets branch, not in the PR diff." })),
+    }), { minItems: 1, maxItems: 10, description: "PR images, appended after the body. Maximum 10 MiB each and 20 MiB total. Stored on an isolated assets ref, not in the PR diff." })),
   }))({
   id: "github.create_comment",
   name: "Create Comment",
@@ -391,14 +391,14 @@ const createComment = action(Type.Object({
       }
       const { data } = await octokit.request(
         "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
-        { owner, repo, issue_number: issueNumber, body: body ?? "" },
+        { owner, repo, issue_number: issueNumber, body: body ?? "", request: { signal: ctx.signal } },
       );
       return { success: true, data: stored ? { ...data, ...stored } : data };
     } catch (err) {
       if (images !== undefined) {
         return {
-          success: false, data: stored, error: imageUploadError(err) + (stored
-            ? " Images are stored. Retry create_comment with these image URLs in body and omit images to avoid another upload." : ""),
+          success: false, data: stored, error: imageUploadError(err, stored ? "comment" : "storage") + (stored
+            ? ` Images are stored. Retry create_comment with the following Markdown in body and omit images to avoid another upload:\n\n${imageCommentBody(undefined, images, stored.imageUrls)}` : ""),
         };
       }
       return handleOctokitError(err, "github.create_comment", "Create comment");

@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { createHash, randomInt } from "node:crypto";
 import type { PluginActionContext } from "@valet/engine";
 import type { Octokit } from "octokit";
 
@@ -22,31 +23,41 @@ function imageExtension(bytes: Uint8Array): string {
   throw new CommentImageError("Unsupported image content. Export the file as PNG, JPEG, GIF, or WebP and retry.");
 }
 
-function plainMarkdown(text: string): string {
-  return text.replace(/[\r\n]+/g, " ").replace(/[\\`*{}\[\]()<>!_#|]/g, "\\$&");
+// Encode every character before GFM parsing, including mentions and autolink punctuation.
+function inertText(text: string): string {
+  return Array.from(text.replace(/[\r\n]+/g, " "), (char) => `&#${char.codePointAt(0)};`).join("");
 }
 
 export function imageCommentBody(body: string | undefined, images: CommentImage[], urls: string[]): string {
   return [body, ...images.map((image, i) => {
-    const alt = plainMarkdown(image.alt ?? image.caption ?? `Image ${i + 1}`);
-    const caption = image.caption ? `\n\n${plainMarkdown(image.caption)}` : "";
+    const alt = inertText(image.alt ?? image.caption ?? `Image ${i + 1}`);
+    const caption = image.caption ? `\n\n<p><code>${inertText(image.caption)}</code></p>` : "";
     return `![${alt}](${urls[i]})${caption}`;
   })].filter(Boolean).join("\n\n");
 }
 
-/** Only HTTP status codes cross this boundary. Remote error bodies can contain secrets. */
 function statusOf(err: unknown): number | undefined {
   return typeof err === "object" && err !== null && "status" in err && typeof err.status === "number"
     ? err.status : undefined;
 }
 
-export function imageUploadError(err: unknown): string {
+function githubMessage(err: unknown): string {
+  return err instanceof Error ? err.message : "No GitHub error detail";
+}
+
+export function imageUploadError(err: unknown, stage: "storage" | "comment" | "PR lookup" = "storage"): string {
+  if (err instanceof CommentImageError) return err.message;
+  if (err instanceof Error && err.name === "AbortError") return "Image attachment was cancelled. Retry from an active session if the images are still needed.";
   const status = statusOf(err);
-  if (status === undefined && err instanceof CommentImageError) return err.message;
-  if (status === 401) return "GitHub rejected the credential. Reconnect GitHub in Settings and retry.";
-  if (status === 403) return "GitHub denied image storage or commenting. Grant contents:write, pull_requests:read, and issues:write to the App. Check branch rules and rate limits.";
-  if (status === 404) return "GitHub could not access the repository or pull request. Check owner and issueNumber. Grant repository access in Settings.";
-  return `GitHub image attachment failed (${status ?? "network error"}). Check repository branch rules and GitHub availability, then retry.`;
+  const detail = `GitHub ${stage} failed (${status ?? "network error"}): ${githubMessage(err)}.`;
+  if (status === 401) return `${detail} Reconnect GitHub in Settings and retry.`;
+  if (stage === "PR lookup" && status === 404) return `${detail} Images work only on pull requests. Check the PR number and repository access. For a plain issue, omit images.`;
+  if (stage === "storage" && /repository rule|ruleset|protected.*(?:branch|ref)|GH013/i.test(githubMessage(err))) return `${detail} Ask a repository admin to allow this assets ref under the reported repository rules.`;
+  if (status === 403) return `${detail} Check the connected user's repository role or the App's repository permissions. Grant contents write, pull requests read, and issues write as needed.`;
+  if (status === 404) return `${detail} Check owner and repo. Grant repository access in Settings.`;
+  if (stage === "comment" && status === 422) return `${detail} Shorten the comment or correct the fields GitHub rejected, then retry.`;
+  if (status === 409 || status === 422) return `${detail} Ask a repository admin to allow this assets ref under the reported repository rules.`;
+  return `${detail} Check GitHub availability and rate limits, then retry.`;
 }
 
 /** Validate the complete batch before any GitHub write. Use the sandbox port, not host filesystem access. */
@@ -57,13 +68,14 @@ export async function storeCommentImages(
   repo: string,
   issueNumber: number,
   images: CommentImage[],
-): Promise<{ imageUrls: string[]; assetsBranch: string; assetsCommit: string }> {
+): Promise<{ imageUrls: string[]; assetsRef: string; assetsCommit: string }> {
   if (!Number.isInteger(issueNumber) || issueNumber < 1) {
     throw new CommentImageError("Invalid pull request number. Supply a positive issueNumber and retry.");
   }
   if (images.length < 1 || images.length > 10) {
     throw new CommentImageError("Invalid image count. Supply between 1 and 10 sandbox image files.");
   }
+  const request = { signal: ctx.signal };
   const files: { path: string; bytes: Uint8Array }[] = [];
   let total = 0;
   for (const image of images) {
@@ -75,7 +87,10 @@ export async function storeCommentImages(
         throw new CommentImageError("size limit");
       }
       bytes = await ctx.sandbox.readBinary(image.path);
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && err.message === "sandbox unavailable in workflow action invocation") {
+        throw new CommentImageError("Images need a session sandbox. Run create_comment from a session with these files, not a standalone workflow action.");
+      }
       throw new CommentImageError(`Cannot read image ${image.path}. Choose a readable sandbox file of 1 byte to 10 MiB. Keep the batch below 20 MiB.`);
     }
     total += bytes.byteLength;
@@ -88,64 +103,68 @@ export async function storeCommentImages(
   }
 
   const { data: pull } = await octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
-    owner, repo, pull_number: issueNumber,
-  });
-  const assetsBranch = `valet-pr-assets-${issueNumber}`;
-  if ([pull.head.ref, pull.base.ref, pull.base.repo.default_branch].includes(assetsBranch)) {
-    throw new CommentImageError("The assets branch is a PR or default branch. Rename that branch before attaching images.");
-  }
+    owner, repo, pull_number: issueNumber, request,
+  }).catch((err: unknown) => { throw new CommentImageError(imageUploadError(err, "PR lookup")); });
+  const assetsRef = `refs/valet/pr-assets/${issueNumber}`;
+  const marker = `Valet-Assets: pr-${issueNumber}`;
   const tree: { path: string; mode: "100644"; type: "blob"; sha: string }[] = [];
   // Identical bytes share a blob and a tree entry, but keep their individual captions.
   for (const file of new Map(files.map((file) => [file.path, file])).values()) {
     const { data: blob } = await octokit.request("POST /repos/{owner}/{repo}/git/blobs", {
-      owner, repo, content: Buffer.from(file.bytes).toString("base64"), encoding: "base64",
+      owner, repo, content: Buffer.from(file.bytes).toString("base64"), encoding: "base64", request,
     });
     tree.push({ path: file.path, mode: "100644", type: "blob", sha: blob.sha });
   }
   // No base_tree: each commit contains only this batch. Prior batches remain in parent history.
-  const { data: snapshot } = await octokit.request("POST /repos/{owner}/{repo}/git/trees", { owner, repo, tree });
-  for (let attempt = 0; attempt < 3; attempt++) {
-    let parent: string | undefined;
+  const { data: snapshot } = await octokit.request("POST /repos/{owner}/{repo}/git/trees", { owner, repo, tree, request });
+  async function assetHead(): Promise<string | undefined> {
     try {
       const { data: ref } = await octokit.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
-        owner, repo, ref: `heads/${assetsBranch}`,
+        owner, repo, ref: assetsRef.slice(5), request,
       });
-      parent = ref.object.sha;
+      return ref.object.sha;
     } catch (err) {
       if (statusOf(err) !== 404) throw err;
+      return undefined;
     }
+  }
+  for (let attempt = 0; ; attempt++) {
+    const parent = await assetHead();
     if (parent) {
       const { data: previous } = await octokit.request("GET /repos/{owner}/{repo}/git/commits/{commit_sha}", {
-        owner, repo, commit_sha: parent,
+        owner, repo, commit_sha: parent, request,
       });
-      if (!previous.message.includes(`Attach images for PR #${issueNumber}\n\nChangelog: Attach PR comment images with Valet.`)) {
-        throw new CommentImageError("The assets branch contains unrelated commits. Rename that branch before attaching images.");
+      if (!previous.message.split(/\r?\n/).includes(marker)) {
+        throw new CommentImageError("The assets ref contains unrelated commits. Ask a repository admin to move it before attaching images.");
       }
     }
     const { data: commit } = await octokit.request("POST /repos/{owner}/{repo}/git/commits", {
-      owner, repo, tree: snapshot.sha, parents: parent ? [parent] : [],
-      message: `Attach images for PR #${issueNumber}\n\nChangelog: Attach PR comment images with Valet.`,
+      owner, repo, tree: snapshot.sha, parents: parent ? [parent] : [], request,
+      message: `Attach images for PR #${issueNumber}\n\n${marker}`,
     });
     try {
       if (parent) {
         await octokit.request("PATCH /repos/{owner}/{repo}/git/refs/{ref}", {
-          owner, repo, ref: `heads/${assetsBranch}`, sha: commit.sha, force: false,
+          owner, repo, ref: assetsRef.slice(5), request, sha: commit.sha, force: false,
         });
       } else {
         await octokit.request("POST /repos/{owner}/{repo}/git/refs", {
-          owner, repo, ref: `refs/heads/${assetsBranch}`, sha: commit.sha,
+          owner, repo, ref: assetsRef, sha: commit.sha, request,
         });
       }
-      const base = pull.base.repo.html_url;
       return {
-        assetsBranch, assetsCommit: commit.sha,
-        imageUrls: files.map((file) => `${base}/blob/${commit.sha}/${file.path}?raw=true`),
+        assetsRef, assetsCommit: commit.sha,
+        imageUrls: files.map((file) => `${pull.base.repo.html_url}/blob/${commit.sha}/${file.path}?raw=true`),
       };
     } catch (err) {
-      // A normal concurrent upload can win ref creation or advancement. Never force-push over it.
       if (![409, 422].includes(statusOf(err) ?? 0)) throw err;
-      if (attempt === 2) throw new CommentImageError("GitHub refused the assets branch update. Check branch rules, then retry after other uploads finish.");
+      // Retry only if another writer actually changed the ref. Rules failures keep GitHub's message.
+      const currentSha = await assetHead().catch(() => { throw err; });
+      if (!currentSha || currentSha === parent) throw err;
+      if (attempt === 11) {
+        throw new CommentImageError(`Concurrent image uploads kept advancing the assets ref: ${githubMessage(err)}. Retry after other uploads finish.`);
+      }
+      await delay(randomInt(250, Math.min(5000, 500 * 2 ** attempt)), undefined, { signal: ctx.signal });
     }
   }
-  throw new CommentImageError("Image storage did not finish. Retry after other uploads finish.");
 }

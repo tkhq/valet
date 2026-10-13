@@ -27,8 +27,10 @@ The system resolves the best available token for each request. You do not pass a
 
 ## Attribution
 
-GitHub attributes action writes to the resolved user account or App bot.
-The v2 actions do not add personal co-author trailers or an on-behalf-of suffix.
+When acting under a bot token (App install), actions automatically add attribution so the user's identity is visible:
+
+- **Commits** — `Co-Authored-By: <name> <email>` trailer appended to commit message
+- **PR and issue bodies** — a suffix noting the action was performed on behalf of the user
 
 Users connect their personal GitHub account at **Settings → Integrations → GitHub**.
 
@@ -102,12 +104,13 @@ call_tool github:github.create_comment params={
 
 `body` is optional with images. Images appear after the body.
 Supply 1 to 10 PNG, JPEG, GIF, or WebP files, up to 10 MiB each and 20 MiB total.
-The result includes normal comment fields plus `imageUrls`, `assetsBranch`, and `assetsCommit`.
-Images stay on `valet-pr-assets-<PR number>`, outside the PR diff.
-Public repository images are public. Private images require GitHub repository access.
+The result includes normal comment fields plus `imageUrls`, `assetsRef`, and `assetsCommit`.
+Images stay on `refs/valet/pr-assets/<PR number>`, outside the PR diff and default branch fetches.
+Public repository images are public. Private images require a logged-in GitHub browser with repository access.
+Email, mobile push, Slack unfurls, and Valet channel views can show broken private images.
 The App needs contents write, pull requests read, and issues write permissions.
-Keep the assets branch while comments need the images. Branch deletion does not securely erase Git objects or cached images.
-If storage succeeds but commenting fails, retry with the returned URLs in `body`, without `images`.
+Keep the assets ref while comments need the images. Ref deletion does not securely erase Git objects or cached images.
+If storage succeeds but commenting fails, the error includes recovery Markdown. Retry with that Markdown in `body`, without `images`.
 Check the PR before retrying after a lost response, because a comment might already exist.
 
 ### List all repos you have access to
