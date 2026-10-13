@@ -112,6 +112,7 @@ export class ChildReplyDispatcher {
           queueItemId = item?.id ?? null;
           if (queueItemId) await db.update(childReplyDeliveries).set({ queueItemId }).where(leased);
         }
+        if (queueItemId) queueItemId = await this.followPromotion(row, queueItemId, leased);
         outcome = queueItemId ? await this.deps.deliver({ ...row, queueItemId }) : await this.unadmitted(row);
       } catch (error) {
         outcome = { kind: "undeliverable", reason: error instanceof Error ? error.message : String(error) };
@@ -127,6 +128,24 @@ export class ChildReplyDispatcher {
         await this.recordFailure(row, leased, outcome.reason);
       }
     }
+  }
+
+  /**
+   * "Send now" on a queued parent update settles that item as superseded,
+   * so it never runs, and admits a successor with the same content. The
+   * intent moves to the successor, which is the turn that writes the reply.
+   */
+  private async followPromotion(row: ChildReplyRow, queueItemId: string, leased: ReturnType<typeof and>): Promise<string> {
+    const store = this.deps.engineStore;
+    let item = await store.getQueueItem(row.sessionId, queueItemId);
+    while (item?.supersededByItemId) {
+      const successor = await store.getQueueItem(row.sessionId, item.supersededByItemId);
+      if (successor?.metadata?.promotedFromItemId !== item.id) break;
+      item = successor;
+    }
+    if (!item || item.id === queueItemId) return queueItemId;
+    await this.deps.db.update(childReplyDeliveries).set({ queueItemId: item.id }).where(leased);
+    return item.id;
   }
 
   /**

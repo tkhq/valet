@@ -360,6 +360,43 @@ describe("delegated child completion over a channel", () => {
     expect((await childSettledSignals(run.parentId)).map((signal) => signal.content.origin)).toEqual([ORIGIN]);
   });
 
+  it("posts once when a person sends the parent's queued update now", async () => {
+    const run = await bootDelegation("child-promote-update");
+    const { db, engineStore } = api!.providers;
+    const now = Date.now();
+    await db.insert(agentSessions).values({
+      id: run.parentId, userId: USER_ID, orgId: ORG_ID, workspace: "/tmp", status: "active",
+      ownerType: "user", ownerId: USER_ID, createdAt: now, updatedAt: now,
+    });
+    const [parentRow] = await db.select().from(agentSessions).where(eq(agentSessions.id, run.parentId));
+    if (!parentRow) throw new Error("parent session row missing");
+
+    // The parent thread is paused, so its update for the child waits in the queue.
+    await run.parentThread.pause();
+    await engineStore.settleUnclaimed("child-promote-update", run.childThreadId, run.queueItemId, { outcome: "completed" });
+    const replyId = namespaceInternalDispatchId("child-promote-update", `settled:child-promote-update:${run.queueItemId}`);
+    const queued = await vi.waitFor(async () => {
+      const [intent] = await db.select().from(childReplyDeliveries).where(eq(childReplyDeliveries.id, replyId));
+      if (!intent?.queueItemId) throw new Error("the parent update is not admitted yet");
+      return intent.queueItemId;
+    }, { timeout: 30_000, interval: 20 });
+    expect((await engineStore.getQueueItem(run.parentId, queued))?.status).toBe("queued");
+
+    // "Send now" settles the queued update as superseded and runs a successor.
+    const promoted = await submitSessionPrompt(api!.providers, parentRow, "", {
+      threadId: run.parentThread.id, promoteItemId: queued, author: { id: USER_ID },
+    });
+    const successor = promoted?.messageId;
+    if (!successor) throw new Error("the parent update was not promoted");
+    await run.parentThread.resume();
+    await run.parentThread.awaitResult(successor);
+
+    await api!.providers.channelHost.retryChildReplies();
+    await api!.providers.channelHost.retryChildReplies();
+    expect(run.transport.sent).toHaveLength(1);
+    expect(run.transport.sent[0]?.conversationKey).toBe("fake:dm:C1");
+  });
+
   it("treats a watch written before reply routes as manual", async () => {
     const run = await bootDelegation("child-legacy");
     const { db, engineStore } = api!.providers;

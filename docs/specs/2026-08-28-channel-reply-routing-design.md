@@ -384,7 +384,10 @@ An addressed turn has at most one automatic assistant-text delivery: its first e
   keeps the route, including recovery after an interrupted `child_send`.
 - **Automatic child completion replies have durable delivery intents.** The
   watcher stores an intent before it submits `child.settled`. It stores the
-  parent submission ID before it marks the watch settled. The `child_status`
+  parent submission ID before it marks the watch settled. If a person
+  sends a queued parent update now, the engine supersedes it with a
+  promoted successor, and the dispatcher moves the intent to that
+  successor. The `child_status`
   repair, which marks a stale watch settled when the child's work is done,
   skips only a watch whose automatic reply has no admitted parent update.
   Every other watch, including a manual one, is repaired and frees its
