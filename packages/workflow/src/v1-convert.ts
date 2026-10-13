@@ -243,7 +243,8 @@ function collect(value: unknown, where: string, found: Collected): void {
       enabled: value.enabled !== false && value.enabled !== 0,
       workflowId: optionalString(value.workflowId ?? value.workflow_id),
       workflowName: optionalString(value.workflowName ?? value.workflow_name),
-      config,
+      // V1's API returns the type on the row and inside config; keep one.
+      config: typeof config.type === 'string' || typeof value.type !== 'string' ? config : { ...config, type: value.type },
       ...(isRecord(mapping) ? { variableMapping: mapping } : {}),
     });
     return;
@@ -474,10 +475,11 @@ function addTool(raw: Record<string, unknown>, id: string, lane: Lane, b: Build)
     case 'spawn_session':
       return addSpawnSession(args, id, lane, b);
     case 'send_message': {
-      const target = stringField(args.targetSessionId) || 'a session';
-      b.checklist.push(
-        `Step "${id}" sent "${excerpt(stringField(args.content), 80)}" to V1 session ${target}, which does not exist in V2. The import leaves it out. To send the message somewhere, add a tool node, such as a Slack message.`,
-      );
+      const target = stringField(args.targetSessionId);
+      const content = stringField(args.content);
+      b.checklist.push(target && content
+        ? `Step "${id}" sent "${excerpt(content, 80)}" to V1 session ${target}, which does not exist in V2. The import leaves it out. To send the message somewhere, add a tool node, such as a Slack message.`
+        : `Step "${id}" is a send_message step with no target session or content, so it failed in V1. The import leaves it out.`);
       return;
     }
     case 'run_workflow': {
