@@ -451,6 +451,22 @@ describe("WorkflowEditorPage", () => {
     expect(useComposerDraftStore.getState().byKey[draftKey("workflow-assistant", "other-thread")]).toBeUndefined();
   });
 
+  it("puts a test request in the assistant's composer and stays in the editor when Test is clicked", () => {
+    useComposerDraftStore.setState({ byKey: {} });
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Test" }));
+
+    expect(useComposerDraftStore.getState().byKey[draftKey("workflow-assistant", "workflow-thread")]?.text).toBe(
+      "Test this workflow: state the checks, dry-run it, then ask me before a real run.",
+    );
+    // A narrow screen shows one view at a time, so Test switches to the conversation.
+    expect(screen.getByRole("button", { name: "Show assistant" }).getAttribute("aria-pressed")).toBe("true");
+    // The assistant asks before a real run, so Test starts nothing and goes nowhere.
+    expect(startMutateAsync).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it("offers Leave without saving while a departure is held, and proceeds on confirm", () => {
     blocker = BLOCKED_BLOCKER;
     render(<WorkflowEditorPage workflowId="wf_1" />);
