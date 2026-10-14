@@ -97,10 +97,21 @@ Both routes are owner-scoped like every other `/api/workflows/:id/*` route:
 cross-owner access 404s.
 
 The assistant reads the same prediction through the `workflows.get_permissions`
-action (risk level `low`). It calls `analyzeWorkflowPermissions` with the
-assistant's owner, so it applies the same owner check and returns the same
-`nodes`. Without it, the assistant saw only the definition and told users that
-steps an org policy allows still needed approval.
+action (risk level `low`). It reads the definition with the assistant's owner,
+so it applies the same owner check and returns the same `nodes`, plus
+`unchecked`: the agent and sub-workflow steps whose actions are checked only
+when they run. Without it, the assistant saw only the definition and told users
+that steps an org policy allows still needed approval.
+
+Two node fields say where the policy mode alone is not the answer. A parameter
+that is a template is unknown until the run renders it, so the prediction passes
+it to the resolver as unresolved (`partialParams`): a deny or approval rule that
+could match counts, and the node carries `runtimeParams: true`. On a team
+workflow, `sharedAccount: true` marks a step whose team has no connection of its
+own for the service while a member shares one. The invoker then asks that member
+on every run, unless the person who starts the run shares their own account.
+The check reads credential and share rows only, so the preview reads no secret
+and refreshes no token.
 
 ## Files
 

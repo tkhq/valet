@@ -1,10 +1,11 @@
 /** Permission preview and durable grants scoped to one workflow and its owner.
  * Explicit policy restrictions remain authoritative; human approval nodes are separate.
  */
-import { sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { sameWorkflowSteps } from "./definition-version.js";
-import { workflowActionGrants } from "../schema/index.js";
+import { credentials, credentialShares, workflowActionGrants } from "../schema/index.js";
+import { findCredentialDeclaration } from "../services/integration-availability.js";
 import { canAdministerTeam } from "../services/teams.js";
 import { resolvePolicyDecision } from "../policies/resolution.js";
 import { loadPolicyRows } from "../policies/service.js";
@@ -84,7 +85,39 @@ export async function analyzeWorkflowPermissions(
   return analyzeDefinitionPermissions(deps, owner, summary);
 }
 
-async function analyzeDefinitionPermissions(
+/** A value without the templates a run fills in, and whether it had any. */
+function withoutTemplates(value: unknown): { value: unknown; templated: boolean } {
+  if (typeof value === "string") return value.includes("{{") ? { value: undefined, templated: true } : { value, templated: false };
+  if (Array.isArray(value)) {
+    const items = value.map(withoutTemplates);
+    return { value: items.map((item) => item.value), templated: items.some((item) => item.templated) };
+  }
+  if (typeof value === "object" && value !== null) {
+    let templated = false;
+    const kept: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      const clean = withoutTemplates(entry);
+      templated ||= clean.templated;
+      if (clean.value !== undefined) kept[key] = clean.value;
+    }
+    return { value: kept, templated };
+  }
+  return { value, templated: false };
+}
+
+/**
+ * For a team workflow: the services the team has a connection of its own
+ * for, and the services a member shares. Rows only, so the preview reads no
+ * secret and refreshes no token.
+ */
+async function teamConnections(db: AppQueryable, teamId: string): Promise<{ own: Set<string>; shared: Set<string> }> {
+  const own = await db.select({ service: credentials.service }).from(credentials)
+    .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, teamId)));
+  const shared = await db.select({ service: credentialShares.service }).from(credentialShares).where(eq(credentialShares.teamId, teamId));
+  return { own: new Set(own.map((row) => row.service)), shared: new Set(shared.map((row) => row.service)) };
+}
+
+export async function analyzeDefinitionPermissions(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   summary: WorkflowDefinitionSummary,
@@ -104,6 +137,7 @@ async function analyzeDefinitionPermissions(
     userId: summary.ownerType === "user" ? summary.ownerId : owner.userId,
     teamId: summary.ownerType === "team" ? summary.ownerId : undefined,
   });
+  const team = summary.ownerType === "team" ? await teamConnections(deps.db, summary.ownerId) : undefined;
   const nodes: WorkflowNodePermissionWire[] = [];
   for (const ref of refs) {
     const entry = deps.actionPluginByService?.get(ref.service);
@@ -115,18 +149,27 @@ async function analyzeDefinitionPermissions(
     const actionId = qualifiedActionId(ref.service, action);
     // Preview what the run decides: schema defaults applied, as the invoker does.
     const prepared = ref.params === undefined ? undefined : prepareActionArgs(action.parameters, ref.params);
+    // A template's value is unknown until the run renders it.
+    const known = withoutTemplates(prepared?.ok ? prepared.args : ref.params);
     const decision = resolvePolicyDecision(
       rows,
       {
         service: ref.service,
         actionId,
         riskLevel: action.riskLevel,
-        params: prepared?.ok ? prepared.args : ref.params,
+        params: typeof known.value === "object" && known.value !== null && !Array.isArray(known.value)
+          ? Object.fromEntries(Object.entries(known.value)) : undefined,
+        ...(known.templated ? { partialParams: true } : {}),
         appliesIn: "workflow",
         now,
       },
       entry.actionPlugin.defaultApprovalMode,
     );
+    // The invoker uses a member's shared account only after the team's own
+    // connection and an organization-provided one, and asks that member.
+    const credentialService = entry.actionPlugin.credentialService ?? ref.service;
+    const sharedAccount = team !== undefined && !team.own.has(credentialService) && team.shared.has(credentialService)
+      && !findCredentialDeclaration([entry.plugin], credentialService)?.requires?.orgCredential;
     nodes.push({
       nodeId: ref.nodeId,
       service: ref.service,
@@ -135,6 +178,8 @@ async function analyzeDefinitionPermissions(
       riskLevel: action.riskLevel,
       mode: decision.mode,
       provenance: decision.provenance.source,
+      ...(known.templated ? { runtimeParams: true as const } : {}),
+      ...(sharedAccount ? { sharedAccount: true as const } : {}),
     });
   }
   return nodes;

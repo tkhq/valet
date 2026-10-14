@@ -62,7 +62,7 @@ import {
   updateWorkflowTrigger,
 } from "./trigger-service.js";
 import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
-import { analyzeWorkflowPermissions } from "./permissions.js";
+import { analyzeDefinitionPermissions } from "./permissions.js";
 import { readStepTranscript } from "./step-transcript.js";
 import {
   deleteWorkflowWebhook,
@@ -247,6 +247,22 @@ function armDepsFrom(deps: WorkflowServiceDeps): TeamServiceReadinessDeps {
   return { db: deps.db, credentials: deps.credentials, plugins: deps.plugins ?? [], onePassword: deps.onePassword };
 }
 
+/** Steps whose actions the permission preview cannot see: an agent decides
+ * them, or a sub-workflow runs them. A foreach reports its body's type. */
+function uncheckedSteps(definition: unknown): Array<{ nodeId: string; type: string }> {
+  const nodes = typeof definition === "object" && definition !== null && "nodes" in definition && Array.isArray(definition.nodes)
+    ? definition.nodes : [];
+  const unchecked: Array<{ nodeId: string; type: string }> = [];
+  for (const node of nodes) {
+    if (typeof node !== "object" || node === null || !("id" in node) || typeof node.id !== "string") continue;
+    const body = "body" in node && typeof node.body === "object" && node.body !== null ? node.body : undefined;
+    const typed = body ?? node;
+    const type = "type" in typed && typeof typed.type === "string" ? typed.type : "";
+    if (["session", "llm", "orchestrator", "workflow"].includes(type)) unchecked.push({ nodeId: node.id, type });
+  }
+  return unchecked;
+}
+
 export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): ActionPlugin {
   const copyToTeam = action(Type.Object({
     workflow_id: Type.String({ description: "Explicit personal workflow ID to copy." }),
@@ -329,16 +345,19 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Show what policy decides for each tool step of a workflow, as the workflow page's Permissions section shows it. " +
       "Per step: mode `allow` means no policy gates the step, `require_approval` waits for a person, `deny` is blocked " +
       "by policy, and `unknown` is checked when the run reaches it. `provenance` names the rule that set the mode. " +
-      "This is a preview, not a runtime guarantee: a step can still wait when it uses another member's shared account, " +
-      "or when a policy matches a parameter value that a template fills in at run time. " +
+      "`sharedAccount: true` means each run asks the member whose shared account it uses, whatever the mode. " +
+      "`runtimeParams: true` means a parameter is a template, so the mode assumes the worst value. " +
+      "`unchecked` lists agent and sub-workflow steps; their actions are checked when they run. " +
       "Read this before you tell a user that a step needs approval, and check a run's `waitingOn` to confirm.",
     riskLevel: "low",
     execute: async ({ workflow_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
-      const nodes = await analyzeWorkflowPermissions(getDeps(), owner, workflow_id);
-      if (nodes === null) return { success: false, error: `workflow not found: ${workflow_id}` };
-      return { success: true, data: { workflowId: workflow_id, nodes } };
+      const deps = getDeps();
+      const summary = await getWorkflowDefinition(deps, owner, workflow_id);
+      if (!summary) return { success: false, error: `workflow not found: ${workflow_id}` };
+      const nodes = await analyzeDefinitionPermissions(deps, owner, summary);
+      return { success: true, data: { workflowId: workflow_id, nodes, unchecked: uncheckedSteps(summary.definition) } };
     },
   });
 

@@ -16,7 +16,7 @@ import {
   type WorkflowServiceDeps,
 } from "./service.js";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { actionPolicies, teams, teamMembers, eventSubscriptions, orgs, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
+import { actionPolicies, credentials, credentialShares, teams, teamMembers, eventSubscriptions, orgs, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { InMemoryCredentialStore, InMemorySessionStore } from "@valet/engine";
 import { OnePasswordAuthError } from "../services/onepassword.js";
@@ -280,7 +280,7 @@ describe("DB-backed actions", () => {
 
   beforeEach(async () => {
     await buildAppQueryable(pglite).query(
-      `TRUNCATE workflow_webhooks, workflow_definitions, workflow_runs, workflow_schedules, event_subscriptions, action_policies RESTART IDENTITY CASCADE`,
+      `TRUNCATE workflow_webhooks, workflow_definitions, workflow_runs, workflow_schedules, event_subscriptions, action_policies, credentials, credential_shares RESTART IDENTITY CASCADE`,
     );
     runHost = new StubRunHost();
     deps = {
@@ -996,8 +996,69 @@ describe("DB-backed actions", () => {
           { nodeId: "post", service: "chat", action: "send_message", actionId: "chat.send_message", riskLevel: "high", mode: "allow", provenance: "org_policy" },
           { nodeId: "ship", service: "chat", action: "deploy", actionId: "chat.deploy", riskLevel: "high", mode: "require_approval", provenance: "risk_default" },
         ],
+        unchecked: [],
       },
     });
+  });
+
+  it("get_permissions assumes the worst value for a templated parameter", async () => {
+    deps.actionPluginByService = chatCatalog();
+    await db.insert(workflowDefinitions).values({
+      id: "perm-tpl", orgId: "org1", ownerType: "user", ownerId: "user1", name: "Templated", createdAt: 1, updatedAt: 1,
+      definition: {
+        version: "dag/v1",
+        nodes: [
+          { id: "trigger", type: "trigger" },
+          { id: "post", type: "tool", service: "chat", action: "send_message", params: { channel: "{{trigger.data.channel}}" } },
+        ],
+        edges: [{ from: "trigger", to: "post" }],
+      },
+    });
+    await db.insert(actionPolicies).values([
+      { id: "org-allow-all", orgId: "org1", principalType: "org", principalId: "org1", actionId: "chat.send_message", mode: "allow",
+        paramMatchers: [], appliesIn: "any", origin: "settings", createdAt: 1, updatedAt: 1 },
+      { id: "org-deny-general", orgId: "org1", principalType: "org", principalId: "org1", actionId: "chat.send_message", mode: "deny",
+        paramMatchers: [{ path: "channel", op: "eq", value: "#general" }], appliesIn: "any", origin: "settings", createdAt: 1, updatedAt: 1 },
+    ]);
+    const get = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.get_permissions")!;
+    expect(await get.execute({ workflow_id: "perm-tpl" }, ctx())).toMatchObject({
+      success: true, data: { nodes: [{ nodeId: "post", mode: "deny", runtimeParams: true }] },
+    });
+  });
+
+  it("get_permissions flags a team step that a member's shared account would answer, and lists agent steps", async () => {
+    deps.actionPluginByService = chatCatalog();
+    await db.insert(teams).values({ id: "perm-team-share", orgId: "org1", name: "Share", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: "perm-team-share", userId: "user1", role: "member" });
+    await db.insert(workflowDefinitions).values({
+      id: "perm-share", orgId: "org1", ownerType: "team", ownerId: "perm-team-share", name: "Shared", createdAt: 1, updatedAt: 1,
+      definition: {
+        version: "dag/v1",
+        nodes: [
+          { id: "trigger", type: "trigger" },
+          { id: "draft", type: "session", prompt: "Draft it." },
+          { id: "each", type: "foreach", items: "{{trigger.data.items}}", body: { id: "child", type: "workflow", workflowId: "wf-child" } },
+          { id: "post", type: "tool", service: "chat", action: "send_message", params: {} },
+        ],
+        edges: [{ from: "trigger", to: "draft" }, { from: "draft", to: "each" }, { from: "each", to: "post" }],
+      },
+    });
+    await db.insert(credentialShares).values({ teamId: "perm-team-share", service: "chat", userId: "user2", createdAt: 1 });
+    const get = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.get_permissions")!;
+    const teamCtx = ctx({ owner: { type: "team", id: "perm-team-share" } });
+
+    expect(await get.execute({ workflow_id: "perm-share" }, teamCtx)).toMatchObject({
+      success: true,
+      data: {
+        nodes: [{ nodeId: "post", sharedAccount: true }],
+        unchecked: [{ nodeId: "draft", type: "session" }, { nodeId: "each", type: "workflow" }],
+      },
+    });
+    // With a connection of its own, the team does not borrow the share.
+    await db.insert(credentials).values({ ownerType: "team", ownerId: "perm-team-share", service: "chat", type: "api_key", createdAt: 1, updatedAt: 1 });
+    const own = await get.execute({ workflow_id: "perm-share" }, teamCtx);
+    expect(own).toMatchObject({ success: true });
+    expect(JSON.stringify(own)).not.toContain("sharedAccount");
   });
 
   it("get_permissions refuses a workflow the caller cannot read", async () => {
