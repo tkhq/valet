@@ -12,7 +12,7 @@
 import { loadConfig } from "./cli/config.js";
 import { refreshSelectedProfile } from "./cli/token-refresh.js";
 import { CliError, ExitCode } from "./cli/exit.js";
-import { printErr, printLine } from "./cli/output.js";
+import { exitAfterOutput, printErr, printLine } from "./cli/output.js";
 import type { CommandModule } from "./cli/types.js";
 import { VALET_VERSION } from "./version.js";
 
@@ -115,9 +115,9 @@ async function main(): Promise<number> {
 }
 
 main()
-  .then((code) => process.exit(code))
   .catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     printErr(message);
-    process.exit(err instanceof CliError ? err.exitCode : 1);
-  });
+    return err instanceof CliError ? err.exitCode : 1;
+  })
+  .then(exitAfterOutput);

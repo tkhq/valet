@@ -9,6 +9,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, st
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ConfigError } from "./exit.js";
+import { printErr } from "./output.js";
 
 export interface ServeConfig {
   port?: number;
@@ -106,7 +107,7 @@ export function loadConfig(): ValetConfig {
   const known: ValetConfig = {};
   for (const [key, value] of Object.entries(obj)) {
     if (!KNOWN_KEYS.has(key)) {
-      process.stderr.write(`config: ignoring unknown key "${key}"\n`);
+      printErr(`config: ignoring unknown key "${key}"`);
       continue;
     }
     if (key === "serve" && isRecord(value)) known.serve = value as ServeConfig;
