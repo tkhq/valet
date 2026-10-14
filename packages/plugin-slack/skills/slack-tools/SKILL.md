@@ -77,14 +77,14 @@ Pick the send tool by where the message goes:
 
 - **`slack.reply_to_origin`** -- reply in the thread this turn came from. Use it for later updates and final results. On an addressed turn, the first assistant text posts automatically. An explicit first reply suppresses that automatic copy. It needs no approval and cannot reach the wrong channel.
 - **`slack.reply_file_to_origin`**: upload a sandbox file to the origin thread. Use it for generated images, documents, and other file results.
-- **`slack.send_message`** -- post to any other channel or thread by ID. This can ping a channel outside the current conversation, such as a customer channel, so it requires approval on every call. Prefer `reply_to_origin` when you are staying in the same thread.
+- **`slack.send_message`** -- post to any other channel or thread by ID. This can ping a channel outside the current conversation, such as a customer channel, so Valet asks for approval when the organization's policy requires it. Do not call `ask_approval` first. Prefer `reply_to_origin` when you are staying in the same thread.
 
 `send_message`, `reply_to_origin`, `dm_owner`, and `dm_user` return the message `ts` and `channel`. Save both. You need them to edit or delete the message later.
 
 Fix a mistake with your own message:
 
 - **`slack.update_message`** -- edit a message Valet sent. Pass the `channel` and `ts` from the send result and the full replacement `text`. To blank a message you cannot delete, send a single space. Slack rejects edits to messages Valet did not send.
-- **`slack.delete_message`** -- delete a message Valet sent. This requires approval and is irreversible. If the content only needs a correction, use `update_message` instead. Slack rejects deletes of messages Valet did not send.
+- **`slack.delete_message`** -- delete a message Valet sent. This is irreversible, and Valet asks for approval when policy requires it. If the content only needs a correction, use `update_message` instead. Slack rejects deletes of messages Valet did not send.
 
 ## Private Channels
 

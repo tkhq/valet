@@ -1082,7 +1082,7 @@ const sendMessage = action(Type.Object({
   }))({
   id: 'slack.send_message',
   name: 'Send Message',
-  description: 'Post a message to an arbitrary Slack channel or thread the bot has joined. This requires approval on every call, because it can post outside the current conversation — for example into a customer channel. To answer or follow up in the thread this turn came from, use reply_to_origin instead: it needs no approval and cannot reach a wrong channel. Returns ts (message timestamp) and channel — save ts to thread a follow-up under this message via thread_ts, or to edit or delete this message later with update_message / delete_message.',
+  description: 'Post a message to an arbitrary Slack channel or thread the bot has joined. It can post outside the current conversation, for example into a customer channel, so Valet asks for approval when your organization\'s policy requires it. Do not call ask_approval before this action. To answer or follow up in the thread this turn came from, use reply_to_origin instead: it cannot reach a wrong channel. Returns ts (message timestamp) and channel — save ts to thread a follow-up under this message via thread_ts, or to edit or delete this message later with update_message / delete_message.',
   riskLevel: 'high',
   execute: async (args, ctx) => {
     const p = args;

@@ -717,7 +717,9 @@ export const askApprovalTool = defineTool({
   description:
     "Ask the user for an explicit approval before proceeding with an action. " +
     "Blocks until the user approves or denies (or the gate expires). Use for " +
-    "irreversible or sensitive steps the user should sign off on.",
+    "irreversible or sensitive steps the user should sign off on. " +
+    "Do not use it before an integration action: call_tool asks for approval itself " +
+    "when policy requires it, and that request offers to allow the action from then on.",
   parameters: Type.Object({
     title: Type.String({ description: "Short question, e.g. 'Delete the staging database?'" }),
     body: Type.Optional(Type.String({ description: "Details the user needs to decide." })),
