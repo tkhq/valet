@@ -34,6 +34,7 @@ import {
   type ActionInvokerOpts,
   type ServiceActions,
 } from "../plugins/action-invoker.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 import { actionInvocations } from "../schema/index.js";
@@ -80,7 +81,7 @@ export function clearDiscoveryCache(): void {
 const CLAIM_STALE_MS = 15 * 60_000;
 
 /** A stable digest of params: object keys are sorted, so key order does not change it. */
-function paramsDigest(value: unknown): string {
+export function paramsDigest(value: unknown): string {
   const canonical = (v: unknown): unknown => {
     if (Array.isArray(v)) return v.map(canonical);
     if (v && typeof v === "object") {
@@ -94,7 +95,7 @@ function paramsDigest(value: unknown): string {
 const DISCOVERY_TIMEOUT_MS = 8_000;
 const MAX_IDEMPOTENCY_KEY = 200;
 
-function invokerOpts(c: Context<AppEnv>): ActionInvokerOpts {
+export function invokerOpts(c: Context<AppEnv>): ActionInvokerOpts {
   const { db, engineCredentials, actionPluginByService, plugins, encryptionKey, onePassword } = c.var.providers;
   return {
     db,
@@ -114,7 +115,7 @@ async function callerContext(c: Context<AppEnv>, workspace: string | undefined):
 }
 
 /** Split `service.action` on the longest registered service prefix. */
-function parseToolId(c: Context<AppEnv>, toolId: string): { service: string; action: string } | undefined {
+export function parseToolId(c: Context<AppEnv>, toolId: string): { service: string; action: string } | undefined {
   const services = [...c.var.providers.actionPluginByService.keys()].sort((a, b) => b.length - a.length);
   const service = services.find((s) => toolId.startsWith(`${s}.`));
   return service ? { service, action: toolId.slice(service.length + 1) } : undefined;
@@ -235,17 +236,30 @@ actionsRouter.post("/:toolId/invoke", async (c) => {
   }
 
   const toolId = qualifiedActionId(tool.service, tool.action);
-  const db = c.var.providers.db;
-  const invocationId = invocationIdFor(toolId);
-  const claimId = `claim:${invocationId}`;
-  const keyed = typeof key === "string";
+  const result = await invokeOnce(c.var.providers.db, invocationIdFor(toolId), typeof key === "string",
+    (invocationId) => buildActionInvoker(tool.opts)({ service: tool.service, action: tool.action.id, params: params as Record<string, unknown>, invocationId }, ctx));
+  if (!result) return c.json(inProgress(toolId));
+  if (result.ok) return c.json({ tool_id: toolId, status: "completed", result: result.result } satisfies ActionInvokeResponse);
+  if ("requiresApproval" in result) return c.json(approvalRequired(toolId, result));
+  return c.json({ tool_id: toolId, status: "failed", error: result.error } satisfies ActionInvokeResponse);
+});
 
-  // A keyed call holds a claim while it runs, so a retry (a client timeout,
-  // a second agent) waits for it instead of running the action twice. Every
-  // keyed call claims, even when a result is stored: the invoker returns the
-  // stored result, and a failed result can be deleted between a check and
-  // the call. Only the request that holds the claim releases it.
-  let holdsClaim = false;
+type InvokeResult = Awaited<ReturnType<ReturnType<typeof buildActionInvoker>>>;
+
+/**
+ * Runs one call under the idempotency-key protocol and returns null while
+ * another request with the same key still runs.
+ *
+ * A keyed call holds a claim while it runs, so a retry (a client timeout,
+ * a second agent) waits for it instead of running the action twice. Every
+ * keyed call claims, even when a result is stored: the invoker returns the
+ * stored result, and a failed result can be deleted between a check and
+ * the call. Only the request that holds the claim releases it.
+ */
+export async function invokeOnce(
+  db: AppDb, invocationId: string, keyed: boolean, invoke: (invocationId: string) => Promise<InvokeResult>,
+): Promise<InvokeResult | null> {
+  const claimId = `claim:${invocationId}`;
   if (keyed) {
     const claimed = await db.insert(actionInvocations).values({ invocationId: claimId, result: { claim: true }, createdAt: Date.now() })
       .onConflictDoNothing().returning({ id: actionInvocations.invocationId });
@@ -257,23 +271,17 @@ actionsRouter.post("/:toolId/invoke", async (c) => {
       const takenOver = await db.update(actionInvocations).set({ createdAt: now })
         .where(and(eq(actionInvocations.invocationId, claimId), lt(actionInvocations.createdAt, now - CLAIM_STALE_MS)))
         .returning({ id: actionInvocations.invocationId });
-      if (takenOver.length === 0) {
-        return c.json({
-          tool_id: toolId, status: "in_progress",
-          next_step: "A call with this idempotency_key is still running. Call again with the same key and params to get its result.",
-        } satisfies ActionInvokeResponse);
-      }
+      if (takenOver.length === 0) return null;
     }
-    holdsClaim = true;
   }
 
-  let result: Awaited<ReturnType<ReturnType<typeof buildActionInvoker>>>;
+  let result: InvokeResult;
   try {
-    result = await buildActionInvoker(tool.opts)({ service: tool.service, action: tool.action.id, params: params as Record<string, unknown>, invocationId }, ctx);
+    result = await invoke(invocationId);
   } finally {
     // A failed release must not hide the call's own error. The claim then
     // goes stale after CLAIM_STALE_MS and the next retry takes it over.
-    if (holdsClaim) {
+    if (keyed) {
       await db.delete(actionInvocations).where(eq(actionInvocations.invocationId, claimId))
         .catch((err: unknown) => console.error(`actions: could not release claim ${claimId}:`, err));
     }
@@ -283,10 +291,15 @@ actionsRouter.post("/:toolId/invoke", async (c) => {
   if (!result.ok && !("requiresApproval" in result)) {
     await db.delete(actionInvocations).where(eq(actionInvocations.invocationId, invocationId));
   }
-  if (result.ok) return c.json({ tool_id: toolId, status: "completed", result: result.result } satisfies ActionInvokeResponse);
-  if ("requiresApproval" in result) return c.json(approvalRequired(toolId, result));
-  return c.json({ tool_id: toolId, status: "failed", error: result.error } satisfies ActionInvokeResponse);
-});
+  return result;
+}
+
+export function inProgress(toolId: string): ActionInvokeResponse {
+  return {
+    tool_id: toolId, status: "in_progress",
+    next_step: "A call with this idempotency_key is still running. Call again with the same key and params to get its result.",
+  };
+}
 
 /** The caller label for the audit row: the credential type, and the OAuth client for MCP. */
 function externalClient(c: Context<AppEnv>): string {
@@ -294,9 +307,9 @@ function externalClient(c: Context<AppEnv>): string {
   return c.var.authVia;
 }
 
-type ApprovalResult = Extract<Awaited<ReturnType<ReturnType<typeof buildActionInvoker>>>, { requiresApproval: true }>;
+type ApprovalResult = Extract<InvokeResult, { requiresApproval: true }>;
 
-function approvalRequired(toolId: string, result: ApprovalResult): ActionInvokeResponse {
+export function approvalRequired(toolId: string, result: ApprovalResult): ActionInvokeResponse {
   return {
     tool_id: toolId,
     status: "approval_required",
