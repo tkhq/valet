@@ -62,6 +62,7 @@ import {
   updateWorkflowTrigger,
 } from "./trigger-service.js";
 import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
+import { analyzeDefinitionPermissions } from "./permissions.js";
 import { readStepTranscript } from "./step-transcript.js";
 import {
   deleteWorkflowWebhook,
@@ -246,6 +247,22 @@ function armDepsFrom(deps: WorkflowServiceDeps): TeamServiceReadinessDeps {
   return { db: deps.db, credentials: deps.credentials, plugins: deps.plugins ?? [], onePassword: deps.onePassword };
 }
 
+/** Steps whose actions the permission preview cannot see: an agent decides
+ * them, or a sub-workflow runs them. A foreach reports its body's type. */
+function uncheckedSteps(definition: unknown): Array<{ nodeId: string; type: string }> {
+  const nodes = typeof definition === "object" && definition !== null && "nodes" in definition && Array.isArray(definition.nodes)
+    ? definition.nodes : [];
+  const unchecked: Array<{ nodeId: string; type: string }> = [];
+  for (const node of nodes) {
+    if (typeof node !== "object" || node === null || !("id" in node) || typeof node.id !== "string") continue;
+    const body = "body" in node && typeof node.body === "object" && node.body !== null ? node.body : undefined;
+    const typed = body ?? node;
+    const type = "type" in typed && typeof typed.type === "string" ? typed.type : "";
+    if (["session", "llm", "orchestrator", "workflow"].includes(type)) unchecked.push({ nodeId: node.id, type });
+  }
+  return unchecked;
+}
+
 export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): ActionPlugin {
   const copyToTeam = action(Type.Object({
     workflow_id: Type.String({ description: "Explicit personal workflow ID to copy." }),
@@ -315,6 +332,32 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           updatedAt: wf.updatedAt,
         },
       };
+    },
+  });
+
+  // The assistant's copy of `GET /api/workflows/:id/permissions`: the same
+  // analysis and the same owner check, so it never reports a gate the
+  // workflow page does not show.
+  const getPermissions = action(Type.Object({ workflow_id: Type.String() }))({
+    id: "workflows.get_permissions",
+    name: "Get workflow step permissions",
+    description:
+      "Show what policy decides for each tool step of a workflow, as the workflow page's Permissions section shows it. " +
+      "Per step: mode `allow` means no policy gates the step, `require_approval` waits for a person, `deny` is blocked " +
+      "by policy, and `unknown` is checked when the run reaches it. `provenance` names the rule that set the mode. " +
+      "`sharedAccount: true` means a run may use a member's shared account and then asks that member, whatever the mode; a team 1Password item for the service avoids it. " +
+      "`runtimeParams: true` means a policy rule keys on a parameter the step fills in at run time, so a run can decide differently. " +
+      "`unchecked` lists agent and sub-workflow steps; their actions are checked when they run. " +
+      "Read this before you tell a user that a step needs approval, and check a run's `waitingOn` to confirm.",
+    riskLevel: "low",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const deps = getDeps();
+      const summary = await getWorkflowDefinition(deps, owner, workflow_id);
+      if (!summary) return { success: false, error: `workflow not found: ${workflow_id}` };
+      const nodes = await analyzeDefinitionPermissions(deps, owner, summary);
+      return { success: true, data: { workflowId: workflow_id, nodes, unchecked: uncheckedSteps(summary.definition) } };
     },
   });
 
@@ -1423,6 +1466,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       copyToTeam,
       listWorkflows,
       getWorkflow,
+      getPermissions,
       saveWorkflow,
       patchWorkflow,
       updateModel,

@@ -96,10 +96,33 @@ gating action. Rules:
 Both routes are owner-scoped like every other `/api/workflows/:id/*` route:
 cross-owner access 404s.
 
+The assistant reads the same prediction through the `workflows.get_permissions`
+action (risk level `low`). It reads the definition with the assistant's owner,
+so it applies the same owner check and returns the same `nodes`, plus
+`unchecked`: the agent and sub-workflow steps whose actions are checked only
+when they run. Without it, the assistant saw only the definition and told users
+that steps an org policy allows still needed approval.
+
+Two node fields say where the policy mode alone is not the answer. The mode
+reads a template parameter literally, as a workflow grant does. When a policy or
+override for the action matches on a parameter the step fills in at run time,
+the node carries `runtimeParams: true`, because the run can resolve differently
+once it renders the value. Matcher paths parse the way the matcher reads them,
+so `to[0]` overlaps a templated `to`, and the whole-object path `""` overlaps
+every template. On a team workflow, `sharedAccount: true` marks a step whose
+team has no live connection of its own for the service while a current member
+shares one (`membersSharing`; never GitHub, which the invoker never borrows). A
+dead team connection (`isDeadConnection`) does not count, because the invoker
+skips it for a share. The invoker may then ask that member on every run. It
+does not when the person who starts the run shares their own account, or when a
+team 1Password item covers the service. The check reads credential and share
+rows only, so the preview reads no secret, no vault, and refreshes no token.
+
 ## Files
 
 - `packages/api/src/workflows/permissions.ts` — analysis + bulk allow.
 - `packages/api/src/routes/workflows.ts` — the two routes.
+- `packages/api/src/workflows/actions.ts` — the `workflows.get_permissions` assistant action.
 - `packages/api/src/routes/workflow-permissions.test.ts` — route tests.
 - `packages/web/src/api/{client,workflows}.ts` — client + hooks.
 - `packages/web/src/components/workflows/editor/{flow-node,canvas,editor}.tsx`
