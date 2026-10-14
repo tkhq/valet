@@ -254,7 +254,7 @@ async function resolveRunContext(opts: WorkflowEngineDepsOpts, runId: string): P
  * `resolveRunContext` and `promptOrchestrator` so both derive the same
  * value from a `Principal` the same way.
  */
-function actorUserIdFor(principal: Principal): string {
+export function actorUserIdFor(principal: Principal): string {
   return principal.type === "user" ? principal.id : `${principal.type}:${principal.id}`;
 }
 

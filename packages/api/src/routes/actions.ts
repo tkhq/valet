@@ -94,7 +94,7 @@ function paramsDigest(value: unknown): string {
 const DISCOVERY_TIMEOUT_MS = 8_000;
 const MAX_IDEMPOTENCY_KEY = 200;
 
-function invokerOpts(c: Context<AppEnv>): ActionInvokerOpts {
+export function invokerOpts(c: Context<AppEnv>): ActionInvokerOpts {
   const { db, engineCredentials, actionPluginByService, plugins, encryptionKey, onePassword } = c.var.providers;
   return {
     db,
@@ -114,7 +114,7 @@ async function callerContext(c: Context<AppEnv>, workspace: string | undefined):
 }
 
 /** Split `service.action` on the longest registered service prefix. */
-function parseToolId(c: Context<AppEnv>, toolId: string): { service: string; action: string } | undefined {
+export function parseToolId(c: Context<AppEnv>, toolId: string): { service: string; action: string } | undefined {
   const services = [...c.var.providers.actionPluginByService.keys()].sort((a, b) => b.length - a.length);
   const service = services.find((s) => toolId.startsWith(`${s}.`));
   return service ? { service, action: toolId.slice(service.length + 1) } : undefined;
