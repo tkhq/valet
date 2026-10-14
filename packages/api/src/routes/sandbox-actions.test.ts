@@ -5,7 +5,7 @@
  */
 import { Type } from "typebox";
 import type { ValetPlugin } from "@valet/engine";
-import { and, eq } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -22,12 +22,14 @@ afterEach(async () => {
 const TEAM = "script-team";
 const RUN = "wfrun_script";
 const SESSION = `wf:${RUN}:fetch`;
+let echoCalls = 0;
 
 function plugins(): ValetPlugin[] {
   const echo = {
     id: "demo.echo", name: "Echo", description: "Echoes text and reports the credential it used.", riskLevel: "low" as const,
     parameters: Type.Object({ text: Type.Optional(Type.String()) }),
     execute: async (args: unknown, ctx: { credentials: { get: () => Promise<{ accessToken: string } | null> } }) => {
+      echoCalls += 1;
       const credential = await ctx.credentials.get();
       const text = typeof args === "object" && args !== null && "text" in args && typeof args.text === "string" ? args.text : null;
       return { success: true, data: { text, credential: credential?.accessToken ?? null } };
@@ -51,15 +53,18 @@ async function seed(): Promise<string> {
   await p.db.insert(workflowDefinitions).values({ id: "wf_script", orgId: "local-org", ownerType: "team", ownerId: TEAM, name: "Script", definition: {}, createdAt: now, updatedAt: now });
   await p.workflowStore.createRun(RUN, { workflowId: "wf_script", definitionVersionId: "v1" },
     { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: TEAM, actorUserId: "local-user" });
+  await p.workflowStore.claimRun(RUN, "host", 30_000);
+  echoCalls = 0;
   // The member who started the run has an account too; the call must use the team's.
   await p.engineCredentials.save({ type: "team", id: TEAM }, "demo", { type: "api_key", apiKey: "team-key" });
   await p.engineCredentials.save({ type: "user", id: "local-user" }, "demo", { type: "api_key", apiKey: "member-key" });
   return (await mintSandboxToken(p.db, { sessionId: SESSION, userId: "local-user", orgId: "local-org" })).token;
 }
 
-function invoke(token: string, toolId: string, params: Record<string, unknown> = {}): Promise<Response> {
+function invoke(token: string, toolId: string, params: Record<string, unknown> = {}, idempotencyKey?: string): Promise<Response> {
   return fetch(`${api!.baseUrl}/api/sandbox/actions/${toolId}/invoke`, {
-    method: "POST", headers: { "Content-Type": "application/json", "x-valet-sandbox": token }, body: JSON.stringify({ params }),
+    method: "POST", headers: { "Content-Type": "application/json", "x-valet-sandbox": token },
+    body: JSON.stringify({ params, ...(idempotencyKey ? { idempotencyKey } : {}) }),
   });
 }
 
@@ -73,9 +78,37 @@ describe("POST /api/sandbox/actions/:toolId/invoke", () => {
     const dynamic = await invoke(token, "remote.lookup");
     expect(await dynamic.json()).toMatchObject({ status: "completed", result: { found: true } });
 
+    // The broker's external audit row, one per call.
     const rows = await api!.providers.db.select().from(actionInvocations)
-      .where(and(eq(actionInvocations.actionId, "demo.echo"), eq(actionInvocations.workflowExecutionId, RUN)));
+      .where(and(eq(actionInvocations.actionId, "demo.echo"), like(actionInvocations.invocationId, "pol:ext:%")));
     expect(rows).toHaveLength(1);
+  });
+
+  it("applies the session-scoped policy the step's agent has, so a script cannot get around it", async () => {
+    const token = await seed();
+    await createPolicy(api!.providers.db, { orgId: "local-org", type: "org", id: "local-org" },
+      { actionId: "demo.echo", mode: "deny", appliesIn: "session", managedBy: "local-user", now: Date.now() });
+    const denied = await invoke(token, "demo.echo");
+    expect(await denied.json()).toMatchObject({ status: "failed" });
+    expect(echoCalls).toBe(0);
+  });
+
+  it("refuses a run that has finished", async () => {
+    const token = await seed();
+    await api!.providers.workflowStore.settleRun(RUN, "cancelled");
+    const res = await invoke(token, "demo.echo");
+    expect(res.status).toBe(409);
+    expect(echoCalls).toBe(0);
+  });
+
+  it("runs a call with a repeated idempotencyKey once", async () => {
+    const token = await seed();
+    const first = await (await invoke(token, "demo.echo", { text: "once" }, "k1")).json();
+    const second = await (await invoke(token, "demo.echo", { text: "once" }, "k1")).json();
+    expect(second).toEqual(first);
+    expect(echoCalls).toBe(1);
+    await invoke(token, "demo.echo", { text: "other params" }, "k1");
+    expect(echoCalls).toBe(2);
   });
 
   it("refuses a session that is not a workflow step", async () => {

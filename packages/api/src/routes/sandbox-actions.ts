@@ -1,30 +1,37 @@
 /**
  * `POST /api/sandbox/actions/:toolId/invoke`: a workflow step's script calls
- * an integration action the way the step's own `tool` nodes do.
+ * an integration action with the same power as the step's agent.
  *
  * Auth is the sandbox-token rung of `middleware/auth.ts` (`x-valet-sandbox`,
- * prefix `/api/sandbox/`). Only a workflow step session qualifies: its run
- * names the owner (`workflowSessionOwner`), and the call runs as that run
- * (`workflowExecutionId`). So `appliesIn: "workflow"` policies, the run's
- * grants, and the owner's credentials apply exactly as for a `tool` node,
- * and every call writes its Action Log row. No credential reaches the
+ * prefix `/api/sandbox/`). Only a workflow step session of an active run
+ * qualifies: its run names the owner (`workflowSessionOwner`), and a settled
+ * or cancelled run's script can call nothing more. The call runs through the
+ * action invoker in the tool broker's external mode, so `appliesIn:
+ * "session"` policies apply exactly as they do to the step's agent, and no
+ * workflow grant meant for `tool` nodes applies. Code in the sandbox can
+ * therefore do nothing the agent cannot. The owner's credentials make the
+ * call, each call writes its Action Log row, and no credential reaches the
  * sandbox.
  *
- * A call that policy holds for a person's approval is refused, because a
- * script cannot wait for one. Valet's own services stay refused, as they are
- * for every agent caller.
+ * A call that policy holds for approval is refused, because a script cannot
+ * wait for one. Valet's own services stay refused, as for every agent
+ * caller. `idempotencyKey` makes a retry return the first call's result.
  */
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
+import { actionInvocations } from "../schema/index.js";
 import { buildActionInvoker, externalServiceRefusal } from "../plugins/action-invoker.js";
 import { actorUserIdFor, parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import type { ActionInvokeResponse } from "../wire/types.js";
-import { invokerOpts, parseToolId } from "./actions.js";
+import { approvalRequired, invokerOpts, paramsDigest, parseToolId } from "./actions.js";
 
 export const sandboxActionsRouter = new Hono<AppEnv>();
+
+const MAX_IDEMPOTENCY_KEY = 200;
 
 sandboxActionsRouter.post("/actions/:toolId/invoke", async (c) => {
   const sandbox = c.var.sandbox;
@@ -46,18 +53,33 @@ sandboxActionsRouter.post("/actions/:toolId/invoke", async (c) => {
     return c.json({ error: "Send a JSON object with params, such as {\"params\": {}}." }, 400);
   }
 
+  const key = body.idempotencyKey;
+  if (key !== undefined && (typeof key !== "string" || key === "" || key.length > MAX_IDEMPOTENCY_KEY)) {
+    return c.json({ error: `Set idempotencyKey to a string of 1-${MAX_IDEMPOTENCY_KEY} characters, or omit it.` }, 400);
+  }
+
   const { runId, nodeId } = parseWorkflowSessionId(sandbox.sessionId);
   const run = await c.var.providers.workflowStore.getRun(runId);
-  const result = await buildActionInvoker(invokerOpts(c))(
-    { service: parsed.service, action: parsed.action, params: Object.fromEntries(Object.entries(params)), invocationId: `wf:${runId}:${nodeId}:script:${randomUUID()}` },
-    { userId: run?.actorUserId ?? actorUserIdFor(owner), orgId: sandbox.orgId, owner, workflowExecutionId: runId },
-  );
-  if (result.ok) return c.json({ tool_id: toolId, status: "completed", result: result.result } satisfies ActionInvokeResponse);
-  if ("requiresApproval" in result) {
-    return c.json({
-      tool_id: toolId, status: "approval_required",
-      next_step: "Policy requires a person to approve this action, and a script cannot wait for approval. Call it from a tool node, or ask an admin to allow it for this workflow.",
-    } satisfies ActionInvokeResponse, 403);
+  if (!run || (run.status !== "running" && run.status !== "parked")) {
+    return c.json({ error: "This workflow run has finished, so its steps can call no more actions." }, 409);
   }
+  // A key is namespaced by run, step, tool, and params, as the broker does.
+  const invocationId = `wf:${runId}:${nodeId}:script:${typeof key === "string" ? `${toolId}:${paramsDigest(params)}:${key}` : randomUUID()}`;
+  const result = await buildActionInvoker(invokerOpts(c))(
+    {
+      service: parsed.service, action: parsed.action, params: Object.fromEntries(Object.entries(params)),
+      invocationId,
+    },
+    {
+      userId: run.actorUserId ?? actorUserIdFor(owner), orgId: sandbox.orgId, owner,
+      external: { client: "workflow-script", attempt: randomUUID() },
+    },
+  );
+  // A failure must not stick to the key: the script fixes the cause and retries.
+  if (!result.ok && !("requiresApproval" in result)) {
+    await c.var.providers.db.delete(actionInvocations).where(eq(actionInvocations.invocationId, invocationId));
+  }
+  if (result.ok) return c.json({ tool_id: toolId, status: "completed", result: result.result } satisfies ActionInvokeResponse);
+  if ("requiresApproval" in result) return c.json(approvalRequired(toolId, result), 403);
   return c.json({ tool_id: toolId, status: "failed", error: result.error } satisfies ActionInvokeResponse);
 });

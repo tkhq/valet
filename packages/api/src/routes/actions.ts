@@ -80,7 +80,7 @@ export function clearDiscoveryCache(): void {
 const CLAIM_STALE_MS = 15 * 60_000;
 
 /** A stable digest of params: object keys are sorted, so key order does not change it. */
-function paramsDigest(value: unknown): string {
+export function paramsDigest(value: unknown): string {
   const canonical = (v: unknown): unknown => {
     if (Array.isArray(v)) return v.map(canonical);
     if (v && typeof v === "object") {
@@ -296,7 +296,7 @@ function externalClient(c: Context<AppEnv>): string {
 
 type ApprovalResult = Extract<Awaited<ReturnType<ReturnType<typeof buildActionInvoker>>>, { requiresApproval: true }>;
 
-function approvalRequired(toolId: string, result: ApprovalResult): ActionInvokeResponse {
+export function approvalRequired(toolId: string, result: ApprovalResult): ActionInvokeResponse {
   return {
     tool_id: toolId,
     status: "approval_required",
