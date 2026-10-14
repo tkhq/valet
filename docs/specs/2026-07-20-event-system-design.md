@@ -275,15 +275,18 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   fan-out); a workflow↔orchestrator pair warns but never blocks. Disabled
   rows are skipped — they cannot fire — and enabling one re-runs the gate.
 - Replacement proposals: `events.propose_subscription` takes an optional
-  `replaces`, the ID of an enabled subscription with the same owner, and
-  stores it as `target.replaces`. The action refuses an unknown ID, an ID
-  from another workspace, and a disabled subscription. When a person enables
-  the proposal, the PATCH route disables the replaced subscription in the
-  same transaction and leaves it out of the collision gate, so one version
-  replies. The disable requires the replaced subscription to still be on.
-  If it is off or removed, for example because another replacement of it was
-  enabled first, the enable is refused with 409 and the person asks for a new
-  proposal. The enable clears `target.replaces` and records the ID as
+  `replaces`, the ID of an enabled assistant subscription
+  (`target.kind: "orchestrator"`) with the same owner, and stores it as
+  `target.replaces`. The action refuses an unknown ID, an ID from another
+  workspace, a workflow trigger, and a disabled subscription. When a person
+  enables the proposal, the PATCH route disables the replaced subscription in
+  the same transaction and leaves it out of the collision gate, so one version
+  replies. The PATCH lookup applies the same owner and kind checks. The
+  disable requires the replaced subscription to still be on. If it is off,
+  for example because it was paused or another replacement of it was enabled
+  first, the enable is refused with 409, and the message tells the person to
+  turn it back on and enable again. If it was removed, the message tells the
+  person to delete the proposal and ask for a new one. The enable clears `target.replaces` and records the ID as
   `target.replaced`, so turning the new version off and on later leaves the
   old one alone. A repeated proposal key returns the stored proposal before it
   checks `replaces`; a retry matches the spent form only when `replaced`

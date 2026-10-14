@@ -161,14 +161,16 @@ describe("eventsActionPlugin", () => {
       { ...rule, id: "team-rule", orgId: ORG, ownerType: "team", ownerId: "replace-team", name: "Team rule", createdBy: "member" },
       { ...rule, id: "other-org", orgId: "foreign", ownerType: "user", ownerId: "member", name: "Other org", createdBy: "member" },
       { ...rule, id: "parked", orgId: ORG, ownerType: "user", ownerId: "member", name: "Parked", enabled: false, createdBy: "member" },
+      { ...rule, id: "trigger", orgId: ORG, ownerType: "user", ownerId: "member", name: "Trigger", target: { kind: "workflow", workflowId: "wf" }, createdBy: "member" },
     ]);
     const tool = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
     const input = { proposal_key: "refused", name: "Next", event_keys: ["github.pull_request.opened"] };
-    for (const replaces of ["missing", "colleague", "team-rule", "other-org"]) {
-      expect(await tool.execute({ ...input, replaces }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("No subscription with this replaces ID exists in this workspace") });
+    // A workflow trigger is not an assistant version, even the caller's own.
+    for (const replaces of ["missing", "colleague", "team-rule", "other-org", "trigger"]) {
+      expect(await tool.execute({ ...input, replaces }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("No assistant subscription with this replaces ID exists in this workspace") });
     }
     expect(await tool.execute({ ...input, replaces: "parked" }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("\"Parked\" is not enabled") });
-    expect(await db.select().from(eventSubscriptions)).toHaveLength(4);
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(5);
   });
 
   it("persists explicit personal thread preferences and rejects them for team proposals", async () => {

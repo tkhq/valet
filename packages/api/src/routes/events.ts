@@ -135,9 +135,14 @@ type NarrowedSubscriptionRow = Omit<
   target: EventSubscriptionTargetWire;
 };
 
-const STALE_REPLACEMENT =
-  "This proposal replaces a subscription that is already off or removed, so enabling it could leave two versions on. " +
-  "Ask the assistant for a new proposal that replaces the live version.";
+/** Why a replacement cannot turn on, and how the reviewer recovers. */
+function staleReplacement(name: string | undefined): string {
+  if (name === undefined) {
+    return "This proposal replaces a subscription that was removed. Delete this proposal, then ask the assistant for a new one.";
+  }
+  return `This proposal replaces "${name}", which is off, so enabling it could leave two versions on. ` +
+    `Turn "${name}" back on, then enable this proposal. Enabling it turns "${name}" off again.`;
+}
 
 /** Another enable turned the replaced version off first; rolls this enable back. */
 class StaleReplacementError extends Error {}
@@ -841,18 +846,20 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // (see the update below), so that row is not a collision peer. Same owner
   // only: a target written by hand must not reach another workspace's rule.
   const replaces = arming && patchedTarget.kind === "orchestrator" ? patchedTarget.replaces : undefined;
+  // An assistant subscription only: a workflow trigger is not a version.
   const replaced = replaces === undefined ? undefined : (await db
-    .select({ id: eventSubscriptions.id, enabled: eventSubscriptions.enabled })
+    .select({ id: eventSubscriptions.id, name: eventSubscriptions.name, enabled: eventSubscriptions.enabled })
     .from(eventSubscriptions)
     .where(and(
       eq(eventSubscriptions.id, replaces), ne(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId),
       eq(eventSubscriptions.ownerType, row.ownerType), eq(eventSubscriptions.ownerId, row.ownerId),
+      sql`${eventSubscriptions.target}->>'kind' = 'orchestrator'`,
     ))
     .limit(1))[0];
   // A replacement turns off a version that still replies. If that version is
   // already off or gone (another replacement of it was enabled, or a person
   // removed it), enabling this one could leave two versions on.
-  if (replaces !== undefined && !replaced?.enabled) return c.json({ error: STALE_REPLACEMENT }, 409);
+  if (replaces !== undefined && !replaced?.enabled) return c.json({ error: staleReplacement(replaced?.name) }, 409);
   const replacedId = replaced?.id;
   let collisions: EventSubscriptionCollisionsWire | undefined;
   if (willBeEnabled && (matchChanged || arming)) {
@@ -924,7 +931,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       return rows;
     });
   } catch (err) {
-    if (err instanceof StaleReplacementError) return c.json({ error: STALE_REPLACEMENT }, 409);
+    if (err instanceof StaleReplacementError) return c.json({ error: staleReplacement(replaced?.name) }, 409);
     throw err;
   }
 

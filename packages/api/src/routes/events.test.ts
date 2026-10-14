@@ -2195,6 +2195,17 @@ describe("replacement proposals", () => {
     });
     expect((await patchSubscription(a.baseUrl, "sub_stray", { enabled: true })).status).toBe(409);
     expect(await enabledById(a)).toMatchObject({ sub_colleague: true, sub_stray: false });
+    // A link to a workflow trigger is refused too: a trigger is not an assistant version.
+    await seedSubscriptionRow(a, "sub_trigger", "local-org", {
+      ownerType: "user", ownerId: "local-user", eventKeys: MATCH.eventKeys,
+      filters: [{ field: "repo", op: "eq", value: "acme/trigger" }], target: { kind: "workflow", workflowId: "wf-1" },
+    });
+    await seedSubscriptionRow(a, "sub_takeover", "local-org", {
+      ownerType: "user", ownerId: "local-user", enabled: false, eventKeys: MATCH.eventKeys,
+      filters: [{ field: "repo", op: "eq", value: "acme/takeover" }], target: { kind: "orchestrator", replaces: "sub_trigger" },
+    });
+    expect((await patchSubscription(a.baseUrl, "sub_takeover", { enabled: true })).status).toBe(409);
+    expect(await enabledById(a)).toMatchObject({ sub_trigger: true, sub_takeover: false });
 
     // The replaced rule is not a collision peer, so no override is needed.
     const res = await patchSubscription(a.baseUrl, "sub_next", { enabled: true });
@@ -2221,8 +2232,12 @@ describe("replacement proposals", () => {
     expect((await patchSubscription(a.baseUrl, "sub_sibling", { enabled: true })).status).toBe(200);
     const stale = await patchSubscription(a.baseUrl, "sub_next", { enabled: true, allowCollision: true });
     expect(stale.status).toBe(409);
-    expect(await stale.json()).toMatchObject({ error: expect.stringContaining("Ask the assistant for a new proposal") });
+    expect(await stale.json()).toMatchObject({ error: expect.stringContaining('Turn "replies v1" back on, then enable this proposal.') });
     expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: false, sub_sibling: true });
+    // The recovery the message names works: turn the version back on, then enable.
+    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: true, allowCollision: true })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true, allowCollision: true })).status).toBe(200);
+    expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: true });
   });
 
   it("refuses a replacement whose version was removed, and keeps its link", async () => {
@@ -2230,7 +2245,9 @@ describe("replacement proposals", () => {
     await seedSubscriptionRow(a, "sub_orphan", "local-org", {
       ownerType: "user", ownerId: "local-user", ...MATCH, name: "replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_gone" },
     });
-    expect((await patchSubscription(a.baseUrl, "sub_orphan", { enabled: true })).status).toBe(409);
+    const refused = await patchSubscription(a.baseUrl, "sub_orphan", { enabled: true });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: expect.stringContaining("Delete this proposal") });
     const [orphan] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_orphan"));
     expect(orphan).toMatchObject({ enabled: false, target: { replaces: "sub_gone" } });
   });

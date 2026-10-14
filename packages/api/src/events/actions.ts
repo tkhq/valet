@@ -207,10 +207,13 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
         createdBy: userId, createdAt: now, updatedAt: now,
       };
       const insert = async (tx: AppQueryable): Promise<{ error: string } | { row?: EventSubscriptionRow; replaced?: { id: string; name: string } }> => {
+        // Only an assistant subscription has versions to replace. A workflow
+        // trigger is not one, even when the assistant can list it.
         const findReplaced = async (replacesId: string) => (await tx
           .select({ id: eventSubscriptions.id, name: eventSubscriptions.name, enabled: eventSubscriptions.enabled })
           .from(eventSubscriptions).where(and(eq(eventSubscriptions.id, replacesId), eq(eventSubscriptions.orgId, values.orgId),
-            eq(eventSubscriptions.ownerType, ownerType), eq(eventSubscriptions.ownerId, ownerId))).limit(1))[0];
+            eq(eventSubscriptions.ownerType, ownerType), eq(eventSubscriptions.ownerId, ownerId),
+            sql`${eventSubscriptions.target}->>'kind' = 'orchestrator'`)).limit(1))[0];
         // A repeated proposal key answers with the stored record, whatever
         // happened since to the subscription it replaces.
         const [existing] = await tx.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, values.id)).limit(1);
@@ -225,7 +228,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
         let replaced: { id: string; name: string } | undefined;
         if (input.replaces !== undefined) {
           const found = await findReplaced(input.replaces);
-          if (!found) return { error: "No subscription with this replaces ID exists in this workspace. Use events.list_subscriptions to find the enabled subscription to replace." };
+          if (!found) return { error: "No assistant subscription with this replaces ID exists in this workspace. Use events.list_subscriptions to find the enabled assistant subscription to replace." };
           // A disabled rule is not the version that replies, so replacing it
           // would leave the live version on.
           if (!found.enabled) {
