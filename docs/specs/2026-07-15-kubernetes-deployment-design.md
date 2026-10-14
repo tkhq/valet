@@ -332,7 +332,7 @@ The 2026-09-26 note above says the old pod serves traffic during the upgrade. Th
 
 Chart 0.10.20 removes two parts of the window:
 
-- A `pre-upgrade` hook Job (`api.imagePrepull`) starts the new api image on the api nodes before Helm changes the Deployment. Helm waits for the Job, so the new pod starts from a cached image. If the Job does not finish in `api.imagePrepull.activeDeadlineSeconds`, the upgrade fails before the old pod stops.
+- A `pre-upgrade` hook Job (`api.imagePrepull`) starts the new api image on the api nodes before Helm changes the Deployment. Helm waits for the Job, so the new pod starts from a cached image. The Job copies the api's node placement (nodeSelector, tolerations, `affinity.nodeAffinity`) and uses a hard hostname spread with `nodeTaintsPolicy: Honor`, so each eligible node gets one pod while `replicas` is at most the node count. It does not copy api pod affinity terms, because they are written relative to api pods. If the Job does not finish in `api.imagePrepull.activeDeadlineSeconds`, the upgrade fails before the old pod stops.
 - The startup and readiness probes poll every second. `api.startupProbe.failureThreshold` keeps its five-second units, and the chart multiplies it by 5, so the 30-minute budget and existing overrides do not change. Readiness tolerates 15 consecutive failures, the same 15 seconds as before.
 
 Process start and the boot chain are not changed by this update.

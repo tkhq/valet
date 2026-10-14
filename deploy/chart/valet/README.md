@@ -45,7 +45,7 @@ These limits cover database initialization. Session restore runs after the liste
 The api Deployment uses the `Recreate` strategy: the old pod stops before the new pod starts, so the Service has no ready pod during an upgrade and the ingress returns 503.
 The chart keeps this window short:
 
-1. A `pre-upgrade` hook Job (`api.imagePrepull`) pulls the new api image onto the api nodes before Helm changes the Deployment. Set `api.imagePrepull.replicas` to the number of nodes that match `api.nodeSelector`.
+1. A `pre-upgrade` hook Job (`api.imagePrepull`) pulls the new api image onto the api nodes before Helm changes the Deployment. The Job copies the api's `nodeSelector`, tolerations, and `affinity.nodeAffinity`, and puts one pod on each eligible node. Set `api.imagePrepull.replicas` to the number of eligible nodes. With fewer replicas, some nodes stay cold.
 2. The startup and readiness probes poll every second, so traffic returns within a second of the boot chain finishing.
 
 If the pre-pull Job cannot finish in `api.imagePrepull.activeDeadlineSeconds`, the upgrade fails before the old pod stops.

@@ -294,6 +294,24 @@ echo "$PREPULL" | grep -q 'app.kubernetes.io/component: api$' \
 helm template valet "$CHART_DIR" --kube-version 1.30.0 --set api.imagePrepull.enabled=false \
   | grep -q 'api-image-prepull' && fail "api.imagePrepull.enabled=false must not render the Job"
 pass "api image pre-pull hook renders as a pre-upgrade Job on the new image"
+AFFINITY_ARGS=(--set 'api.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=pool'
+  --set 'api.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator=In'
+  --set 'api.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values[0]=api'
+  --set 'api.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey=kubernetes.io/hostname'
+  --set 'api.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].labelSelector.matchLabels.app=other')
+PREPULL_AFFINITY=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --show-only templates/api-image-prepull-job.yaml "${AFFINITY_ARGS[@]}")
+echo "$PREPULL_AFFINITY" | grep -A8 'nodeAffinity:' | grep -q 'key: pool' \
+  || fail "image pre-pull Job must copy api.affinity.nodeAffinity so it warms the api's nodes"
+echo "$PREPULL_AFFINITY" | grep -q '^ *podAntiAffinity:' \
+  && fail "image pre-pull Job must not copy api pod (anti-)affinity terms"
+echo "$PREPULL" | grep -A6 'topologySpreadConstraints:' | grep -q 'whenUnsatisfiable: DoNotSchedule' \
+  || fail "image pre-pull spread must be hard so each eligible node gets a pod"
+echo "$PREPULL" | grep -A6 'topologySpreadConstraints:' | grep -q 'nodeTaintsPolicy: Honor' \
+  || fail "image pre-pull spread must ignore cordoned/NotReady nodes (nodeTaintsPolicy: Honor)"
+echo "$PREPULL" | grep -q '^ *affinity:' \
+  && fail "image pre-pull Job must not render an empty affinity without api.affinity"
+pass "image pre-pull Job copies api node placement and spreads one pod per node"
 
 
 # --- lookup-retain helper present in Secret template ---------------------

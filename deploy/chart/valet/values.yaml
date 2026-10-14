@@ -17,10 +17,11 @@ api:
 
   # Pull the new api image onto the nodes before the Recreate rollout stops
   # the old pod. A pre-upgrade hook Job runs `replicas` pods of the new image,
-  # spread across nodes that match api.nodeSelector, and Helm waits for them.
-  # This removes the image pull (~10s on agents-dev) from the 503 window.
-  # Set replicas to the number of nodes the api can schedule on. If a pod
-  # cannot finish within activeDeadlineSeconds, the hook fails the upgrade.
+  # one per node that matches the api's nodeSelector, tolerations, and
+  # affinity.nodeAffinity, and Helm waits for them. This removes the image
+  # pull (~10s on agents-dev) from the 503 window. Set replicas to the number
+  # of nodes the api can schedule on: with fewer, some nodes stay cold. If a
+  # pod cannot finish within activeDeadlineSeconds, the hook fails the upgrade.
   imagePrepull:
     enabled: true
     replicas: 2
