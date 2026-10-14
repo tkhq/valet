@@ -48,7 +48,10 @@ echo "== SIGTERM to the whole process tree at once (systemd KillMode=control-gro
 "$valet" serve --port "$port" --data-dir "$work/data2" --sandbox local >"$work/log2" 2>&1 &
 pid=$!
 wait_healthy
-tree="$pid $(pgrep -P "$pid" | tr '\n' ' ')"
+tree="$pid"
+for _ in 1 2 3; do  # wrapper -> bwrap -> valet
+  tree="$tree $(for p in $tree; do pgrep -P "$p" || true; done | tr '\n' ' ')"
+done
 # shellcheck disable=SC2086
 kill -TERM $tree
 status=0
