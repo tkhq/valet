@@ -937,16 +937,28 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!owner) return NO_OWNER;
       const detail = await getWorkflowRunDetail(getDeps(), owner, run_id);
       if (!detail) return { success: false, error: `run not found: ${run_id}` };
-      const checkpoint = detail.checkpoints.find(
+      const matches = detail.checkpoints.filter(
         (cp) => cp.nodeId === node_id && (iteration === undefined || cp.iteration === iteration),
       );
-      if (!checkpoint) return { success: false, error: `run ${run_id} has no checkpoint for node ${JSON.stringify(node_id)}` };
+      if (matches.length === 0) return { success: false, error: `run ${run_id} has no checkpoint for node ${JSON.stringify(node_id)}` };
+      if (matches.length > 1) {
+        const iterations = matches.map((cp) => cp.iteration).sort((a, b) => a - b).join(", ");
+        return { success: false, error: `Node ${JSON.stringify(node_id)} ran iterations ${iterations}. Pass iteration to choose one.` };
+      }
+      const checkpoint = matches[0]!;
       if (!checkpoint.sessionId) {
         return { success: false, error: `Node ${JSON.stringify(node_id)} ran no conversation. Only session and orchestrator steps keep a transcript; use get_node_result for this node.` };
       }
       const pageSize = Math.min(Math.max(Math.trunc(limit ?? TRANSCRIPT_PAGE), 1), TRANSCRIPT_PAGE_MAX);
-      const transcript = await readStepTranscript(getDeps().engineStore, checkpoint.sessionId, checkpoint.threadId,
-        { ...(before !== undefined ? { before: Math.trunc(before) } : {}), limit: pageSize });
+      // A session step owns its thread, repair turn included. An orchestrator
+      // step shares a thread with other steps and with chat, so it reads only
+      // its own submission.
+      const ownThread = checkpoint.sessionId.startsWith("wf:");
+      const transcript = await readStepTranscript(getDeps().engineStore, checkpoint.sessionId, checkpoint.threadId, {
+        ...(before !== undefined ? { before: Math.trunc(before) } : {}),
+        limit: pageSize,
+        ...(!ownThread && checkpoint.queueItemId ? { queueItemId: checkpoint.queueItemId } : {}),
+      });
       if (!transcript) return { success: false, error: `The conversation for node ${JSON.stringify(node_id)} is no longer stored.` };
       return {
         success: true,

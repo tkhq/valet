@@ -7,7 +7,7 @@ import {
   ownerFromContext,
   workflowsActionPlugin,
 } from "./actions.js";
-import type { PluginActionContext } from "@valet/engine";
+import type { PluginActionContext, SessionEntry } from "@valet/engine";
 import {
   createWorkflowDefinition,
   getWorkflowDefinition,
@@ -825,6 +825,69 @@ describe("DB-backed actions", () => {
 
     const notSession = await action("workflows.get_node_transcript").execute({ run_id: "run-t", node_id: "missing" }, ctx());
     expect(notSession).toMatchObject({ success: false, error: expect.stringContaining("no checkpoint") });
+  });
+
+  it("get_node_transcript pages by message index, bounds every page, keeps an orchestrator step to its own turn, and asks for an iteration", async () => {
+    const plugin = workflowsActionPlugin(() => deps);
+    const transcript = plugin.actions.find((a) => a.id === "workflows.get_node_transcript")!;
+    const owner = { ownerType: "user", ownerId: "user1" };
+    const params = {
+      workflowId: "wf-p", definitionVersionId: "v1",
+      input: { type: "manual", timestamp: "2026-01-01T00:00:00Z", data: {}, metadata: {} },
+    };
+    await deps.workflowStore.createRun("run-p", params, { version: "dag/v1", nodes: [], edges: [] }, "v1", owner);
+    const claim = await deps.workflowStore.claimRun("run-p", "host", 30_000);
+    if (!claim) throw new Error("claim failed");
+    const base = { runId: "run-p", attempt: claim.attempt, createdAt: 1 };
+    const checkpoint = async (nodeId: string, iteration: number, effects: Record<string, unknown>) => {
+      await deps.workflowStore.putIntent({ ...base, nodeId, iteration, status: "intent" });
+      await deps.workflowStore.completeCheckpoint("run-p", nodeId, iteration, claim.attempt, { ...base, nodeId, iteration, status: "completed", result: {}, effects });
+    };
+    const seed = async (sessionId: string, threadId: string, entries: SessionEntry[]) => {
+      await deps.engineStore.saveSession({ id: sessionId, orgId: "org1", userId: "user1", owner: { type: "user", id: "user1" }, workspace: "/tmp", purpose: "interactive", status: "running", createdAt: 1, updatedAt: 1 });
+      await deps.engineStore.saveThread(sessionId, { id: threadId, sessionId, key: threadId, status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+      await deps.engineStore.appendEntries(sessionId, threadId, entries);
+    };
+    const message = (sessionId: string, threadId: string, id: string, content: string, queueItemId?: string): SessionEntry =>
+      ({ id, sessionId, threadId, parentId: null, type: "message", role: "assistant", content, createdAt: 1, ...(queueItemId ? { queueItemId } : {}) });
+
+    // A session step whose thread holds a non-message entry among 6 messages.
+    const stepSession = "wf:run-p:verify";
+    await seed(stepSession, "t-step", [
+      message(stepSession, "t-step", "m0", "zero"), message(stepSession, "t-step", "m1", "one"),
+      { id: "cmd", sessionId: stepSession, threadId: "t-step", parentId: null, type: "command_result", command: "/status", source: "builtin", ok: true, output: "ok", createdAt: 1 },
+      message(stepSession, "t-step", "m2", "two"), message(stepSession, "t-step", "m3", "three"),
+      message(stepSession, "t-step", "m4", "four"), message(stepSession, "t-step", "m5", "five"),
+    ]);
+    await checkpoint("verify", 0, { sessionId: stepSession, receipt: { sessionId: stepSession, threadId: "t-step", queueItemId: "q" } });
+    const page = async (args: Record<string, unknown>) => {
+      const r = await transcript.execute({ run_id: "run-p", node_id: "verify", ...args }, ctx());
+      if (!r.success) throw new Error(r.error);
+      return r.data as { total: number; messages: Array<{ index: number; text?: string }> };
+    };
+    const latest = await page({ limit: 2 });
+    expect(latest.total).toBe(6);
+    expect(latest.messages.map((m) => [m.index, m.text])).toEqual([[4, "four"], [5, "five"]]);
+    const older = await page({ limit: 2, before: latest.messages[0]!.index });
+    expect(older.messages.map((m) => m.text)).toEqual(["two", "three"]);
+    expect((await page({ limit: 2, before: -1 })).messages).toEqual([]);
+
+    // An orchestrator step shares its thread; it reads only its own submission.
+    const shared = "assistant-session";
+    await seed(shared, "t-shared", [
+      message(shared, "t-shared", "o1", "another step's turn", "q-other"),
+      message(shared, "t-shared", "o2", "this step's turn", "q-mine"),
+    ]);
+    await checkpoint("summarize", 0, { sessionId: shared, receipt: { sessionId: shared, threadId: "t-shared", queueItemId: "q-mine" } });
+    const mine = await transcript.execute({ run_id: "run-p", node_id: "summarize" }, ctx());
+    expect(mine.success && (mine.data as { messages: Array<{ text?: string }> }).messages.map((m) => m.text)).toEqual(["this step's turn"]);
+
+    // A foreach body has one checkpoint per iteration.
+    await checkpoint("each", 0, { sessionId: stepSession, receipt: { sessionId: stepSession, threadId: "t-step", queueItemId: "q" } });
+    await checkpoint("each", 1, { sessionId: stepSession, receipt: { sessionId: stepSession, threadId: "t-step", queueItemId: "q" } });
+    expect(await transcript.execute({ run_id: "run-p", node_id: "each" }, ctx()))
+      .toMatchObject({ success: false, error: expect.stringContaining("Pass iteration") });
+    expect((await transcript.execute({ run_id: "run-p", node_id: "each", iteration: 1 }, ctx())).success).toBe(true);
   });
 
   it("list_runs names a parked run's waitingOn conditions", async () => {

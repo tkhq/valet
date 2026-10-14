@@ -27,32 +27,34 @@ const TEXT_CHARS = 6_000;
 const TOOL_CHARS = 1_500;
 
 /**
- * The step's messages, oldest first. `before` pages back from a message
- * index, and `limit` bounds the page. Null when the session or thread does
+ * The step's messages, oldest first. `index` counts messages only, so
+ * `before` pages back from any message's index, and `limit` bounds the
+ * page. `queueItemId` keeps one submission's entries, for a step that
+ * shares its thread with other steps. Null when the session or thread does
  * not exist.
  */
 export async function readStepTranscript(
   store: SessionStore,
   sessionId: string,
   threadId: string | undefined,
-  page: { before?: number; limit: number },
+  page: { before?: number; limit: number; queueItemId?: string },
 ): Promise<{ threadId: string; total: number; messages: StepTranscriptMessage[] } | null> {
   const thread = threadId ?? (await store.listThreads(sessionId))[0]?.id;
   if (!thread) return null;
   const snapshot = await store.getThreadSnapshot(sessionId, thread);
   if (!snapshot) return null;
-  const all = snapshot.entries.flatMap((entry, index) => toMessage(entry, index));
-  const end = Math.min(page.before ?? all.length, all.length);
+  const entries = page.queueItemId ? snapshot.entries.filter((entry) => entry.queueItemId === page.queueItemId) : snapshot.entries;
+  const all = entries.flatMap(toMessage).map((message, index) => ({ index, ...message }));
+  const end = Math.min(Math.max(page.before ?? all.length, 0), all.length);
   return { threadId: thread, total: all.length, messages: all.slice(Math.max(0, end - page.limit), end) };
 }
 
-function toMessage(entry: SessionEntry, index: number): StepTranscriptMessage[] {
-  if (entry.type === "compaction") return [{ index, role: "system", text: "[Earlier context was compacted here.]" }];
+function toMessage(entry: SessionEntry): Omit<StepTranscriptMessage, "index">[] {
+  if (entry.type === "compaction") return [{ role: "system", text: "[Earlier context was compacted here.]" }];
   if (entry.type !== "message") return [];
   const text = (entry.parts ?? []).filter((part) => part.type === "text").map((part) => part.text).join("\n") || entry.content;
   const toolCalls = (entry.parts ?? []).flatMap((part) => part.type === "tool_call" ? [toolCall(part)] : []);
   return [{
-    index,
     role: entry.role,
     ...(text ? clip(text, TEXT_CHARS) : {}),
     ...(entry.stopReason ? { stopReason: entry.stopReason } : {}),
