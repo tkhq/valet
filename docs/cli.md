@@ -309,7 +309,9 @@ nix run github:tkhq/valet/dev-v2 -- --help
 nix profile install github:tkhq/valet/dev-v2
 ```
 
-The flake pins a versioned release (`nix/valet.nix`). Run
+The flake supports `x86_64-linux` only. The `valet/v0.1.0` linux-arm64 binary
+fails on every command, so the flake does not offer `aarch64-linux`. The flake
+pins a versioned release (`nix/valet.nix`). Run
 `nix/update.sh <version>` to move it to a newer `valet/v<version>` release.
 The binary stays dynamically linked. This is a NixOS-compatible package, not a
 static executable. It needs unprivileged user namespaces (the NixOS default).

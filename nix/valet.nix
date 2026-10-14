@@ -1,8 +1,8 @@
 # Valet CLI for NixOS.
 #
 # The release binary is a Bun `--compile` executable. It is dynamically linked
-# against glibc and expects the loader at /lib64/ld-linux-x86-64.so.2 (or
-# /lib/ld-linux-aarch64.so.1). NixOS has no such path.
+# against glibc and expects the loader at /lib64/ld-linux-x86-64.so.2.
+# NixOS has no such path.
 #
 # We do not patch the binary. Bun appends its payload to the end of the ELF
 # file, and patchelf moves data around the ELF headers, which can break the
@@ -18,15 +18,13 @@ let
   version = "0.1.0";
 
   # Release assets of tkhq/valet tag valet/v${version}.
+  # Only x86_64-linux: the v0.1.0 linux-arm64 asset does not run (its embedded
+  # sharp module lacks the linux-arm64 native binary).
   # Update with `nix/update.sh <version>`.
   assets = {
     x86_64-linux = {
       name = "valet-linux-x64";
       hash = "sha256-APYZ4RjzFrbU9ryXtVWucn5as7CSVK8RWFA01YQxfEI=";
-    };
-    aarch64-linux = {
-      name = "valet-linux-arm64";
-      hash = "sha256-VOBv9v/s/BLkSYpLWFtDiCcMaOEKGL9EC5QmRVuq4SY=";
     };
   };
 
