@@ -2237,14 +2237,15 @@ export interface WorkflowNodePermissionWire {
   /** `PolicyProvenanceSource` of the prediction (org_policy, override,
    * plugin_default, risk_default, ...). Absent when `mode` is `unknown`. */
   provenance?: string;
-  /** True when a parameter is a template a run fills in. The prediction
-   * treats its value as unknown: a deny or approval rule that could match
-   * it counts, an allow rule that needs it does not. */
+  /** True when a policy or override for this action matches on a parameter
+   * that the step fills in from a template at run time. `mode` reads the
+   * template literally, as a workflow grant does, so the run can resolve
+   * differently once it renders the value. */
   runtimeParams?: true;
   /** True for a team workflow whose team has no connection of its own for
-   * the step's service while a member shares one. A run then asks that
-   * member to approve, per run, unless the person who starts it shares
-   * their own account. */
+   * the step's service while a current member shares one (never GitHub). A
+   * run then asks that member to approve, per run, unless the person who
+   * starts it shares their own account. */
   sharedAccount?: true;
 }
 

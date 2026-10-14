@@ -1,4 +1,5 @@
 import { PGlite } from "@electric-sql/pglite";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryWorkflowStore, type RunHost, type WorkflowDefinition } from "@valet/workflow";
 import {
@@ -1001,7 +1002,7 @@ describe("DB-backed actions", () => {
     });
   });
 
-  it("get_permissions assumes the worst value for a templated parameter", async () => {
+  it("get_permissions reads templates literally and flags a rule that keys on one", async () => {
     deps.actionPluginByService = chatCatalog();
     await db.insert(workflowDefinitions).values({
       id: "perm-tpl", orgId: "org1", ownerType: "user", ownerId: "user1", name: "Templated", createdAt: 1, updatedAt: 1,
@@ -1010,20 +1011,27 @@ describe("DB-backed actions", () => {
         nodes: [
           { id: "trigger", type: "trigger" },
           { id: "post", type: "tool", service: "chat", action: "send_message", params: { channel: "{{trigger.data.channel}}" } },
+          { id: "note", type: "tool", service: "chat", action: "send_message", params: { text: "{{trigger.data.text}}" } },
         ],
-        edges: [{ from: "trigger", to: "post" }],
+        edges: [{ from: "trigger", to: "post" }, { from: "post", to: "note" }],
       },
     });
-    await db.insert(actionPolicies).values([
-      { id: "org-allow-all", orgId: "org1", principalType: "org", principalId: "org1", actionId: "chat.send_message", mode: "allow",
-        paramMatchers: [], appliesIn: "any", origin: "settings", createdAt: 1, updatedAt: 1 },
-      { id: "org-deny-general", orgId: "org1", principalType: "org", principalId: "org1", actionId: "chat.send_message", mode: "deny",
-        paramMatchers: [{ path: "channel", op: "eq", value: "#general" }], appliesIn: "any", origin: "settings", createdAt: 1, updatedAt: 1 },
-    ]);
-    const get = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.get_permissions")!;
-    expect(await get.execute({ workflow_id: "perm-tpl" }, ctx())).toMatchObject({
-      success: true, data: { nodes: [{ nodeId: "post", mode: "deny", runtimeParams: true }] },
+    await db.insert(actionPolicies).values({
+      id: "org-deny-general", orgId: "org1", principalType: "org", principalId: "org1", actionId: "chat.send_message", mode: "deny",
+      paramMatchers: [{ path: "channel", op: "eq", value: "#general" }], appliesIn: "any", origin: "settings", createdAt: 1, updatedAt: 1,
     });
+    const get = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.get_permissions")!;
+    const result = await get.execute({ workflow_id: "perm-tpl" }, ctx());
+    // The mode stays what a workflow grant reads; only the channel step is
+    // flagged, because the deny keys on the channel it renders at run time.
+    expect(result).toMatchObject({
+      success: true,
+      data: { nodes: [
+        { nodeId: "post", mode: "require_approval", provenance: "risk_default", runtimeParams: true },
+        { nodeId: "note", mode: "require_approval", provenance: "risk_default" },
+      ] },
+    });
+    expect(JSON.stringify(result)).toContain('"nodeId":"note","service":"chat","action":"send_message","actionId":"chat.send_message","riskLevel":"high","mode":"require_approval","provenance":"risk_default"}');
   });
 
   it("get_permissions flags a team step that a member's shared account would answer, and lists agent steps", async () => {
@@ -1043,6 +1051,7 @@ describe("DB-backed actions", () => {
         edges: [{ from: "trigger", to: "draft" }, { from: "draft", to: "each" }, { from: "each", to: "post" }],
       },
     });
+    await db.insert(teamMembers).values({ teamId: "perm-team-share", userId: "user2", role: "member" });
     await db.insert(credentialShares).values({ teamId: "perm-team-share", service: "chat", userId: "user2", createdAt: 1 });
     const get = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.get_permissions")!;
     const teamCtx = ctx({ owner: { type: "team", id: "perm-team-share" } });
@@ -1054,6 +1063,11 @@ describe("DB-backed actions", () => {
         unchecked: [{ nodeId: "draft", type: "session" }, { nodeId: "each", type: "workflow" }],
       },
     });
+    // A share from someone who left the team is not one a run would use.
+    await db.delete(teamMembers).where(eq(teamMembers.userId, "user2"));
+    const former = await get.execute({ workflow_id: "perm-share" }, teamCtx);
+    expect(JSON.stringify(former)).not.toContain("sharedAccount");
+    await db.insert(teamMembers).values({ teamId: "perm-team-share", userId: "user2", role: "member" });
     // With a connection of its own, the team does not borrow the share.
     await db.insert(credentials).values({ ownerType: "team", ownerId: "perm-team-share", service: "chat", type: "api_key", createdAt: 1, updatedAt: 1 });
     const own = await get.execute({ workflow_id: "perm-share" }, teamCtx);
