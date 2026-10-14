@@ -13,9 +13,22 @@
 # The binary stays dynamically linked. This is a NixOS-compatible package, not
 # a static executable.
 #
-# Signals: see the comment on `fhs` below. The package's bin/valet is a small
-# wrapper that forwards SIGTERM, SIGINT, SIGHUP and SIGQUIT to Valet.
-{ lib, stdenvNoCC, fetchurl, buildFHSEnv, writeShellApplication, procps, cacert }:
+# Signals and process lifetime: see the comments on `run` and the wrapper below.
+#
+# `binary` replaces the packaged executable. Tests use it to run a probe
+# program through the same wrapper (see packages.valet-signal-probe in flake.nix).
+{ lib
+, stdenvNoCC
+, fetchurl
+, buildFHSEnv
+, writeShellApplication
+, writeShellScript
+, procps
+, coreutils
+, util-linux
+, cacert
+, binary ? null
+}:
 
 let
   version = "0.1.0";
@@ -34,7 +47,7 @@ let
   asset = assets.${stdenvNoCC.hostPlatform.system}
     or (throw "valet: unsupported system ${stdenvNoCC.hostPlatform.system}");
 
-  unwrapped = stdenvNoCC.mkDerivation {
+  unwrapped = if binary != null then binary else stdenvNoCC.mkDerivation {
     pname = "valet-unwrapped";
     inherit version;
 
@@ -55,29 +68,66 @@ let
     '';
   };
 
-  # The FHS launcher (bubblewrap). Two behaviors matter for signals:
-  # - bwrap stays alive as the parent of Valet and has no signal handlers, so a
-  #   SIGTERM sent to it kills it and does not reach Valet.
-  # - With --die-with-parent, bwrap's death then SIGKILLs Valet, so Valet's
-  #   graceful shutdown never runs. dieWithParent is off to avoid that.
-  # The wrapper below forwards signals to Valet instead.
+  setpriv = lib.getExe' util-linux "setpriv";
+  env = lib.getExe' coreutils "env";
+
+  # Runs inside the FHS sandbox, as a child of the bwrap monitor process.
+  #
+  # PR_SET_PDEATHSIG is set to SIGTERM, so Valet gets a graceful SIGTERM when
+  # the bwrap monitor dies for any reason, including SIGKILL of the wrapper
+  # (the wrapper starts bwrap with the same setting, see below). bwrap's own
+  # --die-with-parent sends SIGKILL, which would skip Valet's shutdown handler,
+  # so it is off (dieWithParent = false).
+  #
+  # Race: if the monitor died before the prctl call, no signal is sent. The
+  # monitor exports its pid as VALET_FHS_PARENT. After the prctl call we check
+  # that our parent is still that process, and exit if it is not.
+  #
+  # The launcher (bwrap) is a background job of the wrapper, so it runs with
+  # SIGINT and SIGQUIT ignored. That keeps it alive when a terminal sends
+  # Ctrl-C or Ctrl-\ to the process group while Valet handles it. Ignored
+  # signals stay ignored across exec, so env resets both to the default here.
+  start = writeShellScript "valet-fhs-start" ''
+    if [ "$PPID" != "''${VALET_FHS_PARENT:-}" ]; then
+      echo "valet: launcher exited during startup" >&2
+      exit 143
+    fi
+    unset VALET_FHS_PARENT
+    exec ${env} --default-signal=INT,QUIT ${unwrapped}/bin/valet "$@"
+  '';
+
+  run = writeShellScript "valet-fhs-run" ''
+    exec ${setpriv} --pdeathsig TERM -- ${start} "$@"
+  '';
+
+  # The FHS launcher (bubblewrap). The bwrap monitor process stays alive as
+  # the parent of Valet and has no signal handlers.
   fhs = buildFHSEnv {
     pname = "valet-fhs";
     inherit version;
     # buildFHSEnv always provides glibc and the standard loader path.
     targetPkgs = _: [ cacert ];
-    runScript = "${unwrapped}/bin/valet";
+    runScript = run;
     dieWithParent = false;
+    # The script ends with `exec bwrap`, so $$ is the bwrap monitor pid.
+    extraPreBwrapCmds = "export VALET_FHS_PARENT=$$";
   };
 in
 (writeShellApplication {
   name = "valet";
-  runtimeInputs = [ procps ];
-  # forward() runs from traps, which shellcheck cannot see.
-  excludeShellChecks = [ "SC2317" ];
+  runtimeInputs = [ procps coreutils util-linux ];
+  # SC2317: forward() runs from traps. SC2016: the bash -c script is single-quoted on purpose.
+  excludeShellChecks = [ "SC2317" "SC2016" ];
   text = ''
-    # Forward termination signals to Valet so its graceful shutdown runs.
-    # bwrap runs Valet as its child. If Valet is not up yet, signal bwrap.
+    # Signal behavior (each point is covered by nix/test-signals.sh):
+    # - SIGTERM and SIGHUP go to Valet, so its graceful shutdown runs. Until
+    #   Valet is up, they go to the launcher instead.
+    # - SIGINT and SIGQUIT are not forwarded. A terminal sends them to the
+    #   whole process group, so Valet already gets them. The wrapper only
+    #   needs to survive them and keep waiting. A kill -INT sent to the
+    #   wrapper pid alone is therefore not delivered to Valet.
+    # - If this wrapper dies (even SIGKILL), the launcher gets SIGTERM, and
+    #   then Valet does (see `start`), so nothing keeps the port or data lock.
     valet_pid=""
     find_valet() {
       pgrep -P "$launcher" -x valet 2>/dev/null | head -n1 || true
@@ -87,13 +137,21 @@ in
       kill "-$1" "''${valet_pid:-$launcher}" 2>/dev/null || true
     }
 
+    # Race: if this wrapper died before the prctl call in setpriv, no signal
+    # is sent. The inner shell checks that its parent is still this process.
     # Explicit <&0: a background job would otherwise get /dev/null as stdin.
-    ${fhs}/bin/valet-fhs "$@" <&0 &
+    ${setpriv} --pdeathsig TERM -- "$BASH" -c '
+      if [ "$PPID" != "$1" ]; then exit 143; fi
+      shift
+      exec "$@"
+    ' bash "$$" ${fhs}/bin/valet-fhs "$@" <&0 &
     launcher=$!
-    for sig in TERM INT HUP QUIT; do
-      # shellcheck disable=SC2064
-      trap "forward $sig" "$sig"
-    done
+
+    trap 'forward TERM' TERM
+    trap 'forward HUP' HUP
+    # A trap with a handler (not "ignore") keeps this shell alive and waiting
+    # while Valet handles the signal.
+    trap : INT QUIT
 
     # Learn Valet's pid early. A SIGTERM that also kills bwrap (a service
     # manager signals every process in the group) leaves Valet running its
@@ -125,7 +183,7 @@ in
     homepage = "https://github.com/tkhq/valet";
     license = lib.licenses.mit;
     mainProgram = "valet";
-    platforms = builtins.attrNames assets;
+    platforms = [ "x86_64-linux" ];
     sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
   };
 }).overrideAttrs (old: {

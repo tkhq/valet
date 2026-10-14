@@ -15,6 +15,22 @@
       packages = forAll (pkgs: rec {
         valet = pkgs.callPackage ./nix/valet.nix { };
         valet-unwrapped = valet.unwrapped;
+
+        # The same wrapper around a probe program instead of Valet. Tests use
+        # it to check signal dispositions, stdin, exit codes and parent-death
+        # cleanup without depending on what Valet does with signals.
+        valet-signal-probe = pkgs.callPackage ./nix/valet.nix {
+          binary = pkgs.writeShellScriptBin "valet" ''
+            case "$1" in
+              sleep)
+                echo "probe-ready $(grep SigIgn /proc/self/status)" >&2
+                exec ${pkgs.coreutils}/bin/sleep 31337 ;;
+              cat) exec ${pkgs.coreutils}/bin/cat ;;
+              exit) exit "$2" ;;
+              args) printf '[%s]\n' "$@" ;;
+            esac
+          '';
+        };
         default = valet;
       });
 

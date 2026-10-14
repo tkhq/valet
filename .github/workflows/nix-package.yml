@@ -52,6 +52,7 @@ jobs:
         run: |
           nix build .#valet --print-build-logs
           nix build .#valet-unwrapped --out-link result-unwrapped
+          nix build .#valet-signal-probe --out-link result-probe
 
       # The release binary is not modified: same dynamic ELF, same loader path.
       # This documents that the package is not a static executable.
@@ -78,7 +79,9 @@ jobs:
           echo "raw release binary fails without /lib64, as on NixOS"
           "${NIXROOT[@]}" "$pkg" --help
 
-      # The wrapper is a bubblewrap launcher. SIGTERM must reach `valet serve`
-      # so its graceful shutdown runs, and a killed wrapper must not orphan it.
+      # The wrapper is a bubblewrap launcher. This checks, through the wrapper:
+      # SIGTERM and SIGKILL cleanup of `valet serve`, terminal-style SIGINT and
+      # SIGQUIT (not ignored), stdin, arguments, exit status, and no leftover
+      # process after a SIGKILL at any point of startup.
       - name: Signal handling through the wrapper
-        run: nix/test-signals.sh result/bin/valet
+        run: nix/test-signals.sh result/bin/valet result-probe/bin/valet
