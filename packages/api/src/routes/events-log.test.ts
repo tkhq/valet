@@ -108,6 +108,11 @@ it("shows a filter miss only where a workspace's rules, or the org's, name its e
   const ids = async (ownerType: string, ownerId: string) => ((await (await fetch(
     `${api!.baseUrl}/api/events/log?ownerType=${ownerType}&ownerId=${ownerId}&diagnostics=1`)).json()) as EventLogResponse).items.map((item) => item.id);
   // This workspace subscribes to github.push and slack.*, never to pull requests.
+  // A disabled rule for the key does not count: ingest never checked it.
+  await api.providers.db.insert(eventSubscriptions).values({
+    id: "sub_off", orgId: "local-org", ownerType: "user", ownerId: "local-user", name: "Off",
+    eventKeys: ["github.*"], filters: [], target: { kind: "orchestrator" }, enabled: false, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+  });
   expect(await ids("user", "local-user")).not.toContain("drop_pr");
   expect(await ids("user", "local-user")).toContain("drop_filter");
   await api.providers.db.insert(eventSubscriptions).values({
