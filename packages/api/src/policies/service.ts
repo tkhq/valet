@@ -41,7 +41,9 @@ import { shareGeneration, canBorrowCredential, isUnattendedTeamSession, writeBor
 import { orgFallbackPolicy, readTeamCredential } from "../services/credential-resolution.js";
 import { membersSharing } from "../services/credential-shares.js";
 import type { OnePasswordService } from "../services/onepassword.js";
-import { isTeamMember } from "../services/teams.js";
+import { canAdministerTeam, isTeamMember } from "../services/teams.js";
+import { lockTeamDeletionAccess } from "../services/team-deletion-access.js";
+import { upsertOverride, upsertSimpleTeamPolicy, validateOverrideBounds } from "./admin.js";
 import { isOrgAdmin } from "../services/org.js";
 import { recordActionChannelMessage } from "../services/channel-messages.js";
 import {
@@ -49,6 +51,7 @@ import {
   resolvePolicyDecision,
   type ActionPolicyOverrideRow,
   type ActionPolicyRow,
+  type PolicyResolutionInput,
   type PolicyResolutionRows,
   type RuntimeGrantRow,
 } from "./resolution.js";
@@ -66,6 +69,10 @@ export const POLICY_AUDIT_FIELD_CAP = 8192;
  *  `onResolution`, and any UI stay in lockstep on the ids. */
 export const GATE_ACTION_APPROVE_SESSION = "approve_session";
 export const GATE_ACTION_ALWAYS_ALLOW = "always_allow";
+/** Allows the action from now on for the session's owner: the person's own
+ *  override in a personal session, the team's policy in a team session. It
+ *  writes the same rows as the Integrations and team permission settings. */
+export const GATE_ACTION_ALWAYS_ALLOW_OWNER = "always_allow_owner";
 
 /**
  * May `userId` pick `always_allow` on a gate raised in `sessionOrgId`?
@@ -108,23 +115,106 @@ export interface PolicyRowScope {
  * session/execution, and the user's overrides. Filtering/precedence is the
  * pure core's job; this only narrows the query.
  */
-export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): Promise<PolicyResolutionRows> {
-  // Session ownership comes from the durable row, never the acting member.
-  // A personal session follows its owner's permission settings, also on a
-  // turn another member sent from a shared thread (`services/thread-share.ts`).
-  // That turn is not covered by the owner's session grants: it asks again.
-  let teamId = scope.teamId;
-  let userId = scope.userId;
-  let sessionGrants = !scope.externalSender;
-  if (scope.sessionId) {
-    const [session] = await db.select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
-      .from(agentSessions).where(and(eq(agentSessions.id, scope.sessionId), eq(agentSessions.orgId, scope.orgId))).limit(1);
-    if (session) teamId = session.ownerType === "team" ? session.ownerId ?? undefined : undefined;
-    if (session?.ownerType === "user" && session.ownerId) {
-      if (scope.userId && scope.userId !== session.ownerId) sessionGrants = false;
-      userId = session.ownerId;
-    }
+/**
+ * Whose permission settings apply to a call. Session ownership comes from the
+ * durable row, never the acting member. A personal session follows its
+ * owner's settings, also on a turn another member sent from a shared thread
+ * (`services/thread-share.ts`). A session with no app row (a workflow step)
+ * keeps the caller's team or user.
+ */
+export async function policyOwner(
+  db: AppQueryable,
+  scope: { orgId: string; sessionId?: string; teamId?: string; userId?: string },
+): Promise<{ teamId?: string; userId?: string; personalSession: boolean }> {
+  const fallback = { teamId: scope.teamId, userId: scope.userId, personalSession: false };
+  if (!scope.sessionId) return fallback;
+  const [session] = await db.select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
+    .from(agentSessions).where(and(eq(agentSessions.id, scope.sessionId), eq(agentSessions.orgId, scope.orgId))).limit(1);
+  if (!session) return fallback;
+  if (session.ownerType === "user" && session.ownerId) return { userId: session.ownerId, personalSession: true };
+  return { teamId: session.ownerType === "team" ? session.ownerId ?? undefined : undefined, userId: scope.userId, personalSession: false };
+}
+
+/**
+ * Why `userId` may not pick `always_allow_owner` on a gate in this session,
+ * or `undefined` when they may. In a personal session only its owner may
+ * allow the action for themselves. In a team session only a team admin may
+ * allow it for the team. Every resolver surface calls this before the engine
+ * consumes the gate, as `canApplyAlwaysAllow` does for the org option.
+ */
+export async function ownerAlwaysAllowRefusal(
+  db: AppQueryable,
+  scope: { orgId: string; sessionId?: string; teamId?: string; userId?: string },
+  resolverId: string,
+): Promise<string | undefined> {
+  const owner = await policyOwner(db, scope);
+  if (owner.teamId) {
+    return await canAdministerTeam(db, owner.teamId, resolverId)
+      ? undefined
+      : "Only a team admin can always allow this for the team. Approve it once, or ask a team admin.";
   }
+  return owner.userId === resolverId ? undefined : "Only the owner of this conversation can always allow this. Approve it once instead.";
+}
+
+/**
+ * Would the owner's lasting allow actually allow this call? Applies the write
+ * to the loaded rows, as `upsertOverride` or `upsertSimpleTeamPolicy` would,
+ * and resolves again. A conditional rule that still requires approval would
+ * make the option look done and change nothing, so it is not offered.
+ */
+export function ownerAllowTakesEffect(
+  rows: PolicyResolutionRows,
+  owner: { teamId?: string },
+  input: PolicyResolutionInput,
+  pluginDefault: ApprovalMode | undefined,
+): boolean {
+  const sameTarget = (row: { service: string | null; actionId: string | null; riskLevel: RiskLevel | null }) =>
+    row.service === null && row.riskLevel === null && row.actionId === input.actionId;
+  const written: ActionPolicyOverrideRow = { id: "owner-allow", service: null, actionId: input.actionId, riskLevel: null, mode: "allow", paramMatchers: [], updatedAt: input.now };
+  const applied: PolicyResolutionRows = owner.teamId
+    ? { ...rows, policies: [
+      ...rows.policies.filter((row) => !(row.principalType === "team" && sameTarget(row)
+        && row.appliesIn === "any" && row.paramMatchers.length === 0 && row.expiresAt === null)),
+      { ...written, principalType: "team", appliesIn: "any", expiresAt: null, revokedAt: null },
+    ] }
+    : { ...rows, overrides: [...rows.overrides.filter((row) => !sameTarget(row)), written] };
+  return resolvePolicyDecision(applied, input, pluginDefault).mode === "allow";
+}
+
+/** Writes `always_allow_owner`: the team's simple policy in a team session,
+ *  the owner's own override in a personal one. Same writers, locks, and
+ *  bounds as the team permission route and the Integrations panel. */
+async function writeOwnerAlwaysAllow(
+  deps: PolicyResolverDeps,
+  input: PolicyResolveInput & { orgId: string },
+  resolvedBy: string,
+  now: number,
+): Promise<void> {
+  const refusal = await ownerAlwaysAllowRefusal(deps.db, input, resolvedBy);
+  if (refusal) throw new Error(refusal);
+  const target = { actionId: input.actionId };
+  const { teamId } = await policyOwner(deps.db, input);
+  if (teamId) {
+    await deps.db.transaction(async (tx) => {
+      if (!(await lockTeamDeletionAccess(tx, { orgId: input.orgId, userId: resolvedBy }, teamId))) {
+        throw new Error("Only a team admin can always allow this for the team. Approve it once, or ask a team admin.");
+      }
+      const bounds = await validateOverrideBounds(tx, input.orgId, target, "allow", now, deps.actionPluginByService);
+      if (!bounds.ok) throw new Error(bounds.error);
+      await upsertSimpleTeamPolicy(tx, { orgId: input.orgId, type: "team", id: teamId }, { ...target, mode: "allow", managedBy: resolvedBy, now });
+    });
+    return;
+  }
+  const result = await upsertOverride(deps.db, input.orgId, resolvedBy, { ...target, mode: "allow", now }, deps.actionPluginByService);
+  if (!result.ok) throw new Error(result.error);
+}
+
+export async function loadPolicyRows(db: AppQueryable, scope: PolicyRowScope): Promise<PolicyResolutionRows> {
+  // A turn another member sent in a personal session is not covered by the
+  // owner's session grants: it asks again.
+  const { teamId, userId, personalSession } = await policyOwner(db, scope);
+  let sessionGrants = !scope.externalSender;
+  if (personalSession && scope.userId && scope.userId !== userId) sessionGrants = false;
   const principalFilter = teamId
     ? or(and(eq(actionPolicies.principalType, "org"), eq(actionPolicies.principalId, scope.orgId)), and(eq(actionPolicies.principalType, "team"), eq(actionPolicies.principalId, teamId)))
     : and(eq(actionPolicies.principalType, "org"), eq(actionPolicies.principalId, scope.orgId));
@@ -711,13 +801,28 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       }
       if (decision.mode !== "require_approval") return decision;
 
-      // Offer the two escalation actions on the gate. `onResolution`
-      // enforces the admin check for `always_allow`; the engine strips the
-      // `approves` flag before opening the gate.
+      // Offer the escalation actions on the gate. `onResolution` enforces who
+      // may pick each one; the engine strips the `approves` flag before
+      // opening the gate. The owner option appears only where the owner's
+      // own setting could allow the action, the rule Integrations applies.
+      const owner = await policyOwner(deps.db, { ...input, orgId: input.orgId });
+      const now = clock();
+      const ownerMayAllow = !input.externalSender && (owner.teamId ?? owner.userId) !== undefined
+        && (await validateOverrideBounds(deps.db, input.orgId, { actionId: input.actionId }, "allow", now, deps.actionPluginByService)).ok
+        && ownerAllowTakesEffect(
+          await loadPolicyRows(deps.db, { orgId: input.orgId, teamId: input.teamId, userId: input.userId, sessionId: input.sessionId }),
+          owner,
+          { service: input.service, actionId: input.actionId, riskLevel: input.riskLevel, params: input.params, appliesIn: input.appliesIn,
+            sessionId: input.sessionId, now, ...(input.partialParams ? { partialParams: true } : {}) },
+          pluginDefaultFor(input.service),
+        );
       return {
         ...decision,
         extraGateActions: [
           { id: GATE_ACTION_APPROVE_SESSION, label: "Approve for this session", approves: true },
+          ...(ownerMayAllow
+            ? [{ id: GATE_ACTION_ALWAYS_ALLOW_OWNER, label: owner.teamId ? "Always allow for this team" : "Always allow for me", approves: true }]
+            : []),
           { id: GATE_ACTION_ALWAYS_ALLOW, label: "Always allow (org)", approves: true },
         ],
       };
@@ -772,6 +877,10 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
           grantedBy: resolution.resolvedBy,
           now,
         });
+      } else if (resolution.actionId === GATE_ACTION_ALWAYS_ALLOW_OWNER) {
+        // Throws for a resolver who may not choose it, or when an org policy
+        // now stops the allow; the engine fails the approval closed.
+        await writeOwnerAlwaysAllow(deps, { ...input, orgId: input.orgId }, resolution.resolvedBy, now);
       }
       // Plain "approve" (or any other resolution) is a one-shot allow — no
       // durable write.
