@@ -258,12 +258,18 @@ New route in `packages/web/src/routes/` (proposed `usage.tsx`, or a tab under se
 
 ### 9. Onboarding panel
 
-A settings panel that issues a proxy key and shows copy-paste setup:
+A settings panel that issues a proxy key and shows copy-paste setup. Every tool reads the key from one environment variable, `VALET_PROXY_KEY`, so the reader sets the key once:
+
+```
+export VALET_PROXY_KEY=vlt_<key>
+```
+
+A proxy key is an ordinary valet API key (`vlt_` prefix, the better-auth `apiKey` plugin). The panel names it `proxy-key`. The gateway and the `/api` auth ladder verify it the same way.
 
 - **Claude Code:**
   ```
   export ANTHROPIC_BASE_URL=https://<valet-host>/proxy/anthropic
-  export ANTHROPIC_AUTH_TOKEN=vlt_<key>
+  export ANTHROPIC_AUTH_TOKEN="$VALET_PROXY_KEY"
   ```
 - **Codex** (`~/.codex/config.toml`):
   ```toml
@@ -271,10 +277,9 @@ A settings panel that issues a proxy key and shows copy-paste setup:
   [model_providers.valet]
   name = "valet"
   base_url = "https://<valet-host>/proxy/openai/v1"
-  env_key = "VALET_KEY"
+  env_key = "VALET_PROXY_KEY"
   wire_api = "responses"
   ```
-  plus `export VALET_KEY=vlt_<key>`.
 - **OpenCode** (`opencode.json`):
   ```json
   {
@@ -288,7 +293,17 @@ A settings panel that issues a proxy key and shows copy-paste setup:
     }
   }
   ```
-  plus `export VALET_PROXY_KEY=vlt_<key>`. The `baseURL` must end in `/v1`. OpenCode's Anthropic client appends `/messages` to `baseURL` directly, so the Claude Code base URL makes it request `/proxy/anthropic/messages`, which returns 404. This applies to `ANTHROPIC_BASE_URL` too, because OpenCode reads that variable as its `baseURL`. In pass-through mode, `apiKey` reads `{env:ANTHROPIC_API_KEY}` and `options.headers` sets `Authorization: Bearer {env:VALET_PROXY_KEY}`. OpenCode sends `apiKey` as `x-api-key`, so the gateway forwards it and uses the Bearer `vlt_` key for identity.
+  The `baseURL` must end in `/v1`. OpenCode's Anthropic client appends `/messages` to `baseURL` directly, so the Claude Code base URL makes it request `/proxy/anthropic/messages`, which returns 404. This applies to `ANTHROPIC_BASE_URL` too, because OpenCode reads that variable as its `baseURL`.
+- **OpenAI SDK** (scripts): `base_url` is `https://<valet-host>/proxy/openai/v1` and `api_key` is `os.environ["VALET_PROXY_KEY"]`.
+
+In pass-through mode, the shared block also exports `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`. Each tool sends the provider key in one header and the `vlt_` key in the other:
+
+| Tool | Provider key | `vlt_` key |
+|---|---|---|
+| Claude Code | `ANTHROPIC_API_KEY` as `x-api-key` | `ANTHROPIC_AUTH_TOKEN` as Bearer |
+| Codex | `env_key = "OPENAI_API_KEY"` as Bearer | `env_http_headers = { "x-api-key" = "VALET_PROXY_KEY" }` |
+| OpenCode | `apiKey` from `ANTHROPIC_API_KEY` as `x-api-key` | `options.headers` Bearer from `VALET_PROXY_KEY` |
+| OpenAI SDK | `api_key` as Bearer | `default_headers` `x-api-key` |
 
 Before a key exists, the panel shows steps 3 and 4 in a collapsed setup guide. The guide renders the same snippets with the `<your-valet-proxy-key>` placeholder, so a reader can see the setup without creating a key. A team member who cannot create a key can also read it. After creation, the snippets contain the real key.
 

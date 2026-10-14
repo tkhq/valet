@@ -108,23 +108,36 @@ export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) 
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   const key = apiKey.key ?? "";
 
-  // Claude Code snippets differ by mode.
+  // Every tool reads the proxy key from one variable, VALET_PROXY_KEY, so the
+  // key is set once. Pass-through mode adds the provider keys that the
+  // gateway forwards upstream.
+  const keyEnvSnippet =
+    mode === "centralized"
+      ? `export VALET_PROXY_KEY=${key}`
+      : [
+          `export VALET_PROXY_KEY=${key}`,
+          `# Pass-through mode: your own key is forwarded and billed; the Valet key only identifies you.`,
+          `export ANTHROPIC_API_KEY=<your-own-anthropic-key>  # Claude Code, OpenCode`,
+          `export OPENAI_API_KEY=<your-own-openai-key>        # Codex, OpenAI SDK`,
+        ].join("\n");
+
+  // Claude Code sends ANTHROPIC_AUTH_TOKEN as the Bearer header and, when set,
+  // ANTHROPIC_API_KEY as x-api-key. The gateway picks the `vlt_` one.
   const claudeCodeSnippet =
     mode === "centralized"
       ? [
           `export ANTHROPIC_BASE_URL=${origin}/proxy/anthropic`,
-          `export ANTHROPIC_AUTH_TOKEN=${key}`,
+          `export ANTHROPIC_AUTH_TOKEN="$VALET_PROXY_KEY"`,
           `# If ANTHROPIC_API_KEY is set, unset it — in centralized mode Valet uses its own key.`,
           `# unset ANTHROPIC_API_KEY`,
         ].join("\n")
       : [
           `export ANTHROPIC_BASE_URL=${origin}/proxy/anthropic`,
-          `export ANTHROPIC_AUTH_TOKEN=${key}`,
-          `export ANTHROPIC_API_KEY=<your-own-anthropic-key>`,
-          `# Pass-through mode: your own key is forwarded and billed; the Valet key only identifies you.`,
+          `export ANTHROPIC_AUTH_TOKEN="$VALET_PROXY_KEY"`,
         ].join("\n");
 
-  // Codex snippets differ by mode.
+  // Passthrough: Codex sends env_key as the Bearer header (forwarded
+  // upstream) and env_http_headers adds the proxy key as x-api-key.
   const codexTomlSnippet =
     mode === "centralized"
       ? [
@@ -134,7 +147,7 @@ export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) 
           `[model_providers.valet]`,
           `name = "valet"`,
           `base_url = "${origin}/proxy/openai/v1"`,
-          `env_key = "VALET_KEY"`,
+          `env_key = "VALET_PROXY_KEY"`,
           `wire_api = "responses"`,
         ].join("\n")
       : [
@@ -145,93 +158,55 @@ export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) 
           `name = "valet"`,
           `base_url = "${origin}/proxy/openai/v1"`,
           `env_key = "OPENAI_API_KEY"`,
+          `env_http_headers = { "x-api-key" = "VALET_PROXY_KEY" }`,
           `wire_api = "responses"`,
-          `http_headers = { "x-api-key" = "${key}" }`,
         ].join("\n");
 
   // OpenCode's Anthropic client appends `/messages` to `baseURL` directly, so
   // the URL must end in `/v1`. Claude Code's base URL (no `/v1`) 404s here.
   // Passthrough: OpenCode sends `apiKey` as x-api-key (forwarded upstream)
   // and the Bearer header carries the proxy key that identifies you.
-  const opencodeConfigSnippet =
-    mode === "centralized"
-      ? [
-          `{`,
-          `  "$schema": "https://opencode.ai/config.json",`,
-          `  "provider": {`,
-          `    "anthropic": {`,
-          `      "options": {`,
-          `        "baseURL": "${origin}/proxy/anthropic/v1",`,
-          `        "apiKey": "{env:VALET_PROXY_KEY}"`,
-          `      }`,
-          `    }`,
-          `  }`,
-          `}`,
-        ].join("\n")
+  const opencodeConfigSnippet = [
+    `{`,
+    `  "$schema": "https://opencode.ai/config.json",`,
+    `  "provider": {`,
+    `    "anthropic": {`,
+    `      "options": {`,
+    `        "baseURL": "${origin}/proxy/anthropic/v1",`,
+    ...(mode === "centralized"
+      ? [`        "apiKey": "{env:VALET_PROXY_KEY}"`]
       : [
-          `{`,
-          `  "$schema": "https://opencode.ai/config.json",`,
-          `  "provider": {`,
-          `    "anthropic": {`,
-          `      "options": {`,
-          `        "baseURL": "${origin}/proxy/anthropic/v1",`,
           `        "apiKey": "{env:ANTHROPIC_API_KEY}",`,
           `        "headers": { "Authorization": "Bearer {env:VALET_PROXY_KEY}" }`,
-          `      }`,
-          `    }`,
-          `  }`,
-          `}`,
-        ].join("\n");
-
-  const opencodeEnvSnippet =
-    mode === "centralized"
-      ? `export VALET_PROXY_KEY=${key}`
-      : [
-          `export VALET_PROXY_KEY=${key}`,
-          `export ANTHROPIC_API_KEY=<your-own-anthropic-key>`,
-          `# Pass-through mode: your own key is forwarded and billed; the Valet key only identifies you.`,
-        ].join("\n");
-
-  const codexEnvSnippet =
-    mode === "centralized"
-      ? `export VALET_KEY=${key}`
-      : [
-          `export OPENAI_API_KEY=<your-own-openai-key>`,
-          `# Your Valet identity goes in http_headers above (already in the config).`,
-        ].join("\n");
+        ]),
+    `      }`,
+    `    }`,
+    `  }`,
+    `}`,
+  ].join("\n");
 
   // OpenAI SDK snippet for self-service scripts. Centralized: the proxy key is
   // the api_key (sent as Bearer). Passthrough: your own key is forwarded and
   // bills your account, and the proxy key identifies you via x-api-key.
-  const openaiSdkSnippet =
-    mode === "centralized"
-      ? [
-          `from openai import OpenAI`,
-          ``,
-          `client = OpenAI(`,
-          `    base_url="${origin}/proxy/openai/v1",`,
-          `    api_key="${key}",  # your Valet proxy key`,
-          `)`,
-          `resp = client.chat.completions.create(`,
-          `    model="gpt-4o-mini",`,
-          `    messages=[{"role": "user", "content": "hello"}],`,
-          `)`,
-          `print(resp.choices[0].message.content)`,
-        ].join("\n")
+  const openaiSdkSnippet = [
+    `import os`,
+    `from openai import OpenAI`,
+    ``,
+    `client = OpenAI(`,
+    `    base_url="${origin}/proxy/openai/v1",`,
+    ...(mode === "centralized"
+      ? [`    api_key=os.environ["VALET_PROXY_KEY"],`]
       : [
-          `from openai import OpenAI`,
-          ``,
-          `client = OpenAI(`,
-          `    base_url="${origin}/proxy/openai/v1",`,
-          `    api_key="<your-own-openai-key>",       # forwarded upstream, bills you`,
-          `    default_headers={"x-api-key": "${key}"},  # your Valet identity`,
-          `)`,
-          `resp = client.chat.completions.create(`,
-          `    model="gpt-4o-mini",`,
-          `    messages=[{"role": "user", "content": "hello"}],`,
-          `)`,
-          `print(resp.choices[0].message.content)`,
-        ].join("\n");
+          `    api_key=os.environ["OPENAI_API_KEY"],  # forwarded upstream, bills you`,
+          `    default_headers={"x-api-key": os.environ["VALET_PROXY_KEY"]},  # your Valet identity`,
+        ]),
+    `)`,
+    `resp = client.chat.completions.create(`,
+    `    model="gpt-4o-mini",`,
+    `    messages=[{"role": "user", "content": "hello"}],`,
+    `)`,
+    `print(resp.choices[0].message.content)`,
+  ].join("\n");
 
   function setupCode(code: string): string {
     if (!team) return code;
@@ -249,22 +224,30 @@ export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) 
   return (
     <div className="min-w-0 max-w-full overflow-hidden">
       <p className="mb-4 break-all text-xs text-muted">{baseUrlNote}</p>
+
+      {/* The key, set once for every tool */}
+      <h4 className="text-sm font-medium text-ink mb-1">Proxy key</h4>
+      <p className="text-xs text-muted mb-2">
+        Set this in your shell profile. Every tool below reads <code>VALET_PROXY_KEY</code>.
+      </p>
+      <CodeBlock label="Shell env" code={setupCode(keyEnvSnippet)} />
+
       {/* Claude Code */}
-      <h4 className="text-sm font-medium text-ink mb-1">Claude Code</h4>
+      <h4 className="text-sm font-medium text-ink mb-1 mt-4">Claude Code</h4>
+      <p className="text-xs text-muted mb-2">Add these lines to your shell profile, after the proxy key.</p>
       <CodeBlock label="Shell env" code={setupCode(claudeCodeSnippet)} />
 
       {/* Codex */}
       <h4 className="text-sm font-medium text-ink mb-1 mt-4">Codex</h4>
+      <p className="text-xs text-muted mb-2">Add this to <code>~/.codex/config.toml</code>.</p>
       <CodeBlock label="~/.codex/config.toml" code={setupCode(codexTomlSnippet)} />
-      <CodeBlock label="Shell env" code={setupCode(codexEnvSnippet)} />
 
       {/* OpenCode */}
       <h4 className="text-sm font-medium text-ink mb-1 mt-4">OpenCode</h4>
       <p className="text-xs text-muted mb-2">
-        Put this in <code>opencode.json</code> in your project, or in <code>~/.config/opencode/opencode.json</code>. Keep the <code>/v1</code> at the end of <code>baseURL</code>.
+        Add this to <code>opencode.json</code> in your project, or to <code>~/.config/opencode/opencode.json</code>. Keep the <code>/v1</code> at the end of <code>baseURL</code>.
       </p>
       <CodeBlock label="opencode.json" code={setupCode(opencodeConfigSnippet)} />
-      <CodeBlock label="Shell env" code={setupCode(opencodeEnvSnippet)} />
 
       {/* Self-service SDK */}
       <h4 className="text-sm font-medium text-ink mb-1 mt-4">OpenAI SDK (scripts)</h4>
