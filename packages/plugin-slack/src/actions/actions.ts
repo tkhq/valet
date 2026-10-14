@@ -291,6 +291,46 @@ async function resolveAndEnrichMessages(token: string, messages: Record<string, 
   });
 }
 
+/** The most distinct mentioned users one post checks. Mentions past this
+ *  number go out unchecked. */
+const MAX_CHECKED_MENTIONS = 20;
+
+/**
+ * The error for outgoing text that mentions a user ID Slack does not know, or
+ * undefined when the text can go out. Slack accepts such a post and shows a
+ * broken mention, so a mistyped ID otherwise fails with no signal. Every
+ * action that posts or edits message text calls this before it writes.
+ */
+async function unknownMentionError(
+  token: string,
+  ...texts: (string | undefined)[]
+): Promise<PluginActionResult | undefined> {
+  const ids = new Set<string>();
+  for (const text of texts) {
+    for (const m of (text ?? '').matchAll(SLACK_USER_MENTION_RE)) ids.add(m[1]);
+  }
+  const results = await Promise.all([...ids].slice(0, MAX_CHECKED_MENTIONS).map(async (id) => {
+    // Only Slack's definite user_not_found refuses the post. The check exists
+    // to catch a mistyped ID. A lookup that fails for another reason (rate
+    // limit, missing users:read scope, network) must not stop every post.
+    try {
+      const res = await slackGet('users.info', token, { user: id });
+      if (!res.ok) return undefined;
+      const data = (await res.json()) as { ok: boolean; error?: string };
+      return !data.ok && data.error === 'user_not_found' ? id : undefined;
+    } catch {
+      return undefined;
+    }
+  }));
+  const unknown = results.filter((id) => id !== undefined);
+  if (unknown.length === 0) return undefined;
+  return {
+    success: false,
+    error: `Slack has no user with ID${unknown.length > 1 ? 's' : ''} ${unknown.join(', ')}, so Valet did not send the message. ` +
+      'Look up the user again with slack.list_users or slack.lookup_user_by_email. Then retry with the correct ID.',
+  };
+}
+
 // ─── Response Helpers ─────────────────────────────────────────────────────────
 
 function slimUser(u: Record<string, unknown>): Record<string, unknown> {
@@ -388,6 +428,8 @@ async function openAndSendDM(
     fallbackBlocks = markdownFallbackBlocks(body.blocks as Record<string, unknown>[], text, formattedText, SLACK_MAX_BLOCKS);
   }
 
+  const mentionError = await unknownMentionError(token, text);
+  if (mentionError) return mentionError;
   const { res, data } = await postActionMessage(token, body, ctx, sender, fallbackBlocks);
   if (!res.ok) return slackError(res);
   if (!data.ok) return slackError(res, data);
@@ -1165,6 +1207,8 @@ const sendMessage = action(Type.Object({
       body.blocks = userBlocks;
     }
 
+    const mentionError = await unknownMentionError(token, p.text, p.blocks);
+    if (mentionError) return mentionError;
     const { res, data } = await postActionMessage(token, body, ctx, p, fallbackBlocks);
     if (!res.ok || !data.ok) {
       return { success: false, error: `Slack API error: ${data.error || res.statusText}` };
@@ -1215,6 +1259,8 @@ const replyToOrigin = action(Type.Object({
   execute: async (args, ctx) => {
     const o = await resolveSlackOrigin(ctx);
     if ('error' in o) return { success: false, error: o.error };
+    const mentionError = await unknownMentionError(o.token, args.text);
+    if (mentionError) return mentionError;
     const { res, data } = await postActionMessage(o.token, {
       channel: o.channelId,
       thread_ts: o.threadTs,
@@ -1251,6 +1297,8 @@ const replyFileToOrigin = action(Type.Object({
     if (!stat.isFile) {
       return { success: false, error: 'The upload path is not a file. Choose a file in the sandbox and retry.' };
     }
+    const mentionError = await unknownMentionError(o.token, args.caption);
+    if (mentionError) return mentionError;
     const data = await ctx.sandbox.readBinary(args.path);
     const name = args.name ?? args.path.split('/').filter(Boolean).at(-1) ?? 'file';
     const api = new SlackApi(o.token);
@@ -1332,6 +1380,8 @@ const updateMessage = action(Type.Object({
       body.blocks = [];
     }
 
+    const mentionError = await unknownMentionError(token, args.text);
+    if (mentionError) return mentionError;
     type UpdateData = { ok: boolean; error?: string; ts?: string; channel?: string; text?: string };
     let res = await slackFetch('chat.update', token, body);
     if (!res.ok) return slackError(res);

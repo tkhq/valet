@@ -88,6 +88,37 @@ function mockFileAccess(fetchMock: ReturnType<typeof vi.fn>, url: string): void 
   mockGuardAllowsPublicChannel(fetchMock);
 }
 
+/** Answer each Slack method by name, so a case does not depend on call order.
+ *  `usersInfo` answers the users.info lookup for one user ID. */
+function mockSlackMethods(
+  fetchMock: ReturnType<typeof vi.fn>,
+  usersInfo: (user: string) => Response | Promise<Response>,
+): void {
+  fetchMock.mockImplementation(async (url: string) => {
+    const { pathname, searchParams } = new URL(url);
+    const method = pathname.split('/').pop();
+    if (method === 'users.info') return usersInfo(searchParams.get('user') ?? '');
+    if (method === 'conversations.info') return jsonResponse(200, { ok: true, channel: { id: 'C1', name: 'general', is_private: false } });
+    if (method === 'conversations.open') return jsonResponse(200, { ok: true, channel: { id: 'D1' } });
+    if (method === 'files.getUploadURLExternal') return jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F1' });
+    return jsonResponse(200, { ok: true, ts: '1.2', channel: 'C1' });
+  });
+}
+
+/** The user IDs the mention check looked up, in call order. */
+function lookedUpUsers(fetchMock: ReturnType<typeof vi.fn>): (string | null)[] {
+  return fetchMock.mock.calls.flatMap(([url]) => {
+    const parsed = new URL(url);
+    return parsed.pathname.endsWith('/users.info') ? [parsed.searchParams.get('user')] : [];
+  });
+}
+
+/** Calls that post, edit, or upload message content. */
+function messageWrites(fetchMock: ReturnType<typeof vi.fn>): unknown[] {
+  return fetchMock.mock.calls.filter(([url]) =>
+    /\/(chat\.postMessage|chat\.update|files\.getUploadURLExternal)$/.test(url));
+}
+
 describe('slack actions', () => {
   // A fixed claim made the assistant ask a plain approval question before
   // every post, even when an org policy allowed the action.
@@ -1258,10 +1289,12 @@ describe('slack actions', () => {
       } else {
         mockGuardAllowsPublicChannel(fetchMock);
       }
+      // The mention check looks up the mentioned user before the post.
+      fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, user: { id: 'U123' } }));
       fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' }));
       const text = '| Owner | Doc | Channel |\n|-|-|-|\n| <@U123> <!group> | <https://example.com|the doc> | <#C0123|general> |';
       await action(name).execute({ channel: 'C1', user: 'U123', ts: '123.456', text }, pluginCtx());
-      const init = fetchMock.mock.calls[1]?.[1];
+      const init = fetchMock.mock.calls[2]?.[1];
       if (typeof init?.body !== 'string') throw new Error('Expected a JSON request body');
       expect(JSON.parse(init.body)).toMatchObject({ blocks: [{
         type: 'section',
@@ -1269,6 +1302,87 @@ describe('slack actions', () => {
       }] });
     },
   );
+
+  // A mistyped user ID in a mention reached Slack, which showed a broken
+  // mention and reported success, so the assistant never saw its mistake.
+  describe('mentioned user check', () => {
+    const unknownUser = 'U01ZZZZZZZ';
+    const userFound = (user: string) => jsonResponse(200, { ok: true, user: { id: user } });
+    const unknownUserNotFound = (user: string) => user === unknownUser
+      ? jsonResponse(200, { ok: false, error: 'user_not_found' })
+      : userFound(user);
+    const mentionCtx = () => pluginCtx({
+      credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { owner_slack_user_id: 'U01OWNER00' } }),
+      origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' },
+      sandbox: makeSandbox({
+        stat: async () => ({ isFile: true, isDirectory: false, size: 3 }),
+        readBinary: async () => new Uint8Array([1, 2, 3]),
+      }),
+    });
+
+    it.each([
+      'slack.send_message',
+      'slack.reply_to_origin',
+      'slack.reply_file_to_origin',
+      'slack.dm_owner',
+      'slack.dm_user',
+      'slack.update_message',
+    ])('%s refuses text that mentions an unknown user and sends nothing', async (id) => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const text = `Ask <@U01AAAAAAA> and <@${unknownUser}> to review.`;
+      const result = await action(id).execute(
+        { channel: 'C1', user: 'U01AAAAAAA', ts: '1.2', path: '/workspace/report.pdf', text, caption: text },
+        mentionCtx(),
+      );
+      expect(result).toEqual({
+        success: false,
+        error: `Slack has no user with ID ${unknownUser}, so Valet did not send the message. ` +
+          'Look up the user again with slack.list_users or slack.lookup_user_by_email. Then retry with the correct ID.',
+      });
+      expect(messageWrites(fetchMock)).toHaveLength(0);
+    });
+
+    it('send_message refuses an unknown user mentioned only in blocks', async () => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const blocks = JSON.stringify([{ type: 'section', text: { type: 'mrkdwn', text: `Ping <@${unknownUser}>` } }]);
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: 'Ping', blocks }, pluginCtx());
+      expect(result).toMatchObject({ success: false, error: expect.stringContaining(unknownUser) });
+      expect(messageWrites(fetchMock)).toHaveLength(0);
+    });
+
+    it('send_message looks up each mentioned user once, labeled or not, and skips special mentions', async () => {
+      mockSlackMethods(fetchMock, userFound);
+      const text = 'Hi <@U01AAAAAAA|reviewer> and <@U01AAAAAAA>, <@W01BBBBBBB>. <!here> <!channel> <!subteam^S01CCCCCCC> <#C01DDDDDDD|general>';
+      const result = await action('slack.send_message').execute({ channel: 'C1', text }, mentionCtx());
+      expect(result.success).toBe(true);
+      // The attribution block mentions the owner, but Valet wrote that mention, so it is not checked.
+      expect(lookedUpUsers(fetchMock).sort()).toEqual(['U01AAAAAAA', 'W01BBBBBBB']);
+      expect(messageWrites(fetchMock)).toHaveLength(1);
+    });
+
+    it.each([
+      ['a missing scope', () => jsonResponse(200, { ok: false, error: 'missing_scope' })],
+      ['a user hidden from the bot', () => jsonResponse(200, { ok: false, error: 'user_not_visible' })],
+      ['a server error', () => jsonResponse(500, { ok: false })],
+      ['a rate limit', () => new Response('{}', { status: 429, headers: { 'Retry-After': '0' } })],
+      ['a network failure', () => Promise.reject(new TypeError('fetch failed'))],
+      ['a malformed body', () => new Response('not json', { status: 200 })],
+    ])('send_message posts when the mention lookup fails with %s', async (_label, answer) => {
+      mockSlackMethods(fetchMock, answer);
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: `Ask <@${unknownUser}>.` }, pluginCtx());
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(messageWrites(fetchMock)).toHaveLength(1);
+    });
+
+    it('send_message checks at most 20 distinct mentioned users', async () => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const known = Array.from({ length: 20 }, (_, i) => `U01AAAAA${String(i).padStart(2, '0')}`);
+      const text = [...known, unknownUser].map((id) => `<@${id}>`).join(' ');
+      const result = await action('slack.send_message').execute({ channel: 'C1', text }, pluginCtx());
+      expect(result.success).toBe(true);
+      expect(lookedUpUsers(fetchMock)).toEqual(known);
+    });
+  });
 
   it.each(['slack.send_message', 'slack.dm_user'])(
     '%s sends the Markdown fallback before retrying without the assistant identity', async (name) => {

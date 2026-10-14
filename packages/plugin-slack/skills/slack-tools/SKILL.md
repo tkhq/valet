@@ -81,6 +81,8 @@ Pick the send tool by where the message goes:
 
 `send_message`, `reply_to_origin`, `dm_owner`, and `dm_user` return the message `ts` and `channel`. Save both. You need them to edit or delete the message later.
 
+If a message mentions a user ID (`<@U…>`) that Slack does not know, the action fails and Valet sends nothing. Look up the correct ID with `slack.list_users`, then retry.
+
 Fix a mistake with your own message:
 
 - **`slack.update_message`** -- edit a message Valet sent. Pass the `channel` and `ts` from the send result and the full replacement `text`. To blank a message you cannot delete, send a single space. Slack rejects edits to messages Valet did not send.
