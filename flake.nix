@@ -27,7 +27,7 @@
                 exec ${pkgs.coreutils}/bin/sleep 31337 ;;
               cat) exec ${pkgs.coreutils}/bin/cat ;;
               exit) exit "$2" ;;
-              args) printf '[%s]\n' "$@" ;;
+              args) shift; printf '[%s]\n' "$@" ;;
             esac
           '';
         };
