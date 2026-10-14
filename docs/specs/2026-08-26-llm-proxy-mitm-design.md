@@ -275,6 +275,22 @@ A settings panel that issues a proxy key and shows copy-paste setup:
   wire_api = "responses"
   ```
   plus `export VALET_KEY=vlt_<key>`.
+- **OpenCode** (`opencode.json`):
+  ```json
+  {
+    "provider": {
+      "anthropic": {
+        "options": {
+          "baseURL": "https://<valet-host>/proxy/anthropic/v1",
+          "apiKey": "{env:VALET_PROXY_KEY}"
+        }
+      }
+    }
+  }
+  ```
+  plus `export VALET_PROXY_KEY=vlt_<key>`. The `baseURL` must end in `/v1`. OpenCode's Anthropic client appends `/messages` to `baseURL` directly, so the Claude Code base URL makes it request `/proxy/anthropic/messages`, which returns 404. This applies to `ANTHROPIC_BASE_URL` too, because OpenCode reads that variable as its `baseURL`. In pass-through mode, `apiKey` reads `{env:ANTHROPIC_API_KEY}` and `options.headers` sets `Authorization: Bearer {env:VALET_PROXY_KEY}`. OpenCode sends `apiKey` as `x-api-key`, so the gateway forwards it and uses the Bearer `vlt_` key for identity.
+
+Before a key exists, the panel shows steps 3 and 4 in a collapsed setup guide. The guide renders the same snippets with the `<your-valet-proxy-key>` placeholder, so a reader can see the setup without creating a key. A team member who cannot create a key can also read it. After creation, the snippets contain the real key.
 
 ## Error handling
 
@@ -352,7 +368,7 @@ The in-place schema repair adds `team_id`, permits a null `user_id`, and updates
 
 Regression coverage includes real team key forwarding in both credential modes, disabled governance, creator departure, invalid key pins, deleted teams, revocation, recording attribution, schema repair, permissions, and workspace transitions.
 
-Both scopes start with the Proxy section and Step 2, Create your key. Success shows the new secret once, setup snippets containing that key, Run it commands, and Create another key. Create another clears the secret and returns to creation. Team snippets retain the organization credential mode. The shared API keys link opens scoped key management; no separate key list or placeholder setup appears on the Proxy page. Snippets and revealed keys scroll inside the settings column. Key creation errors show the server corrective message, including when real authentication is disabled.
+Both scopes start with the Proxy section and Step 2, Create your key. Success shows the new secret once, setup snippets containing that key, Run it commands, and Create another key. Create another clears the secret and returns to creation. Team snippets retain the organization credential mode. The shared API keys link opens scoped key management; no separate key list appears on the Proxy page. Before creation, a collapsed setup guide shows the snippets with a key placeholder (section 9). Snippets and revealed keys scroll inside the settings column. Key creation errors show the server corrective message, including when real authentication is disabled.
 
 Frontend regression tests cover successful creation in both scopes, actual-key snippets, Run it, Create another, member and admin permissions, scope changes, access errors, and delayed responses. The permission cases cover a plain member, a team admin, an organization admin who is not on the team, and a regular user in a personal workspace.
 

@@ -1,14 +1,17 @@
 /**
  * Panel for minting a proxy key and showing copy-paste setup snippets for
- * Claude Code and Codex. The key is shown ONCE after creation (better-auth
- * does not return it again on list). Uses `useCreateApiKey` from
- * `~/api/api-keys` — no new backend endpoint needed.
+ * Claude Code, Codex, OpenCode, and the OpenAI SDK. The key is shown ONCE
+ * after creation (better-auth does not return it again on list). Uses
+ * `useCreateApiKey` from `~/api/api-keys` — no new backend endpoint needed.
  *
  * Numbered steps:
  *   1. Gateway status
  *   2. Create your key
  *   3. Configure your tool
  *   4. Run it
+ *
+ * Before a key exists, steps 3 and 4 sit in a collapsed setup guide with a
+ * key placeholder, so a reader can see the setup without creating a key.
  */
 import { useId, useState } from "react";
 import { Link } from "@tanstack/react-router";
@@ -146,6 +149,49 @@ export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) 
           `http_headers = { "x-api-key" = "${key}" }`,
         ].join("\n");
 
+  // OpenCode's Anthropic client appends `/messages` to `baseURL` directly, so
+  // the URL must end in `/v1`. Claude Code's base URL (no `/v1`) 404s here.
+  // Passthrough: OpenCode sends `apiKey` as x-api-key (forwarded upstream)
+  // and the Bearer header carries the proxy key that identifies you.
+  const opencodeConfigSnippet =
+    mode === "centralized"
+      ? [
+          `{`,
+          `  "$schema": "https://opencode.ai/config.json",`,
+          `  "provider": {`,
+          `    "anthropic": {`,
+          `      "options": {`,
+          `        "baseURL": "${origin}/proxy/anthropic/v1",`,
+          `        "apiKey": "{env:VALET_PROXY_KEY}"`,
+          `      }`,
+          `    }`,
+          `  }`,
+          `}`,
+        ].join("\n")
+      : [
+          `{`,
+          `  "$schema": "https://opencode.ai/config.json",`,
+          `  "provider": {`,
+          `    "anthropic": {`,
+          `      "options": {`,
+          `        "baseURL": "${origin}/proxy/anthropic/v1",`,
+          `        "apiKey": "{env:ANTHROPIC_API_KEY}",`,
+          `        "headers": { "Authorization": "Bearer {env:VALET_PROXY_KEY}" }`,
+          `      }`,
+          `    }`,
+          `  }`,
+          `}`,
+        ].join("\n");
+
+  const opencodeEnvSnippet =
+    mode === "centralized"
+      ? `export VALET_PROXY_KEY=${key}`
+      : [
+          `export VALET_PROXY_KEY=${key}`,
+          `export ANTHROPIC_API_KEY=<your-own-anthropic-key>`,
+          `# Pass-through mode: your own key is forwarded and billed; the Valet key only identifies you.`,
+        ].join("\n");
+
   const codexEnvSnippet =
     mode === "centralized"
       ? `export VALET_KEY=${key}`
@@ -212,6 +258,14 @@ export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) 
       <CodeBlock label="~/.codex/config.toml" code={setupCode(codexTomlSnippet)} />
       <CodeBlock label="Shell env" code={setupCode(codexEnvSnippet)} />
 
+      {/* OpenCode */}
+      <h4 className="text-sm font-medium text-ink mb-1 mt-4">OpenCode</h4>
+      <p className="text-xs text-muted mb-2">
+        Put this in <code>opencode.json</code> in your project, or in <code>~/.config/opencode/opencode.json</code>. Keep the <code>/v1</code> at the end of <code>baseURL</code>.
+      </p>
+      <CodeBlock label="opencode.json" code={setupCode(opencodeConfigSnippet)} />
+      <CodeBlock label="Shell env" code={setupCode(opencodeEnvSnippet)} />
+
       {/* Self-service SDK */}
       <h4 className="text-sm font-medium text-ink mb-1 mt-4">OpenAI SDK (scripts)</h4>
       <p className="text-xs text-muted mb-2">
@@ -219,6 +273,51 @@ export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) 
       </p>
       <CodeBlock label="Python" code={setupCode(openaiSdkSnippet)} />
     </div>
+  );
+}
+
+function RunCommands() {
+  return (
+    <>
+      <p className="text-xs text-muted mb-2">Send a quick request to confirm the proxy is working:</p>
+      <div className="space-y-2">
+        <CodeBlock label="Claude Code" code={`claude -p "hello"`} />
+        <CodeBlock label="Codex" code={`codex exec "hello"`} />
+        <CodeBlock label="OpenCode" code={`opencode run "hello"`} />
+      </div>
+    </>
+  );
+}
+
+/** Shown in place of a real key before one exists. */
+const KEY_PLACEHOLDER = "<your-valet-proxy-key>";
+
+interface SetupGuideProps {
+  mode: "centralized" | "passthrough";
+  team: boolean;
+}
+
+/** Steps 3 and 4 before a key exists: collapsed, with a key placeholder. */
+function SetupGuide({ mode, team }: SetupGuideProps) {
+  return (
+    <details className="group min-w-0 max-w-full">
+      <summary className="cursor-pointer text-sm font-medium text-ink select-none">
+        Setup guide: Claude Code, Codex, OpenCode, and OpenAI SDK
+      </summary>
+      <div className="mt-4 min-w-0 max-w-full space-y-6">
+        <p className="text-xs text-muted">
+          Replace <code>{KEY_PLACEHOLDER}</code> with your proxy key. After you create a key, these snippets show it.
+        </p>
+        <div>
+          <StepHeading n={3} title="Configure your tool" />
+          <ModeSnippets apiKey={{ key: KEY_PLACEHOLDER }} mode={mode} team={team} />
+        </div>
+        <div>
+          <StepHeading n={4} title="Run it" />
+          <RunCommands />
+        </div>
+      </div>
+    </details>
   );
 }
 
@@ -274,11 +373,7 @@ function KeyDisplay({ apiKey, settingsQuery, onCreateAnother, team = false }: Ke
       {/* Step 4 — Run it */}
       <div>
         <StepHeading n={4} title="Run it" />
-        <p className="text-xs text-muted mb-2">Send a quick request to confirm the proxy is working:</p>
-        <div className="space-y-2">
-          <CodeBlock label="Claude Code" code={`claude -p "hello"`} />
-          <CodeBlock label="Codex" code={`codex exec "hello"`} />
-        </div>
+        <RunCommands />
       </div>
 
       <button
@@ -372,8 +467,8 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
           <StepHeading n={2} title="Create your key" />
           <p className="text-sm text-muted mb-4">
             {team
-              ? "Create a shared team key for Claude Code or Codex. Requests and spend belong to this team."
-              : "Create a key to route your Claude Code or Codex requests through the recording proxy. Usage is tracked per key."}
+              ? "Create a shared team key for Claude Code, Codex, or OpenCode. Requests and spend belong to this team."
+              : "Create a key to route your Claude Code, Codex, or OpenCode requests through the recording proxy. Usage is tracked per key."}
           </p>
           {blocked && (
             <div id={blockedHelpId} className="mb-4 space-y-2 text-sm text-muted">
@@ -414,6 +509,8 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
             {creation.isPending ? "Creating…" : "Create proxy key"}
           </button>
         </div>
+
+        {settingsQuery.data && <SetupGuide mode={settingsQuery.data.mode} team={team} />}
       </div>
     </div>
   );
