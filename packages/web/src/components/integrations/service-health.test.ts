@@ -5,8 +5,8 @@
  * row in the store.
  */
 import { describe, expect, it } from "vitest";
-import type { PluginServiceSummary } from "@valet/api/wire";
-import { healthBadge, healthNote, needsReauth, serviceHealth } from "./service-health";
+import type { CredentialSummary, PluginServiceSummary } from "@valet/api/wire";
+import { credentialRowHealth, healthBadge, healthNote, needsReauth, serviceHealth } from "./service-health";
 
 const NOW = 1_700_000_000_000;
 
@@ -84,5 +84,20 @@ describe("healthBadge and healthNote", () => {
     }
     expect(healthNote("connected")).toBeNull();
     expect(healthNote("disconnected")).toBeNull();
+  });
+});
+
+describe("credentialRowHealth", () => {
+  const row = (over: Partial<CredentialSummary>): CredentialSummary => ({
+    service: "greenhouse", type: "oauth2", connectedAt: "2026-09-01T00:00:00Z", ...over,
+  });
+
+  it("reads a failed refresh as refresh-failed and a sign-in-only grant as identity-only", () => {
+    expect(credentialRowHealth(row({ refreshFailedAt: NOW }))).toBe("refresh-failed");
+    expect(credentialRowHealth(row({ identityOnly: true }))).toBe("identity-only");
+  });
+
+  it("reads a past expiry as connected, because an OAuth row renews when it is used", () => {
+    expect(credentialRowHealth(row({ expiresAt: NOW - 1 }))).toBe("connected");
   });
 });

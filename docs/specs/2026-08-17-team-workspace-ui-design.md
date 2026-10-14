@@ -127,6 +127,14 @@ Public pages keep their own titles.
     the list. The existing server member and admin gates remain authoritative.
     Users switch to Personal to connect and share their own credentials.
 
+    A row whose token refresh failed, or whose grant gives sign-in only, shows
+    the same badge as a personal card and names its repair. A team connects a
+    service once, so an admin disconnects a dead team connection and connects
+    the service again. Only its member can repair a shared account. A past
+    expiry alone is not shown, because an OAuth row renews when it is used.
+    "Share a personal connection" sits beside the Connected heading, outside
+    the list, because it applies to the team and not to one integration.
+
     Credential cache keys include scope and team ID. A workspace change
     unmounts open forms and dialogs. A completed team disconnect invalidates
     its request's team key, even after the caller switches workspaces.

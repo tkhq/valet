@@ -14,7 +14,7 @@
  * early still reads as `connected` until a refresh fails. See the health
  * doc comment on `PluginServiceSummary`.
  */
-import type { PluginServiceSummary } from "@valet/api/wire";
+import type { CredentialSummary, PluginServiceSummary } from "@valet/api/wire";
 
 export type ServiceHealth =
   | "disconnected"
@@ -35,6 +35,18 @@ export function serviceHealth(service: PluginServiceSummary, now: number = Date.
   if (health.refreshFailed) return "refresh-failed";
   if (typeof health.expiresAt === "number" && health.expiresAt <= now) return "expired";
   if (health.identityOnly) return "identity-only";
+  return "connected";
+}
+
+/**
+ * The health of one stored credential row, for lists that read
+ * `CredentialSummary` and not the plugin catalog. A past `expiresAt` is no
+ * failure here: an OAuth row with a refresh token renews when it is used,
+ * so only a failed refresh or a sign-in-only grant needs a repair.
+ */
+export function credentialRowHealth(row: Pick<CredentialSummary, "refreshFailedAt" | "identityOnly">): ServiceHealth {
+  if (typeof row.refreshFailedAt === "number") return "refresh-failed";
+  if (row.identityOnly) return "identity-only";
   return "connected";
 }
 

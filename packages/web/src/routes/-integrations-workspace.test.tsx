@@ -153,7 +153,13 @@ describe("Integrations workspace isolation", () => {
     const view = mount();
     await screen.findByText("Linear MCP");
     let rejectRead: (error: Error) => void = () => {};
-    vi.mocked(api.listCredentials).mockReturnValueOnce(new Promise((_resolve, reject) => { rejectRead = reject; }));
+    // Hold team B's read by its arguments, not by call order: the share
+    // control above the list reads credentials too, and it renders first.
+    const readCredentials = vi.mocked(api.listCredentials).getMockImplementation();
+    vi.mocked(api.listCredentials).mockImplementation((scope, id) =>
+      scope === "team" && id === "b"
+        ? new Promise((_resolve, reject) => { rejectRead = reject; })
+        : readCredentials ? readCredentials(scope, id) : Promise.reject(new Error("No credential mock")));
     view.switchTo("b");
     expect(screen.getByText("Loading credentials…")).toBeTruthy();
     expect(screen.queryByText("Linear MCP")).toBeNull();

@@ -44,6 +44,7 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
               <Section
                 title="Connected"
                 description="Team actions use the acting member's own account first, then the team connection. Using another member's account asks them first."
+                actions={<PullFromPersonal teamId={teamId} teamName={team.name} />}
               >
                 {!canMutate && (
                   <p className="pb-3 text-sm text-muted">Only team or organization admins can remove team connections.</p>
@@ -60,10 +61,6 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                 >
                   {onePasswordConnected && onePassword}
                 </TeamCredentials>
-                <div className="flex flex-wrap items-center gap-3 pt-3">
-                  <PullFromPersonal teamId={teamId} teamName={team.name} />
-                  <p className="text-sm text-muted">Shares one of your own connections with this team.</p>
-                </div>
               </Section>
               <TeamConnectionSetup teamId={teamId} canManage={canMutate}>
                 {!onePasswordConnected && onePassword}

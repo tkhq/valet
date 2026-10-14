@@ -5,6 +5,7 @@ import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/
 import { errorText } from "~/lib/error-text";
 import { CardHeading } from "./integration-card";
 import { displayName } from "./display-name";
+import { credentialRowHealth, healthBadge, needsReauth, type ServiceHealth } from "./service-health";
 
 /**
  * The verb for a removal control. A share is a member's own account, so
@@ -24,6 +25,25 @@ function removalLabels(
   return row.delegatedFrom
     ? { action: "Stop sharing", pending: "Stopping…", target: `${nameFor(row.delegatedFrom)}'s ${service} with ${teamName}` }
     : { action: "Disconnect", pending: "Disconnecting…", target: `${service} from ${teamName}` };
+}
+
+/**
+ * The repair for a row that cannot act. A team connects a service once, so
+ * an admin replaces a dead team connection by removing it first. A shared
+ * account belongs to its member, so only that member can repair it.
+ */
+function repairNote(
+  row: CredentialSummary,
+  health: ServiceHealth,
+  canMutate: boolean,
+  nameFor: (userId: string) => string,
+): string {
+  const service = displayName(row.service);
+  const problem = health === "identity-only" ? "This connection gives sign-in only." : "The last token refresh failed.";
+  if (row.delegatedFrom) return `${problem} ${nameFor(row.delegatedFrom)} must reconnect ${service} in their own Integrations.`;
+  return canMutate
+    ? `${problem} Disconnect it, then connect ${service} again under Available.`
+    : `${problem} Ask a team admin to connect ${service} again.`;
 }
 
 /** The rows grouped by integration, in the order the API lists them. */
@@ -107,15 +127,21 @@ export function TeamCredentials({
               <ul className="mt-2 space-y-3 text-xs sm:pl-12">
                 {group.rows.map((row) => {
                   const removal = removalLabels(row, team.name, nameFor);
+                  const health = credentialRowHealth(row);
+                  const badge = needsReauth(health) ? healthBadge(health) : null;
                   return (
                     <li key={row.delegatedFrom ?? "team"} className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
                       <div className="min-w-0">
                         <p className="flex items-center gap-2 text-ink">
                           <span className="truncate">{row.delegatedFrom ? `Shared by ${nameFor(row.delegatedFrom)}` : "Team connection"}</span>
                           {row.referenceBroken && <Badge variant="danger">Broken</Badge>}
+                          {!row.referenceBroken && badge && <Badge variant={badge.variant}>{badge.label}</Badge>}
                         </p>
                         {row.referenceBroken && (
                           <p className="text-danger-500">Their account is gone or they left the team. They can share it again.</p>
+                        )}
+                        {!row.referenceBroken && badge && (
+                          <p className="text-danger-500">{repairNote(row, health, canMutate, nameFor)}</p>
                         )}
                       </div>
                       {canMutate && (
