@@ -33,10 +33,12 @@ import {
 } from "./schedule-service.js";
 import {
   addAggregateNode,
+  canReadWorkflowRun,
   cancelWorkflowRun,
   copyWorkflowDefinition,
   createWorkflowDefinition,
   deleteWorkflowDefinition,
+  findNodeInDefinition,
   getWorkflowDefinition,
   getWorkflowRunDetail,
   isRunStatus,
@@ -604,12 +606,12 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     id: "workflows.resolve_approval",
     name: "Resolve workflow approval",
     description:
-      "Approve or deny a run's pending approval-node gate. Approval gates exist for HUMANS — " +
-      "only call this when the user has explicitly told you their decision in this " +
-      "conversation; never resolve a gate on your own judgment. (This action itself " +
-      "requires the user's confirmation.) Policy gates on tool nodes must be resolved " +
-      "from the run page, not via this action.",
-    riskLevel: "high",
+      "Approve or deny a run's pending gate: an approval node, or a tool node that policy holds. " +
+      "Call it when the user asks you to resolve a gate; never resolve one on your own judgment. " +
+      "Valet shows the user a card for the gate, and the gate resolves as the person who confirms it.",
+    // The call itself always asks a person (below), so the catalog's own
+    // approval card would only ask twice. A policy cannot skip that question.
+    riskLevel: "medium",
     execute: async ({ run_id, node_id, approved, note, iteration }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
@@ -618,19 +620,43 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (typeof sessionId === "string" && sessionId.startsWith("wf:invoke:")) {
         return { success: false, error: "A workflow cannot resolve approval gates. A human must resolve this gate from the run page." };
       }
-      const result = await resolveWorkflowApproval(getDeps(), owner, {
+      const deps = getDeps();
+      // Name the step only for a run the caller may read.
+      const run = (await canReadWorkflowRun(deps, owner, run_id)) ? await deps.workflowStore.getRun(run_id) : null;
+      if (!run) return { success: false, error: `run not found: ${run_id}` };
+      const node = findNodeInDefinition(run.definition, node_id);
+      const step = node?.type === "tool" && typeof node.service === "string" && typeof node.action === "string"
+        ? (node.action.includes(".") ? node.action : `${node.service}.${node.action}`)
+        : `step ${node_id}`;
+      // A gate exists for a person. The agent relays the request, and the
+      // person who answers this card resolves the gate under their own access,
+      // as the run page would.
+      const decision = await ctx.requestDecision({
+        type: "approval",
+        title: `${approved ? "Approve" : "Deny"} ${step} on this workflow run?`,
+        body: [`Run ${run_id}, step ${node_id}${iteration ? `, iteration ${iteration}` : ""}.`, note].filter(Boolean).join("\n\n"),
+        actions: [
+          { id: "approve", label: approved ? "Approve step" : "Deny step", style: approved ? "primary" : "danger" },
+          { id: "cancel", label: "Cancel" },
+        ],
+        resumeKey: `workflow-gate:${run_id}:${node_id}:${iteration ?? 0}:${approved ? "approve" : "deny"}`,
+      });
+      if (decision.actionId !== "approve") {
+        return { success: false, error: `Nobody confirmed the card, so ${node_id} on run ${run_id} still waits for a decision.` };
+      }
+      const person: WorkflowOwner = { userId: decision.resolvedBy, orgId: owner.orgId, principal: { type: "user", id: decision.resolvedBy } };
+      const result = await resolveWorkflowApproval(deps, person, {
         runId: run_id,
         nodeId: node_id,
         approved,
         note,
         iteration,
-        via: "agent",
+        via: "thread",
       });
       if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
       if (result === "not_parked") return { success: false, error: `run ${run_id} is not parked on approval gate ${node_id}` };
       if (result === "already_resolved") return { success: false, error: `approval gate ${node_id} on run ${run_id} has already been resolved` };
       if (result === "timed_out") return { success: false, error: `approval gate ${node_id} on run ${run_id} has timed out` };
-      if (result === "human_only") return { success: false, error: "A human must resolve this policy gate from the run page." };
       if (result === "not_approver") return { success: false, error: "This step would use another member's shared account. Only that member can answer it." };
       if (result === "forbidden_always") return { success: false, error: "scope=always requires an org admin" };
       if (result === "org_mismatch") return { success: false, error: "not a member of this workflow's org" };
@@ -1331,7 +1357,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     // for triggering a run — equivalent in blast radius to granting a new
     // credential, which the plugin catalog's default policy (medium ==
     // auto-allow) would otherwise let the agent do with no human in the
-    // loop, the same reasoning that keeps resolve_approval at "high".
+    // loop.
     riskLevel: "high",
     execute: async ({ workflow_id }, ctx) => {
       const owner = ownerFromContext(ctx);

@@ -1982,7 +1982,8 @@ export async function resolveWorkflowApproval(
     note?: string;
     scope?: "once" | "run" | "always" | "workflow";
     iteration?: number;
-    via: "web" | "agent";
+    /** "thread": a person answered the agent's card in a conversation. */
+    via: "web" | "agent" | "thread";
   },
 ): Promise<ResolveApprovalOutcome> {
   const iter = input.iteration ?? 0;

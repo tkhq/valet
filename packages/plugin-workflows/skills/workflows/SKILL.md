@@ -23,7 +23,7 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 - `workflows.get_node_result` — a node's FULL checkpoint output, for debugging failures
 - `workflows.list_runs` — a workflow's runs (find parked/active ones)
 - `workflows.cancel_run` — terminate a run (settles asynchronously; re-check with `get_run`)
-- `workflows.resolve_approval` — approve/deny a gate, ONLY when the user has explicitly told you their decision (the call itself asks the user to confirm)
+- `workflows.resolve_approval` — approve/deny a gate (an approval node, or a tool node that policy holds), ONLY when the user asks. Valet shows the user a card, and the gate resolves as the person who confirms it. Call it once per gate.
 - `workflows.list_event_types` — event keys workflows can be triggered by
 - `workflows.create_trigger` / `workflows.list_triggers` / `workflows.delete_trigger` — run a workflow automatically on matching events. Event data arrives as `{{trigger.data.payload...}}`.
 - `workflows.create_schedule` / `workflows.list_schedules` / `workflows.delete_schedule` — cron schedules (5-field cron + IANA timezone, ~30s fire accuracy; downtime collapses to one catch-up run). Target a WORKFLOW (`workflow_id`; static `input` arrives as `{{trigger.data.input...}}`) or the ORCHESTRATOR (`prompt`: you receive the prompt each fire — use this for recurring assistant tasks like "review my inbox each morning").
