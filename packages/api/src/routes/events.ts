@@ -135,6 +135,13 @@ type NarrowedSubscriptionRow = Omit<
   target: EventSubscriptionTargetWire;
 };
 
+/** The target without a replacement link (`events.propose_subscription`'s `replaces`). */
+function withoutReplaces(target: EventSubscriptionTargetWire): EventSubscriptionTargetWire {
+  if (target.kind !== "orchestrator" || target.replaces === undefined) return target;
+  const { replaces: _link, ...rest } = target;
+  return rest;
+}
+
 /**
  * The collision report for one candidate write (TKAI-294): the candidate
  * compared against every ENABLED subscription in the org, minus the rows the
@@ -603,7 +610,9 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     name: body.name,
     eventKeys: body.eventKeys,
     filters,
-    target: body.target,
+    // Only an assistant's proposal carries `replaces`, and only its enable
+    // spends it. A direct create stores no link.
+    target: withoutReplaces(body.target),
     audience,
     enabled,
     createdBy: user.id,
@@ -864,9 +873,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
 
   // The link is spent once the replaced version is off. Clearing it keeps a
   // later off-and-on of this version from disabling the old one again.
-  const enabledTarget = replacedId !== undefined && patchedTarget.kind === "orchestrator"
-    ? (({ replaces: _applied, ...rest }) => rest)(patchedTarget)
-    : patchedTarget;
+  const enabledTarget = replacedId !== undefined ? withoutReplaces(patchedTarget) : patchedTarget;
   const updated = await db.transaction(async (tx) => {
     const rows = await tx
       .update(eventSubscriptions)

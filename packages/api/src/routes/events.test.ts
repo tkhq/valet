@@ -2211,6 +2211,13 @@ describe("replacement proposals", () => {
     expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: true });
   });
 
+  it("stores no replacement link on a direct create", async () => {
+    const a = await boot();
+    const created = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { ...VALID_BODY.target, replaces: "sub_live" } });
+    expect(created.status).toBe(201);
+    expect((await created.json() as CreateEventSubscriptionResponse).target).not.toHaveProperty("replaces");
+  });
+
   it("rolls back the enable when the replaced subscription cannot be disabled", async () => {
     const a = await boot();
     await seedReplacement(a);

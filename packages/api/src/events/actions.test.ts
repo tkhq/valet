@@ -123,8 +123,11 @@ describe("eventsActionPlugin", () => {
     expect(proposed).toMatchObject({ success: true, data: { proposal: { enabled: false, replaces: { id: "live", name: "Replies v1" }, config: { target: { replaces: "live" } } } } });
     // A retry after a person enabled the proposal (which disabled the live
     // version) still answers with the stored proposal.
-    const proposalId = (await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.name, "Replies v2")))[0]!.id;
-    await db.update(eventSubscriptions).set({ enabled: true }).where(eq(eventSubscriptions.id, proposalId));
+    const stored = (await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.name, "Replies v2")))[0]!;
+    const proposalId = stored.id;
+    // The PATCH route's enable: switch on, and clear the spent link.
+    const { replaces: _spent, ...spentTarget } = stored.target as { replaces?: string };
+    await db.update(eventSubscriptions).set({ enabled: true, target: spentTarget }).where(eq(eventSubscriptions.id, proposalId));
     await db.update(eventSubscriptions).set({ enabled: false }).where(eq(eventSubscriptions.id, "live"));
     expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { id: proposalId, enabled: true } } });
     // Without replaces, a proposal stores no link, as before.

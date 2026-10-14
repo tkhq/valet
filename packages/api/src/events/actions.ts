@@ -230,9 +230,14 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       if (written && "error" in written) return { success: false, error: written.error };
       const row = written?.row;
       if (!row) return { success: false, error: "Team is no longer available. Open an active team and retry." };
+      // A person's enable spends the link and clears it (PATCH route), so a
+      // retry after the enable matches the rest of the target.
+      const { replaces: _spent, ...withoutLink } = target;
+      const spent = row.enabled && input.replaces !== undefined
+        && !(typeof row.target === "object" && row.target !== null && "replaces" in row.target);
       if (!isDeepStrictEqual(
         [row.name, row.eventKeys, row.filters, row.target, row.audience, row.createdBy],
-        [values.name, values.eventKeys, values.filters, values.target, values.audience, values.createdBy],
+        [values.name, values.eventKeys, values.filters, spent ? withoutLink : values.target, values.audience, values.createdBy],
       )) return { success: false, error: "This proposal key already names a different subscription. Use a new proposal_key." };
       return { success: true, data: proposalResult("subscription", row.id, row.enabled, row, written.replaced) };
     },
