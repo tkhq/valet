@@ -26,6 +26,7 @@
 , procps
 , coreutils
 , util-linux
+, gawk
 , cacert
 , executableOverride ? null
 }:
@@ -115,7 +116,7 @@ let
 in
 (writeShellApplication {
   name = "valet";
-  runtimeInputs = [ procps coreutils util-linux ];
+  runtimeInputs = [ procps coreutils util-linux gawk ];
   # SC2317: forward() runs from traps. SC2016: the bash -c script is single-quoted on purpose.
   excludeShellChecks = [ "SC2317" "SC2016" ];
   text = ''
@@ -171,9 +172,16 @@ in
       break
     done
 
-    # bwrap died first but Valet is still shutting down: wait for it.
+    # bwrap died first but Valet is still shutting down: wait for it. A zombie
+    # (state Z) has exited but may never be reaped when its new parent is a
+    # container init that does not reap, so it does not count as running.
+    running() {
+      local state
+      state="$(awk '{print $3}' "/proc/$1/stat" 2>/dev/null)" || return 1
+      [ -n "$state" ] && [ "$state" != Z ]
+    }
     if [ -n "$valet_pid" ]; then
-      while kill -0 "$valet_pid" 2>/dev/null; do sleep 0.1; done
+      while running "$valet_pid"; do sleep 0.1; done
     fi
     exit "$status"
   '';
