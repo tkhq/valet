@@ -7,7 +7,8 @@ import {
   ownerFromContext,
   workflowsActionPlugin,
 } from "./actions.js";
-import type { PluginActionContext, SessionEntry } from "@valet/engine";
+import type { ActionPlugin, PluginActionContext, SessionEntry, ValetPlugin } from "@valet/engine";
+import { Type } from "typebox";
 import {
   createWorkflowDefinition,
   getWorkflowDefinition,
@@ -15,7 +16,7 @@ import {
   type WorkflowServiceDeps,
 } from "./service.js";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { teams, teamMembers, eventSubscriptions, orgs, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
+import { actionPolicies, teams, teamMembers, eventSubscriptions, orgs, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { InMemoryCredentialStore, InMemorySessionStore } from "@valet/engine";
 import { OnePasswordAuthError } from "../services/onepassword.js";
@@ -57,6 +58,7 @@ describe("workflowsActionPlugin", () => {
       "workflows.delete_workflow",
       "workflows.get_node_result",
       "workflows.get_node_transcript",
+      "workflows.get_permissions",
       "workflows.get_run",
       "workflows.get_webhook",
       "workflows.get_workflow",
@@ -96,6 +98,7 @@ describe("workflowsActionPlugin", () => {
     const byId = new Map(plugin.actions.map((a) => [a.id, a.riskLevel]));
     expect(byId.get("workflows.list_workflows")).toBe("low");
     expect(byId.get("workflows.get_workflow")).toBe("low");
+    expect(byId.get("workflows.get_permissions")).toBe("low");
     expect(byId.get("workflows.get_run")).toBe("low");
     expect(byId.get("workflows.get_node_transcript")).toBe("low");
     expect(byId.get("workflows.save_workflow")).toBe("medium");
@@ -277,7 +280,7 @@ describe("DB-backed actions", () => {
 
   beforeEach(async () => {
     await buildAppQueryable(pglite).query(
-      `TRUNCATE workflow_webhooks, workflow_definitions, workflow_runs, workflow_schedules, event_subscriptions RESTART IDENTITY CASCADE`,
+      `TRUNCATE workflow_webhooks, workflow_definitions, workflow_runs, workflow_schedules, event_subscriptions, action_policies RESTART IDENTITY CASCADE`,
     );
     runHost = new StubRunHost();
     deps = {
@@ -944,6 +947,75 @@ describe("DB-backed actions", () => {
     expect(parked?.waitingOn).toEqual([
       { kind: "signal", nodeId: "get_pr", signalType: "approval:get_pr" },
     ]);
+  });
+
+  /** A static catalog with two high-risk actions, so a step gates unless a
+   * policy allows it. */
+  function chatCatalog(): NonNullable<WorkflowServiceDeps["actionPluginByService"]> {
+    const fixture = (id: string) => ({
+      id, name: id, description: `fixture action ${id}`, riskLevel: "high" as const,
+      parameters: Type.Object({}), execute: async () => ({ success: true, data: {} }),
+    });
+    const actionPlugin: ActionPlugin = { service: "chat", actions: [fixture("send_message"), fixture("deploy")] };
+    const plugin: ValetPlugin = { name: "chat", version: "0.0.1", actions: [actionPlugin] };
+    return new Map([["chat", { plugin, actionPlugin }]]);
+  }
+
+  async function seedToolWorkflow(id: string, owner: { ownerType: "user" | "team"; ownerId: string }): Promise<void> {
+    await db.insert(workflowDefinitions).values({
+      id, orgId: "org1", ...owner, name: "Release", createdAt: 1, updatedAt: 1,
+      definition: {
+        version: "dag/v1",
+        nodes: [
+          { id: "trigger", type: "trigger" },
+          { id: "post", type: "tool", service: "chat", action: "send_message", params: {} },
+          { id: "ship", type: "tool", service: "chat", action: "deploy", params: {} },
+        ],
+        edges: [{ from: "trigger", to: "post" }, { from: "post", to: "ship" }],
+      },
+    });
+  }
+
+  it("get_permissions reports an org allow policy as allow and an uncovered high-risk step as require_approval", async () => {
+    deps.actionPluginByService = chatCatalog();
+    await seedToolWorkflow("perm-wf", { ownerType: "user", ownerId: "user1" });
+    await db.insert(actionPolicies).values({
+      id: "org-allow-post", orgId: "org1", principalType: "org", principalId: "org1",
+      actionId: "chat.send_message", mode: "allow", paramMatchers: [], appliesIn: "any",
+      origin: "settings", createdAt: 1, updatedAt: 1,
+    });
+    const get = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.get_permissions")!;
+
+    const result = await get.execute({ workflow_id: "perm-wf" }, ctx());
+
+    expect(result).toEqual({
+      success: true,
+      data: {
+        workflowId: "perm-wf",
+        nodes: [
+          { nodeId: "post", service: "chat", action: "send_message", actionId: "chat.send_message", riskLevel: "high", mode: "allow", provenance: "org_policy" },
+          { nodeId: "ship", service: "chat", action: "deploy", actionId: "chat.deploy", riskLevel: "high", mode: "require_approval", provenance: "risk_default" },
+        ],
+      },
+    });
+  });
+
+  it("get_permissions refuses a workflow the caller cannot read", async () => {
+    deps.actionPluginByService = chatCatalog();
+    await db.insert(teams).values({ id: "perm-other-team", orgId: "org1", name: "Other", createdAt: 1 });
+    await seedToolWorkflow("perm-personal", { ownerType: "user", ownerId: "user1" });
+    await seedToolWorkflow("perm-team", { ownerType: "team", ownerId: "perm-other-team" });
+    const get = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.get_permissions")!;
+
+    // The owner reads it, so each refusal below is the access check.
+    expect(await get.execute({ workflow_id: "perm-personal" }, ctx())).toMatchObject({ success: true });
+    expect(await get.execute({ workflow_id: "perm-personal" }, ctx({ userId: "someone-else" })))
+      .toEqual({ success: false, error: "workflow not found: perm-personal" });
+    // user1 is not a member of the owning team.
+    expect(await get.execute({ workflow_id: "perm-team" }, ctx({ owner: { type: "team", id: "perm-other-team" } })))
+      .toEqual({ success: false, error: "workflow not found: perm-team" });
+    expect(await get.execute({ workflow_id: "perm-team" }, ctx()))
+      .toEqual({ success: false, error: "workflow not found: perm-team" });
   });
 
   it("get_webhook fails for a workflow the caller doesn't own", async () => {

@@ -96,10 +96,17 @@ gating action. Rules:
 Both routes are owner-scoped like every other `/api/workflows/:id/*` route:
 cross-owner access 404s.
 
+The assistant reads the same prediction through the `workflows.get_permissions`
+action (risk level `low`). It calls `analyzeWorkflowPermissions` with the
+assistant's owner, so it applies the same owner check and returns the same
+`nodes`. Without it, the assistant saw only the definition and told users that
+steps an org policy allows still needed approval.
+
 ## Files
 
 - `packages/api/src/workflows/permissions.ts` — analysis + bulk allow.
 - `packages/api/src/routes/workflows.ts` — the two routes.
+- `packages/api/src/workflows/actions.ts` — the `workflows.get_permissions` assistant action.
 - `packages/api/src/routes/workflow-permissions.test.ts` — route tests.
 - `packages/web/src/api/{client,workflows}.ts` — client + hooks.
 - `packages/web/src/components/workflows/editor/{flow-node,canvas,editor}.tsx`

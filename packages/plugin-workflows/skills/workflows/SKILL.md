@@ -13,6 +13,7 @@ Discover them with `list_tools` (service `workflows`), invoke with `call_tool`:
 
 - `workflows.list_workflows` — list definitions (id, name)
 - `workflows.get_workflow` — full definition by id
+- `workflows.get_permissions` — each tool step's approval `mode` and the rule that set it (`provenance`), as the workflow page's Permissions section shows them
 - `workflows.save_workflow` — create (omit `workflow_id`) or update (pass it)
 - `workflows.patch_workflow` — small edits without re-sending the definition: rename, upsert/remove single nodes, add/remove edges (result is fully linted)
 - `workflows.update_model` — set an approved model or org size tier on selected `llm` and `session` nodes
@@ -130,8 +131,11 @@ For list-shaped output, abstain with an empty array and gate on `if` with `lengt
 - Fields live FLAT on the node (`model`, `prompt`, `values`, …) — never nested under a `config` object.
 - Node ids containing `-` need bracket form in templates: `nodes["my-id"].result`.
 - To modify a workflow: `get_workflow` first, edit the returned definition, then `save_workflow` with the same `workflow_id`. Updates never affect in-flight runs (runs snapshot their definition at start) — a parked run can be waiting on a node from an OLDER definition version; read the run's own checkpoints, not the current definition.
-- After `start_run`, use `get_run` to report progress. `status: "parked"` with an approval in `waitingOn` means a human must approve — tell the user and point them at the approval card; you cannot approve on their behalf.
+- After `start_run`, use `get_run` to report progress. `status: "parked"` with an approval in `waitingOn` means a human must approve. Tell the user. If they ask you to approve, call `resolve_approval` once per gate; each call shows them a card, and the gate resolves as the person who confirms it.
 - `tool` nodes can park WITHOUT an approval node in the definition: when org policy resolves the action to require_approval, the node raises a policy gate and parks on `approval:<nodeId>` until a human resolves it (optional `approvalTimeout`, `onDeny` on the tool node). `list_runs` shows each parked run's `waitingOn`.
+- Before you tell a user that a step needs approval, read `get_permissions`. Mode `allow` means the step runs with no approval, whatever its risk level.
+- If a step is `require_approval` from `risk_default` or `plugin_default`, the workflow owner or a team admin can allow it for every later run. They click "Allow for this workflow" on the run's approval card, or "Review permissions" in the workflow page's Permissions section.
+- If the provenance is `org_policy`, only an org admin can change it, in Settings → Organization → Policies. For `team_policy`, a team admin changes the team's Policies page.
 - A `session` step's script can call the same integrations its run can: POST `{"params": {...}}` to `$VALET_API_URL/api/sandbox/actions/<service.action>/invoke` with header `x-valet-sandbox` set from `/etc/valet/creds/token` (or `$VALET_SANDBOX_TOKEN`). The reply is `{status, result}`. Use it for data jobs with many calls; the script never holds a credential and has the step agent's permissions, no more. Add `"idempotencyKey"` to make a retry safe. If the reply is `in_progress`, the first call still runs; call again with the same key and params. An action that policy holds for approval is refused, so put it in a `tool` node instead.
 - Debug a surprising node with `get_node_result` — it returns the checkpoint result verbatim, the same value templates read via `nodes.<id>.result` (oversized results come back as `{ truncated: true, jsonPrefix }`).
 - To learn WHY a session or orchestrator step produced its result, read `get_node_transcript`: the prompt it received with templates filled in, its replies, each tool call with its result or error, and any format-repair prompt. `get_run` marks a step with `repairAttempted` and `schemaError` when its first reply failed the output schema. Page back with `before`.

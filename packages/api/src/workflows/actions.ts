@@ -62,6 +62,7 @@ import {
   updateWorkflowTrigger,
 } from "./trigger-service.js";
 import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
+import { analyzeWorkflowPermissions } from "./permissions.js";
 import { readStepTranscript } from "./step-transcript.js";
 import {
   deleteWorkflowWebhook,
@@ -315,6 +316,27 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           updatedAt: wf.updatedAt,
         },
       };
+    },
+  });
+
+  // The assistant's copy of `GET /api/workflows/:id/permissions`: the same
+  // analysis and the same owner check, so it never reports a gate the
+  // workflow page does not show.
+  const getPermissions = action(Type.Object({ workflow_id: Type.String() }))({
+    id: "workflows.get_permissions",
+    name: "Get workflow step permissions",
+    description:
+      "Show whether each tool step of a workflow needs approval, as the workflow page's Permissions section shows it. " +
+      "Per step: mode `allow` runs with no approval, `require_approval` waits for a person, `deny` is blocked by policy, " +
+      "and `unknown` is checked when the run reaches it. `provenance` names the rule that set the mode. " +
+      "Read this before you tell a user that a step needs approval.",
+    riskLevel: "low",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const nodes = await analyzeWorkflowPermissions(getDeps(), owner, workflow_id);
+      if (nodes === null) return { success: false, error: `workflow not found: ${workflow_id}` };
+      return { success: true, data: { workflowId: workflow_id, nodes } };
     },
   });
 
@@ -1411,6 +1433,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       copyToTeam,
       listWorkflows,
       getWorkflow,
+      getPermissions,
       saveWorkflow,
       patchWorkflow,
       updateModel,
