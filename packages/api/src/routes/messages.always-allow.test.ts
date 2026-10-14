@@ -163,6 +163,34 @@ describe("POST /decisions/:gateId/resolve — always_allow_owner", () => {
   });
 });
 
+it("lets the run's members read a workflow step's messages for its logs, read-only", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const now = Date.now();
+  await p.db.insert(teams).values({ id: "logs-team", orgId: "local-org", name: "Logs team", createdAt: now });
+  await p.db.insert(teamMembers).values({ teamId: "logs-team", userId: "local-user", role: "member" });
+  await p.db.insert(workflowDefinitions).values({ id: "logs-workflow", orgId: "local-org", ownerType: "team", ownerId: "logs-team", name: "Logs workflow", definition: {}, createdAt: now, updatedAt: now });
+  await p.workflowStore.createRun("logs-run", { workflowId: "logs-workflow", definitionVersionId: "v1" },
+    { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "logs-team" });
+  const sessionId = "wf:logs-run:verify";
+  await p.engineStore.saveSession({ id: sessionId, orgId: "local-org", userId: "team:logs-team", owner: { type: "team", id: "logs-team" }, workspace: "/tmp", purpose: "interactive", status: "running", createdAt: 1, updatedAt: 1 });
+  await p.engineStore.saveThread(sessionId, { id: "logs-thread", sessionId, key: "workflow", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+  const entry = { sessionId, threadId: "logs-thread", parentId: null, type: "message" as const, createdAt: 1 };
+  await p.engineStore.appendEntries(sessionId, "logs-thread", [
+    { ...entry, id: "m1", role: "user", content: "Verify the draft.", queueItemId: "q-first" },
+    { ...entry, id: "m2", role: "assistant", content: "Checked 16 PRs.", queueItemId: "q-first" },
+    { ...entry, id: "m3", role: "user", content: "Your previous response did not match the required JSON schema.", queueItemId: "q-repair" },
+  ]);
+  const url = `${api.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/messages?threadId=logs-thread`;
+  const all = await fetch(url);
+  expect(all.status).toBe(200);
+  expect(((await all.json()) as { messages: Array<{ content: string }> }).messages.map((m) => m.content))
+    .toEqual(["Verify the draft.", "Checked 16 PRs.", "Your previous response did not match the required JSON schema."]);
+  const repair = await fetch(`${url}&queueItemId=q-repair`);
+  expect(((await repair.json()) as { messages: unknown[] }).messages).toHaveLength(1);
+  expect((await fetch(url, { headers: { "x-valet-test-user-id": "test-member" } })).status).toBe(404);
+});
+
 describe("POST /decisions/:gateId/resolve — answer types", () => {
   it("refuses a non-text answer before it can resolve a gate", async () => {
     api = await bootTestApi();
