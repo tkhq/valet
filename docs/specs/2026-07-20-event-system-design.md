@@ -280,8 +280,12 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   from another workspace, and a disabled subscription. When a person enables
   the proposal, the PATCH route disables the replaced subscription in the
   same transaction and leaves it out of the collision gate, so one version
-  replies. The enable clears `target.replaces`, so turning the new version
-  off and on later leaves the old one alone. The review dialog names the
+  replies. The disable requires the replaced subscription to still be on.
+  If it is off or removed, for example because another replacement of it was
+  enabled first, the enable is refused with 409 and the person asks for a new
+  proposal. The enable clears `target.replaces`, so turning the new version
+  off and on later leaves the old one alone. A repeated proposal key returns
+  the stored proposal before it checks `replaces`. The review dialog names the
   replaced subscription. An agent still cannot enable or change a live
   subscription.
 - Workflow editor: an "event" trigger node type whose save/update syncs an

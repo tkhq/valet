@@ -130,6 +130,12 @@ describe("eventsActionPlugin", () => {
     await db.update(eventSubscriptions).set({ enabled: true, target: spentTarget }).where(eq(eventSubscriptions.id, proposalId));
     await db.update(eventSubscriptions).set({ enabled: false }).where(eq(eventSubscriptions.id, "live"));
     expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { id: proposalId, enabled: true } } });
+    // Still the stored record after the new version is turned off, and after
+    // the version it replaced is deleted.
+    await db.update(eventSubscriptions).set({ enabled: false }).where(eq(eventSubscriptions.id, proposalId));
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { id: proposalId, enabled: false } } });
+    await db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, "live"));
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { id: proposalId } } });
     // Without replaces, a proposal stores no link, as before.
     const { replaces: _replaces, ...unlinked } = input;
     const plain = await tool.execute({ ...unlinked, proposal_key: "plain" }, context("member"));

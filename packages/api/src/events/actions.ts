@@ -207,16 +207,24 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
         createdBy: userId, createdAt: now, updatedAt: now,
       };
       const insert = async (tx: AppQueryable): Promise<{ error: string } | { row?: EventSubscriptionRow; replaced?: { id: string; name: string } }> => {
+        const findReplaced = async (replacesId: string) => (await tx
+          .select({ id: eventSubscriptions.id, name: eventSubscriptions.name, enabled: eventSubscriptions.enabled })
+          .from(eventSubscriptions).where(and(eq(eventSubscriptions.id, replacesId), eq(eventSubscriptions.orgId, values.orgId),
+            eq(eventSubscriptions.ownerType, ownerType), eq(eventSubscriptions.ownerId, ownerId))).limit(1))[0];
+        // A repeated proposal key answers with the stored record, whatever
+        // happened since to the subscription it replaces.
+        const [existing] = await tx.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, values.id)).limit(1);
+        if (existing) {
+          const found = input.replaces === undefined ? undefined : await findReplaced(input.replaces);
+          return { row: existing, replaced: found && { id: found.id, name: found.name } };
+        }
         let replaced: { id: string; name: string } | undefined;
         if (input.replaces !== undefined) {
-          const [found] = await tx.select({ id: eventSubscriptions.id, name: eventSubscriptions.name, enabled: eventSubscriptions.enabled })
-            .from(eventSubscriptions).where(and(eq(eventSubscriptions.id, input.replaces), eq(eventSubscriptions.orgId, values.orgId),
-              eq(eventSubscriptions.ownerType, ownerType), eq(eventSubscriptions.ownerId, ownerId))).limit(1);
+          const found = await findReplaced(input.replaces);
           if (!found) return { error: "No subscription with this replaces ID exists in this workspace. Use events.list_subscriptions to find the enabled subscription to replace." };
           // A disabled rule is not the version that replies, so replacing it
-          // would leave the live version on. A retry after a person enabled
-          // this proposal is the exception: that enable disabled the rule.
-          if (!found.enabled && (await tx.select({ id: eventSubscriptions.id }).from(eventSubscriptions).where(eq(eventSubscriptions.id, values.id)).limit(1)).length === 0) {
+          // would leave the live version on.
+          if (!found.enabled) {
             return { error: `Subscription "${found.name}" is not enabled. Set replaces to the enabled subscription from events.list_subscriptions.` };
           }
           replaced = { id: found.id, name: found.name };
@@ -231,9 +239,10 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       const row = written?.row;
       if (!row) return { success: false, error: "Team is no longer available. Open an active team and retry." };
       // A person's enable spends the link and clears it (PATCH route), so a
-      // retry after the enable matches the rest of the target.
+      // retry after that enable matches the rest of the target, even if the
+      // new version was turned off again later.
       const { replaces: _spent, ...withoutLink } = target;
-      const spent = row.enabled && input.replaces !== undefined
+      const spent = input.replaces !== undefined
         && !(typeof row.target === "object" && row.target !== null && "replaces" in row.target);
       if (!isDeepStrictEqual(
         [row.name, row.eventKeys, row.filters, row.target, row.audience, row.createdBy],
