@@ -1,9 +1,9 @@
 import { afterEach, expect, it } from "vitest";
-import type { NodeCheckpoint, WorkflowRun } from "@valet/workflow";
+import type { NodeCheckpoint, RunSignal, WorkflowRun } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
 import { createTeam } from "../services/teams.js";
-import { buildRunOriginReport, runReport } from "./run-attention.js";
+import { approvalReport, buildRunApprovalReport, buildRunOriginReport, runReport } from "./run-attention.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -79,4 +79,53 @@ it.each(["app-assistant:local-user", "slack:C_PRIVATE:1.2"])("reports a legacy t
   expect(queued).toHaveLength(1);
   expect(queued[0]).toMatchObject({ threadId: target.id, content: { signalType: "workflow.settled" } });
   expect(await p.engineStore.getSession(execution.sessionId)).toMatchObject({ parentSessionId: root.sessionId, parentThreadId: source.id });
+});
+
+it("says a run waits for approval and where to read who can approve it", () => {
+  const text = approvalReport("Dashboard", "run-1");
+  expect(text).toContain('Workflow "Dashboard" is waiting for approval.');
+  expect(text).toContain("Read get_run for every step that waits");
+  expect(text).toContain("/workflows/runs/run-1");
+});
+
+it("wakes the thread that started a run once per batch of steps waiting for approval", async () => {
+  api = await bootTestApi();
+  const { session, sessionId } = await ensureDefaultAssistantSession(api.providers, { type: "user", id: "local-user" },
+    { actorUserId: "local-user", orgId: "local-org" });
+  const thread = await session.createThread("web:approving");
+  thread.pause();
+  let origin: WorkflowRun["params"]["origin"] = { assistantSessionId: sessionId, threadId: thread.id };
+  const signals: RunSignal[] = [];
+  const report = buildRunApprovalReport({
+    db: api.providers.db, engineHost: api.providers.engineHost,
+    store: {
+      getRun: async () => ({
+        runId: "run-1", status: "parked", waitingOn: [], updatedAt: 2, attempt: 1, wakeRequested: false, createdAt: 1,
+        definition: { version: "dag/v1" }, definitionVersionId: "v1", actorUserId: "local-user",
+        params: { workflowId: "wf-1", definitionVersionId: "v1", ...(origin ? { origin } : {}) },
+      }),
+      listSignals: async () => signals,
+    },
+  });
+  // The engine keeps the newest unsettled signal of a thread, so the dispatch
+  // id of the queued item shows which wake was admitted.
+  const queued = async () => (await api!.providers.engineStore.listUnsettledSubmissions(sessionId))
+    .filter((item) => item.threadId === thread.id).map((item) => item.dispatchId);
+
+  // Six steps park in one drive: one signal, and no refused duplicate.
+  for (const nodeId of ["jobs_sales", "jobs_ops", "jobs_eng", "ext_jobs", "users", "prospects"]) {
+    await report({ runId: "run-1", nodeId, kind: "policy_gate", service: "greenhouse", action: "list_jobs" });
+  }
+  expect(await queued()).toEqual(["workflow-approval:run-1:0"]);
+
+  // A step that parks after an approval resolved wakes the thread again.
+  signals.push({ runId: "run-1", signalId: "approval:jobs_sales:resolution", signalType: "approval:jobs_sales", payload: { approved: true }, createdAt: 3 });
+  await report({ runId: "run-1", nodeId: "assemble" });
+  expect(await queued()).toEqual(["workflow-approval:run-1:1"]);
+
+  // A run no thread started reports nowhere.
+  origin = undefined;
+  signals.push({ runId: "run-1", signalId: "approval:assemble:resolution", signalType: "approval:assemble", payload: { approved: true }, createdAt: 4 });
+  await report({ runId: "run-1", nodeId: "late" });
+  expect(await queued()).toEqual(["workflow-approval:run-1:1"]);
 });

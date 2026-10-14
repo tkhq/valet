@@ -65,7 +65,7 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
-import { buildRunOriginReport, buildRunSettledAttention, buildRunThreadArchive, workflowApprovalHref } from "../workflows/run-attention.js";
+import { buildRunApprovalReport, buildRunOriginReport, buildRunSettledAttention, buildRunThreadArchive, workflowApprovalHref } from "../workflows/run-attention.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
@@ -649,6 +649,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // routes through the Phase 4 notification system. `onApprovalPending`
   // only receives `{runId, nodeId, prompt, summary?, details?}` — no owner
   // — so it re-resolves the run's owner from the store itself.
+  const runApprovalReport = buildRunApprovalReport({ db, engineHost, store: workflowStore });
   const onApprovalPending: OnApprovalPending = async (info) => {
     // Contained: the executor awaits this AFTER persisting the approval
     // intent, so a throw here would abort the drive AND permanently skip the
@@ -684,6 +685,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     } catch (err) {
       console.error(`workflow approval notification failed for ${info.runId}:${info.nodeId}`, err);
     }
+    // The thread that started the run hears about it too, so Valet can say
+    // which steps wait instead of staying silent until the run settles.
+    await runApprovalReport(info);
   };
 
   // "Grant the rest of this run" (action-policies plan, Task 3): an approval

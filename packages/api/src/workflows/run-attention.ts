@@ -23,7 +23,7 @@
 import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import { eq } from "drizzle-orm";
 import type { SessionStore } from "@valet/engine";
-import type { NodeCheckpoint, OnRunSettled, WorkflowStore } from "@valet/workflow";
+import type { NodeCheckpoint, OnApprovalPending, OnRunSettled, WorkflowRun, WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import { ensureAssistantRuntime, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
@@ -156,31 +156,83 @@ export function buildRunOriginReport(deps: RunOriginReportDeps): OnRunSettled {
     if (info.parentRunId !== undefined) return;
     try {
       const run = await deps.store.getRun(info.runId);
-      const origin = run?.params.origin;
-      if (!run || !origin) return;
-      const assistant = await loadAssistantBySessionId(deps.db, origin.assistantSessionId);
-      if (!assistant || assistant.archivedAt !== null) return;
-      const actorUserId = run.actorUserId ?? (assistant.ownerType === "user" ? assistant.ownerId : undefined);
-      if (!actorUserId) return;
-      const meta = { actorUserId, orgId: assistant.orgId };
-      const source = await ensureAssistantRuntime(deps, assistant, meta);
-      const sourceThread = source.session.threadById(origin.threadId);
-      if (!sourceThread) return;
-      const { thread, priorQueueItemId } = await resolveWorkflowReportTarget(deps,
-        { type: assistant.ownerType, id: assistant.ownerId }, meta, source.session, sourceThread, `workflow-settled:${info.runId}`);
-      if (priorQueueItemId) return;
-      const name = await workflowName(deps.db, info.workflowId);
-      const checkpoints = await deps.store.getCheckpoints(info.runId);
-      await thread.submitPrompt({
-        kind: "signal",
+      if (!run) return;
+      await signalOrigin(deps, run, `workflow-settled:${info.runId}`, async () => ({
         signalType: "workflow.settled",
-        body: runReport(name, info.runId, info.outcome, checkpoints),
+        body: runReport(await workflowName(deps.db, info.workflowId), info.runId, info.outcome, await deps.store.getCheckpoints(info.runId)),
         attributes: { runId: info.runId, outcome: info.outcome },
-      }, { dispatchId: `workflow-settled:${info.runId}` });
+      }));
     } catch (err) {
       console.error(`workflow run report to its thread failed for ${info.runId}:`, err);
     }
   };
+}
+
+/**
+ * Sends a signal to the assistant thread that started `run`, once per
+ * `dispatchId`. A run no thread started (scheduled, event, or a sub-run)
+ * has nowhere to report.
+ */
+async function signalOrigin(
+  deps: Pick<RunOriginReportDeps, "db" | "engineHost">,
+  run: WorkflowRun,
+  dispatchId: string,
+  signal: () => Promise<{ signalType: string; body: string; attributes: Record<string, string> }>,
+): Promise<void> {
+  const origin = run.params.origin;
+  if (!origin) return;
+  const assistant = await loadAssistantBySessionId(deps.db, origin.assistantSessionId);
+  if (!assistant || assistant.archivedAt !== null) return;
+  const actorUserId = run.actorUserId ?? (assistant.ownerType === "user" ? assistant.ownerId : undefined);
+  if (!actorUserId) return;
+  const meta = { actorUserId, orgId: assistant.orgId };
+  const source = await ensureAssistantRuntime(deps, assistant, meta);
+  const sourceThread = source.session.threadById(origin.threadId);
+  if (!sourceThread) return;
+  const { thread, priorQueueItemId } = await resolveWorkflowReportTarget(deps,
+    { type: assistant.ownerType, id: assistant.ownerId }, meta, source.session, sourceThread, dispatchId);
+  if (priorQueueItemId) return;
+  await thread.submitPrompt({ kind: "signal", ...(await signal()) }, { dispatchId });
+}
+
+export interface RunApprovalReportDeps extends Pick<RunOriginReportDeps, "db" | "engineHost"> {
+  store: Pick<WorkflowStore, "getRun" | "listSignals">;
+}
+
+/**
+ * Tells the thread that started a run that the run waits for approval, as a
+ * `workflow.approval_needed` signal, so Valet can say which steps wait and
+ * offer to approve them instead of staying silent until the run settles.
+ *
+ * Steps that park together share one signal: the dispatch id counts the
+ * approvals already resolved, so six steps parking at once wake the thread
+ * once, and a step that parks after some approvals wakes it again. Contained
+ * like the reports above.
+ */
+export function buildRunApprovalReport(deps: RunApprovalReportDeps): OnApprovalPending {
+  return async (info) => {
+    try {
+      const run = await deps.store.getRun(info.runId);
+      if (!run) return;
+      const resolved = (await deps.store.listSignals(info.runId))
+        .filter((signal) => signal.signalType.startsWith("approval:") && signal.signalId.endsWith(":resolution")).length;
+      // One message for the whole batch, whichever step parks first: the
+      // dispatch id admits identical content once and refuses any other.
+      await signalOrigin(deps, run, `workflow-approval:${info.runId}:${resolved}`, async () => ({
+        signalType: "workflow.approval_needed",
+        body: approvalReport(await workflowName(deps.db, run.params.workflowId), info.runId),
+        attributes: { runId: info.runId },
+      }));
+    } catch (err) {
+      console.error(`workflow approval report to its thread failed for ${info.runId}:${info.nodeId}:`, err);
+    }
+  };
+}
+
+/** What a run waiting for approval tells the thread that started it. */
+export function approvalReport(name: string, runId: string): string {
+  return `Workflow "${name}" is waiting for approval. Read get_run for every step that waits and who can approve it ` +
+    `(a step on a teammate's shared account waits for that teammate). Run ${runId} (/workflows/runs/${runId}).`;
 }
 
 /** What a settled run tells the thread that started it. */

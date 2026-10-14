@@ -148,6 +148,17 @@ iteration suffix (`{runId}:{nodeId}{iterationSuffix}`) — the current
 The existing attention `href` (`/workflows/runs/{runId}`) is the deep link;
 channel deliverers get it for free and remain the mobile story for v1.
 
+The host also tells the thread that started the run (2026-10-14,
+`buildRunApprovalReport` in `run-attention.ts`). It submits a
+`workflow.approval_needed` signal to the origin thread, so the assistant says
+which steps wait and offers to approve them, instead of staying silent until
+the run settles. The dispatch id is `workflow-approval:{runId}:{n}`, where `n`
+counts the approvals already resolved: steps that park together wake the
+thread once, and a step that parks after an approval wakes it again. The body
+is the same for every step in a batch and tells the assistant to read
+`get_run` for each waiting step and who can approve it. A run with no origin
+thread (scheduled, event, or a sub-run) sends no signal.
+
 ### 3. Approval scopes
 
 The gate card offers three approve scopes and deny:
