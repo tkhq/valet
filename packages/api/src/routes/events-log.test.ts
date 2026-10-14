@@ -11,7 +11,7 @@ async function seed(a: TestApi) {
   const now = Date.now();
   await a.providers.db.insert(eventSubscriptions).values({
     id: "sub_mine", orgId: "local-org", ownerType: "user", ownerId: "local-user", name: "Mine",
-    eventKeys: ["github.push"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+    eventKeys: ["github.push", "slack.*"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
   });
   const event = (id: string, at: number) => ({
     id, orgId: "local-org", service: "github", eventKey: "github.push", dedupeKey: id, refs: {}, summary: `push ${id}`,
@@ -92,9 +92,36 @@ it("keeps other workspaces' events out, and hides form diagnostics from members"
   api = await bootTestApi();
   await seed(api);
   const other = await (await fetch(`${api.baseUrl}/api/events/log?ownerType=team&ownerId=other&diagnostics=1`)).json() as EventLogResponse;
-  expect(other.items.map((item) => item.kind)).toEqual(["problem", "problem"]);
+  // The org-wide form diagnostic shows; the filter miss belongs to a rule this workspace does not have.
+  expect(other.items.map((item) => item.id)).toEqual(["drop_form"]);
   const member = await (await fetch(`${api.baseUrl}/api/events/log?ownerType=user&ownerId=test-member`, { headers: { "x-valet-test-user-id": "test-member" } })).json() as EventLogResponse;
   expect(member.items.map((item) => item.id)).not.toContain("drop_form");
+});
+
+it("shows a filter miss only where a workspace's rules, or the org's, name its event key", async () => {
+  api = await bootTestApi();
+  await seed(api);
+  const now = Date.now();
+  await api.providers.db.insert(eventDropLog).values({
+    id: "drop_pr", orgId: "local-org", reason: "filter_excluded", detail: "pull request filtered", eventKey: "github.pull_request.opened", createdAt: now - 500,
+  });
+  const ids = async (ownerType: string, ownerId: string) => ((await (await fetch(
+    `${api!.baseUrl}/api/events/log?ownerType=${ownerType}&ownerId=${ownerId}&diagnostics=1`)).json()) as EventLogResponse).items.map((item) => item.id);
+  // This workspace subscribes to github.push and slack.*, never to pull requests.
+  expect(await ids("user", "local-user")).not.toContain("drop_pr");
+  expect(await ids("user", "local-user")).toContain("drop_filter");
+  await api.providers.db.insert(eventSubscriptions).values({
+    id: "sub_reviews", orgId: "local-org", ownerType: "team", ownerId: "reviews", name: "Reviews",
+    eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+  });
+  expect(await ids("team", "reviews")).toContain("drop_pr");
+  expect(await ids("user", "local-user")).not.toContain("drop_pr");
+  // An org-owned rule for the key shows the miss in every workspace.
+  await api.providers.db.insert(eventSubscriptions).values({
+    id: "sub_org_prs", orgId: "local-org", ownerType: "org", ownerId: "local-org", name: "Org PRs",
+    eventKeys: ["github.*"], filters: [], target: { kind: "orchestrator" }, enabled: true, createdBy: "local-user", createdAt: 1, updatedAt: 1,
+  });
+  expect(await ids("user", "local-user")).toContain("drop_pr");
 });
 
 it("includes events an org-owned rule received, skips other orgs, and looks back 30 days", async () => {

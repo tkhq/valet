@@ -109,7 +109,7 @@ async function logFilterExcludedDrop(
   reason = "filter_excluded",
 ): Promise<void> {
   if (!throttleClaimed && !claimDropThrottle(orgId, throttleKeySuffix)) return;
-  const message = detail ?? `A ${eventKey} event arrived, but every subscription for it excluded it by filter. Check the filters on your ${eventKey} subscription.`;
+  const message = detail ?? `A ${eventKey} event arrived, but every subscription in the organization for it excluded it by filter. Check the filters on the ${eventKey} subscriptions.`;
   try {
     await writeDropLog(db, {
       orgId,
