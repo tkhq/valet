@@ -7,6 +7,8 @@
  * shaping, owner scoping, signal writes — without paying for the poll loop.
  */
 import type { RunHost, WorkflowDefinition } from "@valet/workflow";
+import type { DecisionGateRequest, PluginActionContext } from "@valet/engine";
+import { workflowsActionPlugin } from "../workflows/actions.js";
 import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveDefaultAssistant } from "../assistants/service.js";
@@ -1493,6 +1495,59 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       { runId, nodeId: "gate", approved: true, via: "agent" },
     );
     expect(result).toBe("human_only");
+  });
+
+  describe("workflows.resolve_approval asks a person in the thread", () => {
+    async function parkedPolicyGate() {
+      const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+      api = localApi;
+      await localApi.providers.workflowStore.parkRun(runId, 1, [
+        { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+      ]);
+      const { db, workflowStore, workflowRunHost, engineStore, engineCredentials } = localApi.providers;
+      const deps = { db, workflowStore, workflowRunHost, engineStore, credentials: engineCredentials };
+      const resolve = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.resolve_approval");
+      if (!resolve) throw new Error("resolve_approval is missing");
+      return { localApi, runId, resolve };
+    }
+    const asked: DecisionGateRequest[] = [];
+    function threadCtx(answer: string, resolvedBy = "local-user"): PluginActionContext {
+      asked.length = 0;
+      const context: Partial<PluginActionContext> = {
+        userId: "local-user", orgId: "local-org", owner: { type: "user", id: "local-user" },
+        actionId: "workflows.resolve_approval", service: "workflows",
+        requestDecision: async (gate) => {
+          asked.push(gate);
+          return { actionId: answer, resolvedBy, resolvedAt: Date.now() };
+        },
+      };
+      return context as PluginActionContext;
+    }
+
+    it("resolves a policy gate as the person who confirms the card", async () => {
+      const { localApi, runId, resolve } = await parkedPolicyGate();
+      const result = await resolve.execute({ run_id: runId, node_id: "gate", approved: true }, threadCtx("approve"));
+      expect(result).toMatchObject({ success: true });
+      expect(asked).toHaveLength(1);
+      expect(asked[0]?.title).toBe("Approve widgets.nuke on this workflow run?");
+      const signals = await localApi.providers.workflowStore.listSignals(runId);
+      expect(signals.find((sig) => sig.signalType === "approval:gate")?.payload)
+        .toMatchObject({ approved: true, resolvedBy: "local-user", resolvedVia: "thread" });
+    });
+
+    it("leaves the gate open when the person does not confirm", async () => {
+      const { localApi, runId, resolve } = await parkedPolicyGate();
+      const result = await resolve.execute({ run_id: runId, node_id: "gate", approved: true }, threadCtx("deny"));
+      expect(result).toMatchObject({ success: false });
+      expect(await localApi.providers.workflowStore.listSignals(runId)).toHaveLength(0);
+    });
+
+    it("refuses a person who cannot act on the run", async () => {
+      const { localApi, runId, resolve } = await parkedPolicyGate();
+      const result = await resolve.execute({ run_id: runId, node_id: "gate", approved: true }, threadCtx("approve", "someone-else"));
+      expect(result).toMatchObject({ success: false });
+      expect(await localApi.providers.workflowStore.listSignals(runId)).toHaveLength(0);
+    });
   });
 
   it("foreach body gate: park on approval:body1:3, resolve with iteration: 3 → signal approval:body1:3:resolution", async () => {

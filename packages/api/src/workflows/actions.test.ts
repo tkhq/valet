@@ -103,11 +103,11 @@ describe("workflowsActionPlugin", () => {
     expect(byId.get("workflows.delete_workflow")).toBe("medium");
     expect(byId.get("workflows.list_runs")).toBe("low");
     expect(byId.get("workflows.cancel_run")).toBe("medium");
-    // High → the plugin catalog's default policy gates it behind a human
-    // decision — the agent cannot silently approve its own gates.
-    expect(byId.get("workflows.resolve_approval")).toBe("high");
+    // Medium → the action asks a person itself on every call, so the
+    // catalog's card would only repeat the question.
+    expect(byId.get("workflows.resolve_approval")).toBe("medium");
     // High → minting the hookId grants a new bearer credential that alone
-    // authorizes starting runs, same reasoning as resolve_approval.
+    // authorizes starting runs.
     expect(byId.get("workflows.create_webhook")).toBe("high");
     expect(byId.get("workflows.get_webhook")).toBe("low");
     expect(byId.get("workflows.delete_webhook")).toBe("medium");

@@ -205,18 +205,23 @@ Hardening (applies to approval-node resolutions too — shared route):
    resolutions can no longer mint grants — the executor's `onApprovalGrant`
    path stays but the route never feeds it. Blanket coverage now comes from
    a policy gate's `run` scope or an org policy.
-4. **Humans only.** The agent-callable `workflows.resolve_approval` action
-   refuses to resolve policy gates (`approval:{nodeId}` waits on `tool`
-   nodes) and refuses to run at all from a workflow tool-node invocation
-   context (the synthetic `wf:invoke:` session id) — a workflow must not
-   approve its own or another run's gates. Its error names the corrective
-   action ("A human must resolve this gate from the run page."). Policy-gate
-   resolution is HTTP-principal-only by construction, not by prompt.
+4. **Humans only.** A person resolves every gate. The agent-callable
+   `workflows.resolve_approval` action relays a request: on each call it
+   opens a decision card in the thread (`ctx.requestDecision`), and the gate
+   resolves as the person who confirms that card (`resolvedBy`), with the same
+   access checks as the run page and `resolvedVia: 'thread'`. No policy can
+   skip the card, so the action is `medium` and the catalog adds no second
+   card. A direct `via: 'agent'` resolution of a policy gate still returns
+   `human_only`. The action refuses to run from a workflow tool-node
+   invocation context (the synthetic `wf:invoke:` session id), so a workflow
+   cannot approve its own or another run's gates. Updated 2026-10-14: before,
+   the action refused policy gates, and an agent could only send the user to
+   the run page.
 5. **Timeout.** After `timeoutAt` has passed, resolution returns 409
    `Gate timed out`.
 
 The signal payload records `resolvedBy`, `note`, `scope`, and
-`resolvedVia: 'web'` for the audit trail.
+`resolvedVia` (`'web'` or `'thread'`) for the audit trail.
 
 ### 5. Run-page UI
 
