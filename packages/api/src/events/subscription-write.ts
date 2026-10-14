@@ -140,6 +140,9 @@ export function validateSubscription(
     if (target.assistantId !== undefined) {
       return "Assistant selection is not supported. Choose the personal or team workspace instead.";
     }
+    if (target.replaces !== undefined && (typeof target.replaces !== "string" || target.replaces.length === 0)) {
+      return "replaces must be the ID of the subscription this rule updates";
+    }
     // Both prompt templates are validated against the SELECTED catalog
     // entries, the same set a filter field is held to: a template addresses
     // exactly the payload fields this rule's events declare.

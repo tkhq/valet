@@ -11,7 +11,7 @@ import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import type { RunHost } from "@valet/workflow";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
@@ -2157,5 +2157,72 @@ describe("subscription collision gate (TKAI-294)", () => {
       body: JSON.stringify({ name: "still parked" }),
     });
     expect(rename.status).toBe(200);
+  });
+});
+
+describe("replacement proposals", () => {
+  const MATCH = {
+    eventKeys: ["github.pull_request.opened"],
+    filters: [{ field: "repo", op: "eq" as const, value: "acme/widgets" }],
+  };
+
+  /** The caller's live rule and a disabled proposal that replaces it, with
+   * the same match, so they would collide if both were enabled. */
+  async function seedReplacement(a: TestApi): Promise<void> {
+    const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH };
+    await seedSubscriptionRow(a, "sub_live", "local-org", { ...mine, name: "replies v1" });
+    await seedSubscriptionRow(a, "sub_next", "local-org", {
+      ...mine, name: "replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_live" },
+    });
+  }
+
+  async function enabledById(a: TestApi): Promise<Record<string, boolean>> {
+    const rows = await a.providers.db.select().from(eventSubscriptions);
+    return Object.fromEntries(rows.map((r) => [r.id, r.enabled]));
+  }
+
+  it("enabling a replacement disables the replaced subscription, never one in another workspace", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    // A hand-written link to a colleague's rule enables the proposal but
+    // leaves the colleague's rule alone.
+    await seedSubscriptionRow(a, "sub_colleague", "local-org", {
+      ...MATCH, filters: [{ field: "repo", op: "eq", value: "acme/colleague" }],
+    });
+    await seedSubscriptionRow(a, "sub_stray", "local-org", {
+      ownerType: "user", ownerId: "local-user", enabled: false, eventKeys: MATCH.eventKeys,
+      filters: [{ field: "repo", op: "eq", value: "acme/stray" }], target: { kind: "orchestrator", replaces: "sub_colleague" },
+    });
+    expect((await patchSubscription(a.baseUrl, "sub_stray", { enabled: true })).status).toBe(200);
+    expect(await enabledById(a)).toMatchObject({ sub_colleague: true, sub_stray: true });
+
+    // The replaced rule is not a collision peer, so no override is needed.
+    const res = await patchSubscription(a.baseUrl, "sub_next", { enabled: true });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as PatchEventSubscriptionResponse;
+    expect(body.enabled).toBe(true);
+    expect(body.collisions).toBeUndefined();
+    expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: true });
+    // The link is spent: turning the new version off and on leaves the old one alone.
+    expect(body.target).not.toHaveProperty("replaces");
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: false })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: true })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true, allowCollision: true })).status).toBe(200);
+    expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: true });
+  });
+
+  it("rolls back the enable when the replaced subscription cannot be disabled", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    // Fail only the second write of the transaction: the disable of sub_live.
+    await a.providers.db.execute(sql`
+      CREATE FUNCTION refuse_live_disable() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'refused'; END $$`);
+    await a.providers.db.execute(sql`
+      CREATE TRIGGER refuse_live_disable BEFORE UPDATE ON event_subscriptions
+      FOR EACH ROW WHEN (OLD.id = 'sub_live') EXECUTE FUNCTION refuse_live_disable()`);
+
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(500);
+    expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: false });
   });
 });

@@ -274,6 +274,16 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   workflow targets on different workflows never collide (intentional
   fan-out); a workflow↔orchestrator pair warns but never blocks. Disabled
   rows are skipped — they cannot fire — and enabling one re-runs the gate.
+- Replacement proposals: `events.propose_subscription` takes an optional
+  `replaces`, the ID of an enabled subscription with the same owner, and
+  stores it as `target.replaces`. The action refuses an unknown ID, an ID
+  from another workspace, and a disabled subscription. When a person enables
+  the proposal, the PATCH route disables the replaced subscription in the
+  same transaction and leaves it out of the collision gate, so one version
+  replies. The enable clears `target.replaces`, so turning the new version
+  off and on later leaves the old one alone. The review dialog names the
+  replaced subscription. An agent still cannot enable or change a live
+  subscription.
 - Workflow editor: an "event" trigger node type whose save/update syncs an
   `event_subscriptions` row.
 

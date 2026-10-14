@@ -4619,6 +4619,13 @@ export type EventSubscriptionTargetWire =
        * write that names anything else is refused.
        */
       userPromptTemplate?: string;
+      /**
+       * The ID of a subscription with the same owner that this rule updates.
+       * `events.propose_subscription` sets it. When a person enables this
+       * rule, the server disables that subscription in the same transaction,
+       * so one version replies.
+       */
+      replaces?: string;
     };
 
 /**

@@ -119,3 +119,7 @@ Use the exact `name` filter or follow `nextOffset` with `offset` to find its ID.
 Call `events.set_subscription_presence` with `subscription_id` and `presence: { displayName?, avatarUrl? }`.
 This replaces the override. Send `presence: null` to clear it. The tool preserves matching rules, target, and enabled state.
 `workflows.create_trigger` and `workflows.propose_trigger` also accept optional `presence`.
+
+To change the prompts or matching rules of an enabled subscription, call `events.propose_subscription` with `replaces` set to its ID.
+When a person enables the proposal, Valet disables the replaced subscription, so only one version replies.
+Do not propose a new version without `replaces`, and do not set `replaces` to an earlier proposal that is not enabled.

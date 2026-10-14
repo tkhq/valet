@@ -100,6 +100,13 @@ function describeTarget(
   return "Notify your assistant";
 }
 
+/** The name of the subscription that `sub` replaces, or its ID when the list
+ * does not hold it. Undefined when `sub` replaces nothing. */
+function replacedName(sub: EventSubscriptionWire, subscriptions: EventSubscriptionWire[]): string | undefined {
+  const id = sub.target.kind === "orchestrator" ? sub.target.replaces : undefined;
+  return id === undefined ? undefined : subscriptions.find((s) => s.id === id)?.name ?? id;
+}
+
 /**
  * Event subscriptions: the rules that turn an ingested event into action —
  * a workflow run or an orchestrator prompt. List with enable/disable,
@@ -202,6 +209,7 @@ export function SubscriptionsPanel({ reviewId, onReviewClose }: { reviewId?: str
               teamNames={teamNames}
               viewerId={meQ.data?.id}
               mutable={canMutate(sub, meQ.data?.id, memberTeamIds)}
+              replacesName={replacedName(sub, subscriptions)}
             />
           ))}
         </div>
@@ -213,7 +221,7 @@ export function SubscriptionsPanel({ reviewId, onReviewClose }: { reviewId?: str
           load. */}
       {creating && <AutomationWizard open onOpenChange={setCreating} />}
       {reviewId && subsQ.data && !proposed && <ErrorRow>This proposal is not in the selected workspace. Switch to its workspace and reopen the review link.</ErrorRow>}
-      {proposed && canMutate(proposed, meQ.data?.id, memberTeamIds) && <EditSubscriptionDialog key={proposed.id} open review sub={proposed}
+      {proposed && canMutate(proposed, meQ.data?.id, memberTeamIds) && <EditSubscriptionDialog key={proposed.id} open review sub={proposed} replacesName={replacedName(proposed, subscriptions)}
         targetLabel={describeTarget(proposed.target, workflowNames, teamNames)} onOpenChange={(open) => { if (!open) onReviewClose?.(); }} />}
 
     </div>
@@ -226,6 +234,7 @@ function SubscriptionRow({
   teamNames,
   viewerId,
   mutable,
+  replacesName,
 }: {
   sub: EventSubscriptionWire;
   workflowNames: Map<string, string>;
@@ -234,6 +243,7 @@ function SubscriptionRow({
   viewerId: string | undefined;
   /** False for a colleague's personal subscription — visible, not actionable. */
   mutable: boolean;
+  replacesName?: string;
 }) {
   const patch = usePatchEventSubscription();
   const del = useDeleteEventSubscription();
@@ -328,6 +338,7 @@ function SubscriptionRow({
           onOpenChange={setEditing}
           sub={sub}
           review={!sub.enabled}
+          replacesName={replacesName}
           targetLabel={describeTarget(sub.target, workflowNames, teamNames)}
         />
       )}

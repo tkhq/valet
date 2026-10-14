@@ -4,8 +4,8 @@ import { and, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
 import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResult, ValetPlugin } from "@valet/engine";
-import type { AppDb } from "../lib/drizzle.js";
-import { eventDropLog, eventReceipts, eventSubscriptions, orgMembers, type EventDropLogRow } from "../schema/index.js";
+import type { AppDb, AppQueryable } from "../lib/drizzle.js";
+import { eventDropLog, eventReceipts, eventSubscriptions, orgMembers, type EventDropLogRow, type EventSubscriptionRow } from "../schema/index.js";
 
 import { withAuthorizedTeamOwnership } from "../services/teams.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
@@ -69,7 +69,7 @@ function matchOutcome(reason: string): "excluded_by_filter" | null {
 export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => ValetPlugin[]) = []): ActionPlugin {
   async function withSubscriptionScope(
     ctx: PluginActionContext,
-    operation: (tx: Parameters<Parameters<typeof withAuthorizedTeamOwnership>[2]>[0], scope: { orgId: string; ownerType: "user" | "team"; ownerId: string }) => Promise<PluginActionResult>,
+    operation: (tx: AppQueryable, scope: { orgId: string; ownerType: "user" | "team"; ownerId: string }) => Promise<PluginActionResult>,
   ): Promise<PluginActionResult> {
     if (ctx.externalSender) return EXTERNAL_SENDER;
     const userId = ctx.actor?.id ?? ctx.userId;
@@ -157,10 +157,11 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
     user_prompt_template: Type.Optional(Type.String()),
     system_prompt: Type.Optional(Type.String()),
     audience: Type.Optional(Type.Union([Type.Literal("team"), Type.Literal("organization")])),
+    replaces: Type.Optional(Type.String({ minLength: 1, description: "ID of the enabled subscription in this workspace that this proposal updates. When a person enables the proposal, Valet disables that subscription." })),
   }))({
     id: "events.propose_subscription",
     name: "Propose assistant event subscription",
-    description: "Save a disabled event subscription for the current personal or team assistant. Pick event keys from workflows.list_event_types. Returns the stored configuration and an Events review link. The user must review and enable it. Repeated proposal keys do not change the existing record.",
+    description: "Save a disabled event subscription for the current personal or team assistant. Pick event keys from workflows.list_event_types. Returns the stored configuration and an Events review link. The user must review and enable it. Repeated proposal keys do not change the existing record. To revise an enabled subscription, set replaces to its ID from events.list_subscriptions; enabling the proposal disables the replaced subscription, so only one version replies.",
     riskLevel: "low",
     execute: async (input, ctx) => {
       if (ctx.externalSender) return EXTERNAL_SENDER;
@@ -192,6 +193,7 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
         ...(input.presence !== undefined ? { presence: input.presence } : {}),
         ...(input.user_prompt_template !== undefined ? { userPromptTemplate: input.user_prompt_template } : {}),
         ...(input.system_prompt !== undefined ? { systemPrompt: input.system_prompt } : {}),
+        ...(input.replaces !== undefined ? { replaces: input.replaces } : {}),
       };
       const write = await validateSubscriptionWrite(db, typeof plugins === "function" ? plugins() : plugins, {
         name: input.name, eventKeys: input.event_keys, filters: input.filters ?? [], target, audience: input.audience,
@@ -204,19 +206,35 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
         filters: write.filters, target, audience: write.audience ?? null, enabled: false,
         createdBy: userId, createdAt: now, updatedAt: now,
       };
-      const insert = async (tx: Parameters<Parameters<typeof withAuthorizedTeamOwnership>[2]>[0]) => {
+      const insert = async (tx: AppQueryable): Promise<{ error: string } | { row?: EventSubscriptionRow; replaced?: { id: string; name: string } }> => {
+        let replaced: { id: string; name: string } | undefined;
+        if (input.replaces !== undefined) {
+          const [found] = await tx.select({ id: eventSubscriptions.id, name: eventSubscriptions.name, enabled: eventSubscriptions.enabled })
+            .from(eventSubscriptions).where(and(eq(eventSubscriptions.id, input.replaces), eq(eventSubscriptions.orgId, values.orgId),
+              eq(eventSubscriptions.ownerType, ownerType), eq(eventSubscriptions.ownerId, ownerId))).limit(1);
+          if (!found) return { error: "No subscription with this replaces ID exists in this workspace. Use events.list_subscriptions to find the enabled subscription to replace." };
+          // A disabled rule is not the version that replies, so replacing it
+          // would leave the live version on. A retry after a person enabled
+          // this proposal is the exception: that enable disabled the rule.
+          if (!found.enabled && (await tx.select({ id: eventSubscriptions.id }).from(eventSubscriptions).where(eq(eventSubscriptions.id, values.id)).limit(1)).length === 0) {
+            return { error: `Subscription "${found.name}" is not enabled. Set replaces to the enabled subscription from events.list_subscriptions.` };
+          }
+          replaced = { id: found.id, name: found.name };
+        }
         const rows = await tx.insert(eventSubscriptions).values(values).onConflictDoNothing().returning();
-        return rows[0] ?? (await tx.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, values.id)))[0];
+        return { row: rows[0] ?? (await tx.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, values.id)))[0], replaced };
       };
-      const row = ownerType === "team"
+      const written = ownerType === "team"
         ? await withAuthorizedTeamOwnership(db, { teamId: ownerId, orgId: ctx.orgId, userId, principalTeamId: ownerId, requireMembership: true }, insert)
         : await insert(db);
+      if (written && "error" in written) return { success: false, error: written.error };
+      const row = written?.row;
       if (!row) return { success: false, error: "Team is no longer available. Open an active team and retry." };
       if (!isDeepStrictEqual(
         [row.name, row.eventKeys, row.filters, row.target, row.audience, row.createdBy],
         [values.name, values.eventKeys, values.filters, values.target, values.audience, values.createdBy],
       )) return { success: false, error: "This proposal key already names a different subscription. Use a new proposal_key." };
-      return { success: true, data: proposalResult("subscription", row.id, row.enabled, row) };
+      return { success: true, data: proposalResult("subscription", row.id, row.enabled, row, written.replaced) };
     },
   });
   const listProblems = action(

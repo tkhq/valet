@@ -14,7 +14,7 @@ import { getLinearIngressStatus, linearEventArmBlock } from "../services/linear-
  * `event_keys`/`filters` jsonb shapes this file writes.
  */
 import type { FilterOption, FilterOptionResolver, StoredCredential, ValetPlugin } from "@valet/engine";
-import { and, desc, eq, or, type SQL } from "drizzle-orm";
+import { and, desc, eq, ne, or, sql, type SQL } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { randomUUID } from "node:crypto";
 import type { AppEnv } from "../env.js";
@@ -137,8 +137,9 @@ type NarrowedSubscriptionRow = Omit<
 
 /**
  * The collision report for one candidate write (TKAI-294): the candidate
- * compared against every ENABLED subscription in the org, minus the row
- * being edited. Disabled rows do not fire, so they cannot collide; enabling
+ * compared against every ENABLED subscription in the org, minus the rows the
+ * write leaves off: the row being edited, and the row an enabled replacement
+ * disables. Disabled rows do not fire, so they cannot collide; enabling
  * one later re-runs this check (see the PATCH route).
  */
 async function collisionsForWrite(
@@ -146,14 +147,14 @@ async function collisionsForWrite(
   plugins: ValetPlugin[],
   orgId: string,
   candidate: { ownerType?: string; eventKeys: string[]; filters: SubscriptionFilter[]; target: EventSubscriptionTargetWire },
-  excludeId?: string,
+  excludeIds: readonly string[] = [],
 ): Promise<CollisionReport<NarrowedSubscriptionRow>> {
   const rows = await db
     .select()
     .from(eventSubscriptions)
     .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
   const existing: NarrowedSubscriptionRow[] = rows
-    .filter((r) => r.id !== excludeId)
+    .filter((r) => !excludeIds.includes(r.id))
     .map((r) => ({
       ...r,
       eventKeys: r.eventKeys as string[],
@@ -812,6 +813,18 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   const willBeEnabled = body.enabled ?? row.enabled;
   const matchChanged = body.filters !== undefined || body.eventKeys !== undefined;
   const arming = body.enabled === true && !row.enabled;
+  // Enabling a replacement proposal disables the subscription it replaces
+  // (see the update below), so that row is not a collision peer. Same owner
+  // only: a target written by hand must not reach another workspace's rule.
+  const replaces = arming && patchedTarget.kind === "orchestrator" ? patchedTarget.replaces : undefined;
+  const replacedId = replaces === undefined ? undefined : (await db
+    .select({ id: eventSubscriptions.id })
+    .from(eventSubscriptions)
+    .where(and(
+      eq(eventSubscriptions.id, replaces), ne(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId),
+      eq(eventSubscriptions.ownerType, row.ownerType), eq(eventSubscriptions.ownerId, row.ownerId),
+    ))
+    .limit(1))[0]?.id;
   let collisions: EventSubscriptionCollisionsWire | undefined;
   if (willBeEnabled && (matchChanged || arming)) {
     const ingressBlocked = await linearEventArmBlock(db,c.var.providers.engineCredentials,user.orgId,merged.eventKeys as string[]);
@@ -829,7 +842,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
         // would answer for the rule as it was.
         target: patchedTarget,
       },
-      id,
+      replacedId !== undefined ? [id, replacedId] : [id],
     );
     if (report.blocking.length > 0 && body.allowCollision !== true) {
       const resp: EventSubscriptionCollisionErrorWire = {
@@ -849,19 +862,35 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     }
   }
 
-  const updated = await db
-    .update(eventSubscriptions)
-    .set({
-      name: merged.name,
-      eventKeys: merged.eventKeys,
-      filters,
-      target: patchedTarget,
-      audience,
-      enabled: willBeEnabled,
-      updatedAt: Math.max(Date.now(), row.updatedAt + 1),
-    })
-    .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.updatedAt, row.updatedAt)))
-    .returning();
+  // The link is spent once the replaced version is off. Clearing it keeps a
+  // later off-and-on of this version from disabling the old one again.
+  const enabledTarget = replacedId !== undefined && patchedTarget.kind === "orchestrator"
+    ? (({ replaces: _applied, ...rest }) => rest)(patchedTarget)
+    : patchedTarget;
+  const updated = await db.transaction(async (tx) => {
+    const rows = await tx
+      .update(eventSubscriptions)
+      .set({
+        name: merged.name,
+        eventKeys: merged.eventKeys,
+        filters,
+        target: enabledTarget,
+        audience,
+        enabled: willBeEnabled,
+        updatedAt: Math.max(Date.now(), row.updatedAt + 1),
+      })
+      .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.updatedAt, row.updatedAt)))
+      .returning();
+    // One transaction, so the replacement and the version it replaces are
+    // never both enabled.
+    if (rows[0] && replacedId !== undefined) {
+      await tx
+        .update(eventSubscriptions)
+        .set({ enabled: false, updatedAt: sql`greatest(${eventSubscriptions.updatedAt} + 1, ${Date.now()})` })
+        .where(and(eq(eventSubscriptions.id, replacedId), eq(eventSubscriptions.orgId, user.orgId)));
+    }
+    return rows;
+  });
 
   if (!updated[0]) return c.json({ error: "This subscription changed while you were editing it. Refresh and try again." }, 409);
 
