@@ -163,7 +163,8 @@ export function ModeSnippets({ apiKey, mode, team = false }: ModeSnippetsProps) 
         ].join("\n");
 
   // OpenCode's Anthropic client appends `/messages` to `baseURL` directly, so
-  // the URL must end in `/v1`. Claude Code's base URL (no `/v1`) 404s here.
+  // the URL ends in `/v1`. The gateway also adds a missing `/v1`
+  // (`proxySubpath`), so a copied Claude Code base URL still works.
   // Passthrough: OpenCode sends `apiKey` as x-api-key (forwarded upstream)
   // and the Bearer header carries the proxy key that identifies you.
   const opencodeConfigSnippet = [

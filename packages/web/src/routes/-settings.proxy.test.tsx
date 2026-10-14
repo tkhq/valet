@@ -137,8 +137,8 @@ describe("setup guide before a key exists", () => {
   });
 
   it("points OpenCode at the /v1 base URL", () => {
-    // OpenCode appends `/messages` to baseURL. Without `/v1` it requests
-    // `/proxy/anthropic/messages`, which 404s.
+    // OpenCode appends `/messages` to baseURL, so the documented URL ends in
+    // `/v1` and matches the upstream path without the gateway's fallback.
     render(<SettingsProxyPage />);
     const config = screen.getByText(/"baseURL":/);
     expect(config.textContent).toContain(`"baseURL": "${window.location.origin}/proxy/anthropic/v1"`);

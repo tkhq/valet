@@ -293,7 +293,7 @@ A proxy key is an ordinary valet API key (`vlt_` prefix, the better-auth `apiKey
     }
   }
   ```
-  The `baseURL` must end in `/v1`. OpenCode's Anthropic client appends `/messages` to `baseURL` directly, so the Claude Code base URL makes it request `/proxy/anthropic/messages`, which returns 404. This applies to `ANTHROPIC_BASE_URL` too, because OpenCode reads that variable as its `baseURL`.
+  The `baseURL` ends in `/v1`. OpenCode's Anthropic client appends `/messages` to `baseURL` directly, so the Claude Code base URL makes it request `/proxy/anthropic/messages`. OpenCode also reads `ANTHROPIC_BASE_URL` as its `baseURL`, so the same path comes from the Claude Code environment. The gateway adds a missing `/v1` to every Anthropic subpath (`proxySubpath`), so both base URLs reach `/v1/messages` upstream. OpenAI subpaths stay unchanged, because an org's custom OpenAI upstream (Azure) can use other path shapes.
 - **OpenAI SDK** (scripts): `base_url` is `https://<valet-host>/proxy/openai/v1` and `api_key` is `os.environ["VALET_PROXY_KEY"]`.
 
 In pass-through mode, the shared block also exports `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`. Each tool sends the provider key in one header and the `vlt_` key in the other:
