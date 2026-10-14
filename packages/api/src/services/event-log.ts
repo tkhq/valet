@@ -116,9 +116,18 @@ export async function listEventLog(db: AppDb, query: EventLogQuery): Promise<{ i
   }
 
   // Problems carry no owner, so the organization's are listed in every workspace.
+  // A filter miss is the exception: only the enabled subscriptions that name
+  // its event key excluded it (ingest checks no disabled rule). It shows in a
+  // workspace whose enabled rules (or the org's) name that key, so a workspace that never asked for the event does not read
+  // another workspace's filter as its own.
   const problemRows: EventLogItem[] = [];
   if (query.diagnostics) {
-    const where: SQL[] = [sql`org_id = ${orgId}`];
+    const where: SQL[] = [sql`org_id = ${orgId}`, sql`(reason <> 'filter_excluded' OR event_key IS NULL OR EXISTS (
+      SELECT 1 FROM event_subscriptions s, jsonb_array_elements_text(s.event_keys) AS k(pattern)
+      WHERE s.org_id = ${orgId} AND s.enabled
+        AND ((s.owner_type = ${owner.type} AND s.owner_id = ${owner.id}) OR s.owner_type = 'org')
+        AND (k.pattern = event_drop_log.event_key
+          OR (right(k.pattern, 2) = '.*' AND starts_with(event_drop_log.event_key, left(k.pattern, -1))))))`];
     if (!query.admin) where.push(sql`reason NOT IN (${sql.join(ADMIN_ONLY_REASONS.map((r) => sql`${r}`), sql`, `)})`);
     if (like) where.push(sql`(reason ILIKE ${like} ESCAPE '\\' OR detail ILIKE ${like} ESCAPE '\\')`);
     if (query.before) where.push(sql`(created_at, id) < (${query.before.at}, ${query.before.id})`);
