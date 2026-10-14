@@ -364,6 +364,17 @@ describe("V1 export details", () => {
     expect(wf?.checklist.join("\n")).not.toContain("unknown type");
   });
 
+  it("lists one problem once when two V1 rows have it", () => {
+    const value = convert({
+      workflows: [{ id: "wf1", name: "Digest", enabled: true, data: { steps: [{ id: "s1", type: "agent_message", content: "Go." }] } }],
+      triggers: [
+        { name: "V1 trigger", workflowId: "wf1", enabled: true, config: { type: "github_event" } },
+        { name: "V1 trigger", workflowId: "wf1", enabled: true, config: { type: "github_event" } },
+      ],
+    });
+    expect(value.workflows[0]?.checklist).toEqual(['V1 trigger "V1 trigger" has the unknown type "github_event". The import did not create it.']);
+  });
+
   it("names an empty send_message step as a V1 failure", () => {
     const result = convertV1Workflows({ steps: [{ id: "s1", type: "tool", tool: "send_message", arguments: {} }] });
     if (!result.ok) throw new Error(result.errors.join("; "));

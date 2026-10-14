@@ -17,7 +17,6 @@
  * credential must not sit behind a box that takes a repository name.
  */
 import { useId, useRef, useState, type ChangeEvent } from "react";
-import type { WorkflowDefinition } from "@valet/workflow";
 import { useNavigate } from "@tanstack/react-router";
 import { Upload } from "lucide-react";
 import { api } from "~/api/client";
@@ -388,6 +387,8 @@ function ReviewStep({
   onName: (next: string) => void;
   id: string;
 }) {
+  const preview = previewWorkflowImport(value.definition);
+
   return (
     <div className="grid gap-3">
       <div className="grid gap-1">
@@ -402,26 +403,10 @@ function ReviewStep({
         </p>
       )}
 
-      <DefinitionSummary definition={value.definition} from={from} />
-    </div>
-  );
-}
-
-/** The nodes and services a definition holds, for a review step. */
-export function DefinitionSummary({ definition, from }: { definition: WorkflowDefinition; from?: string }) {
-  const preview = previewWorkflowImport(definition);
-
-  return (
-    <>
       <div className="rounded border border-line bg-ink-wash px-3 py-2">
         <p className="text-xs text-ink">
           <span className="font-medium">{preview.nodeCount}</span> node
-          {preview.nodeCount === 1 ? "" : "s"}
-          {from !== undefined && (
-            <>
-              {" "}from <span className="font-mono">{from}</span>
-            </>
-          )}
+          {preview.nodeCount === 1 ? "" : "s"} from <span className="font-mono">{from}</span>
         </p>
         <ul className="mt-1.5 flex flex-wrap gap-1.5">
           {preview.nodeTypes.map((entry) => (
@@ -448,6 +433,6 @@ export function DefinitionSummary({ definition, from }: { definition: WorkflowDe
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 }

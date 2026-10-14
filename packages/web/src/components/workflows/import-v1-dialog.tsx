@@ -19,13 +19,14 @@ import {
   readV1Paste,
   v1ChecklistPrompt,
   type V1Conversion,
+  type WorkflowDefinition,
 } from "@valet/workflow";
 import { api } from "~/api/client";
 import { useCreateSchedule, useCreateWorkflow } from "~/api/workflows";
-import { Button, Dialog, DialogContent, DialogFooter, Label, Spinner, Textarea } from "~/components/primitives";
+import { Badge, Button, Dialog, DialogContent, DialogFooter, Label, Spinner, Textarea } from "~/components/primitives";
 import { errorMessages } from "~/lib/error-text";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
-import { DefinitionSummary } from "./import-workflow-dialog";
+import { NODE_META } from "./editor-model";
 
 type Phase =
   | { kind: "idle" }
@@ -102,7 +103,7 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
       <DialogContent
         className="max-h-[85vh] max-w-lg overflow-y-auto"
         title="Import from V1"
-        description="Converts V1 workflows and their schedules. The editor assistant of each workflow gets the items that need a decision."
+        description="Converts V1 workflows and their schedules. Anything that needs your decision goes to each workflow's editor assistant."
       >
         {phase.kind === "confirm" ? (
           <V1Review value={phase.value} />
@@ -170,39 +171,45 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
 /** Each converted workflow with what it still needs, then the prompts and notes. */
 function V1Review({ value }: { value: V1Conversion }) {
   return (
-    <div className="grid gap-3">
-      {/* A static list: index keys are safe, and V1 names need not be unique. */}
-      {value.workflows.map((wf, i) => (
-        <section key={i} aria-label={wf.name} className="grid gap-2 rounded border border-line px-3 py-2">
-          <p className="text-sm font-medium text-ink">{wf.name}</p>
-          <DefinitionSummary definition={wf.definition} />
-          {wf.schedules.length > 0 && (
-            <p className="text-xs text-muted">
-              Schedules: {wf.schedules.map((s) => `${s.name} (${s.cron})`).join(", ")}
-            </p>
-          )}
-          {wf.checklist.length > 0 ? (
-            <div className="grid gap-1">
-              <p className="text-xs text-muted">The editor assistant gets these items to finish:</p>
-              <ul className="list-disc space-y-1 pl-4 text-xs text-ink">
-                {wf.checklist.map((line, i) => (
-                  <li key={i}>{line}</li>
+    <div className="grid gap-4">
+      <ul className="divide-y divide-line">
+        {/* A static list: index keys are safe, and V1 names need not be unique. */}
+        {value.workflows.map((wf, i) => {
+          const steps = stepSummary(wf.definition);
+          return (
+            <li key={i} aria-label={wf.name} className="grid gap-1.5 py-3 first:pt-0 last:pb-0">
+              <div className="flex min-w-0 items-start justify-between gap-3">
+                <p className="min-w-0 break-words text-sm font-medium text-ink">{wf.name}</p>
+                {wf.checklist.length > 0
+                  ? <Badge variant="warning" className="shrink-0">{wf.checklist.length} to finish</Badge>
+                  : <Badge variant="success" className="shrink-0">Ready</Badge>}
+              </div>
+              <p className="text-xs text-muted">
+                {steps || "No steps"}
+                {wf.schedules.map((s, j) => (
+                  <span key={j}> · {s.name} <code className="font-mono text-[11px]">{s.cron}</code></span>
                 ))}
-              </ul>
-            </div>
-          ) : (
-            <p className="text-xs text-muted">Every step converted. Nothing needs a decision.</p>
-          )}
-        </section>
-      ))}
+              </p>
+              {wf.checklist.length > 0 && (
+                <div className="mt-1 grid gap-1">
+                  <p className="text-xs font-medium text-ink">The editor assistant will ask you about</p>
+                  <ul className="list-disc space-y-1 pl-4 text-xs leading-relaxed text-muted">
+                    {wf.checklist.map((line, j) => <li key={j}>{line}</li>)}
+                  </ul>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
 
       {value.promptSchedules.length > 0 && (
-        <div className="grid gap-1">
-          <p className="text-xs text-muted">These schedules send a prompt to the assistant:</p>
-          <ul className="list-disc space-y-1 pl-4 text-xs text-ink">
+        <div className="grid gap-1 border-t border-line pt-3">
+          <p className="text-xs font-medium text-ink">Schedules that prompt the assistant</p>
+          <ul className="space-y-1 text-xs text-muted">
             {value.promptSchedules.map((s, i) => (
-              <li key={i}>
-                {s.name} ({s.cron}): {s.prompt}
+              <li key={i} className="break-words">
+                {s.name} <code className="font-mono text-[11px]">{s.cron}</code>: {s.prompt}
               </li>
             ))}
           </ul>
@@ -218,4 +225,16 @@ function V1Review({ value }: { value: V1Conversion }) {
       )}
     </div>
   );
+}
+
+/** "2 Runtime, 1 Approval": the steps a person added, in the editor's own
+ * labels. The trigger and stop every workflow has are left out. */
+function stepSummary(definition: WorkflowDefinition): string {
+  const counts = new Map<string, number>();
+  for (const node of definition.nodes) {
+    if (node.type === "trigger" || node.type === "stop") continue;
+    const label = NODE_META[node.type].label;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts].map(([label, count]) => `${count} ${label}`).join(", ");
 }

@@ -71,7 +71,8 @@ describe("ImportV1Dialog", () => {
     paste(V1_PASTE);
 
     expect(screen.getByText("Nightly triage")).toBeTruthy();
-    expect(screen.getByText("Schedules: Every night (0 3 * * *)")).toBeTruthy();
+    expect(screen.getByText("0 3 * * *").closest("p")?.textContent).toContain("1 Runtime · Every night 0 3 * * *");
+    expect(screen.getByText("1 to finish")).toBeTruthy();
     expect(screen.getByText(/sent "done" to V1 session s1/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Import 1 workflow" })).toBeTruthy();
     expect(createWorkflow).not.toHaveBeenCalled();
