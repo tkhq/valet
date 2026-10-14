@@ -64,6 +64,7 @@ import { mutateTeamOnePassword } from "../services/team-onepassword-token.js";
 import { isDeniedCredentialService } from "../services/credential-resolution.js";
 import { mapOnePasswordError } from "./_onepassword-errors.js";
 import { canAdministerTeam, canViewTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
+import { isDeadConnection } from "../services/credential-resolution.js";
 import { deleteSharesFrom, listShareTeamsFrom, listTeamShares, revokeShare, shareCredential } from "../services/credential-shares.js";
 import { GITHUB_CREDENTIAL_SERVICE, checkGithubUserRow } from "../services/github-tokens.js";
 import { credentials } from "../schema/index.js";
@@ -257,6 +258,7 @@ async function toSummary(
     login: typeof metadata?.login === "string" ? metadata.login : undefined,
     identityOnly: metadata?.identityOnly === true ? true : undefined,
     refreshFailedAt: typeof metadata?.refreshFailedAt === "number" ? metadata.refreshFailedAt : undefined,
+    dead: isDeadConnection(stored, Date.now()) ? true : undefined,
     onepasswordRef: onePasswordMeta(stored)?.reference,
     onepasswordTokenScope: onePasswordMeta(stored)?.tokenScope,
     ...extra,

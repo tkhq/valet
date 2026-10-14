@@ -28,7 +28,9 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
   }, [canConnect]);
   const services = [...new Map((plugins.error ? [] : plugins.data?.plugins ?? [])
     .flatMap((p) => p.services).map((s) => [s.service, s])).values()];
-  const occupied = new Set(credentials.data?.credentials.map((c) => c.service));
+  // Only the team's own connection fills a service's slot. A member's shared
+  // account sits beside it, so an admin can still connect the team's own.
+  const occupied = new Set(credentials.data?.credentials.filter((c) => !c.delegatedFrom).map((c) => c.service));
   const choices = services.filter((s) => s.configKeys.length > 0 &&
     s.service !== "slack-user" && s.service !== "slack" && s.service !== "github" &&
     // `onepassword` is a service-account TOKEN, not one service's credential.

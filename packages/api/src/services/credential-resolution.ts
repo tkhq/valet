@@ -343,15 +343,16 @@ export async function readTeamCredential(
 }
 
 /**
- * A connection Valet can no longer use: its last token refresh failed and its
- * access token is past expiry. The refreshing store retries on every read, so
- * the stamp is cleared as soon as a refresh works again. Takes a stored
- * credential or a raw `credentials` row.
+ * A connection Valet can no longer use: the provider refused its refresh
+ * token (`metadata.refreshRefused`, a 400 or 401 from the token endpoint) and
+ * its access token is past expiry. A temporary refresh failure does not count.
+ * The refreshing store retries on every read and clears the stamp when a
+ * refresh works. Takes a stored credential or a raw `credentials` row.
  */
 export function isDeadConnection(row: { type: string; expiresAt?: number | null; metadata?: unknown }, now: number): boolean {
   const metadata = row.metadata;
-  const failed = typeof metadata === "object" && metadata !== null && "refreshFailedAt" in metadata && typeof metadata.refreshFailedAt === "number";
-  return row.type === "oauth2" && failed && typeof row.expiresAt === "number" && row.expiresAt <= now;
+  const refused = typeof metadata === "object" && metadata !== null && "refreshRefused" in metadata && metadata.refreshRefused === true;
+  return row.type === "oauth2" && refused && typeof row.expiresAt === "number" && row.expiresAt <= now;
 }
 
 /** `readTeamCredential`'s credential: a team action's read. */

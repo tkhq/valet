@@ -15,6 +15,7 @@ export {
   buildAuthorizationUrl,
   exchangeCodePkce,
   refreshTokenPkce,
+  OAuthTokenError,
 } from './mcp/oauth.js';
 export type { AuthServerMetadata, RegisteredClient, TokenResponse } from './mcp/oauth.js';
 

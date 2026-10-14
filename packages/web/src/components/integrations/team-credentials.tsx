@@ -6,7 +6,7 @@ import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/
 import { errorText } from "~/lib/error-text";
 import { CardHeading } from "./integration-card";
 import { displayName } from "./display-name";
-import { credentialRowHealth, healthBadge, healthNote, isDeadConnection, needsReauth, type ServiceHealth } from "./service-health";
+import { credentialRowHealth, healthBadge, healthNote, needsReauth, type ServiceHealth } from "./service-health";
 import { TeamConnectionDialog } from "./team-connection-setup";
 
 /**
@@ -36,7 +36,7 @@ function removalLabels(
 
 /**
  * The repair for a row that cannot act. Any member may reconnect a dead team
- * connection (`isDeadConnection`). For a team connection in another broken
+ * connection (`CredentialSummary.dead`). For a team connection in another broken
  * state, an admin removes it and connects again. A shared account belongs to
  * its member, so only that member can repair it.
  */
@@ -49,7 +49,7 @@ function repairNote(
   const service = displayName(row.service);
   const problem = health === "identity-only" ? "This connection gives sign-in only." : "The last token refresh failed.";
   if (row.delegatedFrom) return `${problem} ${nameFor(row.delegatedFrom)} must reconnect ${service} in their own Integrations.`;
-  if (isDeadConnection(row)) return healthNote(health) ?? problem;
+  if (row.dead === true) return healthNote(health) ?? problem;
   return canMutate
     ? `${problem} Disconnect it, then connect ${service} again under Available.`
     : `${problem} Ask a team admin to connect ${service} again.`;
@@ -145,7 +145,7 @@ export function TeamCredentials({
                   const canRemove = canMutate || !row.delegatedFrom;
                   const health = credentialRowHealth(row);
                   const badge = needsReauth(health) ? healthBadge(health) : null;
-                  const canReconnect = !row.delegatedFrom && row.type === "oauth2" && isDeadConnection(row);
+                  const canReconnect = !row.delegatedFrom && row.type === "oauth2" && row.dead === true;
                   return (
                     <li key={row.delegatedFrom ?? "team"} className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
                       <div className="min-w-0">

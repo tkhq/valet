@@ -994,7 +994,7 @@ describe("team OAuth connections", () => {
   });
 
   describe("reconnect", () => {
-    const dead = { type: "oauth2" as const, accessToken: "dead", refreshToken: "dead-refresh", expiresAt: 1, metadata: { refreshFailedAt: 2 } };
+    const dead = { type: "oauth2" as const, accessToken: "dead", refreshToken: "dead-refresh", expiresAt: 1, metadata: { refreshFailedAt: 2, refreshRefused: true } };
     const startReconnect = (baseUrl: string, teamId: string, userId: string) =>
       fetch(`${baseUrl}/api/credentials/linear/connect?scope=team&teamId=${teamId}&reconnect=1`, {
         redirect: "manual", headers: { "x-valet-test-user-id": userId },
@@ -1018,16 +1018,23 @@ describe("team OAuth connections", () => {
       });
     });
 
-    it("refuses someone outside the team, and a member when the team connection works", async () => {
+    it("refuses someone outside the team, and sends a member back when the connection is not dead", async () => {
       const { app, team } = await setup();
       await saveTeamRow(app, team.id, dead);
       // An organization member who is not on the team.
       expect((await startReconnect(app.baseUrl, team.id, "test-member")).status).toBe(404);
       await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
-      await saveTeamRow(app, team.id, { type: "oauth2", accessToken: "live", refreshToken: "rt", expiresAt: Date.now() + 3_600_000 });
-      const live = await startReconnect(app.baseUrl, team.id, "test-member");
-      expect(live.status).toBe(409);
-      expect(await live.json()).toEqual({ error: "This team connection still works. Ask a team admin to replace it." });
+      const unneeded = `/integrations?teamId=${team.id}&error=team_reconnect_unneeded`;
+      // A working connection, and one whose last refresh failed only temporarily.
+      for (const row of [
+        { type: "oauth2" as const, accessToken: "live", refreshToken: "rt", expiresAt: Date.now() + 3_600_000 },
+        { type: "oauth2" as const, accessToken: "blip", refreshToken: "rt", expiresAt: 1, metadata: { refreshFailedAt: 2 } },
+      ]) {
+        await saveTeamRow(app, team.id, row);
+        const response = await startReconnect(app.baseUrl, team.id, "test-member");
+        expect(response.status).toBe(302);
+        expect(response.headers.get("location")).toBe(unneeded);
+      }
       expect(fake.registrations).toHaveLength(0);
     });
 

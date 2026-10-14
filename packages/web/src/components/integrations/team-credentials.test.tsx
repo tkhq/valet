@@ -52,7 +52,7 @@ describe("TeamCredentials", () => {
   });
 
   it("marks a dead team connection and lets any member reconnect it", async () => {
-    teamCreds = [cred({ refreshFailedAt: 1, expiresAt: 1 }), cred({ delegatedFrom: "u2" })];
+    teamCreds = [cred({ refreshFailedAt: 1, expiresAt: 1, dead: true }), cred({ delegatedFrom: "u2" })];
     renderRows(false);
     expect(screen.getAllByText("Refresh failed")).toHaveLength(1);
     expect(screen.getByText("The last token refresh failed. Select Reconnect to sign in again.")).toBeTruthy();

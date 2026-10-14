@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { CredentialStore, CredentialOwner, StoredCredential, ValetPlugin } from "@valet/engine";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../test-helpers/oauth-fixture.js";
@@ -132,6 +132,41 @@ describe("OAuthRefreshingCredentialStore", () => {
     expect(got?.metadata?.refreshFailedAt).toBe(NOW);
     const persisted = await inner.get(OWNER, "linear");
     expect(persisted?.metadata?.refreshFailedAt).toBe(NOW);
+    // A 400 from the token endpoint is a refusal: the row can be replaced.
+    expect(persisted?.metadata?.refreshRefused).toBe(true);
+  });
+
+  it("does not mark a temporary refresh failure as a refusal", async () => {
+    await seedMcpClient();
+    const inner = memoryStore();
+    await inner.save(OWNER, "linear", { type: "oauth2", accessToken: "stale", refreshToken: "rt", expiresAt: NOW - 1 });
+    fake.tokenFailure = 503;
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+    await store.get(OWNER, "linear");
+    const persisted = await inner.get(OWNER, "linear");
+    expect(persisted?.metadata?.refreshFailedAt).toBe(NOW);
+    expect(persisted?.metadata?.refreshRefused).toBeUndefined();
+  });
+
+  it("keeps a reconnect that lands while a refresh is in flight", async () => {
+    await seedMcpClient();
+    const inner = memoryStore();
+    await inner.save(OWNER, "linear", { type: "oauth2", accessToken: "dead", refreshToken: "dead-rt", expiresAt: NOW - 1 });
+    fake.tokenFailure = 400;
+    const reconnected: StoredCredential = { type: "oauth2", accessToken: "new", refreshToken: "new-rt", expiresAt: NOW + 3_600_000 };
+    const actualFetch = globalThis.fetch;
+    const tokenCall = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith("/token")) await inner.save(OWNER, "linear", reconnected);
+      return actualFetch(input, init);
+    });
+    try {
+      const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+      expect(await store.get(OWNER, "linear")).toMatchObject({ accessToken: "new" });
+      expect(await inner.get(OWNER, "linear")).toEqual(reconnected);
+    } finally {
+      tokenCall.mockRestore();
+    }
   });
 
   it("never refreshes github (excluded service)", async () => {

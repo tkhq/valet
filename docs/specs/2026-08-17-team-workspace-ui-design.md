@@ -132,12 +132,18 @@ Public pages keep their own titles.
 
     A row whose token refresh failed, or whose grant gives sign-in only, shows
     the same badge as a personal card and names its repair. A past expiry
-    alone is not shown, because an OAuth row renews when it is used. A dead
-    team connection (last refresh failed and token past expiry,
-    `isDeadConnection`) offers Reconnect to every team member. The callback
-    replaces the row only while it is still dead, under the team and row
-    locks, and saves the reconnecting member's sign-in as the team's account.
-    Only its member can repair a shared account.
+    alone is not shown, because an OAuth row renews when it is used. A team
+    connection is dead when the provider refused its refresh token (a 400 or
+    401 from the token endpoint, `metadata.refreshRefused`) and its token is
+    past expiry (`isDeadConnection`, reported as `CredentialSummary.dead`). A
+    temporary failure (5xx, 429, network) is not a refusal. A dead team
+    connection offers Reconnect to every team member. The callback replaces
+    the row only while it is still dead, under the team and row locks, and
+    saves the reconnecting member's sign-in as the team's account. A refresh
+    in flight saves its result only if the row still holds the tokens it
+    refreshed, so it cannot undo a reconnect. Only its member can repair a
+    shared account, and a member's share does not fill the team's own slot
+    under Available.
 
     A team read passes over a dead team connection to the org row and to
     members' shares, and it still asks a share's member first. With nothing

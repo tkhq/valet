@@ -705,7 +705,7 @@ describe("resolveTeamCredentialRead", () => {
     });
 
     it("reads past a team connection that can no longer refresh, still asking the share's member", async () => {
-      const dead: StoredCredential = { type: "oauth2", accessToken: "dead", refreshToken: "rt", expiresAt: 1, metadata: { refreshFailedAt: 2 } };
+      const dead: StoredCredential = { type: "oauth2", accessToken: "dead", refreshToken: "rt", expiresAt: 1, metadata: { refreshFailedAt: 2, refreshRefused: true } };
       const fresh: StoredCredential = { type: "oauth2", accessToken: "bea-fresh", expiresAt: Date.now() + 3_600_000 };
       const deps = { credentials: await storeWith([[team, dead], [bea, fresh]]), shares: shares(["bea"]) };
       await expect(readTeamCredential(deps, { orgId, teamId, userId: "al" }, "linear", "reference-only"))
@@ -718,8 +718,8 @@ describe("resolveTeamCredentialRead", () => {
         .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "dead" }) });
     });
 
-    it("keeps an expired team connection whose refresh has not failed", async () => {
-      const expired: StoredCredential = { type: "oauth2", accessToken: "team", refreshToken: "rt", expiresAt: 1 };
+    it("keeps an expired team connection whose refresh failed only temporarily", async () => {
+      const expired: StoredCredential = { type: "oauth2", accessToken: "team", refreshToken: "rt", expiresAt: 1, metadata: { refreshFailedAt: 2 } };
       const deps = { credentials: await storeWith([[team, expired], [bea, { type: "api_key", apiKey: "bea-key" }]]), shares: shares(["bea"]) };
       await expect(readTeamCredential(deps, { orgId, teamId, userId: "al" }, "linear", "reference-only"))
         .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "team" }) });

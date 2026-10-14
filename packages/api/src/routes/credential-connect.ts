@@ -154,7 +154,10 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
       return c.json({ error: "Team not found. Ask a team admin to connect this service." }, 404);
     }
     if (reconnect && !(await teamConnectionIsDead(db, teamId, service, Date.now()))) {
-      return c.json({ error: "This team connection still works. Ask a team admin to replace it." }, 409);
+      // The dialog navigates here, so the answer is a page, not JSON: another
+      // member reconnected, or a read revived the row, since it opened.
+      const origin = resolveReturnOrigin(c.req.url, c.req.header("referer"), process.env);
+      return c.redirect(`${origin}/integrations?teamId=${encodeURIComponent(teamId)}&error=team_reconnect_unneeded`, 302);
     }
     if (service === "slack-user" || found.decl.requires?.orgCredential) {
       return c.json({ error: "This connection cannot be used for a team. Connect a dedicated team token instead." }, 400);
