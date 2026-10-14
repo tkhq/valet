@@ -21,6 +21,11 @@ vi.mock("~/api/integrations", () => {
   };
 });
 
+const submitRequest = vi.fn();
+vi.mock("~/api/team-deletion-requests", () => ({
+  useSubmitTeamDeletionRequest: () => ({ mutate: submitRequest, reset: vi.fn(), isPending: false, error: null }),
+}));
+
 import { TeamCredentials } from "./team-credentials";
 
 const team: TeamSummary = {
@@ -74,6 +79,16 @@ describe("TeamCredentials", () => {
     expect(screen.getByText("The last token refresh failed. Ask a team admin to connect Greenhouse again.")).toBeTruthy();
     expect(screen.getByText("Sign-in only")).toBeTruthy();
     expect(screen.getByText("This connection gives sign-in only. Alice must reconnect Greenhouse in their own Integrations.")).toBeTruthy();
+  });
+
+  it("lets a member ask a team admin to remove the team connection", async () => {
+    teamCreds = [cred(), cred({ delegatedFrom: "u2" })];
+    renderRows(false);
+    const user = userEvent.setup();
+    expect(screen.queryByRole("button", { name: /Stop sharing/ })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Request removal of Greenhouse from Recruiting" }));
+    await user.click(screen.getByRole("button", { name: "Request removal" }));
+    expect(submitRequest).toHaveBeenCalledWith({ resourceType: "credential", resourceId: "greenhouse" }, expect.anything());
   });
 
   it("shows no health badge on working rows", () => {

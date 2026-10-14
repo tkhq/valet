@@ -51,7 +51,7 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
           {children}
           {available.map((service) => {
             const blocked = service.connect === "unconfigured" && service.connectBlockedBy !== "org";
-            const reason = blocked ? "Ask an organization admin to configure OAuth for this service." : canManage ? undefined : "Team admin required";
+            const reason = blocked ? "Ask an organization admin to configure OAuth for this service." : canManage ? undefined : "Team member required";
             const label = blocked ? "Set up" : "Connect";
             const name = displayName(service.service);
             return <IntegrationCard key={service.service}>

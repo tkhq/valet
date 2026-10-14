@@ -18,7 +18,7 @@ import { and, eq } from "drizzle-orm";
 import { teams, credentials, orgMembers } from "../schema/index.js";
 import { signState } from "../lib/oauth-state.js";
 import { buildAppDb } from "../lib/drizzle.js";
-import { insertCredentialIfAbsent, lockTeamCredentialAuthority } from "../services/credential-insert.js";
+import { insertCredentialIfAbsent, lockTeamCredentialRole } from "../services/credential-insert.js";
 import {
   identityForExternal,
   identityForUser,
@@ -783,7 +783,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("team credential authority row l
       const locked = new Promise<void>((resolve) => { signalLocked = resolve; });
       const released = new Promise<void>((resolve) => { release = resolve; });
       insertion = db.transaction(async (tx) => {
-        expect(await lockTeamCredentialAuthority(tx, { orgId: "org", userId: "actor", teamId: schema })).toBe(true);
+        expect(await lockTeamCredentialRole(tx, { orgId: "org", userId: "actor", teamId: schema })).toBe("admin");
         signalLocked();
         await released;
         return insertCredentialIfAbsent(tx, "test-key", { type: "team", id: schema }, "demo", {
@@ -858,9 +858,17 @@ describe("team OAuth connections", () => {
     expect(publicOutput).not.toContain("team-refresh");
   });
 
-  it("refuses non-admins and missing teams before contacting the provider", async () => {
+  it("lets a team member connect a team account", async () => {
     const { app, team } = await setup();
     await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    fake.tokenResponse = { access_token: "member-team-access", refresh_token: "member-team-refresh", expires_in: 3600, scope: "read" };
+    const response = await finish(app.baseUrl, await start(app.baseUrl, team.id, "test-member"), "test-member");
+    expect(response.headers.get("location")).toBe(`/integrations?teamId=${team.id}&connected=linear`);
+    expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "member-team-access" });
+  });
+
+  it("refuses someone outside the team and missing teams before contacting the provider", async () => {
+    const { app, team } = await setup();
     for (const id of [team.id, "missing-team"]) {
       const response = await fetch(`${app.baseUrl}/api/credentials/linear/connect?scope=team&teamId=${id}`, {
         redirect: "manual", headers: { "x-valet-test-user-id": "test-member" },
@@ -900,7 +908,9 @@ describe("team OAuth connections", () => {
     expect(fake.tokenRequests).toHaveLength(0);
   });
 
-  it.each(["remove", "demote", "org-demote", "org-remove", "delete-team"])(
+  // A demotion to member keeps the right to add a team connection, so only a
+  // change that ends team access refuses the callback.
+  it.each(["remove", "org-demote", "org-remove", "delete-team"])(
     "refuses a callback when %s occurs during token exchange", async (change) => {
       const { app, team } = await setup();
       const orgAdmin = change.startsWith("org-");

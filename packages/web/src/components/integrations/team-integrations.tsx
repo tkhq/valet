@@ -18,6 +18,9 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
   const loading = teamsQ.isLoading || meQ.isLoading;
   const failed = teamsQ.error || meQ.error;
   const canMutate = meQ.data?.orgRole === "admin" || team?.callerRole === "admin";
+  // Every member adds team connections. Removal stays with admins, and a
+  // member asks one (team resource deletion requests).
+  const canConnect = canMutate || (team?.callerRole ?? null) !== null;
   // The team's own 1Password service account is what makes op:// references
   // and valet-secrets work for its sessions. It sits with the connections
   // once connected, and under Available until then (or while unknown).
@@ -47,7 +50,7 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                 actions={<PullFromPersonal teamId={teamId} teamName={team.name} />}
               >
                 {!canMutate && (
-                  <p className="pb-3 text-sm text-muted">Only team or organization admins can remove team connections.</p>
+                  <p className="pb-3 text-sm text-muted">A team admin removes team connections. Request removal to ask one.</p>
                 )}
                 {directoryQ.isLoading && <LoadingRow label="Loading member names…" />}
                 {directoryQ.error && (
@@ -62,7 +65,7 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                   {onePasswordConnected && onePassword}
                 </TeamCredentials>
               </Section>
-              <TeamConnectionSetup teamId={teamId} canManage={canMutate}>
+              <TeamConnectionSetup teamId={teamId} canManage={canConnect}>
                 {!onePasswordConnected && onePassword}
               </TeamConnectionSetup>
             </>

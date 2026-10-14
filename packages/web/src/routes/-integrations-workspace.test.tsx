@@ -175,12 +175,15 @@ describe("Integrations workspace isolation", () => {
     expect(screen.queryByRole("button", { name: "Share with a team" })).toBeNull();
   });
 
-  it("keeps members read-only and explains empty teams", async () => {
+  it("lets a member request removal of a team connection, not of another member's share", async () => {
     teamId = "a";
     teams = [team("a", "Team A", "member")];
     const view = mount();
     await screen.findByText("Shared by Alice");
-    expect(screen.getByText("Only team or organization admins can remove team connections.")).toBeTruthy();
+    expect(screen.getByText("A team admin removes team connections. Request removal to ask one.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Disconnect|Stop sharing|Request removal/ })).toBeNull();
+    act(() => view.client.setQueryData<ListCredentialsResponse>(qkIntegrations.credentials("team", "a"), { credentials: [A, B] }));
+    expect(await screen.findByRole("button", { name: /^Request removal of .+ from Team A$/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Disconnect|Stop sharing/ })).toBeNull();
     act(() => view.client.setQueryData<ListCredentialsResponse>(qkIntegrations.credentials("team", "a"), { credentials: [] }));
     expect(await screen.findByText(/No connections added to this team yet/)).toBeTruthy();
@@ -381,12 +384,12 @@ describe("Team account connection", () => {
     expect(shownOnPhones(screen.getAllByText("Ask an organization admin to configure OAuth for this service."))).toBe(true);
   });
 
-  it("tells a plain member on a phone why Connect is disabled", async () => {
+  it("lets a plain team member connect a team account", async () => {
     teamId = "a";
     teams = [team("a", "Team A", "member")];
     mount();
-    expect((await screen.findByRole("button", { name: "Connect Typefully" })).hasAttribute("disabled")).toBe(true);
-    expect(shownOnPhones(screen.getAllByText("Team admin required"))).toBe(true);
+    expect((await screen.findByRole("button", { name: "Connect Typefully" })).hasAttribute("disabled")).toBe(false);
+    expect(screen.queryByText("Team member required")).toBeNull();
   });
 
   it("shows the team 1Password fallback status on phones", async () => {
@@ -439,10 +442,4 @@ describe("Team account connection", () => {
     expect(screen.queryByRole("button", { name: "Connect GitHub" })).toBeNull();
   });
 
-  it("keeps connection controls disabled for ordinary team members", async () => {
-    teamId = "a";
-    teams = [team("a", "Team A", "member")];
-    mount();
-    expect((await screen.findByRole("button", { name: "Connect Typefully" })).hasAttribute("disabled")).toBe(true);
-  });
 });

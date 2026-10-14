@@ -60,16 +60,15 @@ interface OAuthConnectState {
   /** Validated web origin to land back on, e.g. "http://localhost:5173".
    * Empty/absent → relative redirect (prod same-origin serving). */
   returnTo?: string;
-  /** Replace the team's dead connection. Any team member may (see `isDeadConnection`). */
+  /** Replace the team's dead connection (see `isDeadConnection`). */
   reconnect?: true;
   nonce: string;
   exp: number;
 }
 
-/** A team admin may connect. Any member may reconnect a dead team connection. */
-async function mayConnectTeam(db: AppQueryable, teamId: string, userId: string, reconnect: boolean): Promise<boolean> {
-  if (await canAdministerTeam(db, teamId, userId)) return true;
-  return reconnect && (await isTeamMember(db, teamId, userId));
+/** Every team member may connect a team account or reconnect a dead one. */
+async function mayConnectTeam(db: AppQueryable, teamId: string, userId: string): Promise<boolean> {
+  return (await canAdministerTeam(db, teamId, userId)) || (await isTeamMember(db, teamId, userId));
 }
 
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
@@ -151,7 +150,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
   const reconnect = c.req.query("reconnect") === "1";
   if (reconnect && teamId === undefined) return c.json({ error: "Choose the team whose connection to reconnect." }, 400);
   if (teamId !== undefined) {
-    if (!(await getTeamInOrg(db, user.orgId, teamId)) || !(await mayConnectTeam(db, teamId, user.id, reconnect))) {
+    if (!(await getTeamInOrg(db, user.orgId, teamId)) || !(await mayConnectTeam(db, teamId, user.id))) {
       return c.json({ error: "Team not found. Ask a team admin to connect this service." }, 404);
     }
     if (reconnect && !(await teamConnectionIsDead(db, teamId, service, Date.now()))) {
@@ -255,7 +254,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
   const landing = `${returnTo}/integrations?${teamId ? `teamId=${encodeURIComponent(teamId)}&` : ""}`;
   const teamFailure = (error: string) => c.redirect(`${landing}error=${error}`, 302);
   if (teamId && (verified.orgId !== user.orgId || !(await getTeamInOrg(db, user.orgId, teamId))
-    || !(await mayConnectTeam(db, teamId, user.id, verified.reconnect === true)))) {
+    || !(await mayConnectTeam(db, teamId, user.id)))) {
     return teamFailure("team_access_changed");
   }
 
@@ -347,7 +346,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
         const role = verified.orgId === user.orgId
           ? await lockTeamCredentialRole(tx, { orgId: user.orgId, userId: user.id, teamId })
           : null;
-        if (!role || (role === "member" && !verified.reconnect)) return "team_access_changed";
+        if (!role) return "team_access_changed";
         const credential: StoredCredential = {
           type: "oauth2", accessToken: saved.accessToken, refreshToken: saved.refreshToken,
           expiresAt: saved.expiresAt, scopes: saved.scopes, metadata: saved.metadata,

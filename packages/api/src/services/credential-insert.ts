@@ -7,18 +7,11 @@ import { fromJsonbColumn } from "@valet/store-postgres";
 import { lockTeamForOwnership } from "./teams.js";
 import { isDeadConnection } from "./credential-resolution.js";
 
-/** Call inside the insertion transaction; retain authority locks until commit. */
-export async function lockTeamCredentialAuthority(
-  tx: AppTx,
-  actor: { orgId: string; userId: string; teamId: string },
-): Promise<boolean> {
-  return (await lockTeamCredentialRole(tx, actor)) === "admin";
-}
-
 /**
- * The caller's authority over a team's credentials, under the same locks:
- * "admin" for an organization or team admin, "member" for another member of
- * the team, and null otherwise.
+ * The caller's authority over a team's credentials: "admin" for an
+ * organization or team admin, "member" for another member of the team, and
+ * null otherwise. Call inside the write transaction; the locks it takes hold
+ * until commit.
  */
 export async function lockTeamCredentialRole(
   tx: AppTx,

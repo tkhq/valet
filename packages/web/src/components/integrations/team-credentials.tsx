@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import type { CredentialSummary, OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 import { useCredentials, useDisconnectCredential, useRevokeDelegation } from "~/api/integrations";
+import { useSubmitTeamDeletionRequest } from "~/api/team-deletion-requests";
 import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { CardHeading } from "./integration-card";
@@ -21,11 +22,16 @@ function removalLabels(
   row: CredentialSummary,
   teamName: string,
   nameFor: (userId: string) => string,
+  canMutate: boolean,
 ): { action: string; pending: string; target: string } {
   const service = displayName(row.service);
-  return row.delegatedFrom
-    ? { action: "Stop sharing", pending: "Stopping…", target: `${nameFor(row.delegatedFrom)}'s ${service} with ${teamName}` }
-    : { action: "Disconnect", pending: "Disconnecting…", target: `${service} from ${teamName}` };
+  if (row.delegatedFrom) {
+    return { action: "Stop sharing", pending: "Stopping…", target: `${nameFor(row.delegatedFrom)}'s ${service} with ${teamName}` };
+  }
+  return canMutate
+    ? { action: "Disconnect", pending: "Disconnecting…", target: `${service} from ${teamName}` }
+    // A member asks a team admin (team resource deletion requests).
+    : { action: "Request removal", pending: "Sending…", target: `of ${service} from ${teamName}` };
 }
 
 /**
@@ -80,17 +86,21 @@ export function TeamCredentials({
   const credsQ = useCredentials("team", { teamId: team.id });
   const disconnect = useDisconnectCredential();
   const revoke = useRevokeDelegation();
+  const requestRemoval = useSubmitTeamDeletionRequest(team.id);
   // One row at a time, so the list renders ONE dialog.
   const [removing, setRemoving] = useState<CredentialSummary | null>(null);
   const [reconnecting, setReconnecting] = useState<string | null>(null);
   const nameFor = (userId: string) => orgMembers.find((m) => m.userId === userId)?.name ?? userId;
   const rows = credsQ.error ? [] : credsQ.data?.credentials ?? [];
-  const dialogLabels = removing ? removalLabels(removing, team.name, nameFor) : null;
-  const pending = disconnect.isPending || revoke.isPending;
-  const failure = removing?.delegatedFrom ? revoke.error : disconnect.error;
+  const dialogLabels = removing ? removalLabels(removing, team.name, nameFor, canMutate) : null;
+  const pending = disconnect.isPending || revoke.isPending || requestRemoval.isPending;
+  const failure = removing?.delegatedFrom ? revoke.error : canMutate ? disconnect.error : requestRemoval.error;
 
   function removalNote(row: CredentialSummary): string {
     const service = displayName(row.service);
+    if (!canMutate) {
+      return `A team admin approves or declines the request. Team actions keep using ${service} until then.`;
+    }
     if (row.delegatedFrom) {
       return `Team actions stop using ${nameFor(row.delegatedFrom)}'s ${service} account. They keep their own ` +
         `${service} connection and can share it with the team again from Integrations.`;
@@ -130,7 +140,9 @@ export function TeamCredentials({
               {/* pl-12 starts these lines under the title, past the 36px icon and its gap. */}
               <ul className="mt-2 space-y-3 text-xs sm:pl-12">
                 {group.rows.map((row) => {
-                  const removal = removalLabels(row, team.name, nameFor);
+                  const removal = removalLabels(row, team.name, nameFor, canMutate);
+                  // A member may ask to remove the team's own connection, not another member's share.
+                  const canRemove = canMutate || !row.delegatedFrom;
                   const health = credentialRowHealth(row);
                   const badge = needsReauth(health) ? healthBadge(health) : null;
                   const canReconnect = !row.delegatedFrom && row.type === "oauth2" && isDeadConnection(row);
@@ -156,7 +168,7 @@ export function TeamCredentials({
                           Reconnect
                         </Button>
                       )}
-                      {canMutate && (
+                      {canRemove && (
                         <Button
                           size="sm"
                           variant="secondary"
@@ -168,6 +180,7 @@ export function TeamCredentials({
                             // opens: React Query holds `error` until the next mutate.
                             disconnect.reset();
                             revoke.reset();
+                            requestRemoval.reset();
                             setRemoving(row);
                           }}
                         >
@@ -193,7 +206,7 @@ export function TeamCredentials({
           onClose={() => setReconnecting(null)}
         />
       )}
-      {canMutate && !credsQ.error && removing && dialogLabels && (
+      {!credsQ.error && removing && dialogLabels && (canMutate || !removing.delegatedFrom) && (
         <ConfirmDialog
           open
           onOpenChange={(next) => {
@@ -207,7 +220,9 @@ export function TeamCredentials({
           error={failure != null ? errorText(failure) : undefined}
           onConfirm={() => {
             const done = { onSuccess: () => setRemoving(null) };
-            if (removing.delegatedFrom) {
+            if (!canMutate) {
+              requestRemoval.mutate({ resourceType: "credential", resourceId: removing.service }, done);
+            } else if (removing.delegatedFrom) {
               revoke.mutate({ service: removing.service, teamId: team.id, userId: removing.delegatedFrom }, done);
             } else {
               disconnect.mutate({ service: removing.service, scope: "team", teamId: team.id }, done);
