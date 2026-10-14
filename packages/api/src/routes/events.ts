@@ -142,10 +142,18 @@ const STALE_REPLACEMENT =
 /** Another enable turned the replaced version off first; rolls this enable back. */
 class StaleReplacementError extends Error {}
 
-/** The target without a replacement link (`events.propose_subscription`'s `replaces`). */
-function withoutReplaces(target: EventSubscriptionTargetWire): EventSubscriptionTargetWire {
-  if (target.kind !== "orchestrator" || target.replaces === undefined) return target;
+/** After an enable turned `replacedId` off: the link is cleared and its ID
+ * recorded as `replaced`, so the link acts once and a retry can see it did. */
+function spendReplacement(target: EventSubscriptionTargetWire, replacedId: string | undefined): EventSubscriptionTargetWire {
+  if (replacedId === undefined || target.kind !== "orchestrator") return target;
   const { replaces: _link, ...rest } = target;
+  return { ...rest, replaced: replacedId };
+}
+
+/** The target without a replacement link or its record (`events.propose_subscription`'s `replaces`). */
+function withoutReplaces(target: EventSubscriptionTargetWire): EventSubscriptionTargetWire {
+  if (target.kind !== "orchestrator" || (target.replaces === undefined && target.replaced === undefined)) return target;
+  const { replaces: _link, replaced: _record, ...rest } = target;
   return rest;
 }
 
@@ -885,7 +893,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
 
   // The link is spent once the replaced version is off. Clearing it keeps a
   // later off-and-on of this version from disabling the old one again.
-  const enabledTarget = replacedId !== undefined ? withoutReplaces(patchedTarget) : patchedTarget;
+  const enabledTarget = spendReplacement(patchedTarget, replacedId);
   let updated: (typeof eventSubscriptions.$inferSelect)[];
   try {
     updated = await db.transaction(async (tx) => {

@@ -283,9 +283,12 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   replies. The disable requires the replaced subscription to still be on.
   If it is off or removed, for example because another replacement of it was
   enabled first, the enable is refused with 409 and the person asks for a new
-  proposal. The enable clears `target.replaces`, so turning the new version
-  off and on later leaves the old one alone. A repeated proposal key returns
-  the stored proposal before it checks `replaces`. The review dialog names the
+  proposal. The enable clears `target.replaces` and records the ID as
+  `target.replaced`, so turning the new version off and on later leaves the
+  old one alone. A repeated proposal key returns the stored proposal before it
+  checks `replaces`; a retry matches the spent form only when `replaced`
+  names the same ID, so adding `replaces` to a proposal stored without one is
+  a key conflict. The review dialog names the
   replaced subscription. An agent still cannot enable or change a live
   subscription.
 - Workflow editor: an "event" trigger node type whose save/update syncs an

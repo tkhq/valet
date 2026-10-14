@@ -2203,8 +2203,9 @@ describe("replacement proposals", () => {
     expect(body.enabled).toBe(true);
     expect(body.collisions).toBeUndefined();
     expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: true });
-    // The link is spent: turning the new version off and on leaves the old one alone.
+    // The link is spent and recorded: turning the new version off and on leaves the old one alone.
     expect(body.target).not.toHaveProperty("replaces");
+    expect(body.target).toMatchObject({ replaced: "sub_live" });
     expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: false })).status).toBe(200);
     expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: true })).status).toBe(200);
     expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true, allowCollision: true })).status).toBe(200);

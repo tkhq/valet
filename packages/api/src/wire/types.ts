@@ -4626,6 +4626,12 @@ export type EventSubscriptionTargetWire =
        * so one version replies.
        */
       replaces?: string;
+      /**
+       * The ID that `replaces` named, recorded when an enable turned that
+       * subscription off and cleared the link. It changes nothing; a retried
+       * proposal reads it to tell a spent link from one that never existed.
+       */
+      replaced?: string;
     };
 
 /**

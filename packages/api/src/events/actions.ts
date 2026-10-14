@@ -215,7 +215,11 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
         // happened since to the subscription it replaces.
         const [existing] = await tx.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, values.id)).limit(1);
         if (existing) {
-          const found = input.replaces === undefined ? undefined : await findReplaced(input.replaces);
+          // Name what the stored proposal replaces, never what this call asks.
+          const stored = typeof existing.target === "object" && existing.target !== null ? existing.target : {};
+          const link = "replaces" in stored && typeof stored.replaces === "string" ? stored.replaces
+            : "replaced" in stored && typeof stored.replaced === "string" ? stored.replaced : undefined;
+          const found = link === undefined ? undefined : await findReplaced(link);
           return { row: existing, replaced: found && { id: found.id, name: found.name } };
         }
         let replaced: { id: string; name: string } | undefined;
@@ -238,15 +242,15 @@ export function eventsActionPlugin(db: AppDb, plugins: ValetPlugin[] | (() => Va
       if (written && "error" in written) return { success: false, error: written.error };
       const row = written?.row;
       if (!row) return { success: false, error: "Team is no longer available. Open an active team and retry." };
-      // A person's enable spends the link and clears it (PATCH route), so a
-      // retry after that enable matches the rest of the target, even if the
-      // new version was turned off again later.
+      // A person's enable spends the link: it clears `replaces` and records
+      // the ID as `replaced` (PATCH route). A retry of that proposal matches
+      // the spent form; a proposal stored with no link never does.
       const { replaces: _spent, ...withoutLink } = target;
-      const spent = input.replaces !== undefined
-        && !(typeof row.target === "object" && row.target !== null && "replaces" in row.target);
+      const spentTarget = input.replaces === undefined ? values.target : { ...withoutLink, replaced: input.replaces };
+      const expected = isDeepStrictEqual(row.target, spentTarget) ? spentTarget : values.target;
       if (!isDeepStrictEqual(
         [row.name, row.eventKeys, row.filters, row.target, row.audience, row.createdBy],
-        [values.name, values.eventKeys, values.filters, spent ? withoutLink : values.target, values.audience, values.createdBy],
+        [values.name, values.eventKeys, values.filters, expected, values.audience, values.createdBy],
       )) return { success: false, error: "This proposal key already names a different subscription. Use a new proposal_key." };
       return { success: true, data: proposalResult("subscription", row.id, row.enabled, row, written.replaced) };
     },

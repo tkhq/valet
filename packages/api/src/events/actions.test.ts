@@ -125,9 +125,9 @@ describe("eventsActionPlugin", () => {
     // version) still answers with the stored proposal.
     const stored = (await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.name, "Replies v2")))[0]!;
     const proposalId = stored.id;
-    // The PATCH route's enable: switch on, and clear the spent link.
-    const { replaces: _spent, ...spentTarget } = stored.target as { replaces?: string };
-    await db.update(eventSubscriptions).set({ enabled: true, target: spentTarget }).where(eq(eventSubscriptions.id, proposalId));
+    // The PATCH route's enable: switch on, clear the spent link, record it.
+    const { replaces: _spent, ...unlinkedTarget } = stored.target as { replaces?: string };
+    await db.update(eventSubscriptions).set({ enabled: true, target: { ...unlinkedTarget, replaced: "live" } }).where(eq(eventSubscriptions.id, proposalId));
     await db.update(eventSubscriptions).set({ enabled: false }).where(eq(eventSubscriptions.id, "live"));
     expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { id: proposalId, enabled: true } } });
     // Still the stored record after the new version is turned off, and after
@@ -136,6 +136,12 @@ describe("eventsActionPlugin", () => {
     expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { id: proposalId, enabled: false } } });
     await db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, "live"));
     expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { id: proposalId } } });
+    // Adding replaces to a proposal stored without a link is a different
+    // proposal, not a spent one: the key conflicts.
+    const { replaces: _none, ...firstPlain } = input;
+    expect(await tool.execute({ ...firstPlain, proposal_key: "plain-first" }, context("member"))).toMatchObject({ success: true });
+    expect(await tool.execute({ ...firstPlain, proposal_key: "plain-first", replaces: "live" }, context("member")))
+      .toMatchObject({ success: false, error: expect.stringContaining("Use a new proposal_key") });
     // Without replaces, a proposal stores no link, as before.
     const { replaces: _replaces, ...unlinked } = input;
     const plain = await tool.execute({ ...unlinked, proposal_key: "plain" }, context("member"));
