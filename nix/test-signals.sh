@@ -26,7 +26,9 @@ echo "== SIGTERM to the wrapper must run the graceful shutdown"
 "$valet" serve --port "$port" --data-dir "$work/data" --sandbox local >"$work/log" 2>&1 &
 pid=$!
 wait_healthy
-echo "wrapper pid $pid; children: $(pgrep -P "$pid" | tr '\n' ' ')"
+echo "process tree under the wrapper (pid $pid):"
+ps -eo pid,ppid,stat,args --forest | awk -v p="$pid" '$1==p || $2==p || f[$2] {f[$1]=1; print}' | cut -c1-200
+for p in $(pgrep -P "$pid") "$pid"; do echo "pid $p: $(grep -E '^(Name|SigCgt)' /proc/$p/status | tr '\n' ' ')"; done
 kill -TERM "$pid"
 status=0
 for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
