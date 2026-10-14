@@ -3955,6 +3955,8 @@ export interface OrgPluginsResponse {
  * leaves out `tokenEnv` and `authQueryParam`, which say where a token lives.
  *  - `displayName` — the configured name, or the title-cased `name` the
  *    connect UI also shows.
+ *  - `url` — scheme, host, and path of the configured URL. The API drops
+ *    userinfo, query, and fragment, where an operator can put a token.
  *  - `riskLevel` — the configured risk, or the `medium` default.
  *  - `enabled` — false when the entry sets `enabled: false`; the API did not
  *    load it.

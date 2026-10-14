@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import type { McpServerDecl } from "../config/instance-config.js";
+import { users } from "../schema/index.js";
 import type { OrgMcpServersResponse } from "../wire/types.js";
 
 const MEMBER = "test-member";
@@ -105,5 +106,48 @@ describe("GET /api/org/mcp-servers", () => {
     api = await bootTestApi();
     const body = (await (await getServers(api, MEMBER)).json()) as OrgMcpServersResponse;
     expect(body.servers).toEqual([]);
+  });
+
+  it("403s for an authenticated user with no org_members row", async () => {
+    // `AuthUser.orgId` resolves for every session without a membership row,
+    // so the route's own check is what stops a removed user.
+    api = await bootTestApi({ mcpServers: SERVERS });
+    await api.providers.db
+      .insert(users)
+      .values({ id: "test-outsider", email: "outsider@dev", name: "Outsider", role: "member" })
+      .onConflictDoNothing();
+
+    const res = await getServers(api, "test-outsider");
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("org membership required");
+    expect(JSON.stringify(body)).not.toContain("metabase");
+  });
+
+  it("shows only the scheme, host, and path of a URL that carries a credential", async () => {
+    api = await bootTestApi({
+      mcpServers: [
+        {
+          name: "internal",
+          url: "https://svc:FAKE-USERINFO-SECRET@internal.example.test:8443/mcp/v1?key=FAKE-QUERY-SECRET&region=us#FAKE-FRAGMENT",
+          auth: "api_key",
+        },
+        {
+          name: "parked",
+          url: "http://parked.example.test/mcp?token=FAKE-DISABLED-SECRET",
+          auth: "none",
+          enabled: false,
+        },
+      ],
+    });
+    const res = await getServers(api, MEMBER);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain("FAKE");
+    const body = JSON.parse(text) as OrgMcpServersResponse;
+    expect(body.servers.map((s) => s.url)).toEqual([
+      "https://internal.example.test:8443/mcp/v1",
+      "http://parked.example.test/mcp",
+    ]);
   });
 });

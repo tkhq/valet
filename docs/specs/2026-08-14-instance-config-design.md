@@ -518,13 +518,19 @@ Rules:
   `critical`. The mapping lives in `deriveRiskLevel`
   (`packages/sdk/src/mcp/action-plugin.ts`).
 - `GET /api/org/mcp-servers` lists every entry read-only to any org
-  member, in file order and with disabled entries included. Organization
-  settings shows it as "MCP servers". The wire carries `name`,
+  member, in file order and with disabled entries included. It does not
+  read the `organizations` feature gate. It checks the live `org_members`
+  row and returns 403 to a user without one, because a session resolves
+  `orgId` without a membership row. Organization settings shows the list
+  as "MCP servers". While organizations are off, the same page opens at
+  `/settings/mcp-servers` from Personal workspace. The wire carries `name`,
   `displayName`, `url`, `auth`, `scopes`, `description`, `riskLevel`,
   `enabled`, and the caller's own `connected` state for `oauth` and
-  `api_key` entries (`null` for `none` and `bearer`). It leaves out
-  `tokenEnv` and `authQueryParam`. To change a server, edit the config
-  file; this surface has no write path.
+  `api_key` entries (`null` for `none` and `bearer`). `url` is the scheme,
+  host, and path only: the route drops userinfo, query, and fragment,
+  because an operator can put a token there. It leaves out `tokenEnv` and
+  `authQueryParam`. To change a server, edit the config file; this surface
+  has no write path.
 
 ## Tool policies
 

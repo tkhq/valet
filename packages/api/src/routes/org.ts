@@ -41,7 +41,7 @@ import {
   setPluginEntitlement,
 } from "../services/plugin-entitlements.js";
 import type { EngineHost } from "../engine/host.js";
-import { configMcpDisplayName } from "../plugins/config-mcp.js";
+import { configMcpDisplayName, configMcpDisplayUrl } from "../plugins/config-mcp.js";
 import type { PluginEntitlementMode } from "@valet/shared";
 import type {
   OrgDirectoryResponse,
@@ -405,10 +405,19 @@ orgRouter.patch("/plugins/:name", async (c) => {
 // `mcpServers` list. Read-only: the operator changes servers in the config
 // file. Not tied to the `organizations` gate, for the same reason as
 // `/plugins`: a single-org deployment still runs these servers.
+//
+// The membership check has the same reason as `/directory`'s: every
+// authenticated session resolves `orgId` with no `org_members` row, so a
+// removed user would otherwise still read the list. The URL goes out as
+// scheme, host, and path only (`configMcpDisplayUrl`), because an operator
+// can put a token in its userinfo or query.
 
 orgRouter.get("/mcp-servers", async (c) => {
-  const { configMcpServers, engineCredentials } = c.var.providers;
+  const { db, configMcpServers, engineCredentials } = c.var.providers;
   const user = c.var.user;
+  if (!(await isOrgMember(db, user.orgId, user.id))) {
+    return c.json({ error: "org membership required" }, 403);
+  }
   const connected = new Set(
     (await engineCredentials.list({ type: "user", id: user.id })).map((cred) => cred.service),
   );
@@ -416,7 +425,7 @@ orgRouter.get("/mcp-servers", async (c) => {
     servers: configMcpServers.map((entry) => ({
       name: entry.name,
       displayName: configMcpDisplayName(entry),
-      url: entry.url,
+      url: configMcpDisplayUrl(entry.url),
       auth: entry.auth,
       scopes: entry.scopes ?? [],
       description: entry.description ?? null,

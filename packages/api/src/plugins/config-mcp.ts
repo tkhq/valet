@@ -107,6 +107,17 @@ export function configMcpDisplayName(entry: Pick<McpServerDecl, "name" | "displa
   return entry.displayName ?? titleCaseSlug(entry.name);
 }
 
+/**
+ * The entry's URL as the org MCP server list shows it: scheme, host (with
+ * port), and path only. Config validation accepts a URL with userinfo, a
+ * query, or a fragment, and an operator can put a token in any of them
+ * (`?key=...`, `user:token@host`). Those parts never leave the API.
+ */
+export function configMcpDisplayUrl(url: string): string {
+  const parsed = new URL(url);
+  return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+}
+
 /** "grafana-cloud" → "Grafana Cloud" — the fallback when the entry names no
  * displayName. Slugs are validated lowercase, so each word just uppercases
  * its first letter. */
