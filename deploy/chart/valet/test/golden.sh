@@ -264,17 +264,36 @@ pass "probe split: readiness /api/ready, startup+liveness /api/health"
 # Database upgrades run before the listener binds. Keep a separate rollout budget.
 echo "$API_DEPLOY_BLOCK" | grep -q '^  progressDeadlineSeconds: 2100$' \
   || fail "default api rollout must allow 35 minutes for database upgrades"
-echo "$API_DEPLOY_BLOCK" | grep -A6 'startupProbe:' | grep -q 'failureThreshold: 360' \
-  || fail "default startup probe must allow 30 minutes at its 5-second period"
+echo "$API_DEPLOY_BLOCK" | grep -A6 'startupProbe:' | grep -q 'failureThreshold: 1800' \
+  || fail "default startup probe must allow 30 minutes (360 five-second units, polled every 1s)"
+echo "$API_DEPLOY_BLOCK" | grep -A6 'startupProbe:' | grep -q 'periodSeconds: 1$' \
+  || fail "startup probe must poll every second; readiness waits on it during the Recreate gap"
+echo "$API_DEPLOY_BLOCK" | grep -A6 'readinessProbe:' | grep -q 'periodSeconds: 1$' \
+  || fail "readiness probe must poll every second; each extra second is a 503 during rollout"
 helm --kube-context rancher-desktop template valet "$CHART_DIR" --kube-version 1.30.0 \
   --show-only templates/deployment.yaml \
   --set api.startupProbe.failureThreshold=480 --set api.progressDeadlineSeconds=2700 \
   > "$TMP_DIR/upgrade-budget.yaml"
 grep -q '^  progressDeadlineSeconds: 2700$' "$TMP_DIR/upgrade-budget.yaml" \
   || fail "api rollout deadline override was lost"
-grep -A6 'startupProbe:' "$TMP_DIR/upgrade-budget.yaml" | grep -q 'failureThreshold: 480' \
+grep -A6 'startupProbe:' "$TMP_DIR/upgrade-budget.yaml" | grep -q 'failureThreshold: 2400' \
   || fail "api startup probe threshold override was lost"
 pass "database upgrade startup and rollout budgets support overrides"
+
+# --- api image pre-pull hook: no image pull inside the Recreate gap -------
+PREPULL=$(helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --show-only templates/api-image-prepull-job.yaml --set api.image.tag=sha-test)
+echo "$PREPULL" | grep -q '"helm.sh/hook": pre-upgrade' \
+  || fail "image pre-pull Job must be a pre-upgrade hook so Helm waits before Recreate"
+echo "$PREPULL" | grep -q 'image: ".*:sha-test"' \
+  || fail "image pre-pull Job must pull the same api image tag as the Deployment"
+echo "$PREPULL" | grep -q 'app.kubernetes.io/component: api-image-prepull' \
+  || fail "image pre-pull pods need their own component label"
+echo "$PREPULL" | grep -q 'app.kubernetes.io/component: api$' \
+  && fail "image pre-pull pods must not match the api Service selector"
+helm template valet "$CHART_DIR" --kube-version 1.30.0 --set api.imagePrepull.enabled=false \
+  | grep -q 'api-image-prepull' && fail "api.imagePrepull.enabled=false must not render the Job"
+pass "api image pre-pull hook renders as a pre-upgrade Job on the new image"
 
 
 # --- lookup-retain helper present in Secret template ---------------------
