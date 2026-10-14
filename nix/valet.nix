@@ -73,10 +73,9 @@ in
 (writeShellApplication {
   name = "valet";
   runtimeInputs = [ procps ];
+  # forward() runs from traps, which shellcheck cannot see.
+  excludeShellChecks = [ "SC2317" ];
   text = ''
-    # forward() runs from traps, which shellcheck cannot see.
-    # shellcheck disable=SC2317
-
     # Forward termination signals to Valet so its graceful shutdown runs.
     # bwrap runs Valet as its child. If Valet is not up yet, signal bwrap.
     valet_pid=""
