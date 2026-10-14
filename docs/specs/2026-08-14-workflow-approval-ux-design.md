@@ -148,6 +148,28 @@ iteration suffix (`{runId}:{nodeId}{iterationSuffix}`) — the current
 The existing attention `href` (`/workflows/runs/{runId}`) is the deep link;
 channel deliverers get it for free and remain the mobile story for v1.
 
+The host also tells the thread that started the run (2026-10-14,
+`buildRunApprovalReport` in `run-attention.ts`). It submits a
+`workflow.approval_needed` signal to the origin thread, so the assistant says
+which steps wait and offers to approve them, instead of staying silent until
+the run settles. The run host fires the report through `onApprovalParked`,
+after a drive that opened a gate parks the run. `onApprovalPending` fires
+inside the wave, before slow sibling nodes finish and before the park records
+every waiting step, so it is too early. The dispatch id is
+`workflow-approval:{runId}:{attempt}`. Each drive has its own attempt, so the
+steps one drive parks wake the thread once. A later drive that opens a gate
+wakes it again, whether the earlier gate was approved, denied, or timed out.
+A drive that only resolves gates opens none and sends nothing. The host keeps
+a run that opened a gate until a park reports it, so if the drive fails
+before it parks, the retry on that host reports. A process that dies loses
+the report: delivery is at most once, like the settle report. The signal
+queues as `followup` on every thread. A personal thread steers by default,
+and a steer admission would drop the person's queued messages, abort the
+running turn, and withdraw open decision cards. The body tells the assistant
+to call `get_run`, whose `pendingGates` names each waiting step and the
+teammate who must approve a step on a shared account. A run with no origin
+thread (scheduled or event) and a sub-run send no signal.
+
 ### 3. Approval scopes
 
 The gate card offers three approve scopes and deny:

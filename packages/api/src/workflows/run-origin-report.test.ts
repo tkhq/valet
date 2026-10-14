@@ -3,7 +3,7 @@ import type { NodeCheckpoint, WorkflowRun } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
 import { createTeam } from "../services/teams.js";
-import { buildRunOriginReport, runReport } from "./run-attention.js";
+import { approvalReport, buildRunApprovalReport, buildRunOriginReport, runReport } from "./run-attention.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -79,4 +79,52 @@ it.each(["app-assistant:local-user", "slack:C_PRIVATE:1.2"])("reports a legacy t
   expect(queued).toHaveLength(1);
   expect(queued[0]).toMatchObject({ threadId: target.id, content: { signalType: "workflow.settled" } });
   expect(await p.engineStore.getSession(execution.sessionId)).toMatchObject({ parentSessionId: root.sessionId, parentThreadId: source.id });
+});
+
+it("says a run waits for approval and where to read who can approve it", () => {
+  const text = approvalReport("Dashboard", "run-1");
+  expect(text).toContain('Workflow "Dashboard" is waiting for approval.');
+  expect(text).toContain("pendingGates lists every step that waits");
+  expect(text).toContain("/workflows/runs/run-1");
+});
+
+it("queues one approval signal per drive behind the person's messages", async () => {
+  api = await bootTestApi();
+  const { session, sessionId } = await ensureDefaultAssistantSession(api.providers, { type: "user", id: "local-user" },
+    { actorUserId: "local-user", orgId: "local-org" });
+  const thread = await session.createThread("web:approving");
+  thread.pause();
+  let params: WorkflowRun["params"] = {
+    workflowId: "wf-1", definitionVersionId: "v1", origin: { assistantSessionId: sessionId, threadId: thread.id },
+  };
+  const report = buildRunApprovalReport({
+    db: api.providers.db, engineHost: api.providers.engineHost,
+    store: {
+      getRun: async () => ({
+        runId: "run-1", status: "parked", waitingOn: [], updatedAt: 2, attempt: 1, wakeRequested: false, createdAt: 1,
+        definition: { version: "dag/v1" }, definitionVersionId: "v1", actorUserId: "local-user", params,
+      }),
+      getCheckpoints: async () => [],
+    },
+  });
+  const unsettled = async () => (await api!.providers.engineStore.listUnsettledSubmissions(sessionId))
+    .filter((item) => item.threadId === thread.id).map((item) => item.dispatchId ?? "person");
+
+  // A personal thread steers. The signal must not supersede what the person queued.
+  await thread.submitPrompt("Also, rename the dashboard workflow to Hiring.", {});
+  await report({ runId: "run-1", attempt: 3 });
+  await report({ runId: "run-1", attempt: 3 });
+  expect(await unsettled()).toEqual(["person", "workflow-approval:run-1:3"]);
+
+  // A later drive that opens a gate queues its own signal.
+  await report({ runId: "run-1", attempt: 4 });
+  expect(await unsettled()).toEqual(["person", "workflow-approval:run-1:3", "workflow-approval:run-1:4"]);
+
+  // A sub-run copies its parent's origin but reports nothing.
+  params = { ...params, parentRunId: "parent-run", parentNodeId: "child" };
+  await report({ runId: "run-1", attempt: 5 });
+  // A run no thread started reports nowhere.
+  params = { workflowId: "wf-1", definitionVersionId: "v1" };
+  await report({ runId: "run-1", attempt: 6 });
+  expect(await unsettled()).toHaveLength(3);
 });
