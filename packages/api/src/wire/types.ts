@@ -2166,9 +2166,9 @@ export interface WorkflowStepCost {
 }
 
 /**
- * A step that called different models than in the previous run with the
- * same steps. Nobody edited the steps between the two runs, so the platform
- * changed the model: a size tier remap or a new default.
+ * A step that called none of the same models as in the previous run with
+ * the same steps. Nobody edited the steps between the two runs, so the
+ * platform changed the model: a size tier remap or a new default.
  */
 export interface WorkflowModelChange {
   nodeId: string;

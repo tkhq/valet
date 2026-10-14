@@ -8,6 +8,11 @@
  * costs, from the usage projection) with the previous run of the same
  * workflow whose steps were the same (`sameWorkflowSteps`). A run after an
  * edit has no such run, so the change an author made is never flagged.
+ *
+ * A step is flagged only when it called none of the same models in the two
+ * runs. A `switch_model` call or a provider fallback adds a model for one
+ * turn, and the step still calls its assigned model, so a shared model means
+ * the platform did not remap the step.
  */
 import { and, desc, eq, lt, or } from "drizzle-orm";
 import type { WorkflowStore } from "@valet/workflow";
@@ -32,12 +37,15 @@ function modelsByStep(costs: WorkflowStepCost[]): Map<string, string[]> {
   return new Map([...models].filter(([, step]) => step.size > 0).map(([nodeId, step]) => [nodeId, [...step].sort()]));
 }
 
-/** `stepCosts` are the run's own step costs, which the run page already reads. */
+/** `stepCosts` are the run's own step costs, which the run page already reads.
+ * `canRead` is the run page's own access check. A run the viewer may not read
+ * is never compared, so its models stay hidden. */
 export async function workflowRunModelChanges(
   db: AppDb,
   store: Pick<WorkflowStore, "getCheckpoints">,
   run: { runId: string; workflowId: string; createdAt: number; definition: unknown },
   stepCosts: WorkflowStepCost[],
+  canRead: (runId: string) => Promise<boolean>,
 ): Promise<WorkflowModelChange[]> {
   const current = modelsByStep(stepCosts);
   // A `workflow` step's models come from the runs it started. Their workflow
@@ -54,12 +62,19 @@ export async function workflowRunModelChanges(
     )))
     .orderBy(desc(workflowRuns.createdAt), desc(workflowRuns.id))
     .limit(PREVIOUS_RUN_WINDOW);
-  const previousRun = older.find((row) => sameWorkflowSteps(row.definition, run.definition));
+  let previousRun: (typeof older)[number] | undefined;
+  for (const row of older) {
+    // Checked one at a time: the newest readable run ends the search.
+    if (sameWorkflowSteps(row.definition, run.definition) && await canRead(row.id)) {
+      previousRun = row;
+      break;
+    }
+  }
   if (!previousRun) return [];
 
   const previous = modelsByStep(await workflowRunStepCosts(db, store, previousRun.id));
   return [...current].flatMap(([nodeId, models]) => {
     const before = previous.get(nodeId);
-    return before && before.join("\n") !== models.join("\n") ? [{ nodeId, previous: before, current: models }] : [];
+    return before && !models.some((model) => before.includes(model)) ? [{ nodeId, previous: before, current: models }] : [];
   });
 }

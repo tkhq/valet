@@ -24,6 +24,7 @@ import {
 } from "@valet/workflow";
 import { stringify as stringifyYaml } from "yaml";
 import {
+  canReadWorkflowRun,
   cancelWorkflowRun,
   createWorkflowDefinition,
   copyWorkflowDefinition,
@@ -859,7 +860,8 @@ workflowsRouter.get("/runs/:runId", async (c) => {
     workflowRunConversations(c, runId),
     workflowRunStepCosts(deps.db, deps.workflowStore, runId),
   ]);
-  const modelChanges = await workflowRunModelChanges(deps.db, deps.workflowStore, resp.run, stepCosts);
+  const modelChanges = await workflowRunModelChanges(deps.db, deps.workflowStore, resp.run, stepCosts,
+    (id) => canReadWorkflowRun(deps, owner, id));
   return c.json({ ...resp, conversations, stepCosts, modelChanges });
 });
 

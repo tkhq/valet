@@ -37,7 +37,7 @@ async function call(db: PgDb, id: string, sessionId: string, model: string): Pro
 
 async function changes(appDb: AppDb, runId: string, createdAt: number, definition: unknown) {
   const stepCosts = await workflowRunStepCosts(appDb, noCheckpoints, runId);
-  return workflowRunModelChanges(appDb, noCheckpoints, { runId, workflowId: "wf-1", createdAt, definition }, stepCosts);
+  return workflowRunModelChanges(appDb, noCheckpoints, { runId, workflowId: "wf-1", createdAt, definition }, stepCosts, async () => true);
 }
 
 describe("workflowRunModelChanges", () => {
@@ -73,6 +73,22 @@ describe("workflowRunModelChanges", () => {
     expect(await changes(appDb, "run-2", NOW + 1000, edited)).toEqual([]);
   });
 
+  it("does not flag a model that a step used for one turn only", async () => {
+    // A `switch_model` call or a provider fallback adds a model to one run.
+    // The step still calls its assigned model, so neither run is flagged.
+    await run(appDb, "run-1", NOW, STEPS);
+    await call(db, "e-1", "wf:run-1:draft", "sol-5.6");
+    await call(db, "e-2", "wf:run-1:draft", "sol-6.1");
+    await run(appDb, "run-2", NOW + 1000, STEPS);
+    await call(db, "e-3", "wf:run-2:draft", "sol-5.6");
+    await run(appDb, "run-3", NOW + 2000, STEPS);
+    await call(db, "e-4", "wf:run-3:draft", "sol-5.6");
+    await call(db, "e-5", "wf:run-3:draft", "sol-6.1");
+
+    expect(await changes(appDb, "run-2", NOW + 1000, STEPS)).toEqual([]);
+    expect(await changes(appDb, "run-3", NOW + 2000, STEPS)).toEqual([]);
+  });
+
   it("does not flag the first run of a workflow", async () => {
     await run(appDb, "run-1", NOW, STEPS);
     await call(db, "e-1", "wf:run-1:draft", "sol-6.1");
@@ -101,6 +117,28 @@ describe("model changes on the run page", () => {
     }
 
     const res = await fetch(`${api.baseUrl}/api/workflows/runs/run-2`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as GetWorkflowRunResponse;
+    expect(body.modelChanges).toEqual([{ nodeId: "draft", previous: ["sol-5.6"], current: ["sol-6.1"] }]);
+  });
+
+  it("compares only against a run the viewer may read", async () => {
+    api = await bootTestApi();
+    const p = api.providers;
+    await seedWorkflowRun(p.db, { runId: "run-1", orgId: "local-org", owner: { type: "user", id: "local-user" } });
+    const [first] = await p.db.select().from(workflowRuns);
+    // A run started by a Slack event with no known channel is hidden from
+    // every viewer (`runEventVisible`).
+    const hiddenParams = { workflowId: first.workflowId, definitionVersionId: first.definitionVersionId, input: { type: "event", data: { key: "slack.message" } } };
+    await p.db.insert(workflowRuns).values({ ...first, id: "run-2", params: hiddenParams, createdAt: first.createdAt + 1000, updatedAt: first.createdAt + 1000 });
+    await p.db.insert(workflowRuns).values({ ...first, id: "run-3", createdAt: first.createdAt + 2000, updatedAt: first.createdAt + 2000 });
+    for (const [id, sessionId, model] of [["e-1", "wf:run-1:draft", "sol-5.6"], ["e-2", "wf:run-2:draft", "hidden-model"], ["e-3", "wf:run-3:draft", "sol-6.1"]]) {
+      await p.db.execute(sql`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, model, usage, cost, created_at)
+        VALUES (${id}, ${sessionId}, 'th', 'message', 'assistant', ${model}, '{"total":10}', '{"total":0.01}', ${NOW})`);
+    }
+    expect((await fetch(`${api.baseUrl}/api/workflows/runs/run-2`)).status).toBe(404);
+
+    const res = await fetch(`${api.baseUrl}/api/workflows/runs/run-3`);
     expect(res.status).toBe(200);
     const body = await res.json() as GetWorkflowRunResponse;
     expect(body.modelChanges).toEqual([{ nodeId: "draft", previous: ["sol-5.6"], current: ["sol-6.1"] }]);
