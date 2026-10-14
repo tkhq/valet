@@ -326,10 +326,12 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     id: "workflows.get_permissions",
     name: "Get workflow step permissions",
     description:
-      "Show whether each tool step of a workflow needs approval, as the workflow page's Permissions section shows it. " +
-      "Per step: mode `allow` runs with no approval, `require_approval` waits for a person, `deny` is blocked by policy, " +
-      "and `unknown` is checked when the run reaches it. `provenance` names the rule that set the mode. " +
-      "Read this before you tell a user that a step needs approval.",
+      "Show what policy decides for each tool step of a workflow, as the workflow page's Permissions section shows it. " +
+      "Per step: mode `allow` means no policy gates the step, `require_approval` waits for a person, `deny` is blocked " +
+      "by policy, and `unknown` is checked when the run reaches it. `provenance` names the rule that set the mode. " +
+      "This is a preview, not a runtime guarantee: a step can still wait when it uses another member's shared account, " +
+      "or when a policy matches a parameter value that a template fills in at run time. " +
+      "Read this before you tell a user that a step needs approval, and check a run's `waitingOn` to confirm.",
     riskLevel: "low",
     execute: async ({ workflow_id }, ctx) => {
       const owner = ownerFromContext(ctx);
