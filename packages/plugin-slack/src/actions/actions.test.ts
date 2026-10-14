@@ -89,6 +89,15 @@ function mockFileAccess(fetchMock: ReturnType<typeof vi.fn>, url: string): void 
 }
 
 describe('slack actions', () => {
+  // A fixed claim made the assistant ask a plain approval question before
+  // every post, even when an org policy allowed the action.
+  it('never states a fixed approval mode, which org policy can change', () => {
+    for (const a of slackPlugin.actions) {
+      expect(a.description).not.toMatch(/requires approval on every call|requires approval and/i);
+    }
+    expect(action('slack.send_message').description).toContain('Do not call ask_approval');
+  });
+
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
