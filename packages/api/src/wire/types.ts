@@ -4632,6 +4632,13 @@ export type EventSubscriptionTargetWire =
        * proposal reads it to tell a spent link from one that never existed.
        */
       replaced?: string;
+      /**
+       * Set on the replaced subscription when an enable turns it off: the ID
+       * of the version that replaced it. It stays when that version is
+       * deleted, so a stale proposal for this subscription is never told to
+       * turn it back on.
+       */
+      replacedBy?: string;
     };
 
 /**

@@ -2255,6 +2255,23 @@ describe("replacement proposals", () => {
     expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: false, sub_v3: true, sub_old: false });
   });
 
+  it("still refuses a stale replacement after the version that replaced it is deleted", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH, enabled: false };
+    await seedSubscriptionRow(a, "sub_old", "local-org", { ...mine, name: "replies v2b", target: { kind: "orchestrator", replaces: "sub_live" } });
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: false })).status).toBe(200);
+    await a.providers.db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_next"));
+    const stale = await patchSubscription(a.baseUrl, "sub_old", { enabled: true });
+    expect(stale.status).toBe(409);
+    const message = ((await stale.json()) as { error: string }).error;
+    expect(message).toContain('"replies v1" was already replaced by a newer version.');
+    expect(message).not.toContain("back on");
+    const [live] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_live"));
+    expect(live).toMatchObject({ enabled: false, target: { replacedBy: "sub_next" } });
+  });
+
   it("tells the reviewer to turn a paused version back on, and that recovery leaves one version on", async () => {
     const a = await boot();
     await seedReplacement(a);

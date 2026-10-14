@@ -283,8 +283,11 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   the same transaction and leaves it out of the collision gate, so one version
   replies. The PATCH lookup applies the same owner and kind checks. The
   disable requires the replaced subscription to still be on. If it is off,
-  the enable is refused with 409. If any version already replaced it (its
-  `target.replaced` names the same ID), the message tells the person to
+  the enable is refused with 409. The enable that turns a version off also
+  writes `target.replacedBy` on that version, so the history survives when
+  the successor is deleted. If any version already replaced it (its
+  `target.replacedBy` is set, or a row's `target.replaced` names the same
+  ID), the message tells the person to
   delete the proposal, and names that successor when it is on. It never
   advises turning the old version back on, because the successor, or a
   later version that replaced the successor, may still reply. If nothing

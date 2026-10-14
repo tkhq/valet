@@ -140,12 +140,14 @@ type NarrowedSubscriptionRow = Omit<
  * version already replaced the same one, re-enabling the old one and
  * retrying could leave two versions on: the successor, or a later version
  * that replaced it, may still reply. So the message never advises that.
- * It names the direct successor only while that successor is on.
+ * The replaced row's own `replacedBy` keeps that history after its
+ * successor is deleted. The message names the direct successor only while
+ * that successor is on.
  */
 async function staleReplacement(
   db: AppDb,
   proposal: Pick<typeof eventSubscriptions.$inferSelect, "id" | "orgId" | "ownerType" | "ownerId">,
-  replaced: { id: string; name: string } | undefined,
+  replaced: { id: string; name: string; target: unknown } | undefined,
 ): Promise<string> {
   if (replaced === undefined) {
     return "This proposal replaces a subscription that was removed. Delete this proposal, then ask the assistant for a new one.";
@@ -164,7 +166,8 @@ async function staleReplacement(
     return `"${replaced.name}" was already replaced by "${successor.name}". ` +
       `Delete this proposal, or ask the assistant for a new one that replaces "${successor.name}".`;
   }
-  if (successor) {
+  const replacedBefore = typeof replaced.target === "object" && replaced.target !== null && "replacedBy" in replaced.target;
+  if (successor || replacedBefore) {
     return `"${replaced.name}" was already replaced by a newer version. Delete this proposal. ` +
       "To change the version that replies now, ask the assistant for a new proposal that replaces it.";
   }
@@ -876,7 +879,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   const replaces = arming && patchedTarget.kind === "orchestrator" ? patchedTarget.replaces : undefined;
   // An assistant subscription only: a workflow trigger is not a version.
   const replaced = replaces === undefined ? undefined : (await db
-    .select({ id: eventSubscriptions.id, name: eventSubscriptions.name, enabled: eventSubscriptions.enabled })
+    .select({ id: eventSubscriptions.id, name: eventSubscriptions.name, enabled: eventSubscriptions.enabled, target: eventSubscriptions.target })
     .from(eventSubscriptions)
     .where(and(
       eq(eventSubscriptions.id, replaces), ne(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId),
@@ -951,7 +954,13 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       if (rows[0] && replacedId !== undefined) {
         const off = await tx
           .update(eventSubscriptions)
-          .set({ enabled: false, updatedAt: sql`greatest(${eventSubscriptions.updatedAt} + 1, ${Date.now()})` })
+          // `replacedBy` stays on the old row, so deleting this row later
+          // does not erase that the old one was replaced.
+          .set({
+            enabled: false,
+            target: sql`${eventSubscriptions.target} || jsonb_build_object('replacedBy', ${id}::text)`,
+            updatedAt: sql`greatest(${eventSubscriptions.updatedAt} + 1, ${Date.now()})`,
+          })
           .where(and(eq(eventSubscriptions.id, replacedId), eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.enabled, true)))
           .returning({ id: eventSubscriptions.id });
         if (off.length === 0) throw new StaleReplacementError();
