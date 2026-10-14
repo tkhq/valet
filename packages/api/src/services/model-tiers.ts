@@ -192,13 +192,17 @@ async function isNamespaceUsable(
  * list. A run never walks past an active-but-keyless entry to a later usable
  * one, so neither does the gate. One tier-map read, one provider-row read
  * and at most one key test per namespace serve all five tiers.
+ *
+ * `proposed` replaces the stored tier map, so a save can check the map it
+ * is about to write.
  */
 export async function resolvableTiers(
   db: AppQueryable,
   credentials: CredentialStore,
   orgId: string,
+  proposed?: TierMap,
 ): Promise<Map<SizeTier, string>> {
-  const tierMap = await getOrgTierMap(db, orgId);
+  const tierMap = proposed ?? (await getOrgTierMap(db, orgId));
   const rows = await listLlmProviders(db, orgId);
   const usableByNamespace = new Map<string, boolean>();
   const usable = new Map<SizeTier, string>();

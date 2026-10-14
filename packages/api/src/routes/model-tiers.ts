@@ -5,7 +5,8 @@
  *   `orgs.default_tier`. Org-admin gated.
  *
  * Each spec in a tier's list must exist in the org catalog and be approved.
- * `defaultTier` takes a tier token, or null to clear it.
+ * `defaultTier` takes a tier token, or null to clear it. A tier token must
+ * reach a provider this org holds a key for (`resolvableTiers`).
  */
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
@@ -14,6 +15,7 @@ import {
   getOrgDefaultTier,
   getOrgTierMap,
   isSizeTier,
+  resolvableTiers,
   setOrgDefaultTier,
   setOrgTierMap,
   TIER_TOKENS,
@@ -39,6 +41,16 @@ export function tierTargetsNotApproved(merged: TierMap, approved: string[] | nul
     }
   }
   return null;
+}
+
+/** `current` with each tier that `patch` names replaced. */
+function applyTierPatch(current: TierMap, patch: PatchModelTiersRequest): TierMap {
+  const merged: TierMap = { ...current };
+  for (const tier of TIER_TOKENS) {
+    const replacement = patch[tier];
+    if (replacement) merged[tier] = replacement;
+  }
+  return merged;
 }
 
 export const modelTiersRouter = new Hono<AppEnv>();
@@ -99,16 +111,28 @@ modelTiersRouter.patch("/", async (c) => {
   const changesTiers = TIER_TOKENS.some((tier) => tier in validated);
   const validIds = changesTiers ? catalogValidIds(await buildOrgCatalog(db, engineCredentials, user.orgId)) : null;
 
+  // A default tier must reach a provider this org holds a key for, in the
+  // tier map this request leaves behind, or new sessions that fall to it
+  // cannot run. This reads credentials, so it runs before the transaction,
+  // like the catalog check.
+  if (isSizeTier(defaultTier)) {
+    const proposed = applyTierPatch(await getOrgTierMap(db, user.orgId), patch);
+    const usable = await resolvableTiers(db, engineCredentials, user.orgId, proposed);
+    if (!usable.has(defaultTier)) {
+      return c.json({
+        error:
+          `No provider this organization holds a key for serves tier "${defaultTier}". ` +
+          `Point the tier's first target at a provider with a key in Settings → Organization → Models, ` +
+          `or choose another default tier.`,
+      }, 400);
+    }
+  }
+
   const result = await db.transaction(async (tx) => {
     await lockOrgModelPolicy(tx, user.orgId);
     // Build the merged tier map under the same row lock used by approved
     // model writes, so neither policy can validate against stale state.
-    const current = await getOrgTierMap(tx, user.orgId);
-    const merged: TierMap = { ...current };
-    for (const tier of TIER_TOKENS) {
-      const replacement = patch[tier];
-      if (replacement) merged[tier] = replacement;
-    }
+    const merged = applyTierPatch(await getOrgTierMap(tx, user.orgId), patch);
 
     if (validIds) {
       for (const tier of TIER_TOKENS) {

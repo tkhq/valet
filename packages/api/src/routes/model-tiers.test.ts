@@ -1,11 +1,13 @@
 /**
  * `/api/org/model-tiers` — the org default tier field. The stub-auth harness
  * resolves the caller to `local-org`. `x-valet-test-user-id: test-member`
- * makes the caller a non-admin member.
+ * makes the caller a non-admin member. The unit project scrubs provider env
+ * keys before each test, so a test that saves a tier stubs a key first.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { DEFAULT_TIER_MAP, getOrgDefaultTier, getOrgTierMap } from "../services/model-tiers.js";
+import { createLlmProvider, updateLlmProvider } from "../services/llm-providers.js";
+import { DEFAULT_TIER_MAP, getOrgDefaultTier, getOrgTierMap, setOrgTierMap } from "../services/model-tiers.js";
 import type { GetModelTiersResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -14,9 +16,19 @@ const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-
 let api: TestApi | undefined;
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await api?.cleanup();
   api = undefined;
 });
+
+/** Points tier "l" at the model of an OpenAI provider that is then disabled,
+ * so no active provider serves "l". The other tiers keep their defaults. */
+async function disableLargeTier(test: TestApi): Promise<void> {
+  const { db } = test.providers;
+  const row = await createLlmProvider(db, { orgId: "local-org", kind: "openai", name: "OpenAI" });
+  await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, l: ["openai/gpt-4.1"] });
+  await updateLlmProvider(db, "local-org", row.id, { enabled: false });
+}
 
 async function patchTiers(baseUrl: string, body: unknown, headers = HEADERS): Promise<Response> {
   return fetch(`${baseUrl}/api/org/model-tiers`, { method: "PATCH", headers, body: JSON.stringify(body) });
@@ -31,6 +43,7 @@ describe("/api/org/model-tiers defaultTier", () => {
   });
 
   it("an admin sets the default tier without changing the tier map, and null clears it", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
     api = await bootTestApi();
     const { db } = api.providers;
 
@@ -55,6 +68,33 @@ describe("/api/org/model-tiers defaultTier", () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "defaultTier must be one of xs, s, m, l, xl, or null to clear it." });
     expect(await getOrgDefaultTier(api.providers.db, "local-org")).toBeNull();
+  });
+
+  it("refuses a tier that no provider with a key serves, and names the fix", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    api = await bootTestApi();
+    await disableLargeTier(api);
+
+    const res = await patchTiers(api.baseUrl, { defaultTier: "l" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error:
+        'No provider this organization holds a key for serves tier "l". ' +
+        "Point the tier's first target at a provider with a key in Settings → Organization → Models, " +
+        "or choose another default tier.",
+    });
+    expect(await getOrgDefaultTier(api.providers.db, "local-org")).toBeNull();
+  });
+
+  it("checks the default tier against the tier map the same request writes", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    api = await bootTestApi();
+    await disableLargeTier(api);
+
+    const res = await patchTiers(api.baseUrl, { l: ["anthropic/claude-opus-4-7"], defaultTier: "l" });
+    expect(res.status).toBe(200);
+    expect(await getOrgDefaultTier(api.providers.db, "local-org")).toBe("l");
+    expect((await getOrgTierMap(api.providers.db, "local-org")).l).toEqual(["anthropic/claude-opus-4-7"]);
   });
 
   it("403s for a non-admin org member", async () => {

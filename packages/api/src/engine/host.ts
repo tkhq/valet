@@ -104,7 +104,7 @@ import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { clampToMax, getOrgReasoningSettings, type ReasoningLevel } from "../services/reasoning.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
-import { getOrgDefaultTier, TIER_SET } from "../services/model-tiers.js";
+import { getOrgDefaultTier, resolveTier, TIER_SET, type SizeTier } from "../services/model-tiers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   agentSessions,
@@ -3413,6 +3413,23 @@ export class EngineHost {
   }
 
   /**
+   * `orgs.default_tier` when one of its targets has an active provider, else
+   * `undefined`. Like a team default, it applies to people who did not pick
+   * it. The PATCH route refuses a tier that no provider serves, but a later
+   * provider or tier-map change can still empty it. Such a tier falls
+   * through to the next default instead of failing every new session.
+   * Uncached, same as `userDefaultModel`.
+   */
+  private async orgDefaultTier(orgId: string): Promise<SizeTier | undefined> {
+    if (!this.opts.db) return undefined;
+    const tier = await getOrgDefaultTier(this.opts.db, orgId);
+    if (!tier) return undefined;
+    if (await resolveTier(this.opts.db, this.opts.engineCredentials, orgId, tier)) return tier;
+    console.warn(`[engine-host] org default tier "${tier}" has no active provider; using the next default`);
+    return undefined;
+  }
+
+  /**
    * Resolve the `Model` to build/restore a session with. Spec-pinned
    * restore-no-clobber constraint: `Session.rehydrate`
    * (`packages/engine/src/session.ts`) always takes `options.model` as
@@ -3429,10 +3446,11 @@ export class EngineHost {
    * `overrideId ?? assistantDefault ?? childDefault ?? userDefault ?? teamDefault ?? orgDefaultTier ?? opts.defaultModelId ?? "s"`
    * — most-specific wins. Org model preferences are gone (superseded by the
    * per-tier ordered target lists). `orgDefaultTier` is the admin-set tier
-   * token in `orgs.default_tier`; when it is unset, the final fallback is
-   * the tier token `"s"`. `resolveModelSpec` resolves either token through
-   * the org's tier map (`resolveTier` walks that tier's ordered list for
-   * the first active provider), so an org remap of a tier reaches every
+   * token in `orgs.default_tier`; when it is unset or no active provider
+   * serves it (`orgDefaultTier`), the final fallback is the tier token
+   * `"s"`. `resolveModelSpec` resolves either token through the org's tier
+   * map (`resolveTier` walks that tier's ordered list for the first active
+   * provider), so an org remap of a tier reaches every
    * session that bottoms out at it. A child sets `childDefault: "s"`, so
    * the org default tier never reaches delegated work. The tiers are
    * opt-in via `prefs`:
@@ -3475,7 +3493,7 @@ export class EngineHost {
       prefs.childDefault ??
       (prefs.userId ? await this.userDefaultModel(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultModel(orgId, prefs.ownerTeamId) : undefined) ??
-      (this.opts.db ? await getOrgDefaultTier(this.opts.db, orgId) : null) ??
+      (await this.orgDefaultTier(orgId)) ??
       this.opts.defaultModelId ??
       "s";
     return this.resolveModelObject(orgId, id);

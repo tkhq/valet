@@ -801,6 +801,22 @@ describe("EngineHost model resolution wiring", () => {
       expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-6");
     });
 
+    it("falls through to \"s\" when a provider change leaves the org default tier with no active target", async () => {
+      api = await bootTestApi();
+      const { db } = api.providers;
+      await setOrgDefaultTier(db, "local-org", "l");
+      const row = await createLlmProvider(db, { orgId: "local-org", kind: "openai", name: "OpenAI" });
+      await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, l: [`openai/${OPENAI_MODEL}`] });
+      await updateLlmProvider(db, "local-org", row.id, { enabled: false });
+
+      const session = await defaultAssistantSessionFor(api.providers,
+        { type: "user", id: "local-user" },
+        { actorUserId: "local-user", orgId: "local-org" },
+      );
+      expect(session.options.modelSpec).toBe("s");
+      expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+    });
+
     it("a user default beats the org default tier", async () => {
       api = await bootTestApi();
       const { db } = api.providers;

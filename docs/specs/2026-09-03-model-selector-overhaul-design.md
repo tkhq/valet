@@ -203,7 +203,12 @@ sets as "Default tier for new threads" on the org Models page
 (`PATCH /api/org/model-tiers` with `defaultTier`, null clears it). Without
 it, an orchestrator with no personal or team default ran on `s`, and
 teams set an expensive concrete model as the team default to avoid that.
-When the column is null, the cascade is unchanged. A child passes
+When the column is null, the cascade is unchanged. The PATCH refuses a
+tier that no provider with a key serves (`resolvableTiers`, checked
+against the tier map that the same request writes), and the error names
+the fix. A later provider or tier-map change can still leave the saved
+tier with no active target. The cascade then skips it with a warning
+and continues to `s`, as it does for an inactive team default. A child passes
 `childDefault: "s"`, so delegated work stays on `s` whatever the org
 default tier is. The personal and team pickers label their clear state
 with the tier it falls to, for example "Medium (Organization default)".
