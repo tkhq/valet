@@ -576,6 +576,11 @@ marker, quote marker, heading marker, or rule keeps its characters. Explicit
 GitHub references are linked before the table is parsed, so they become links
 inside cells too. A line that opens a blockquote, list item, or heading never
 starts a table; the text stays in its Markdown block.
+Rich text shows an emoji shortcode as typed, so a shortcode in a body cell, such
+as `:smile:` or a custom `:murg'd:`, becomes an `emoji` element. A shortcode in a
+code span stays literal, and a shortcode with a letter or digit on either side
+stays text, so `10:30:45` keeps its colons. Slack accepts an element with an
+unknown name, so a typo does not lose the message (verified 2026-10-14).
 Header cells are plain text. An empty cell holds a single space, because Slack
 rejects an empty rich text cell and drops the whole message. Every column wraps,
 and the delimiter row sets column alignment.

@@ -8,6 +8,7 @@ const cell = (...elements: Record<string, unknown>[]) => ({
 });
 const text = (value: string, style?: Record<string, boolean>) => (style ? { type: 'text', text: value, style } : { type: 'text', text: value });
 const link = (url: string, label: string, style?: Record<string, boolean>) => (style ? { type: 'link', url, text: label, style } : { type: 'link', url, text: label });
+const emoji = (name: string) => ({ type: 'emoji', name });
 const column = (align = 'left') => ({ align, is_wrapped: true });
 const blank = cell(text(' '));
 
@@ -50,6 +51,23 @@ describe('tablesToTableBlocks', () => {
       rows: [[raw('a'), raw('b'), raw('c'), raw('d'), raw('e')], [
         cell(text('- pending')), cell(text('1. first')), cell(text('> 5')), cell(text('---')), cell(text('# not a heading')),
       ]],
+    });
+  });
+
+  it('turns emoji shortcodes in a cell into emoji elements', () => {
+    const source = "| Merged | State |\n|-|-|\n| :murg'd: Oct 13 · @reviewer | :hourglass_flowing_sand:<br>**done** :smile: |";
+    expect(tablesToTableBlocks(source, 50)?.[0]).toMatchObject({
+      rows: [[raw('Merged'), raw('State')], [
+        cell(emoji("murg'd"), text(' Oct 13 · @reviewer')),
+        cell(emoji('hourglass_flowing_sand'), text('\n'), text('done', { bold: true }), text(' '), emoji('smile')),
+      ]],
+    });
+  });
+
+  it('keeps shortcodes in inline code and colons between digits as text', () => {
+    const source = '| a | b |\n|-|-|\n| `:smile:` | at 10:30:45 |';
+    expect(tablesToTableBlocks(source, 50)?.[0]).toMatchObject({
+      rows: [[raw('a'), raw('b')], [cell(text(':smile:', { code: true })), cell(text('at 10:30:45'))]],
     });
   });
 
