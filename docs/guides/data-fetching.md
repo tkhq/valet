@@ -37,8 +37,10 @@ The api runs as one pod, so each deploy has a short window where the ingress
 returns 502, 503, or 504 itself. `request()` in `src/api/client.ts` handles this
 window. Do not add retries for it in a query or a component.
 
-- A GET retries an ingress error (an HTML 502/503/504) or a network failure
-  with backoff, for up to 45 seconds.
+- A GET retries an ingress error or a network failure with backoff, for up
+  to 45 seconds. An ingress error is a non-JSON 502, 503, or 504 (nginx), or a
+  non-JSON 404 (Traefik drops the route while no pod is ready). The api answers
+  every error with JSON, including unknown routes.
 - Other methods do not retry, because the api may have applied the change. They
   throw `ApiUnavailableError`, which tells the user to wait and try again.
 - A JSON error from the api is not retried. The api sent it on purpose.

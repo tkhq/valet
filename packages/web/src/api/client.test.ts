@@ -294,6 +294,28 @@ describe("api client: unavailable api during a deploy", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("retries a plain-text 404 from Traefik, which drops the route while no pod is ready", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("404 page not found", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } }))
+      .mockResolvedValueOnce(ok({ id: "s1" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = api.getSession("s1");
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(result).resolves.toEqual({ id: "s1" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a JSON 404 from the api", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "Content-Type": "application/json" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const err = await api.getSession("s1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).not.toBeInstanceOf(ApiUnavailableError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("does not retry a mutation, because the api may have applied it", async () => {
     const fetchMock = vi.fn(async () => gateway());
     vi.stubGlobal("fetch", fetchMock);

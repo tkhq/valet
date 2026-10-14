@@ -317,11 +317,14 @@ class ApiUnavailableError extends ApiError {
   }
 }
 
-/** Statuses the ingress returns itself when no api pod is ready. */
-const GATEWAY_STATUSES = new Set([502, 503, 504]);
+/** Statuses the ingress returns itself when no api pod is ready. nginx
+ * answers 502/503/504. Traefik (the chart default) drops the route for a
+ * Service with no endpoints and answers a plain-text 404. */
+const GATEWAY_STATUSES = new Set([404, 502, 503, 504]);
 
 /** True when the ingress, not the api, produced this response. The api
- * answers errors with JSON. The ingress answers with an HTML page. */
+ * answers every error with JSON, including unknown routes (`app.notFound`),
+ * so a non-JSON answer with one of these statuses came from the ingress. */
 function isGatewayResponse(res: Response): boolean {
   if (!GATEWAY_STATUSES.has(res.status)) return false;
   const type = res.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();

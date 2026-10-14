@@ -54,6 +54,23 @@ describe("api reconnecting banner", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/health", { cache: "no-store" });
   });
 
+  it("refetches failed queries when another request clears the outage before a poll", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => health(false)));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const queryKey = ["failed-during-outage"];
+    const queryFn = vi.fn().mockRejectedValueOnce(new Error("503")).mockResolvedValue("fresh");
+    await client.prefetchQuery({ queryKey, queryFn });
+    expect(client.getQueryState(queryKey)?.status).toBe("error");
+    mount(client);
+    act(() => useApiAvailability.getState().markUnavailable());
+    await act(() => vi.advanceTimersByTimeAsync(HEALTH_POLL_MS - 500));
+    // A retried GET succeeds before the next poll: request() marks the api available.
+    act(() => useApiAvailability.getState().markAvailable());
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(queryFn).toHaveBeenCalledTimes(2);
+    expect(client.getQueryData(queryKey)).toBe("fresh");
+  });
+
   it("does not poll while the api is available", async () => {
     const fetchMock = vi.fn(async () => health(true));
     vi.stubGlobal("fetch", fetchMock);
