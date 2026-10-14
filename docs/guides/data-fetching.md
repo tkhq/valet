@@ -31,6 +31,20 @@ const queryClient = new QueryClient({
 Override per query when a surface needs something different. Do not change the
 defaults to fix one page.
 
+### When the api is unavailable
+
+The api runs as one pod, so each deploy has a short window where the ingress
+returns 502, 503, or 504 itself. `request()` in `src/api/client.ts` handles this
+window. Do not add retries for it in a query or a component.
+
+- A GET retries an ingress error (an HTML 502/503/504) or a network failure
+  with backoff, for up to 45 seconds.
+- Other methods do not retry, because the api may have applied the change. They
+  throw `ApiUnavailableError`, which tells the user to wait and try again.
+- A JSON error from the api is not retried. The api sent it on purpose.
+- `ApiReconnectingBanner` shows while the api is unavailable. It polls
+  `/api/health` and refetches failed queries when the api answers again.
+
 ## Query key factories
 
 Every module in `src/api/` defines a key factory. Keys are always arrays, and

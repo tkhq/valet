@@ -6,7 +6,8 @@
  * `fetch` to assert the exact request URL without a real server.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import { api } from "./client";
+import { api, ApiError, ApiUnavailableError } from "./client";
+import { useApiAvailability } from "~/stores/api-availability";
 
 function stubFetchOk(body: unknown = {}): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn(
@@ -247,5 +248,87 @@ describe("usage request cancellation", () => {
       expect(removed).toHaveBeenCalledWith("abort", added.mock.calls[0]?.[1]);
       expect(vi.getTimerCount()).toBe(0);
     } finally { vi.useRealTimers(); }
+  });
+});
+
+describe("api client: unavailable api during a deploy", () => {
+  const gateway = (status = 503) =>
+    new Response("<html><body>503 Service Temporarily Unavailable</body></html>", {
+      status,
+      headers: { "Content-Type": "text/html" },
+    });
+  const ok = (body: unknown = {}) =>
+    new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    useApiAvailability.setState({ unavailableSince: null });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("retries a GET through ingress gateway errors and network failures", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(gateway(503))
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(gateway(502))
+      .mockResolvedValueOnce(ok({ id: "s1" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = api.getSession("s1");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(useApiAvailability.getState().unavailableSince).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(1_000 + 2_000);
+    await expect(result).resolves.toEqual({ id: "s1" });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(useApiAvailability.getState().unavailableSince).toBeNull();
+  });
+
+  it("gives up after the retry budget with a message that names the action", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => gateway()));
+    const result = api.getSession("s1");
+    const rejected = expect(result).rejects.toThrow("Wait a few seconds, then try again.");
+    await vi.advanceTimersByTimeAsync(60_000);
+    await rejected;
+    await expect(result).rejects.toBeInstanceOf(ApiUnavailableError);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not retry a mutation, because the api may have applied it", async () => {
+    const fetchMock = vi.fn(async () => gateway());
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(api.deleteSession("s1")).rejects.toBeInstanceOf(ApiUnavailableError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(useApiAvailability.getState().unavailableSince).not.toBeNull();
+  });
+
+  it("does not retry a JSON 503 from the api itself", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ error: "not configured" }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    useApiAvailability.setState({ unavailableSince: 1 });
+    const err = await api.getSession("s1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).not.toBeInstanceOf(ApiUnavailableError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(useApiAvailability.getState().unavailableSince).toBeNull();
+  });
+
+  it("stops retrying when the caller aborts", async () => {
+    const fetchMock = vi.fn(async () => gateway());
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const result = api.proxySettings(controller.signal);
+    const rejected = expect(result).rejects.toBeDefined();
+    await vi.advanceTimersByTimeAsync(100);
+    controller.abort(new Error("left the page"));
+    await rejected;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
