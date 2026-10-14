@@ -338,7 +338,8 @@ function convertWorkflow(row: V1WorkflowRow, triggers: V1TriggerRow[]): V1Conver
     name,
     definition: { version: 'dag/v1', nodes: [trigger, ...b.nodes], edges: b.edges },
     schedules,
-    checklist: b.checklist,
+    // Two V1 rows with the same problem read the same; list it once.
+    checklist: [...new Set(b.checklist)],
   };
 }
 
