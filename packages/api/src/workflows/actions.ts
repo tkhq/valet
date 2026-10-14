@@ -345,7 +345,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Show what policy decides for each tool step of a workflow, as the workflow page's Permissions section shows it. " +
       "Per step: mode `allow` means no policy gates the step, `require_approval` waits for a person, `deny` is blocked " +
       "by policy, and `unknown` is checked when the run reaches it. `provenance` names the rule that set the mode. " +
-      "`sharedAccount: true` means each run asks the member whose shared account it uses, whatever the mode. " +
+      "`sharedAccount: true` means a run may use a member's shared account and then asks that member, whatever the mode; a team 1Password item for the service avoids it. " +
       "`runtimeParams: true` means a policy rule keys on a parameter the step fills in at run time, so a run can decide differently. " +
       "`unchecked` lists agent and sub-workflow steps; their actions are checked when they run. " +
       "Read this before you tell a user that a step needs approval, and check a run's `waitingOn` to confirm.",

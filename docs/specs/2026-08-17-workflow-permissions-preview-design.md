@@ -107,12 +107,16 @@ Two node fields say where the policy mode alone is not the answer. The mode
 reads a template parameter literally, as a workflow grant does. When a policy or
 override for the action matches on a parameter the step fills in at run time,
 the node carries `runtimeParams: true`, because the run can resolve differently
-once it renders the value. On a team workflow, `sharedAccount: true` marks a
-step whose team has no connection of its own for the service while a current
-member shares one (`membersSharing`; never GitHub, which the invoker never
-borrows). The invoker then asks that member on every run, unless the person who
-starts the run shares their own account. The check reads credential and share
-rows only, so the preview reads no secret and refreshes no token.
+once it renders the value. Matcher paths parse the way the matcher reads them,
+so `to[0]` overlaps a templated `to`, and the whole-object path `""` overlaps
+every template. On a team workflow, `sharedAccount: true` marks a step whose
+team has no live connection of its own for the service while a current member
+shares one (`membersSharing`; never GitHub, which the invoker never borrows). A
+dead team connection (`isDeadConnection`) does not count, because the invoker
+skips it for a share. The invoker may then ask that member on every run. It
+does not when the person who starts the run shares their own account, or when a
+team 1Password item covers the service. The check reads credential and share
+rows only, so the preview reads no secret, no vault, and refreshes no token.
 
 ## Files
 

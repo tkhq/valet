@@ -10,6 +10,8 @@ import { findCredentialDeclaration } from "../services/integration-availability.
 import { canAdministerTeam } from "../services/teams.js";
 import { resolvePolicyDecision, type PolicyResolutionRows } from "../policies/resolution.js";
 import { loadPolicyRows } from "../policies/service.js";
+import { parsePath } from "../policies/matchers.js";
+import { isDeadConnection } from "../services/credential-resolution.js";
 import { prepareActionArgs } from "@valet/engine";
 import { findAction, qualifiedActionId } from "../plugins/action-invoker.js";
 import type {
@@ -86,11 +88,11 @@ export async function analyzeWorkflowPermissions(
   return analyzeDefinitionPermissions(deps, owner, summary);
 }
 
-/** Dot-paths of the parameters that are templates a run fills in. */
-function templatedPaths(value: unknown, prefix = ""): string[] {
-  if (typeof value === "string") return value.includes("{{") && prefix ? [prefix] : [];
+/** The paths, as segments, of the parameters that are templates a run fills in. */
+function templatedPaths(value: unknown, prefix: string[] = []): string[][] {
+  if (typeof value === "string") return value.includes("{{") ? [prefix] : [];
   if (typeof value !== "object" || value === null) return [];
-  return Object.entries(value).flatMap(([key, entry]) => templatedPaths(entry, prefix ? `${prefix}.${key}` : key));
+  return Object.entries(value).flatMap(([key, entry]) => templatedPaths(entry, [...prefix, key]));
 }
 
 /** True when a policy or override for this action matches on a parameter
@@ -98,10 +100,22 @@ function templatedPaths(value: unknown, prefix = ""): string[] {
 function dependsOnTemplates(
   rows: PolicyResolutionRows,
   target: { service: string; actionId: string },
-  paths: string[],
+  paths: string[][],
 ): boolean {
   if (paths.length === 0) return false;
-  const overlaps = (path: string) => paths.some((t) => t === path || path.startsWith(`${t}.`) || t.startsWith(`${path}.`));
+  // Matcher paths parse the way the matcher reads them (`to[0]` is `to.0`,
+  // `""` is the whole object). A path the matcher cannot parse counts.
+  const overlaps = (path: string) => {
+    let matcher: string[];
+    try {
+      matcher = parsePath(path).map(String);
+    } catch {
+      return true;
+    }
+    return paths.some((t) => t.length <= matcher.length
+      ? t.every((segment, i) => segment === matcher[i])
+      : matcher.every((segment, i) => segment === t[i]));
+  };
   return [...rows.policies, ...rows.overrides].some((row) =>
     (row.actionId === target.actionId || (row.actionId === null && (row.service === null || row.service === target.service)))
     && row.paramMatchers.some((matcher) => overlaps(matcher.path)));
@@ -127,12 +141,17 @@ export async function analyzeDefinitionPermissions(
     userId: summary.ownerType === "user" ? summary.ownerId : owner.userId,
     teamId: summary.ownerType === "team" ? summary.ownerId : undefined,
   });
-  // A team's own connections, read as rows: the preview reads no secret and
-  // refreshes no token. Shares are read per service the way the run reads
-  // them (`membersSharing`: current members only).
+  // A team's own live connections, read as rows: the preview reads no secret
+  // and refreshes no token. A dead connection does not count: the run skips
+  // it for a member's share, as `readTeamCredential` does. Shares are read
+  // per service the way the run reads them (`membersSharing`: current
+  // members only).
   const teamId = summary.ownerType === "team" ? summary.ownerId : undefined;
-  const teamOwn = teamId === undefined ? undefined : new Set((await deps.db.select({ service: credentials.service }).from(credentials)
-    .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, teamId)))).map((row) => row.service));
+  const teamOwn = teamId === undefined ? undefined : new Set((await deps.db
+    .select({ service: credentials.service, type: credentials.type, expiresAt: credentials.expiresAt, metadata: credentials.metadata })
+    .from(credentials)
+    .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, teamId))))
+    .filter((row) => !isDeadConnection(row, now)).map((row) => row.service));
   const sharedServices = new Map<string, boolean>();
   const nodes: WorkflowNodePermissionWire[] = [];
   for (const ref of refs) {
@@ -161,8 +180,9 @@ export async function analyzeDefinitionPermissions(
     // flag says when a rule keys on a value the run renders.
     const runtimeParams = dependsOnTemplates(rows, { service: ref.service, actionId }, templatedPaths(ref.params));
     // The invoker uses a member's shared account only after the team's own
-    // connection and an organization-provided one, never for GitHub, and
-    // asks that member.
+    // connection, an organization-provided one, and a team 1Password item,
+    // never for GitHub, and asks that member. The preview reads no vault, so
+    // the flag says the run may ask.
     const credentialService = entry.actionPlugin.credentialService ?? ref.service;
     let sharedAccount = false;
     if (teamId !== undefined && teamOwn !== undefined && !teamOwn.has(credentialService) && credentialService !== "github"

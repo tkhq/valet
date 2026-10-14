@@ -2242,10 +2242,11 @@ export interface WorkflowNodePermissionWire {
    * template literally, as a workflow grant does, so the run can resolve
    * differently once it renders the value. */
   runtimeParams?: true;
-  /** True for a team workflow whose team has no connection of its own for
-   * the step's service while a current member shares one (never GitHub). A
-   * run then asks that member to approve, per run, unless the person who
-   * starts it shares their own account. */
+  /** True for a team workflow whose team has no live connection of its own
+   * for the step's service while a current member shares one (never
+   * GitHub). A run may then ask that member to approve, per run. It does
+   * not when the person who starts it shares their own account, or when a
+   * team 1Password item covers the service; the preview reads no vault. */
   sharedAccount?: true;
 }
 

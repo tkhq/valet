@@ -1,5 +1,5 @@
 import { PGlite } from "@electric-sql/pglite";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryWorkflowStore, type RunHost, type WorkflowDefinition } from "@valet/workflow";
 import {
@@ -1073,6 +1073,40 @@ describe("DB-backed actions", () => {
     const own = await get.execute({ workflow_id: "perm-share" }, teamCtx);
     expect(own).toMatchObject({ success: true });
     expect(JSON.stringify(own)).not.toContain("sharedAccount");
+    // A dead team connection does not answer: the run falls through to the share.
+    await db.update(credentials).set({ type: "oauth2", expiresAt: 1, metadata: { refreshRefused: true } })
+      .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, "perm-team-share")));
+    expect(await get.execute({ workflow_id: "perm-share" }, teamCtx)).toMatchObject({
+      success: true, data: { nodes: [{ nodeId: "post", sharedAccount: true }] },
+    });
+  });
+
+  it("get_permissions reads matcher paths the way the matcher does", async () => {
+    deps.actionPluginByService = chatCatalog();
+    await db.insert(workflowDefinitions).values({
+      id: "perm-paths", orgId: "org1", ownerType: "user", ownerId: "user1", name: "Paths", createdAt: 1, updatedAt: 1,
+      definition: {
+        version: "dag/v1",
+        nodes: [
+          { id: "trigger", type: "trigger" },
+          { id: "dm", type: "tool", service: "chat", action: "send_message", params: { to: "{{trigger.data.who}}" } },
+          { id: "note", type: "tool", service: "chat", action: "send_message", params: { text: "{{trigger.data.text}}" } },
+        ],
+        edges: [{ from: "trigger", to: "dm" }, { from: "dm", to: "note" }],
+      },
+    });
+    const policy = (id: string, path: string): typeof actionPolicies.$inferInsert => ({
+      id, orgId: "org1", principalType: "org", principalId: "org1", actionId: "chat.send_message", mode: "deny",
+      paramMatchers: [{ path, op: "exists" }], appliesIn: "any", origin: "settings", createdAt: 1, updatedAt: 1,
+    });
+    await db.insert(actionPolicies).values(policy("org-deny-first", "to[0]"));
+    const get = workflowsActionPlugin(() => deps).actions.find((a) => a.id === "workflows.get_permissions")!;
+    const flagged = async () => ((await get.execute({ workflow_id: "perm-paths" }, ctx())) as { data: { nodes: Array<{ nodeId: string; runtimeParams?: true }> } })
+      .data.nodes.filter((node) => node.runtimeParams).map((node) => node.nodeId);
+    expect(await flagged()).toEqual(["dm"]);
+    // The whole-object path reads every parameter.
+    await db.insert(actionPolicies).values(policy("org-deny-any", ""));
+    expect(await flagged()).toEqual(["dm", "note"]);
   });
 
   it("get_permissions refuses a workflow the caller cannot read", async () => {
