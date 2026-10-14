@@ -26,27 +26,30 @@ export interface StepToolCall {
 const TEXT_CHARS = 6_000;
 const TOOL_CHARS = 1_500;
 
+/** The most entries one read loads per submission. A step that exceeds it
+ * shows its latest entries. */
+const ENTRY_CAP = 2_000;
+
 /**
  * The step's messages, oldest first. `index` counts messages only, so
  * `before` pages back from any message's index, and `limit` bounds the
- * page. `queueItemId` keeps one submission's entries, for a step that
- * shares its thread with other steps. Null when the session or thread does
- * not exist.
+ * page. `queueItemIds` keeps those submissions' entries, in order, for a step
+ * that shares its thread with other steps. Each read is bounded by the store
+ * and takes no thread lock. Null when the session or thread does not exist.
  */
 export async function readStepTranscript(
   store: SessionStore,
   sessionId: string,
   threadId: string | undefined,
-  page: { before?: number; limit: number; queueItemId?: string },
+  page: { before?: number; limit: number; queueItemIds?: string[] },
 ): Promise<{ threadId: string; total: number; messages: StepTranscriptMessage[] } | null> {
-  const thread = threadId ?? (await store.listThreads(sessionId))[0]?.id;
+  const thread = threadId ? await store.getThread(sessionId, threadId) : (await store.listThreads(sessionId))[0];
   if (!thread) return null;
-  const snapshot = await store.getThreadSnapshot(sessionId, thread);
-  if (!snapshot) return null;
-  const entries = page.queueItemId ? snapshot.entries.filter((entry) => entry.queueItemId === page.queueItemId) : snapshot.entries;
+  const reads = page.queueItemIds?.length ? page.queueItemIds.map((queueItemId) => ({ queueItemId })) : [{}];
+  const entries = (await Promise.all(reads.map((filter) => store.getEntries(sessionId, thread.id, { limit: ENTRY_CAP, ...filter })))).flat();
   const all = entries.flatMap(toMessage).map((message, index) => ({ index, ...message }));
   const end = Math.min(Math.max(page.before ?? all.length, 0), all.length);
-  return { threadId: thread, total: all.length, messages: all.slice(Math.max(0, end - page.limit), end) };
+  return { threadId: thread.id, total: all.length, messages: all.slice(Math.max(0, end - page.limit), end) };
 }
 
 function toMessage(entry: SessionEntry): Omit<StepTranscriptMessage, "index">[] {

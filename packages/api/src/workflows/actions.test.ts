@@ -882,6 +882,20 @@ describe("DB-backed actions", () => {
     const mine = await transcript.execute({ run_id: "run-p", node_id: "summarize" }, ctx());
     expect(mine.success && (mine.data as { messages: Array<{ text?: string }> }).messages.map((m) => m.text)).toEqual(["this step's turn"]);
 
+    // After a format repair the receipt names the repair; both turns load.
+    await deps.engineStore.appendEntries(shared, "t-shared", [
+      message(shared, "t-shared", "r1", "first try with the tool error", "q-first"),
+      message(shared, "t-shared", "r2", "a later step's turn", "q-later"),
+      message(shared, "t-shared", "r3", "repaired reply", "q-repair"),
+    ]);
+    await checkpoint("repaired", 0, {
+      sessionId: shared, repairAttempted: true, firstError: "no json block", firstQueueItemId: "q-first",
+      receipt: { sessionId: shared, threadId: "t-shared", queueItemId: "q-repair" },
+    });
+    const repaired = await transcript.execute({ run_id: "run-p", node_id: "repaired" }, ctx());
+    expect(repaired.success && (repaired.data as { messages: Array<{ text?: string }> }).messages.map((m) => m.text))
+      .toEqual(["first try with the tool error", "repaired reply"]);
+
     // A foreach body has one checkpoint per iteration.
     await checkpoint("each", 0, { sessionId: stepSession, receipt: { sessionId: stepSession, threadId: "t-step", queueItemId: "q" } });
     await checkpoint("each", 1, { sessionId: stepSession, receipt: { sessionId: stepSession, threadId: "t-step", queueItemId: "q" } });

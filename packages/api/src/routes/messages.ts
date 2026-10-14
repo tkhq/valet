@@ -58,6 +58,8 @@ import type {
 } from "../wire/types.js";
 import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { workflowRequestContext } from "../workflows/request-context.js";
+import { canReadWorkflowRun } from "../workflows/service.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { answersGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
@@ -930,28 +932,30 @@ export async function listMessages(c: Context<AppEnv>, sessionId: string, thread
 
 /**
  * A workflow step session's messages, for the run page's step logs. The
- * session has no app row, so `loadEngineSession` cannot reach it. Members who
- * can answer the run's gates read it straight from the store. A named
- * approver for a run they cannot otherwise see gets nothing here.
+ * session has no app row, so `loadEngineSession` cannot reach it. Whoever may
+ * read the run reads its steps, by the same check as `get_run`, and the read
+ * is bounded like the live path. Nothing builds the session.
  */
 async function listWorkflowStepMessages(c: Context<AppEnv>, sessionId: string, threadId?: string) {
-  const access = await authorizeWorkflowSession(c, sessionId);
-  if ("error" in access) return access.error;
-  if (access.session.decisionApproverOnly) return c.json({ error: "session not found" }, 404);
+  const missing = () => c.json({ error: "session not found" }, 404);
+  let runId: string;
+  try { ({ runId } = parseWorkflowSessionId(sessionId)); } catch { return missing(); }
+  const { deps, owner } = workflowRequestContext(c);
+  if (!(await canReadWorkflowRun(deps, owner, runId))) return missing();
   const store = c.var.providers.engineStore;
   const requested = threadId ?? (c.req.query("threadId") || undefined);
-  const thread = requested ?? (await store.listThreads(sessionId))[0]?.id;
-  const snapshot = thread ? await store.getThreadSnapshot(sessionId, thread) : null;
-  if (!snapshot) return c.json({ error: "thread not found" }, 404);
+  const thread = requested ? await store.getThread(sessionId, requested) : (await store.listThreads(sessionId))[0];
+  if (!thread) return c.json({ error: "thread not found" }, 404);
   const parsedLimit = Number.parseInt(c.req.query("limit") ?? "100", 10);
   const limit = Math.min(2000, Number.isNaN(parsedLimit) ? 100 : Math.max(1, parsedLimit));
   const queueItemId = c.req.query("queueItemId") || undefined;
-  const entries = queueItemId ? snapshot.entries.filter((e) => e.queueItemId === queueItemId) : snapshot.entries;
+  const entries = await store.getEntries(sessionId, thread.id, { limit: limit + 1, cursor: c.req.query("cursor") ?? undefined, queueItemId });
+  const hasMore = entries.length > limit;
   const body: ListMessagesResponse = {
-    messages: entries.slice(-limit)
-      .map((e) => entryToMessage(e, sessionId, snapshot.thread.id))
+    messages: (hasMore ? entries.slice(1) : entries)
+      .map((e) => entryToMessage(e, sessionId, thread.id))
       .filter((m): m is Message => m !== null),
-    hasMore: entries.length > limit,
+    hasMore,
     nextCursor: undefined,
   };
   return c.json(body);
@@ -1402,21 +1406,6 @@ function decisionDenied(c: Context<AppEnv>) {
  */
 export async function loadDecisionSession(c: Context<AppEnv>, id: string, threadId?: string) {
   if (!id.startsWith("wf:")) return loadEngineSession(c, id, { threadId });
-  const access = await authorizeWorkflowSession(c, id, threadId);
-  if ("error" in access) return access;
-  const p = c.var.providers;
-  const engineSession = await ensureWorkflowSession({
-    db: p.db, store: p.workflowStore, engineStore: p.engineStore,
-    host: p.engineHost, actionPluginByService: p.actionPluginByService,
-    credentials: p.engineCredentials,
-  }, id);
-  return { session: access.session, engineSession };
-}
-
-/** Who may reach a workflow step session: the run owner's members, and a
- * named approver for a run whose origin the caller cannot see. Builds no
- * session, so a read never starts an agent or a sandbox. */
-async function authorizeWorkflowSession(c: Context<AppEnv>, id: string, threadId?: string) {
   const missing = () => ({ error: c.json({ error: "session not found" }, 404) });
   let parts;
   try { parts = parseWorkflowSessionId(id); } catch { return missing(); }
@@ -1439,7 +1428,12 @@ async function authorizeWorkflowSession(c: Context<AppEnv>, id: string, threadId
   }
   // A guessed node ID must not materialize a new agent on a read request.
   if (!(await p.engineStore.getSession(id))) return missing();
-  return { session: { ...session, decisionApproverOnly } };
+  const engineSession = await ensureWorkflowSession({
+    db: p.db, store: p.workflowStore, engineStore: p.engineStore,
+    host: p.engineHost, actionPluginByService: p.actionPluginByService,
+    credentials: p.engineCredentials,
+  }, id);
+  return { session: { ...session, decisionApproverOnly }, engineSession };
 }
 
 /** Pending gates on threads this request may see. Another pod may have made

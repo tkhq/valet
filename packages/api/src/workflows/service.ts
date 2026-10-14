@@ -1779,6 +1779,12 @@ async function pendingApprovers(deps: WorkflowServiceDeps, run: { runId: string;
   return found;
 }
 
+/** May `owner` read run `runId`? The check `get_run` and the run page use:
+ * the run's owner and the audience of its origin thread or Slack channel. */
+export async function canReadWorkflowRun(deps: WorkflowServiceDeps, owner: WorkflowOwner, runId: string): Promise<boolean> {
+  return (await ownedRun(deps, owner, runId)) !== null;
+}
+
 async function ownedRun(
   deps: WorkflowServiceDeps,
   owner: WorkflowOwner,

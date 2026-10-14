@@ -953,11 +953,17 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       // A session step owns its thread, repair turn included. An orchestrator
       // step shares a thread with other steps and with chat, so it reads only
       // its own submission.
+      // After a format repair the checkpoint's receipt names the repair, and
+      // the stored effects keep the first submission, so both turns load.
       const ownThread = checkpoint.sessionId.startsWith("wf:");
+      const stored = (await getDeps().workflowStore.getCheckpoints(run_id))
+        .find((cp) => cp.nodeId === node_id && cp.iteration === checkpoint.iteration);
+      const firstQueueItemId = typeof stored?.effects?.firstQueueItemId === "string" ? stored.effects.firstQueueItemId : undefined;
+      const queueItemIds = [firstQueueItemId, checkpoint.queueItemId].filter((id): id is string => id !== undefined);
       const transcript = await readStepTranscript(getDeps().engineStore, checkpoint.sessionId, checkpoint.threadId, {
         ...(before !== undefined ? { before: Math.trunc(before) } : {}),
         limit: pageSize,
-        ...(!ownThread && checkpoint.queueItemId ? { queueItemId: checkpoint.queueItemId } : {}),
+        ...(!ownThread && queueItemIds.length > 0 ? { queueItemIds } : {}),
       });
       if (!transcript) return { success: false, error: `The conversation for node ${JSON.stringify(node_id)} is no longer stored.` };
       return {

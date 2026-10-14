@@ -69,6 +69,9 @@ interface SubmissionEffects {
   repairAttempted: boolean;
   /** First schema failure, retained after repair for checkpoint diagnostics. */
   firstError?: string;
+  /** The first submission's queue item, kept after a repair replaces
+   * `receipt`, so a reader can find both turns of the step. */
+  firstQueueItemId?: string;
 }
 
 export async function executeSubmissionNode<TDispatched, TSettled>(
@@ -184,7 +187,7 @@ export async function executeSubmissionNode<TDispatched, TSettled>(
     hooks.outputSchema !== undefined ? { resultSchema: hooks.outputSchema } : undefined,
   );
 
-  return await handleOutcome(ctx, hooks, sessionId, receipt, effects.repairAttempted, effects.firstError, result);
+  return await handleOutcome(ctx, hooks, sessionId, receipt, effects, result);
 }
 
 async function handleOutcome<TDispatched, TSettled>(
@@ -192,8 +195,7 @@ async function handleOutcome<TDispatched, TSettled>(
   hooks: SubmissionNodeHooks<TDispatched, TSettled>,
   sessionId: string,
   receipt: WorkflowPromptReceipt,
-  repairAttempted: boolean,
-  firstError: string | undefined,
+  prior: SubmissionEffects,
   result: SubmissionResult,
 ): Promise<
   | { status: 'completed'; result: TDispatched | TSettled }
@@ -201,6 +203,8 @@ async function handleOutcome<TDispatched, TSettled>(
   | { status: 'parked'; waitingOn: [{ kind: 'submission'; nodeId: string; sessionId: string; threadId: string; queueItemId: string }] }
 > {
   const { run, nodeId, attempt, iteration, store, clock } = ctx;
+  const { repairAttempted, firstQueueItemId } = prior;
+  let firstError = prior.firstError;
 
   if (result.outcome !== 'completed') {
     const error = result.error ?? `${hooks.nodeKind} node "${nodeId}" submission outcome: ${result.outcome}`;
@@ -210,7 +214,7 @@ async function handleOutcome<TDispatched, TSettled>(
       iteration,
       status: 'failed',
       error,
-      effects: effectsToRecord({ sessionId, receipt, repairAttempted, firstError }),
+      effects: effectsToRecord({ sessionId, receipt, repairAttempted, firstError, firstQueueItemId }),
       attempt,
       createdAt: clock(),
     });
@@ -225,7 +229,7 @@ async function handleOutcome<TDispatched, TSettled>(
       iteration,
       status: 'completed',
       result: settledResult,
-      effects: effectsToRecord({ sessionId, receipt, repairAttempted, firstError }),
+      effects: effectsToRecord({ sessionId, receipt, repairAttempted, firstError, firstQueueItemId }),
       attempt,
       createdAt: clock(),
     });
@@ -241,7 +245,7 @@ async function handleOutcome<TDispatched, TSettled>(
       iteration,
       status: 'failed',
       error,
-      effects: effectsToRecord({ sessionId, receipt, repairAttempted, firstError }),
+      effects: effectsToRecord({ sessionId, receipt, repairAttempted, firstError, firstQueueItemId }),
       attempt,
       createdAt: clock(),
     });
@@ -268,7 +272,7 @@ async function handleOutcome<TDispatched, TSettled>(
       iteration,
       status: 'failed',
       error,
-      effects: effectsToRecord({ sessionId, receipt, repairAttempted, firstError }),
+      effects: effectsToRecord({ sessionId, receipt, repairAttempted, firstError, firstQueueItemId }),
       attempt,
       createdAt: clock(),
     });
@@ -281,7 +285,7 @@ async function handleOutcome<TDispatched, TSettled>(
     status: 'intent',
     attempt,
     createdAt: clock(),
-    effects: effectsToRecord({ sessionId, receipt: repairReceipt, repairAttempted: true, firstError }),
+    effects: effectsToRecord({ sessionId, receipt: repairReceipt, repairAttempted: true, firstError, firstQueueItemId: receipt.queueItemId }),
   });
   return {
     status: 'parked',
@@ -342,6 +346,7 @@ function readSubmissionEffects(existingCheckpoint: NodeCheckpoint | undefined): 
     receipt: parseReceipt(raw.receipt),
     repairAttempted: raw.repairAttempted === true,
     firstError: typeof raw.firstError === 'string' ? raw.firstError : undefined,
+    firstQueueItemId: typeof raw.firstQueueItemId === 'string' ? raw.firstQueueItemId : undefined,
   };
 }
 
@@ -355,6 +360,7 @@ function parseReceipt(value: unknown): WorkflowPromptReceipt | undefined {
 function effectsToRecord(effects: SubmissionEffects): Record<string, unknown> {
   const record: Record<string, unknown> = { repairAttempted: effects.repairAttempted };
   if (effects.firstError !== undefined) record.firstError = effects.firstError;
+  if (effects.firstQueueItemId !== undefined) record.firstQueueItemId = effects.firstQueueItemId;
   if (effects.sessionId !== undefined) record.sessionId = effects.sessionId;
   if (effects.receipt !== undefined) record.receipt = effects.receipt;
   return record;
