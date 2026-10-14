@@ -183,6 +183,14 @@ export class LocalRunHost implements RunHost {
    * restarts re-earns its strikes in minutes.
    */
   private readonly driveFailures = new Map<string, number>();
+  /**
+   * Runs with a gate that opened since their last park report. Held on the
+   * host, not the drive: a drive that opens a gate and then fails retries on
+   * this host, and the retry does not open the gate again. A process that
+   * dies loses the entry, so the report is at most once, like the settle
+   * report.
+   */
+  private readonly gatesToReport = new Set<string>();
   /** How many parked runs a single sweep pass enumerates via `store.listParked`. */
   private readonly sweepBatchLimit = 1_000;
 
@@ -338,9 +346,8 @@ export class LocalRunHost implements RunHost {
       void this.store.heartbeat(runId, this.ownerId, this.leaseMs);
     }, this.heartbeatMs);
 
-    let gateOpened = false;
     const onApprovalPending: OnApprovalPending = async (info) => {
-      gateOpened = true;
+      this.gatesToReport.add(runId);
       await this.onApprovalPending?.(info);
     };
 
@@ -362,7 +369,8 @@ export class LocalRunHost implements RunHost {
             : undefined,
       });
       await this.afterPark(runId, park);
-      if (gateOpened && park.status === 'parked') await this.reportApprovalPark(runId, claim.attempt);
+      if (park.status === 'parked' && this.gatesToReport.delete(runId)) await this.reportApprovalPark(runId, claim.attempt);
+      if (park.status === 'settled') this.gatesToReport.delete(runId);
       this.driveFailures.delete(runId);
     } catch (err) {
       // A `WorkflowFenceError` means a superseded attempt, not a sick run —
@@ -400,6 +408,7 @@ export class LocalRunHost implements RunHost {
       try {
         await settleAndNotify(this.store, this.onRunSettled, runId, 'failed');
         this.driveFailures.delete(runId);
+        this.gatesToReport.delete(runId);
       } catch (settleErr) {
         // Keep the strike count: if the settle write itself failed, the
         // next reclaim lands here again and retries the settle.

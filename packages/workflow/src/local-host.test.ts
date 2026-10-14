@@ -313,6 +313,58 @@ describe('LocalRunHost approval park reporting', () => {
   });
 });
 
+describe('LocalRunHost approval park reporting after a failed drive', () => {
+  it('reports the gate on the retry when the drive that opened it failed to park', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const parkRun = store.parkRun.bind(store);
+    let failPark = true;
+    store.parkRun = async (...args) => {
+      if (failPark) {
+        failPark = false;
+        throw new Error('transient park failure');
+      }
+      return parkRun(...args);
+    };
+    let opened = 0;
+    const reports: number[] = [];
+    const host = new LocalRunHost({
+      store,
+      engine: makeRunHostFixtureEngine(),
+      clock: clock.now,
+      pollMs: 10,
+      sweepMs: 20,
+      leaseMs: 50,
+      heartbeatMs: 300,
+      onApprovalPending: () => {
+        opened++;
+      },
+      onApprovalParked: ({ attempt }) => {
+        reports.push(attempt);
+      },
+    });
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [{ id: 't', type: 'trigger' }, { id: 'a', type: 'approval', prompt: 'A?' }],
+      edges: [{ from: 't', to: 'a' }],
+    };
+
+    host.startHost();
+    try {
+      await host.start('run-retry', runParams(), definition);
+      await waitFor(async () => {
+        clock.advance(100);
+        return reports.length > 0;
+      });
+    } finally {
+      await host.stopHost();
+    }
+    expect(opened).toBe(1);
+    expect(reports).toHaveLength(1);
+    expect((await store.getRun('run-retry'))?.waitingOn).toEqual([{ kind: 'signal', nodeId: 'a', signalType: 'approval:a', timeoutAt: undefined }]);
+  });
+});
+
 // ─── LocalRunHost-specific: poisoned-run cap ─────────────────────────────────
 // A run whose drive throws deterministically on every reclaim must settle as
 // `failed` after `maxConsecutiveDriveFailures` strikes instead of retrying

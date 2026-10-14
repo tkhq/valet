@@ -159,7 +159,10 @@ every waiting step, so it is too early. The dispatch id is
 `workflow-approval:{runId}:{attempt}`. Each drive has its own attempt, so the
 steps one drive parks wake the thread once. A later drive that opens a gate
 wakes it again, whether the earlier gate was approved, denied, or timed out.
-A drive that only resolves gates opens none and sends nothing. The signal
+A drive that only resolves gates opens none and sends nothing. The host keeps
+a run that opened a gate until a park reports it, so if the drive fails
+before it parks, the retry on that host reports. A process that dies loses
+the report: delivery is at most once, like the settle report. The signal
 queues as `followup` on every thread. A personal thread steers by default,
 and a steer admission would drop the person's queued messages, abort the
 running turn, and withdraw open decision cards. The body tells the assistant
