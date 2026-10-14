@@ -74,12 +74,15 @@ in
   name = "valet";
   runtimeInputs = [ procps ];
   text = ''
-    # Forward termination signals to Valet (the child of bwrap) so its
-    # graceful shutdown runs. If Valet is not up yet, signal bwrap itself.
+    # Forward termination signals to Valet so its graceful shutdown runs.
+    # bwrap runs Valet as its child. If Valet is not up yet, signal bwrap.
+    valet_pid=""
+    find_valet() {
+      pgrep -P "$launcher" -x valet 2>/dev/null | head -n1 || true
+    }
     forward() {
-      local target
-      target="$(pgrep -P "$launcher" | head -n1 || true)"
-      kill "-$1" "''${target:-$launcher}" 2>/dev/null || true
+      [ -n "$valet_pid" ] || valet_pid="$(find_valet)"
+      kill "-$1" "''${valet_pid:-$launcher}" 2>/dev/null || true
     }
 
     # Explicit <&0: a background job would otherwise get /dev/null as stdin.
@@ -90,14 +93,29 @@ in
       trap "forward $sig" "$sig"
     done
 
+    # Learn Valet's pid early. A SIGTERM that also kills bwrap (a service
+    # manager signals every process in the group) leaves Valet running its
+    # shutdown, and this script must wait for it.
+    for _ in $(seq 1 40); do
+      valet_pid="$(find_valet)"
+      if [ -n "$valet_pid" ] || ! kill -0 "$launcher" 2>/dev/null; then break; fi
+      sleep 0.05
+    done
+
     # A trapped signal interrupts wait with status > 128. Wait again until the
-    # launcher is gone, then report Valet's exit status.
+    # launcher is gone.
     while :; do
       status=0
       wait "$launcher" || status=$?
       if [ "$status" -gt 128 ] && kill -0 "$launcher" 2>/dev/null; then continue; fi
-      exit "$status"
+      break
     done
+
+    # bwrap died first but Valet is still shutting down: wait for it.
+    if [ -n "$valet_pid" ]; then
+      while kill -0 "$valet_pid" 2>/dev/null; do sleep 0.1; done
+    fi
+    exit "$status"
   '';
 
   meta = {

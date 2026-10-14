@@ -62,5 +62,9 @@ pid=""
 cat "$work/log2"
 grep -q "Received SIGTERM, shutting down" "$work/log2" \
   || { echo "FAIL: group SIGTERM did not reach Valet's shutdown handler" >&2; exit 1; }
-[[ "$status" -eq 0 ]] || { echo "FAIL: exit status $status after group SIGTERM, expected 0" >&2; exit 1; }
-echo "ok: group SIGTERM ran the graceful shutdown, exit 0"
+# Exit status is not checked here: bwrap died from the same signal, so the
+# wrapper reports bwrap's status. Valet's shutdown must still have finished.
+if curl -fsS "http://localhost:$port/api/health" >/dev/null 2>&1; then
+  echo "FAIL: server still answers after the wrapper exited (orphaned child)" >&2; exit 1
+fi
+echo "ok: group SIGTERM ran the graceful shutdown and the wrapper waited for it"
