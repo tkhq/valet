@@ -768,6 +768,37 @@ describe("DB-backed actions", () => {
     expect(typeof hugeCp.result.jsonPrefix).toBe("string");
   });
 
+  it("get_run lists the steps that wait for approval and the teammate who must approve one", async () => {
+    const plugin = workflowsActionPlugin(() => deps);
+    const action = (id: string) => plugin.actions.find((a) => a.id === id)!;
+    const params = {
+      workflowId: "wf-g", definitionVersionId: "v1",
+      input: { type: "manual", timestamp: "2026-01-01T00:00:00Z", data: {}, metadata: {} },
+    };
+    const definition = { version: "dag/v1", nodes: [
+      { id: "post", type: "tool", service: "slack", action: "send_message", params: {} },
+      { id: "check", type: "approval", prompt: "Ship it?" },
+    ], edges: [] };
+    await deps.workflowStore.createRun("run-g", params, definition, "v1", { ownerType: "user", ownerId: "user1" });
+    const claim = await deps.workflowStore.claimRun("run-g", "host", 30_000);
+    if (!claim) throw new Error("claim failed");
+    await deps.workflowStore.putIntent({ runId: "run-g", nodeId: "post", iteration: 0, status: "intent", attempt: claim.attempt, createdAt: 1,
+      effects: { gate: true, provenance: "shared_account", approver: { userId: "user2", name: "Teammate" } } });
+    await deps.workflowStore.putIntent({ runId: "run-g", nodeId: "check", iteration: 0, status: "intent", attempt: claim.attempt, createdAt: 1 });
+    await deps.workflowStore.parkRun("run-g", claim.attempt, [
+      { kind: "signal", nodeId: "post", signalType: "approval:post" },
+      { kind: "signal", nodeId: "check", signalType: "approval:check" },
+    ]);
+
+    const run = await action("workflows.get_run").execute({ run_id: "run-g" }, ctx());
+    expect(run.success).toBe(true);
+    if (!run.success) return;
+    expect((run.data as { pendingGates: unknown[] }).pendingGates).toEqual([
+      { nodeId: "post", kind: "policy_gate", service: "slack", action: "send_message", approver: { userId: "user2", name: "Teammate" } },
+      { nodeId: "check", kind: "approval" },
+    ]);
+  });
+
   it("get_node_transcript reads a step's prompt, tool errors, and format repair, and get_run flags the repair", async () => {
     const plugin = workflowsActionPlugin(() => deps);
     const action = (id: string) => plugin.actions.find((a) => a.id === id)!;

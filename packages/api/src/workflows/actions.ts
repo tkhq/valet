@@ -494,7 +494,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Get workflow run",
     description:
       "Fetch a run's status, outcome, per-node checkpoints, and what it is waiting on " +
-      "(timers, signals, approvals). Use to check progress or find pending approval gates.",
+      "(timers, signals, approvals). pendingGates lists each step that waits for approval and, " +
+      "for a step on a teammate's shared account, the teammate who must approve it.",
     riskLevel: "low",
     execute: async ({ run_id }, ctx) => {
       const owner = ownerFromContext(ctx);
@@ -509,6 +510,16 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           status: detail.run.status,
           outcome: detail.run.outcome,
           waitingOn: detail.run.waitingOn,
+          // The steps that wait for approval, and the member who must approve
+          // a step on their shared account. Anyone who can run the workflow
+          // approves a step with no approver.
+          pendingGates: detail.pendingGates.map((gate) => ({
+            nodeId: gate.nodeId,
+            ...(gate.iteration !== undefined ? { iteration: gate.iteration } : {}),
+            kind: gate.kind,
+            ...(gate.service ? { service: gate.service, action: gate.action } : {}),
+            ...(gate.approver ? { approver: { userId: gate.approver.userId, name: gate.approver.name } } : {}),
+          })),
           checkpoints: detail.checkpoints.map((cp) => ({
             nodeId: cp.nodeId,
             iteration: cp.iteration,

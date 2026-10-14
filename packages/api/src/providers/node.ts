@@ -649,7 +649,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // routes through the Phase 4 notification system. `onApprovalPending`
   // only receives `{runId, nodeId, prompt, summary?, details?}` — no owner
   // — so it re-resolves the run's owner from the store itself.
-  const runApprovalReport = buildRunApprovalReport({ db, engineHost, store: workflowStore });
   const onApprovalPending: OnApprovalPending = async (info) => {
     // Contained: the executor awaits this AFTER persisting the approval
     // intent, so a throw here would abort the drive AND permanently skip the
@@ -685,9 +684,6 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     } catch (err) {
       console.error(`workflow approval notification failed for ${info.runId}:${info.nodeId}`, err);
     }
-    // The thread that started the run hears about it too, so Valet can say
-    // which steps wait instead of staying silent until the run settles.
-    await runApprovalReport(info);
   };
 
   // "Grant the rest of this run" (action-policies plan, Task 3): an approval
@@ -762,6 +758,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engine: workflowEngineDeps,
     executors: createDefaultNodeExecutors(),
     onApprovalPending,
+    // The thread that started the run hears about it too, once the run
+    // parks, so Valet can say which steps wait instead of staying silent
+    // until the run settles.
+    onApprovalParked: buildRunApprovalReport({ db, engineHost, store: workflowStore }),
     onApprovalGrant,
     onGateResolved,
     // Settle attention (batch-fanout design decision 4): a failed top-level

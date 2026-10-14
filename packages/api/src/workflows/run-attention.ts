@@ -23,7 +23,7 @@
 import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import { eq } from "drizzle-orm";
 import type { SessionStore } from "@valet/engine";
-import type { NodeCheckpoint, OnApprovalPending, OnRunSettled, WorkflowRun, WorkflowStore } from "@valet/workflow";
+import type { NodeCheckpoint, OnApprovalParked, OnRunSettled, WorkflowRun, WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import { ensureAssistantRuntime, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
@@ -172,6 +172,11 @@ export function buildRunOriginReport(deps: RunOriginReportDeps): OnRunSettled {
  * Sends a signal to the assistant thread that started `run`, once per
  * `dispatchId`. A run no thread started (scheduled, event, or a sub-run)
  * has nowhere to report.
+ *
+ * The signal queues as `followup`, whatever the thread's own mode. A
+ * personal thread steers, and a steer admission supersedes the person's
+ * queued messages, aborts the running turn, and withdraws its open
+ * decision cards. A run report must wait its turn instead.
  */
 async function signalOrigin(
   deps: Pick<RunOriginReportDeps, "db" | "engineHost">,
@@ -192,47 +197,43 @@ async function signalOrigin(
   const { thread, priorQueueItemId } = await resolveWorkflowReportTarget(deps,
     { type: assistant.ownerType, id: assistant.ownerId }, meta, source.session, sourceThread, dispatchId);
   if (priorQueueItemId) return;
-  await thread.submitPrompt({ kind: "signal", ...(await signal()) }, { dispatchId });
+  await thread.submitPrompt({ kind: "signal", ...(await signal()) }, { dispatchId, queueMode: "followup" });
 }
 
-export interface RunApprovalReportDeps extends Pick<RunOriginReportDeps, "db" | "engineHost"> {
-  store: Pick<WorkflowStore, "getRun" | "listSignals">;
-}
+export type RunApprovalReportDeps = RunOriginReportDeps;
 
 /**
  * Tells the thread that started a run that the run waits for approval, as a
  * `workflow.approval_needed` signal, so Valet can say which steps wait and
  * offer to approve them instead of staying silent until the run settles.
  *
- * Steps that park together share one signal: the dispatch id counts the
- * approvals already resolved, so six steps parking at once wake the thread
- * once, and a step that parks after some approvals wakes it again. Contained
- * like the reports above.
+ * The host fires this after a drive that opened a gate parks the run, so
+ * `get_run` already lists every waiting step. Steps that park in one drive
+ * share one signal, keyed on the drive's attempt. A drive that only
+ * resolves some gates opens none and sends nothing. A sub-run reports
+ * nothing, like the settle report: its parent's thread did not start it.
+ * Contained like the reports above.
  */
-export function buildRunApprovalReport(deps: RunApprovalReportDeps): OnApprovalPending {
+export function buildRunApprovalReport(deps: RunApprovalReportDeps): OnApprovalParked {
   return async (info) => {
     try {
       const run = await deps.store.getRun(info.runId);
-      if (!run) return;
-      const resolved = (await deps.store.listSignals(info.runId))
-        .filter((signal) => signal.signalType.startsWith("approval:") && signal.signalId.endsWith(":resolution")).length;
-      // One message for the whole batch, whichever step parks first: the
-      // dispatch id admits identical content once and refuses any other.
-      await signalOrigin(deps, run, `workflow-approval:${info.runId}:${resolved}`, async () => ({
+      if (!run || run.params.parentRunId !== undefined) return;
+      await signalOrigin(deps, run, `workflow-approval:${info.runId}:${info.attempt}`, async () => ({
         signalType: "workflow.approval_needed",
         body: approvalReport(await workflowName(deps.db, run.params.workflowId), info.runId),
         attributes: { runId: info.runId },
       }));
     } catch (err) {
-      console.error(`workflow approval report to its thread failed for ${info.runId}:${info.nodeId}:`, err);
+      console.error(`workflow approval report to its thread failed for ${info.runId}:`, err);
     }
   };
 }
 
 /** What a run waiting for approval tells the thread that started it. */
 export function approvalReport(name: string, runId: string): string {
-  return `Workflow "${name}" is waiting for approval. Read get_run for every step that waits and who can approve it ` +
-    `(a step on a teammate's shared account waits for that teammate). Run ${runId} (/workflows/runs/${runId}).`;
+  return `Workflow "${name}" is waiting for approval. Call get_run: pendingGates lists every step that waits, ` +
+    `and names the teammate who must approve a step on their shared account. Run ${runId} (/workflows/runs/${runId}).`;
 }
 
 /** What a settled run tells the thread that started it. */
