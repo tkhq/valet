@@ -81,7 +81,9 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
     name: `${CONFIG_MCP_PLUGIN_PREFIX}${entry.name}`,
     version: "0.0.0",
     displayName,
-    description: entry.description ?? `Config-declared MCP server (${entry.url})`,
+    // The connect UI shows this text, so it carries the display URL: never
+    // the userinfo or query string a server URL can hold a secret in.
+    description: entry.description ?? `Config-declared MCP server (${configMcpDisplayUrl(entry.url)})`,
     actions: [
       mcpActionPlugin({
         mcpUrl: entry.url,
