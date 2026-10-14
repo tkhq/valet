@@ -60,6 +60,7 @@ import {
   updateWorkflowTrigger,
 } from "./trigger-service.js";
 import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
+import { readStepTranscript } from "./step-transcript.js";
 import {
   deleteWorkflowWebhook,
   getWorkflowWebhook,
@@ -514,6 +515,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             // started — how the agent reaches a failed node's actual output.
             sessionId: cp.sessionId,
             childRunId: cp.childRunId,
+            ...(cp.repairAttempted ? { repairAttempted: true } : {}),
+            ...(cp.schemaError ? { schemaError: cp.schemaError } : {}),
           })),
         },
       };
@@ -906,6 +909,75 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             error: cp.error,
             result: presentResult(cp.result, 20_000),
           })),
+        },
+      };
+    },
+  });
+
+  const getNodeTranscript = action(
+    Type.Object({
+      run_id: Type.String(),
+      node_id: Type.String(),
+      iteration: Type.Optional(Type.Number()),
+      before: Type.Optional(Type.Number()),
+      limit: Type.Optional(Type.Number()),
+    }),
+  )({
+    id: "workflows.get_node_transcript",
+    name: "Get node transcript",
+    description:
+      "Read the conversation a session or orchestrator step held: the prompt it received with " +
+      "templates filled in, its replies, any format-repair prompt, and each tool call with its " +
+      "arguments, result, and error. Use it when a step's result is surprising and " +
+      "get_node_result does not explain why. Messages come oldest first. `index` numbers each " +
+      "message; pass `before` to read the page before that index.",
+    riskLevel: "low",
+    execute: async ({ run_id, node_id, iteration, before, limit }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const detail = await getWorkflowRunDetail(getDeps(), owner, run_id);
+      if (!detail) return { success: false, error: `run not found: ${run_id}` };
+      const matches = detail.checkpoints.filter(
+        (cp) => cp.nodeId === node_id && (iteration === undefined || cp.iteration === iteration),
+      );
+      if (matches.length === 0) return { success: false, error: `run ${run_id} has no checkpoint for node ${JSON.stringify(node_id)}` };
+      if (matches.length > 1) {
+        const iterations = matches.map((cp) => cp.iteration).sort((a, b) => a - b).join(", ");
+        return { success: false, error: `Node ${JSON.stringify(node_id)} ran iterations ${iterations}. Pass iteration to choose one.` };
+      }
+      const checkpoint = matches[0]!;
+      if (!checkpoint.sessionId) {
+        return { success: false, error: `Node ${JSON.stringify(node_id)} ran no conversation. Only session and orchestrator steps keep a transcript; use get_node_result for this node.` };
+      }
+      const pageSize = Math.min(Math.max(Math.trunc(limit ?? TRANSCRIPT_PAGE), 1), TRANSCRIPT_PAGE_MAX);
+      // A session step owns its thread, repair turn included. An orchestrator
+      // step shares a thread with other steps and with chat, so it reads only
+      // its own submission.
+      // After a format repair the checkpoint's receipt names the repair, and
+      // the stored effects keep the first submission, so both turns load.
+      const ownThread = checkpoint.sessionId.startsWith("wf:");
+      const stored = (await getDeps().workflowStore.getCheckpoints(run_id))
+        .find((cp) => cp.nodeId === node_id && cp.iteration === checkpoint.iteration);
+      const firstQueueItemId = typeof stored?.effects?.firstQueueItemId === "string" ? stored.effects.firstQueueItemId : undefined;
+      const queueItemIds = [firstQueueItemId, checkpoint.queueItemId].filter((id): id is string => id !== undefined);
+      const transcript = await readStepTranscript(getDeps().engineStore, checkpoint.sessionId, checkpoint.threadId, {
+        ...(before !== undefined ? { before: Math.trunc(before) } : {}),
+        limit: pageSize,
+        ...(!ownThread && queueItemIds.length > 0 ? { queueItemIds } : {}),
+      });
+      if (!transcript) return { success: false, error: `The conversation for node ${JSON.stringify(node_id)} is no longer stored.` };
+      return {
+        success: true,
+        data: {
+          runId: run_id,
+          nodeId: node_id,
+          iteration: checkpoint.iteration,
+          sessionId: checkpoint.sessionId,
+          threadId: transcript.threadId,
+          ...(checkpoint.repairAttempted ? { repairAttempted: true } : {}),
+          ...(checkpoint.schemaError ? { schemaError: checkpoint.schemaError } : {}),
+          total: transcript.total,
+          messages: transcript.messages,
         },
       };
     },
@@ -1322,6 +1394,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       startRun,
       getRun,
       getNodeResult,
+      getNodeTranscript,
       listRuns,
       cancelRun,
       resolveApproval,
@@ -1342,6 +1415,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     ],
   };
 }
+
+/** Messages per `get_node_transcript` page, and the most a caller may ask for. */
+const TRANSCRIPT_PAGE = 20;
+const TRANSCRIPT_PAGE_MAX = 50;
 
 /**
  * Return a checkpoint result verbatim when its JSON fits `maxChars`, so the

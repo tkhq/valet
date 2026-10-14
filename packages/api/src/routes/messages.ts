@@ -58,6 +58,8 @@ import type {
 } from "../wire/types.js";
 import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
+import { workflowRequestContext } from "../workflows/request-context.js";
+import { canReadWorkflowRun } from "../workflows/service.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW, GATE_ACTION_ALWAYS_ALLOW_OWNER, ownerAlwaysAllowRefusal } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { answersGate, canResolveSessionGate, canViewSession, gateApprover, type SessionOwnerLike } from "../services/session-access.js";
@@ -893,6 +895,7 @@ async function visibleThread(
 messagesRouter.get("/:id/messages", (c) => listMessages(c, c.req.param("id")));
 
 export async function listMessages(c: Context<AppEnv>, sessionId: string, threadId?: string) {
+  if (sessionId.startsWith("wf:")) return listWorkflowStepMessages(c, sessionId, threadId);
   const result = await loadEngineSession(c, sessionId);
   if ("error" in result) return result.error;
   const { session, engineSession } = result;
@@ -923,6 +926,37 @@ export async function listMessages(c: Context<AppEnv>, sessionId: string, thread
     messages,
     hasMore,
     nextCursor: undefined, // engine cursor pagination is opaque; revisit if needed
+  };
+  return c.json(body);
+}
+
+/**
+ * A workflow step session's messages, for the run page's step logs. The
+ * session has no app row, so `loadEngineSession` cannot reach it. Whoever may
+ * read the run reads its steps, by the same check as `get_run`, and the read
+ * is bounded like the live path. Nothing builds the session.
+ */
+async function listWorkflowStepMessages(c: Context<AppEnv>, sessionId: string, threadId?: string) {
+  const missing = () => c.json({ error: "session not found" }, 404);
+  let runId: string;
+  try { ({ runId } = parseWorkflowSessionId(sessionId)); } catch { return missing(); }
+  const { deps, owner } = workflowRequestContext(c);
+  if (!(await canReadWorkflowRun(deps, owner, runId))) return missing();
+  const store = c.var.providers.engineStore;
+  const requested = threadId ?? (c.req.query("threadId") || undefined);
+  const thread = requested ? await store.getThread(sessionId, requested) : (await store.listThreads(sessionId))[0];
+  if (!thread) return c.json({ error: "thread not found" }, 404);
+  const parsedLimit = Number.parseInt(c.req.query("limit") ?? "100", 10);
+  const limit = Math.min(2000, Number.isNaN(parsedLimit) ? 100 : Math.max(1, parsedLimit));
+  const queueItemId = c.req.query("queueItemId") || undefined;
+  const entries = await store.getEntries(sessionId, thread.id, { limit: limit + 1, cursor: c.req.query("cursor") ?? undefined, queueItemId });
+  const hasMore = entries.length > limit;
+  const body: ListMessagesResponse = {
+    messages: (hasMore ? entries.slice(1) : entries)
+      .map((e) => entryToMessage(e, sessionId, thread.id))
+      .filter((m): m is Message => m !== null),
+    hasMore,
+    nextCursor: undefined,
   };
   return c.json(body);
 }

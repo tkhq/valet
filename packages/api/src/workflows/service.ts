@@ -1694,8 +1694,9 @@ function workflowActionTrigger(params: unknown): ListWorkflowActionRequiredRespo
  * node's `sessionId` and a workflow node's `childRunId` in the checkpoint's
  * `effects` bag (`nodes/submission-node.ts`, `nodes/workflow-call.ts`);
  * both are what turns a run page into a link to the work the node started.
- * The rest of `effects` (receipts, repair state) is interpreter bookkeeping
- * and stays off the wire.
+ * The repair state is on the wire too: without it, a step whose first reply
+ * failed its schema looks the same as one that passed. The rest of `effects`
+ * is interpreter bookkeeping and stays off the wire.
  */
 export function toRunCheckpoint(cp: NodeCheckpoint): WorkflowRunCheckpoint {
   const effects = cp.effects;
@@ -1715,6 +1716,8 @@ export function toRunCheckpoint(cp: NodeCheckpoint): WorkflowRunCheckpoint {
     // /chat, which then lands on the NEWEST thread rather than the run's.
     threadId: receiptField(effects, "threadId"),
     queueItemId: receiptField(effects, "queueItemId"),
+    ...(effects?.repairAttempted === true ? { repairAttempted: true } : {}),
+    ...(typeof effects?.firstError === "string" ? { schemaError: effects.firstError } : {}),
   };
 }
 
@@ -1774,6 +1777,12 @@ async function pendingApprovers(deps: WorkflowServiceDeps, run: { runId: string;
     if (approver) found.set(`${cp.nodeId}:${cp.iteration}`, approver);
   }
   return found;
+}
+
+/** May `owner` read run `runId`? The check `get_run` and the run page use:
+ * the run's owner and the audience of its origin thread or Slack channel. */
+export async function canReadWorkflowRun(deps: WorkflowServiceDeps, owner: WorkflowOwner, runId: string): Promise<boolean> {
+  return (await ownedRun(deps, owner, runId)) !== null;
 }
 
 async function ownedRun(

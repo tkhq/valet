@@ -390,6 +390,13 @@ describe('executeSession: schema validation failure triggers exactly one repair'
     expect(byNode.get('s')?.status).toBe('intent'); // still parked on the repair submission, not terminal
     expect(byNode.get('s')?.effects?.repairAttempted).toBe(true);
     expect(byNode.get('s')?.effects?.firstError).toContain('missing value');
+    // The repair replaces the receipt; the first submission stays findable.
+    const effects = byNode.get('s')?.effects;
+    const receipt = effects?.receipt;
+    const repairQueueItemId = receipt && typeof receipt === 'object' && 'queueItemId' in receipt ? receipt.queueItemId : undefined;
+    expect(typeof effects?.firstQueueItemId).toBe('string');
+    expect(typeof repairQueueItemId).toBe('string');
+    expect(effects?.firstQueueItemId).not.toBe(repairQueueItemId);
   });
 });
 
@@ -425,6 +432,8 @@ describe('executeSession: second validation failure fails the node', () => {
     expect(byNode.get('s')?.status).toBe('failed');
     expect(byNode.get('s')?.error).toMatch(/second validation error/);
     expect(byNode.get('s')?.effects?.firstError).toBe('first validation error');
+    // The settled checkpoint keeps the first submission after the repair failed too.
+    expect(typeof byNode.get('s')?.effects?.firstQueueItemId).toBe('string');
     expect(byNode.get('s')?.result).toBeUndefined();
 
     const repairCalls = calls.filter((c) => c.kind === 'prompt' && c.dispatchId === 'workflow:run-8:s:repair');

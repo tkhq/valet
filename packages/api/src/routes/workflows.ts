@@ -11,10 +11,9 @@ import { workflowRunConversations } from "./workflow-run-conversations.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { NotFoundError } from "@valet/shared";
-import type { CredentialStore } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requirePrincipal } from "../middleware/auth.js";
-import { isAgentCaller, resolveCreateOwner, type AuthVia, type RequestPrincipal } from "../lib/request-principal.js";
+import { resolveCreateOwner } from "../lib/request-principal.js";
 import { isTeamMember } from "../services/teams.js";
 import {
   WorkflowCursorError,
@@ -66,6 +65,7 @@ import {
   type WorkflowScheduleSummary,
 } from "../workflows/schedule-service.js";
 import { buildValidateEnvironment, buildOrgValidateEnvironment } from "../workflows/validation-env.js";
+import { workflowRequestContext } from "../workflows/request-context.js";
 import { applyWorkflowModelPatch } from "../workflows/patch.js";
 import { workflowRunStepCosts } from "../workflows/step-cost.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
@@ -150,29 +150,8 @@ function parseRunLimit(raw: string | undefined): { limit?: number } | { error: s
   return { limit };
 }
 
-function serviceCtx(c: {
-  var: {
-    providers: Omit<WorkflowServiceDeps, "credentials"> & { engineCredentials: CredentialStore };
-    user: { id: string; orgId: string };
-    principal?: RequestPrincipal;
-    authVia?: AuthVia;
-  };
-}): { deps: WorkflowServiceDeps; owner: WorkflowOwner; env: ValidateEnvironment } {
-  const { db, workflowStore, workflowRunHost, actionPluginByService, engineCredentials, engineStore } =
-    c.var.providers;
-  return {
-    // `engineStore` is what run-origin validation probes for the origin
-    // thread (`activeWorkflowOrigin`).
-    deps: { db, workflowStore, workflowRunHost, actionPluginByService, credentials: engineCredentials, engineStore },
-    owner: {
-      userId: c.var.principal?.type === "team" ? `team:${c.var.principal.id}` : c.var.user.id,
-      orgId: c.var.user.orgId,
-      principal: c.var.principal,
-      // An MCP app or a `valet login` CLI: a step change revokes grants.
-      agentEditor: c.var.authVia !== undefined && isAgentCaller(c.var.authVia),
-    },
-    env: buildValidateEnvironment(actionPluginByService),
-  };
+function serviceCtx(c: Parameters<typeof workflowRequestContext>[0]): { deps: WorkflowServiceDeps; owner: WorkflowOwner; env: ValidateEnvironment } {
+  return { ...workflowRequestContext(c), env: buildValidateEnvironment(c.var.providers.actionPluginByService) };
 }
 
 
