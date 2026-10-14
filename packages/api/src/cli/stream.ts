@@ -26,6 +26,7 @@
  */
 import { WebSocket, type RawData } from "ws";
 import { UnreachableError } from "./exit.js";
+import { printErr } from "./output.js";
 import { latestCredential } from "./token-refresh.js";
 import type { WireEvent, WireEventType } from "../wire/types.js";
 
@@ -269,11 +270,11 @@ export async function* streamSession(opts: StreamSessionOpts): AsyncGenerator<Wi
         try {
           parsed = JSON.parse(text);
         } catch {
-          process.stderr.write("streamSession: dropping malformed (non-JSON) frame\n");
+          printErr("streamSession: dropping malformed (non-JSON) frame");
           return;
         }
         if (!isWireEvent(parsed)) {
-          process.stderr.write("streamSession: dropping frame with unknown type\n");
+          printErr("streamSession: dropping frame with unknown type");
           return;
         }
         // Progress → reset backoff and advance the resume offset.

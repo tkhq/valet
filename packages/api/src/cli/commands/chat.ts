@@ -28,7 +28,7 @@
 import type { Interface as ReadlineInterface } from "node:readline";
 import { InstanceClient } from "../client.js";
 import { ExitCode } from "../exit.js";
-import { parseGlobalFlags, printErr, printLine } from "../output.js";
+import { parseGlobalFlags, printErr, printLine, printText } from "../output.js";
 import { resolveInstance } from "../resolve.js";
 import { streamSession } from "../stream.js";
 import type { CliContext } from "../types.js";
@@ -361,7 +361,7 @@ export async function run(args: string[], ctx: CliContext): Promise<number> {
           url: instance.url,
           apiKey: instance.apiKey,
           signal: controller.signal,
-          write: (s) => process.stdout.write(s),
+          write: printText,
           readSelection: (gate) => question(`resolve ${gate.id} › `, controller.signal),
         },
         { sessionId, threadId, text },

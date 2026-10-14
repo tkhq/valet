@@ -11,7 +11,7 @@
  */
 import { InstanceClient } from "../client.js";
 import { ExitCode } from "../exit.js";
-import { emitNdjson, parseGlobalFlags, printErr, printLine, type ParsedFlags } from "../output.js";
+import { emitNdjson, parseGlobalFlags, printErr, printLine, printText, type ParsedFlags } from "../output.js";
 import { resolveInstance } from "../resolve.js";
 import { streamSession, type StreamSessionOpts } from "../stream.js";
 import type { CliContext } from "../types.js";
@@ -153,7 +153,7 @@ export async function consumeSend(deps: Omit<SendDeps, "client">, ctx: ConsumeCt
     if (!ctx.json) {
       switch (ev.type) {
         case "text_delta":
-          if (ev.threadId === ctx.threadId) process.stdout.write(ev.delta);
+          if (ev.threadId === ctx.threadId) printText(ev.delta);
           break;
         case "tool_start":
           if (ev.threadId === ctx.threadId) printLine(renderToolStart(ev.toolName));
