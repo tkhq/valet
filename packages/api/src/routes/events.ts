@@ -136,43 +136,19 @@ type NarrowedSubscriptionRow = Omit<
 };
 
 /**
- * Why a replacement cannot turn on, and how the reviewer recovers. When any
- * version already replaced the same one, re-enabling the old one and
- * retrying could leave two versions on: the successor, or a later version
- * that replaced it, may still reply. So the message never advises that.
- * The replaced row's own `replacedBy` keeps that history after its
- * successor is deleted. The message names the direct successor only while
- * that successor is on.
+ * Why a replacement cannot turn on, and how the reviewer recovers. The
+ * message never says to turn the replaced version back on: that version's
+ * history (a successor, a later version that replaced the successor, a
+ * rollback) decides whether doing so leaves two versions replying, and the
+ * rows do not keep that history reliably. It sends the reviewer to the
+ * version that replies now.
  */
-async function staleReplacement(
-  db: AppDb,
-  proposal: Pick<typeof eventSubscriptions.$inferSelect, "id" | "orgId" | "ownerType" | "ownerId">,
-  replaced: { id: string; name: string; target: unknown } | undefined,
-): Promise<string> {
+function staleReplacement(replaced: { name: string } | undefined): string {
   if (replaced === undefined) {
     return "This proposal replaces a subscription that was removed. Delete this proposal, then ask the assistant for a new one.";
   }
-  const [successor] = await db
-    .select({ name: eventSubscriptions.name, enabled: eventSubscriptions.enabled })
-    .from(eventSubscriptions)
-    .where(and(
-      ne(eventSubscriptions.id, proposal.id), eq(eventSubscriptions.orgId, proposal.orgId),
-      eq(eventSubscriptions.ownerType, proposal.ownerType), eq(eventSubscriptions.ownerId, proposal.ownerId),
-      sql`${eventSubscriptions.target}->>'replaced' = ${replaced.id}`,
-    ))
-    .orderBy(desc(eventSubscriptions.enabled))
-    .limit(1);
-  if (successor?.enabled) {
-    return `"${replaced.name}" was already replaced by "${successor.name}". ` +
-      `Delete this proposal, or ask the assistant for a new one that replaces "${successor.name}".`;
-  }
-  const replacedBefore = typeof replaced.target === "object" && replaced.target !== null && "replacedBy" in replaced.target;
-  if (successor || replacedBefore) {
-    return `"${replaced.name}" was already replaced by a newer version. Delete this proposal. ` +
-      "To change the version that replies now, ask the assistant for a new proposal that replaces it.";
-  }
-  return `This proposal replaces "${replaced.name}", which is off, so enabling it could leave two versions on. ` +
-    `Turn "${replaced.name}" back on, then enable this proposal. Enabling it turns "${replaced.name}" off again.`;
+  return `This proposal replaces "${replaced.name}", which is off, so enabling it could leave two versions replying. ` +
+    "Delete this proposal. To change the subscription that replies now, ask the assistant for a new proposal that replaces it.";
 }
 
 /** Another enable turned the replaced version off first; rolls this enable back. */
@@ -879,7 +855,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   const replaces = arming && patchedTarget.kind === "orchestrator" ? patchedTarget.replaces : undefined;
   // An assistant subscription only: a workflow trigger is not a version.
   const replaced = replaces === undefined ? undefined : (await db
-    .select({ id: eventSubscriptions.id, name: eventSubscriptions.name, enabled: eventSubscriptions.enabled, target: eventSubscriptions.target })
+    .select({ id: eventSubscriptions.id, name: eventSubscriptions.name, enabled: eventSubscriptions.enabled })
     .from(eventSubscriptions)
     .where(and(
       eq(eventSubscriptions.id, replaces), ne(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId),
@@ -890,7 +866,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // A replacement turns off a version that still replies. If that version is
   // already off or gone (another replacement of it was enabled, or a person
   // removed it), enabling this one could leave two versions on.
-  if (replaces !== undefined && !replaced?.enabled) return c.json({ error: await staleReplacement(db, row, replaced) }, 409);
+  if (replaces !== undefined && !replaced?.enabled) return c.json({ error: staleReplacement(replaced) }, 409);
   const replacedId = replaced?.id;
   let collisions: EventSubscriptionCollisionsWire | undefined;
   if (willBeEnabled && (matchChanged || arming)) {
@@ -954,13 +930,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       if (rows[0] && replacedId !== undefined) {
         const off = await tx
           .update(eventSubscriptions)
-          // `replacedBy` stays on the old row, so deleting this row later
-          // does not erase that the old one was replaced.
-          .set({
-            enabled: false,
-            target: sql`${eventSubscriptions.target} || jsonb_build_object('replacedBy', ${id}::text)`,
-            updatedAt: sql`greatest(${eventSubscriptions.updatedAt} + 1, ${Date.now()})`,
-          })
+          .set({ enabled: false, updatedAt: sql`greatest(${eventSubscriptions.updatedAt} + 1, ${Date.now()})` })
           .where(and(eq(eventSubscriptions.id, replacedId), eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.enabled, true)))
           .returning({ id: eventSubscriptions.id });
         if (off.length === 0) throw new StaleReplacementError();
@@ -968,7 +938,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       return rows;
     });
   } catch (err) {
-    if (err instanceof StaleReplacementError) return c.json({ error: await staleReplacement(db, row, replaced) }, 409);
+    if (err instanceof StaleReplacementError) return c.json({ error: staleReplacement(replaced) }, 409);
     throw err;
   }
 

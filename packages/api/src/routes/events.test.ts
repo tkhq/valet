@@ -2223,65 +2223,57 @@ describe("replacement proposals", () => {
     expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: true });
   });
 
-  it("refuses a replacement whose version is already off, so two siblings never both reply", async () => {
+  // Whatever turned the replaced version off, the 409 sends the reviewer to
+  // the version that replies now and never says to turn the old one back on:
+  // its history decides whether that leaves two versions replying.
+  async function expectStale(a: TestApi, id: string): Promise<void> {
+    const stale = await patchSubscription(a.baseUrl, id, { enabled: true, allowCollision: true });
+    expect(stale.status).toBe(409);
+    const message = ((await stale.json()) as { error: string }).error;
+    expect(message).toContain("Delete this proposal.");
+    expect(message).not.toContain("back on");
+  }
+
+  it("refuses a replacement whose version a sibling already replaced", async () => {
     const a = await boot();
     await seedReplacement(a);
     await seedSubscriptionRow(a, "sub_sibling", "local-org", {
       ownerType: "user", ownerId: "local-user", ...MATCH, name: "replies v3", enabled: false, target: { kind: "orchestrator", replaces: "sub_live" },
     });
     expect((await patchSubscription(a.baseUrl, "sub_sibling", { enabled: true })).status).toBe(200);
-    const stale = await patchSubscription(a.baseUrl, "sub_next", { enabled: true, allowCollision: true });
-    expect(stale.status).toBe(409);
-    // The message points at the live version, never back at the one it replaced.
-    const message = ((await stale.json()) as { error: string }).error;
-    expect(message).toContain('"replies v1" was already replaced by "replies v3".');
-    expect(message).not.toContain("back on");
+    await expectStale(a, "sub_next");
     expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: false, sub_sibling: true });
   });
 
-  it("refuses a replacement of a version replaced two generations ago, without advising to turn it back on", async () => {
+  it("refuses a replacement of a version that was rolled back, and of one rolled back and then paused", async () => {
     const a = await boot();
     await seedReplacement(a);
     const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH, enabled: false };
-    await seedSubscriptionRow(a, "sub_old", "local-org", { ...mine, name: "replies v2b", target: { kind: "orchestrator", replaces: "sub_live" } });
     await seedSubscriptionRow(a, "sub_v3", "local-org", { ...mine, name: "replies v3", target: { kind: "orchestrator", replaces: "sub_next" } });
     expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(200);
-    expect((await patchSubscription(a.baseUrl, "sub_v3", { enabled: true })).status).toBe(200);
-    const stale = await patchSubscription(a.baseUrl, "sub_old", { enabled: true, allowCollision: true });
-    expect(stale.status).toBe(409);
-    const message = ((await stale.json()) as { error: string }).error;
-    expect(message).toContain('"replies v1" was already replaced by a newer version.');
-    expect(message).not.toContain("back on");
-    expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: false, sub_v3: true, sub_old: false });
+    // Roll back by hand: the new version off, the original on.
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: false })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: true, allowCollision: true })).status).toBe(200);
+    await expectStale(a, "sub_v3");
+    expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: false, sub_v3: false });
+    // A proposal for the restored original works while it is on; once it is paused, it is stale too.
+    await seedSubscriptionRow(a, "sub_q", "local-org", { ...mine, name: "replies q", target: { kind: "orchestrator", replaces: "sub_live" } });
+    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: false })).status).toBe(200);
+    await expectStale(a, "sub_q");
   });
 
-  it("still refuses a stale replacement after the version that replaced it is deleted", async () => {
+  it("refuses a stale replacement after the version that replaced it is deleted, and writes nothing onto the replaced row", async () => {
     const a = await boot();
     await seedReplacement(a);
+    const [before] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_live"));
     const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH, enabled: false };
     await seedSubscriptionRow(a, "sub_old", "local-org", { ...mine, name: "replies v2b", target: { kind: "orchestrator", replaces: "sub_live" } });
     expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(200);
-    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: false })).status).toBe(200);
+    // The replaced row keeps its own target, so a retried proposal for it still matches.
+    const [after] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_live"));
+    expect(after.target).toEqual(before.target);
     await a.providers.db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_next"));
-    const stale = await patchSubscription(a.baseUrl, "sub_old", { enabled: true });
-    expect(stale.status).toBe(409);
-    const message = ((await stale.json()) as { error: string }).error;
-    expect(message).toContain('"replies v1" was already replaced by a newer version.');
-    expect(message).not.toContain("back on");
-    const [live] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_live"));
-    expect(live).toMatchObject({ enabled: false, target: { replacedBy: "sub_next" } });
-  });
-
-  it("tells the reviewer to turn a paused version back on, and that recovery leaves one version on", async () => {
-    const a = await boot();
-    await seedReplacement(a);
-    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: false })).status).toBe(200);
-    const stale = await patchSubscription(a.baseUrl, "sub_next", { enabled: true });
-    expect(stale.status).toBe(409);
-    expect(await stale.json()).toMatchObject({ error: expect.stringContaining('Turn "replies v1" back on, then enable this proposal.') });
-    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: true })).status).toBe(200);
-    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(200);
-    expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: true });
+    await expectStale(a, "sub_old");
   });
 
   it("refuses a replacement whose version was removed, and keeps its link", async () => {
