@@ -4841,6 +4841,12 @@ export interface EventDeliveryWire {
   /** The subscription's display name, so a delivery row can say what it
    * was trying to reach without a second request. */
   subscriptionName?: string;
+  /** The assistant thread that received this delivery. Absent when the
+   * delivery reached no thread, or when the viewer may not open it. */
+  thread?: { sessionId: string; threadId: string };
+  /** The workflow run this delivery started. Absent when no run started, or
+   * when the viewer may not open it. */
+  runId?: string;
 }
 
 /** `POST /api/events/:id/redeliver` — queue a fresh delivery for an event

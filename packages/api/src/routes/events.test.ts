@@ -13,6 +13,7 @@ import slackPlugin from "@valet/plugin-slack/plugin";
 import type { RunHost } from "@valet/workflow";
 import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   eventDeliveries,
@@ -26,6 +27,7 @@ import {
   workflowDefinitions,
 } from "../schema/index.js";
 import * as teamsService from "../services/teams.js";
+import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { deleteTeam } from "../services/teams.js";
 import type {
   CreateEventSubscriptionRequest,
@@ -791,6 +793,65 @@ describe("GET /api/events/:id", () => {
 
     const res = await fetch(`${a.baseUrl}/api/events/ev_foreign`);
     expect(res.status).toBe(404);
+  });
+
+  /** One event with an assistant delivery admitted to the caller's own
+   * assistant thread, a workflow delivery whose run started, and a dead
+   * workflow delivery that started nothing. */
+  async function seedDestinations(a: TestApi): Promise<{ sessionId: string; threadId: string }> {
+    await seedEventRow(a, { id: "ev_dest", receivedAt: 1_000 });
+    const owner = { ownerType: "user" as const, ownerId: "local-user" };
+    await seedSubscriptionRow(a, "sub_assist", "local-org", { ...owner, name: "Triage" });
+    await seedSubscriptionRow(a, "sub_wf", "local-org", { ...owner, target: { kind: "workflow", workflowId: "wf_dest" } });
+    await seedWorkflowRow(a, "wf_dest");
+    const delivered = { eventId: "ev_dest", attempts: 1, nextAttemptAt: 1_000, createdAt: 1_000 };
+    await a.providers.db.insert(eventDeliveries).values([
+      { ...delivered, id: "del_assist", subscriptionId: "sub_assist", status: "delivered", deliveredAt: 2_000 },
+      { ...delivered, id: "del_wf", subscriptionId: "sub_wf", status: "delivered", deliveredAt: 2_000 },
+      { ...delivered, id: "del_wf_dead", subscriptionId: "sub_wf", status: "dead", lastError: "boom" },
+    ]);
+    // The thread is paused, so the admitted delivery waits in the queue and
+    // no model runs.
+    const session = await defaultAssistantSessionFor(a.providers, { type: "user", id: "local-user" }, { actorUserId: "local-user", orgId: "local-org" });
+    const thread = session.thread("events");
+    await thread.pause();
+    await thread.submitPrompt(
+      { kind: "signal", signalType: "github.pull_request.opened", body: "event ev_dest" },
+      { dispatchId: eventDeliveryDispatchId("del_assist") },
+    );
+    const definition = { version: "dag/v1" as const, nodes: [], edges: [] };
+    await a.providers.workflowStore.createRun(eventDeliveryRunId("del_wf"), { workflowId: "wf_dest", definitionVersionId: "v1" }, definition, "v1", owner);
+    return { sessionId: session.id, threadId: thread.id };
+  }
+
+  it("links an assistant delivery to its thread and a workflow delivery to its run", async () => {
+    const a = await boot();
+    const thread = await seedDestinations(a);
+
+    const body = (await (await fetch(`${a.baseUrl}/api/events/ev_dest`)).json()) as GetEventResponse;
+    const byId = new Map(body.deliveries.map((d) => [d.id, d]));
+    expect(byId.get("del_assist")?.thread).toEqual(thread);
+    expect(byId.get("del_assist")?.runId).toBeUndefined();
+    expect(byId.get("del_wf")?.runId).toBe(eventDeliveryRunId("del_wf"));
+    expect(byId.get("del_wf")?.thread).toBeUndefined();
+    // A delivery that started no run links nowhere.
+    expect(byId.get("del_wf_dead")?.runId).toBeUndefined();
+  });
+
+  it("omits the thread and the run for a viewer who may not open them", async () => {
+    const a = await boot();
+    await seedDestinations(a);
+
+    // The event and its deliveries are org-visible, but the thread and the
+    // run belong to another member's personal workspace.
+    const res = await fetch(`${a.baseUrl}/api/events/ev_dest`, { headers: { "x-valet-test-user-id": "test-member" } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as GetEventResponse;
+    expect(body.deliveries).toHaveLength(3);
+    for (const delivery of body.deliveries) {
+      expect(delivery.thread).toBeUndefined();
+      expect(delivery.runId).toBeUndefined();
+    }
   });
 });
 

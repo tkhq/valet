@@ -259,6 +259,17 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
 - `GET /api/events` — org event feed (filter by service/key/time);
   `GET /api/events/:id` includes its deliveries (debugging "why didn't my
   trigger fire").
+- Each delivery on `GET /api/events/:id` names where it went, when the
+  caller may open it: `thread` (`sessionId`, `threadId`) for an assistant
+  delivery, `runId` for a workflow delivery. The dispatcher admits an
+  assistant delivery under the dispatch id `event:{deliveryId}`, and the
+  engine keeps that id on the queue item. One query over
+  `engine_queue_items` finds the thread of every delivery of the event. A
+  thread must pass the `/threads/:threadId` rule: `canViewSession`, then
+  on a team the thread's audience (`visibleThreadIds`). A run must pass the
+  run page rule (`canReadWorkflowRun`) for the derived id
+  `wfrun_evt_{deliveryId}`. A delivery that reached nothing, or that the
+  caller may not open, has neither field.
 - `GET /api/events/catalog` — merged catalog from loaded plugins; drives the
   subscription-builder UI.
 - `POST/GET/PATCH/DELETE /api/event-subscriptions` — CRUD; validates event
@@ -322,6 +333,11 @@ first UI over this system. Two tabs:
   workflow. The UI says "assistant"; the wire keeps `orchestrator`. Rows
   badge team owners with the team's name and a colleague's personal
   subscription with "Personal"; an unbadged row is the caller's own.
+
+An event also has its own page (`routes/events.$eventId.tsx`). Its delivery
+list (`components/events/delivery-list.tsx`) shows "Open thread" or "Open
+run" on a delivery that carries a `thread` or a `runId`. A reader can then
+open the transcript or the run that the event caused.
 
 Each mutable row's menu opens an edit dialog
 (`components/events/edit-subscription-dialog.tsx`): name, event keys, and
