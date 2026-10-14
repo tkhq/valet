@@ -44,16 +44,20 @@ if curl -fsS "http://localhost:$port/api/health" >/dev/null 2>&1; then
 fi
 echo "ok: SIGTERM reached Valet, graceful exit 0, no orphan"
 
-echo "== SIGKILL to the wrapper must not leave an orphaned server"
+echo "== SIGTERM to the whole process tree at once (systemd KillMode=control-group)"
 "$valet" serve --port "$port" --data-dir "$work/data2" --sandbox local >"$work/log2" 2>&1 &
 pid=$!
 wait_healthy
-kill -KILL "$pid"
-wait "$pid" 2>/dev/null || true
+tree="$pid $(pgrep -P "$pid" | tr '\n' ' ')"
+# shellcheck disable=SC2086
+kill -TERM $tree
+status=0
+for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+if kill -0 "$pid" 2>/dev/null; then echo "valet still running 30s after SIGTERM" >&2; exit 1; fi
+wait "$pid" || status=$?
 pid=""
-for _ in $(seq 1 15); do
-  curl -fsS "http://localhost:$port/api/health" >/dev/null 2>&1 || { echo "ok: no orphan after SIGKILL"; exit 0; }
-  sleep 1
-done
-echo "FAIL: server still running after the wrapper was SIGKILLed" >&2
-exit 1
+cat "$work/log2"
+grep -q "Received SIGTERM, shutting down" "$work/log2" \
+  || { echo "FAIL: group SIGTERM did not reach Valet's shutdown handler" >&2; exit 1; }
+[[ "$status" -eq 0 ]] || { echo "FAIL: exit status $status after group SIGTERM, expected 0" >&2; exit 1; }
+echo "ok: group SIGTERM ran the graceful shutdown, exit 0"

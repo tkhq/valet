@@ -12,7 +12,10 @@
 #
 # The binary stays dynamically linked. This is a NixOS-compatible package, not
 # a static executable.
-{ lib, stdenvNoCC, fetchurl, buildFHSEnv, cacert }:
+#
+# Signals: see the comment on `fhs` below. The package's bin/valet is a small
+# wrapper that forwards SIGTERM, SIGINT, SIGHUP and SIGQUIT to Valet.
+{ lib, stdenvNoCC, fetchurl, buildFHSEnv, writeShellApplication, procps, cacert }:
 
 let
   version = "0.1.0";
@@ -51,13 +54,51 @@ let
       runHook postInstall
     '';
   };
+
+  # The FHS launcher (bubblewrap). Two behaviors matter for signals:
+  # - bwrap stays alive as the parent of Valet and has no signal handlers, so a
+  #   SIGTERM sent to it kills it and does not reach Valet.
+  # - With --die-with-parent, bwrap's death then SIGKILLs Valet, so Valet's
+  #   graceful shutdown never runs. dieWithParent is off to avoid that.
+  # The wrapper below forwards signals to Valet instead.
+  fhs = buildFHSEnv {
+    pname = "valet-fhs";
+    inherit version;
+    # buildFHSEnv always provides glibc and the standard loader path.
+    targetPkgs = _: [ cacert ];
+    runScript = "${unwrapped}/bin/valet";
+    dieWithParent = false;
+  };
 in
-(buildFHSEnv {
-  pname = "valet";
-  inherit version;
-  # buildFHSEnv always provides glibc and the standard loader path.
-  targetPkgs = _: [ cacert ];
-  runScript = "${unwrapped}/bin/valet";
+(writeShellApplication {
+  name = "valet";
+  runtimeInputs = [ procps ];
+  text = ''
+    # Forward termination signals to Valet (the child of bwrap) so its
+    # graceful shutdown runs. If Valet is not up yet, signal bwrap itself.
+    forward() {
+      local target
+      target="$(pgrep -P "$launcher" | head -n1 || true)"
+      kill "-$1" "''${target:-$launcher}" 2>/dev/null || true
+    }
+
+    # Explicit <&0: a background job would otherwise get /dev/null as stdin.
+    ${fhs}/bin/valet-fhs "$@" <&0 &
+    launcher=$!
+    for sig in TERM INT HUP QUIT; do
+      # shellcheck disable=SC2064
+      trap "forward $sig" "$sig"
+    done
+
+    # A trapped signal interrupts wait with status > 128. Wait again until the
+    # launcher is gone, then report Valet's exit status.
+    while :; do
+      status=0
+      wait "$launcher" || status=$?
+      if [ "$status" -gt 128 ] && kill -0 "$launcher" 2>/dev/null; then continue; fi
+      exit "$status"
+    done
+  '';
 
   meta = {
     description = "Valet CLI (Bun-compiled release binary run in an FHS environment)";
@@ -68,5 +109,5 @@ in
     sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
   };
 }).overrideAttrs (old: {
-  passthru = (old.passthru or { }) // { inherit unwrapped; };
+  passthru = (old.passthru or { }) // { inherit unwrapped fhs; };
 })
