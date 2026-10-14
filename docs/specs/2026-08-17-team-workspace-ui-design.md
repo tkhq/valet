@@ -128,10 +128,19 @@ Public pages keep their own titles.
     Users switch to Personal to connect and share their own credentials.
 
     A row whose token refresh failed, or whose grant gives sign-in only, shows
-    the same badge as a personal card and names its repair. A team connects a
-    service once, so an admin disconnects a dead team connection and connects
-    the service again. Only its member can repair a shared account. A past
-    expiry alone is not shown, because an OAuth row renews when it is used.
+    the same badge as a personal card and names its repair. A past expiry
+    alone is not shown, because an OAuth row renews when it is used. A dead
+    team connection (last refresh failed and token past expiry,
+    `isDeadConnection`) offers Reconnect to every team member. The callback
+    replaces the row only while it is still dead, under the team and row
+    locks, and saves the reconnecting member's sign-in as the team's account.
+    Replacing a working connection stays admin-only, through Disconnect. Only
+    its member can repair a shared account.
+
+    A team read passes over a dead team connection to the org row and to
+    members' shares, and it still asks a share's member first. With nothing
+    else, the dead row stays the answer, so the caller sees the provider's
+    refusal.
     "Share a personal connection" sits beside the Connected heading, outside
     the list, because it applies to the team and not to one integration.
 

@@ -50,6 +50,15 @@ export function credentialRowHealth(row: Pick<CredentialSummary, "refreshFailedA
   return "connected";
 }
 
+/**
+ * A row Valet has stopped using: its last refresh failed and its token is
+ * past expiry. Any team member may reconnect a team connection in this state
+ * (the server's `isDeadConnection`).
+ */
+export function isDeadConnection(row: Pick<CredentialSummary, "refreshFailedAt" | "expiresAt">, now: number = Date.now()): boolean {
+  return typeof row.refreshFailedAt === "number" && typeof row.expiresAt === "number" && row.expiresAt <= now;
+}
+
 /** True when the connection is present but unusable, so the card must offer
  * a repair and not only a disconnect. */
 export function needsReauth(health: ServiceHealth): boolean {

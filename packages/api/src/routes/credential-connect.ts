@@ -21,15 +21,18 @@ import { invalidateWorkflowSources } from "../services/content-sync/invalidation
 import { refreshCredentialReadiness } from "../services/credential-readiness.js";
 import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
-import { canAdministerTeam, getTeamInOrg } from "../services/teams.js";
-import { insertCredentialIfAbsent, lockTeamCredentialAuthority } from "../services/credential-insert.js";
+import { canAdministerTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
+import {
+  insertCredentialIfAbsent, lockTeamCredentialRole, replaceDeadTeamCredential, teamConnectionIsDead,
+} from "../services/credential-insert.js";
 import { buildAuthorizationUrl, exchangeCodePkce, generatePkceChallenge } from "@valet/sdk";
 import type { AppEnv } from "../env.js";
+import type { AppQueryable } from "../lib/drizzle.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState, STATE_TTL_MS } from "../lib/oauth-state.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { loadAuthConfig } from "../auth/config.js";
-import { OAuthInterpretError, type OAuthIdentity, type TokenInterpretation } from "@valet/engine";
+import { OAuthInterpretError, type OAuthIdentity, type StoredCredential, type TokenInterpretation } from "@valet/engine";
 import {
   authCodeEnvReady,
   ensureMcpOAuthClient,
@@ -57,23 +60,33 @@ interface OAuthConnectState {
   /** Validated web origin to land back on, e.g. "http://localhost:5173".
    * Empty/absent → relative redirect (prod same-origin serving). */
   returnTo?: string;
+  /** Replace the team's dead connection. Any team member may (see `isDeadConnection`). */
+  reconnect?: true;
   nonce: string;
   exp: number;
+}
+
+/** A team admin may connect. Any member may reconnect a dead team connection. */
+async function mayConnectTeam(db: AppQueryable, teamId: string, userId: string, reconnect: boolean): Promise<boolean> {
+  if (await canAdministerTeam(db, teamId, userId)) return true;
+  return reconnect && (await isTeamMember(db, teamId, userId));
 }
 
 export function verifyOAuthConnectState(state: string, key: Buffer, nowMs: number): OAuthConnectState | null {
   return verifyState<OAuthConnectState>("integration-connect", state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, service, codeVerifier, returnTo, nonce, exp, teamId, orgId } = payload;
+    const { userId, service, codeVerifier, returnTo, nonce, exp, teamId, orgId, reconnect } = payload;
     if (teamId !== undefined && (typeof teamId !== "string" || !teamId || typeof orgId !== "string" || !orgId)) return null;
     if (typeof userId !== "string" || typeof service !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (codeVerifier !== undefined && typeof codeVerifier !== "string") return null;
     if (returnTo !== undefined && typeof returnTo !== "string") return null;
+    if (reconnect !== undefined && (reconnect !== true || typeof teamId !== "string")) return null;
     if (exp < nowMs) return null;
     return {
       userId, service, codeVerifier, returnTo, nonce, exp,
       ...(typeof teamId === "string" && typeof orgId === "string" ? { teamId, orgId } : {}),
+      ...(reconnect === true ? { reconnect } : {}),
     };
   });
 }
@@ -135,9 +148,14 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
     return c.json({ error: "Remove the team selection to connect a personal account." }, 400);
   }
   if (c.req.query("scope") === "team" && !teamId) return c.json({ error: "Choose a team before connecting." }, 400);
+  const reconnect = c.req.query("reconnect") === "1";
+  if (reconnect && teamId === undefined) return c.json({ error: "Choose the team whose connection to reconnect." }, 400);
   if (teamId !== undefined) {
-    if (!(await getTeamInOrg(db, user.orgId, teamId)) || !(await canAdministerTeam(db, teamId, user.id))) {
+    if (!(await getTeamInOrg(db, user.orgId, teamId)) || !(await mayConnectTeam(db, teamId, user.id, reconnect))) {
       return c.json({ error: "Team not found. Ask a team admin to connect this service." }, 404);
+    }
+    if (reconnect && !(await teamConnectionIsDead(db, teamId, service, Date.now()))) {
+      return c.json({ error: "This team connection still works. Ask a team admin to replace it." }, 409);
     }
     if (service === "slack-user" || found.decl.requires?.orgCredential) {
       return c.json({ error: "This connection cannot be used for a team. Connect a dedicated team token instead." }, 400);
@@ -149,6 +167,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
   const base: Omit<OAuthConnectState, "codeVerifier"> = {
     userId: user.id,
     ...(teamId ? { teamId, orgId: user.orgId } : {}),
+    ...(reconnect ? { reconnect: true as const } : {}),
     service,
     ...(returnTo ? { returnTo } : {}),
     nonce: randomBytes(16).toString("hex"),
@@ -235,7 +254,8 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
   const teamId = verified.teamId;
   const landing = `${returnTo}/integrations?${teamId ? `teamId=${encodeURIComponent(teamId)}&` : ""}`;
   const teamFailure = (error: string) => c.redirect(`${landing}error=${error}`, 302);
-  if (teamId && (verified.orgId !== user.orgId || !(await getTeamInOrg(db, user.orgId, teamId)) || !(await canAdministerTeam(db, teamId, user.id)))) {
+  if (teamId && (verified.orgId !== user.orgId || !(await getTeamInOrg(db, user.orgId, teamId))
+    || !(await mayConnectTeam(db, teamId, user.id, verified.reconnect === true)))) {
     return teamFailure("team_access_changed");
   }
 
@@ -324,13 +344,20 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
     let outcome: string | null;
     try {
       outcome = await db.transaction(async (tx) => {
-        if (verified.orgId !== user.orgId || !(await lockTeamCredentialAuthority(tx, { orgId: user.orgId, userId: user.id, teamId }))) {
-          return "team_access_changed";
-        }
-        const inserted = await insertCredentialIfAbsent(tx, encryptionKey, { type: "team", id: teamId }, verified.service, {
+        const role = verified.orgId === user.orgId
+          ? await lockTeamCredentialRole(tx, { orgId: user.orgId, userId: user.id, teamId })
+          : null;
+        if (!role || (role === "member" && !verified.reconnect)) return "team_access_changed";
+        const credential: StoredCredential = {
           type: "oauth2", accessToken: saved.accessToken, refreshToken: saved.refreshToken,
           expiresAt: saved.expiresAt, scopes: saved.scopes, metadata: saved.metadata,
-        });
+        };
+        if (verified.reconnect) {
+          const replaced = await replaceDeadTeamCredential(tx, encryptionKey, teamId, verified.service, credential, Date.now());
+          if (replaced) await invalidateWorkflowSources(tx, { teamId });
+          return replaced ? null : "team_reconnect_unneeded";
+        }
+        const inserted = await insertCredentialIfAbsent(tx, encryptionKey, { type: "team", id: teamId }, verified.service, credential);
         if (inserted) await invalidateWorkflowSources(tx, { teamId });
         return inserted ? null : "team_connection_exists";
       });

@@ -119,7 +119,7 @@ describe("OAuthRefreshingCredentialStore", () => {
     expect((await inner.get(OWNER, "linear"))?.accessToken).toBe("at-new"); // persisted
   });
 
-  it("stamps metadata.refreshFailedAt and returns the stored credential on refresh failure", async () => {
+  it("stamps metadata.refreshFailedAt and returns the stamped credential on refresh failure", async () => {
     await seedMcpClient();
     const inner = memoryStore();
     await inner.save(OWNER, "linear", { type: "oauth2", accessToken: "stale", refreshToken: "rt", expiresAt: NOW + 30_000 });
@@ -128,6 +128,8 @@ describe("OAuthRefreshingCredentialStore", () => {
 
     const got = await store.get(OWNER, "linear");
     expect(got?.accessToken).toBe("stale");
+    // The caller sees the failure on this read, not only the next one.
+    expect(got?.metadata?.refreshFailedAt).toBe(NOW);
     const persisted = await inner.get(OWNER, "linear");
     expect(persisted?.metadata?.refreshFailedAt).toBe(NOW);
   });

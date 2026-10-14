@@ -6,6 +6,7 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { CredentialSummary, OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 
 let teamCreds: CredentialSummary[] = [];
@@ -16,6 +17,7 @@ vi.mock("~/api/integrations", () => {
     useCredentials: () => ({ data: { credentials: teamCreds }, isLoading: false, error: null }),
     useDisconnectCredential: mutation,
     useRevokeDelegation: mutation,
+    useConnectCredential: mutation,
   };
 });
 
@@ -44,11 +46,26 @@ describe("TeamCredentials", () => {
     teamCreds = [];
   });
 
-  it("marks the team connection whose refresh failed and names the repair", () => {
+  it("marks a dead team connection and lets any member reconnect it", async () => {
     teamCreds = [cred({ refreshFailedAt: 1, expiresAt: 1 }), cred({ delegatedFrom: "u2" })];
-    renderRows(true);
+    renderRows(false);
     expect(screen.getAllByText("Refresh failed")).toHaveLength(1);
+    expect(screen.getByText("The last token refresh failed. Select Reconnect to sign in again.")).toBeTruthy();
+    const location = { href: "" };
+    vi.stubGlobal("location", location);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Reconnect Greenhouse for Recruiting" }));
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Continue to Greenhouse" }));
+    expect(location.href).toBe("/api/credentials/greenhouse/connect?scope=team&teamId=t1&reconnect=1");
+    vi.unstubAllGlobals();
+  });
+
+  it("sends an admin to disconnect a broken team connection that is not dead yet", () => {
+    teamCreds = [cred({ refreshFailedAt: 1, expiresAt: Date.now() + 3_600_000 })];
+    renderRows(true);
     expect(screen.getByText("The last token refresh failed. Disconnect it, then connect Greenhouse again under Available.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Reconnect/ })).toBeNull();
   });
 
   it("sends a member to a team admin, and a shared account to its owner", () => {
@@ -64,5 +81,6 @@ describe("TeamCredentials", () => {
     renderRows(true);
     expect(screen.queryByText("Refresh failed")).toBeNull();
     expect(screen.queryByText("Expired")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Reconnect/ })).toBeNull();
   });
 });

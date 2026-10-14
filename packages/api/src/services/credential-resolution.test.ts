@@ -704,6 +704,27 @@ describe("resolveTeamCredentialRead", () => {
         .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "cy-key" }) });
     });
 
+    it("reads past a team connection that can no longer refresh, still asking the share's member", async () => {
+      const dead: StoredCredential = { type: "oauth2", accessToken: "dead", refreshToken: "rt", expiresAt: 1, metadata: { refreshFailedAt: 2 } };
+      const fresh: StoredCredential = { type: "oauth2", accessToken: "bea-fresh", expiresAt: Date.now() + 3_600_000 };
+      const deps = { credentials: await storeWith([[team, dead], [bea, fresh]]), shares: shares(["bea"]) };
+      await expect(readTeamCredential(deps, { orgId, teamId, userId: "al" }, "linear", "reference-only"))
+        .resolves.toEqual({ credential: null, approvalFrom: "bea" });
+      await expect(readTeamCredential(deps, { orgId, teamId, userId: "al", mayBorrow: async (id) => id === "bea" }, "linear", "reference-only"))
+        .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "bea-fresh" }) });
+      // With nothing else to use, the dead row stays the answer, so the caller still sees the provider's refusal.
+      const alone = { credentials: await storeWith([[team, dead]]), shares: shares([]) };
+      await expect(readTeamCredential(alone, { orgId, teamId, userId: "al" }, "linear", "reference-only"))
+        .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "dead" }) });
+    });
+
+    it("keeps an expired team connection whose refresh has not failed", async () => {
+      const expired: StoredCredential = { type: "oauth2", accessToken: "team", refreshToken: "rt", expiresAt: 1 };
+      const deps = { credentials: await storeWith([[team, expired], [bea, { type: "api_key", apiKey: "bea-key" }]]), shares: shares(["bea"]) };
+      await expect(readTeamCredential(deps, { orgId, teamId, userId: "al" }, "linear", "reference-only"))
+        .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "team" }) });
+    });
+
     it("falls back to the org bot behind a share whose account is gone", async () => {
       const credentials = await storeWith([[{ type: "org", id: orgId }, { type: "bot_token", accessToken: "org-bot" }]], "slack");
       const got = await resolveTeamCredentialRead({ credentials, shares: shares(["departed"]) }, { orgId, teamId }, "slack", "org-provided");

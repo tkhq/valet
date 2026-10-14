@@ -7,8 +7,9 @@
  * routes through here (its refresh lives in services/github-tokens.ts) —
  * findOAuthDeclaration excludes it. Refresh failure stamps
  * metadata.refreshFailedAt (the health field the credential summary
- * already whitelists) and returns the stored credential: the caller gets
- * the provider's own 401 and the UI shows the unhealthy badge.
+ * already whitelists) and returns the stamped credential: the caller gets
+ * the provider's own 401, the UI shows the unhealthy badge, and a team read
+ * can pass over the row on the same read (`isDeadConnection`).
  */
 import { eq } from "drizzle-orm";
 import type { CredentialOwner, CredentialStore, StoredCredential, ValetPlugin } from "@valet/engine";
@@ -89,7 +90,7 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
         metadata: { ...stored.metadata, refreshFailedAt: now },
       };
       await this.inner.save(owner, service, stamped);
-      return stored;
+      return stamped;
     }
 
     const { refreshFailedAt: _cleared, ...restMetadata } = stored.metadata ?? {};

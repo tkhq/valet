@@ -309,7 +309,11 @@ export async function readTeamCredential(
   }
   const teamRow = await deps.credentials.get({ type: "team", id: ctx.teamId }, service);
   const fromTeam = await resolveRow(deps, teamRow, readCtx, "resolve");
-  if (fromTeam) return { credential: fromTeam };
+  // A dead team connection cannot answer, so the read goes on to the org row
+  // and members' shares, still asking a share's member first. It stays the
+  // last answer, so with nothing else the caller gets the provider's refusal.
+  const deadTeam = fromTeam && isDeadConnection(fromTeam, Date.now()) ? fromTeam : null;
+  if (fromTeam && !deadTeam) return { credential: fromTeam };
   if (orgFallback !== "none") {
     if (orgFallback === "org-provided") {
       const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
@@ -332,9 +336,22 @@ export async function readTeamCredential(
     // Only an account that would actually answer is worth an approval.
     if (!approved[i] && await fromShare(memberId)) return { credential: null, approvalFrom: memberId };
   }
+  if (deadTeam) return { credential: deadTeam };
   // A share whose member left their account unusable: name the fix.
   if (brokenShare) throw new CredentialReferenceBrokenError(service);
   return { credential: null };
+}
+
+/**
+ * A connection Valet can no longer use: its last token refresh failed and its
+ * access token is past expiry. The refreshing store retries on every read, so
+ * the stamp is cleared as soon as a refresh works again. Takes a stored
+ * credential or a raw `credentials` row.
+ */
+export function isDeadConnection(row: { type: string; expiresAt?: number | null; metadata?: unknown }, now: number): boolean {
+  const metadata = row.metadata;
+  const failed = typeof metadata === "object" && metadata !== null && "refreshFailedAt" in metadata && typeof metadata.refreshFailedAt === "number";
+  return row.type === "oauth2" && failed && typeof row.expiresAt === "number" && row.expiresAt <= now;
 }
 
 /** `readTeamCredential`'s credential: a team action's read. */

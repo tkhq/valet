@@ -74,6 +74,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   team_sync_failed: "Connection saved. Open Workflows and sync the team sources again.",
   team_access_changed: "Team access changed. Ask a team admin to restart the connection.",
   team_connection_exists: "This team already has a connection. Disconnect it before connecting another account.",
+  team_reconnect_unneeded: "The team connection changed while you signed in, so nothing was replaced. Reload the page to see it.",
   team_identity_unsupported: "This personal identity cannot be used for a team. Connect a team account instead.",
   identity_conflict:
     "This Slack account is already linked to another Valet user. Unlink it there first, or sign in as that user.",

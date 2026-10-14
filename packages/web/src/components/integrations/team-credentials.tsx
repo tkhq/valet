@@ -5,7 +5,8 @@ import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/
 import { errorText } from "~/lib/error-text";
 import { CardHeading } from "./integration-card";
 import { displayName } from "./display-name";
-import { credentialRowHealth, healthBadge, needsReauth, type ServiceHealth } from "./service-health";
+import { credentialRowHealth, healthBadge, healthNote, isDeadConnection, needsReauth, type ServiceHealth } from "./service-health";
+import { TeamConnectionDialog } from "./team-connection-setup";
 
 /**
  * The verb for a removal control. A share is a member's own account, so
@@ -28,9 +29,10 @@ function removalLabels(
 }
 
 /**
- * The repair for a row that cannot act. A team connects a service once, so
- * an admin replaces a dead team connection by removing it first. A shared
- * account belongs to its member, so only that member can repair it.
+ * The repair for a row that cannot act. Any member may reconnect a dead team
+ * connection (`isDeadConnection`). For a team connection in another broken
+ * state, an admin removes it and connects again. A shared account belongs to
+ * its member, so only that member can repair it.
  */
 function repairNote(
   row: CredentialSummary,
@@ -41,6 +43,7 @@ function repairNote(
   const service = displayName(row.service);
   const problem = health === "identity-only" ? "This connection gives sign-in only." : "The last token refresh failed.";
   if (row.delegatedFrom) return `${problem} ${nameFor(row.delegatedFrom)} must reconnect ${service} in their own Integrations.`;
+  if (isDeadConnection(row)) return healthNote(health) ?? problem;
   return canMutate
     ? `${problem} Disconnect it, then connect ${service} again under Available.`
     : `${problem} Ask a team admin to connect ${service} again.`;
@@ -79,6 +82,7 @@ export function TeamCredentials({
   const revoke = useRevokeDelegation();
   // One row at a time, so the list renders ONE dialog.
   const [removing, setRemoving] = useState<CredentialSummary | null>(null);
+  const [reconnecting, setReconnecting] = useState<string | null>(null);
   const nameFor = (userId: string) => orgMembers.find((m) => m.userId === userId)?.name ?? userId;
   const rows = credsQ.error ? [] : credsQ.data?.credentials ?? [];
   const dialogLabels = removing ? removalLabels(removing, team.name, nameFor) : null;
@@ -129,6 +133,7 @@ export function TeamCredentials({
                   const removal = removalLabels(row, team.name, nameFor);
                   const health = credentialRowHealth(row);
                   const badge = needsReauth(health) ? healthBadge(health) : null;
+                  const canReconnect = !row.delegatedFrom && row.type === "oauth2" && isDeadConnection(row);
                   return (
                     <li key={row.delegatedFrom ?? "team"} className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
                       <div className="min-w-0">
@@ -144,6 +149,13 @@ export function TeamCredentials({
                           <p className="text-danger-500">{repairNote(row, health, canMutate, nameFor)}</p>
                         )}
                       </div>
+                      <div className="flex shrink-0 gap-2">
+                      {canReconnect && (
+                        <Button size="sm" variant="primary" aria-label={`Reconnect ${displayName(row.service)} for ${team.name}`}
+                          onClick={() => setReconnecting(row.service)}>
+                          Reconnect
+                        </Button>
+                      )}
                       {canMutate && (
                         <Button
                           size="sm"
@@ -162,6 +174,7 @@ export function TeamCredentials({
                           {removal.action}
                         </Button>
                       )}
+                      </div>
                     </li>
                   );
                 })}
@@ -171,6 +184,15 @@ export function TeamCredentials({
         ))}
       </ul>
 
+      {reconnecting && (
+        <TeamConnectionDialog
+          key={reconnecting}
+          teamId={team.id}
+          service={{ service: reconnecting, type: "oauth2", connect: "oauth" }}
+          reconnect
+          onClose={() => setReconnecting(null)}
+        />
+      )}
       {canMutate && !credsQ.error && removing && dialogLabels && (
         <ConfirmDialog
           open

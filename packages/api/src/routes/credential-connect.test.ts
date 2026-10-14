@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { createHmac, randomUUID } from "node:crypto";
 import { Pool } from "pg";
-import type { ValetPlugin } from "@valet/engine";
+import type { StoredCredential, ValetPlugin } from "@valet/engine";
 import { OAuthInterpretError, type TokenInterpretation } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../test-helpers/oauth-fixture.js";
@@ -712,6 +712,14 @@ describe("verifyOAuthConnectState", () => {
     return { userId: "u1", orgId: "o1", teamId: "t1", service: "linear", nonce: "n1", exp: Date.now() + expInMs };
   }
 
+  it("keeps reconnect only as true, and only on a team state", () => {
+    expect(verifyOAuthConnectState(signState("integration-connect", { ...payload(), reconnect: true }, key), key, Date.now()))
+      .toMatchObject({ teamId: "t1", reconnect: true });
+    expect(verifyOAuthConnectState(signState("integration-connect", { ...payload(), reconnect: "yes" }, key), key, Date.now())).toBeNull();
+    const { teamId: _teamId, orgId: _orgId, ...personal } = payload();
+    expect(verifyOAuthConnectState(signState("integration-connect", { ...personal, reconnect: true }, key), key, Date.now())).toBeNull();
+  });
+
   it("accepts a validly signed, unexpired payload", () => {
     const state = signState("integration-connect", payload(), key);
     const verified = verifyOAuthConnectState(state, key, Date.now());
@@ -973,6 +981,57 @@ describe("team OAuth connections", () => {
     } finally {
       resync.mockRestore();
     }
+  });
+
+  describe("reconnect", () => {
+    const dead = { type: "oauth2" as const, accessToken: "dead", refreshToken: "dead-refresh", expiresAt: 1, metadata: { refreshFailedAt: 2 } };
+    const startReconnect = (baseUrl: string, teamId: string, userId: string) =>
+      fetch(`${baseUrl}/api/credentials/linear/connect?scope=team&teamId=${teamId}&reconnect=1`, {
+        redirect: "manual", headers: { "x-valet-test-user-id": userId },
+      });
+    const stateOf = (response: Response) => new URL(response.headers.get("location") ?? "").searchParams.get("state") ?? "";
+    // Saved straight to the store, so no refresh runs on the dead row.
+    const saveTeamRow = (app: TestApi, teamId: string, row: StoredCredential) =>
+      app.providers.engineCredentials.save({ type: "team", id: teamId }, "linear", row);
+
+    it("lets any team member replace a dead team connection", async () => {
+      const { app, team } = await setup();
+      await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+      await saveTeamRow(app, team.id, dead);
+      fake.tokenResponse = { access_token: "member-access", refresh_token: "member-refresh", expires_in: 3600, scope: "read" };
+      const started = await startReconnect(app.baseUrl, team.id, "test-member");
+      expect(started.status).toBe(302);
+      const response = await finish(app.baseUrl, stateOf(started), "test-member");
+      expect(response.headers.get("location")).toBe(`/integrations?teamId=${team.id}&connected=linear`);
+      expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({
+        accessToken: "member-access", refreshToken: "member-refresh",
+      });
+    });
+
+    it("refuses someone outside the team, and a member when the team connection works", async () => {
+      const { app, team } = await setup();
+      await saveTeamRow(app, team.id, dead);
+      // An organization member who is not on the team.
+      expect((await startReconnect(app.baseUrl, team.id, "test-member")).status).toBe(404);
+      await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+      await saveTeamRow(app, team.id, { type: "oauth2", accessToken: "live", refreshToken: "rt", expiresAt: Date.now() + 3_600_000 });
+      const live = await startReconnect(app.baseUrl, team.id, "test-member");
+      expect(live.status).toBe(409);
+      expect(await live.json()).toEqual({ error: "This team connection still works. Ask a team admin to replace it." });
+      expect(fake.registrations).toHaveLength(0);
+    });
+
+    it("keeps a connection that someone repaired while the member signed in", async () => {
+      const { app, team } = await setup();
+      await addMember(app.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+      await saveTeamRow(app, team.id, dead);
+      const started = await startReconnect(app.baseUrl, team.id, "test-member");
+      await saveTeamRow(app, team.id, { type: "oauth2", accessToken: "repaired", refreshToken: "rt", expiresAt: Date.now() + 3_600_000 });
+      const response = await finish(app.baseUrl, stateOf(started), "test-member");
+      expect(response.headers.get("location")).toBe(`/integrations?teamId=${team.id}&error=team_reconnect_unneeded`);
+      expect(await app.providers.engineCredentials.get({ type: "team", id: team.id }, "linear")).toMatchObject({ accessToken: "repaired" });
+    });
+
   });
 
   it("keeps an occupied team slot when two OAuth callbacks complete", async () => {
