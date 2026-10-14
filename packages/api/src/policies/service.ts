@@ -51,6 +51,7 @@ import {
   resolvePolicyDecision,
   type ActionPolicyOverrideRow,
   type ActionPolicyRow,
+  type PolicyResolutionInput,
   type PolicyResolutionRows,
   type RuntimeGrantRow,
 } from "./resolution.js";
@@ -153,6 +154,31 @@ export async function ownerAlwaysAllowRefusal(
       : "Only a team admin can always allow this for the team. Approve it once, or ask a team admin.";
   }
   return owner.userId === resolverId ? undefined : "Only the owner of this conversation can always allow this. Approve it once instead.";
+}
+
+/**
+ * Would the owner's lasting allow actually allow this call? Applies the write
+ * to the loaded rows, as `upsertOverride` or `upsertSimpleTeamPolicy` would,
+ * and resolves again. A conditional rule that still requires approval would
+ * make the option look done and change nothing, so it is not offered.
+ */
+export function ownerAllowTakesEffect(
+  rows: PolicyResolutionRows,
+  owner: { teamId?: string },
+  input: PolicyResolutionInput,
+  pluginDefault: ApprovalMode | undefined,
+): boolean {
+  const sameTarget = (row: { service: string | null; actionId: string | null; riskLevel: RiskLevel | null }) =>
+    row.service === null && row.riskLevel === null && row.actionId === input.actionId;
+  const written: ActionPolicyOverrideRow = { id: "owner-allow", service: null, actionId: input.actionId, riskLevel: null, mode: "allow", paramMatchers: [], updatedAt: input.now };
+  const applied: PolicyResolutionRows = owner.teamId
+    ? { ...rows, policies: [
+      ...rows.policies.filter((row) => !(row.principalType === "team" && sameTarget(row)
+        && row.appliesIn === "any" && row.paramMatchers.length === 0 && row.expiresAt === null)),
+      { ...written, principalType: "team", appliesIn: "any", expiresAt: null, revokedAt: null },
+    ] }
+    : { ...rows, overrides: [...rows.overrides.filter((row) => !sameTarget(row)), written] };
+  return resolvePolicyDecision(applied, input, pluginDefault).mode === "allow";
 }
 
 /** Writes `always_allow_owner`: the team's simple policy in a team session,
@@ -780,8 +806,16 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
       // opening the gate. The owner option appears only where the owner's
       // own setting could allow the action, the rule Integrations applies.
       const owner = await policyOwner(deps.db, { ...input, orgId: input.orgId });
+      const now = clock();
       const ownerMayAllow = !input.externalSender && (owner.teamId ?? owner.userId) !== undefined
-        && (await validateOverrideBounds(deps.db, input.orgId, { actionId: input.actionId }, "allow", clock(), deps.actionPluginByService)).ok;
+        && (await validateOverrideBounds(deps.db, input.orgId, { actionId: input.actionId }, "allow", now, deps.actionPluginByService)).ok
+        && ownerAllowTakesEffect(
+          await loadPolicyRows(deps.db, { orgId: input.orgId, teamId: input.teamId, userId: input.userId, sessionId: input.sessionId }),
+          owner,
+          { service: input.service, actionId: input.actionId, riskLevel: input.riskLevel, params: input.params, appliesIn: input.appliesIn,
+            sessionId: input.sessionId, now, ...(input.partialParams ? { partialParams: true } : {}) },
+          pluginDefaultFor(input.service),
+        );
       return {
         ...decision,
         extraGateActions: [

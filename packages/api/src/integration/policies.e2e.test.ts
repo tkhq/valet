@@ -303,7 +303,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       queueCallTool(faux, "widgets.nuke", {}, "nuke it");
       await postPrompt(baseUrl, sessionA, "call nuke");
       const defaultGate = await waitForGate(baseUrl, sessionA);
-      expect(defaultGate.actions.map((a) => a.id).sort()).toEqual(["always_allow", "approve", "approve_session", "deny"]);
+      expect(defaultGate.actions.map((a) => a.id).sort()).toEqual(["always_allow", "always_allow_owner", "approve", "approve_session", "deny"]);
       // The live gate carries WHY it opened (spec Deviations T6 #5, fixed):
       // risk default for an unconfigured critical action.
       expect(defaultGate.provenance).toMatchObject({ baseMode: "require_approval", source: "risk_default" });

@@ -680,6 +680,20 @@ describe("always allow for the session's owner", () => {
     expect(await resolver.resolve(teamInput)).toMatchObject({ mode: "allow", provenance: { source: "team_policy" } });
   });
 
+  it("leaves the team option out when a conditional team rule would still ask for this call", async () => {
+    await teamSession();
+    await db.insert(actionPolicies).values({ id: "team-c1", orgId: ORG, principalType: "team", principalId: TEAM, actionId: SEND, mode: "require_approval", paramMatchers: [{ path: "channel", op: "eq", value: "C1" }], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
+    const teamInput = { ...input, teamId: TEAM };
+    // The C1 rule outranks an unconditional allow, so writing one would change nothing.
+    expect(ownerOption(await resolver.resolve(teamInput))).toBeUndefined();
+    // Another channel does not match the rule: the option is offered and works.
+    const otherChannel = { ...teamInput, params: { channel: "C2", text: "promoted" } };
+    const decision = await resolver.resolve(otherChannel);
+    expect(ownerOption(decision)?.label).toBe("Always allow for this team");
+    await resolver.onResolution?.(otherChannel, decision, resolution(TEAM_ADMIN));
+    expect(await resolver.resolve(otherChannel)).toMatchObject({ mode: "allow", provenance: { source: "team_policy" } });
+  });
+
   it("leaves the option out when an org policy requires approval for the action", async () => {
     await personalSession(SESSION);
     await db.insert(actionPolicies).values({ id: "org-ask", orgId: ORG, principalType: "org", principalId: ORG, actionId: SEND, mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
