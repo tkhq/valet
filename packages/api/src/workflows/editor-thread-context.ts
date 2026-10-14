@@ -27,11 +27,25 @@ export function workflowEditorThreadContext(thread: { key: string }): string | u
 /** A run with no conversation origin reports on its own thread
  * (`workflowRunThreadKey`). A person may watch it from the run page, or
  * nobody may, so a question is allowed but a guess is stated instead when
- * it is safe. A run started from a conversation reports there, so its key
- * never matches. */
+ * it is safe. A guess about what an action says is as unsafe as a guess
+ * about where it goes. A run started from a conversation reports there, so
+ * its key never matches.
+ *
+ * Thread context applies to every turn of the thread, and a person can
+ * reply on the run page. The rule therefore names the run's own
+ * `workflow.request` messages (`engine-deps.ts#promptOrchestrator`), and a
+ * person's reply keeps the normal rules for questions. */
 export function workflowRunThreadContext(thread: { key: string }): string | undefined {
   if (!/^(?:signal|slack-events:[^:]+):workflow:[A-Za-z0-9_-]+$/.test(thread.key)) return undefined;
-  return "A person may not be watching this run. Call ask_question only when a guess could send, change, or delete something in the wrong place. Otherwise, state your assumptions in the result.";
+  return [
+    "A person may not be watching this run.",
+    "Call ask_question before you send, change, or delete something if a fact the action needs is missing or in conflict.",
+    "This covers what the action says, such as a price or a time, and where it goes.",
+    "If no one answers, do not do that action, and say in the result what was missing.",
+    "For other gaps, state your assumptions in the result.",
+    "These rules apply to messages with signalType `workflow.request`.",
+    "When a person writes in this conversation, use your normal rules for questions.",
+  ].join(" ");
 }
 
 /** The thread context an assistant session gives each of its threads. */
