@@ -20,7 +20,7 @@
         # it to check signal dispositions, stdin, exit codes and parent-death
         # cleanup without depending on what Valet does with signals.
         valet-signal-probe = pkgs.callPackage ./nix/valet.nix {
-          binary = pkgs.writeShellScriptBin "valet" ''
+          executableOverride = pkgs.writeShellScriptBin "valet" ''
             case "$1" in
               sleep)
                 echo "probe-ready $(grep SigIgn /proc/self/status)" >&2

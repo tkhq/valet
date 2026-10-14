@@ -15,7 +15,7 @@
 #
 # Signals and process lifetime: see the comments on `run` and the wrapper below.
 #
-# `binary` replaces the packaged executable. Tests use it to run a probe
+# `executableOverride` replaces the packaged executable. Tests use it to run a probe
 # program through the same wrapper (see packages.valet-signal-probe in flake.nix).
 { lib
 , stdenvNoCC
@@ -27,7 +27,7 @@
 , coreutils
 , util-linux
 , cacert
-, binary ? null
+, executableOverride ? null
 }:
 
 let
@@ -47,7 +47,7 @@ let
   asset = assets.${stdenvNoCC.hostPlatform.system}
     or (throw "valet: unsupported system ${stdenvNoCC.hostPlatform.system}");
 
-  unwrapped = if binary != null then binary else stdenvNoCC.mkDerivation {
+  unwrapped = if executableOverride != null then executableOverride else stdenvNoCC.mkDerivation {
     pname = "valet-unwrapped";
     inherit version;
 
