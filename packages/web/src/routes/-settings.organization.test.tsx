@@ -147,6 +147,10 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 // importOriginal keeps the module's other exports real (see vitest.config.ts).
+// Team credential rows let a member request removal through this hook.
+vi.mock("~/api/team-deletion-requests", () => ({
+  useSubmitTeamDeletionRequest: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, error: null }),
+}));
 vi.mock("~/components/settings/team-deletion-requests", () => ({
   TeamDeletionRequests: ({ teamId, canManage }: { teamId: string; canManage: boolean }) =>
     <section aria-label="Deletion requests" data-team-id={teamId} data-can-manage={canManage} />,

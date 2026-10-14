@@ -8,7 +8,7 @@
  */
 import { eq } from "drizzle-orm";
 import type { CredentialDeclaration, OAuthDeclaration, ValetPlugin } from "@valet/engine";
-import { discoverAuthServer, registerClient, type TokenResponse } from "@valet/sdk";
+import { discoverAuthServer, OAuthTokenError, registerClient, type TokenResponse } from "@valet/sdk";
 import { mcpOauthClients } from "../schema/index.js";
 
 import type { AppQueryable } from "../lib/drizzle.js";
@@ -199,7 +199,7 @@ async function tokenPostRaw(tokenUrl: string, form: Record<string, string>): Pro
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`OAuth token request failed: ${res.status} ${body.slice(0, 200)}`);
+    throw new OAuthTokenError(`OAuth token request failed: ${res.status} ${body.slice(0, 200)}`, res.status);
   }
   return res.json();
 }

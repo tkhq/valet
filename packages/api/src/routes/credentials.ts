@@ -46,7 +46,7 @@ import { deleteTeamCredential } from "../services/team-resource-deletion.js";
 import { invalidateWorkflowSources } from "../services/content-sync/invalidation.js";
 import { refreshCredentialReadiness } from "../services/credential-readiness.js";
 import { Hono, type Context } from "hono";
-import { insertCredentialIfAbsent, lockTeamCredentialAuthority, replaceCredential } from "../services/credential-insert.js";
+import { insertCredentialIfAbsent, lockTeamCredentialRole, replaceCredential } from "../services/credential-insert.js";
 import { and, eq } from "drizzle-orm";
 import { fromJsonbColumn } from "@valet/store-postgres";
 import { credentialSecret, type CredentialOwner, type StoredCredential } from "@valet/engine";
@@ -64,6 +64,7 @@ import { mutateTeamOnePassword } from "../services/team-onepassword-token.js";
 import { isDeniedCredentialService } from "../services/credential-resolution.js";
 import { mapOnePasswordError } from "./_onepassword-errors.js";
 import { canAdministerTeam, canViewTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
+import { isDeadConnection } from "../services/credential-resolution.js";
 import { deleteSharesFrom, listShareTeamsFrom, listTeamShares, revokeShare, shareCredential } from "../services/credential-shares.js";
 import { GITHUB_CREDENTIAL_SERVICE, checkGithubUserRow } from "../services/github-tokens.js";
 import { credentials } from "../schema/index.js";
@@ -111,7 +112,8 @@ async function resolveCredentialOwner(
   c: Context<AppEnv>,
   scope: CredentialScope,
   teamId: string | undefined,
-  access: "read" | "write",
+  /** "create" adds a team connection: every team member may. "write" replaces one: admins only. */
+  access: "read" | "create" | "write",
 ): Promise<CredentialOwner | Response> {
   const user = c.var.user;
   if (scope === "org") {
@@ -130,9 +132,9 @@ async function resolveCredentialOwner(
     // uses: an admin who can already store the team's credentials must be
     // able to see them.
     const allowed =
-      access === "write"
-        ? await canAdministerTeam(db, teamId, user.id)
-        : await canViewTeam(db, teamId, user.id);
+      access === "write" ? await canAdministerTeam(db, teamId, user.id)
+        : access === "create" ? (await canAdministerTeam(db, teamId, user.id)) || (await isTeamMember(db, teamId, user.id))
+          : await canViewTeam(db, teamId, user.id);
     if (!allowed) return c.json({ error: "Team not found." }, 404);
     return { type: "team", id: teamId };
   }
@@ -256,6 +258,7 @@ async function toSummary(
     login: typeof metadata?.login === "string" ? metadata.login : undefined,
     identityOnly: metadata?.identityOnly === true ? true : undefined,
     refreshFailedAt: typeof metadata?.refreshFailedAt === "number" ? metadata.refreshFailedAt : undefined,
+    dead: isDeadConnection(stored, Date.now()) ? true : undefined,
     onepasswordRef: onePasswordMeta(stored)?.reference,
     onepasswordTokenScope: onePasswordMeta(stored)?.tokenScope,
     ...extra,
@@ -336,7 +339,8 @@ credentialsRouter.put("/:service", async (c) => {
   }
 
   const scope = parseCredentialScope(body.scope);
-  const ownerOrErr = await resolveCredentialOwner(c, scope, body.teamId, "write");
+  // Any team member may add a team connection. Replacing one stays with an admin.
+  const ownerOrErr = await resolveCredentialOwner(c, scope, body.teamId, body.createOnly === true ? "create" : "write");
   if (ownerOrErr instanceof Response) return ownerOrErr;
   const owner = ownerOrErr;
   if (body.createOnly !== undefined && typeof body.createOnly !== "boolean") {
@@ -567,9 +571,8 @@ credentialsRouter.put("/:service", async (c) => {
 
   if (owner.type === "team") {
     const outcome = await db.transaction(async (tx) => {
-      if (!(await lockTeamCredentialAuthority(tx, { orgId: user.orgId, userId: user.id, teamId: owner.id }))) {
-        return "access_changed";
-      }
+      const role = await lockTeamCredentialRole(tx, { orgId: user.orgId, userId: user.id, teamId: owner.id });
+      if (!role || (role === "member" && !body.createOnly)) return "access_changed";
       if (body.createOnly) {
         const inserted = await insertCredentialIfAbsent(tx, c.var.providers.encryptionKey, owner, service, credential);
         if (inserted) await invalidateWorkflowSources(tx, { teamId: owner.id });
@@ -583,7 +586,7 @@ credentialsRouter.put("/:service", async (c) => {
       return c.json({ error: "Team access changed. Ask a team admin to restart the connection." }, 404);
     }
     if (outcome === "exists") {
-      return c.json({ error: "This team already has a connection for this service. Ask a team admin to remove it before connecting another account." }, 409);
+      return c.json({ error: "This team already has a connection for this service. Ask a team admin to remove it, then connect again." }, 409);
     }
   } else {
     await engineCredentials.save(owner, service, credential);

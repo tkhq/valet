@@ -28,7 +28,9 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
   }, [canConnect]);
   const services = [...new Map((plugins.error ? [] : plugins.data?.plugins ?? [])
     .flatMap((p) => p.services).map((s) => [s.service, s])).values()];
-  const occupied = new Set(credentials.data?.credentials.map((c) => c.service));
+  // Only the team's own connection fills a service's slot. A member's shared
+  // account sits beside it, so an admin can still connect the team's own.
+  const occupied = new Set(credentials.data?.credentials.filter((c) => !c.delegatedFrom).map((c) => c.service));
   const choices = services.filter((s) => s.configKeys.length > 0 &&
     s.service !== "slack-user" && s.service !== "slack" && s.service !== "github" &&
     // `onepassword` is a service-account TOKEN, not one service's credential.
@@ -51,7 +53,7 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
           {children}
           {available.map((service) => {
             const blocked = service.connect === "unconfigured" && service.connectBlockedBy !== "org";
-            const reason = blocked ? "Ask an organization admin to configure OAuth for this service." : canManage ? undefined : "Team admin required";
+            const reason = blocked ? "Ask an organization admin to configure OAuth for this service." : canManage ? undefined : "Team member required";
             const label = blocked ? "Set up" : "Connect";
             const name = displayName(service.service);
             return <IntegrationCard key={service.service}>
@@ -87,16 +89,21 @@ export function TeamConnectionSetup({ teamId, canManage, children }: {
   </>;
 }
 
-function TeamConnectionDialog({ teamId, service, onClose }: {
-  teamId: string; service: PluginServiceSummary; onClose: () => void;
+/** Connect a team account, or with `reconnect`, sign in again to replace the
+ * team's dead connection (OAuth only; any team member may). */
+export function TeamConnectionDialog({ teamId, service, reconnect = false, onClose }: {
+  teamId: string; service: Pick<PluginServiceSummary, "service" | "type" | "connect">; reconnect?: boolean; onClose: () => void;
 }) {
   const connect = useConnectCredential();
   const [token, setToken] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const oauth = service.connect === "oauth" && service.service !== "github";
+  const name = displayName(service.service);
   return <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
-    <DialogContent title={`Connect ${displayName(service.service)} to this team`}
-      description={oauth ? "Sign in to the account intended for this team. Everyone on the team can use the permissions you grant." : "Paste a token for the account intended for this team. Everyone on this team can use its permissions."}>
+    <DialogContent title={reconnect ? `Reconnect ${name} for this team` : `Connect ${name} to this team`}
+      description={reconnect
+        ? `The team's ${name} connection can no longer refresh. Sign in to replace it. Everyone on the team uses the account you sign in with.`
+        : oauth ? "Sign in to the account intended for this team. Everyone on the team can use the permissions you grant." : "Paste a token for the account intended for this team. Everyone on this team can use its permissions."}>
       {!oauth && <label className="text-sm">Team account token
         <Textarea value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" spellCheck={false} />
       </label>}
@@ -104,11 +111,11 @@ function TeamConnectionDialog({ teamId, service, onClose }: {
         <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
         I authorize team members to use this account’s permissions.
       </label>
-      <p className="text-xs text-muted">One connection per service. Disconnect the existing account before replacing it.</p>
+      {!reconnect && <p className="text-xs text-muted">One connection per service. Disconnect the existing account before replacing it.</p>}
       {connect.error && <ErrorRow>{errorText(connect.error)}</ErrorRow>}
       <Button disabled={(!oauth && !token.trim()) || !confirmed || connect.isPending} onClick={() => {
         if (oauth) {
-          window.location.href = `/api/credentials/${encodeURIComponent(service.service)}/connect?scope=team&teamId=${encodeURIComponent(teamId)}`;
+          window.location.href = `/api/credentials/${encodeURIComponent(service.service)}/connect?scope=team&teamId=${encodeURIComponent(teamId)}${reconnect ? "&reconnect=1" : ""}`;
           return;
         }
         connect.mutate({ service: service.service, body: {

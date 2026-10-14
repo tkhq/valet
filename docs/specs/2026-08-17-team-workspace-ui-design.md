@@ -122,10 +122,35 @@ Public pages keep their own titles.
     personal catalog, token forms, or identity controls.
 
     Integrations and Team Settings share `TeamCredentials`. Each row identifies
-    a direct team credential or its delegating member. Team and organization
-    admins can confirm a disconnect or stop sharing. Other members can read
-    the list. The existing server member and admin gates remain authoritative.
+    a direct team credential or its delegating member. Every team member can
+    connect a team account (OAuth or a create-only token) and reconnect a dead
+    one. Team and organization admins can confirm a disconnect or stop
+    sharing, and can replace a working connection. A member's Request removal
+    files a team resource deletion request for the team's own connection.
+    The server member and admin gates remain authoritative.
     Users switch to Personal to connect and share their own credentials.
+
+    A row whose token refresh failed, or whose grant gives sign-in only, shows
+    the same badge as a personal card and names its repair. A past expiry
+    alone is not shown, because an OAuth row renews when it is used. A team
+    connection is dead when the provider refused its refresh token (a 400 or
+    401 from the token endpoint, `metadata.refreshRefused`) and its token is
+    past expiry (`isDeadConnection`, reported as `CredentialSummary.dead`). A
+    temporary failure (5xx, 429, network) is not a refusal. A dead team
+    connection offers Reconnect to every team member. The callback replaces
+    the row only while it is still dead, under the team and row locks, and
+    saves the reconnecting member's sign-in as the team's account. A refresh
+    in flight saves its result only if the row still holds the tokens it
+    refreshed, so it cannot undo a reconnect. Only its member can repair a
+    shared account, and a member's share does not fill the team's own slot
+    under Available.
+
+    A team read passes over a dead team connection to the org row and to
+    members' shares, and it still asks a share's member first. With nothing
+    else, the dead row stays the answer, so the caller sees the provider's
+    refusal.
+    "Share a personal connection" sits beside the Connected heading, outside
+    the list, because it applies to the team and not to one integration.
 
     Credential cache keys include scope and team ID. A workspace change
     unmounts open forms and dialogs. A completed team disconnect invalidates

@@ -1134,7 +1134,6 @@ describe("team credential scope (TKAI-205)", () => {
       method: "PUT", headers,
       body: JSON.stringify({ scope: "team", teamId: team.id, type: "api_key", apiKey: token, createOnly: true }),
     });
-    expect((await write("member", MEMBER_HEADERS)).status).toBe(404);
     const responses = await Promise.all([write("one"), write("two")]);
     expect(responses.map((r) => r.status).sort()).toEqual([200, 409]);
     const winner = responses[0].status === 200 ? "one" : "two";
@@ -1145,6 +1144,17 @@ describe("team credential scope (TKAI-205)", () => {
       .toMatchObject({ apiKey: winner });
     const list = await fetch(`${baseUrl}/api/credentials?scope=team&teamId=${team.id}`);
     expect(await list.text()).not.toContain(winner === "one" ? '"apiKey":"one"' : '"apiKey":"two"');
+  });
+
+  it("lets a team member add a team token but not replace one", async () => {
+    const team = await teamWithMember();
+    const put = (apiKey: string, createOnly: boolean) => fetch(`${api!.baseUrl}/api/credentials/demo`, {
+      method: "PUT", headers: MEMBER_HEADERS,
+      body: JSON.stringify({ scope: "team", teamId: team.id, type: "api_key", apiKey, createOnly }),
+    });
+    expect((await put("member-key", true)).status).toBe(200);
+    expect((await put("member-replacement", false)).status).toBe(404);
+    expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "demo")).toMatchObject({ apiKey: "member-key" });
   });
 
   it("omits complete access and refresh token sentinels from direct team responses", async () => {
@@ -1599,9 +1609,11 @@ describe("team credential scope (TKAI-205)", () => {
     }
 
     // Exercise the existing provider-validation await; this adds no Slack setup flow.
+    // A demoted admin stays a team member, who may still add a connection,
+    // so a demotion refuses only a replacement.
     it.each(["remove", "demote", "org-demote", "org-remove", "delete-team"].flatMap((change) =>
       [true, false].map((createOnly) => ({ change, createOnly })),
-    ))(
+    ).filter(({ change, createOnly }) => !(createOnly && (change === "demote" || change === "org-demote"))))(
       "refuses direct writing with createOnly=$createOnly when $change occurs during validation", async ({ change, createOnly }) => {
         const team = await teamWithMember([slackDeclaration]);
         if (!api) throw new Error("API not booted");

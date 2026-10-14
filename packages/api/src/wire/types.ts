@@ -3219,6 +3219,10 @@ export interface CredentialSummary {
   /** `metadata.refreshFailedAt`, when a previous token-refresh attempt
    * failed and left the credential needing a reconnect. Epoch ms. */
   refreshFailedAt?: number;
+  /** True when the provider refused the refresh token and the access token is
+   * past expiry (`isDeadConnection`). Any team member may reconnect a dead
+   * team connection. */
+  dead?: boolean;
   /** `metadata.onepassword.reference`, when this credential resolves via a
    * 1Password reference instead of an inline secret (1Password credential
    * provider plan, Task 3). Display-only — never secret material. */

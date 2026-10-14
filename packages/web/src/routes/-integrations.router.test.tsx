@@ -42,6 +42,10 @@ vi.mock("~/api/repos", () => ({
 }));
 let credentials: CredentialSummary[] = [];
 let plugins: ListPluginsResponse = { plugins: [] };
+// Team credential rows let a member request removal through this hook.
+vi.mock("~/api/team-deletion-requests", () => ({
+  useSubmitTeamDeletionRequest: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, error: null }),
+}));
 vi.mock("~/api/integrations", () => ({
   usePlugins: () => ({ data: plugins, isLoading: false, error: null }),
   useCredentials: () => ({ data: { credentials }, isLoading: false, error: null }),

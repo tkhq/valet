@@ -21,6 +21,13 @@ describe("Section", () => {
     expect(screen.getByRole("heading", { name: "Plugins" }).className).not.toContain("sr-only");
   });
 
+  it("puts its actions beside the heading, outside the group of rows", () => {
+    const { container } = render(<Section title="Connected" actions={<button type="button">Share</button>}>rows</Section>);
+    const group = container.querySelector("section > div:last-child");
+    expect(screen.getByRole("button", { name: "Share" })).toBeTruthy();
+    expect(group?.textContent).toBe("rows");
+  });
+
   it("hides the group when no row renders", () => {
     function NothingToShow() {
       return null;
