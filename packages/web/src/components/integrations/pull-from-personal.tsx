@@ -31,11 +31,13 @@ const ONEPASSWORD = "onepassword";
  * team a pointer that never resolves — the route refuses it, and saying so
  * here saves the round trip.
  */
-export function blockedReason(cred: CredentialSummary, sharedByMe: Set<string>): string | null {
+export function blockedReason(cred: CredentialSummary, sharedByMe: Set<string>, teamOwn: Set<string>): string | null {
   if (cred.service === ONEPASSWORD) {
     return "A 1Password token is not a single connection. Connect a team service account instead.";
   }
   if (sharedByMe.has(cred.service)) return "You already share this with the team.";
+  // The route refuses a share beside the team's own connection.
+  if (teamOwn.has(cred.service)) return "The team has its own connection for this. Teammates use it.";
   if (cred.onepasswordTokenScope === "personal") {
     return "This reads a personal 1Password token, which a team cannot use. Store it again with the organization token.";
   }
@@ -53,6 +55,7 @@ export function PullFromPersonal({ teamId, teamName }: { teamId: string; teamNam
   const me = useMe();
   // Each member keeps their own share, so only the caller's own blocks a pull.
   const sharedByMe = new Set((teamQ.data?.credentials ?? []).filter((c) => c.delegatedFrom === me.data?.id).map((c) => c.service));
+  const teamOwn = new Set((teamQ.data?.credentials ?? []).filter((c) => !c.delegatedFrom).map((c) => c.service));
   const settled = !mineQ.isLoading && !mineQ.error;
 
   return (
@@ -98,7 +101,7 @@ export function PullFromPersonal({ teamId, teamName }: { teamId: string; teamNam
 
         {settled &&
           mine.map((cred) => {
-            const blocked = blockedReason(cred, sharedByMe);
+            const blocked = blockedReason(cred, sharedByMe, teamOwn);
             const title = displayName(cred.service);
             return (
               <div key={cred.service} className="px-2 py-1">

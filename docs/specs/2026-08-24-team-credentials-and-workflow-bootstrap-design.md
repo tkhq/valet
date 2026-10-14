@@ -340,6 +340,8 @@ Mobile graph QA (2026-09-11): the editor permits zooming out to 10% so Fit View 
 
 The upgrade moves each legacy `metadata.delegatedFrom` team row into `credential_shares`. It preserves the member's source credential and removes the secretless team reference. Direct team connections remain unchanged. Each member can share an account for the same service.
 
+A team with its own connection for a service takes no new share of it (2026-10-14). The share route returns 409. If the team connection works, the error says a team admin must remove it before a member shares their own. If the connection stopped working (`isDeadConnection`), the error says to reconnect it, which any member may do. Shares made before the team connected stay, and the acting member's own share still resolves first.
+
 The acting member's own share resolves first. The team's connection and permitted organization sources follow. For other services, another member's share requires that member's approval. Scheduled workflows can therefore pause for approval after upgrade when their actor differs from the sharer. The account owner must approve the request before the run continues.
 
 GitHub has an exception. Its policy paths do not request permission to borrow another member's account. The sharer's own GitHub actions still resolve their migrated share. Other actors use a direct team connection or the organization GitHub App. If a team previously relied on one member's GitHub delegation, install the organization GitHub App or store a team GitHub connection. The migration alone does not preserve that delegation's access for other actors.

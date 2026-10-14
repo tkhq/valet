@@ -699,8 +699,28 @@ credentialsRouter.post("/:service/delegate", async (c) => {
       );
     }
   }
+  // A team with its own connection for this service uses it. A member's
+  // share beside it would add an account the team did not choose, so the
+  // team's connection blocks new shares. A connection that stopped working
+  // is repaired in place, which any member may do.
+  const [teamRow] = await db
+    .select({ type: credentials.type, expiresAt: credentials.expiresAt, metadata: credentials.metadata })
+    .from(credentials)
+    .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, body.teamId), eq(credentials.service, service)))
+    .limit(1);
+  if (teamRow) {
+    return c.json(
+      {
+        error: isDeadConnection(teamRow, Date.now())
+          ? `${team.name}'s own ${label} connection stopped working. Reconnect it in the team's Integrations instead of sharing your own.`
+          : `${team.name} already has its own ${label} connection, and teammates use it. ` +
+            `To use your account instead, ask a team admin to remove the team's ${label} connection, then share yours.`,
+      },
+      409,
+    );
+  }
   // Each member keeps their own share, so sharing never displaces another
-  // member's account or the team's own connection.
+  // member's account.
   await db.transaction(async (tx) => {
     await shareCredential(tx, { teamId: body.teamId, service, userId: user.id, createdAt: Date.now() });
     await invalidateWorkflowSources(tx, { teamId: body.teamId });

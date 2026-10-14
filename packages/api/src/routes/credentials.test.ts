@@ -5,7 +5,7 @@
  * `plugins.test.ts` — flip `VALET_LOCAL_AUTH` off for one request).
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { contentSources, credentials, orgMembers, orgs, users } from "../schema/index.js";
@@ -1350,7 +1350,7 @@ describe("team credential scope (TKAI-205)", () => {
     });
   });
 
-  it("keeps each member's share beside the others and the team's own connection", async () => {
+  it("keeps each member's share beside the others", async () => {
     const team = await teamWithMember();
     const connect = (headers: Record<string, string>, apiKey: string) => fetch(`${api!.baseUrl}/api/credentials/linear`, {
       method: "PUT", headers, body: JSON.stringify({ type: "api_key", apiKey }),
@@ -1389,6 +1389,32 @@ describe("team credential scope (TKAI-205)", () => {
     expect((await fetch(`${api!.baseUrl}/api/credentials/linear/delegations/${team.id}?userId=local-user`, { method: "DELETE", headers: MEMBER_HEADERS })).status).toBe(403);
     expect((await fetch(`${api!.baseUrl}/api/credentials/linear/delegations/${team.id}?userId=test-member`, { method: "DELETE", headers: HEADERS })).status).toBe(200);
     expect((await list()).map((row) => row.delegatedFrom)).toEqual(["local-user"]);
+  });
+
+  it("refuses a share of a service the team has its own connection for, and names the fix", async () => {
+    const team = await teamWithMember();
+    const shareFrom = () => fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST", headers: MEMBER_HEADERS, body: JSON.stringify({ teamId: team.id }),
+    });
+    await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT", headers: MEMBER_HEADERS, body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
+    });
+    await api!.providers.db.insert(credentials).values({
+      ownerType: "team", ownerId: team.id, service: "linear", type: "api_key", createdAt: 1, updatedAt: 1,
+    });
+    const refused = await shareFrom();
+    expect(refused.status).toBe(409);
+    expect(((await refused.json()) as { error: string }).error).toContain("ask a team admin to remove the team's Linear connection");
+    // A team connection that stopped working is repaired, not shared around.
+    await api!.providers.db.update(credentials).set({ type: "oauth2", expiresAt: 1, metadata: { refreshRefused: true } })
+      .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, team.id), eq(credentials.service, "linear")));
+    const dead = await shareFrom();
+    expect(dead.status).toBe(409);
+    expect(((await dead.json()) as { error: string }).error).toContain("Reconnect it in the team's Integrations");
+    // With no team connection, the member shares.
+    await api!.providers.db.delete(credentials)
+      .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, team.id), eq(credentials.service, "linear")));
+    expect((await shareFrom()).status).toBe(201);
   });
 
   // A team row is read with org-scoped 1Password tokens only, so a
@@ -1782,7 +1808,7 @@ describe("team credential scope (TKAI-205)", () => {
     expect(((await unshareable.json()) as { error: string }).error).toContain("Ask a team admin to connect GitHub for the team instead.");
   });
 
-  it("shares beside the team's own connection without touching it", async () => {
+  it("refuses a share beside the team's own connection, and leaves that connection alone", async () => {
     const team = await teamWithMember();
     const putDirect = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
       method: "PUT",
@@ -1800,7 +1826,7 @@ describe("team credential scope (TKAI-205)", () => {
       headers: MEMBER_HEADERS,
       body: JSON.stringify({ teamId: team.id }),
     });
-    expect(share.status).toBe(201);
+    expect(share.status).toBe(409);
     const direct = await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear");
     expect(direct).toMatchObject({ type: "api_key", apiKey: "team-lin" });
     expect(direct?.metadata).toBeUndefined();
