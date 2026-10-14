@@ -77,3 +77,8 @@ jobs:
           fi
           echo "raw release binary fails without /lib64, as on NixOS"
           "${NIXROOT[@]}" "$pkg" --help
+
+      # The wrapper is a bubblewrap launcher. SIGTERM must reach `valet serve`
+      # so its graceful shutdown runs, and a killed wrapper must not orphan it.
+      - name: Signal handling through the wrapper
+        run: nix/test-signals.sh result/bin/valet
