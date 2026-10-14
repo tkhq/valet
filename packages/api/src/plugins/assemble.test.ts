@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, SkillSource, ValetPlugin } from "@valet/engine";
+import { buildToolIndex } from "./action-id.js";
 import { assemblePlugins, partitionByName, pluginSessionExtras, withCredentialRequirement } from "./assemble.js";
+import { bundledPlugins } from "./registry.gen.js";
 
 function makeAction(id: string): PluginAction {
   return {
@@ -64,6 +66,37 @@ describe("assemblePlugins", () => {
 
     expect(actionPluginByService.get("service-a")?.plugin.name).toBe("plugin-a");
     expect(actionPluginByService.get("service-b")?.plugin.name).toBe("plugin-b");
+  });
+
+  // A plugin can declare ids with its own prefix (google_workspace ships
+  // `drive.search_files`). The broker resolves those through the tool index.
+  it("indexes an action id that does not start with its service", () => {
+    const suite = makePlugin("suite", { actions: [{ service: "suite", actions: [makeAction("docs.open"), makeAction("find")] }] });
+    const index = buildToolIndex(assemblePlugins([[suite]]).actionPluginByService);
+
+    expect(index.get("docs.open")).toEqual({ service: "suite", actionId: "docs.open" });
+    expect(index.get("suite.find")).toEqual({ service: "suite", actionId: "find" });
+  });
+
+  it("throws when an action id starts with another service's name", () => {
+    const suite = makePlugin("suite", { actions: [{ service: "suite", actions: [makeAction("files.find")] }] });
+    const files = makePlugin("files-mcp", { actions: [makeActionPlugin("files")] });
+
+    expect(() => assemblePlugins([[suite, files]])).toThrowError(/"files\.find" from "suite" starts with the service name "files" of "files-mcp"/);
+  });
+
+  it("throws when two services declare the same tool id", () => {
+    const a = makePlugin("plugin-a", { actions: [{ service: "service-a", actions: [makeAction("shared.run")] }] });
+    const b = makePlugin("plugin-b", { actions: [{ service: "service-b", actions: [makeAction("shared.run")] }] });
+
+    expect(() => assemblePlugins([[a, b]])).toThrowError(/"shared\.run" is declared by both "plugin-a" and "plugin-b"/);
+  });
+
+  it("gives every bundled tool id one service", () => {
+    const index = buildToolIndex(assemblePlugins([bundledPlugins]).actionPluginByService);
+
+    expect(index.get("drive.search_files")).toEqual({ service: "google_workspace", actionId: "drive.search_files" });
+    expect(index.get("calendar.list_events")).toEqual({ service: "google_calendar", actionId: "calendar.list_events" });
   });
 });
 

@@ -42,9 +42,10 @@ sandboxActionsRouter.post("/actions/:toolId/invoke", async (c) => {
   if (owner === null) return c.json({ error: "This workflow run is no longer available." }, 404);
 
   const toolId = c.req.param("toolId");
-  const refused = externalServiceRefusal(toolId.split(".")[0] ?? "");
-  if (refused) return c.json({ error: refused }, 403);
   const parsed = parseToolId(c, toolId);
+  // Check the resolved service too: a tool id does not always start with it.
+  const refused = externalServiceRefusal(toolId.split(".")[0] ?? "") ?? (parsed && externalServiceRefusal(parsed.service));
+  if (refused) return c.json({ error: refused }, 403);
   if (!parsed) return c.json({ error: `Unknown tool "${toolId}". Use a service.action id from the integration's tool list.` }, 404);
   const body = await readOptionalJsonObject(c);
   const params = body?.params ?? {};
