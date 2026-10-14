@@ -2239,6 +2239,22 @@ describe("replacement proposals", () => {
     expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: false, sub_sibling: true });
   });
 
+  it("refuses a replacement of a version replaced two generations ago, without advising to turn it back on", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH, enabled: false };
+    await seedSubscriptionRow(a, "sub_old", "local-org", { ...mine, name: "replies v2b", target: { kind: "orchestrator", replaces: "sub_live" } });
+    await seedSubscriptionRow(a, "sub_v3", "local-org", { ...mine, name: "replies v3", target: { kind: "orchestrator", replaces: "sub_next" } });
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, "sub_v3", { enabled: true })).status).toBe(200);
+    const stale = await patchSubscription(a.baseUrl, "sub_old", { enabled: true, allowCollision: true });
+    expect(stale.status).toBe(409);
+    const message = ((await stale.json()) as { error: string }).error;
+    expect(message).toContain('"replies v1" was already replaced by a newer version.');
+    expect(message).not.toContain("back on");
+    expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: false, sub_v3: true, sub_old: false });
+  });
+
   it("tells the reviewer to turn a paused version back on, and that recovery leaves one version on", async () => {
     const a = await boot();
     await seedReplacement(a);

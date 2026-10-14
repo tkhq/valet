@@ -136,10 +136,11 @@ type NarrowedSubscriptionRow = Omit<
 };
 
 /**
- * Why a replacement cannot turn on, and how the reviewer recovers. When
- * another version already replaced the same one, re-enabling the old one
- * and retrying would leave two versions on, so the message points at the
- * live version instead.
+ * Why a replacement cannot turn on, and how the reviewer recovers. When any
+ * version already replaced the same one, re-enabling the old one and
+ * retrying could leave two versions on: the successor, or a later version
+ * that replaced it, may still reply. So the message never advises that.
+ * It names the direct successor only while that successor is on.
  */
 async function staleReplacement(
   db: AppDb,
@@ -149,18 +150,23 @@ async function staleReplacement(
   if (replaced === undefined) {
     return "This proposal replaces a subscription that was removed. Delete this proposal, then ask the assistant for a new one.";
   }
-  const [live] = await db
-    .select({ name: eventSubscriptions.name })
+  const [successor] = await db
+    .select({ name: eventSubscriptions.name, enabled: eventSubscriptions.enabled })
     .from(eventSubscriptions)
     .where(and(
       ne(eventSubscriptions.id, proposal.id), eq(eventSubscriptions.orgId, proposal.orgId),
       eq(eventSubscriptions.ownerType, proposal.ownerType), eq(eventSubscriptions.ownerId, proposal.ownerId),
-      eq(eventSubscriptions.enabled, true), sql`${eventSubscriptions.target}->>'replaced' = ${replaced.id}`,
+      sql`${eventSubscriptions.target}->>'replaced' = ${replaced.id}`,
     ))
+    .orderBy(desc(eventSubscriptions.enabled))
     .limit(1);
-  if (live) {
-    return `"${replaced.name}" was already replaced by "${live.name}". ` +
-      `Delete this proposal, or ask the assistant for a new one that replaces "${live.name}".`;
+  if (successor?.enabled) {
+    return `"${replaced.name}" was already replaced by "${successor.name}". ` +
+      `Delete this proposal, or ask the assistant for a new one that replaces "${successor.name}".`;
+  }
+  if (successor) {
+    return `"${replaced.name}" was already replaced by a newer version. Delete this proposal. ` +
+      "To change the version that replies now, ask the assistant for a new proposal that replaces it.";
   }
   return `This proposal replaces "${replaced.name}", which is off, so enabling it could leave two versions on. ` +
     `Turn "${replaced.name}" back on, then enable this proposal. Enabling it turns "${replaced.name}" off again.`;

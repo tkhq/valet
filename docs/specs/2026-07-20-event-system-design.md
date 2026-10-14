@@ -283,13 +283,18 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   the same transaction and leaves it out of the collision gate, so one version
   replies. The PATCH lookup applies the same owner and kind checks. The
   disable requires the replaced subscription to still be on. If it is off,
-  the enable is refused with 409. If another replacement of it is on (its
-  `target.replaced` names the same ID), the message names that live version
-  and tells the person to delete the proposal or ask for one that replaces
-  the live version; turning the old one back on would leave two versions on.
-  If it was paused or turned off by hand, the message tells the person to
-  turn it back on and enable again. If it was removed, the message tells the
-  person to delete the proposal and ask for a new one. The review dialog
+  the enable is refused with 409. If any version already replaced it (its
+  `target.replaced` names the same ID), the message tells the person to
+  delete the proposal, and names that successor when it is on. It never
+  advises turning the old version back on, because the successor, or a
+  later version that replaced the successor, may still reply. If nothing
+  replaced it, it was paused or turned off by hand, and the message tells
+  the person to turn it back on and enable again. If it was removed, the message tells the
+  person to delete the proposal and ask for a new one. Deliveries already
+  queued for the replaced version when it turns off are skipped at dispatch,
+  as for any disabled subscription, and the replacement gets no delivery for
+  an event ingested before it was on. A swap can therefore miss an event
+  that arrives during it. The review dialog
   says when the replaced version is already off instead of promising to turn
   it off. The enable clears `target.replaces` and records the ID as
   `target.replaced`, so turning the new version off and on later leaves the
