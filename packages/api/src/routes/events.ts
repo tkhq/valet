@@ -135,13 +135,35 @@ type NarrowedSubscriptionRow = Omit<
   target: EventSubscriptionTargetWire;
 };
 
-/** Why a replacement cannot turn on, and how the reviewer recovers. */
-function staleReplacement(name: string | undefined): string {
-  if (name === undefined) {
+/**
+ * Why a replacement cannot turn on, and how the reviewer recovers. When
+ * another version already replaced the same one, re-enabling the old one
+ * and retrying would leave two versions on, so the message points at the
+ * live version instead.
+ */
+async function staleReplacement(
+  db: AppDb,
+  proposal: Pick<typeof eventSubscriptions.$inferSelect, "id" | "orgId" | "ownerType" | "ownerId">,
+  replaced: { id: string; name: string } | undefined,
+): Promise<string> {
+  if (replaced === undefined) {
     return "This proposal replaces a subscription that was removed. Delete this proposal, then ask the assistant for a new one.";
   }
-  return `This proposal replaces "${name}", which is off, so enabling it could leave two versions on. ` +
-    `Turn "${name}" back on, then enable this proposal. Enabling it turns "${name}" off again.`;
+  const [live] = await db
+    .select({ name: eventSubscriptions.name })
+    .from(eventSubscriptions)
+    .where(and(
+      ne(eventSubscriptions.id, proposal.id), eq(eventSubscriptions.orgId, proposal.orgId),
+      eq(eventSubscriptions.ownerType, proposal.ownerType), eq(eventSubscriptions.ownerId, proposal.ownerId),
+      eq(eventSubscriptions.enabled, true), sql`${eventSubscriptions.target}->>'replaced' = ${replaced.id}`,
+    ))
+    .limit(1);
+  if (live) {
+    return `"${replaced.name}" was already replaced by "${live.name}". ` +
+      `Delete this proposal, or ask the assistant for a new one that replaces "${live.name}".`;
+  }
+  return `This proposal replaces "${replaced.name}", which is off, so enabling it could leave two versions on. ` +
+    `Turn "${replaced.name}" back on, then enable this proposal. Enabling it turns "${replaced.name}" off again.`;
 }
 
 /** Another enable turned the replaced version off first; rolls this enable back. */
@@ -859,7 +881,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   // A replacement turns off a version that still replies. If that version is
   // already off or gone (another replacement of it was enabled, or a person
   // removed it), enabling this one could leave two versions on.
-  if (replaces !== undefined && !replaced?.enabled) return c.json({ error: staleReplacement(replaced?.name) }, 409);
+  if (replaces !== undefined && !replaced?.enabled) return c.json({ error: await staleReplacement(db, row, replaced) }, 409);
   const replacedId = replaced?.id;
   let collisions: EventSubscriptionCollisionsWire | undefined;
   if (willBeEnabled && (matchChanged || arming)) {
@@ -931,7 +953,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       return rows;
     });
   } catch (err) {
-    if (err instanceof StaleReplacementError) return c.json({ error: staleReplacement(replaced?.name) }, 409);
+    if (err instanceof StaleReplacementError) return c.json({ error: await staleReplacement(db, row, replaced) }, 409);
     throw err;
   }
 

@@ -10,14 +10,14 @@ export function AutomationReview({ when, scope, result, destination, permissions
   workflowId?: string;
   follow?: boolean;
   audience?: string;
-  /** The subscription that enabling this one turns off. */
+  /** What enabling this one does to the subscription it replaces. */
   replaces?: string;
 }) {
   const rows = [
     ["When", when], ["Scope", scope], ["Result", result], ["Destination", destination],
     ...(follow !== undefined ? [["Delivery", follow ? "Also deliver later replies from the source thread" : "Deliver only events matching these filters"]] : []),
     ...(audience ? [["Audience", audience === "team" ? "Team members" : "Anyone in the organization"]] : []),
-    ...(replaces ? [["Replaces", `${replaces}. Enabling this subscription turns that one off.`]] : []),
+    ...(replaces ? [["Replaces", replaces]] : []),
     ["Permissions", permissions ?? (workflowId ? <span><a className="text-moss underline" href={`/workflows/${encodeURIComponent(workflowId)}`} target="_blank" rel="noreferrer">Review workflow permissions</a>. Enabling grants no new access. Dynamic actions are checked at runtime.</span> : "Uses this workspace’s existing access. Enabling does not grant new permissions.")],
   ];
   return <dl aria-label="Automation review" className="divide-y divide-line rounded-lg border border-line px-3">

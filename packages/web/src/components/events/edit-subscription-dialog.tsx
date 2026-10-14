@@ -56,7 +56,7 @@ export function EditSubscriptionDialog({
   sub,
   targetLabel,
   review = false,
-  replacesName,
+  replacesNote,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -66,7 +66,7 @@ export function EditSubscriptionDialog({
   targetLabel: string;
   review?: boolean;
   /** The name of the subscription this proposal replaces, when it has one. */
-  replacesName?: string;
+  replacesNote?: string;
 }) {
   const catalogQ = useEventCatalog();
   const patch = usePatchEventSubscription();
@@ -212,7 +212,7 @@ export function EditSubscriptionDialog({
 
           <AutomationReview follow={sub.target.kind === "orchestrator" ? sub.target.follow : undefined} audience={sub.audience} workflowId={sub.target.kind === "workflow" ? sub.target.workflowId : undefined} when={[...keys].join(", ")} scope={filterRows.map(row => `${row.field} ${row.op} ${row.label || row.value}`).join("; ") || "All matching events"}
             result={sub.target.kind === "orchestrator" ? prompts.userPromptTemplate || "Deliver matching events to the workspace assistant" : targetLabel}
-            destination={targetLabel} replaces={review && !sub.enabled ? replacesName : undefined} />
+            destination={targetLabel} replaces={review && !sub.enabled ? replacesNote : undefined} />
           {collisions !== null && (
             <CollisionNotice
               report={collisions.report}

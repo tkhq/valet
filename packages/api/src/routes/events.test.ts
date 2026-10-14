@@ -2232,11 +2232,22 @@ describe("replacement proposals", () => {
     expect((await patchSubscription(a.baseUrl, "sub_sibling", { enabled: true })).status).toBe(200);
     const stale = await patchSubscription(a.baseUrl, "sub_next", { enabled: true, allowCollision: true });
     expect(stale.status).toBe(409);
-    expect(await stale.json()).toMatchObject({ error: expect.stringContaining('Turn "replies v1" back on, then enable this proposal.') });
+    // The message points at the live version, never back at the one it replaced.
+    const message = ((await stale.json()) as { error: string }).error;
+    expect(message).toContain('"replies v1" was already replaced by "replies v3".');
+    expect(message).not.toContain("back on");
     expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: false, sub_sibling: true });
-    // The recovery the message names works: turn the version back on, then enable.
-    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: true, allowCollision: true })).status).toBe(200);
-    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true, allowCollision: true })).status).toBe(200);
+  });
+
+  it("tells the reviewer to turn a paused version back on, and that recovery leaves one version on", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: false })).status).toBe(200);
+    const stale = await patchSubscription(a.baseUrl, "sub_next", { enabled: true });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ error: expect.stringContaining('Turn "replies v1" back on, then enable this proposal.') });
+    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: true })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(200);
     expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: true });
   });
 
