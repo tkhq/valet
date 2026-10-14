@@ -15,19 +15,18 @@
  *
  * A call that policy holds for approval is refused, because a script cannot
  * wait for one. Valet's own services stay refused, as for every agent
- * caller. `idempotencyKey` makes a retry return the first call's result.
+ * caller. `idempotencyKey` makes a retry return the first call's result, and a
+ * retry that arrives while the first call runs gets `in_progress`.
  */
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
-import { actionInvocations } from "../schema/index.js";
 import { buildActionInvoker, externalServiceRefusal } from "../plugins/action-invoker.js";
 import { actorUserIdFor, parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import type { ActionInvokeResponse } from "../wire/types.js";
-import { approvalRequired, invokerOpts, paramsDigest, parseToolId } from "./actions.js";
+import { approvalRequired, inProgress, invokeOnce, invokerOpts, paramsDigest, parseToolId } from "./actions.js";
 
 export const sandboxActionsRouter = new Hono<AppEnv>();
 
@@ -65,20 +64,14 @@ sandboxActionsRouter.post("/actions/:toolId/invoke", async (c) => {
   }
   // A key is namespaced by run, step, tool, and params, as the broker does.
   const invocationId = `wf:${runId}:${nodeId}:script:${typeof key === "string" ? `${toolId}:${paramsDigest(params)}:${key}` : randomUUID()}`;
-  const result = await buildActionInvoker(invokerOpts(c))(
-    {
-      service: parsed.service, action: parsed.action, params: Object.fromEntries(Object.entries(params)),
-      invocationId,
-    },
+  const result = await invokeOnce(c.var.providers.db, invocationId, typeof key === "string", (id) => buildActionInvoker(invokerOpts(c))(
+    { service: parsed.service, action: parsed.action, params: Object.fromEntries(Object.entries(params)), invocationId: id },
     {
       userId: run.actorUserId ?? actorUserIdFor(owner), orgId: sandbox.orgId, owner,
       external: { client: "workflow-script", attempt: randomUUID() },
     },
-  );
-  // A failure must not stick to the key: the script fixes the cause and retries.
-  if (!result.ok && !("requiresApproval" in result)) {
-    await c.var.providers.db.delete(actionInvocations).where(eq(actionInvocations.invocationId, invocationId));
-  }
+  ));
+  if (!result) return c.json(inProgress(toolId));
   if (result.ok) return c.json({ tool_id: toolId, status: "completed", result: result.result } satisfies ActionInvokeResponse);
   if ("requiresApproval" in result) return c.json(approvalRequired(toolId, result), 403);
   return c.json({ tool_id: toolId, status: "failed", error: result.error } satisfies ActionInvokeResponse);

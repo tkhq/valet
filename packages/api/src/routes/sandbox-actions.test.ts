@@ -6,7 +6,7 @@
 import { Type } from "typebox";
 import type { ValetPlugin } from "@valet/engine";
 import { and, eq, like } from "drizzle-orm";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createPolicy } from "../policies/admin.js";
@@ -23,6 +23,8 @@ const TEAM = "script-team";
 const RUN = "wfrun_script";
 const SESSION = `wf:${RUN}:fetch`;
 let echoCalls = 0;
+// Set to hold the echo action open, so a second request can overlap it.
+let hold: Promise<void> | undefined;
 
 function plugins(): ValetPlugin[] {
   const echo = {
@@ -30,6 +32,7 @@ function plugins(): ValetPlugin[] {
     parameters: Type.Object({ text: Type.Optional(Type.String()) }),
     execute: async (args: unknown, ctx: { credentials: { get: () => Promise<{ accessToken: string } | null> } }) => {
       echoCalls += 1;
+      await hold;
       const credential = await ctx.credentials.get();
       const text = typeof args === "object" && args !== null && "text" in args && typeof args.text === "string" ? args.text : null;
       return { success: true, data: { text, credential: credential?.accessToken ?? null } };
@@ -55,6 +58,7 @@ async function seed(): Promise<string> {
     { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: TEAM, actorUserId: "local-user" });
   await p.workflowStore.claimRun(RUN, "host", 30_000);
   echoCalls = 0;
+  hold = undefined;
   // The member who started the run has an account too; the call must use the team's.
   await p.engineCredentials.save({ type: "team", id: TEAM }, "demo", { type: "api_key", apiKey: "team-key" });
   await p.engineCredentials.save({ type: "user", id: "local-user" }, "demo", { type: "api_key", apiKey: "member-key" });
@@ -64,6 +68,8 @@ async function seed(): Promise<string> {
 function invoke(token: string, toolId: string, params: Record<string, unknown> = {}, idempotencyKey?: string): Promise<Response> {
   return fetch(`${api!.baseUrl}/api/sandbox/actions/${toolId}/invoke`, {
     method: "POST", headers: { "Content-Type": "application/json", "x-valet-sandbox": token },
+    // A request that runs the held action a second time would hang; fail it instead.
+    signal: AbortSignal.timeout(20_000),
     body: JSON.stringify({ params, ...(idempotencyKey ? { idempotencyKey } : {}) }),
   });
 }
@@ -109,6 +115,20 @@ describe("POST /api/sandbox/actions/:toolId/invoke", () => {
     expect(echoCalls).toBe(1);
     await invoke(token, "demo.echo", { text: "other params" }, "k1");
     expect(echoCalls).toBe(2);
+  });
+
+  it("answers in_progress to a retry that overlaps the first call, and runs the action once", async () => {
+    const token = await seed();
+    let release!: () => void;
+    hold = new Promise((resolve) => { release = resolve; });
+    const first = invoke(token, "demo.echo", { text: "once" }, "k2");
+    await vi.waitFor(() => expect(echoCalls).toBe(1));
+    const overlap = await (await invoke(token, "demo.echo", { text: "once" }, "k2")).json();
+    expect(overlap).toMatchObject({ tool_id: "demo.echo", status: "in_progress" });
+    release();
+    expect(await (await first).json()).toMatchObject({ status: "completed", result: { text: "once" } });
+    expect(await (await invoke(token, "demo.echo", { text: "once" }, "k2")).json()).toMatchObject({ status: "completed" });
+    expect(echoCalls).toBe(1);
   });
 
   it("refuses a session that is not a workflow step", async () => {
