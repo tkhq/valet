@@ -56,6 +56,7 @@ describe("workflowsActionPlugin", () => {
       "workflows.delete_webhook",
       "workflows.delete_workflow",
       "workflows.get_node_result",
+      "workflows.get_node_transcript",
       "workflows.get_run",
       "workflows.get_webhook",
       "workflows.get_workflow",
@@ -96,6 +97,7 @@ describe("workflowsActionPlugin", () => {
     expect(byId.get("workflows.list_workflows")).toBe("low");
     expect(byId.get("workflows.get_workflow")).toBe("low");
     expect(byId.get("workflows.get_run")).toBe("low");
+    expect(byId.get("workflows.get_node_transcript")).toBe("low");
     expect(byId.get("workflows.save_workflow")).toBe("medium");
     expect(byId.get("workflows.start_run")).toBe("medium");
     expect(byId.get("workflows.delete_workflow")).toBe("medium");
@@ -764,6 +766,65 @@ describe("DB-backed actions", () => {
       .checkpoints[0]!;
     expect(hugeCp.result.truncated).toBe(true);
     expect(typeof hugeCp.result.jsonPrefix).toBe("string");
+  });
+
+  it("get_node_transcript reads a step's prompt, tool errors, and format repair, and get_run flags the repair", async () => {
+    const plugin = workflowsActionPlugin(() => deps);
+    const action = (id: string) => plugin.actions.find((a) => a.id === id)!;
+    const owner = { ownerType: "user", ownerId: "user1" };
+    const params = {
+      workflowId: "wf-t", definitionVersionId: "v1",
+      input: { type: "manual", timestamp: "2026-01-01T00:00:00Z", data: {}, metadata: {} },
+    };
+    await deps.workflowStore.createRun("run-t", params, { version: "dag/v1", nodes: [], edges: [] }, "v1", owner);
+    const claim = await deps.workflowStore.claimRun("run-t", "host", 30_000);
+    if (!claim) throw new Error("claim failed");
+    const sessionId = "wf:run-t:verify";
+    const threadId = "verify-thread";
+    const base = { runId: "run-t", attempt: claim.attempt, createdAt: 1 };
+    await deps.workflowStore.putIntent({ ...base, nodeId: "verify", iteration: 0, status: "intent" });
+    await deps.workflowStore.completeCheckpoint("run-t", "verify", 0, claim.attempt, {
+      ...base, nodeId: "verify", iteration: 0, status: "completed", result: { output: { notification_text: "Review incomplete." } },
+      effects: {
+        sessionId, repairAttempted: true, firstError: "no fenced json block in the reply",
+        receipt: { sessionId, threadId, queueItemId: "q1" },
+      },
+    });
+    await deps.engineStore.saveSession({ id: sessionId, orgId: "org1", userId: "user1", owner: { type: "user", id: "user1" }, workspace: "/tmp", purpose: "interactive", status: "running", createdAt: 1, updatedAt: 1 });
+    await deps.engineStore.saveThread(sessionId, { id: threadId, sessionId, key: "workflow", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+    const entry = { sessionId, threadId, parentId: null, type: "message" as const, createdAt: 1 };
+    await deps.engineStore.appendEntries(sessionId, threadId, [
+      { ...entry, id: "e1", role: "user", content: "Use this research result as the draft: {...}" },
+      { ...entry, id: "e2", role: "assistant", content: "", parts: [{ type: "tool_call", callId: "c1", toolName: "github.list_pull_requests", status: "error", args: { repo: "tkhq/gitops" }, error: "GitHub App installation is not connected for this team." }] },
+      { ...entry, id: "e3", role: "user", content: "Your previous response did not match the required JSON schema." },
+      { ...entry, id: "e4", role: "assistant", content: "The release review is incomplete.", stopReason: "end_turn" },
+    ]);
+
+    const run = await action("workflows.get_run").execute({ run_id: "run-t" }, ctx());
+    expect(run.success).toBe(true);
+    if (!run.success) return;
+    expect((run.data as { checkpoints: unknown[] }).checkpoints).toEqual([
+      expect.objectContaining({ nodeId: "verify", repairAttempted: true, schemaError: "no fenced json block in the reply" }),
+    ]);
+
+    const transcript = await action("workflows.get_node_transcript").execute({ run_id: "run-t", node_id: "verify" }, ctx());
+    expect(transcript.success).toBe(true);
+    if (!transcript.success) return;
+    const data = transcript.data as { total: number; repairAttempted: boolean; messages: Array<{ index: number; role: string; text?: string; toolCalls?: Array<{ tool: string; status: string; error?: string }> }> };
+    expect(data.total).toBe(4);
+    expect(data.repairAttempted).toBe(true);
+    expect(data.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+    expect(data.messages[0]?.text).toContain("Use this research result as the draft");
+    expect(data.messages[1]?.toolCalls).toEqual([expect.objectContaining({
+      tool: "github.list_pull_requests", status: "error", error: "GitHub App installation is not connected for this team.",
+    })]);
+    expect(data.messages[2]?.text).toContain("did not match the required JSON schema");
+
+    const older = await action("workflows.get_node_transcript").execute({ run_id: "run-t", node_id: "verify", before: 2, limit: 1 }, ctx());
+    expect(older.success && (older.data as { messages: Array<{ index: number }> }).messages.map((m) => m.index)).toEqual([1]);
+
+    const notSession = await action("workflows.get_node_transcript").execute({ run_id: "run-t", node_id: "missing" }, ctx());
+    expect(notSession).toMatchObject({ success: false, error: expect.stringContaining("no checkpoint") });
   });
 
   it("list_runs names a parked run's waitingOn conditions", async () => {

@@ -2095,6 +2095,11 @@ export interface WorkflowRunCheckpoint {
   threadId?: string;
   /** Latest dispatched attempt; used to isolate inline logs from other turns. */
   queueItemId?: string;
+  /** The step's first reply did not match its output schema, so the step
+   * sent one format-repair prompt. The result is the repaired reply. */
+  repairAttempted?: boolean;
+  /** Why the first reply failed the schema, kept after the repair. */
+  schemaError?: string;
 }
 
 /** One pending approval gate on a parked workflow run. */
