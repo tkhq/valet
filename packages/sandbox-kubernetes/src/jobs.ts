@@ -138,6 +138,24 @@ export function pruneOldJobFilesScript(jobsDir: string = JOBS_DIR): string {
 }
 
 /**
+ * The capping filter that writes a job's output to `outFile`: the first
+ * `limit` bytes, then one marker line when more output follows, then a
+ * `cat` that drains the rest. GNU head writes through stdio, which buffers
+ * a file in 4 KB blocks, so a running job's log stayed empty until it
+ * printed 4 KB or exited. `stdbuf -o0` turns that buffering off, so a poll
+ * (`process_read`, a `watch`) sees each line as the job prints it. Without
+ * stdbuf (a BusyBox image), head keeps its buffering: the log then shows in
+ * 4 KB steps and at exit.
+ */
+export function jobCappingFilter(limit: number, outFile: string, marker: string): string {
+  return (
+    `if command -v stdbuf >/dev/null 2>&1; then stdbuf -o0 head -c ${limit}; else head -c ${limit}; fi > ${shQuote(outFile)}; ` +
+    `if [ "$(head -c 1 | wc -c | tr -d ' ')" -gt 0 ]; then printf '\\n%s' ${shQuote(marker)} >> ${shQuote(outFile)}; fi; ` +
+    `cat > /dev/null`
+  );
+}
+
+/**
  * Builds the kickoff script. Structure (see module docblock for why the
  * grouping matters):
  *
@@ -233,11 +251,7 @@ export function jobKickoffCommand(execId: string, innerCommand: string, maxOutpu
     // that reads no more than it writes from a pipe: GNU coreutils does
     // (checked on the sandbox image); BSD head over-reads, so the marker
     // can be missing there.
-    const marker = jobLogCappedLine(limit);
-    const cappingFilter =
-      `head -c ${limit} > ${shQuote(outFile)}; ` +
-      `if [ "$(head -c 1 | wc -c | tr -d ' ')" -gt 0 ]; then printf '\\n%s' ${shQuote(marker)} >> ${shQuote(outFile)}; fi; ` +
-      `cat > /dev/null`;
+    const cappingFilter = jobCappingFilter(limit, outFile, jobLogCappedLine(limit));
     // The capping filter has to run as a SEPARATE process from the job
     // (see module docblock's "maxOutputBytes" section for why a plain
     // `head -c LIMIT` alone would SIGPIPE-kill the job early) — but piping
