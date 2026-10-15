@@ -17,6 +17,8 @@ import {
   orderNodes,
   staticShape,
 } from "./workflow-preview.js";
+import { encodeToolOutput, type PluginAction, type PluginActionContext } from "@valet/engine";
+import { workflowsActionPlugin } from "../workflows/actions.js";
 import type { CreateWorkflowResponse, PreviewWorkflowResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -585,6 +587,141 @@ describe("POST /api/workflows/:id/preview — the editor's correction loop", () 
     expect(saveRes.status).toBe(400);
     const saveBody = (await saveRes.json()) as { error: string; errors: string[] };
     expect(saveBody.errors).toEqual(previewBody.errors);
+  });
+});
+
+/** The agent's action, wired to the same providers the route reads. */
+function previewAction(testApi: TestApi): { action: PluginAction; ctx: PluginActionContext } {
+  const { providers } = testApi;
+  const plugin = workflowsActionPlugin(() => ({
+    db: providers.db,
+    workflowStore: providers.workflowStore,
+    workflowRunHost: providers.workflowRunHost,
+    credentials: providers.engineCredentials,
+    engineStore: providers.engineStore,
+    actionPluginByService: providers.actionPluginByService,
+  }));
+  const action = plugin.actions.find((a) => a.id === "workflows.preview_workflow");
+  if (!action) throw new Error("missing preview_workflow action");
+  // The action reads only host-stamped identity; sandbox and credential methods are unused.
+  const ctx = { orgId: "local-org", userId: "local-user", actionId: action.id, service: "workflows" } as PluginActionContext;
+  return { action, ctx };
+}
+
+describe("workflows.preview_workflow", () => {
+  it("returns the route's preview for the same workflow and input", async () => {
+    api = await bootTestApi();
+    const { action, ctx } = previewAction(api);
+    const cases = [
+      { definition: PURE_DEFINITION, input: { email: "a@example.com" } },
+      { definition: EFFECTFUL_DEFINITION, input: { topic: "caching" } },
+    ];
+
+    for (const { definition, input } of cases) {
+      const created = await createWorkflow(api.baseUrl, definition);
+      // A workflow with no run gets a synthetic trigger stamped with the
+      // current time. Hold the clock so both previews stamp the same value.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-13T12:00:00Z"));
+      try {
+        const routeBody = await preview(api.baseUrl, created.id, { input });
+        const result = await action.execute({ workflow_id: created.id, input }, ctx);
+        expect(result.error).toBeUndefined();
+        // The route's reply went through JSON, so the action's must too.
+        const { workflowId, ...actionBody } = JSON.parse(JSON.stringify(result.data)) as PreviewWorkflowResponse & { workflowId: string };
+        expect(workflowId).toBe(created.id);
+        expect(actionBody).toEqual(routeBody);
+        expect(routeBody.nodes).toHaveLength(definition.nodes.length);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  });
+
+  it("names the corrective action for a node id the definition does not hold", async () => {
+    api = await bootTestApi();
+    const { action, ctx } = previewAction(api);
+    const created = await createWorkflow(api.baseUrl, PURE_DEFINITION);
+
+    const result = await action.execute({ workflow_id: created.id, node_id: "nope" }, ctx);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("omit nodeId");
+  });
+
+  it("cuts long sample values so the tool result keeps the get_node_result budget", async () => {
+    api = await bootTestApi();
+    const { action, ctx } = previewAction(api);
+    // The preview repeats the draft's text five times: as the draft's
+    // observed example, as the copy step's field, output and example, and
+    // in the hand-off prompt.
+    const created = await createWorkflow(api.baseUrl, {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "draft", type: "llm", model: MODEL, prompt: "Write the report" },
+        { id: "copy", type: "set", values: { text: "{{nodes.draft.result.text}}" } },
+        { id: "hand-off", type: "orchestrator", prompt: "Review: {{nodes.copy.result.text}}" },
+      ],
+      edges: [
+        { from: "trigger", to: "draft" },
+        { from: "draft", to: "copy" },
+        { from: "copy", to: "hand-off" },
+      ],
+    });
+    const runId = "wfr_preview_large";
+    const store = api.providers.workflowStore;
+    await store.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1", input: {} },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    const attempt = (await store.claimRun(runId, "test", 60_000))?.attempt ?? 1;
+    const checkpoint = { runId, nodeId: "draft", iteration: 0, attempt, createdAt: Date.now() };
+    await store.putIntent({ ...checkpoint, status: "intent" });
+    await store.completeCheckpoint(runId, "draft", 0, attempt, {
+      ...checkpoint,
+      status: "completed",
+      result: { text: "x".repeat(200_000) },
+    });
+
+    // The editor's route keeps every copy.
+    expect(JSON.stringify(await preview(api.baseUrl, created.id)).length).toBeGreaterThan(1_000_000);
+
+    const result = await action.execute({ workflow_id: created.id }, ctx);
+    expect(result.success).toBe(true);
+    // Measure what the model reads, encoded the way the engine encodes it.
+    const text = encodeToolOutput(result.data);
+    expect(text.length).toBeLessThan(20_000);
+    expect(JSON.stringify(result.data).length).toBeLessThan(20_000);
+    expect(text).toContain("truncated: true");
+    expect(text).toContain("call get_node_result");
+    // Only the values are cut. Every step still reports on itself.
+    for (const nodeId of ["trigger", "draft", "copy", "hand-off"]) expect(text).toContain(`nodeId: ${nodeId}`);
+  });
+
+  it("keeps a deeply nested sample value inside the encoded tool result budget", async () => {
+    api = await bootTestApi();
+    const { action, ctx } = previewAction(api);
+    const created = await createWorkflow(api.baseUrl, {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "copy", type: "set", values: { value: "{{trigger.data.value}}" } },
+      ],
+      edges: [{ from: "trigger", to: "copy" }],
+    });
+    // The encoder indents each level, so 100 levels encode to about ten
+    // times their compact JSON. The JSON alone fits the budget.
+    let value: unknown = "leaf";
+    for (let i = 0; i < 100; i++) value = { child: value };
+
+    const result = await action.execute({ workflow_id: created.id, sample: "none", input: { value } }, ctx);
+    expect(result.success).toBe(true);
+    const text = encodeToolOutput(result.data);
+    expect(text.length).toBeLessThanOrEqual(20_000);
+    expect(text).toContain("call get_node_result");
   });
 });
 

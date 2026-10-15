@@ -6,7 +6,7 @@ import type {
 } from "@valet/api/wire";
 import { triggerDataSchema, visibleTriggerFields, type WorkflowDefinition } from "@valet/workflow";
 import { MoreHorizontal } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   downloadWorkflowFile,
   useAllowWorkflowPermissions,
@@ -35,7 +35,7 @@ import {
 } from "~/components/primitives";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
 import { WorkflowAssistantPanel } from "~/components/workflows/editor/assistant-panel";
-import { Editor } from "~/components/workflows/editor/editor";
+import { Editor, type EditorHandle } from "~/components/workflows/editor/editor";
 import { WorkflowPreview } from "~/components/workflows/preview";
 import { RiskBadge } from "~/components/workflows/risk-badge";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
@@ -49,6 +49,7 @@ import { errorText, validationMessages } from "~/lib/error-text";
 import { relativeTime } from "~/lib/relative-time";
 import { runCountLabel } from "~/lib/run-count";
 import { useAdoptWorkspaceScope } from "~/lib/workspace-scope";
+import { prefillComposerDraft } from "~/stores/composer-drafts";
 
 /**
  * `/workflows/$workflowId` — the visual editor page (plan decision 11):
@@ -126,6 +127,14 @@ export function WorkflowEditorPage({ workflowId, newTrigger }: { workflowId: str
   );
 }
 
+/** What Test puts in the assistant's composer. The editor conversation's
+ * own guidance (`editor-thread-context.ts`) says how to carry it out. */
+const TEST_REQUEST = "Test this workflow: state the checks, dry-run it, then ask me before a real run.";
+
+/** Why Test is off while the definition has unsaved edits: the assistant
+ * reads the saved workflow, so it would test something the canvas does not show. */
+const TEST_NEEDS_SAVE = "Save your changes first. Test checks the saved workflow.";
+
 /** Module scope so the blocker's effect does not re-register on each render.
  * `disabled` decides whether the blocker runs at all; when it runs, every
  * departure is blocked. */
@@ -181,6 +190,7 @@ function WorkflowEditorPane({
   const copy = useCopyWorkflow();
   const mirrored = origin === "repo";
   const assistant = useWorkflowAssistant(workflowId, { ownerType, ownerId });
+  const editorRef = useRef<EditorHandle>(null);
   // The one thing that makes a live edit visible: a completed patch in the
   // panel's conversation refetches the workflow, and `Editor` adopts it.
   useWorkflowPatchWatch(assistant.sessionId, assistant.threadId, workflowId);
@@ -268,6 +278,14 @@ function WorkflowEditorPane({
     goToRun(result.runId);
   }
 
+  /** Test stays in the editor: it asks the assistant, which reports the
+   * result in this conversation. Run goes to the run page instead. */
+  function handleTest() {
+    if (!assistant.sessionId || !assistant.threadId) return;
+    prefillComposerDraft(assistant.sessionId, assistant.threadId, TEST_REQUEST);
+    editorRef.current?.showAssistant();
+  }
+
   function setPreapproveDialog(open: boolean) {
     setPreapproveOpen(open);
     // A closed dialog must not reopen showing the previous attempt's error.
@@ -337,6 +355,12 @@ function WorkflowEditorPane({
               {copy.isPending ? "Copying…" : "Copy"}
             </Button>
           )}
+          {/* A disabled Button takes no pointer events, so the wrapper shows the reason. */}
+          <span className="inline-flex" title={definitionDirty ? TEST_NEEDS_SAVE : undefined}>
+            <Button size="sm" variant="secondary" onClick={handleTest} disabled={!assistant.sessionId || !assistant.threadId || definitionDirty}>
+              Test
+            </Button>
+          </span>
           <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
             {startRun.isPending ? "Starting…" : "Run"}
           </Button>
@@ -480,6 +504,7 @@ function WorkflowEditorPane({
       <div className="relative flex min-h-0 min-w-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
           <Editor
+            ref={editorRef}
             initialDefinition={initialDefinition}
             onSave={handleSave}
             saving={update.isPending}

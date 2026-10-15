@@ -477,3 +477,19 @@ A schedule, an event, or a webhook starts a team run with no acting user. The te
 The membership gate now applies only when a person acts. The gate reads the acting user id: the turn's author when it has one, and the tool context's own user id when it does not. When that value is the assistant's own team principal id, the call authorizes through the session's server-derived owner. Every other value names a person, and a person's turn always carries an author. A person who left the team keeps no reach through the same assistant: their turn carries their user id, and the membership read still refuses it.
 
 One submitter sets no author and is not a person: an internal signal (`packages/api/src/orchestrator/signals.ts`). A signal therefore reads as a machine turn. The edge rules in `authorizeEdge` bound what that reaches. They admit a parent-to-child or child-to-parent edge, and an org-owned assistant to a user-owned one in the same organization. They deny a user-owned assistant an edge to a team-owned one, and to another user-owned one.
+
+### Testing a workflow from the editor (2026-10-13)
+
+The editor has a **Test** button next to **Run**. Test does not start a run. It puts a test request in the editor conversation's composer and keeps the person in the editor. The assistant previews and runs the saved workflow, so Test is disabled while the definition has unsaved edits. Its tooltip tells the person to save first. The editor guidance (`editor-thread-context.ts`) and the workflows skill define the procedure:
+
+1. State two to four concrete checks that the result must pass.
+2. Call `workflows.preview_workflow`. It uses the same `previewWorkflow()` function as `POST /api/workflows/:id/preview`. It runs only `trigger`, `set`, `if`, and `stop` steps and describes the other steps, so it has no side effects.
+3. Start a real run only after the person agrees. A real run posts messages and calls integrations. Only high-risk actions pause at an approval gate.
+4. Read the result in the `workflow.settled` report and with `get_node_result`. Fix the workflow and run it again, at most three times.
+5. End with each check marked passed or failed.
+
+A preview repeats sample values: a step's output, its observed example, and each downstream field that reads it. One 200,000-character checkpoint once gave a 1,000,000-character tool result. So `workflows.preview_workflow` keeps its tool result under 20,000 characters, the same budget as `get_node_result`. The values share half of that budget. The `presentResult` helper that `get_node_result` uses cuts each longer value to a `{ truncated: true, jsonPrefix, note }` stub. The note tells the assistant to pass `node_id` for one step, or to call `get_node_result`. The action measures the reply as `encodeToolOutput` encodes it for the model, not as compact JSON. The encoder indents each nested level, so a deep value encodes to many times its JSON size. If the encoded reply still does not fit, the action cuts it as a whole and shortens the stub's JSON prefix until the encoded stub fits. The HTTP route still gives the editor the full preview.
+
+A preview reads the workflow's five newest runs. It takes its sample from the newest one that the caller can read and that completed a step. It skips each run that fails `canReadWorkflowRun`, the check that `get_run` and `get_node_result` use. A team run started from a private thread or a private Slack channel belongs to that audience, so its trigger payload and step results never become another viewer's sample. If no run qualifies, the preview uses only the sample input. The route and the action both apply this rule, because both call `previewWorkflow()`.
+
+Outside a test, the editor still does not run a workflow unless the person asks. A test mode that holds outbound actions for review is a follow-up.

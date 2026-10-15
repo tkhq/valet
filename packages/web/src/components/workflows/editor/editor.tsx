@@ -21,7 +21,7 @@ import { PresenceSettings } from "~/components/presence-settings";
  * an invalid definition is otherwise a completely normal in-progress
  * editing state and is never silently discarded.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { validateWorkflowDefinition, type WorkflowDefinition } from "@valet/workflow";
 import { ArrowLeft, MoreHorizontal } from "lucide-react";
 import { ApiError } from "~/api/client";
@@ -72,7 +72,15 @@ import { cn } from "~/lib/cn";
 import { CompactPalette, Palette } from "./palette";
 import { errorNodeIdsFrom, ValidationBanner } from "./validation-banner";
 
+/** What the page can ask the editor to do. */
+export interface EditorHandle {
+  /** Put the assistant conversation on screen: close a step form, and on a
+   * narrow screen switch to the Assistant view. */
+  showAssistant(): void;
+}
+
 export interface EditorProps {
+  ref?: Ref<EditorHandle>;
   /**
    * The definition as the server currently holds it. It seeds the local
    * draft at mount and backs Cancel, and the editor also ADOPTS it when it
@@ -134,6 +142,7 @@ function EditorDraft({
   onDirtyChange,
   gateByNodeId,
   readOnly = false,
+  ref,
 }: EditorProps) {
   const [definition, setDefinition] = useState<WorkflowDefinition>(initialDefinition);
   const [dirty, setDirty] = useState(false);
@@ -352,6 +361,8 @@ function EditorDraft({
     clearSelection();
     setCompactView("assistant");
   }
+
+  useImperativeHandle(ref, () => ({ showAssistant }));
 
   const saveDisabled = !effectiveDirty || !validation.ok || validatePresence(definition.presence ?? {}) !== null || saving === true;
 

@@ -19,6 +19,11 @@ export function workflowEditorThreadContext(thread: { key: string }): string | u
     "Use patch_workflow to build its steps incrementally so the person can review the canvas.",
     "Use propose_trigger or propose_schedule for automation so the person can review the saved configuration before enabling it.",
     "Do not run it or enable schedules or event subscriptions unless the person explicitly asks.",
+    "If the person asks you to test it, first state 2 to 4 concrete checks that the result must pass.",
+    "Then call preview_workflow to find template and structure errors. A preview has no side effects.",
+    "Start a real run only after the person agrees, because a real run posts messages and calls integrations.",
+    "Read its result in the workflow.settled report and with get_node_result. Fix the workflow and run it again, at most 3 times.",
+    "End the test with each check marked passed or failed.",
     "In replies, call the workflow by its name. Do not show its wf_ id.",
     "The workflow tools enforce the current owner's permissions.",
   ].join(" ");
