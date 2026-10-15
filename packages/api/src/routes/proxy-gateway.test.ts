@@ -1,6 +1,6 @@
 // packages/api/src/routes/proxy-gateway.test.ts
 import { describe, it, expect } from "vitest";
-import { outboundHeaders, sanitizeResponseHeaders, injectIncludeUsage } from "./proxy-gateway.js";
+import { outboundHeaders, sanitizeResponseHeaders, injectIncludeUsage, proxySubpath } from "./proxy-gateway.js";
 
 describe("injectIncludeUsage", () => {
   const chat = "/v1/chat/completions";
@@ -75,5 +75,28 @@ describe("outboundHeaders", () => {
     const out = outboundHeaders(raw, "openai", "sk-real");
     expect(out.get("authorization")).toBe("Bearer sk-real");
     expect(out.get("openai-beta")).toBe("responses=v1");
+  });
+});
+
+describe("proxySubpath", () => {
+  it("keeps Anthropic paths that already carry /v1", () => {
+    expect(proxySubpath("anthropic", "/proxy/anthropic/v1/messages")).toBe("/v1/messages");
+    expect(proxySubpath("anthropic", "/proxy/anthropic/v1/messages/count_tokens")).toBe("/v1/messages/count_tokens");
+    expect(proxySubpath("anthropic", "/proxy/anthropic/v1")).toBe("/v1");
+  });
+
+  it("adds /v1 for a client that appends /messages to the Claude Code base URL", () => {
+    // OpenCode with baseURL `/proxy/anthropic` sends this path. Before the
+    // fix the gateway forwarded `/messages` upstream, and Anthropic 404'd.
+    expect(proxySubpath("anthropic", "/proxy/anthropic/messages")).toBe("/v1/messages");
+    expect(proxySubpath("anthropic", "/proxy/anthropic/models")).toBe("/v1/models");
+    // A segment that only starts with "v1" is not the version segment.
+    expect(proxySubpath("anthropic", "/proxy/anthropic/v1beta")).toBe("/v1/v1beta");
+  });
+
+  it("leaves OpenAI paths and the bare root untouched", () => {
+    expect(proxySubpath("openai", "/proxy/openai/v1/responses")).toBe("/v1/responses");
+    expect(proxySubpath("openai", "/proxy/openai/chat/completions")).toBe("/chat/completions");
+    expect(proxySubpath("anthropic", "/proxy/anthropic")).toBe("/");
   });
 });

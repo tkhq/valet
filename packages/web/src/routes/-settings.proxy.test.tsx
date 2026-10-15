@@ -120,6 +120,41 @@ describe("SettingsProxyPage — onboarding panel", () => {
   });
 });
 
+// ── setup guide before a key exists ─────────────────────────────────────
+
+describe("setup guide before a key exists", () => {
+  it.each(["personal", "team"])("%s shows collapsed setup docs with a key placeholder", (scope) => {
+    teamId = scope === "team" ? "team-1" : undefined;
+    const { container } = render(<SettingsProxyPage />);
+    const guide = container.querySelector("details");
+    expect(guide).toBeTruthy();
+    expect(guide?.open).toBe(false);
+    expect(guide?.querySelector("summary")?.textContent).toContain("OpenCode");
+    expect(guide?.textContent).toContain("export VALET_PROXY_KEY=<your-valet-proxy-key>");
+    expect(guide?.textContent).toContain('opencode run "hello"');
+    expect(createKeyMutate).not.toHaveBeenCalled();
+    expect(teamCreate).not.toHaveBeenCalled();
+  });
+
+  it("points OpenCode at the /v1 base URL", () => {
+    // OpenCode appends `/messages` to baseURL, so the documented URL ends in
+    // `/v1` and matches the upstream path without the gateway's fallback.
+    render(<SettingsProxyPage />);
+    const config = screen.getByText(/"baseURL":/);
+    expect(config.textContent).toContain(`"baseURL": "${window.location.origin}/proxy/anthropic/v1"`);
+    expect(config.textContent).toContain('"apiKey": "{env:VALET_PROXY_KEY}"');
+    expect(screen.getByText("export VALET_PROXY_KEY=<your-valet-proxy-key>")).toBeTruthy();
+  });
+
+  it("is still readable by a team member who cannot create a key", () => {
+    teamId = "team-1";
+    teamRole = "member";
+    orgData = { data: { callerRole: "member", features: { organizations: true } }, isLoading: false };
+    const { container } = render(<SettingsProxyPage />);
+    expect(container.querySelector("details")?.textContent).toContain("opencode.json");
+  });
+});
+
 // ── single-user mode (editable) ───────────────────────────────────────────
 
 describe("SettingsProxyPage — single-user mode (editable ProxyGovernance)", () => {
@@ -185,11 +220,15 @@ describe("shared personal and team onboarding", () => {
       act(() => createKeyMutate.mock.calls[0][1].onSuccess({ key: "vlt_new_key" }));
     }
     expect(screen.getByText("Your proxy key is shown once. Store it now.")).toBeTruthy();
-    expect(screen.getByText(/export ANTHROPIC_AUTH_TOKEN=vlt_new_key/)).toBeTruthy();
-    expect(screen.getByText(/export VALET_KEY=vlt_new_key/)).toBeTruthy();
+    // The key appears once; every tool reads it from VALET_PROXY_KEY.
+    expect(screen.getByText(/export VALET_PROXY_KEY=vlt_new_key/)).toBeTruthy();
+    expect(screen.getAllByText(/vlt_new_key/)).toHaveLength(2); // revealed key + env block
+    expect(screen.getByText(/export ANTHROPIC_AUTH_TOKEN="\$VALET_PROXY_KEY"/)).toBeTruthy();
+    expect(screen.getByText(/env_key = "VALET_PROXY_KEY"/)).toBeTruthy();
     expect(screen.getByRole("heading", { name: /Step 3.*Configure your tool/ })).toBeTruthy();
     expect(screen.getByRole("heading", { name: /Step 4.*Run it/ })).toBeTruthy();
     expect(screen.getByText('codex exec "hello"')).toBeTruthy();
+    expect(screen.getByText('opencode run "hello"')).toBeTruthy();
     // The key list is the API keys section on the same page or team tab.
     expect(screen.getByText(`You can revoke keys anytime in the API keys section on this ${scope === "team" ? "tab" : "page"}.`)).toBeTruthy();
     expect(screen.queryByRole("link", { name: /API keys/ })).toBeNull();
@@ -222,9 +261,16 @@ describe("shared personal and team onboarding", () => {
     expect(screen.getByText("Gateway: Off · Pass-through mode")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
     act(() => teamCreate.mock.calls[0][2].onSuccess({ name: "proxy-key", key: "vlt_pass" }));
-    expect(screen.getByText(/export ANTHROPIC_AUTH_TOKEN=vlt_pass/)).toBeTruthy();
-    expect(screen.getByText(/http_headers =.*vlt_pass/)).toBeTruthy();
+    expect(screen.getByText(/export VALET_PROXY_KEY=vlt_pass/)).toBeTruthy();
+    // Codex forwards OPENAI_API_KEY and sends the proxy key as x-api-key.
+    const codex = screen.getByText(/env_http_headers = \{ "x-api-key" = "VALET_PROXY_KEY" \}/);
+    expect(codex.textContent).toContain('env_key = "OPENAI_API_KEY"');
+    expect(screen.getByText(/export ANTHROPIC_API_KEY=<approved-anthropic-key>/)).toBeTruthy();
     expect(screen.getByText(/export OPENAI_API_KEY=<approved-openai-key>/)).toBeTruthy();
+    // OpenCode sends `apiKey` as x-api-key (forwarded upstream); the proxy
+    // key rides in the Bearer header that identifies the caller.
+    const opencode = screen.getByText(/"Authorization": "Bearer \{env:VALET_PROXY_KEY\}"/);
+    expect(opencode.textContent).toContain('"apiKey": "{env:ANTHROPIC_API_KEY}"');
     expect(screen.getByText(/An admin must enable/)).toBeTruthy();
   });
 

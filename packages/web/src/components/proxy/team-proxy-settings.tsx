@@ -22,7 +22,7 @@ export function TeamProxySettings({ teamId }: { teamId: string }) {
   const canCreate = team.callerRole === "admin" || orgQ.data.callerRole === "admin";
   return (
     <div className="min-w-0 max-w-full space-y-10">
-      <Section title="Proxy" description={`Route Claude Code or Codex traffic through ${team.name} for spend tracking and recording.`}>
+      <Section title="Proxy" description={`Route Claude Code, Codex, or OpenCode traffic through ${team.name} for spend tracking and recording.`}>
         <ProxyGovernance editable={false} />
       </Section>
       <TeamOnboarding key={`${teamId}:${canCreate}`} teamId={teamId} canCreate={canCreate} settingsQuery={settingsQ} />
