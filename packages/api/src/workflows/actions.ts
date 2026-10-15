@@ -293,6 +293,19 @@ export const RESOLVED_GATE_NEXT_ELSEWHERE =
   "The run continues, but its signals go to the conversation that started it, not this one. " +
   "To tell the person the result here, call get_run when they ask or after a short wait.";
 
+/** The same, when other approvals were already waiting on the run. A
+ * workflow.approval_needed signal reports only a gate a drive opens, so no
+ * signal names these steps: the assistant must name them now. */
+export function resolvedGateStillWaiting(gates: { nodeId: string; iteration?: number; approver?: { name?: string } }[]): string {
+  const steps = gates.map((gate) => {
+    const step = gate.iteration === undefined ? gate.nodeId : `${gate.nodeId} (item ${gate.iteration})`;
+    return gate.approver?.name ? `${step}, which ${gate.approver.name} must approve` : step;
+  });
+  return `The run still waits for approval at ${steps.join("; ")}. ` +
+    "These steps were already waiting, so no new signal reports them. " +
+    "Tell the person which steps still wait and who must approve each. Do not say the run continues.";
+}
+
 export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): ActionPlugin {
   const copyToTeam = action(Type.Object({
     workflow_id: Type.String({ description: "Explicit personal workflow ID to copy." }),
@@ -751,7 +764,11 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       // The result is what the assistant reads right after the card. Saying
       // here that the signal reports the run stops a get_run poll that
       // reports the run twice: once from the poll, once from the signal.
-      const next = runReportsToThread(run.params, ctx.sessionId, ctx.threadId) ? RESOLVED_GATE_NEXT : RESOLVED_GATE_NEXT_ELSEWHERE;
+      // An answered gate leaves pendingGates, so what remains still waits.
+      const stillWaiting = (await getWorkflowRunDetail(deps, owner, run_id))?.pendingGates ?? [];
+      const next = stillWaiting.length > 0
+        ? resolvedGateStillWaiting(stillWaiting)
+        : runReportsToThread(run.params, ctx.sessionId, ctx.threadId) ? RESOLVED_GATE_NEXT : RESOLVED_GATE_NEXT_ELSEWHERE;
       return { success: true, data: { runId: run_id, nodeId: node_id, approved, next } };
     },
   });
