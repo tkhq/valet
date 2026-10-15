@@ -20,7 +20,7 @@ import {
   type PluginActionResult,
 } from "@valet/engine";
 import { authorizeSlackFile } from "./file-access.js";
-import { slackFetch, slackGet } from "./api.js";
+import { slackFetch, slackGet, slackGetOnce } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
 import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
 import { buildContentBlocks, hasTableBlock, needsContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
@@ -295,26 +295,56 @@ async function resolveAndEnrichMessages(token: string, messages: Record<string, 
  *  number go out unchecked. */
 const MAX_CHECKED_MENTIONS = 20;
 
+/** The longest time one users.info lookup in the mention check can take. A
+ *  slower lookup counts as failed, and the post goes out unchecked. */
+const MENTION_LOOKUP_TIMEOUT_MS = 3_000;
+
 /**
- * The error for outgoing text that mentions a user ID Slack does not know, or
- * undefined when the text can go out. Slack accepts such a post and shows a
- * broken mention, so a mistyped ID otherwise fails with no signal. Every
- * action that posts or edits message text calls this before it writes.
+ * The user IDs that message content mentions, in first-seen order. Each
+ * source is message text or parsed Block Kit JSON. The walk scans every
+ * string for `<@U…>` mentions and adds the user_id of every rich-text `user`
+ * element.
+ */
+function mentionedUserIds(sources: unknown[]): Set<string> {
+  const ids = new Set<string>();
+  // A queue, not recursion: blocks are caller-supplied JSON of any depth.
+  const queue = [...sources];
+  for (let i = 0; i < queue.length; i++) {
+    const value = queue[i];
+    if (typeof value === 'string') {
+      for (const m of value.matchAll(SLACK_USER_MENTION_RE)) ids.add(m[1]);
+    } else if (Array.isArray(value)) {
+      for (const item of value) queue.push(item);
+    } else if (typeof value === 'object' && value !== null) {
+      if ('type' in value && value.type === 'user' && 'user_id' in value && typeof value.user_id === 'string') {
+        ids.add(value.user_id);
+      }
+      for (const item of Object.values(value)) queue.push(item);
+    }
+  }
+  return ids;
+}
+
+/**
+ * The error for outgoing message content that mentions a user ID Slack does
+ * not know, or undefined when the content can go out. Slack accepts such a
+ * post and shows a broken mention, so a mistyped ID otherwise fails with no
+ * signal. Every action that posts or edits message content calls this before
+ * it writes. Each source is message text or parsed Block Kit JSON.
  */
 async function unknownMentionError(
   token: string,
-  ...texts: (string | undefined)[]
+  ...sources: unknown[]
 ): Promise<PluginActionResult | undefined> {
-  const ids = new Set<string>();
-  for (const text of texts) {
-    for (const m of (text ?? '').matchAll(SLACK_USER_MENTION_RE)) ids.add(m[1]);
-  }
+  const ids = mentionedUserIds(sources);
   const results = await Promise.all([...ids].slice(0, MAX_CHECKED_MENTIONS).map(async (id) => {
     // Only Slack's definite user_not_found refuses the post. The check exists
     // to catch a mistyped ID. A lookup that fails for another reason (rate
-    // limit, missing users:read scope, network) must not stop every post.
+    // limit, timeout, missing users:read scope, network) must not stop every
+    // post. The lookup makes one attempt: a retry would wait out Slack's
+    // Retry-After and hold the post back.
     try {
-      const res = await slackGet('users.info', token, { user: id });
+      const res = await slackGetOnce('users.info', token, { user: id }, MENTION_LOOKUP_TIMEOUT_MS);
       if (!res.ok) return undefined;
       const data = (await res.json()) as { ok: boolean; error?: string };
       return !data.ok && data.error === 'user_not_found' ? id : undefined;
@@ -1207,7 +1237,7 @@ const sendMessage = action(Type.Object({
       body.blocks = userBlocks;
     }
 
-    const mentionError = await unknownMentionError(token, p.text, p.blocks);
+    const mentionError = await unknownMentionError(token, p.text, userBlocks);
     if (mentionError) return mentionError;
     const { res, data } = await postActionMessage(token, body, ctx, p, fallbackBlocks);
     if (!res.ok || !data.ok) {

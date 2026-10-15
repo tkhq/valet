@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import type {
   Credential,
   CredentialProvider,
@@ -92,12 +92,12 @@ function mockFileAccess(fetchMock: ReturnType<typeof vi.fn>, url: string): void 
  *  `usersInfo` answers the users.info lookup for one user ID. */
 function mockSlackMethods(
   fetchMock: ReturnType<typeof vi.fn>,
-  usersInfo: (user: string) => Response | Promise<Response>,
+  usersInfo: (user: string, init?: RequestInit) => Response | Promise<Response>,
 ): void {
-  fetchMock.mockImplementation(async (url: string) => {
+  fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
     const { pathname, searchParams } = new URL(url);
     const method = pathname.split('/').pop();
-    if (method === 'users.info') return usersInfo(searchParams.get('user') ?? '');
+    if (method === 'users.info') return usersInfo(searchParams.get('user') ?? '', init);
     if (method === 'conversations.info') return jsonResponse(200, { ok: true, channel: { id: 'C1', name: 'general', is_private: false } });
     if (method === 'conversations.open') return jsonResponse(200, { ok: true, channel: { id: 'D1' } });
     if (method === 'files.getUploadURLExternal') return jsonResponse(200, { ok: true, upload_url: 'https://uploads.slack.test/file', file_id: 'F1' });
@@ -1311,6 +1311,8 @@ describe('slack actions', () => {
     const unknownUserNotFound = (user: string) => user === unknownUser
       ? jsonResponse(200, { ok: false, error: 'user_not_found' })
       : userFound(user);
+    const unknownUserError = `Slack has no user with ID ${unknownUser}, so Valet did not send the message. ` +
+      'Look up the user again with slack.list_users or slack.lookup_user_by_email. Then retry with the correct ID.';
     const mentionCtx = () => pluginCtx({
       credentials: makeCredentials({ accessToken: 'xoxb-test-token', metadata: { owner_slack_user_id: 'U01OWNER00' } }),
       origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' },
@@ -1334,19 +1336,23 @@ describe('slack actions', () => {
         { channel: 'C1', user: 'U01AAAAAAA', ts: '1.2', path: '/workspace/report.pdf', text, caption: text },
         mentionCtx(),
       );
-      expect(result).toEqual({
-        success: false,
-        error: `Slack has no user with ID ${unknownUser}, so Valet did not send the message. ` +
-          'Look up the user again with slack.list_users or slack.lookup_user_by_email. Then retry with the correct ID.',
-      });
+      expect(result).toEqual({ success: false, error: unknownUserError });
       expect(messageWrites(fetchMock)).toHaveLength(0);
     });
 
-    it('send_message refuses an unknown user mentioned only in blocks', async () => {
+    // Slack reads the parsed blocks. A scan of the raw JSON string missed a
+    // rich-text user element and a mention whose "<" was JSON-escaped.
+    it.each([
+      ['mrkdwn text', JSON.stringify([{ type: 'section', text: { type: 'mrkdwn', text: `Ping <@${unknownUser}>` } }])],
+      ['a rich-text user element', JSON.stringify([{ type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [
+        { type: 'text', text: 'Ping ' },
+        { type: 'user', user_id: unknownUser },
+      ] }] }])],
+      ['JSON-escaped mrkdwn text', `[{"type":"section","text":{"type":"mrkdwn","text":"Ping \\u003c@${unknownUser}>"}}]`],
+    ])('send_message refuses an unknown user mentioned only in blocks as %s', async (_label, blocks) => {
       mockSlackMethods(fetchMock, unknownUserNotFound);
-      const blocks = JSON.stringify([{ type: 'section', text: { type: 'mrkdwn', text: `Ping <@${unknownUser}>` } }]);
       const result = await action('slack.send_message').execute({ channel: 'C1', text: 'Ping', blocks }, pluginCtx());
-      expect(result).toMatchObject({ success: false, error: expect.stringContaining(unknownUser) });
+      expect(result).toEqual({ success: false, error: unknownUserError });
       expect(messageWrites(fetchMock)).toHaveLength(0);
     });
 
@@ -1371,6 +1377,38 @@ describe('slack actions', () => {
       mockSlackMethods(fetchMock, answer);
       const result = await action('slack.send_message').execute({ channel: 'C1', text: `Ask <@${unknownUser}>.` }, pluginCtx());
       expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(messageWrites(fetchMock)).toHaveLength(1);
+    });
+
+    // A retry on 429 slept for Slack's Retry-After before each new attempt,
+    // so one rate limit held the post back for three times that value.
+    it('send_message makes one lookup per user and does not wait out a rate limit', async () => {
+      mockSlackMethods(fetchMock, () => new Response('{}', { status: 429, headers: { 'Retry-After': '120' } }));
+      const started = performance.now();
+      const result = await action('slack.send_message').execute(
+        { channel: 'C1', text: `Ask <@U01AAAAAAA> and <@${unknownUser}>.` },
+        pluginCtx(),
+      );
+      expect(performance.now() - started).toBeLessThan(1_000);
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(lookedUpUsers(fetchMock).sort()).toEqual(['U01AAAAAAA', unknownUser]);
+      expect(messageWrites(fetchMock)).toHaveLength(1);
+    });
+
+    it('send_message posts when a mention lookup outlasts its timeout', async () => {
+      // Keep the 3-second timeout the action asks for out of the test run.
+      const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+      const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => realTimeout(10));
+      onTestFinished(() => timeout.mockRestore());
+      // The lookup never answers. Only an abort of its signal ends it.
+      mockSlackMethods(fetchMock, (_user, init) => new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal) signal.addEventListener('abort', () => reject(signal.reason));
+      }));
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: `Ask <@${unknownUser}>.` }, pluginCtx());
+      expect(timeout).toHaveBeenCalledWith(3_000);
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(lookedUpUsers(fetchMock)).toEqual([unknownUser]);
       expect(messageWrites(fetchMock)).toHaveLength(1);
     });
 
