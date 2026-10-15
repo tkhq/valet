@@ -25,8 +25,13 @@ Valet narrows tools by task. Scopes reduce unrelated choices. Existing authoriza
 ## Workflow troubleshooting
 
 `focus_tools` selects diagnose, repair, validate, or general focus. It never expands a session or submission ceiling.
-Diagnose exposes workflow evidence reads. Repair adds definition edits and preview. Validate adds run controls and explicitly named integration actions.
+Diagnose exposes workflow evidence reads and previews. Repair adds definition edits, automation proposals, and automation corrections.
+Validate retains previews and adds run controls and explicitly named integration actions.
+Every focused phase retains replies, reactions, and files to the originating Slack conversation, and replies to the originating Telegram conversation.
+These actions resolve the existing origin. They do not accept an arbitrary destination, and inherited ceilings still apply.
+Automation activation still requires the person's request and existing policy checks. Prefer disabled proposals for review.
 General clears thread focus. It does not remove inherited ceilings or change action policies.
+Use general for other workflow management tasks, such as copying or deleting a workflow.
 The workflow skill loads the troubleshooting procedure for failures. It records checks, inspects evidence, repairs one cause, and verifies results.
 The workflow editor starts in diagnose focus. An edit request selects repair. An authorized test selects validate.
 The patch action rejects unknown parameters. An unsupported patch format must not appear to save a successful edit.
@@ -36,6 +41,10 @@ Exact action scopes still permit the internal account-discovery approval needed 
 
 Scopes constrain tools and brokered integration actions. They do not restrict network access from an explicitly allowed shell.
 Do not describe a tool scope as a sandbox firewall.
+
+A run started by a scoped task inherits its effective scope, including nested runs.
+Saving a definition does not bind future independent UI, schedule, event, or webhook runs to the authoring task's ceiling.
+Those runs are new executions under their existing owner and action policies. Scopes do not constrain every future use of an edited configuration.
 
 ## Evidence
 

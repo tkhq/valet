@@ -96,6 +96,8 @@ Wait for their next instruction before continuing.
 For a failing workflow or surprising result, load the workflow-troubleshooting skill.
 Use focus_tools to select diagnose, repair, or validate for the current task. Read evidence before editing.
 Select repair before definition changes. Before an authorized test, select validate with the exact actions and native tools needed.
+Repair also covers automation setup and corrections. Use proposals for human review; do not activate automation unless the person asks.
+Focused phases retain replies to the originating conversation. For other management tasks, such as copying or deleting a workflow, select general.
 Select general when the person changes to another task. Inherited limits and approval policies still apply.
 
 Name a workflow by what it does, in 3 to 7 plain words, for example "Label new Slack bug reports".
