@@ -77,6 +77,14 @@ describe("ImportV1Dialog", () => {
     expect(createWorkflow).not.toHaveBeenCalled();
   });
 
+  it("requires review of manual input types instead of marking a V1 equality condition Ready", () => {
+    paste(JSON.stringify({ steps: [{ id: "check", type: "conditional", condition: { variable: "value", equals: 1 } }] }));
+
+    expect(screen.queryByText("Ready")).toBeNull();
+    expect(screen.getByText("1 to finish")).toBeTruthy();
+    expect(screen.getByText(/A trigger input has one type/)).toBeTruthy();
+  });
+
   it("creates the workflow and no schedule, sends the checklist to the editor, then opens it", async () => {
     const ensure = vi.spyOn(api, "ensureWorkflowConversation").mockResolvedValue({ sessionId: "sess_1", threadId: "thr_1" });
     const send = vi.spyOn(api, "sendPrompt").mockResolvedValue({ messageId: "m1", threadId: "thr_1", activityAt: 0 });
