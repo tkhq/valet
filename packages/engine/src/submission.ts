@@ -12,6 +12,7 @@ import type {
   SubmissionOutcome,
   SuspendedTurnState,
 } from "./types.js";
+import { readModelResponseMetadata } from "./model-response.js";
 import { ValidationError } from "./errors.js";
 import { formatTranscriptText } from "./transcript-formatter.js";
 
@@ -413,6 +414,21 @@ export function resolveSubmissionText(entries: SessionEntry[], queueItemId: stri
     }
   }
   return text;
+}
+
+/** Validate transport completion, not whether a consumer requires text or structured output. */
+export function completedSubmissionOutcome(entries: SessionEntry[], queueItemId: string): SubmissionOutcome {
+  const last = [...entries].reverse().find((entry): entry is MessageEntry =>
+    entry.type === "message" && entry.role === "assistant" && entry.queueItemId === queueItemId);
+  const response = last ? readModelResponseMetadata(last) : null;
+  if (last?.stopReason === "abort") return { outcome: "aborted" };
+  if (response?.stopReason === "length") {
+    return { outcome: "failed", error: "The model reached its output limit. Inspect the node diagnostics before retrying." };
+  }
+  if (last?.stopReason !== "end_turn" || (response && response.stopReason !== "stop")) {
+    return { outcome: "failed", error: "The model did not record a complete terminal response. Inspect the node diagnostics before retrying." };
+  }
+  return { outcome: "completed" };
 }
 
 /**

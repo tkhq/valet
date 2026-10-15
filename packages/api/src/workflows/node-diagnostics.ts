@@ -1,4 +1,4 @@
-import { MESSAGE_TURN_ERROR_KEY, type MessageEntry, type SessionStore } from "@valet/engine";
+import { readModelResponseMetadata, MESSAGE_TURN_ERROR_KEY, type MessageEntry, type SessionStore } from "@valet/engine";
 import type { NodeCheckpoint } from "@valet/workflow";
 
 const ENTRY_LIMIT = 2_000;
@@ -75,6 +75,7 @@ function messageDiagnostics(entry: MessageEntry) {
     textPartsLength: (entry.parts ?? []).reduce((sum, part) => sum + (part.type === "text" ? part.text.length : 0), 0),
     partTypes: [...new Set((entry.parts ?? []).map(part => part.type))],
     usage: entry.usage, cost: entry.cost,
+    modelResponse: readModelResponseMetadata(entry),
     ...(typeof error === "string" ? { providerError: error.slice(0, ERROR_CHARS) } : {}),
   };
 }

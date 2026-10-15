@@ -928,7 +928,7 @@ describe("queue: settlement resilience", () => {
 });
 
 describe("queue: length-terminated turns", () => {
-  it("stopReason 'length' persists as end_turn and settles completed", async () => {
+  it("stopReason 'length' keeps its transcript mapping but settles failed", async () => {
     const faux = registerFauxProvider({ provider: "max-tokens" });
     faux.setResponses([fauxAssistantMessage("truncated but usable", { stopReason: "length" })]);
 
@@ -948,16 +948,18 @@ describe("queue: length-terminated turns", () => {
     });
 
     const item = await store.getQueueItem(session.id, r1.queueItemId);
-    expect(item?.outcome).toEqual({ outcome: "completed" });
+    expect(item?.outcome).toMatchObject({ outcome: "failed", error: expect.stringContaining("output limit") });
+    expect(item?.attemptCount).toBe(1);
+    expect(faux.state.callCount).toBe(1);
 
-    // Task 6 resolves result text from "last assistant entry with stopReason
-    // end_turn" — a max-tokens turn must still carry one.
+    // Partial text remains available, but it is not a completed result.
     const entries = await session.readEntries("web:default");
     const lastAssistant = entries
       .filter((e): e is MessageEntry => e.type === "message" && e.role === "assistant")
       .at(-1);
     expect(lastAssistant?.stopReason).toBe("end_turn");
     expect(lastAssistant?.queueItemId).toBe(r1.queueItemId);
+    expect(lastAssistant?.metadata?.modelResponse).toMatchObject({ stopReason: "length" });
 
     faux.unregister();
   });
