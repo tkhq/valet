@@ -20,7 +20,7 @@ New tool gates store an occurrence ID in their intent checkpoint. Signal and not
 
 Each tool checkpoint retains the IDs of gate signals it consumed. Recovery accepts these receipts even when account consent advances into another intent checkpoint. It still redelivers a signal whose consumption has no checkpoint proof. The executor, recovery sweep, resolver, and pending-gate projection match answers to the current occurrence.
 
-Preview checkpoints can have an account-consent transition marker without occurrence IDs or receipts. Recovery preserves their consumed consent. Old consent cannot answer a later action gate, including consent that an earlier sweep already redelivered. A changed share still accepts its own account answer. A preview run already waiting on the same account after consent fails explicitly.
+Preview checkpoints can have an account-consent transition marker without occurrence IDs or receipts. Recovery preserves their consumed consent. Old consent cannot answer a later action gate, including consent that an earlier sweep already redelivered. A changed share still accepts its own account answer. A preview run already waiting on the same account after consent fails explicitly. This check uses only that node's signal type, including its iteration.
 
 New approval cards submit their occurrence ID. The server rejects missing or stale IDs before it writes grants or signals. Thread cards also use the occurrence ID in their resume key. A card for account borrowing cannot resolve a later action gate on the same node. Legacy pending gates accept their existing requests.
 
