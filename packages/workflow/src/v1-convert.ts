@@ -317,7 +317,6 @@ interface Build {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   checklist: string[];
-  inputs: Record<string, WorkflowInputDefinition>;
   ids: Set<string>;
   /** V1 `outputVariable` name → the V1 step that set it. */
   outputOwners: Map<string, string>;
@@ -340,7 +339,6 @@ function convertWorkflow(row: V1WorkflowRow, triggers: V1TriggerRow[]): V1Conver
     nodes: [],
     edges: [],
     checklist: [],
-    inputs: {},
     ids: new Set(['trigger', 'stop']),
     outputOwners: new Map(),
     nodeOfStep: new Map(),
@@ -369,7 +367,7 @@ function convertWorkflow(row: V1WorkflowRow, triggers: V1TriggerRow[]): V1Conver
   flush(lane, b);
   b.nodes.push({ id: 'stop', type: 'stop', outcome: 'success' });
   connect(lane.tails, 'stop', b);
-  declareInputs(b);
+  describeInputs(b);
 
   if (b.messageSessions.length > 1) {
     // The shared V1 session took a message only after it finished the one
@@ -403,8 +401,7 @@ function convertWorkflow(row: V1WorkflowRow, triggers: V1TriggerRow[]): V1Conver
   const after = b.checklist.length > 0 ? ' after you finish the other items in this list' : '';
   for (const t of schedules) b.checklist.push(scheduleLine(t, row, after, b));
 
-  const trigger: WorkflowNode =
-    Object.keys(b.inputs).length > 0 ? { id: 'trigger', type: 'trigger', dataSchema: b.inputs } : { id: 'trigger', type: 'trigger' };
+  const trigger: WorkflowNode = { id: 'trigger', type: 'trigger' };
   return {
     name,
     definition: { version: 'dag/v1', nodes: [trigger, ...b.nodes], edges: b.edges },
@@ -808,18 +805,20 @@ function addApproval(raw: Record<string, unknown>, id: string, lane: Lane, b: Bu
 }
 
 /**
- * Adds each trigger variable that the if nodes compare to one type to the
- * run form. A declared type refuses a run whose value has another type.
- * V1 compared with `===` and took a value of any type, so a variable that
- * the if nodes compare to two types, or test for truthiness, stays out.
+ * Leaves trigger variables undeclared to preserve V1 input admission.
+ * V1 compared with `===` and accepted any type, including null. Even one
+ * comparison cannot establish the variable's type. A checklist item asks
+ * the person to choose any restrictions needed for the manual run form.
  */
-function declareInputs(b: Build): void {
+function describeInputs(b: Build): void {
   for (const [variable, { ifIds, types }] of b.variables) {
     // A truthiness test already has its line (`addConditional`).
     if (types.has('any')) continue;
     const [type, ...others] = types;
     if (type !== undefined && type !== 'any' && others.length === 0) {
-      b.inputs[variable] = { type, description: 'A V1 workflow variable.' };
+      b.checklist.push(
+        `The if nodes ${ifIds.map(quote).join(', ')} compare "${variable}" to ${type} values. V1 took a value of any type, including null, so the import leaves "${variable}" off the run form. To set it in a run you start by hand, add it as a trigger input. Choose its type after you check the callers. A trigger input has one type, so it rejects values of other types and null.`,
+      );
       continue;
     }
     b.checklist.push(
@@ -873,7 +872,7 @@ function addConditional(raw: Record<string, unknown>, id: string, path: string, 
       `If node "${ifId}" reads "${condition.variable}", which V1 set from the output of step "${owner}"${now}. V2 reads a node's output as nodes.<id>.result. Change the condition to read that node.`,
     );
   } else {
-    // `declareInputs` adds the variable to the run form after the walk.
+    // `describeInputs` explains the run form's type restriction after the walk.
     const seen = b.variables.get(condition.variable) ?? { ifIds: [], types: new Set() };
     seen.ifIds.push(ifId);
     seen.types.add(condition.inputType ?? 'any');
@@ -919,7 +918,7 @@ type ReadCondition =
       kind: 'variable';
       variable: string;
       conditions: IfCondition[];
-      /** Undefined when V1 took a value of any type. */
+      /** Comparison operand type. Undefined for a truthiness test. */
       inputType?: WorkflowInputDefinition['type'];
     };
 
@@ -945,9 +944,8 @@ function readCondition(raw: unknown): ReadCondition {
     return { kind: 'variable', variable, conditions: [{ left, dataType: 'string', operation: 'equals', right: expected }], inputType: 'string' };
   }
   if (typeof expected === 'number') {
-    // A number `equals` reads "0" as 0, and a webhook run skips the trigger
-    // input schema. `exists` passes only a real number, so the two
-    // conditions together compare strictly, as V1's `===` did.
+    // A number `equals` reads "0" as 0. `exists` passes only a real number,
+    // so the two conditions compare strictly, as V1's `===` did.
     return {
       kind: 'variable',
       variable,
