@@ -10,7 +10,12 @@
  *   - Every `agent_message` in one run went to ONE shared session, and a
  *     `bash` step ran in that same sandbox. A run of consecutive
  *     `agent_message` and `bash` steps therefore becomes one session node
- *     whose prompt lists them in order.
+ *     whose prompt lists them in order, unless V1 waited for some of them
+ *     and not for others (`addPending`).
+ *   - V1 waited for an `agent_message` only when it set `await_response`,
+ *     and then only up to a time limit. Without it, V1 sent the message
+ *     with `prompt_async` and went on at once (`executeWorkflowAgentStep`
+ *     in `prompt.ts`).
  *   - `agent`, `loop` and `subworkflow` steps did nothing, and so did every
  *     tool name the runner did not handle (`prompt.ts`
  *     `executeWorkflowToolStep`). The runner recorded them and moved on.
@@ -280,6 +285,12 @@ interface Pending {
   braces?: boolean;
   /** A shell command, whose failure stopped the V1 run. */
   command?: boolean;
+  /** V1 waited for this step before the next one: a command, or a message
+   * with `await_response`. */
+  waits: boolean;
+  /** For a message with `await_response`: how long V1 waited for the
+   * answer, in milliseconds. */
+  awaitMs?: number;
 }
 
 /** A V1 step and its V1 path, such as `step[2].then[0]`. */
@@ -356,9 +367,16 @@ function convertWorkflow(row: V1WorkflowRow, triggers: V1TriggerRow[]): V1Conver
   connect(lane.tails, 'stop', b);
 
   if (b.messageSessions.length > 1) {
+    // The shared V1 session took a message only after it finished the one
+    // before it. Separate sessions lose that order for a node that does not wait.
+    const noWait = b.messageSessions.filter((id) => b.nodes.some((n) => n.id === id && n.type === 'session' && n.wait?.mode === 'none'));
+    const order =
+      noWait.length === 0
+        ? ''
+        : ` V1's shared session did each message only after the one before it. A session node that does not wait (${noWait.map(quote).join(', ')}) lets the session nodes after it start before its work is done.`;
     requireDecision(
       b,
-      `V1 sent every agent message and shell command in a run to one shared session. This import made ${b.messageSessions.length} session nodes (${b.messageSessions.map(quote).join(', ')}), and each one starts a new session. If a later node needs what an earlier one did, add that context to its prompt.`,
+      `V1 sent every agent message and shell command in a run to one shared session. This import made ${b.messageSessions.length} session nodes (${b.messageSessions.map(quote).join(', ')}), and each one starts a new session. If a later node needs what an earlier one did, add that context to its prompt.${order}`,
     );
   }
 
@@ -490,7 +508,7 @@ function walk(steps: Located[], lane: Lane, b: Build, scope?: Scope): void {
       case 'agent_message':
         return addMessage(raw, id, lane, b);
       case 'bash':
-        return addCommand(stringField(raw.command), raw.cwd, id, lane);
+        return addCommand(stringField(raw.command), raw.cwd, id, lane, b);
       case 'tool':
         return addTool(raw, id, lane, b);
       case 'approval':
@@ -530,18 +548,69 @@ function addMessage(raw: Record<string, unknown>, id: string, lane: Lane, b: Bui
       `Step "${id}" set "interrupt", which stopped the message before it in V1. The import runs every message in order.`,
     );
   }
-  lane.pending.push({ stepId: id, text, ...(text.includes('{{') ? { braces: true } : {}) });
+  // V1's runner reads either spelling as true (`executeWorkflowAgentStep`).
+  const awaitMs = raw.await_response === true || raw.awaitResponse === true ? v1AwaitMs(raw) : undefined;
+  addPending(
+    {
+      stepId: id,
+      text,
+      ...(text.includes('{{') ? { braces: true } : {}),
+      waits: awaitMs !== undefined,
+      ...(awaitMs === undefined ? {} : { awaitMs }),
+    },
+    lane,
+    b,
+  );
 }
 
-function addCommand(command: string, cwd: unknown, id: string, lane: Lane): void {
+/** How long V1 waited for an answer (`executeWorkflowAgentStep`): the
+ * step's `await_timeout_ms`, 2 minutes when unset, 15 minutes at most. */
+function v1AwaitMs(raw: Record<string, unknown>): number {
+  const set =
+    typeof raw.await_timeout_ms === 'number'
+      ? raw.await_timeout_ms
+      : typeof raw.awaitTimeoutMs === 'number'
+        ? raw.awaitTimeoutMs
+        : 120_000;
+  return Math.max(1_000, Math.min(set, 900_000));
+}
+
+function addCommand(command: string, cwd: unknown, id: string, lane: Lane, b: Build): void {
   if (command === '') return;
   const dir = stringField(cwd);
   const where = dir === '' ? '' : ` Run it in ${dir}.`;
-  lane.pending.push({
-    stepId: id,
-    text: `Run this shell command.${where} If it fails, stop and report the error.\n\n\`\`\`sh\n${command}\n\`\`\``,
-    command: true,
-  });
+  addPending(
+    {
+      stepId: id,
+      text: `Run this shell command.${where} If it fails, stop and report the error.\n\n\`\`\`sh\n${command}\n\`\`\``,
+      command: true,
+      waits: true,
+    },
+    lane,
+    b,
+  );
+}
+
+/**
+ * Adds a message or a command to the session text that waits for the next
+ * node. A session node has one wait mode, but V1 waited for some steps and
+ * not for others. So the import starts a new node where one wait mode
+ * cannot do what V1 did:
+ *
+ *   - A message that V1 did not wait for, after a step that V1 waited for.
+ *     V1 went on at once after that message.
+ *   - A command after a message that V1 did not wait for. V1 ran the
+ *     command in the runner, beside the agent's work, and waited only for
+ *     the command.
+ *
+ * A message with `await_response` joins the messages before it. V1 waited
+ * until the shared session was idle, so it waited for them too. A new node
+ * is a new session, and the shared-session line of the checklist says so.
+ */
+function addPending(item: Pending, lane: Lane, b: Build): void {
+  const last = lane.pending.at(-1);
+  if (last !== undefined && (last.waits ? !item.waits : item.command === true)) flush(lane, b);
+  lane.pending.push(item);
 }
 
 function addTool(raw: Record<string, unknown>, id: string, lane: Lane, b: Build): void {
@@ -556,7 +625,7 @@ function addTool(raw: Record<string, unknown>, id: string, lane: Lane, b: Build)
         requireDecision(b, `Step "${id}" ran the bash tool with no command, so every V1 run failed at this step. The import leaves it out.`);
         return;
       }
-      return addCommand(command, args.cwd, id, lane);
+      return addCommand(command, args.cwd, id, lane, b);
     }
     case 'spawn_session':
       return addSpawnSession(args, id, lane, b);
@@ -917,7 +986,15 @@ function flush(lane: Lane, b: Build): void {
     lane.pending.length === 1
       ? first.text
       : ['Complete these steps in order.', ...lane.pending.map((p, i) => `${i + 1}. ${p.text}`)].join('\n\n');
-  const node: SessionNode = { id: newId(first.stepId, b), type: 'session', mode: 'start', prompt: literalTemplate(prompt) };
+  // The node waits when V1 waited for one of its steps (`addPending`). Both
+  // modes are explicit, because the editor shows an unset mode as `none`.
+  const node: SessionNode = {
+    id: newId(first.stepId, b),
+    type: 'session',
+    mode: 'start',
+    prompt: literalTemplate(prompt),
+    wait: { mode: lane.pending.some((p) => p.waits) ? 'until_idle' : 'none' },
+  };
   addNode(node, lane, b);
   for (const p of lane.pending) b.nodeOfStep.set(p.stepId, node.id);
   b.messageSessions.push(node.id);
@@ -931,6 +1008,14 @@ function flush(lane: Lane, b: Build): void {
     requireDecision(
       b,
       `Session node "${node.id}" runs the shell commands of steps ${commands.join(', ')}. V1 stopped the run when a command failed. Here the session only reports the failure, and the work after it can still run. Decide how the workflow stops when a command fails.`,
+    );
+  }
+  // dag/v1 refuses a session `wait.timeout`, so the V1 limit cannot carry over.
+  for (const p of lane.pending) {
+    if (p.awaitMs === undefined) continue;
+    requireDecision(
+      b,
+      `V1 waited up to ${durationText(p.awaitMs)} for the answer to step "${p.stepId}", and failed the run when the agent took longer. Session node "${node.id}" waits with no time limit, because V2 has no time limit for a session node. Decide whether the run can wait longer than it did in V1.`,
     );
   }
   lane.pending = [];
@@ -1030,6 +1115,14 @@ function maybeJson(value: unknown): unknown {
   } catch {
     return value;
   }
+}
+
+/** `120000` → `2 minutes`, `1500` → `1.5 seconds`. */
+function durationText(ms: number): string {
+  const seconds = ms / 1000;
+  if (seconds % 60 !== 0) return `${seconds} second${seconds === 1 ? '' : 's'}`;
+  const minutes = seconds / 60;
+  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
 function excerpt(text: string, max: number): string {

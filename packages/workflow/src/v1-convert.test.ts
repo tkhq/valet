@@ -96,6 +96,7 @@ async function runInV2(
   wf: V1ConvertedWorkflow,
   answers: Record<string, boolean>,
   data: Record<string, unknown> = {},
+  deps: WorkflowEngineDeps = engine,
 ): Promise<{ outcome: string | undefined; status: Record<string, string> }> {
   const store = new InMemoryWorkflowStore();
   const input = { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data, metadata: {} };
@@ -103,7 +104,7 @@ async function runInV2(
   for (let drive = 0; drive < 20; drive++) {
     const claim = await store.claimRun('run', `owner-${drive}`, 30_000);
     if (!claim) throw new Error('could not claim the run');
-    const park = await driveUntilPark('run', claim.attempt, { store, engine, clock: () => 1_000 });
+    const park = await driveUntilPark('run', claim.attempt, { store, engine: deps, clock: () => 1_000 });
     if (park.status === 'settled') {
       const checkpoints = await store.getCheckpoints('run');
       return { outcome: park.outcome, status: Object.fromEntries(checkpoints.map((cp) => [cp.nodeId, cp.status])) };
@@ -150,19 +151,43 @@ describe('convertV1Workflows: steps', () => {
       },
     },
     {
-      name: 'consecutive messages and commands share one session node, in order',
+      name: 'consecutive messages and commands that V1 waited for share one session node, in order',
       steps: [
         { id: 'pull', type: 'bash', command: 'git pull', cwd: '/workspace/app' },
-        { id: 'fix', type: 'agent_message', message: 'Fix the failing test.' },
+        { id: 'fix', type: 'agent_message', message: 'Fix the failing test.', await_response: true },
         { id: 'push', type: 'tool', tool: 'bash', arguments: { command: 'git push' } },
       ],
       check: (wf) => {
         expect(wf.definition.nodes.map((n) => n.type)).toEqual(['trigger', 'session', 'stop']);
+        expect(node(wf, 'pull')).toMatchObject({ wait: { mode: 'until_idle' } });
         const text = prompt(node(wf, 'pull'));
         expect(text.startsWith('Complete these steps in order.')).toBe(true);
         expect(text.indexOf('git pull')).toBeLessThan(text.indexOf('Fix the failing test.'));
         expect(text.indexOf('Fix the failing test.')).toBeLessThan(text.indexOf('git push'));
         expect(text).toContain('Run it in /workspace/app.');
+      },
+    },
+    {
+      name: 'a session node waits only where V1 waited, so a change in waiting starts a new node',
+      steps: [
+        { id: 'draft', type: 'agent_message', content: 'Draft the notes.' },
+        { id: 'review', type: 'agent_message', content: 'Review the draft.', await_response: true },
+        { id: 'post', type: 'agent_message', content: 'Post the notes.' },
+        { id: 'check', type: 'bash', command: 'make check' },
+      ],
+      check: (wf) => {
+        // V1 waited until the shared session was idle after "review", which covered "draft" too.
+        expect(prompt(node(wf, 'draft'))).toContain('Review the draft.');
+        expect(node(wf, 'draft')).toMatchObject({ wait: { mode: 'until_idle' } });
+        // V1 went on at once after "post", and ran "check" beside the agent's work.
+        expect(node(wf, 'post')).toMatchObject({ wait: { mode: 'none' } });
+        expect(node(wf, 'check')).toMatchObject({ wait: { mode: 'until_idle' } });
+        expect(edges(wf)).toEqual(['trigger->draft', 'draft->post', 'post->check', 'check->stop']);
+        expect(wf.checklist).toEqual([
+          expect.stringContaining('for the answer to step "review"'),
+          expect.stringContaining('Session node "check" runs the shell commands of steps "check".'),
+          expect.stringContaining('A session node that does not wait ("post") lets the session nodes after it start before its work is done.'),
+        ]);
       },
     },
     {
@@ -453,6 +478,26 @@ describe('convertV1Workflows: approvals and limits in a V2 run', () => {
     expect((await runInV2(wf, {}, { count: 0 })).status).toMatchObject({ none: 'completed', some: 'skipped' });
   });
 
+  it('goes on at once after an agent message, as V1 did, so its failure does not stop the run', async () => {
+    const wf = one([
+      { id: 'migrate', type: 'agent_message', content: 'Start the long data migration.' },
+      { id: 'ok', type: 'approval', prompt: 'Approve cutover?' },
+      { id: 'cutover', type: 'tool', tool: 'spawn_session', arguments: { task: 'Cut over.', workspace: 'app' } },
+    ]);
+    // V1 sent the message with prompt_async and asked for the approval at once.
+    expect(node(wf, 'migrate')).toMatchObject({ type: 'session', wait: { mode: 'none' } });
+    expect(edges(wf)).toEqual(['trigger->migrate', 'migrate->ok', 'ok->cutover', 'cutover->stop']);
+    expect(wf.checklist).toEqual([]);
+
+    const failing: WorkflowEngineDeps = {
+      ...engine,
+      awaitResult: async () => ({ queueItemId: 'queue', outcome: 'failed' as const, error: 'The migration failed.' }),
+    };
+    const run = await runInV2(wf, { ok: true }, {}, failing);
+    expect(run.outcome).toBe('completed');
+    expect(run.status).toMatchObject({ migrate: 'completed', ok: 'completed', cutover: 'completed', stop: 'completed' });
+  });
+
   it('stops the run when a top-level approval is denied, as V1 cancelled it', async () => {
     const wf = one([
       { id: 'gate', type: 'approval', prompt: 'Deploy?' },
@@ -588,6 +633,20 @@ describe('convertV1Workflows: workflows and triggers', () => {
     ]);
     expect(wf.checklist).toEqual([
       expect.stringContaining('Session node "test" runs the shell commands of steps "test". V1 stopped the run when a command failed.'),
+      `${HELD} Add it in Triggers after you finish the other items in this list. Set its time zone to UTC.`,
+    ]);
+  });
+
+  it.each([
+    ['its await_timeout_ms', { await_response: true, await_timeout_ms: 300_000 }, '5 minutes'],
+    ['2 minutes when the step set no limit', { awaitResponse: true }, '2 minutes'],
+    ['15 minutes, the most V1 allowed', { await_response: true, await_timeout_ms: 3_600_000 }, '15 minutes'],
+  ])('says the schedule must wait when V1 waited for an answer only up to %s', (_name, fields, limit) => {
+    const wf = scheduled([{ ...work, ...fields }]);
+    // dag/v1 has no session wait.timeout, so the limit becomes a decision.
+    expect(node(wf, 'clean')).toMatchObject({ wait: { mode: 'until_idle' } });
+    expect(wf.checklist).toEqual([
+      `V1 waited up to ${limit} for the answer to step "clean", and failed the run when the agent took longer. Session node "clean" waits with no time limit, because V2 has no time limit for a session node. Decide whether the run can wait longer than it did in V1.`,
       `${HELD} Add it in Triggers after you finish the other items in this list. Set its time zone to UTC.`,
     ]);
   });
