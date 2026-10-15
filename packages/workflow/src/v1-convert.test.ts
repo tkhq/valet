@@ -7,8 +7,16 @@ import { describe, expect, it } from 'vitest';
 
 import { renderTemplate } from './dag/expression.js';
 import type { WorkflowNode } from './dag/nodes.js';
+import { resolveTriggerInput, triggerDataSchema } from './dag/trigger-input.js';
 import { validateWorkflowDefinition } from './dag/validate.js';
-import { convertV1Workflows, readV1Paste, v1ChecklistPrompt, type V1Conversion, type V1ConvertedWorkflow } from './v1-convert.js';
+import {
+  convertV1Workflows,
+  readV1Paste,
+  v1ChecklistPrompt,
+  v1CronDifference,
+  type V1Conversion,
+  type V1ConvertedWorkflow,
+} from './v1-convert.js';
 
 function convert(input: unknown): V1Conversion {
   const result = convertV1Workflows(input);
@@ -33,6 +41,23 @@ function node(wf: V1ConvertedWorkflow, id: string): WorkflowNode {
 
 function edges(wf: V1ConvertedWorkflow): string[] {
   return wf.definition.edges.map((e) => `${e.from}->${e.to}${e.fromOutput ? `:${e.fromOutput}` : ''}`);
+}
+
+/** Node ids the trigger reaches when node `without` never lets a run past it. */
+function reachableWithout(wf: V1ConvertedWorkflow, without: string): string[] {
+  const seen = new Set(['trigger']);
+  const queue = ['trigger'];
+  for (let from = queue.shift(); from !== undefined; from = queue.shift()) {
+    if (from === without) continue;
+    for (const e of wf.definition.edges) {
+      if (e.from === from && !seen.has(e.to)) {
+        seen.add(e.to);
+        queue.push(e.to);
+      }
+    }
+  }
+  seen.delete(without);
+  return [...seen];
 }
 
 function prompt(n: WorkflowNode): string {
@@ -116,6 +141,19 @@ describe('convertV1Workflows: steps', () => {
       },
     },
     {
+      name: 'a truthiness condition takes a value of any type, as V1 did',
+      steps: [{ id: 'has-pr', type: 'conditional', condition: { variable: 'prUrl' }, then: [{ id: 'a', type: 'agent_message', content: 'Review it.' }] }],
+      check: (wf) => {
+        // A declared boolean input refused a run that passed a URL string.
+        expect(node(wf, 'trigger')).not.toHaveProperty('dataSchema');
+        const schema = triggerDataSchema(wf.definition);
+        for (const prUrl of ['https://github.com/o/r/pull/1', true, 1]) {
+          expect(resolveTriggerInput(schema, { prUrl }).errors).toEqual([]);
+        }
+        expect(wf.checklist).toEqual([expect.stringContaining('If node "has-pr" checks that "prUrl" has a value, as V1 did.')]);
+      },
+    },
+    {
       name: 'a boolean equals compares strictly',
       steps: [{ id: 'flag', type: 'conditional', condition: { variable: 'urgent', equals: false } }],
       check: (wf) => {
@@ -156,25 +194,26 @@ describe('convertV1Workflows: steps', () => {
       },
     },
     {
-      name: 'nested steps listed out of id order are flagged',
+      name: 'nested steps run in id order, as V1 ran them, and the checklist says so',
       steps: [
         {
           id: 'c',
           type: 'conditional',
-          condition: { variable: 'go' },
+          condition: { variable: 'go', equals: 'yes' },
           then: [
-            { id: 'b-second', type: 'approval', prompt: 'B' },
+            { id: 'b-second', type: 'tool', tool: 'spawn_session', arguments: { task: 'Deploy.', workspace: 'app' } },
             { id: 'a-first', type: 'approval', prompt: 'A' },
           ],
         },
       ],
       check: (wf) => {
-        expect(edges(wf)).toContain('b-second->a-first');
-        expect(wf.checklist).toEqual([expect.stringContaining('in id order ("a-first", "b-second")')]);
+        expect(edges(wf)).toContain('a-first->b-second');
+        expect(reachableWithout(wf, 'a-first')).not.toContain('b-second');
+        expect(wf.checklist).toEqual([expect.stringContaining('in id order ("a-first", "b-second"), not in the order listed. The import keeps the V1 order.')]);
       },
     },
     {
-      name: 'a parallel step fans out and joins',
+      name: 'a parallel step runs its steps one after another, as V1 did',
       steps: [
         { id: 'start', type: 'approval', prompt: 'Start?' },
         {
@@ -187,8 +226,28 @@ describe('convertV1Workflows: steps', () => {
         },
       ],
       check: (wf) => {
-        expect(edges(wf)).toEqual(['trigger->start', 'start->left', 'start->right', 'left->stop', 'right->stop']);
-        expect(wf.checklist).toEqual([expect.stringContaining('V2 runs each branch at the same time')]);
+        expect(edges(wf)).toEqual(['trigger->start', 'start->left', 'left->right', 'right->stop']);
+        expect(wf.checklist).toEqual([expect.stringContaining('V1 ran its 2 steps one after another, in id order ("left", "right"). The import does the same.')]);
+      },
+    },
+    {
+      name: 'a denied approval inside a parallel step still stops the deploy after it',
+      steps: [
+        {
+          id: 'release',
+          type: 'parallel',
+          steps: [
+            { id: 'z_notes', type: 'agent_message', content: 'Write release notes.' },
+            { id: 'a_gate', type: 'approval', prompt: 'Ship it?' },
+          ],
+        },
+        { id: 'deploy', type: 'tool', tool: 'spawn_session', arguments: { task: 'Deploy to prod.', workspace: 'app' } },
+      ],
+      check: (wf) => {
+        // V1 sorted a_gate first and cancelled the run on a denial. A
+        // failed approval activates no edge, so nothing after it may start.
+        expect(edges(wf)).toEqual(['trigger->a_gate', 'a_gate->z_notes', 'z_notes->deploy', 'deploy->stop']);
+        expect(reachableWithout(wf, 'a_gate')).toEqual(['trigger']);
       },
     },
     {
@@ -238,10 +297,10 @@ describe('convertV1Workflows: steps', () => {
       check: (wf) => {
         expect(wf.definition.nodes.map((n) => n.id)).toEqual(['trigger', 'stop']);
         expect(wf.checklist).toEqual([
+          expect.stringContaining('unknown type "webhook_call", so V1 refused to run this workflow'),
           expect.stringContaining('("Plan the week.")'),
           expect.stringContaining('the 1 steps inside it'),
           expect.stringContaining('"subworkflow" step'),
-          expect.stringContaining('unknown type "webhook_call", so V1 refused to run this workflow'),
         ]);
       },
     },
@@ -312,6 +371,84 @@ describe('convertV1Workflows: workflows and triggers', () => {
     expect(wf.definition.nodes.map((n) => n.id)).toEqual(['trigger', 'stop']);
     expect(wf.schedules).toEqual([]);
     expect(wf.checklist).toEqual([expect.stringContaining('The V1 workflow was turned off')]);
+  });
+
+  /** One enabled V1 workflow with a nightly schedule, converted. */
+  function scheduled(steps: unknown[], cron = '0 2 * * *'): V1ConvertedWorkflow {
+    const out = convert({
+      workflows: [{ id: 'wf_3', name: 'Cleanup', enabled: true, data: { steps } }],
+      triggers: [{ name: 'Nightly', enabled: true, workflowId: 'wf_3', config: { type: 'schedule', cron, timezone: 'UTC' } }],
+    });
+    return out.workflows[0]!;
+  }
+
+  const HELD = 'The import did not create V1 schedule "Nightly" (0 2 * * *, UTC). This workflow does not do exactly what it did in V1';
+  const work = { id: 'clean', type: 'agent_message', content: 'Delete stale branches.' };
+
+  it.each([
+    ['an unknown step type', [work, { id: 'post', type: 'slack_post' }], 'Step "post" has the unknown type "slack_post", so V1 refused'],
+    ['a bad step in a loop the import leaves out', [work, { id: 'each', type: 'loop', steps: [{ id: 'bad', type: 'bash' }] }], 'Step "bad" is a bash step with no command'],
+    [
+      'a bad step in a branch V1 never took',
+      [work, { id: 'c', type: 'conditional', condition: true, then: [], else: [{ id: 'empty', type: 'agent_message' }] }],
+      'Step "empty" is an agent message with no text',
+    ],
+    ['an interrupt that is not true or false', [{ ...work, interrupt: 'yes' }], 'has an "interrupt" that is not true or false'],
+    ['a branch that is not a list', [work, { id: 'c', type: 'conditional', condition: { variable: 'a', equals: 'b' }, then: 'x' }], 'Step "c" has a "then" that is not a list'],
+  ])('creates no schedule for a workflow V1 refused to run: %s', (_name, steps, refusal) => {
+    const wf = scheduled(steps);
+    expect(wf.schedules).toEqual([]);
+    expect(wf.checklist).toContainEqual(expect.stringContaining(refusal));
+    expect(wf.checklist.at(-1)).toContain(HELD);
+  });
+
+  it('creates no schedule when a failed command no longer stops the run', () => {
+    const wf = scheduled([
+      { id: 'test', type: 'bash', command: 'make test' },
+      { id: 'ok', type: 'approval', prompt: 'Deploy?' },
+      { id: 'deploy', type: 'tool', tool: 'spawn_session', arguments: { task: 'Deploy to prod.', workspace: 'app' } },
+    ]);
+    expect(wf.schedules).toEqual([]);
+    expect(wf.checklist).toEqual([
+      expect.stringContaining('Session node "test" runs the shell commands of steps "test". V1 stopped the run when a command failed.'),
+      expect.stringContaining(HELD),
+    ]);
+  });
+
+  it('keeps the schedule of a workflow that does what it did in V1', () => {
+    expect(scheduled([work]).schedules).toEqual([{ name: 'Nightly', cron: '0 2 * * *', timezone: 'UTC' }]);
+  });
+
+  it('creates no schedule whose cron expression V2 reads differently, and says why', () => {
+    const wf = scheduled([work], '0 9 1-7 * 1');
+    expect(wf.schedules).toEqual([]);
+    expect(wf.checklist).toEqual([
+      expect.stringContaining('V1 schedule "Nightly" (0 9 1-7 * 1) does not run at the same times in V2. V1 ran it only on days that match both'),
+    ]);
+    const out = convert({
+      workflows: [nightly],
+      triggers: [{ name: 'Standup', enabled: true, config: { type: 'schedule', cron: '0 9 * * MON-FRI', target: 'orchestrator', prompt: 'Post the standup.' } }],
+    });
+    expect(out.promptSchedules).toEqual([]);
+    expect(out.notes).toEqual([expect.stringContaining('V1 and V2 read "MON-FRI" in the day of the week field differently')]);
+  });
+
+  it.each([
+    ['0 9 * * 1', undefined],
+    ['*/15 * * * *', undefined],
+    ['0 9 1,15 * *', undefined],
+    ['0 9 * * 5-7', undefined],
+    ['0-30/10 9 * 1-6/2 *', undefined],
+    ['0 9 1-7 * 1', 'match both the day of the month and the day of the week'],
+    ['0 9 * * MON', 'read "MON" in the day of the week field'],
+    ['0 9 */2 * *', 'read "*/2" in the day of the month field'],
+    ['5/15 * * * *', 'read "5/15" in the minute field'],
+    ['0 9 * * 8', 'read "8" in the day of the week field'],
+    ['0 0 9 * * *', 'V1 read only cron expressions with 5 fields'],
+  ])('v1CronDifference(%j)', (cron, difference) => {
+    const found = v1CronDifference(cron);
+    if (difference === undefined) expect(found).toBeUndefined();
+    else expect(found).toContain(difference);
   });
 
   it('refuses a value that is neither a workflow nor a trigger, naming the item', () => {

@@ -502,11 +502,29 @@ A person moved each V1 workflow by hand: they gave the agent the V1 logs and reb
 
 - V1 sent every `agent_message` in a run to one shared session, and `bash` ran in the same sandbox. A run of consecutive `agent_message`, `bash` and `tool: bash` steps becomes one `session` node. Its prompt lists the steps in order, and a command becomes an instruction to run it.
 - `approval` becomes `approval`. `tool: spawn_session` becomes a `session` node with the task as its prompt.
-- `conditional` with `{ variable, equals }` becomes an `if` node on `trigger.data.<variable>`, with `true` and `false` edges. The variable is declared in the trigger's `dataSchema`, so a manual run asks for it. A constant condition keeps only the branch V1 always ran.
-- `parallel` fans out from the previous node and joins at the next one.
+- `conditional` with `{ variable, equals }` becomes an `if` node on `trigger.data.<variable>`, with `true` and `false` edges. The import declares the variable in the trigger's `dataSchema` with the type of the `equals` value, so a manual run asks for it. A condition with no `equals` tests truthiness and declares nothing, because V1 took a value of any type there. A constant condition keeps only the branch V1 always ran.
+- V1 ran the steps inside a `parallel` or a `conditional` branch one after another, sorted by id. The import keeps that order. A `parallel` step therefore becomes a sequence, so an approval among its steps still blocks the steps after it.
 - A workflow-target schedule becomes a schedule on the new workflow. An orchestrator-target schedule keeps its prompt and becomes an orchestrator schedule. A manual trigger needs nothing.
 - V1 rendered no templates, so a `{{ }}` in a message stays literal text in the prompt.
 
-Each item that needs a decision becomes a checklist line, never a silent drop: webhook triggers, `send_message`, `run_workflow`, conditions that read an `outputVariable`, repository context and models on `spawn_session`, steps V1 ran in id order, and the `agent`, `loop` and `subworkflow` steps and unknown tools that did nothing in V1. Every definition must pass `validateWorkflowDefinition`; a conversion that does not pass is refused as a bug.
+Each item that needs a decision becomes a checklist line, never a silent drop. Every definition must pass `validateWorkflowDefinition`; a conversion that does not pass is refused as a bug.
 
-The dialog shows each workflow, its schedules and its checklist before it creates anything. On confirm, it calls `POST /api/workflows`, then `POST /api/workflows/schedules`. It then sends the checklist as the first message of the workflow's editor conversation, so the editor assistant finishes the items. If a call fails part way, the error names what Valet already created.
+When the import cannot do exactly what V1 did, it fails closed. The checklist line is a required decision, and the workflow gets no schedule. One more line names each schedule the import held back, so the person adds it in Triggers after the decisions. Required decisions are:
+
+- a step V1's compiler refused, anywhere in the tree, including loops and branches the import does not convert. V1 never ran such a workflow.
+- a step that failed every V1 run: `spawn_session` without a task or a workspace, `send_message` without a target or content, and `tool: bash` without a command.
+- a shell command. V1 stopped the run when a command failed. A session only reports the failure, and the work after it can still run.
+- more than one session node made from merged messages, `interrupt`, `send_message`, `run_workflow`, a condition that reads an `outputVariable`, and repository context or a model on `spawn_session`.
+
+The import also creates no schedule whose cron expression V2 reads differently. V1 matched cron itself (`cronMatchesNow` in `packages/worker/src/index.ts`), and V2 uses cron-parser. The differences:
+
+- V1 needed the day of the month and the day of the week to match. cron-parser needs either one when both fields have values.
+- V1 took no names, such as `MON`, and never matched them.
+- V1 counted a `*/N` step from 0, also on the day-of-month and month fields, which start at 1.
+- V1 ignored the step in `N/S`.
+
+A schedule passes only when each part is `*`, a number, a range, a range with a step, or `*/N` on a field that starts at 0. At most one of the two day fields can have a value other than `*`. The line for any other schedule names the difference.
+
+Other lines give information and hold no schedule. They cover webhook triggers, steps listed out of id order, and `{{ }}` text. They also cover the `agent`, `loop` and `subworkflow` steps and the unknown tools that did nothing in V1. A truthiness variable that the run form does not show gets one too.
+
+The dialog shows each workflow, its schedules and its checklist before it creates anything. On confirm, it calls `POST /api/workflows`, then `POST /api/workflows/schedules` for each schedule the import kept. It then sends the checklist as the first message of the workflow's editor conversation, so the editor assistant finishes the items. If a call fails part way, the error names what Valet already created.
