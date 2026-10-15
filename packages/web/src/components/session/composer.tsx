@@ -889,6 +889,15 @@ export function Composer({
         </div>
       )}
       <div
+        onMouseDown={(event) => {
+          // A press on the box's padding or hint text moved focus to the page
+          // and collapsed the box, so the next keystrokes went nowhere. Keep
+          // focus in the message field unless the press is on a control.
+          const target = event.target instanceof Element ? event.target : null;
+          if (event.button !== 0 || target?.closest("button, a, input, textarea, select, label, [role=button], [contenteditable]")) return;
+          event.preventDefault();
+          inputRef.current?.focus({ preventScroll: true });
+        }}
         className={cn(
           "flex min-h-0 flex-col rounded-2xl border border-line bg-paper shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss-wash motion-reduce:transition-none",
           expanded ? "p-2" : "p-1",

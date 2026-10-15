@@ -65,6 +65,7 @@ An empty, unfocused composer uses one input row on phones and desktops. Existing
 The composer stays expanded while it contains text, attachments, errors, or a pending submission. An empty composer collapses when focus leaves it.
 Focus movement between the input and its actions keeps the expanded layout stable. Attachment and Stop buttons remain usable from the compact row.
 A press outside the composer blurs it on pointerdown. The composer stays expanded until that press ends and its click fires. Otherwise the collapse moves the content above it, such as a decision card, and the release misses the target (2026-10-15).
+A press on the box's padding or hint text keeps focus in the message field. Only a press on a control (a button, link, or input) moves focus (2026-10-15).
 Preserve accessible action names, 44-pixel touch targets, 16-pixel input text, draft persistence, and bounded multiline scrolling.
 
 Validation plan: test focus and draft transitions, submission focus, and attachment actions. Check compact and expanded geometry in Chromium and WebKit.
