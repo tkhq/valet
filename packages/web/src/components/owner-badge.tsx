@@ -47,8 +47,9 @@ export function OwnerBadge({
       {/* `relative` keeps the badge above a card that covers itself with an
           overlay link (see `SkillCard`), which would otherwise swallow the
           click. */}
-      <Link to="/chat" search={{ workspace: ownerId }} className="relative shrink-0">
-        <Badge variant="accent">{label}</Badge>
+      <Link to="/chat" search={{ workspace: ownerId }} className="relative min-w-0 max-w-full">
+        {/* A long team name truncates; the tooltip names it in full. */}
+        <Badge variant="accent"><span className="min-w-0 truncate">{label}</span></Badge>
       </Link>
     </Tooltip>
   );

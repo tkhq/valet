@@ -41,7 +41,10 @@ export function WorkflowApprovalItem({
           <Link
             to="/workflows/$workflowId"
             params={{ workflowId: item.workflowId }}
-            className="block break-words text-sm font-semibold text-ink hover:underline"
+            // A long name would push the approve controls off screen in this
+            // compact list: two lines, and the full name on hover.
+            title={item.workflowName}
+            className="line-clamp-2 break-words text-sm font-semibold text-ink hover:underline"
           >
             {item.workflowName}
           </Link>

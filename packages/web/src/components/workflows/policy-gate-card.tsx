@@ -73,8 +73,8 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
   if (gate.approver && gate.approver.userId !== me.data?.id) {
     return (
       <div className={cn(cardClass, "p-4")} role="status">
-        <p className="text-sm font-medium text-ink">Asked {gate.approver.name ?? "a teammate"} for permission</p>
-        <p className="mt-1 text-xs text-muted">
+        <p className="text-sm font-medium text-ink [overflow-wrap:anywhere]">Asked {gate.approver.name ?? "a teammate"} for permission</p>
+        <p className="mt-1 text-xs text-muted [overflow-wrap:anywhere]">
           {serviceAction} would use {gate.approver.name ? `${gate.approver.name}'s` : "a teammate's"} shared account. The run continues once they allow it.
         </p>
       </div>

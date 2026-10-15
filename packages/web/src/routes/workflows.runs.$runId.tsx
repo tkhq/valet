@@ -216,7 +216,7 @@ export function RunDetailBody({
         </p>
 
         {nonTerminal && activeSteps.length > 0 && (
-          <p role="status" className="text-sm text-ink">
+          <p role="status" className="text-sm text-ink [overflow-wrap:anywhere]">
             {run.status === "parked" ? "Waiting at: " : "Running: "}{activeSteps.join(", ")}
           </p>
         )}
