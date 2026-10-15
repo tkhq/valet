@@ -140,10 +140,14 @@ function DecisionGateResponse({
         aria-describedby={gate.body ? `gate-${gate.id}-body` : undefined}
         aria-labelledby={`gate-${gate.id}-title`}
       >
+        {/* The icon sits beside the badge, so the title, body, and controls
+            all start at the card's padding edge. */}
         <header className="flex items-start gap-2.5 px-5 pt-3 pb-2">
-          <Icon aria-hidden className="mt-1 h-4 w-4 shrink-0 text-muted" />
           <div className="min-w-0 flex-1">
-            <Badge variant={kind.variant}>{kind.label}</Badge>
+            <div className="flex items-center gap-2">
+              <Icon aria-hidden className="h-4 w-4 shrink-0 text-muted" />
+              <Badge variant={kind.variant}>{kind.label}</Badge>
+            </div>
             <DecisionGateTitle key={`${gate.id}:${gate.title}`} id={`gate-${gate.id}-title`} title={gate.title} />
           </div>
           <Button variant="ghost" size="icon" onClick={cancel} disabled={busy} aria-label="Cancel and dismiss" className="-mr-1">
@@ -165,7 +169,7 @@ function DecisionGateResponse({
           </div>
         )}
 
-        {gate.provenance && (
+        {gate.provenance && provenanceLine(gate.provenance) && (
           <div className="px-5 pb-2 text-xs text-muted" data-testid="gate-provenance">
             {provenanceLine(gate.provenance)}
           </div>
@@ -332,7 +336,7 @@ function DecisionGateTitle({ id, title }: { id: string; title: string }) {
 /** One line naming the precedence rung that gated this call. Policy/override
  * rungs link nowhere from here (the Action Log carries the row links); this
  * is the live "why" the spec's decision 4 promised. */
-function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string {
+function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string | null {
   // Cases mirror the engine's `PolicyProvenanceSource` values exactly.
   switch (p.source) {
     case "team_policy":
@@ -349,8 +353,13 @@ function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string {
       return "Gated by the action's risk level.";
     case "resolver_error":
       return "Policy check failed — approval requested as a safe fallback.";
+    // The title already says the call would use this person's shared
+    // account, and the body says only they can answer.
+    case "shared_account":
+      return null;
     default:
-      return `Gated by policy (${p.source}).`;
+      // An unknown source is an internal id, not something to show people.
+      return "Gated by policy.";
   }
 }
 

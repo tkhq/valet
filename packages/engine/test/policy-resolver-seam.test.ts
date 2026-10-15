@@ -398,12 +398,28 @@ describe("policyResolver seam: another member's shared account", () => {
       makeCtx({ sessionId, policyResolver: resolver, requestDecision: async (req) => { gateReq = req; return { actionId: "deny", resolvedBy: "bea", resolvedAt: Date.now() }; } }),
     );
     expect(gateReq?.title).toBe("Let a teammate use your github account?");
-    expect(gateReq?.body).toContain(`later github actions in this ${scope}`);
-    expect(gateReq?.body).toContain("including actions requested by other teammates");
+    expect(gateReq?.body).toContain(`later github actions in this ${scope} can use it too`);
+    expect(gateReq?.body).toContain("including ones other teammates ask for");
     expect(gateReq?.actions?.map((a) => a.id)).toEqual(["approve", "deny"]);
     expect((gateReq?.context as Record<string, unknown>)?.approver).toEqual({ userId: "bea", name: "Bea" });
     // Allowing a borrow also covers later calls, so it is not one-shot.
     expect((gateReq?.context as Record<string, unknown>)?.oneShot).toBeUndefined();
+  });
+
+  // The card names the product a person knows, not the service id.
+  it("names the plugin's display name in the borrow card", async () => {
+    let gateReq: DecisionGateRequest | undefined;
+    const { resolver } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "allow", source: "shared_account" }, approver: { userId: "bea", name: "Bea" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [{ ...makePlugin(makeAction()), displayName: "GitHub" }] });
+    await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({ policyResolver: resolver, requestDecision: async (req) => { gateReq = req; return { actionId: "deny", resolvedBy: "bea", resolvedAt: Date.now() }; } }),
+    );
+    expect(gateReq?.title).toBe("Let a teammate use your GitHub account?");
+    expect(gateReq?.body).toContain("Valet would use your GitHub account for");
+    expect(gateReq?.body).not.toMatch(/\bgithub\b/);
   });
 });
 
