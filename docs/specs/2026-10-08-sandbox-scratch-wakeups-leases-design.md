@@ -1325,6 +1325,10 @@ with an earlier entry, the entry below wins.
   output. The docker provider now keeps a cancelled job's output until
   the 5-minute eviction backstop, like a finished job. The kubernetes log
   file already stays after a cancel.
+- **Local test, docker TMPDIR.** The docker provider set
+  `TMPDIR=/scratch/tmp`, but only the image entrypoint created that
+  directory, so `mktemp` failed in an image without it. The provider now
+  creates `/scratch/tmp` (1777) on the host before `docker run`.
 - **PR review, EXIT after the log drain.** The kubernetes kickoff saves
   the job's status, waits for the capping filter, then writes `.exit`.
   A poll that sees `.exit` reads a complete log.

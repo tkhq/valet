@@ -1535,6 +1535,12 @@ export class DockerSandboxProvider implements SandboxProvider {
       // the workload user from replacing a path that root code trusts
       // (fix wave 3, security H-1).
       await fs.chmod(value.scratchHostDir, 0o1777);
+      // TMPDIR points at /scratch/tmp, so it must exist before the container
+      // starts. An image whose entrypoint skips start-headless.sh never
+      // creates it, and mktemp then fails.
+      const tmp = join(value.scratchHostDir, "tmp");
+      await fs.mkdir(tmp, { recursive: true });
+      await fs.chmod(tmp, 0o1777);
       // Deviation from the spec's size-limited /scratch (emptyDir with
       // ephemeral-storage sums on kubernetes): a docker bind mount has no
       // quota mechanism. Dev-only backend; tracked for the spec Deviations.
