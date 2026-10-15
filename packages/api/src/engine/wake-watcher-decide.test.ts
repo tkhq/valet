@@ -37,6 +37,15 @@ describe("tail", () => {
     expect(result).toBe("x".repeat(LOG_TAIL_BYTES));
   });
 
+  it("starts a cut tail at a line boundary, so a signal never opens mid-line", () => {
+    // 10-byte lines: a 4096-byte cut lands 6 bytes into a line.
+    const lines = "abcdefghi\n".repeat(1000);
+    const result = tail(lines);
+    expect(result).toBe("abcdefghi\n".repeat(409));
+    // One line longer than the limit keeps its last bytes instead of nothing.
+    expect(tail("y".repeat(LOG_TAIL_BYTES + 10) + "\n")).toBe("y".repeat(LOG_TAIL_BYTES - 1) + "\n");
+  });
+
   it("replaces NUL, which Postgres text rejects (fix wave 2, M4)", () => {
     expect(tail("a\u0000b")).toBe("a�b");
   });

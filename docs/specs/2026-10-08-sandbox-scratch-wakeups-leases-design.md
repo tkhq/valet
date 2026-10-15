@@ -1333,6 +1333,9 @@ with an earlier entry, the entry below wins.
   through a REST refetch on `queue.state`, and only the assistant chat ran
   that refetch. A wakeup signal in a session therefore showed only after a
   reload. `SessionView` now runs the refetch for every view of a session.
+- **Local test, whole-line tails.** A terminal signal's 4 KB log tail was
+  cut at a byte boundary, so a `watch.exited` body could open with a line
+  fragment such as `-2490`. A cut tail now starts after its first newline.
 - **PR review, EXIT after the log drain.** The kubernetes kickoff saves
   the job's status, waits for the capping filter, then writes `.exit`.
   A poll that sees `.exit` reads a complete log.
