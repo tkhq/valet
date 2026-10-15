@@ -853,6 +853,33 @@ describe("GET /api/events/:id", () => {
       expect(delivery.runId).toBeUndefined();
     }
   });
+
+  it("links a personal thread to a member while its owner shares it", async () => {
+    const a = await boot();
+    const thread = await seedDestinations(a);
+    const member = { "x-valet-test-user-id": "test-member" };
+    const threadFor = async () => {
+      const body = (await (await fetch(`${a.baseUrl}/api/events/ev_dest`, { headers: member })).json()) as GetEventResponse;
+      return body.deliveries.find((d) => d.id === "del_assist")?.thread;
+    };
+    const share = (mode: string) => fetch(`${a.baseUrl}/api/threads/${thread.threadId}`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ share: mode }),
+    });
+
+    // Without a share, the member cannot open the owner's thread.
+    expect(await threadFor()).toBeUndefined();
+    expect((await fetch(`${a.baseUrl}/api/threads/${thread.threadId}`, { headers: member })).status).toBe(404);
+
+    // A share admits every member of the organization at /threads/:threadId,
+    // so the event page links the thread for them too.
+    expect((await share("view")).status).toBe(200);
+    expect((await fetch(`${a.baseUrl}/api/threads/${thread.threadId}`, { headers: member })).status).toBe(200);
+    expect(await threadFor()).toEqual(thread);
+
+    // When the owner turns the share off, the link goes away with the access.
+    expect((await share("off")).status).toBe(200);
+    expect(await threadFor()).toBeUndefined();
+  });
 });
 
 // ── Redelivery ──────────────────────────────────────────────────────────────

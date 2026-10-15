@@ -265,8 +265,10 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   assistant delivery under the dispatch id `event:{deliveryId}`, and the
   engine keeps that id on the queue item. One query over
   `engine_queue_items` finds the thread of every delivery of the event. A
-  thread must pass the `/threads/:threadId` rule: `canViewSession`, then
-  on a team the thread's audience (`visibleThreadIds`). A run must pass the
+  thread must pass the `/threads/:threadId` rule, through the same two
+  checks the thread routes call: `threadEntry` (`routes/_thread-access.ts`)
+  admits a viewer of the session or a member the thread's share admits, and
+  `threadsVisibleTo` then checks the thread's key. A run must pass the
   run page rule (`canReadWorkflowRun`) for the derived id
   `wfrun_evt_{deliveryId}`. A delivery that reached nothing, or that the
   caller may not open, has neither field.

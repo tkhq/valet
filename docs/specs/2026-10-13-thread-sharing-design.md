@@ -43,8 +43,10 @@ The share lives on the thread's app metadata row: `session_threads.share_mode` (
 
 A share admits a person to the thread, never to the session. Only two entry points consult it:
 
-- The thread-addressed routes (`routes/threads.ts`). Each route names what a guest may do there: `read` (thread metadata, history, channel activity, pending decisions) or `reply` (prompt, abort, resume). A route that names nothing is the owner's alone and returns 403 to a guest. After the check, the route sets `threadShareGuest` on the request context. `loadOwnedSession` admits that one session and thread for the rest of the request.
+- The thread-addressed routes (`routes/threads.ts`). They read the share through `threadEntry` (`routes/_thread-access.ts`), which returns a viewer of the session or a guest with the share mode. Each route names what a guest may do there: `read` (thread metadata, history, channel activity, pending decisions) or `reply` (prompt, abort, resume). A route that names nothing is the owner's alone and returns 403 to a guest. After the check, the route sets `threadShareGuest` on the request context. `loadOwnedSession` admits that one session and thread for the rest of the request.
 - The session stream, `GET /api/sessions/:id/ws?threadId=…`. A guest stream sends frames for that thread and keepalives only. Session-wide frames, such as `sandbox.status`, never reach a guest. The `init` frame leaves out the session's workspace label and title.
+
+An event's page (`GET /api/events/:id`) also calls `threadEntry`, but only to decide whether a delivery shows its thread link. It admits nobody. A guest sees the link to a shared thread, because the link opens for them.
 
 Every session-addressed route (`/api/sessions/:id/...`) keeps `canViewSession` and returns 404 to a guest. So the owner's other threads, the session detail, the thread list, the session's decisions, child sessions, sandbox files, terminal access, and memory all stay private. A guest's own thread lists, notifications, and briefings never include the shared thread.
 

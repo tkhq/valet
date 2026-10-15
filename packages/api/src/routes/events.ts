@@ -30,7 +30,6 @@ import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-curso
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions } from "../schema/index.js";
 import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError } from "../services/onepassword.js";
-import { canViewSession } from "../services/session-access.js";
 import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
 import type {
   EventDeliveryWire,
@@ -54,8 +53,8 @@ import type {
 import { workflowRequestContext } from "../workflows/request-context.js";
 import { armableDefinitionRow, canReadWorkflowRun } from "../workflows/service.js";
 import { isOrgAdminUser } from "./_org-admin.js";
-import { channelsVisibleTo, viewerOf } from "./_thread-access.js";
-import { slackEventChannel, visibleThreadIds } from "../services/thread-access.js";
+import { channelsVisibleTo, threadEntry, threadsVisibleTo } from "./_thread-access.js";
+import { slackEventChannel } from "../services/thread-access.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog } from "../services/event-log.js";
 
@@ -408,8 +407,9 @@ async function eventVisibleTo(c: Context<AppEnv>, row: { service: string; refs: 
  * dispatcher admits a delivery under `eventDeliveryDispatchId`, and the engine
  * keeps that id on the queue item, so one query finds every thread. A thread
  * stays only when this request may open it at `/threads/:threadId`
- * (`routes/threads.ts`): a viewer of its session, and on a team, a member of
- * the thread's audience.
+ * (`routes/threads.ts`), by the same two checks: `threadEntry` (a viewer of
+ * the session, or a member the thread's share admits), then `threadsVisibleTo`
+ * on the thread's key.
  */
 async function deliveryThreads(
   c: Context<AppEnv>,
@@ -420,29 +420,24 @@ async function deliveryThreads(
   const { db } = c.var.providers;
   const byDispatchId = new Map(deliveryIds.map((id) => [eventDeliveryDispatchId(id), id]));
   const result = await db.execute(sql`
-    SELECT q.dispatch_id, q.session_id, q.thread_id, s.user_id, s.owner_type, s.owner_id
+    SELECT q.dispatch_id, q.session_id, q.thread_id, t.key, s.org_id, s.status, s.user_id, s.owner_type, s.owner_id
     FROM engine_queue_items q
     JOIN agent_sessions s ON s.id = q.session_id
     JOIN engine_threads t ON t.session_id = q.session_id AND t.id = q.thread_id
     WHERE q.dispatch_id IN (${sql.join([...byDispatchId.keys()].map((id) => sql`${id}`), sql`, `)})
       AND s.org_id = ${c.var.user.orgId} AND s.status <> 'deleted'
     ORDER BY q.created_at`) as {
-    rows: Array<{ dispatch_id: string; session_id: string; thread_id: string; user_id: string; owner_type: string; owner_id: string }>;
+    rows: Array<{
+      dispatch_id: string; session_id: string; thread_id: string; key: string;
+      org_id: string; status: string; user_id: string; owner_type: string; owner_id: string;
+    }>;
   };
-  // The deliveries of one event share few sessions, so each is checked once.
-  const viewable = new Map<string, Promise<boolean>>();
+  // An event has few deliveries, so each thread is checked on its own.
   for (const row of result.rows) {
-    if (viewable.has(row.session_id)) continue;
-    viewable.set(row.session_id, canViewSession(db, { userId: row.user_id, ownerType: row.owner_type, ownerId: row.owner_id }, c.var.principal));
-  }
-  const rows: typeof result.rows = [];
-  for (const row of result.rows) if (await viewable.get(row.session_id)) rows.push(row);
-  const shown = await visibleThreadIds(c.var.providers, { ownerType: "team" }, viewerOf(c),
-    rows.filter((row) => row.owner_type === "team").map((row) => ({ sessionId: row.session_id, threadId: row.thread_id })));
-  for (const row of rows) {
     const deliveryId = byDispatchId.get(row.dispatch_id);
     if (deliveryId === undefined || found.has(deliveryId)) continue;
-    if (row.owner_type === "team" && !shown.has(`${row.session_id}:${row.thread_id}`)) continue;
+    const session = { id: row.session_id, orgId: row.org_id, status: row.status, userId: row.user_id, ownerType: row.owner_type, ownerId: row.owner_id };
+    if (!await threadEntry(c, session, row.thread_id) || !await threadsVisibleTo(c, session)(row.key)) continue;
     found.set(deliveryId, { sessionId: row.session_id, threadId: row.thread_id });
   }
   return found;

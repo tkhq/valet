@@ -2,11 +2,10 @@ import { and, eq, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads, users, workflowRuns, workflowDefinitions } from "../schema/index.js";
-import { canViewSession } from "../services/session-access.js";
-import { shareAllows, threadShareGrant, type ThreadShareNeed } from "../services/thread-share.js";
+import { shareAllows, type ThreadShareNeed } from "../services/thread-share.js";
 import type { ThreadAddress } from "../wire/types.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
-import { spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
+import { threadEntry, threadsVisibleTo } from "./_thread-access.js";
 import { ensureDefaultAssistantSession, findDefaultAssistant } from "../assistants/service.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import {
@@ -55,9 +54,9 @@ async function inThread(
       select 1 from engine_threads where engine_threads.session_id = ${agentSessions.id} and engine_threads.id = ${threadId}
     )`)).limit(1);
   let sessionId = appSession?.id;
-  const viewable = appSession ? await canViewSession(db, appSession, c.var.principal) : false;
-  const share = appSession && !viewable ? await threadShareGrant(db, appSession, threadId, c.var.principal) : null;
-  if (share) {
+  const entry = appSession ? await threadEntry(c, appSession, threadId) : null;
+  if (appSession && entry?.as === "guest") {
+    const share = entry.mode;
     if (!guest || !shareAllows(share, guest)) {
       const error = purpose === "decision"
         ? "Only the thread owner can answer approvals in a shared thread. Ask the owner to answer it."
@@ -66,12 +65,12 @@ async function inThread(
           : "Only the thread owner can change this thread.";
       return c.json({ error }, 403);
     }
-    c.set("threadShareGuest", { sessionId: appSession!.id, threadId, mode: share });
+    c.set("threadShareGuest", { sessionId: appSession.id, threadId, mode: share });
   } else if (appSession) {
     if (purpose === "decision") {
       const authorized = await loadDecisionSession(c, appSession.id, threadId);
       if ("error" in authorized) return authorized.error;
-    } else if (!viewable || !await spawnedFromVisibleThread(c, appSession)) {
+    } else if (!entry) {
       return c.json({ error: "Thread not found." }, 404);
     }
   } else {
