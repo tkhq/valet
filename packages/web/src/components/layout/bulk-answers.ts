@@ -42,16 +42,15 @@ export const SKIP_REASON_TEXT: Record<SkipReason, string> = {
   needs_answer: "Needs a typed answer.",
   needs_credential: "Needs a credential.",
   waiting_on_other: "Waits on another member.",
-  shares_your_account: "Lends your shared account. Answer it on its own.",
+  shares_your_account: "Needs your individual approval. Answer it on its own.",
   not_one_shot: "Its approval can cover more than this one call. Answer it on its own.",
   policy_check_failed: "Policy check failed. Answer it on its own.",
   high_risk: "High-risk action. Answer it on its own.",
   not_pending: "Is no longer pending.",
 };
 
-/** A gate that names an approver lends that member's shared account, and its
- * approval also covers later calls in the thread or run. That is not a
- * one-time answer, so a bulk answer skips it whoever the approver is. */
+/** Named approvals can lend an account or require the original author's
+ * consent. Both need individual review, so a bulk answer skips them. */
 function approverReason(approver: { userId: string } | undefined, meId: string | undefined): SkipReason | undefined {
   if (!approver) return undefined;
   return approver.userId === meId ? "shares_your_account" : "waiting_on_other";

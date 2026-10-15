@@ -209,7 +209,10 @@ or allow policy covers the action. Organization and team denies still block
 the action. The gate offers only approve and deny. The catalog rejects
 lasting-grant answers before approval side effects and refuses a missing
 verified actor before opening a gate. Actions still check the author's
-current authority after approval. Read actions retain ordinary policy rules.
+current authority after approval. Other members see that the author must
+review the request. Cards use policy provenance to identify account borrowing.
+Bulk answers leave named approvals for individual review. Read actions retain
+ordinary policy rules.
 
 Settings actions require a verified interactive actor in an assistant turn.
 Only browser sessions and local development authentication mark direct human
