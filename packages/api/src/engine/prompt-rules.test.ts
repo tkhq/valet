@@ -111,6 +111,14 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     expect(CODING_SYSTEM_PROMPT).toContain("do not poll it");
   });
 
+  // Local test: asked to watch a running process, an agent ran its command twice.
+  it("says watch runs its own command, and how to stop work without waiting for a signal", () => {
+    expect(BACKGROUND_WORK_RULES).toContain("cannot attach to a process");
+    expect(BACKGROUND_WORK_RULES).toContain("`wakeup_cancel`");
+    expect(BACKGROUND_WORK_RULES).toContain("sends no signal");
+    expect(BACKGROUND_WORK_RULES).toContain("do not guess a log path");
+  });
+
   // Fix wave 3 (UX prompt 8): only a session with /scratch hears about it.
   it("names /scratch only when the host says the session has it", () => {
     expect(codingSystemPrompt({ secretsCli: true })).not.toContain("/scratch");
