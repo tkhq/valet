@@ -1320,6 +1320,11 @@ with an earlier entry, the entry below wins.
   covers, so the watch kernel's offset never falls behind lines it already
   sent. Docker already counts offsets in its decoded text, so it needs no
   change.
+- **Local test, log after a cancel.** A docker cancel deleted the job's
+  output at once, so `process_read` on a cancelled process returned no
+  output. The docker provider now keeps a cancelled job's output until
+  the 5-minute eviction backstop, like a finished job. The kubernetes log
+  file already stays after a cancel.
 - **PR review, EXIT after the log drain.** The kubernetes kickoff saves
   the job's status, waits for the capping filter, then writes `.exit`.
   A poll that sees `.exit` reads a complete log.
