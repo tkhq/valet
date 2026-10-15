@@ -723,8 +723,12 @@ describe("reconciliation executor (integration)", () => {
     try {
       const thread = session.threadById(THREAD);
       if (!thread) throw new Error("restored thread missing");
-      expect(await thread.awaitResult(itemId)).toMatchObject({ outcome: "failed" });
-      expect((await store.getQueueItem(SESSION, itemId))?.outcome?.outcome).toBe("failed");
+      const outcome = kind === "empty" ? "completed" : "failed";
+      expect(await thread.awaitResult(itemId)).toMatchObject({ outcome });
+      expect((await store.getQueueItem(SESSION, itemId))?.outcome?.outcome).toBe(outcome);
+      const structured = await thread.awaitResult(itemId, { resultSchema: Type.Object({ answer: Type.String() }) });
+      expect(structured.output).toBeUndefined();
+      expect(structured.error).toBeTruthy();
       await session.reconcile();
       expect(faux.state.callCount).toBe(0);
       expect(spy.calls()).toBe(0);

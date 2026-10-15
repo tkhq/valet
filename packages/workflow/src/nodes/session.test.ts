@@ -444,23 +444,6 @@ describe('executeSession: second validation failure fails the node', () => {
 // ─── 9. aborted/failed outcome fails the node ────────────────────────────────
 
 describe('executeSession: non-completed outcome fails the node', () => {
-  it('does not repair or redispatch a failed empty terminal result', async () => {
-    const store = new InMemoryWorkflowStore();
-    const clock = makeClock();
-    const { engine, calls } = makeEngine({ isSettledQueue: [true],
-      awaitResultQueue: [{ outcome: 'failed', text: '', error: 'The model returned no terminal text.' }] });
-    await store.createRun('run-empty', runParams(), sessionDefinition({ outputSchema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] } }), 'v1');
-    const first = await claimAttempt(store, 'run-empty');
-    await driveUntilPark('run-empty', first, { store, engine, clock: clock.now });
-    const second = await claimAttempt(store, 'run-empty', 'owner-2');
-    const settled = await driveUntilPark('run-empty', second, { store, engine, clock: clock.now });
-    expect(settled).toMatchObject({ status: 'settled', outcome: 'failed' });
-    const checkpoint = (await store.getCheckpoints('run-empty')).find(cp => cp.nodeId === 's');
-    expect(checkpoint).toMatchObject({ status: 'failed', effects: { repairAttempted: false } });
-    expect(calls.filter(call => call.kind === 'prompt')).toHaveLength(1);
-    expect(calls.filter(call => call.kind === 'awaitResult')).toHaveLength(1);
-  });
-
   it('fails the node with the submission error for an aborted outcome', async () => {
     const store = new InMemoryWorkflowStore();
     const clock = makeClock();

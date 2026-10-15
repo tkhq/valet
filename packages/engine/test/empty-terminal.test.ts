@@ -17,6 +17,8 @@ import {
   MODEL_RESPONSE_METADATA_KEY,
   modelResponseMetadata,
   readModelResponseMetadata,
+  extractStructuredOutput,
+  resolveSubmissionText,
   VirtualSandboxProvider,
   type MessageEntry,
   type SessionEntry,
@@ -34,13 +36,13 @@ const cases: Array<{
   outcome: string; delta?: string;
 }> = [
   { name: "normal text", content: "answer", stopReason: "stop", outcome: "completed" },
-  { name: "empty", content: [], stopReason: "stop", outcome: "failed" },
-  { name: "whitespace", content: " \n", stopReason: "stop", outcome: "failed" },
-  { name: "thinking only", content: [fauxThinking("PRIVATE REASONING")], stopReason: "stop", outcome: "failed" },
+  { name: "empty", content: [], stopReason: "stop", outcome: "completed" },
+  { name: "whitespace", content: " \n", stopReason: "stop", outcome: "completed" },
+  { name: "thinking only", content: [fauxThinking("PRIVATE REASONING")], stopReason: "stop", outcome: "completed" },
   { name: "length with valid JSON", content: '{"answer":"partial"}', stopReason: "length", outcome: "failed" },
   { name: "error", content: "partial", stopReason: "error", outcome: "failed" },
   { name: "abort", content: "partial", stopReason: "aborted", outcome: "aborted" },
-  { name: "stream/final mismatch", content: [], stopReason: "stop", outcome: "failed", delta: "streamed answer" },
+  { name: "stream/final mismatch", content: [], stopReason: "stop", outcome: "completed", delta: "streamed answer" },
 ];
 
 describe("terminal result integrity", () => {
@@ -79,7 +81,8 @@ describe("terminal result integrity", () => {
       const receipt = await thread.submitPrompt("report", {});
       const result = await thread.awaitResult(receipt.queueItemId, { resultSchema: Type.Object({ answer: Type.String() }), timeoutMs: 2000 });
       expect(result.outcome).toBe(test.outcome);
-      if (test.outcome !== "completed") expect(result.output).toBeUndefined();
+      expect(result.output).toBeUndefined();
+      if (test.outcome === "completed") expect(result.error).toBeTruthy();
       const item = await store.getQueueItem(session.id, receipt.queueItemId);
       expect(item).toMatchObject({ status: "settled", attemptCount: 1, outcome: { outcome: test.outcome } });
       const entries = await store.getEntries(session.id, receipt.threadId);
@@ -102,7 +105,7 @@ describe("terminal result integrity", () => {
     }
   });
 
-  it("rejects a historical empty completed row without changing its durable outcome", async () => {
+  it("validates historical empty text only when the caller requests structured output", async () => {
     const faux = registerFauxProvider({ provider: "historical-empty" });
     faux.setResponses([fauxAssistantMessage("original answer")]);
     const { engine, store } = makeEngine();
@@ -116,7 +119,7 @@ describe("terminal result integrity", () => {
       if (!last) throw new Error("missing terminal entry");
       await store.updateEntry(session.id, receipt.threadId, { ...last, content: "", parts: [], metadata: undefined });
       expect(await thread.awaitResult(receipt.queueItemId, { resultSchema: Type.Object({ answer: Type.String() }) }))
-        .toMatchObject({ outcome: "failed", error: expect.stringContaining("no terminal text") });
+        .toMatchObject({ outcome: "completed", error: "no JSON content found in result text" });
       expect((await store.getQueueItem(session.id, receipt.queueItemId))?.outcome).toEqual({ outcome: "completed" });
       expect(faux.state.callCount).toBe(1);
     } finally { session.suspendTimers(); faux.unregister(); }
@@ -135,7 +138,10 @@ describe("terminal result integrity", () => {
     try {
       const thread = session.thread("research");
       const receipt = await thread.submitPrompt("run effect", {});
-      expect(await thread.awaitResult(receipt.queueItemId)).toMatchObject({ outcome: "failed", error: expect.stringContaining("no terminal text") });
+      expect(await thread.awaitResult(receipt.queueItemId)).toMatchObject({ outcome: "completed", text: "" });
+      const structured = await thread.awaitResult(receipt.queueItemId, { resultSchema: Type.Object({ answer: Type.String() }) });
+      expect(structured).toMatchObject({ outcome: "completed", error: "no JSON content found in result text" });
+      expect(structured.output).toBeUndefined();
       await session.reconcile();
       expect(effects).toBe(1);
       expect(faux.state.callCount).toBe(2);
@@ -154,7 +160,7 @@ function entry(id: string, queueItemId: string, content: string, extra: Partial<
     type: "message", role: "assistant", queueItemId, content, stopReason: "end_turn", ...extra };
 }
 
-it("rejects the last empty response without substituting earlier output across compaction or repair queues", () => {
+it("validates the selected empty text without substituting earlier output across compaction or repair queues", () => {
   const entries: SessionEntry[] = [
     entry("original-answer", "original", '{"answer":"earlier"}'),
     entry("repair-blank-early", "repair", ""),
@@ -163,9 +169,14 @@ it("rejects the last empty response without substituting earlier output across c
     entry("repair-blank-selected", "repair", ""),
   ];
   expect(completedSubmissionOutcome(entries, "original")).toEqual({ outcome: "completed" });
-  expect(completedSubmissionOutcome(entries, "repair")).toMatchObject({ outcome: "failed" });
+  expect(completedSubmissionOutcome(entries, "repair")).toEqual({ outcome: "completed" });
+  const schema = Type.Object({ answer: Type.String() });
+  expect(extractStructuredOutput(resolveSubmissionText(entries, "repair") ?? "", schema))
+    .toEqual({ error: "no JSON content found in result text" });
   entries.push(entry("original-blank", "original", ""));
-  expect(completedSubmissionOutcome(entries, "original")).toMatchObject({ outcome: "failed" });
+  expect(completedSubmissionOutcome(entries, "original")).toEqual({ outcome: "completed" });
+  expect(extractStructuredOutput(resolveSubmissionText(entries, "original") ?? "", schema))
+    .toEqual({ error: "no JSON content found in result text" });
   expect(completedSubmissionOutcome(entries, "missing")).toMatchObject({ outcome: "failed" });
 });
 
