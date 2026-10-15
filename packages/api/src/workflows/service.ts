@@ -1406,6 +1406,7 @@ export async function startWorkflowRun(
   input?: Record<string, unknown>,
   origin?: WorkflowRunOrigin,
   triggerType: "manual" | "event" = "manual",
+  toolScope?: import("@valet/shared").ToolScope,
 ): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
@@ -1431,6 +1432,7 @@ export async function startWorkflowRun(
     metadata: {},
   };
   const params: RunParams = {
+    ...(toolScope ? { toolScope } : {}),
     workflowId,
     definitionVersionId: versionId,
     input: trigger,

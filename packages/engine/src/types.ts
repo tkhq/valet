@@ -1,6 +1,7 @@
 import type { TSchema, Static } from "typebox";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import type { BrowserAuditEntry, BrowserPolicyService } from "@valet/shared";
+import type { ToolScope } from "@valet/shared";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
@@ -652,6 +653,8 @@ export interface PluginStore {
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 
 export interface ToolDef<TParams extends TSchema = TSchema> {
+  /** Integration action behind a direct tool. Scope checks use its canonical ID. */
+  scopeAction?: string;
   name: string;
   description: string;
   parameters: TParams;
@@ -708,6 +711,10 @@ export type ToolArtifact =
   | { type: "diff"; path?: string; content: string };
 
 export interface ToolContext {
+  /** Effective session, submission, and thread restrictions. This may change after a focus call. */
+  readonly toolScope?: ToolScope;
+  readonly toolScopeCeiling?: ToolScope;
+  setToolFocus?: (scope: ToolScope | undefined) => Promise<void>;
   /** The current request offers native image generation; duplicate plugin actions are hidden. */
   nativeImageGeneration?: boolean;
   browserPolicy?: BrowserPolicyService;
@@ -2040,6 +2047,8 @@ export interface SessionStore {
    * head: the oldest item with status 'queued' and no supersededByItemId.
    * Records attemptId, ownerId, lease; increments attemptCount. Returns the
    * updated item, or null when not head / not queued / already claimed.
+   * With trusted metadata.inheritToolScope, intersects and persists all
+   * thread continuation ceilings/focuses into metadata.toolScope atomically.
    */
   claimSubmission(claim: SubmissionClaim): Promise<QueueItem | null>;
   /** CAS: install a new attempt on a running/blocked item whose lease expired. Null when the CAS loses. */
@@ -2495,6 +2504,9 @@ export type ThreadAccessCheck = (req: {
 }) => Promise<boolean>;
 
 export interface CreateSessionOptions {
+  /** Host capability ceiling, persisted across restore. */
+  toolScope?: ToolScope;
+  initialToolFocus?: (thread: { key: string }) => ToolScope | undefined;
   /** Retain history without admitting or resuming execution. */
   readOnlyReason?: string;
   sandboxLifecycle?: SandboxLifecycle;
@@ -2914,6 +2926,7 @@ export interface CompactionConfig {
 
 /** Request payload for the `task` built-in tool. `repo` interpretation is host policy. */
 export interface SpawnChildRequest {
+  toolScope?: ToolScope;
   prompt: string;
   title?: string;
   repo?: string;
@@ -3023,7 +3036,7 @@ export type ChildStatusReader = (
 export type ChildSender = (
   req: { childSessionId: string; message: string; queue?: boolean },
   /** `origin`: the sending turn's channel origin, absent for a web or other non-channel turn. */
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin },
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin; toolScope?: ToolScope },
 ) => Promise<{ queueItemId: string } | null>;
 
 /**

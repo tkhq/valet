@@ -203,6 +203,7 @@ describe("buildChildSpawner", () => {
     });
     const parentThread = parent.thread("web:default");
     const owner = { type: "team" as const, id: "team-x" };
+    await parentThread.setToolFocus({ actions: ["workflows.get_run"] });
 
     const result = await spawner(
       { prompt: "do the thing", title: "The Thing" },
@@ -226,6 +227,7 @@ describe("buildChildSpawner", () => {
     expect(child?.options.parentSessionId).toBe("parent-spawn");
     expect(child?.options.parentThreadId).toBe(parentThread.id);
     expect(child?.owner).toEqual(owner);
+    expect((await api.providers.engineStore.getSession(result.childSessionId))?.metadata?.toolScope).toEqual({ actions: ["workflows.get_run"] });
     // Depth limit 1 (decision 10): the child gets no spawner — `task`
     // inside it falls through to [task_unavailable].
     expect(child?.options.toolConfig?.childSpawner).toBeUndefined();
@@ -2865,6 +2867,7 @@ describe("buildChildSender", () => {
       childId: "actor-child", parentId: "actor-parent", settled: false, queueItemId: "original-actor",
       teamId: "steer-team", credentialOwnerMode,
     });
+    await parentThread.setToolFocus({ actions: ["workflows.get_run"] });
     const deps = childrenDeps(api);
     const receipt = await buildChildSender(deps, new ChildWatcher(deps))(
       { childSessionId: child.id, message: "Check Linear" },
@@ -2872,6 +2875,7 @@ describe("buildChildSender", () => {
     );
     const submission = (await engineStore.listUnsettledSubmissions(child.id)).find(item => item.id === receipt?.queueItemId);
     expect(submission?.author).toEqual({ id: "test-member", name: "Valet" });
+    expect(submission?.metadata?.toolScope).toEqual({ actions: ["workflows.get_run"] });
     expect(await child.credentialProvider({ actorId: submission?.author?.id }).get("linear")).toBeNull();
   });
 

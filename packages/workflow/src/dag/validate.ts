@@ -1,3 +1,4 @@
+import { isToolScope } from "@valet/shared";
 import { validatePresence } from '@valet/shared';
 /**
  * dag/v1 definition validator — linter-grade.
@@ -112,10 +113,10 @@ const ALLOWED_KEYS: Record<DagNodeType, readonly string[]> = {
   if: ['id', 'type', 'combinator', 'conditions'],
   wait: ['id', 'type', 'mode', 'duration'],
   approval: ['id', 'type', 'prompt', 'summary', 'details', 'timeout', 'onDeny'],
-  session: ['id', 'type', 'mode', 'prompt', 'title', 'model', 'outputSchema', 'wait'],
+  session: ['toolScope', 'id', 'type', 'mode', 'prompt', 'title', 'model', 'outputSchema', 'wait'],
   stop: ['id', 'type', 'outcome', 'output', 'message'],
   llm: ['id', 'type', 'model', 'system', 'prompt', 'outputSchema', 'temperature', 'maxOutputTokens', 'reasoning', 'onError'],
-  orchestrator: ['id', 'type', 'prompt', 'outputSchema', 'wait'],
+  orchestrator: ['toolScope', 'id', 'type', 'prompt', 'outputSchema', 'wait'],
   // A tool node carries BOTH policies, and they answer different questions.
   // `onError` decides what a node FAILURE does to the rest of the run;
   // `onDeny`/`approvalTimeout` decide what a policy GATE's refusal or
@@ -510,6 +511,7 @@ function validateNodeFields(
       checkJsonTemplates(label, 'details', node.details, refCtx, errors);
       break;
     case 'session':
+      checkToolScope(node.toolScope, label, errors);
       if (node.mode !== 'start') {
         errors.push(`${label}: session.mode must be the string "start"`);
       }
@@ -561,6 +563,7 @@ function validateNodeFields(
       checkErrorPolicy(label, 'llm', node.onError, errors);
       break;
     case 'orchestrator':
+      checkToolScope(node.toolScope, label, errors);
       if (!isNonEmptyString(node.prompt)) {
         errors.push(`${label}: orchestrator.prompt must be a non-empty string`);
       } else {
@@ -1083,4 +1086,11 @@ function findCycle(nodesById: Map<string, WorkflowNode>, adjacency: Map<string, 
     if (color.get(id) === WHITE && visit(id)) return cycleNode;
   }
   return null;
+}
+
+function checkToolScope(value: unknown, label: string, errors: string[]): void {
+  if (value === undefined) return;
+  if (!isToolScope(value)) {
+    errors.push(`${label}: toolScope must contain valid tools and actions lists. Use native tool names and service.action IDs.`);
+  }
 }

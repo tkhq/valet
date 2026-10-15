@@ -17,6 +17,7 @@ import { isWorkflowRunConversation } from "../workflows/run-conversations.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
 import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
+import { INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   dispatchCommand,
@@ -1074,6 +1075,10 @@ export async function submitSessionPrompt(
     author?: PromptAuthor;
     /** False for agent-driven submissions, which must not reorder the sidebar. */
     recordUserActivity?: boolean;
+    /** Internal continuation ceiling. Never read from the public message body. */
+    toolScope?: ToolScope;
+    /** Resolve the preceding task's ceiling again when the turn starts. */
+    inheritToolScope?: boolean;
     /** Server-validated assistant entry reference. */
     replyTo?: MessageReplyReference;
   },
@@ -1199,6 +1204,10 @@ export async function submitSessionPrompt(
     outcome?.kind === "expand" && outcome.skill
       ? { skill: outcome.skill.source.name, skillArgs: outcome.skill.args }
       : undefined;
+  const continuationMetadata = {
+    ...(opts?.toolScope ? { [TOOL_SCOPE_KEY]: opts.toolScope } : {}),
+    ...(opts?.inheritToolScope ? { [INHERIT_TOOL_SCOPE_KEY]: true } : {}),
+  };
 
   // This is the user action time. Persist it only after the engine accepts
   // the prompt, so a slow command cannot overtake a later user submission.
@@ -1211,13 +1220,11 @@ export async function submitSessionPrompt(
             threadId: thread.id,
             ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
             ...(author ? { author } : {}),
-            ...(replyTo ? { metadata: { [REPLY_METADATA_KEY]: replyTo } } : {}),
+            metadata: { ...(replyTo ? { [REPLY_METADATA_KEY]: replyTo } : {}), ...continuationMetadata },
           })
         : await thread.submitPrompt(withAttachments(promptText), {
             ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
-            ...((skillMetadata || replyTo)
-              ? { metadata: { ...(skillMetadata ?? {}), ...(replyTo ? { [REPLY_METADATA_KEY]: replyTo } : {}) } }
-              : {}),
+            metadata: { ...(skillMetadata ?? {}), ...(replyTo ? { [REPLY_METADATA_KEY]: replyTo } : {}), ...continuationMetadata },
             ...(outcome?.kind === "expand" && outcome.skill
               ? { skillInvocation: { skill: outcome.skill.source, path: outcome.skill.path } }
               : {}),

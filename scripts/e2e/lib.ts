@@ -115,6 +115,7 @@ const INTEGRATION_CORE_FILES = [
   // Valet Security integration suites run keyless: the virtual sandbox
   // provider and abort-based settlement need no model key.
   "src/integration/security-settlement.test.ts",
+  "src/integration/security-scope-nudge.test.ts",
   "src/integration/security-persona.test.ts",
   "src/integration/security-yield.test.ts",
   "src/integration/security-routes.test.ts",

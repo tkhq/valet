@@ -1092,6 +1092,53 @@ const stubCredentials: CredentialProvider = {
   },
 };
 
+it("keeps scoped discovery and direct pinned calls inside the same action ceiling", async () => {
+  let writes = 0;
+  const plugin: ActionPlugin = { service: "demo", actions: [
+    { id: "demo.read", name: "Read", description: "Read", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true, data: "evidence" }) },
+    { id: "demo.write", name: "Write", description: "Write", riskLevel: "low", parameters: Type.Object({}), execute: async () => { writes++; return { success: true }; } },
+  ] };
+  const tools = pluginCatalogTools({ plugins: [plugin], pins: [{ actionId: "demo.write" }] });
+  const ctx = makeCtx({ toolScope: { actions: ["demo.read"] } });
+  const list = tools.find((tool) => tool.name === "list_tools");
+  const pinned = tools.find((tool) => tool.name !== "list_tools" && tool.name !== "call_tool");
+  if (!list || !pinned) throw new Error("catalog tools missing");
+  const found = await list.execute({}, ctx);
+  expect(found.text).toContain("demo.read");
+  expect(found.text).not.toContain("demo.write");
+  expect(found.text).not.toContain("params:");
+  const described = await list.execute({ detail: "schema", query: "demo.read" }, ctx);
+  expect(described.text).toContain("params");
+  const outside = await list.execute({ outside_focus: true, query: "demo.write" }, ctx);
+  expect(outside.text).toContain("demo.write");
+  expect(outside.text).not.toContain("params:");
+  expect((await pinned.execute({}, ctx)).text).toContain("outside this task");
+  expect(writes).toBe(0);
+});
+
+it("refuses a guessed dynamic action before discovering or executing it", async () => {
+  let discoveries = 0;
+  const plugin: ActionPlugin = { service: "remote", actions: [], resolveActions: async () => { discoveries++; return []; } };
+  const result = await invokeAction(buildPluginCatalog([plugin]), "remote.write", {}, makeCtx({ toolScope: { actions: [] } }), "write");
+  expect(result).toMatchObject({ kind: "error" });
+  expect(discoveries).toBe(0);
+});
+
+it("allows exact scoped team dynamic discovery without permitting sibling actions", async () => {
+  let writes = 0;
+  const plugin: ActionPlugin = { service: "remote", actions: [], resolveActions: async () => [
+    { id: "remote.read", name: "Read", description: "Read", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true, data: "evidence" }) },
+    { id: "remote.write", name: "Write", description: "Write", riskLevel: "low", parameters: Type.Object({}), execute: async () => { writes++; return { success: true }; } },
+  ] };
+  const ctx = makeCtx({ owner: { type: "team", id: "team" }, toolScope: { actions: ["remote.read"] },
+    policyResolver: { resolve: async () => ({ mode: "allow", provenance: { baseMode: "allow", source: "risk_default" } }) },
+  });
+  const catalog = buildPluginCatalog([plugin]);
+  expect(await invokeAction(catalog, "remote.read", {}, ctx, "read")).toMatchObject({ kind: "ok", result: { data: "evidence" } });
+  expect(await invokeAction(catalog, "remote.write", {}, ctx, "write")).toMatchObject({ kind: "error" });
+  expect(writes).toBe(0);
+});
+
 function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
   const sandbox: FakeSandbox = { id: "sb-1" };
   return {
@@ -1437,7 +1484,7 @@ describe("pluginCatalogTools: call_tool param validation", () => {
       makeCtx(),
     );
     expect(result.text).toContain("invalid params for test.needs_num");
-    expect(result.text).toContain('Call list_tools (service: "test") to read its parameter schema');
+    expect(result.text).toContain('Call list_tools (service: "test", query: "test.needs_num", detail: "schema") to read its parameter schema');
     expect(executeCalled).toBe(false);
   });
 

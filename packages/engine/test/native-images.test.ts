@@ -574,6 +574,9 @@ it("checks policy once per turn, prepares the sandbox before the paid request, a
   await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox, { permitted, saved }).result();
   expect(permitted).toHaveBeenCalledTimes(1);
   expect(requestTools(fetchMock, 1)).toContain("image_generation");
+  bridge.invalidatePermission();
+  await bridge.stream(model, { messages: [] }, { apiKey: "sk-fixture-key", maxRetries: 0 }, sandbox, { permitted: async () => false, saved }).result();
+  expect(requestTools(fetchMock, 2)).not.toContain("image_generation");
 });
 
 it("withholds the hosted tool for a request whose storage is not writable, before any paid request", async () => {

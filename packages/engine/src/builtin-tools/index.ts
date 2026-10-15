@@ -1,3 +1,5 @@
+import { intersectToolScopes } from "@valet/shared";
+import { toolScopeSchema } from "../tool-scope-schema.js";
 import { Type } from "typebox";
 import {
   isValidSandboxCpu,
@@ -636,6 +638,7 @@ export const childSendTool = defineTool({
       },
       {
         parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId,
+        ...(ctx.toolScope ? { toolScope: ctx.toolScope } : {}),
         // The host keeps automatic channel replies only for a channel turn.
         ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
       },
@@ -883,6 +886,7 @@ export const taskTool = defineTool({
     "Omitted fields inherit defaults.",
   parameters: Type.Object({
     prompt: Type.String({ minLength: 1, description: "The task for the child session to perform." }),
+    toolScope: Type.Optional(toolScopeSchema),
     title: Type.Optional(Type.String()),
     repo: Type.Optional(Type.String({ description: "Clone URL or org/repo; interpretation is host policy." })),
     branch: Type.Optional(Type.String()),
@@ -975,6 +979,7 @@ export const taskTool = defineTool({
     }
 
     const req: SpawnChildRequest = {
+      toolScope: intersectToolScopes(ctx.toolScope, args.toolScope),
       prompt: args.prompt,
       title: args.title,
       repo: args.repo,

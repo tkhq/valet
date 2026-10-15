@@ -1,3 +1,4 @@
+import { intersectToolScopes, readToolScope, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
 /**
  * Child spawning + durable settlement watching (Phase 4 decisions 10/11/21).
  *
@@ -30,6 +31,7 @@ import {
   type ChannelOrigin,
   type ChildReader,
   type CompactionEntry,
+  type DecisionGate,
   type ChildSender,
   type ChildSpawner,
   type ChildStatusReader,
@@ -433,7 +435,7 @@ export function nextReplyRoute(
 
 /** The prompt options of a parent `child_send`. Tests use them to model the real sender. */
 export function childSendPromptOptions(
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin },
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin; toolScope?: ToolScope },
   queue: boolean,
 ): { author: { id: string; name: string }; queueMode: "followup" | "steer"; metadata: Record<string, unknown> } {
   return {
@@ -442,7 +444,7 @@ export function childSendPromptOptions(
     // the spawner.
     author: { id: ctx.actorUserId, name: "Valet" },
     queueMode: queue ? "followup" : "steer",
-    metadata: parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId, ctx.origin),
+    metadata: { ...parentDelegationMetadata(ctx.parentSessionId, ctx.parentThreadId, ctx.origin), ...(ctx.toolScope ? { toolScope: ctx.toolScope } : {}) },
   };
 }
 
@@ -469,6 +471,8 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       throw new Error(`buildChildSpawner: parent session not found: ${ctx.parentSessionId}`);
     }
     const orgId = parentData.orgId;
+    const parentThread = await deps.engineStore.getThread(ctx.parentSessionId, ctx.parentThreadId);
+    const toolScope = intersectToolScopes(readToolScope(parentData.metadata?.[TOOL_SCOPE_KEY]), readToolScope(parentThread?.metadata?.[TOOL_SCOPE_KEY]), req.toolScope);
 
     // Host policy for `req.repo` (`task` tool): normalize before anything is
     // created so a bad value costs nothing. The message is what the tool
@@ -607,6 +611,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       owner: ctx.owner,
       workspace,
       modelId: req.model,
+      toolScope,
       profile: req.profile,
       docker: req.docker,
       resources: req.resources,
@@ -755,11 +760,18 @@ export class ChildWatcher {
    * origin with manual replies: the parent can mention it, never auto-post.
    * One signal per gate: the dispatchId makes a repeat a no-op.
    */
-  async reportGateOpened(childSessionId: string, gate: { id: string; title: string; type: string }): Promise<void> {
+  async reportGateOpened(childSessionId: string, gate: Pick<DecisionGate, "id" | "title" | "type" | "queueItemId" | "threadId">): Promise<void> {
     const watch = await activeChildWatch(this.deps.db, childSessionId);
     if (!watch) return;
     const childData = await this.deps.engineStore.getSession(childSessionId);
     if (!childData) return;
+    const [submission, thread] = await Promise.all([
+      this.deps.engineStore.getQueueItem(childSessionId, gate.queueItemId),
+      this.deps.engineStore.getThread(childSessionId, gate.threadId),
+    ]);
+    const toolScope = submission && thread
+      ? intersectToolScopes(readToolScope(childData.metadata?.[TOOL_SCOPE_KEY]), readToolScope(submission.metadata?.[TOOL_SCOPE_KEY]), readToolScope(thread.metadata?.[TOOL_SCOPE_KEY]))
+      : { tools: [], actions: [] };
     await admitSignal(this.deps, {
       from: { sessionId: childSessionId, owner: childData.owner },
       to: watch.parentSessionId,
@@ -774,6 +786,7 @@ export class ChildWatcher {
         attributes: { child_session_id: childSessionId, gate_id: gate.id, gate_type: gate.type },
         ...(watch.origin !== undefined ? { origin: { ...watch.origin, reply: "manual" } } : {}),
       },
+      toolScope,
       dispatchId: `gate-opened:${childSessionId}:${gate.id}`,
     });
   }
@@ -1014,6 +1027,7 @@ export class ChildWatcher {
         // Preserve the spawning turn's route and reply policy for the parent's update.
         ...(origin !== undefined ? { origin } : {}),
       },
+      toolScope: intersectToolScopes(readToolScope(childData.metadata?.[TOOL_SCOPE_KEY]), readToolScope((await this.deps.engineStore.getQueueItem(watch.childSessionId, watch.queueItemId))?.metadata?.[TOOL_SCOPE_KEY])),
       dispatchId: `settled:${watch.childSessionId}:${watch.queueItemId}`,
     });
 
@@ -1724,7 +1738,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
 
   const send = async (
     req: { childSessionId: string; message: string; queue?: boolean },
-    ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
+    ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; toolScope?: ToolScope },
   ): Promise<{ queueItemId: string } | null> => {
     const watchRows = await deps.db
       .select()
@@ -1787,7 +1801,11 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // active even when the revived turn never touches the sandbox.
     await deps.engineHost.markSessionUsed(req.childSessionId);
 
-    const promptOptions = childSendPromptOptions(ctx, req.queue === true);
+    const parentData = await deps.engineStore.getSession(ctx.parentSessionId);
+    if (!parentData || parentData.orgId !== watchRow.orgId) return null;
+    const parentThread = await deps.engineStore.getThread(ctx.parentSessionId, ctx.parentThreadId);
+    const toolScope = intersectToolScopes(ctx.toolScope, readToolScope(parentData.metadata?.[TOOL_SCOPE_KEY]), readToolScope(parentThread?.metadata?.[TOOL_SCOPE_KEY]));
+    const promptOptions = childSendPromptOptions({ ...ctx, toolScope }, req.queue === true);
     const receipt = await childSession.prompt(req.message, promptOptions);
 
     // Re-point BEFORE arming: the fresh watcher must find the row already
