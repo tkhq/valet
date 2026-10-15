@@ -204,8 +204,12 @@ The host registers four actions under `settings`:
 Every write has high risk and retains the normal policy, approval, and audit
 path. Each settings approval belongs to the verified human who submitted the
 request. Another team member cannot answer it or create lasting grants.
-The catalog checks that identity before approval side effects. Actions
-still check the author's current authority after approval.
+Every write requires one-shot consent, even when a saved grant, override,
+or allow policy covers the action. Organization and team denies still block
+the action. The gate offers only approve and deny. The catalog rejects
+lasting-grant answers before approval side effects and refuses a missing
+verified actor before opening a gate. Actions still check the author's
+current authority after approval. Read actions retain ordinary policy rules.
 
 Settings actions require a verified interactive actor in an assistant turn.
 Only browser sessions and local development authentication mark direct human
