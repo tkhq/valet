@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../errors.js";
+import { CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   MessageEntry,
   QueueItem,
@@ -73,6 +74,24 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
     });
 
     // --- Admission ---
+
+    it.each([THREAD_ID, "other-thread"])("clamps continuation scope at claim using current metadata from %s", async (sourceThreadId) => {
+      const item = makeItem({ metadata: { [INHERIT_TOOL_SCOPE_KEY]: true, [TOOL_SCOPE_KEY]: { actions: ["demo.echo"] } } });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      // The scope changed after the driver's snapshot/admission, on either thread.
+      await store.saveThread(SESSION_ID, { ...newThread(sourceThreadId, sourceThreadId), metadata: { [CONTINUATION_TOOL_SCOPE_KEY]: { tools: [], actions: [] } } });
+      const claimed = await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: item.id, attemptId: "a1", ownerId: "host" });
+      expect(claimed?.metadata?.[TOOL_SCOPE_KEY]).toEqual({ tools: [], actions: [] });
+      expect((await store.getQueueItem(SESSION_ID, item.id))?.metadata?.[TOOL_SCOPE_KEY]).toEqual({ tools: [], actions: [] });
+    });
+
+    it("leaves a new human task independent of the previous continuation ceiling", async () => {
+      await store.saveThread(SESSION_ID, { ...newThread(), metadata: { [CONTINUATION_TOOL_SCOPE_KEY]: { tools: [], actions: [] } } });
+      const item = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, item);
+      const claimed = await store.claimSubmission({ sessionId: SESSION_ID, threadId: THREAD_ID, itemId: item.id, attemptId: "a1", ownerId: "host" });
+      expect(claimed?.metadata?.[TOOL_SCOPE_KEY]).toBeUndefined();
+    });
 
     it("admits and reads back a submission", async () => {
       const item = makeItem();

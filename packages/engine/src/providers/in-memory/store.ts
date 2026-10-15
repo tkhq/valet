@@ -1,5 +1,6 @@
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../../errors.js";
 import { countPendingForCap } from "../../submission.js";
+import { continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -410,6 +411,10 @@ export class InMemorySessionStore implements SessionStore {
     if (!head || head.id !== item.id || head.status !== "queued") return null;
 
     const now = Date.now();
+    if (item.metadata?.[INHERIT_TOOL_SCOPE_KEY] === true) {
+      const scope = continuationToolScope(item.metadata, [...r.threads.values()]);
+      item.metadata = { ...item.metadata, [TOOL_SCOPE_KEY]: scope ?? {} };
+    }
     item.status = "running";
     item.attemptId = claim.attemptId;
     item.ownerId = claim.ownerId;

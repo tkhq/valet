@@ -1,8 +1,35 @@
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type ToolDef } from "../src/index.js";
+import { CONTINUATION_TOOL_SCOPE_KEY } from "@valet/shared";
 
 describe.each(["user", "team"] as const)("%s task scopes", (ownerType) => {
+  it("persists a continuation ceiling per thread and replaces it for a new task", async () => {
+    const faux = registerFauxProvider({ provider: `scope-continuation-${ownerType}` });
+    try {
+      const store = new InMemorySessionStore();
+      const engine = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+      const options = { userId: "alice", orgId: "org", owner: { type: ownerType, id: ownerType === "user" ? "alice" : "team" }, workspace: "/", sandbox: {}, model: faux.getModel(), builtinTools: [] };
+      const session = await engine.createSession(options);
+      const scoped = await session.createThread("scoped");
+      const other = await session.createThread("other");
+      faux.setResponses([fauxAssistantMessage("done")]);
+      const receipt = await scoped.submitPrompt("inspect", { metadata: { toolScope: { tools: [], actions: [] } } });
+      await scoped.awaitResult(receipt.queueItemId);
+      expect((await store.getThread(session.id, scoped.id))?.metadata?.[CONTINUATION_TOOL_SCOPE_KEY]).toEqual({ tools: [], actions: [] });
+      expect((await store.getThread(session.id, other.id))?.metadata?.[CONTINUATION_TOOL_SCOPE_KEY]).toBeUndefined();
+      const fresh = new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } });
+      const restored = await fresh.restoreSession({ sessionId: session.id, options });
+      expect(restored.threadById(scoped.id)?.toThreadData().metadata?.[CONTINUATION_TOOL_SCOPE_KEY]).toEqual({ tools: [], actions: [] });
+      faux.setResponses([fauxAssistantMessage("done")]);
+      const restoredThread = restored.threadById(scoped.id);
+      if (!restoredThread) throw new Error("restored thread missing");
+      const next = await restoredThread.submitPrompt("new task", {});
+      await restoredThread.awaitResult(next.queueItemId);
+      expect((await store.getThread(session.id, scoped.id))?.metadata?.[CONTINUATION_TOOL_SCOPE_KEY]).toEqual({});
+    } finally { faux.unregister(); }
+  });
+
   it("offers newly selected tools on the next model call in the same submission", async () => {
     const faux = registerFauxProvider({ provider: `scope-refresh-${ownerType}` });
     const store = new InMemorySessionStore();

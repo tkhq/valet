@@ -34,7 +34,7 @@
 - [x] Carry scopes through workflow runs, agent nodes, nested runs, and sandbox actions. Test restart and no-side-effect refusals.
 - [x] Update workflow prompts and skills. Add a troubleshooting reference with evidence, clarification, repair, and validation steps.
 - [x] Run targeted checks, full E2E, and an independent readonly review. Fix concrete findings.
-- [ ] File the product PR, deploy a branch preserving current customizations, and run live personal and team checks.
+- [x] File the product PR, deploy a branch preserving current customizations, and run live personal and team checks.
 
 
 ## Execution record
@@ -52,3 +52,7 @@
 - The live rechecks passed all 12 personal/team-model checks, including private team result reads.
 - Adversarial review then demonstrated three missing scope paths: object-shaped foreach bodies, child gate notifications, and security dispatch/handoff. Five regression failures reproduced them. All 40 targeted tests pass after the fixes.
 - Full E2E after the adversarial fixes passed 21 suites with zero failures and 16 environment skips. Live rechecks of this last revision remain pending.
+- A final deterministic review reproduced an unscoped security driver nudge executing a formerly excluded write. Thread metadata now retains continuation ceilings, and driver submissions carry their intersection. The regression fails before the fix and passes after it.
+- Continuation claims now atomically intersect current thread ceilings in both stores. Shared contract tests reproduce limits added on the same or another thread after a stale snapshot.
+- The final targeted checks passed 265 tests, including both store contracts, crash recovery, and the actual driver. Independent review confirmed the stale-snapshot reproduction now refuses the write.
+- The full suite hit one local content-sync timeout. That test passed on rerun. A complete unit rerun with fewer workers and the final deployment are in progress.

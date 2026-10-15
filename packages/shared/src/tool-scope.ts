@@ -5,6 +5,9 @@ export interface ToolScope {
 }
 
 export const TOOL_SCOPE_KEY = "toolScope";
+/** Last started task ceiling, retained after queue history is pruned. */
+export const CONTINUATION_TOOL_SCOPE_KEY = "continuationToolScope";
+export const INHERIT_TOOL_SCOPE_KEY = "inheritToolScope";
 const TOOL_NAME = /^[a-zA-Z0-9_-]+$/;
 const ACTION_NAME = /^[a-zA-Z0-9_-]+\.(?:[a-zA-Z0-9_.-]+|\*)$/;
 
@@ -69,6 +72,12 @@ export function scopeRefusal(name: string): string {
 export function readToolScope(value: unknown): ToolScope | undefined {
   const parsed = parseToolScope(value);
   return parsed === false ? { tools: [], actions: [] } : parsed;
+}
+
+/** A session-wide autonomous continuation has no single originating thread. */
+export function continuationToolScope(metadata: Record<string, unknown> | undefined, threads: readonly { metadata?: Record<string, unknown> }[]): ToolScope | undefined {
+  return intersectToolScopes(readToolScope(metadata?.[TOOL_SCOPE_KEY]),
+    ...threads.flatMap((thread) => [readToolScope(thread.metadata?.[CONTINUATION_TOOL_SCOPE_KEY]), readToolScope(thread.metadata?.[TOOL_SCOPE_KEY])]));
 }
 
 export function isToolScope(value: unknown): value is ToolScope {

@@ -49,6 +49,8 @@ describe("SecurityRunnerDriver", () => {
     return new SecurityRunnerDriver({
       db,
       engineStore: {
+        getSession: async () => null,
+        listThreads: async () => [],
         listUnsettledSubmissions: async (sessionId: string) =>
           unsettledBySession.get(sessionId) ?? unsettled,
       },

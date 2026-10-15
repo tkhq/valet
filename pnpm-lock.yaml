@@ -1228,6 +1228,9 @@ importers:
       '@valet/engine':
         specifier: workspace:*
         version: link:../engine
+      '@valet/shared':
+        specifier: workspace:*
+        version: link:../shared
       pg:
         specifier: ^8.22.0
         version: 8.22.0

@@ -1984,6 +1984,8 @@ export interface SessionStore {
    * head: the oldest item with status 'queued' and no supersededByItemId.
    * Records attemptId, ownerId, lease; increments attemptCount. Returns the
    * updated item, or null when not head / not queued / already claimed.
+   * With trusted metadata.inheritToolScope, intersects and persists all
+   * thread continuation ceilings/focuses into metadata.toolScope atomically.
    */
   claimSubmission(claim: SubmissionClaim): Promise<QueueItem | null>;
   /** CAS: install a new attempt on a running/blocked item whose lease expired. Null when the CAS loses. */

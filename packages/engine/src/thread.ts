@@ -1,4 +1,4 @@
-import { actionInScope, intersectToolScopes, readToolScope, toolInScope, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
+import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, readToolScope, toolInScope, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
@@ -1469,6 +1469,7 @@ export class Thread {
     const fakeAbort = new AbortController();
     let toolResult;
     try {
+      await this.persistContinuationToolScope();
       toolResult = await tool.execute(
         suspended.toolCallId,
         suspended.toolArgs,
@@ -3450,6 +3451,7 @@ export class Thread {
     let turnError: unknown;
     const baselineModel = this.agent.state.model;
     try {
+      await this.persistContinuationToolScope();
       // Rest-state repair FIRST — before appending any recovery output.
       await this.repairRestState(item, fence, repairMessage);
 
@@ -3776,6 +3778,7 @@ export class Thread {
    * nest automatically through the host's context manager.
    */
   private async runItem(item: QueueItem): Promise<void> {
+    await this.persistContinuationToolScope();
     await this.ensureTranscript();
     return this.inSubmissionContext(() =>
       withSpan(
@@ -5214,8 +5217,17 @@ export class Thread {
     );
   }
 
+  private async persistContinuationToolScope(): Promise<void> {
+    const scope = this.toolScopeCeiling();
+    if (!scope && this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY] === undefined) return;
+    const metadata = { ...this.threadMetadata, [CONTINUATION_TOOL_SCOPE_KEY]: scope ?? {} };
+    await this.session.providers.store.saveThread(this.session.id, { ...this.toThreadData(), metadata });
+    this.threadMetadata = metadata;
+  }
+
   toolScopeCeiling(): ToolScope | undefined {
-    return intersectToolScopes(this.session.options.toolScope, readToolScope(this.runningItem?.metadata?.[TOOL_SCOPE_KEY]));
+    return intersectToolScopes(this.session.options.toolScope, readToolScope(this.runningItem?.metadata?.[TOOL_SCOPE_KEY]),
+      this.runningItem?.metadata?.[INHERIT_TOOL_SCOPE_KEY] === true ? readToolScope(this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY]) : undefined);
   }
 
   effectiveToolScope(): ToolScope | undefined {
