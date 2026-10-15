@@ -157,6 +157,7 @@ export function TeamCredentials({
                           {row.referenceBroken && <Badge variant="danger">Broken</Badge>}
                           {!row.referenceBroken && badge && <Badge variant={badge.variant}>{badge.label}</Badge>}
                         </p>
+                        {row.borrowConsentAt != null && !row.referenceBroken && <p className="text-muted">Account use stays allowed for this team. Stop sharing revokes it. Action approvals still apply.</p>}
                         {row.referenceBroken && (
                           <p className="text-danger-500">Their account is gone or they left the team. They can share it again.</p>
                         )}

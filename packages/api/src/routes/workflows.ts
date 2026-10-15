@@ -879,12 +879,15 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if (typeof body.approved !== "boolean") {
     return c.json({ error: "approved is required" }, 400);
   }
+  if (body.gateId !== undefined && typeof body.gateId !== "string") {
+    return c.json({ error: "gateId must be a string. Refresh the run and review its current approval." }, 400);
+  }
   // Reject legacy grantActions field — scope replaces it.
   if ("grantActions" in body) {
     return c.json({ error: "grantActions is no longer supported; use scope instead" }, 400);
   }
-  if (body.scope !== undefined && !["once", "run", "always", "workflow"].includes(body.scope)) {
-    return c.json({ error: "scope must be one of: once, run, always, workflow" }, 400);
+  if (body.scope !== undefined && !["once", "run", "always", "workflow", "team_account"].includes(body.scope)) {
+    return c.json({ error: "scope must be one of: once, run, always, workflow, team_account" }, 400);
   }
   if (body.iteration !== undefined && (!Number.isInteger(body.iteration) || body.iteration < 0)) {
     return c.json({ error: "iteration must be a non-negative integer" }, 400);
@@ -893,6 +896,7 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   const result = await resolveWorkflowApproval(deps, owner, {
     runId,
     nodeId,
+    gateId: body.gateId,
     approved: body.approved,
     note: body.note,
     scope: body.scope,
@@ -902,6 +906,7 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
 
   if (result === "not_found") return c.json({ error: "run not found" }, 404);
   if (result === "not_parked") return c.json({ error: "run is not parked on this approval gate" }, 409);
+  if (result === "stale_gate") return c.json({ error: "This approval gate changed. Refresh the run and review its current approval." }, 409);
   if (result === "already_resolved") return c.json({ error: "this approval gate has already been resolved" }, 409);
   if (result === "timed_out") return c.json({ error: "this approval gate has timed out" }, 409);
   if (result === "forbidden_workflow") return c.json({ error: "This workflow permission cannot be saved. Its owner or team admin must review the current workflow and any policy restrictions." }, 403);

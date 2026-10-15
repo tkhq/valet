@@ -22,6 +22,7 @@ export interface CredentialShare {
   service: string;
   userId: string;
   createdAt: number;
+  borrowConsentAt?: number | null;
 }
 
 /** The members sharing `service` with `teamId` who are still on the team,

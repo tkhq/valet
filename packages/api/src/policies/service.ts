@@ -717,7 +717,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
   /** The member whose shared account this team action would use, when no
    * account of the acting member's or the team's own answers. GitHub has the
    * organization App behind the team's row, so it never borrows. */
-  async function sharedAccountApprover(input: PolicyResolveInput): Promise<{ userId: string; name?: string; shareGeneration: string } | undefined> {
+  async function sharedAccountApprover(input: PolicyResolveInput): Promise<{ userId: string; name?: string; shareGeneration: string; allowTeamConsent: true } | undefined> {
     const service = credentialServiceFor(input.service);
     if (!deps.credentials || !input.teamId || !input.orgId || service === "github") return undefined;
     const sharers = await membersSharing(deps.db, input.teamId, service);
@@ -743,7 +743,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
     const [member] = await deps.db.select({ name: users.name }).from(users).where(eq(users.id, approvalFrom)).limit(1);
     const generation = await shareGeneration(deps.db, input.teamId, service, approvalFrom);
     if (!generation) return undefined;
-    return { shareGeneration: generation, userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
+    return { allowTeamConsent: true, shareGeneration: generation, userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
   }
 
   const pluginDefaultFor = (service: string): ApprovalMode | undefined =>
@@ -797,7 +797,8 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         })))) {
           return { mode: "deny", provenance: { ...decision.provenance, source: "shared_account" } };
         }
-        return { mode: "require_approval", provenance: { ...decision.provenance, source: "shared_account" }, approver };
+        return { mode: "require_approval", provenance: { ...decision.provenance, source: "shared_account" }, approver,
+          extraGateActions: [{ id: "always_allow_account", label: "Always allow for this team", approves: true }] };
       }
       if (decision.mode !== "require_approval") return decision;
 
@@ -846,7 +847,11 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
 
       const now = clock();
       if (decision.approver) {
-        if (resolution.actionId !== "approve") return;
+        if (resolution.actionId !== "approve" && resolution.actionId !== "always_allow_account") return;
+        const lasting = resolution.actionId === "always_allow_account";
+        if (lasting && (!decision.approver.allowTeamConsent || !["web", "slack"].includes(resolution.source?.channelType ?? ""))) {
+          throw new Error("Open this account approval in Valet or Slack to allow it for the team.");
+        }
         // The routes let only the approver answer; refuse anyone else here too.
         if (resolution.resolvedBy !== decision.approver.userId) {
           throw new Error(`Only ${decision.approver.name ?? "the account's owner"} can allow use of their account.`);
@@ -855,6 +860,7 @@ export function buildPolicyResolver(deps: PolicyResolverDeps): PolicyResolver {
         if (!input.teamId) throw new Error("The team is unavailable. Request account approval again.");
         await writeBorrowGrant(deps.db, input.orgId, {
           teamId: input.teamId, shareGeneration: decision.approver.shareGeneration,
+          consentScope: lasting ? "team" : undefined,
           sessionId: input.sessionId, threadId: input.threadId, service: credentialServiceFor(input.service), memberId: decision.approver.userId,
         }, now);
         return;

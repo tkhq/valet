@@ -280,7 +280,7 @@ async function toSummary(
   service: string,
   stored: StoredCredential,
   connectedAt: string,
-  extra?: { delegatedFrom?: string; referenceBroken?: boolean; unusable?: boolean },
+  extra?: { delegatedFrom?: string; referenceBroken?: boolean; unusable?: boolean; borrowConsentAt?: number },
 ): Promise<CredentialSummary | null> {
   if (!isCredentialKind(stored.type)) return null;
   const metadata = stored.metadata;
@@ -344,7 +344,7 @@ credentialsRouter.get("/", async (c) => {
       // resolve. A personal-scope reference has one the team read cannot use.
       const referenceBroken = !source || (!rowHasSecret(source) && !usableByTeamRead(source));
       const summary = await toSummary(share.service, source ?? { type: "api_key" }, new Date(share.createdAt).toISOString(),
-        { delegatedFrom: share.userId, referenceBroken });
+        { delegatedFrom: share.userId, referenceBroken, ...(share.borrowConsentAt != null && !referenceBroken ? { borrowConsentAt: share.borrowConsentAt } : {}) });
       if (summary) listed.push(summary);
     }
     return c.json({ credentials: listed } satisfies ListCredentialsResponse);

@@ -36,7 +36,7 @@ interface PolicyGateCardProps {
 
 export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGateCardProps): ReactElement {
   const { note, setNote, confirmation, submitted, resolve, respond, confirm, onConfirmationOpenChange } =
-    useApprovalResponse(runId, gate.nodeId, gate.iteration);
+    useApprovalResponse(runId, gate.nodeId, gate.iteration, gate.gateId);
   const me = useMe();
 
   const service = gate.service ?? "";
@@ -44,9 +44,9 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
   const serviceAction = service && action ? `${service}.${action}` : gate.nodeId;
 
   const busy = resolve.isPending;
-  const borrowScopeCopy = `Approving this step also lets Valet use your ${service || "shared"} account for later actions in this workflow run, including actions requested by other teammates. Only you can approve use of your account.`;
+  const borrowScopeCopy = `Approving this step also lets Valet use your ${gate.serviceDisplayName || service || "shared"} account for later actions in this workflow run, including actions requested by other teammates. Only you can approve use of your account.`;
 
-  function fireApprove(scope: "once" | "run" | "workflow") {
+  function fireApprove(scope: "once" | "run" | "workflow" | "team_account") {
     respond({ approved: true, scope }, confirmActions || scope === "workflow");
   }
 
@@ -125,7 +125,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
       )}
 
       {gate.approver && (
-        <p className="text-xs text-muted">{borrowScopeCopy}</p>
+        <p className="text-xs text-muted">{borrowScopeCopy}{gate.approver.allowTeamConsent ? " Always allow for this team covers future threads and runs. Choose Stop sharing in Integrations to revoke it. Action approvals still apply." : ""}</p>
       )}
 
       {/* Note input */}
@@ -140,7 +140,10 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
       {/* Action buttons */}
       <div className="flex flex-wrap items-center gap-3">
         {gate.approver ? (
+          <>
           <Button size="sm" onClick={() => fireApprove("run")} disabled={busy}>Allow for this run</Button>
+          {gate.approver.allowTeamConsent && <Button size="sm" variant="secondary" onClick={() => fireApprove("team_account")} disabled={busy}>Always allow for this team</Button>}
+          </>
         ) : <>
         <Button size="sm" onClick={() => fireApprove("workflow")} disabled={busy}>Allow for this workflow</Button>
         {/* Split-button: Approve once + dropdown */}
@@ -224,7 +227,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
           )}
           {is409AlreadyResolved && (
             <div className="text-xs text-muted">
-              This gate was already resolved. Refreshing…
+              This gate changed or was already resolved. Refreshing…
             </div>
           )}
           {errorMsg != null && (

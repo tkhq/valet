@@ -1589,6 +1589,13 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
     return c.json({ error: `Only ${gateApprover(gate)?.name ?? "the account's owner"} can allow use of their account.` }, 403);
   }
 
+  if (body.actionId === "always_allow_account" && (
+    c.var.principal.type !== "user" || !["session", "stub"].includes(c.var.authVia)
+    || !gateApprover(gate) || !gate.actions.some(action => action.id === "always_allow_account")
+  )) {
+    return c.json({ error: "Open this account approval in Valet as the account owner to allow it for the team." }, 403);
+  }
+
   if (gate.context?.browser) {
     const policy = c.var.providers.engineHost.browserPolicy();
     if (c.var.principal.type !== 'user' || !policy) {

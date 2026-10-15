@@ -40,8 +40,10 @@ export type OnApprovalPending = (info: {
   action?: string;
   params?: unknown;
   iteration?: number;        // set only when > 0
+  /** Persisted identity of this gate occurrence. Absent on older gates. */
+  gateId?: string;
   /** The one member who may answer: the action would use their shared account. */
-  approver?: { userId: string; name?: string; shareGeneration?: string };
+  approver?: { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true };
 }) => Promise<void> | void;
 
 /** Host audit seam: the tool executor reports gate settlements the HTTP
@@ -52,8 +54,9 @@ export type OnGateResolved = (info: {
   nodeId: string;
   iteration: number;
   invocationId: string;
-  outcome: 'denied' | 'timeout';
-  resolvedBy: string;
+  outcome: 'denied' | 'timeout' | 'error';
+  resolvedBy?: string;
+  error?: string;
 }) => Promise<void> | void;
 
 /**

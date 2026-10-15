@@ -123,6 +123,13 @@ describe("workflowRequest", () => {
     expect(workflowRequest(node, "approve")).toEqual({ approved: true, iteration: 3 });
     expect(workflowRequest(node, "deny")).toEqual({ approved: false, iteration: 3 });
   });
+  it("keeps the displayed policy gate identity for either bulk answer", () => {
+    const plan = planBulkAnswers([workflow("policy", { kind: "policy_gate", gateId: "approval:node-policy:gate:2" })], [], "me");
+    const target = plan.targets[0];
+    if (!target || target.kind !== "workflow") throw new Error("Expected workflow target");
+    expect(workflowRequest(target, "approve")).toEqual({ approved: true, scope: "once", iteration: undefined, gateId: "approval:node-policy:gate:2" });
+    expect(workflowRequest(target, "deny")).toEqual({ approved: false, iteration: undefined, gateId: "approval:node-policy:gate:2" });
+  });
   it("approves policy gates once only, and denies them plainly", () => {
     expect(workflowRequest(policy, "approve")).toEqual({ approved: true, scope: "once", iteration: 3 });
     expect(workflowRequest(policy, "deny")).toEqual({ approved: false, iteration: 3 });

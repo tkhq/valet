@@ -96,6 +96,17 @@ describe("PolicyGateCard", () => {
     });
   });
 
+  it("binds account approval to the displayed gate occurrence", () => {
+    render(<PolicyGateCard runId="wfrun_1" gate={makeGate({
+      gateId: "approval:node_1:gate:1", approver: { userId: "me" },
+    })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Allow for this run" }));
+    expect(mutate).toHaveBeenCalledWith({
+      nodeId: "node_1",
+      body: { approved: true, scope: "run", note: undefined, iteration: undefined, gateId: "approval:node_1:gate:1" },
+    });
+  });
+
   // ── Case 3: Approve for rest of run ───────────────────────────────────────
 
   it("Approve for rest of run fires with scope=run and sublabel names the action", async () => {
@@ -159,7 +170,7 @@ describe("PolicyGateCard", () => {
       error: "this approval gate has already been resolved",
     });
     render(<PolicyGateCard runId="wfrun_1" gate={makeGate()} />);
-    expect(screen.getByText(/This gate was already resolved\. Refreshing/i)).toBeTruthy();
+    expect(screen.getByText(/This gate changed or was already resolved\. Refreshing/i)).toBeTruthy();
     // The raw "POST … → 409" message must NOT appear in the error area.
     expect(screen.queryByText(/→ 409/)).toBeNull();
   });
@@ -253,6 +264,16 @@ describe("PolicyGateCard", () => {
     expect(mutate).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Allow for this run" }));
     expect(mutate).toHaveBeenCalledExactlyOnceWith({ nodeId: "node_1", body: { approved: true, scope: "run" } });
+  });
+
+  it("offers lasting consent only on new account gates and submits its distinct scope", () => {
+    const { rerender } = render(<PolicyGateCard runId="wfrun_1" gate={makeGate({ approver: { userId: "me" } })} />);
+    expect(screen.queryByRole("button", { name: "Always allow for this team" })).toBeNull();
+    rerender(<PolicyGateCard runId="wfrun_1" gate={makeGate({ serviceDisplayName: "Linear MCP", approver: { userId: "me", allowTeamConsent: true } })} />);
+    expect(screen.getByText(/use your Linear MCP account/)).toBeTruthy();
+    expect(screen.getByText(/Stop sharing/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Always allow for this team" }));
+    expect(mutate).toHaveBeenCalledExactlyOnceWith({ nodeId: "node_1", body: { approved: true, scope: "team_account" } });
   });
 
 });
