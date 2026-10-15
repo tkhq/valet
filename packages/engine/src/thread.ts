@@ -36,6 +36,7 @@ import {
 import { renderTemplate } from "./roles-skills/index.js";
 import {
   buildOverheardDigest,
+  completedSubmissionOutcome,
   deriveQueueState,
   formatSenderLine,
   attributedAuthor,
@@ -83,6 +84,7 @@ import {
 import { context as otelContext, trace as otelTrace, type Span } from "@opentelemetry/api";
 import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
+import { MODEL_RESPONSE_METADATA_KEY, modelResponseMetadata } from "./model-response.js";
 import { modelCallUsage } from "./model-call-usage.js";
 import {
   applyPrune,
@@ -577,6 +579,8 @@ export class Thread {
   private fallbackModelSpec?: string;
   /** Last conversational request model; a switch must recheck the live context. */
   private lastRequestModel: PiModel;
+  private requestedMaxOutputTokens?: number;
+  private streamedTextLength = 0;
   /** Set only after a role model resolves and is applied. Never persisted. */
   private roleModelSpec?: string;
   /**
@@ -3045,7 +3049,11 @@ export class Thread {
     if (current.status === "blocked_on_decision_gate") return;
     if (current.status === "settled" || current.status === "terminalizing") return;
 
-    const outcome = this.decideTurnOutcome(current, turnFailure);
+    const decided = this.decideTurnOutcome(current, turnFailure);
+    // Validate after the agent stops, outside its retry loop. Never replay a failed result.
+    const outcome = decided.outcome === "completed"
+      ? completedSubmissionOutcome(await store.getEntries(this.session.id, this.id, { queueItemId: item.id }), item.id)
+      : decided;
     span.setAttribute("valet.submission.outcome", outcome.outcome);
     this.submissionSpan?.setAttribute("valet.submission.outcome", outcome.outcome);
     recordSettlement(
@@ -3145,8 +3153,7 @@ export class Thread {
       const errText = last && last.role === "assistant" ? last.errorMessage : undefined;
       return { outcome: "failed", error: errText ?? "turn ended with an error" };
     }
-    // "stop" and "length" both settle completed — a length-terminated turn
-    // still ended with usable output (revisit if we want to distinguish).
+    // Settlement validates the persisted terminal response before it accepts completion.
     return { outcome: "completed" };
   }
 
@@ -3217,6 +3224,9 @@ export class Thread {
     suspended: SuspendedTurnState | null,
   ): Promise<void> {
     const store = this.session.providers.store;
+    if (outcome.outcome === "completed") {
+      outcome = completedSubmissionOutcome(await store.getEntries(this.session.id, this.id, { queueItemId: item.id }), item.id);
+    }
 
     if (item.status === "queued" || item.status === "collecting") {
       const ok = await store.settleUnclaimed(this.session.id, this.id, item.id, outcome);
@@ -5080,6 +5090,7 @@ export class Thread {
       // upstream knob forever.
       streamFn: async (model, context, options) => {
         this.lastRequestModel = model;
+        this.requestedMaxOutputTokens = options?.maxTokens;
         await this.persistSkillContextAttributions();
         const runtimeModelContext = this.modelSystemPrompt(undefined, model);
         const initialSystemIndex = context.messages.findIndex((message) => message.role === "system");
@@ -5401,6 +5412,7 @@ export class Thread {
       case "message_start": {
         if (event.message.role === "assistant") {
           this.currentAssistantMessageId = uid("e");
+          this.streamedTextLength = 0;
           this.currentAssistantParts = [];
           this.currentToolCalls.clear();
           this.currentAssistantEntry = undefined;
@@ -5443,6 +5455,7 @@ export class Thread {
         if (this.staleFenceDetected) break;
         const ev = event.assistantMessageEvent;
         if (ev.type === "text_delta") {
+          this.streamedTextLength += ev.delta.length;
           await this.session.emit({
             type: "text_delta",
             threadId: this.id,
@@ -5512,9 +5525,8 @@ export class Thread {
             parts.push(p);
           }
 
-          // "length" maps to end_turn: a length-terminated turn still ended
-          // with usable output (Task 6 resolves result text from the last
-          // assistant entry with stopReason end_turn).
+          // Keep the transcript's legacy stop mapping. Result validation uses
+          // the uncollapsed adapted stop reason below to reject incomplete output.
           const stopReason: MessageEntry["stopReason"] | undefined =
             event.message.stopReason === "aborted"
               ? "abort"
@@ -5541,7 +5553,10 @@ export class Thread {
             model: event.message.model,
             queueItemId: this.runningItem?.id,
             stopReason,
-            ...(turnError ? { metadata: { [MESSAGE_TURN_ERROR_KEY]: turnError } } : {}),
+            metadata: {
+              [MODEL_RESPONSE_METADATA_KEY]: modelResponseMetadata(event.message, this.streamedTextLength, this.requestedMaxOutputTokens),
+              ...(turnError ? { [MESSAGE_TURN_ERROR_KEY]: turnError } : {}),
+            },
             createdAt: Date.now(),
           };
           if (this.checkpointEntry?.id === entry.id) {
@@ -6011,9 +6026,11 @@ export class Thread {
       outcome.outcome === "superseded"
         ? resolvePartialSubmissionText(entries, item.id)
         : resolveSubmissionText(entries, item.id);
-    const result: SubmissionResult = { queueItemId: item.id, outcome: outcome.outcome, text };
-    if (outcome.error !== undefined) result.error = outcome.error;
-    if (opts.resultSchema && outcome.outcome === "completed") {
+    // Also validate historical completed rows. Reading a result never changes queue state.
+    const validated = outcome.outcome === "completed" ? completedSubmissionOutcome(entries, item.id) : outcome;
+    const result: SubmissionResult = { queueItemId: item.id, outcome: validated.outcome, text };
+    if (validated.error !== undefined) result.error = validated.error;
+    if (opts.resultSchema && validated.outcome === "completed") {
       const extracted = extractStructuredOutput(text ?? "", opts.resultSchema);
       if (extracted.output !== undefined) result.output = extracted.output;
       if (extracted.error !== undefined) result.error = extracted.error;
