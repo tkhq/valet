@@ -53,11 +53,13 @@ import {
 } from "@valet/workflow";
 import type { AppEnv } from "../env.js";
 import {
+  canReadWorkflowRun,
   ownedDefinitionRow,
   validateDefinitionInput,
   type WorkflowOwner,
   type WorkflowServiceDeps,
 } from "../workflows/service.js";
+import { workflowRequestContext } from "../workflows/request-context.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import type {
   PreviewField,
@@ -153,12 +155,18 @@ function toTemplateContext(sample: SampleData): TemplateContext {
  * Sample data for one preview: the newest run that produced anything, with
  * the caller's sample input laid over its trigger payload.
  *
+ * Only a run the caller may read is a sample. The check is the one
+ * `get_run` and `get_node_result` use (`canReadWorkflowRun`): a run started
+ * from a private thread or a private Slack channel belongs to that audience,
+ * so its trigger payload and results do not reach anyone else here.
+ *
  * A workflow that has never run still previews. It gets a synthetic trigger
  * payload built from the declared `dataSchema` defaults and the sample
  * input, which is exactly what a manual run would build.
  */
 async function buildSample(
-  store: WorkflowStore,
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
   workflowId: string,
   definition: WorkflowDefinition,
   request: PreviewWorkflowRequest,
@@ -173,9 +181,10 @@ async function buildSample(
   const definedIds = new Set(definition.nodes.map((n) => n.id));
 
   if (request.sample !== "none") {
-    const page = await store.listRuns({ workflowIds: [workflowId], limit: SAMPLE_RUN_SCAN });
+    const page = await deps.workflowStore.listRuns({ workflowIds: [workflowId], limit: SAMPLE_RUN_SCAN });
     for (const run of page.runs) {
-      const checkpoints = await store.getCheckpoints(run.runId);
+      if (!(await canReadWorkflowRun(deps, owner, run.runId))) continue;
+      const checkpoints = await deps.workflowStore.getCheckpoints(run.runId);
       // Iteration 0 only, and only ids the definition still holds — the
       // same two filters `loadCheckpoints` applies in the interpreter. A
       // foreach body's per-item checkpoints are not addressable by
@@ -808,8 +817,6 @@ export function orderNodes(definition: WorkflowDefinition): WorkflowNode[] {
 
 // ── Preview ─────────────────────────────────────────────────────────────────
 
-export type PreviewWorkflowDeps = Pick<WorkflowServiceDeps, "db" | "workflowStore" | "actionPluginByService">;
-
 export type PreviewWorkflowOutcome =
   | { ok: true; response: PreviewWorkflowResponse }
   | { ok: false; reason: "not_found" }
@@ -822,7 +829,7 @@ export type PreviewWorkflowOutcome =
  * assistant read the same answer for the same definition.
  */
 export async function previewWorkflow(
-  deps: PreviewWorkflowDeps,
+  deps: WorkflowServiceDeps,
   owner: WorkflowOwner,
   workflowId: string,
   body: PreviewWorkflowRequest,
@@ -843,7 +850,7 @@ export async function previewWorkflow(
     };
   }
 
-  const sample = await buildSample(deps.workflowStore, workflowId, definition, body);
+  const sample = await buildSample(deps, owner, workflowId, definition, body);
   const context = toTemplateContext(sample);
 
   // A throwaway store, discarded with the request. The executors below need
@@ -892,7 +899,7 @@ export async function previewWorkflow(
 // ── Route ───────────────────────────────────────────────────────────────────
 
 workflowPreviewRouter.post("/:id/preview", async (c) => {
-  const owner: WorkflowOwner = { userId: c.var.user.id, orgId: c.var.user.orgId, principal: c.var.principal };
+  const { deps, owner } = workflowRequestContext(c);
 
   let body: PreviewWorkflowRequest;
   try {
@@ -903,7 +910,7 @@ workflowPreviewRouter.post("/:id/preview", async (c) => {
     body = {};
   }
 
-  const outcome = await previewWorkflow(c.var.providers, owner, c.req.param("id"), body);
+  const outcome = await previewWorkflow(deps, owner, c.req.param("id"), body);
   if (outcome.ok) return c.json(outcome.response);
   switch (outcome.reason) {
     case "not_found":

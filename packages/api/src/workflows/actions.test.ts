@@ -17,7 +17,7 @@ import {
   type WorkflowServiceDeps,
 } from "./service.js";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { actionPolicies, credentials, credentialShares, teams, teamMembers, eventSubscriptions, orgs, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
+import { actionPolicies, credentials, credentialShares, teams, teamMembers, eventSubscriptions, orgs, slackChannelPrivacy, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { InMemoryCredentialStore, InMemorySessionStore } from "@valet/engine";
 import { OnePasswordAuthError } from "../services/onepassword.js";
@@ -772,6 +772,49 @@ describe("DB-backed actions", () => {
       .checkpoints[0]!;
     expect(hugeCp.result.truncated).toBe(true);
     expect(typeof hugeCp.result.jsonPrefix).toBe("string");
+  });
+
+  it("preview_workflow skips a newest run from a private Slack channel, as get_node_result does", async () => {
+    const teamId = "preview-private-team";
+    await db.insert(teams).values({ id: teamId, orgId: "org1", name: "Preview team", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId, userId: "user1", role: "member" });
+    await db.insert(slackChannelPrivacy).values({ orgId: "org1", channelId: "CPRIV-PREVIEW", isPrivate: true, checkedAt: Date.now() });
+    const definition = {
+      version: "dag/v1",
+      nodes: [{ id: "trigger", type: "trigger" }, { id: "copy", type: "set", values: { text: "{{trigger.data.text}}" } }],
+      edges: [{ from: "trigger", to: "copy" }],
+    };
+    const created = await createWorkflowDefinition(deps, { userId: "user1", orgId: "org1" }, { name: "Team preview", definition, teamId });
+
+    // The older run is public. The newer run came from a private channel the
+    // member is not shown to. The ids order the private run first on a tie.
+    const seed = async (runId: string, trigger: { type: string; timestamp: string; data: Record<string, unknown>; metadata: Record<string, unknown> }) => {
+      await deps.workflowStore.createRun(runId, { workflowId: created.id, definitionVersionId: "v1", input: trigger },
+        created.definition, "v1", { ownerType: "team", ownerId: teamId });
+      const claim = await deps.workflowStore.claimRun(runId, "host", 30_000);
+      if (!claim) throw new Error("claim failed");
+      const base = { runId, nodeId: "trigger", iteration: 0, attempt: claim.attempt, createdAt: 1 };
+      await deps.workflowStore.putIntent({ ...base, status: "intent" });
+      await deps.workflowStore.completeCheckpoint(runId, "trigger", 0, claim.attempt, { ...base, status: "completed", result: trigger });
+    };
+    await seed("run-1-public", { type: "manual", timestamp: "2026-01-01T00:00:00Z", data: { text: "public note" }, metadata: {} });
+    await seed("run-2-private", {
+      type: "event",
+      timestamp: "2026-01-02T00:00:00Z",
+      data: { key: "slack.message", refs: { channel: "CPRIV-PREVIEW" }, payload: { channel: "CPRIV-PREVIEW", text: "secret plan" }, text: "secret plan" },
+      metadata: {},
+    });
+
+    const plugin = workflowsActionPlugin(() => deps);
+    const action = (id: string) => plugin.actions.find((a) => a.id === id)!;
+    const member = ctx({ owner: { type: "team", id: teamId } });
+
+    expect(await action("workflows.get_node_result").execute({ run_id: "run-2-private", node_id: "trigger" }, member))
+      .toEqual({ success: false, error: "run not found: run-2-private" });
+    const preview = await action("workflows.preview_workflow").execute({ workflow_id: created.id }, member);
+    expect(preview).toMatchObject({ success: true, data: { sample: { kind: "last_run", runId: "run-1-public" } } });
+    expect(JSON.stringify(preview)).toContain("public note");
+    expect(JSON.stringify(preview)).not.toContain("secret plan");
   });
 
   it("get_run lists the steps that wait for approval and the teammate who must approve one", async () => {
