@@ -232,8 +232,9 @@ Account validation and writes live in `services/account-settings.ts`.
 The team route and action share model-default validation and scoped writes.
 The organization model-tier route and action share the existing validation
 and policy lock through `services/model-tier-settings.ts`. The organization
-action validates every requested field before saving. It rejects NUL
-characters in names. `services/organization-settings.ts` saves the name and
+action validates every requested field before saving. It rejects names that
+are empty after trimming and names with NUL characters. It preserves nonblank
+names as entered. `services/organization-settings.ts` saves the name and
 default tier in one transaction, so a write failure changes neither field.
 Tier validation reads current policy under the existing organization row
 lock. Credential snapshots remain outside the transaction for PGlite.

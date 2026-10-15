@@ -16,6 +16,9 @@ export async function patchOrganizationSettings(db: AppDb, credentials: Credenti
   if (name !== undefined && typeof name !== "string") {
     return { error: "Organization name must be a string. Send the organization name as text." };
   }
+  if (name !== undefined && name.trim().length === 0) {
+    return { error: "Organization name cannot be blank. Enter a name with at least one non-whitespace character." };
+  }
   if (name?.includes("\u0000")) {
     return { error: "Organization name cannot contain NUL characters. Remove them and try again." };
   }
