@@ -21,6 +21,7 @@ import {
 import { useMe, useTeams } from "~/api/settings";
 import { Button, Popover, PopoverContent, PopoverTrigger } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
+import { isTeamOwnConnection } from "./service-health";
 
 export function ShareWithTeam({ service, title }: { service: string; title: string }) {
   const [open, setOpen] = useState(false);
@@ -98,7 +99,7 @@ function TeamShareRow({
   const mine = myRow !== undefined;
   const others = rows.filter((c) => c.delegatedFrom && c.delegatedFrom !== me.data?.id).length;
   // The share route refuses a share beside the team's own connection.
-  const teamOwn = rows.find((c) => !c.delegatedFrom);
+  const teamOwn = rows.find(isTeamOwnConnection);
   const pending = delegate.isPending || revoke.isPending;
   const err = delegate.error ?? revoke.error;
   const context = [teamOwn === undefined ? null : teamOwn.dead

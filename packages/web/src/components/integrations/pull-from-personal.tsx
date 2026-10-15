@@ -4,6 +4,7 @@ import { useMe } from "~/api/settings";
 import { useCredentials, useDelegateCredential } from "~/api/integrations";
 import { Button, Popover, PopoverContent, PopoverTrigger } from "~/components/primitives";
 import { displayName } from "~/components/integrations/display-name";
+import { isTeamOwnConnection } from "~/components/integrations/service-health";
 import { errorText } from "~/lib/error-text";
 
 /**
@@ -58,7 +59,7 @@ export function PullFromPersonal({ teamId, teamName }: { teamId: string; teamNam
   const me = useMe();
   // Each member keeps their own share, so only the caller's own blocks a pull.
   const sharedByMe = new Set((teamQ.data?.credentials ?? []).filter((c) => c.delegatedFrom === me.data?.id).map((c) => c.service));
-  const teamOwn = new Map((teamQ.data?.credentials ?? []).filter((c) => !c.delegatedFrom).map((c) => [c.service, c.dead === true]));
+  const teamOwn = new Map((teamQ.data?.credentials ?? []).filter(isTeamOwnConnection).map((c) => [c.service, c.dead === true]));
   const settled = !mineQ.isLoading && !mineQ.error;
 
   return (

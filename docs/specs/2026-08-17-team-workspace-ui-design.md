@@ -267,7 +267,7 @@ The copy does not claim that an organization integration is currently connected.
 
 ### Team integration identity presentation (2026-09-10)
 
-Team Integrations separates direct connections from connections shared by members. Shared rows name the account owner and explain revocation on departure. Personal sharing stays on Personal Integrations and requires explicit consent. One service has one team connection; connecting never silently replaces it. The team page's share list disables a service the team has its own connection for, and says why.
+Team Integrations separates direct connections from connections shared by members. Shared rows name the account owner and explain revocation on departure. Personal sharing stays on Personal Integrations and requires explicit consent. One service has one team connection; connecting never silently replaces it. The team page's share list disables a service the team has its own connection for, and says why. A team GitHub row that no run uses (`CredentialSummary.unusable`) does not count. When an admin stops a member's share, the confirmation promises a new share only if the team has no own connection for that service.
 
 Slack and the GitHub App stay organization-managed. Team Integrations shows compact access status and links admins to Organization settings. It does not offer a separate team connection for either service. Existing stored connections remain visible for explicit removal. OAuth connects the selected provider account; it does not create a service identity.
 

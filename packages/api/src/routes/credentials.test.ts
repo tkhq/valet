@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
-import type { ValetPlugin } from "@valet/engine";
+import type { StoredCredential, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { contentSources, credentials, orgMembers, orgs, users } from "../schema/index.js";
 import { listTeamShares } from "../services/credential-shares.js";
@@ -1415,6 +1415,33 @@ describe("team credential scope (TKAI-205)", () => {
     await api!.providers.db.delete(credentials)
       .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, team.id), eq(credentials.service, "linear")));
     expect((await shareFrom()).status).toBe(201);
+  });
+
+  // Runs skip a team github row that `isUsableGithubUserRow` refuses, and
+  // GitHub rows are never `isDeadConnection`. That row must not block a
+  // member's healthy share, and the list must mark it for the pickers.
+  it("shares beside a team GitHub row no run uses, and blocks beside a usable one", async () => {
+    const team = await teamWithMember();
+    const { engineCredentials } = api!.providers;
+    const teamGithub = (credential: StoredCredential) => engineCredentials.save({ type: "team", id: team.id }, "github", credential);
+    const shareFrom = () => fetch(`${api!.baseUrl}/api/credentials/github/delegate`, {
+      method: "POST", headers: MEMBER_HEADERS, body: JSON.stringify({ teamId: team.id }),
+    });
+    await engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2", accessToken: "repo-tok", metadata: { login: "octocat" },
+    });
+    await teamGithub({ type: "oauth2", accessToken: "identity-tok", metadata: { identityOnly: true } });
+    const listed = (await (
+      await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: MEMBER_HEADERS })
+    ).json()) as ListCredentialsResponse;
+    expect(listed.credentials).toEqual([expect.objectContaining({ service: "github", unusable: true })]);
+    expect((await shareFrom()).status).toBe(201);
+
+    expect((await fetch(`${api!.baseUrl}/api/credentials/github/delegations/${team.id}`, { method: "DELETE", headers: MEMBER_HEADERS })).status).toBe(200);
+    await teamGithub({ type: "oauth2", accessToken: "team-repo-tok", metadata: { login: "team-bot" } });
+    const blocked = await shareFrom();
+    expect(blocked.status).toBe(409);
+    expect(((await blocked.json()) as { error: string }).error).toContain("already has its own GitHub connection");
   });
 
   // A team row is read with org-scoped 1Password tokens only, so a

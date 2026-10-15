@@ -5,7 +5,7 @@
  * repair, or the team keeps a dead account that looks healthy.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { CredentialSummary, OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 
@@ -89,6 +89,26 @@ describe("TeamCredentials", () => {
     await user.click(screen.getByRole("button", { name: "Request removal of Greenhouse from Recruiting" }));
     await user.click(screen.getByRole("button", { name: "Request removal" }));
     expect(submitRequest).toHaveBeenCalledWith({ resourceType: "credential", resourceId: "greenhouse" }, expect.anything());
+  });
+
+  // The delegate route refuses a share beside the team's own connection, so
+  // the note promises a new share only when the team has none.
+  it("promises a member can share again only when the team has no own connection", async () => {
+    const user = userEvent.setup();
+    const stopSharing = async () => {
+      await user.click(screen.getByRole("button", { name: "Stop sharing Alice's Greenhouse with Recruiting" }));
+      return screen.getByRole("dialog");
+    };
+    teamCreds = [cred(), cred({ delegatedFrom: "u2" })];
+    renderRows(true);
+    expect((await stopSharing()).textContent).toContain(
+      "While Recruiting has its own Greenhouse connection, they cannot share theirs again.",
+    );
+    cleanup();
+
+    teamCreds = [cred({ delegatedFrom: "u2" })];
+    renderRows(true);
+    expect((await stopSharing()).textContent).toContain("They can share it with the team again from Integrations.");
   });
 
   it("shows no health badge on working rows", () => {

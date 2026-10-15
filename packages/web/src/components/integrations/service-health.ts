@@ -50,6 +50,15 @@ export function credentialRowHealth(row: Pick<CredentialSummary, "refreshFailedA
   return "connected";
 }
 
+/**
+ * True for the team's own connection in a team list: not a member's share,
+ * and not a `github` row that no run uses (`CredentialSummary.unusable`).
+ * The delegate route refuses a new share of a service that has one.
+ */
+export function isTeamOwnConnection(row: Pick<CredentialSummary, "delegatedFrom" | "unusable">): boolean {
+  return !row.delegatedFrom && row.unusable !== true;
+}
+
 /** True when the connection is present but unusable, so the card must offer
  * a repair and not only a disconnect. */
 export function needsReauth(health: ServiceHealth): boolean {

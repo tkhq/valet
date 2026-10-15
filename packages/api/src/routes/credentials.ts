@@ -49,7 +49,7 @@ import { Hono, type Context } from "hono";
 import { insertCredentialIfAbsent, lockTeamCredentialRole, replaceCredential } from "../services/credential-insert.js";
 import { and, eq } from "drizzle-orm";
 import { fromJsonbColumn } from "@valet/store-postgres";
-import { credentialSecret, type CredentialOwner, type StoredCredential } from "@valet/engine";
+import { credentialSecret, type CredentialOwner, type CredentialStore, type StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
@@ -66,7 +66,7 @@ import { mapOnePasswordError } from "./_onepassword-errors.js";
 import { canAdministerTeam, canViewTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
 import { isDeadConnection } from "../services/credential-resolution.js";
 import { deleteSharesFrom, listShareTeamsFrom, listTeamShares, revokeShare, shareCredential } from "../services/credential-shares.js";
-import { GITHUB_CREDENTIAL_SERVICE, checkGithubUserRow } from "../services/github-tokens.js";
+import { GITHUB_CREDENTIAL_SERVICE, checkGithubUserRow, isUsableGithubUserRow } from "../services/github-tokens.js";
 import { credentials } from "../schema/index.js";
 import { serviceDisplayName } from "../lib/service-display-name.js";
 import type {
@@ -102,6 +102,24 @@ function rowHasSecret(stored: StoredCredential): boolean {
 /** A delegated user reference can use the org token, never a personal or team token. */
 function usableByTeamRead(stored: StoredCredential): boolean {
   return onePasswordMeta(stored)?.tokenScope === "org";
+}
+
+/**
+ * True when no run uses the team's own `github` row. The invoker's team
+ * branch and readiness skip a row that `isUsableGithubUserRow` refuses, so
+ * that row is not a connection teammates use. A secretless row reads as
+ * absent (`TeamCredentialStore`). A 1Password reference cannot be checked
+ * without resolving it, so it counts as usable. A GitHub read never
+ * refreshes (`OAuthRefreshingCredentialStore` excludes it).
+ */
+async function teamGithubRowUnusable(engineCredentials: CredentialStore, teamId: string): Promise<boolean> {
+  const row = await engineCredentials.get({ type: "team", id: teamId }, GITHUB_CREDENTIAL_SERVICE);
+  if (!row) return true;
+  if (onePasswordMeta(row) !== null) return false;
+  return !isUsableGithubUserRow(
+    { accessToken: credentialSecret(row), refreshToken: row.refreshToken, expiresAt: row.expiresAt, metadata: row.metadata },
+    Date.now(),
+  );
 }
 
 /**
@@ -245,7 +263,7 @@ async function toSummary(
   service: string,
   stored: StoredCredential,
   connectedAt: string,
-  extra?: { delegatedFrom?: string; referenceBroken?: boolean },
+  extra?: { delegatedFrom?: string; referenceBroken?: boolean; unusable?: boolean },
 ): Promise<CredentialSummary | null> {
   if (!isCredentialKind(stored.type)) return null;
   const metadata = stored.metadata;
@@ -296,6 +314,10 @@ credentialsRouter.get("/", async (c) => {
           metadata: fromJsonbColumn<Record<string, unknown>>(row.metadata),
         },
         new Date(row.createdAt).toISOString(),
+        // The share pickers read this to agree with the delegate route.
+        row.service === GITHUB_CREDENTIAL_SERVICE && (await teamGithubRowUnusable(engineCredentials, owner.id))
+          ? { unusable: true }
+          : undefined,
       );
       if (summary) listed.push(summary);
     }
@@ -702,13 +724,15 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   // A team with its own connection for this service uses it. A member's
   // share beside it would add an account the team did not choose, so the
   // team's connection blocks new shares. A connection that stopped working
-  // is repaired in place, which any member may do.
+  // is repaired in place, which any member may do. A github row no run
+  // uses blocks nothing: runs skip it, and Team Integrations offers no
+  // GitHub reconnect.
   const [teamRow] = await db
     .select({ type: credentials.type, expiresAt: credentials.expiresAt, metadata: credentials.metadata })
     .from(credentials)
     .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, body.teamId), eq(credentials.service, service)))
     .limit(1);
-  if (teamRow) {
+  if (teamRow && (service !== GITHUB_CREDENTIAL_SERVICE || !(await teamGithubRowUnusable(engineCredentials, body.teamId)))) {
     return c.json(
       {
         error: isDeadConnection(teamRow, Date.now())
