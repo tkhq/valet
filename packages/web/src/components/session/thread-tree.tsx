@@ -55,6 +55,7 @@ import { isThreadUnread, pendingAgentQuestion, rowPullRequest } from "~/lib/thre
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
 import { projectThreadIds, removeArchivedProject, useThreadProjects } from "~/lib/thread-projects";
+import { downloadTextFile } from "~/lib/download";
 import { useMe } from "~/api/settings";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { ThreadStatusIcon } from "./thread-status-icon";
@@ -275,6 +276,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const projects = useThreadProjects(viewer.data?.id ?? "loading", sessionId);
   const [projectDialog, setProjectDialog] = useState(false);
   const [projectName, setProjectName] = useState("");
+  const [editingProjectId, setEditingProjectId] = useState<string>();
   const [projectMenu, setProjectMenu] = useState<string>();
   const [deleteProject, setDeleteProject] = useState<{ id: string; name: string }>();
   const [deletingProject, setDeletingProject] = useState(false);
@@ -282,14 +284,17 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const [deleteError, setDeleteError] = useState<string>();
 
   const [projectError, setProjectError] = useState<string>();
-  function createProject() {
+  async function createProject() {
     const name = projectName.trim();
     if (!name) return;
-    if (projects.value.projects.some((project) => project.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
-      setProjectError("A project with this name already exists.");
+    if (projects.value.projects.some((project) => project.id !== editingProjectId && project.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+      setProjectError("A project with this name already exists. Choose another name.");
       return;
     }
-    projects.update((current) => ({ ...current, grouped: true, collapsed: false, projects: [...current.projects, { id: crypto.randomUUID(), name, collapsed: false }] }));
+    const saved = await projects.update((current) => ({ ...current, grouped: true, collapsed: false,
+      projects: editingProjectId ? current.projects.map(project => project.id === editingProjectId ? { ...project, name } : project)
+        : [...current.projects, { id: crypto.randomUUID(), name, collapsed: false }] }));
+    if (!saved || currentSession.current !== sessionId) return;
     setProjectDialog(false);
     setProjectName("");
   }
@@ -405,10 +410,11 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
 
   async function createAndNavigate(projectId?: string) {
     setCreationError(undefined);
+    const projectOperation = projects.beginOperation();
     try {
       // A new thread uses the workspace defaults, not the active thread's settings.
       const thread = await createThread.mutateAsync();
-      if (projectId) moveThread(thread.id, projectId);
+      if (projectId) await moveThread(thread.id, projectId, projectOperation.update);
       // A workspace switch during creation must not open the old workspace's thread.
       if (currentSession.current !== sessionId) return;
       navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
@@ -423,23 +429,26 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     deletingRef.current = true;
     setDeletingProject(true);
     setDeleteError(undefined);
-    const ids = projectThreadIds(projects.readCurrent(), deleteProject.id);
+    const projectOperation = projects.beginOperation();
     const archivedIds = new Set<string>();
-    // Bound concurrency and attempt every chat, even when an earlier archive fails.
-    for (const threadId of ids) {
-      try {
-        await setArchived.mutateAsync({ threadId, archived: true });
-        archivedIds.add(threadId);
-      } catch { /* Keep the folder and offer a retry after all attempts. */ }
-    }
     let removed = false;
-    if (archivedIds.size === ids.length) {
-      projects.update(current => {
-        const next = removeArchivedProject(current, deleteProject.id, archivedIds);
-        removed = !next.projects.some(project => project.id === deleteProject.id);
-        return next;
-      });
-    }
+    try {
+      const ids = projectThreadIds(await projectOperation.refresh(), deleteProject.id);
+      let failed = false;
+      for (const threadId of ids) {
+        // Each archive starts from current membership, including unloaded chats.
+        const current = await projectOperation.refresh();
+        if (current.assignments[threadId] !== deleteProject.id) continue;
+        try {
+          await setArchived.mutateAsync({ threadId, archived: true });
+          archivedIds.add(threadId);
+        } catch { failed = true; }
+      }
+      if (!failed) {
+        const saved = await projectOperation.update(current => removeArchivedProject(current, deleteProject.id, archivedIds));
+        removed = saved !== undefined && !saved.projects.some(project => project.id === deleteProject.id);
+      }
+    } catch { /* Keep the folder when membership cannot be checked. */ }
     deletingRef.current = false;
     if (currentSession.current !== sessionId) return;
     setDeletingProject(false);
@@ -472,8 +481,8 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   }, [archiveActive, createThread, navigate]);
 
   const [dropTarget, setDropTarget] = useState<string>();
-  function moveThread(threadId: string, projectId?: string) {
-    projects.update((current) => {
+  function moveThread(threadId: string, projectId?: string, update: typeof projects.update = projects.update) {
+    return update((current) => {
       const assignments = { ...current.assignments };
       if (projectId) assignments[threadId] = projectId;
       else delete assignments[threadId];
@@ -521,6 +530,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               pinned={projects.value.pinned.includes(t.id)}
               onPin={() => projects.update((current) => ({ ...current, pinned: current.pinned.includes(t.id) ? current.pinned.filter((id) => id !== t.id) : [...current.pinned, t.id] }))}
               onMove={(projectId) => moveThread(t.id, projectId)}
+              organizingDisabled={!projects.isReady || projects.isSaving}
               onDragEnd={() => setDropTarget(undefined)}
               onArchive={(threadId) => {
                 void setArchived.mutateAsync({ threadId, archived: true });
@@ -601,14 +611,14 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
         <nav className="pb-3">
           <div className="flex items-center gap-1 px-3 py-2">
-            <button onClick={() => projects.update((current) => ({ ...current, collapsed: !current.collapsed }))} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-sm text-muted hover:text-ink">Projects {threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
+            <button disabled={!projects.isReady || projects.isSaving} onClick={() => projects.update((current) => ({ ...current, collapsed: !current.collapsed }))} aria-expanded={!projects.value.collapsed} className="flex flex-1 items-center gap-1 text-sm text-muted hover:text-ink">Projects {threads.some((thread) => gatedThreadIds.has(thread.id) && projects.value.assignments[thread.id]) && <Bell aria-label="Project threads need approval" className="h-3.5 w-3.5 text-amber-500" />} <ChevronDown className={cn("h-3.5 w-3.5", projects.value.collapsed && "-rotate-90")} /></button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild><button aria-label="Sidebar options" className="rounded p-1 text-muted hover:bg-ink-wash hover:text-ink"><MoreHorizontal className="h-4 w-4" /></button></DropdownMenuTrigger>
               <DropdownMenuContent align="start">
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger><PanelLeft className="h-4 w-4" />Organize sidebar</DropdownMenuSubTrigger>
                   <DropdownMenuSubContent>
-                    {[{ label: "By project", grouped: true }, { label: "In one list", grouped: false }].map((option) => <DropdownMenuItem key={option.label} role="menuitemradio" aria-checked={projects.value.grouped === option.grouped} onSelect={() => projects.update((current) => ({ ...current, grouped: option.grouped }))}><Check className={cn("h-4 w-4", projects.value.grouped !== option.grouped && "invisible")} />{option.label}</DropdownMenuItem>)}
+                    {[{ label: "By project", grouped: true }, { label: "In one list", grouped: false }].map((option) => <DropdownMenuItem key={option.label} role="menuitemradio" disabled={!projects.isReady || projects.isSaving} aria-checked={projects.value.grouped === option.grouped} onSelect={() => projects.update((current) => ({ ...current, grouped: option.grouped }))}><Check className={cn("h-4 w-4", projects.value.grouped !== option.grouped && "invisible")} />{option.label}</DropdownMenuItem>)}
                   </DropdownMenuSubContent>
                 </DropdownMenuSub>
                 <DropdownMenuSub>
@@ -622,8 +632,11 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
                 </DropdownMenuSub>
               </DropdownMenuContent>
             </DropdownMenu>
-            <button aria-label="New project" disabled={!viewer.data?.id} onClick={() => { setProjectError(undefined); setProjectName(""); setProjectDialog(true); }} className="rounded p-1 text-muted hover:bg-ink-wash hover:text-ink"><Plus className="h-4 w-4" /></button>
+            <button aria-label="New project" disabled={!viewer.data?.id || !projects.isReady || projects.isSaving} onClick={() => { setEditingProjectId(undefined); setProjectError(undefined); setProjectName(""); setProjectDialog(true); }} className="rounded p-1 text-muted hover:bg-ink-wash hover:text-ink"><Plus className="h-4 w-4" /></button>
           </div>
+          {projects.isLoading && <p role="status" className="px-4 py-2 text-xs text-muted">Syncing project folders…</p>}
+          {projects.isSaving && <p role="status" className="px-4 py-2 text-xs text-muted">Saving sidebar changes…</p>}
+          {projects.error && <p role="alert" className="px-4 py-2 text-xs text-danger-500">Could not sync project folders. {projects.error} {projects.unsyncedLegacy && <>Folders saved on this device remain in browser storage. <button type="button" className="underline" onClick={() => downloadTextFile("valet-project-folders.json", projects.unsyncedLegacy ?? "", "application/json")}>Download saved folders</button>{" "}</>}<button type="button" className="underline" onClick={() => void projects.retry()}>Retry sync</button></p>}
           {originFilter !== "all" && (
             <p className="flex items-center gap-2 px-4 pb-1 text-xs text-muted">
               Showing {THREAD_ORIGIN_FILTERS.find((option) => option.id === originFilter)?.label.toLowerCase()}
@@ -631,11 +644,12 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
             </p>
           )}
           <Dialog open={projectDialog} onOpenChange={setProjectDialog}>
-            <DialogContent title="New project">
-              <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); createProject(); }}>
-                <label className="grid gap-2 text-sm">Project name<Input autoFocus value={projectName} onChange={(event) => { setProjectName(event.target.value); setProjectError(undefined); }} placeholder="e.g. turnkey" maxLength={100} /></label>
+            <DialogContent title={editingProjectId ? "Rename project" : "New project"} aria-describedby={undefined}>
+              <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void createProject(); }}>
+                <label className="grid gap-2 text-sm">Project name<Input autoFocus value={projectName} disabled={projects.isSaving} onChange={(event) => { setProjectName(event.target.value); setProjectError(undefined); }} placeholder="e.g. turnkey" maxLength={100} /></label>
                 {projectError && <p role="alert" className="text-xs text-danger-500">{projectError}</p>}
-                <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={() => setProjectDialog(false)}>Cancel</Button><Button type="submit" disabled={!projectName.trim()}>Create project</Button></div>
+                {projects.error && <p role="alert" className="text-xs text-danger-500">{projects.error} Retry saving the project.</p>}
+                <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={() => setProjectDialog(false)}>Cancel</Button><Button type="submit" disabled={!projectName.trim() || !projects.isReady || projects.isSaving}>{editingProjectId ? "Save project" : "Create project"}</Button></div>
               </form>
             </DialogContent>
           </Dialog>
@@ -662,18 +676,21 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
             const members = visible.filter((thread) => !projects.value.pinned.includes(thread.id) && projects.value.assignments[thread.id] === project.id);
             return <section key={project.id} aria-label={`Project: ${project.name}`} {...dropHandlers(project.id)} className={cn("mb-1 transition-colors", dropTarget === project.id && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}>
               <div className="flex items-center pr-2" onContextMenu={event => { event.preventDefault(); setProjectMenu(project.id); }}>
-              <button type="button" aria-expanded={!project.collapsed} onClick={() => projects.update((current) => ({ ...current, projects: current.projects.map((item) => item.id === project.id ? { ...item, collapsed: !item.collapsed } : item) }))} className="flex min-w-0 flex-1 items-center gap-2 rounded-none px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
+              <button type="button" disabled={!projects.isReady || projects.isSaving} aria-expanded={!project.collapsed} onClick={() => projects.update((current) => ({ ...current, projects: current.projects.map((item) => item.id === project.id ? { ...item, collapsed: !item.collapsed } : item) }))} className="flex min-w-0 flex-1 items-center gap-2 rounded-none px-4 py-2 text-left text-sm text-ink hover:bg-ink-wash">
                 {project.collapsed ? <Folder className="h-4 w-4 shrink-0" /> : <FolderOpen className="h-4 w-4 shrink-0" />}
                 <span className="truncate">{project.name}</span>{members.some((thread) => gatedThreadIds.has(thread.id)) && <Bell aria-label="Needs approval" className="ml-auto h-3.5 w-3.5 shrink-0 text-amber-500" />}
               </button>
-                <button type="button" aria-label={`New thread in ${project.name}`} title={`New thread in ${project.name}`} disabled={createThread.isPending}
+                <button type="button" aria-label={`New thread in ${project.name}`} title={`New thread in ${project.name}`} disabled={createThread.isPending || !projects.isReady || projects.isSaving}
                   onClick={() => void createAndNavigate(project.id)}
                   className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss disabled:opacity-50 sm:h-8 sm:w-8">
                   <Plus className="h-4 w-4" aria-hidden />
                 </button>
                 <DropdownMenu open={projectMenu === project.id} onOpenChange={open => setProjectMenu(open ? project.id : undefined)}>
                   <DropdownMenuTrigger asChild><button type="button" aria-label={`Project menu: ${project.name}`} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss sm:h-8 sm:w-8"><MoreHorizontal className="h-4 w-4" aria-hidden /></button></DropdownMenuTrigger>
-                  <DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => { setDeleteError(undefined); setDeleteProject({ id: project.id, name: project.name }); }}><Trash2 aria-hidden />Delete project</DropdownMenuItem></DropdownMenuContent>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem disabled={!projects.isReady || projects.isSaving} onSelect={() => { setEditingProjectId(project.id); setProjectName(project.name); setProjectError(undefined); setProjectDialog(true); }}>Rename project</DropdownMenuItem>
+                    <DropdownMenuItem disabled={!projects.isReady || projects.isSaving} onSelect={() => { setDeleteError(undefined); setDeleteProject({ id: project.id, name: project.name }); }}><Trash2 aria-hidden />Delete project</DropdownMenuItem>
+                  </DropdownMenuContent>
                 </DropdownMenu>
               </div>
               {!project.collapsed && <div className="ml-4 border-l border-line/50">{members.map(renderThread)}{members.length === 0 && <p className="px-4 py-2 text-xs text-muted">Start a thread with + or move one here</p>}</div>}
@@ -750,7 +767,9 @@ function ThreadNode({
   onDragEnd,
   pinned,
   onPin,
+  organizingDisabled,
 }: {
+  organizingDisabled: boolean;
   pinned: boolean;
   onPin: () => void;
   projects: Array<{ id: string; name: string }>;
@@ -937,7 +956,7 @@ function ThreadNode({
             />
           </button>
         )}
-        <Tooltip content={pinned ? "Unpin thread" : "Pin thread"}><button type="button" aria-label={pinned ? "Unpin thread" : "Pin thread"} onClick={onPin} className="inline-flex shrink-0 items-center justify-center rounded p-1 text-muted opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-md:opacity-100 hover:bg-ink-wash hover:text-ink">{pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}</button></Tooltip>
+        <Tooltip content={pinned ? "Unpin thread" : "Pin thread"}><button type="button" aria-label={pinned ? "Unpin thread" : "Pin thread"} disabled={organizingDisabled} onClick={onPin} className="inline-flex shrink-0 items-center justify-center rounded p-1 text-muted opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-md:opacity-100 hover:bg-ink-wash hover:text-ink">{pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}</button></Tooltip>
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <button
@@ -950,7 +969,7 @@ function ThreadNode({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" onKeyDown={handleMenuKeyDown}>
             <DropdownMenuSub>
-              <DropdownMenuSubTrigger><Folder className="h-4 w-4" />Move to project</DropdownMenuSubTrigger>
+              <DropdownMenuSubTrigger disabled={organizingDisabled}><Folder className="h-4 w-4" />Move to project</DropdownMenuSubTrigger>
               <DropdownMenuSubContent>
                 <DropdownMenuItem onSelect={() => onMove()}><Check className={cn("h-4 w-4", !!projectId && "invisible")} />Recents</DropdownMenuItem>
                 {projects.length > 0 && <DropdownMenuSeparator />}

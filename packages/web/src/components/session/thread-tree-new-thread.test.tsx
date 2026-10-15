@@ -7,10 +7,12 @@
  * this one needs a render since the behavior is a hook call + navigation.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { renderWithThreadProjects as render } from "~/test/thread-projects-client";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { TooltipProvider } from "~/components/primitives";
+import { api } from "~/api/client";
 
 const navigate = vi.fn();
 const archiveThread = vi.fn().mockResolvedValue(undefined);
@@ -97,7 +99,7 @@ describe("ThreadTree — new thread affordance", () => {
     render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
     await userEvent.click(screen.getByRole("button", { name: "New thread in ACME" }));
     expect(createThreadMutateAsync).toHaveBeenCalledOnce();
-    const saved = JSON.parse(localStorage.getItem(key) ?? "null");
+    const saved = JSON.parse(localStorage.getItem(`${key}:cache-v1`) ?? "null");
     expect(saved.assignments["thread-new"]).toBe("acme");
     expect(saved.projects[0].collapsed).toBe(false);
     expect(navigate).toHaveBeenCalledOnce();
@@ -113,7 +115,7 @@ describe("ThreadTree — new thread affordance", () => {
     view.rerender(<TooltipProvider><ThreadTree sessionId="another-runtime" /></TooltipProvider>);
     await act(async () => finish({ id: "thread-new", title: null, createdAt: 1 }));
     expect(navigate).not.toHaveBeenCalled();
-    expect(JSON.parse(localStorage.getItem(key) ?? "null").assignments["thread-new"]).toBe("acme");
+    expect(JSON.parse(localStorage.getItem(`${key}:cache-v1`) ?? "null").assignments["thread-new"]).toBe("acme");
     expect(localStorage.getItem("valet:thread-projects:user-1:another-runtime")).toBeNull();
   });
 
@@ -125,7 +127,7 @@ describe("ThreadTree — new thread affordance", () => {
     render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
     await userEvent.click(screen.getByRole("button", { name: "New thread in ACME" }));
     expect(screen.getByRole("alert").textContent).toContain("Try again");
-    expect(localStorage.getItem(key)).toBe(original);
+    expect(localStorage.getItem(`${key}:cache-v1`)).toBe(original);
     expect(navigate).not.toHaveBeenCalled();
   });
 
@@ -189,7 +191,7 @@ describe("ThreadTree — delete project", () => {
     await userEvent.click(screen.getByRole("button", { name: "Delete project" }));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Project: ACME" })).toBeNull());
     expect(archiveThread.mock.calls).toEqual([[{ threadId: "thread-1", archived: true }], [{ threadId: "unloaded", archived: true }]]);
-    const saved = JSON.parse(localStorage.getItem(key) ?? "null");
+    const saved = JSON.parse(localStorage.getItem(`${key}:cache-v1`) ?? "null");
     expect(saved.projects).toEqual([]);
     expect(saved.assignments).toEqual({ unrelated: "other" });
     expect(saved.pinned).toEqual(["unrelated"]);
@@ -203,7 +205,7 @@ describe("ThreadTree — delete project", () => {
     await userEvent.click(screen.getByRole("button", { name: "Delete project" }));
     expect((await screen.findByRole("alert")).textContent).toContain("Already archived chats stay archived");
     expect(archiveThread).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(localStorage.getItem(key) ?? "null")).toEqual(original);
+    expect(JSON.parse(localStorage.getItem(`${key}:cache-v1`) ?? localStorage.getItem(key) ?? "null")).toEqual(original);
     await userEvent.click(screen.getByRole("button", { name: "Retry delete project" }));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Project: ACME" })).toBeNull());
   });
@@ -216,7 +218,7 @@ describe("ThreadTree — delete project", () => {
     await userEvent.click(await screen.findByRole("menuitem", { name: "Delete project" }));
     await userEvent.click(screen.getByRole("button", { name: "Delete project" }));
     expect(archiveThread).not.toHaveBeenCalled();
-    expect(JSON.parse(localStorage.getItem(key) ?? "null").projects).toEqual([]);
+    expect(JSON.parse(localStorage.getItem(`${key}:cache-v1`) ?? "null").projects).toEqual([]);
   });
 
   it("finishes only the original workspace after switching during archive", async () => {
@@ -232,21 +234,96 @@ describe("ThreadTree — delete project", () => {
     view.rerender(<TooltipProvider><ThreadTree sessionId="another-runtime" /></TooltipProvider>);
     await act(async () => finish());
     expect(localStorage.getItem(otherKey)).toBe(other);
-    expect(JSON.parse(localStorage.getItem(key) ?? "null").projects).toEqual([]);
+    expect(JSON.parse(localStorage.getItem(`${key}:cache-v1`) ?? "null").projects).toEqual([]);
     expect(navigate).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("does not archive a chat another device moved before delete starts", async () => {
+    const original = seed({ unloaded: "acme" });
+    const view = render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
+    await openDelete();
+    view.server.replace("team-runtime", { ...original, projects: [...original.projects, { id: "other", name: "Other", collapsed: false }], assignments: { unloaded: "other" } });
+    await userEvent.click(screen.getByRole("button", { name: "Delete project" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Project: ACME" })).toBeNull());
+    expect(archiveThread).not.toHaveBeenCalled();
+    const saved = JSON.parse(localStorage.getItem(`${key}:cache-v1`) ?? "null");
+    expect(saved.assignments).toEqual({ unloaded: "other" });
+    expect(saved.pinned).toContain("unloaded");
+  });
+
+  it("checks later chats again when another device moves one during archive", async () => {
+    const original = seed({ "thread-1": "acme", unloaded: "acme" });
+    const view = render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
+    archiveThread.mockImplementationOnce(async () => {
+      view.server.replace("team-runtime", { ...original, projects: [...original.projects, { id: "other", name: "Other", collapsed: false }], assignments: { "thread-1": "acme", unloaded: "other" } });
+    });
+    await openDelete();
+    await userEvent.click(screen.getByRole("button", { name: "Delete project" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Project: ACME" })).toBeNull());
+    expect(archiveThread.mock.calls).toEqual([[{ threadId: "thread-1", archived: true }]]);
+    expect(JSON.parse(localStorage.getItem(`${key}:cache-v1`) ?? "null").pinned).toContain("unloaded");
+  });
+
+  it("keeps the folder and chats when its fresh membership read fails", async () => {
+    seed({ unloaded: "acme" });
+    render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
+    await openDelete();
+    vi.mocked(api.getThreadProjects).mockRejectedValueOnce(new Error("Offline"));
+    await userEvent.click(screen.getByRole("button", { name: "Delete project" }));
+    await screen.findByRole("button", { name: "Retry delete project" });
+    expect(archiveThread).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem(`${key}:cache-v1`) ?? "null").projects).toHaveLength(1);
   });
 
   it("retains the folder when a new assignment arrives during archive", async () => {
     const original = seed({ unloaded: "acme" });
     let finish = () => {};
     archiveThread.mockReturnValueOnce(new Promise<void>(resolve => { finish = resolve; }));
-    render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
+    const view = render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
     await openDelete();
     await userEvent.click(screen.getByRole("button", { name: "Delete project" }));
-    localStorage.setItem(key, JSON.stringify({ ...original, assignments: { unloaded: "acme", added: "acme" } }));
+    view.server.replace("team-runtime", { ...original, assignments: { unloaded: "acme", added: "acme" } });
     await act(async () => finish());
-    expect((await screen.findByRole("alert")).textContent).toContain("assignments changed");
-    expect(JSON.parse(localStorage.getItem(key) ?? "null").projects).toHaveLength(1);
+    await waitFor(() => expect(screen.getAllByRole("alert").some(alert => alert.textContent?.includes("assignments changed"))).toBe(true));
+    expect(JSON.parse(localStorage.getItem(`${key}:cache-v1`) ?? "null").projects).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: "Retry delete project" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Project: ACME" })).toBeNull());
+    expect(archiveThread.mock.calls).toEqual([
+      [{ threadId: "unloaded", archived: true }],
+      [{ threadId: "unloaded", archived: true }],
+      [{ threadId: "added", archived: true }],
+    ]);
   });
+});
+
+it("renames a project through the server and keeps the original browser copy", async () => {
+  const key = "valet:thread-projects:user-1:team-runtime";
+  const original = JSON.stringify({ projects: [{ id: "acme", name: "ACME", collapsed: false }], assignments: {}, pinned: [], grouped: true, collapsed: false });
+  localStorage.setItem(key, original);
+  render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
+  await userEvent.click(screen.getByRole("button", { name: "Project menu: ACME" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Rename project" }));
+  const name = screen.getByRole("textbox", { name: "Project name" });
+  await userEvent.clear(name);
+  await userEvent.type(name, "Customer reports");
+  await userEvent.click(screen.getByRole("button", { name: "Save project" }));
+  expect(await screen.findByRole("button", { name: "Customer reports" })).toBeTruthy();
+  expect(api.changeThreadProjects).toHaveBeenCalledWith("team-runtime", [{ type: "rename", id: "acme", name: "Customer reports" }], "user-1");
+  expect(localStorage.getItem(key)).toBe(original);
+});
+
+it("keeps the project name and existing folders visible when a server write fails", async () => {
+  localStorage.setItem("valet:thread-projects:user-1:team-runtime", JSON.stringify({ projects: [{ id: "acme", name: "ACME", collapsed: false }], assignments: {}, pinned: [], grouped: true, collapsed: false }));
+  render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
+  await waitFor(() => expect(screen.getByRole("button", { name: "New project" }).hasAttribute("disabled")).toBe(false));
+  vi.mocked(api.changeThreadProjects).mockRejectedValueOnce(new Error("Offline. Reconnect and retry."));
+  await userEvent.click(screen.getByRole("button", { name: "New project" }));
+  await userEvent.type(screen.getByRole("textbox", { name: "Project name" }), "Pending folder");
+  await userEvent.click(screen.getByRole("button", { name: "Create project" }));
+  await waitFor(() => expect(screen.getAllByRole("alert").some(alert => alert.textContent?.includes("Reconnect and retry"))).toBe(true));
+  expect(screen.getByRole("textbox", { name: "Project name" }).getAttribute("value")).toBe("Pending folder");
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(screen.getByRole("button", { name: "ACME" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Retry sync" })).toBeTruthy();
 });

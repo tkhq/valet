@@ -1,5 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { CancelledError, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
+import { threadProjectsChanges, type ThreadProjectsOperation, type ThreadProjectsResponse } from "@valet/shared";
+import { api, ApiError } from "~/api/client";
+import { errorText } from "./error-text";
 import { safeLocalStorage } from "./safe-storage";
 
 const schema = z.object({
@@ -19,18 +23,140 @@ function read(key: string): ThreadProjects {
   return { pinned: [], projects: [], assignments: {}, grouped: true, collapsed: false };
 }
 
-/** Personal display preferences, scoped to viewer and workspace runtime. */
+function stored(key: string): string | null {
+  try { return safeLocalStorage().getItem(key); } catch { return null; }
+}
+function remember(key: string, value: string) {
+  try { safeLocalStorage().setItem(key, value); } catch { /* Storage can be blocked or full. The original browser data stays intact. */ }
+}
+
+/** Server preferences keep each viewer's organization separate in a shared runtime. */
 export function useThreadProjects(viewerId: string, sessionId: string) {
+  const client = useQueryClient();
   const key = `valet:thread-projects:${encodeURIComponent(viewerId)}:${encodeURIComponent(sessionId)}`;
-  const initial = useMemo(() => read(key), [key]);
-  const [saved, setSaved] = useState<{ key: string; value: ThreadProjects }>();
-  const value = saved?.key === key ? saved.value : initial;
-  function update(change: (previous: ThreadProjects) => ThreadProjects) {
-    const next = change(read(key));
-    safeLocalStorage().setItem(key, JSON.stringify(next));
-    setSaved({ key, value: next });
+  const initial = useMemo(() => read(stored(`${key}:cache-v1`) ? `${key}:cache-v1` : key), [key]);
+  const queryKey = ["thread-projects", viewerId, sessionId];
+  const [write, setWrite] = useState<{ key: string; pending: number; error?: string }>({ key, pending: 0 });
+  const [migration, setMigration] = useState<{ key: string; error: string }>();
+  const queue = useRef<Promise<void>>(Promise.resolve());
+  const failed = useRef<{ key: string; operations: ThreadProjectsOperation[] } | undefined>(undefined);
+  const identity = useRef({ key, epoch: 0 });
+  if (identity.current.key !== key) identity.current = { key, epoch: identity.current.epoch + 1 };
+  const epoch = identity.current.epoch;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => { setWrite({ key, pending: 0 }); failed.current = undefined; }, [key]);
+  const isCurrent = () => mounted.current && identity.current.key === key && identity.current.epoch === epoch;
+  const mutation = useMutation({ mutationKey: queryKey,
+    networkMode: "always",
+    mutationFn: (request: { sessionId: string; viewerId: string; key: string; epoch: number; operations: ThreadProjectsOperation[]; continuation: boolean }) => {
+      if (!request.continuation && (!mounted.current || identity.current.key !== request.key || identity.current.epoch !== request.epoch)) throw new CancelledError({ silent: true });
+      return api.changeThreadProjects(request.sessionId, request.operations, request.viewerId);
+    } });
+  const query = useQuery({
+    queryKey,
+    enabled: viewerId !== "loading",
+    retry: false,
+    networkMode: "always",
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
+    queryFn: async ({ signal }) => {
+      const check = () => { if (signal.aborted || !isCurrent()) throw new CancelledError({ silent: true }); };
+      let response = await api.getThreadProjects(sessionId, viewerId, signal);
+      check();
+      try {
+        if (!stored(`${key}:synced-v1`)) {
+          const legacy = stored(key);
+          if (legacy) {
+            let raw: unknown;
+            try { raw = JSON.parse(legacy); }
+            catch { throw new Error("Saved project folders could not be read. Download the saved folders before resetting browser data."); }
+            const parsed = schema.safeParse(raw);
+            if (!parsed.success) throw new Error("Saved project folders could not be read. Download the saved folders before resetting browser data.");
+            if (parsed.data.projects.length || parsed.data.pinned.length || Object.keys(parsed.data.assignments).length) {
+              check();
+              response = await api.changeThreadProjects(sessionId, [{ type: "import", value: parsed.data }], viewerId, signal);
+              check();
+            }
+          }
+          remember(`${key}:synced-v1`, "1");
+        }
+        if (isCurrent()) setMigration(undefined);
+      } catch (error) {
+        check();
+        setMigration({ key, error: errorText(error) });
+      }
+      const latest = client.getQueryData<ThreadProjectsResponse>(queryKey);
+      const current = latest && latest.revision > response.revision ? latest : response;
+      remember(`${key}:cache-v1`, JSON.stringify(current.value));
+      return current;
+    },
+  });
+  const value = query.data?.value ?? initial;
+
+  function enqueue(change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[], continuation = false) {
+    const counted = isCurrent();
+    if (counted) setWrite(previous => ({ key, pending: (previous.key === key ? previous.pending : 0) + 1 }));
+    const task = queue.current.then(async () => {
+      let operations: ThreadProjectsOperation[] = [];
+      try {
+        if (!continuation && !isCurrent()) return undefined;
+        if (!query.data) throw new Error("Project folders have not synced. Retry loading before you save changes.");
+        await client.cancelQueries({ queryKey });
+        if (!continuation && !isCurrent()) return undefined;
+        const previous = client.getQueryData<ThreadProjectsResponse>(queryKey) ?? query.data;
+        operations = typeof change === "function" ? threadProjectsChanges(previous.value, change(previous.value)) : change;
+        if (!operations.length) return previous.value;
+        if (previous.generation) operations = operations.map(op => op.type === "create" && op.generation === undefined ? { ...op, generation: previous.generation } : op);
+        const response = await mutation.mutateAsync({ sessionId, viewerId, key, epoch, operations, continuation });
+        const latest = client.getQueryData<ThreadProjectsResponse>(queryKey);
+        const current = latest && latest.revision > response.revision ? latest : response;
+        client.setQueryData(queryKey, current);
+        void client.invalidateQueries({ queryKey, refetchType: "none" });
+        remember(`${key}:cache-v1`, JSON.stringify(current.value));
+        if (isCurrent() && failed.current?.key === key) failed.current = undefined;
+        return current.value;
+      } catch (error) {
+        if (!isCurrent()) return undefined;
+        const conflict = error instanceof ApiError && error.status === 409;
+        if (conflict) failed.current = undefined;
+        else if (operations.length) failed.current = { key, operations: operations.map(op => op.type === "create" ? { ...op, generation: op.generation ?? 0 } : op) };
+        setWrite(previous => previous.key === key ? { ...previous, error: errorText(error) } : previous);
+        if (conflict) await query.refetch();
+        return undefined;
+      } finally {
+        if (counted && isCurrent()) setWrite(previous => previous.key === key ? { ...previous, pending: Math.max(0, previous.pending - 1) } : previous);
+      }
+    });
+    queue.current = task.then(() => {});
+    return task;
   }
-  return { value, update, readCurrent: () => read(key) };
+  return {
+    value, update: enqueue,
+    beginOperation: () => ({
+      update: (change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[]) => enqueue(change, true),
+      readCurrent: () => client.getQueryData<ThreadProjectsResponse>(queryKey)?.value ?? value,
+      refresh: async () => {
+        const response = await api.getThreadProjects(sessionId, viewerId);
+        const latest = client.getQueryData<ThreadProjectsResponse>(queryKey);
+        const current = latest && latest.revision > response.revision ? latest : response;
+        client.setQueryData(queryKey, current);
+        remember(`${key}:cache-v1`, JSON.stringify(current.value));
+        return current.value;
+      },
+    }),
+    readCurrent: () => client.getQueryData<ThreadProjectsResponse>(queryKey)?.value ?? value,
+    isLoading: query.isPending,
+    isReady: query.data !== undefined,
+    isSaving: write.key === key && write.pending > 0,
+    unsyncedLegacy: migration?.key === key ? stored(key) : null,
+    error: write.key === key && write.error ? write.error : query.error ? errorText(query.error) : migration?.key === key ? migration.error : undefined,
+    retry: () => {
+      if (failed.current?.key === key) return enqueue(failed.current.operations);
+      setWrite(previous => previous.key === key ? { ...previous, error: undefined } : previous);
+      return query.refetch();
+    },
+  };
 }
 
 /** Includes pinned, collapsed, filtered, and unloaded chats. */
@@ -45,6 +171,6 @@ export function removeArchivedProject(value: ThreadProjects, projectId: string, 
     ...value,
     projects: value.projects.filter(project => project.id !== projectId),
     assignments: Object.fromEntries(Object.entries(value.assignments).filter(([, id]) => id !== projectId)),
-    pinned: value.pinned.filter(id => !archivedIds.has(id)),
+    pinned: value.pinned.filter(id => value.assignments[id] !== projectId),
   };
 }
