@@ -159,7 +159,10 @@ export function buildRunOriginReport(deps: RunOriginReportDeps): OnRunSettled {
       if (!run) return;
       await signalOrigin(deps, run, `workflow-settled:${info.runId}`, async () => ({
         signalType: "workflow.settled",
-        body: runReport(await workflowName(deps.db, info.workflowId), info.runId, info.outcome, await deps.store.getCheckpoints(info.runId)),
+        body: runReport(await workflowName(deps.db, info.workflowId), info.runId, info.outcome, await deps.store.getCheckpoints(info.runId)) +
+          "\nContinue the workflow task now. Call workflows.get_run and inspect the relevant node results. " +
+          "For failed or empty agent output, call workflows.get_node_diagnostics. " +
+          "Report the outcome and the requested checks to the user. Verify external delivery from recorded tool results before claiming it succeeded.",
         attributes: { runId: info.runId, outcome: info.outcome },
       }));
     } catch (err) {
