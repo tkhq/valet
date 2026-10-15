@@ -39,7 +39,7 @@ describe("workflow run thread context", () => {
         "Call ask_question before you send, change, or delete something if a fact the action needs is missing or in conflict.",
       ]);
       expect(lines).toContain("This covers what the action says, such as a price or a time, and where it goes.");
-      expect(lines).toContain("If no one answers, do not do that action, and say in the result what was missing.");
+      expect(lines).toContain("If no one answers, or the question expires, do not do that action, and say in the result what was missing.");
       expect(lines).toContain("For other gaps, state your assumptions in the result.");
       expect(lines.join(" ")).not.toContain("visual editor");
     }
@@ -51,7 +51,7 @@ describe("workflow run thread context", () => {
     }
     expect(workflowThreadContext({ key: "workflow:wf_demo" })).toContain("visual editor for workflow wf_demo");
   });
-  it("scopes the run rules to the run's requests, so a reply on the run page keeps the normal rules", async () => {
+  it("applies the run rules to every signal message, including a child.settled continuation, while a reply on the run page keeps the normal rules", async () => {
     const faux = registerFauxProvider({ provider: "workflow-run-thread-context" });
     const turns: Message[][] = [];
     const record = (context: { messages: Message[] }) => { turns.push(context.messages); return fauxAssistantMessage("done"); };
@@ -69,7 +69,7 @@ describe("workflow run thread context", () => {
 
       const replyTurn = turns[1] ?? [];
       const system = sentences(replyTurn.filter(message => message.role === "system").map(messageText).join(" "));
-      expect(system).toContain("These rules apply to messages with signalType `workflow.request`.");
+      expect(system).toContain("These rules apply to every signal message in this conversation, such as signalType `workflow.request` or `child.settled`.");
       expect(system).toContain("When a person writes in this conversation, use your normal rules for questions.");
       // The model can tell the two apart: only the run's request carries that signal type.
       const asked = replyTurn.filter(message => message.role === "user").map(messageText);

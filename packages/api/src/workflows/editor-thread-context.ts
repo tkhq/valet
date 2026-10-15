@@ -32,18 +32,20 @@ export function workflowEditorThreadContext(thread: { key: string }): string | u
  * its key never matches.
  *
  * Thread context applies to every turn of the thread, and a person can
- * reply on the run page. The rule therefore names the run's own
- * `workflow.request` messages (`engine-deps.ts#promptOrchestrator`), and a
- * person's reply keeps the normal rules for questions. */
+ * reply on the run page. The rule therefore covers every signal message:
+ * the run's own `workflow.request` (`engine-deps.ts#promptOrchestrator`)
+ * and anything that continues it, such as a delegated task's
+ * `child.settled`. A person's reply arrives as plain text and keeps the
+ * normal rules for questions. */
 export function workflowRunThreadContext(thread: { key: string }): string | undefined {
   if (!/^(?:signal|slack-events:[^:]+):workflow:[A-Za-z0-9_-]+$/.test(thread.key)) return undefined;
   return [
     "A person may not be watching this run.",
     "Call ask_question before you send, change, or delete something if a fact the action needs is missing or in conflict.",
     "This covers what the action says, such as a price or a time, and where it goes.",
-    "If no one answers, do not do that action, and say in the result what was missing.",
+    "If no one answers, or the question expires, do not do that action, and say in the result what was missing.",
     "For other gaps, state your assumptions in the result.",
-    "These rules apply to messages with signalType `workflow.request`.",
+    "These rules apply to every signal message in this conversation, such as signalType `workflow.request` or `child.settled`.",
     "When a person writes in this conversation, use your normal rules for questions.",
   ].join(" ");
 }

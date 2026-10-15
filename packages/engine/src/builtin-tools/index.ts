@@ -787,7 +787,8 @@ export const askQuestionTool = defineTool({
         return {
           text:
             `question expired: "${args.question}". Nobody answered before the deadline. ` +
-            "Do not ask again in this turn. Continue without the answer if you can, and say what you assumed.",
+            "Do not ask again in this turn. Do not send, change, or delete anything that depends on the answer; " +
+            "say what was missing. Continue with the rest of the work, and say what you assumed.",
         };
       }
       throw err;
