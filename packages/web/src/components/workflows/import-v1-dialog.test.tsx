@@ -2,8 +2,9 @@
 /**
  * The V1 import dialog: a paste it cannot read is refused with the reason, a
  * converted workflow shows its checklist before anything is created, and
- * confirming creates the workflow, its schedule, and the editor message that
- * carries the checklist. A workflow that needs a decision gets no schedule.
+ * confirming creates the workflow and the editor message that carries the
+ * checklist. The import creates no schedules: each V1 schedule is a
+ * checklist line.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -36,8 +37,10 @@ function v1Paste(steps: unknown[]): string {
 }
 
 const triage = { id: "triage", type: "agent_message", content: "Triage the open issues." };
-// An "agent" step did nothing in V1, so leaving it out keeps the schedule.
+// An "agent" step did nothing in V1, so the import leaves it out with a line.
 const V1_PASTE = v1Paste([triage, { id: "plan", type: "agent", goal: "Plan the week." }]);
+const SCHEDULE_LINE =
+  'The import creates no schedules, so it did not create V1 schedule "Every night" (0 3 * * *). Add it in Triggers after you finish the other items in this list.';
 
 function paste(text: string): void {
   render(<ImportV1Dialog open onOpenChange={vi.fn()} />);
@@ -60,20 +63,22 @@ describe("ImportV1Dialog", () => {
     expect(createWorkflow).not.toHaveBeenCalled();
   });
 
-  it("shows each workflow with its schedule and checklist before it creates anything", () => {
+  it("shows each workflow with its checklist, schedules included, before it creates anything", () => {
     paste(V1_PASTE);
 
     expect(screen.getByText("Nightly triage")).toBeTruthy();
-    expect(screen.getByText("0 3 * * *").closest("p")?.textContent).toContain("1 Runtime · Every night 0 3 * * *");
-    expect(screen.getByText("1 to finish")).toBeTruthy();
+    expect(screen.getByText("1 Runtime")).toBeTruthy();
+    expect(screen.getByText("2 to finish")).toBeTruthy();
     expect(screen.getByText(/Step "plan" is an "agent" step, which did nothing in V1/)).toBeTruthy();
+    expect(screen.getByText(SCHEDULE_LINE)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Import 1 workflow" })).toBeTruthy();
     expect(createWorkflow).not.toHaveBeenCalled();
   });
 
-  it("creates the workflow and its schedule, sends the checklist to the editor, then opens it", async () => {
+  it("creates the workflow and no schedule, sends the checklist to the editor, then opens it", async () => {
     const ensure = vi.spyOn(api, "ensureWorkflowConversation").mockResolvedValue({ sessionId: "sess_1", threadId: "thr_1" });
     const send = vi.spyOn(api, "sendPrompt").mockResolvedValue({ messageId: "m1", threadId: "thr_1", activityAt: 0 });
+    const scheduleRoute = vi.spyOn(api, "createWorkflowSchedule").mockRejectedValue(new Error("the import must not create a schedule"));
     paste(V1_PASTE);
     fireEvent.click(screen.getByRole("button", { name: "Import 1 workflow" }));
 
@@ -82,38 +87,19 @@ describe("ImportV1Dialog", () => {
       name: "Nightly triage",
       definition: expect.objectContaining({ version: "dag/v1" }),
     });
-    expect(createSchedule).toHaveBeenCalledWith({
-      name: "Every night",
-      cron: "0 3 * * *",
-      timezone: undefined,
-      target: { kind: "workflow", workflowId: "wf_new" },
-    });
+    expect(createSchedule).not.toHaveBeenCalled();
+    expect(scheduleRoute).not.toHaveBeenCalled();
     expect(ensure).toHaveBeenCalledWith("wf_new");
     expect(send).toHaveBeenCalledWith("sess_1", {
       threadId: "thr_1",
-      text: expect.stringContaining('- Step "plan" is an "agent" step'),
+      text: expect.stringContaining(`- Step "plan" is an "agent" step`),
     });
-  });
-
-  it("creates no schedule for a workflow that does not do what it did in V1", async () => {
-    vi.spyOn(api, "ensureWorkflowConversation").mockResolvedValue({ sessionId: "sess_1", threadId: "thr_1" });
-    const send = vi.spyOn(api, "sendPrompt").mockResolvedValue({ messageId: "m1", threadId: "thr_1", activityAt: 0 });
-    paste(v1Paste([triage, { id: "post", type: "slack_post" }]));
-    fireEvent.click(screen.getByRole("button", { name: "Import 1 workflow" }));
-
-    await waitFor(() => expect(navigate).toHaveBeenCalled());
-    expect(createWorkflow).toHaveBeenCalled();
-    expect(createSchedule).not.toHaveBeenCalled();
-    expect(send).toHaveBeenCalledWith("sess_1", {
-      threadId: "thr_1",
-      text: expect.stringContaining('- The import did not create V1 schedule "Every night" (0 3 * * *).'),
-    });
+    expect(send.mock.calls[0]?.[1].text.endsWith(`- ${SCHEDULE_LINE}`)).toBe(true);
   });
 
   it("names what it already created when a later call fails", async () => {
     vi.spyOn(api, "ensureWorkflowConversation").mockResolvedValue({ sessionId: "sess_1", threadId: "thr_1" });
-    vi.spyOn(api, "sendPrompt").mockResolvedValue({ messageId: "m1", threadId: "thr_1", activityAt: 0 });
-    createSchedule.mockRejectedValue(new Error("cron is invalid"));
+    vi.spyOn(api, "sendPrompt").mockRejectedValue(new Error("the editor conversation is not ready"));
     paste(V1_PASTE);
     fireEvent.click(screen.getByRole("button", { name: "Import 1 workflow" }));
 
