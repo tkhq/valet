@@ -203,7 +203,9 @@ sets as "Default tier for new threads" on the org Models page
 (`PATCH /api/org/model-tiers` with `defaultTier`, null clears it). Without
 it, an orchestrator with no personal or team default ran on `s`, and
 teams set an expensive concrete model as the team default to avoid that.
-When the column is null, the cascade is unchanged. The Models page
+A workflow session step without its own model has no `childDefault`, so
+it also falls to this tier; delegated children stay on `s`. The setting's
+hint says both. When the column is null, the cascade is unchanged. The Models page
 select has a "No organization default" option that sends
 `defaultTier: null`.
 

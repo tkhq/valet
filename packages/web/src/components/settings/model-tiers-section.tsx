@@ -93,7 +93,7 @@ export function ModelTiersSection() {
       {modelsQ.data && tiers && (
         <FieldRow
           label="Default tier for new threads"
-          hint="New threads use this tier when no personal or team default applies. With no organization default, they use Small. Delegated work stays on Small."
+          hint="New threads and workflow steps without their own model use this tier when no personal or team default applies. With no organization default, they use Small. Delegated work stays on Small."
           error={
             tiers.defaultTier && !tiers.defaultTierResolvable
               ? "No provider with a key serves this tier, so new threads use Small. Put a target whose provider has a key first in the tier, or choose another default."
