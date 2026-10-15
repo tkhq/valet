@@ -59,8 +59,18 @@ a drawer — plus a lightweight V2 list/detail UI for browsing workflows and run
   must include V2 ids in their outputs. Tools that don't yet are updated as part
   of this work (small, tool-side change; requires `IMAGE_BUILD_VERSION` bump).
 - **Run status freshness:** while a run is non-terminal, the card/drawer polls
-  the run endpoint (~3s interval). Wiring run updates into the session event
+  the run endpoint every five seconds. Wiring run updates into the session event
   stream is an explicit follow-up, not part of this slice.
+- **Background run status (2026-10-15).** A successful `start_run` result adds
+  a compact status row outside the collapsible tool card. The launch tool keeps
+  its `done` state. The status row stays mounted after collapse and reload.
+  It uses `useRunDetail` to poll every five seconds until the run settles.
+  It shows the current run status or final outcome and an **Open run** link.
+  Loading, failed requests, and missing or inaccessible runs have separate messages.
+  The row shows **Completion follow-up registered** only when the persisted result
+  has `followUp.registered === true`. A settled run does not prove delivery of that follow-up.
+  A false registration shows that no automatic chat follow-up exists. Older results
+  without registration data show no follow-up promise. Both workflow call shapes use this row.
 - **Two call shapes (2026-08-17).** One workflows action can arrive under two
   tool names. Through the plugin catalog it is `call_tool`, with the action in
   `args.tool_id` and its parameters under `args.params`. Through a pinned
