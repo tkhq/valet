@@ -85,15 +85,19 @@ function buildPlugin(entry: McpServerDecl, env: NodeJS.ProcessEnv): ValetPlugin 
     // the userinfo or query string a server URL can hold a secret in.
     description: entry.description ?? `Config-declared MCP server (${configMcpDisplayUrl(entry.url)})`,
     actions: [
-      mcpActionPlugin({
-        mcpUrl: entry.url,
-        serviceName: entry.name,
-        defaultRiskLevel: entry.riskLevel ?? "medium",
-        noAuth: entry.auth === "none",
-        staticToken,
-        authQueryParam: entry.authQueryParam,
-        description: entry.description,
-      }),
+      {
+        ...mcpActionPlugin({
+          mcpUrl: entry.url,
+          serviceName: entry.name,
+          defaultRiskLevel: entry.riskLevel ?? "medium",
+          noAuth: entry.auth === "none",
+          staticToken,
+          authQueryParam: entry.authQueryParam,
+          description: entry.description,
+        }),
+        // Approval cards name the account by this, as the connect UI does.
+        displayName,
+      },
     ],
   };
   if (credentials.length > 0) plugin.credentials = credentials;
