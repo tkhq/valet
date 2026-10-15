@@ -237,6 +237,21 @@ The engine stamps `oneShot: true` on the context of every tool approval gate tha
 
 `engineGateToWire` sets the wire `DecisionGate.oneShot: true` only for an approval gate with that flag and no approver. Other approval gates use the same `approve` and `deny` ids but do not carry the flag. Two examples are `ask_approval` and `sec_start`, whose approval covers every later cell dispatch. The bell's bulk answer covers only gates with `oneShot` (`docs/specs/2026-08-14-workflow-approval-ux-design.md`, "Bulk answers in the bell"). The wire also carries `riskLevel` from the same tool approval context, when it is one of `low`, `medium`, `high`, or `critical`. Pinned by `policy-resolver-seam.test.ts` and `bridge.test.ts`.
 
+### Actor consent (2026-10-15)
+
+An action with `approvalScope: "actor"` requires the current verified
+interactive author's one-shot consent on every call. Organization and team
+denies still block the call. Policy allows, overrides, and stored grants
+cannot replace that consent, including grants created before this rule.
+Without a verified author, the catalog refuses the call before opening a
+gate. This rule applies with and without a host policy resolver.
+
+Actor gates offer only approve and deny. The catalog rejects lasting-grant
+answers before the resolver can write grants or policies. Valid one-shot
+answers retain the normal resolution callback and audit path. Ordinary
+actions, including settings reads, retain their existing grant behavior.
+Hosted tools cannot obtain ungated access to an actor-scoped action.
+
 ### Effective tool permissions read (2026-10-13)
 
 `GET /api/me/tool-permissions[?service=][&teamId=]` lists each static catalog action with the caller's effective mode. The Integrations detail panel shows this value per tool, in place of the risk-derived "Approval required" label, which ignored policy rows. `listToolPermissions` (`policies/admin.ts`) loads the rows once with `loadPolicyRows` and runs `resolvePolicyDecision` for each action. It uses `appliesIn: "session"`, no params, and no session, so a matcher-scoped rule and a live grant do not show. The `source` field maps provenance to `default`, `plugin`, `org`, `team`, `personal`, or `grant`. `overridden` is true only for an override on that exact action, which is the row a Reset deletes.

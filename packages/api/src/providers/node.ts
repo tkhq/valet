@@ -1,3 +1,4 @@
+import { settingsActionPlugin } from "../services/settings-actions.js";
 import { PGlite } from "@electric-sql/pglite";
 import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
@@ -380,6 +381,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     description: "Agent-facing skill authoring actions.",
     actions: [skillsActionPlugin(db)],
   };
+  const settingsActions: ValetPlugin = {
+    name: "settings-actions", version: "0.1.0", description: "Authorized conversational Valet settings.",
+    actions: [settingsActionPlugin(db, () => engineCredentials)],
+  };
   const avatarActions: ValetPlugin = {
     name: "profile-picture-actions",
     version: "0.1.0",
@@ -420,7 +425,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         // Config-declared MCP servers (instance config `mcpServers`). A
         // service collision with a bundled plugin throws in assemblePlugins.
         configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
-        [workflowsActions, skillsActions, eventsActions, avatarActions],
+        [workflowsActions, skillsActions, eventsActions, avatarActions, settingsActions],
       ]);
   const pluginLoadFailures = nodeModulesResult.quarantined.map(({ pkg, reason }) => ({
     service: pkg.replace(/^@valet\/plugin-/, "").replace(/^plugin-/, ""),

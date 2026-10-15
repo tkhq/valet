@@ -1,3 +1,4 @@
+export { readAppPageHint, renderAppPageHint, type AppPageHint } from "./app-page-hint.js";
 export * from "./types.js";
 export { toolScopeSchema } from "./tool-scope-schema.js";
 export { modelCallUsage, type ReportedUsage } from "./model-call-usage.js";

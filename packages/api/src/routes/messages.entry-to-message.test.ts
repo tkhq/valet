@@ -10,7 +10,20 @@
  */
 import { describe, expect, it } from "vitest";
 import { MESSAGE_TURN_ERROR_KEY, type CommandResultEntry, type CompactionEntry, type MessageEntry } from "@valet/engine";
-import { entryToMessage } from "./messages.js";
+import { entryToMessage, promptAuthorFromUser } from "./messages.js";
+import type { AuthVia } from "../lib/request-principal.js";
+
+describe("HTTP prompt author provenance", () => {
+  it.each(["session", "stub", "apiKey", "cli", "mcp", undefined] satisfies Array<AuthVia | undefined>)("marks only authenticated direct human auth (%s)", (via) => {
+    const author = promptAuthorFromUser({ id: "person", email: "person@example.test" }, { type: "user", id: "person" }, via);
+    expect(author.id).toBe("person");
+    expect(author.interactive).toBe(via === "session" || via === "stub" ? true : undefined);
+  });
+
+  it("never marks a team credential as a direct human", () => {
+    expect(promptAuthorFromUser({ id: "admin", email: "admin@example.test" }, { type: "team", id: "team" }, "apiKey")).toEqual({ id: "team:team", name: "Team API key" });
+  });
+});
 
 function baseEntry(overrides: Partial<MessageEntry> = {}): MessageEntry {
   const base: MessageEntry = {

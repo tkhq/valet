@@ -18,6 +18,8 @@ export interface PromptAuthor {
    * the turn runs as; `name` is the sender. Tools the sender may not use on
    * their own refuse such a turn (`ToolContext.externalSender`). */
   externalSender?: boolean;
+  /** The host verified a direct human submission, rather than a token or channel sender. */
+  interactive?: boolean;
 }
 
 export interface ChannelTarget {

@@ -14,6 +14,12 @@ import { qk, threadListFilters, mapThreadData, refreshMissingActivityThread } fr
 const MAX_RETRY_MS = 8_000;
 const INITIAL_RETRY_MS = 500;
 
+function isSettingsWrite(toolName: string, args: unknown): boolean {
+  const actionId = typeof args === "object" && args !== null && "tool_id" in args ? args.tool_id : undefined;
+  return ["settings.update_account", "settings.update_team", "settings.update_organization"].some(id =>
+    toolName === id.replace(".", "__") || (toolName === "call_tool" && id === actionId));
+}
+
 function summarizeForLog(ev: WireEvent): string {
   switch (ev.type) {
     case "init":
@@ -116,6 +122,16 @@ export function useSessionWebSocket(sessionId: string, sharedThreadId?: string) 
     setConnection(sessionId, "connecting");
 
     let socket: WebSocket | null = null;
+    const settingsWrites = new Map<string, string>();
+    // A remount resumes after tool_start. Recover pending writes from the
+    // same stream state that retains the durable cursor.
+    for (const message of useStreamStore.getState().bySession[sessionId]?.messages ?? []) {
+      for (const part of message.parts) {
+        if (part.kind === "tool_call" && part.status === "running" && isSettingsWrite(part.toolName, part.args) && message.threadId) {
+          settingsWrites.set(part.callId, message.threadId);
+        }
+      }
+    }
     let retryDelay = INITIAL_RETRY_MS;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -135,6 +151,12 @@ export function useSessionWebSocket(sessionId: string, sharedThreadId?: string) 
             console.debug(`[ws] seq=${wire.seq} ${wire.type} ${summary}`);
           }
           ingest(sessionId, wire);
+          if (wire.type === "tool_start" && wire.callId && isSettingsWrite(wire.toolName, wire.args)) {
+            settingsWrites.set(wire.callId, wire.threadId);
+          }
+          if (wire.type === "tool_end" && wire.callId && settingsWrites.delete(wire.callId) && !wire.isError) {
+            void qc.invalidateQueries({ queryKey: ["settings"] });
+          }
           if (wire.type === "title.updated") {
             invalidatePersistedTitles(qc, sessionId, Boolean(wire.sessionTitle), Boolean(wire.threadTitle));
           }
@@ -142,6 +164,7 @@ export function useSessionWebSocket(sessionId: string, sharedThreadId?: string) 
           // in the session. The list query carries both, so refresh it.
           if (wire.type === "turn_end") {
             void qc.invalidateQueries(threadListFilters(sessionId));
+            for (const [callId, threadId] of settingsWrites) if (threadId === wire.threadId) settingsWrites.delete(callId);
           }
           if (wire.type === "thread.activity") {
             qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(threadListFilters(sessionId), current => mapThreadData(current, thread =>

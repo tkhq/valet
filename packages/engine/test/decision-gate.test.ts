@@ -1533,7 +1533,7 @@ describe("decision gates: durable expiry sweep", () => {
 
 
 describe("interactive actor provenance", () => {
-  it.each(["direct", "authorless", "external", "signal", "workflow", "child"] as const)("marks only a direct authenticated prompt (%s)", async (kind) => {
+  it.each(["direct", "legacy", "agent", "authorless", "external", "signal", "workflow", "child"] as const)("marks only a direct authenticated prompt (%s)", async (kind) => {
     const faux = registerFauxProvider({ provider: `interactive-author-${kind}` });
     const seen: Array<ToolContext["interactiveActor"]> = [];
     const tool: ToolDef = {
@@ -1551,9 +1551,51 @@ describe("interactive actor provenance", () => {
       workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool],
     });
     const content: PromptContent = kind === "signal" ? { kind: "signal", signalType: "schedule.tick", body: "inspect" } : "inspect";
-    const receipt = await session.prompt(content, kind === "authorless" ? {} : { author: { id: "admin", ...(kind === "external" ? { externalSender: true } : {}) } });
+    const author = { id: "admin", ...(kind === "legacy" ? {} : { interactive: kind !== "agent" }), ...(kind === "external" ? { externalSender: true } : {}) };
+    const receipt = await session.prompt(content, kind === "authorless" ? {} : { author });
     await session.thread().awaitResult(receipt.queueItemId);
     expect(seen).toEqual([kind === "direct" ? { id: "admin" } : undefined]);
+    faux.unregister();
+  });
+
+  it.each(["direct", "legacy", "agent", "authorless", "signal", "workflow", "child"] as const)("preserves persisted provenance through pending approval restart (%s)", async (kind) => {
+    const faux = registerFauxProvider({ provider: `interactive-replay-${kind}` });
+    const seen: Array<ToolContext["interactiveActor"]> = [];
+    const tool: ToolDef = {
+      name: "approved_context", description: "Inspect replayed context", parameters: Type.Object({}), policyChecked: true,
+      execute: async (_args, ctx) => {
+        const resolution = await ctx.requestDecision({ type: "approval", title: "Approve?", body: "Inspect replay context", resumeKey: "context" });
+        if (resolution.actionId === "approve") seen.push(ctx.interactiveActor);
+        return { text: "checked" };
+      },
+    };
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("approved_context", {}, { id: "replay-author" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    const { engine, store, bus, events } = makeEngine();
+    const options = {
+      userId: "admin-creator", orgId: "o1", owner: { type: "team", id: "t1" } as const,
+      purpose: kind === "workflow" || kind === "child" ? kind : "orchestrator" as const,
+      workspace: "/", sandbox: {}, model: faux.getModel(), tools: [tool],
+    };
+    const session = await engine.createSession(options);
+    const content: PromptContent = kind === "signal" ? { kind: "signal", signalType: "schedule.tick", body: "inspect" } : "inspect";
+    const author = { id: "admin", ...(kind === "legacy" ? {} : { interactive: kind !== "agent" }) };
+    const receipt = await session.prompt(content, kind === "authorless" ? {} : { author });
+    await waitFor(() => gatesFrom(events).length > 0);
+    const gate = gatesFrom(events)[0];
+    if (!gate) throw new Error("Missing replay gate");
+    await waitForAsync(async () => (await store.getQueueItem(session.id, receipt.queueItemId))?.status === "blocked_on_decision_gate");
+    session.suspendTimers();
+    const restarted = new Engine({ providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() } });
+    const restored = await restarted.restoreSession({ sessionId: session.id, options });
+    await restored.resolveDecision(gate.id, { actionId: "approve", resolvedBy: "admin", resolvedAt: Date.now() });
+    await restored.thread(receipt.threadId).awaitResult(receipt.queueItemId);
+    expect(seen).toEqual([kind === "direct" ? { id: "admin" } : undefined]);
+    expect(events.flatMap(({ event }) => event.type === "tool_end" && event.callId === "replay-author" ? [event] : []))
+      .toMatchObject([{ tool: "approved_context", result: "checked", isError: false }]);
+    restored.suspendTimers();
     faux.unregister();
   });
 });

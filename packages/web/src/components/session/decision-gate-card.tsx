@@ -120,8 +120,7 @@ function DecisionGateResponse({
 
   const Icon = ICON_FOR_TYPE[gate.type];
   const kind = KIND_FOR_TYPE[gate.type];
-  // A gate asking to use a member's shared account answers to that member.
-  // Everyone else sees that the request went to them.
+  // Named approvals wait for that member. Policy provenance identifies account borrowing.
   const waitingOn = gate.approver && gate.approver.userId !== meQ.data?.id ? gate.approver : undefined;
   if (waitingOn) {
     return (
@@ -131,7 +130,9 @@ function DecisionGateResponse({
             ? <p className="text-sm font-medium">Asked {waitingOn.name ?? "a teammate"} for permission</p>
             : <Badge variant={kind.variant}>Asked {waitingOn.name ?? "a teammate"} for permission</Badge>}
           <p className="mt-1.5 text-sm text-muted">
-            This needs {waitingOn.name ?? "a teammate"}'s shared account. Valet asked them, and continues once they allow it.
+            {gate.provenance?.source === "shared_account"
+              ? `This needs ${waitingOn.name ?? "a teammate"}'s shared account. Valet asked them, and continues once they allow it.`
+              : `Valet is waiting for ${waitingOn.name ?? "that person"} to review this request.`}
           </p>
         </div>
       </div>
