@@ -1444,6 +1444,29 @@ describe("team credential scope (TKAI-205)", () => {
     expect(((await blocked.json()) as { error: string }).error).toContain("already has its own GitHub connection");
   });
 
+  // The refreshing store skips an OAuth row with no refresh token, so an
+  // expired one is never renewed or marked dead. No run can use it, so it
+  // must not block a member's share, and the list must mark it for the pickers.
+  it("shares beside an expired team OAuth row that cannot refresh", async () => {
+    const team = await teamWithMember();
+    await api!.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", {
+      type: "oauth2", accessToken: "expired-tok", expiresAt: Date.now() - 60_000,
+    });
+    const connect = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT", headers: MEMBER_HEADERS, body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
+    });
+    expect(connect.status).toBe(200);
+    const listed = (await (
+      await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: MEMBER_HEADERS })
+    ).json()) as ListCredentialsResponse;
+    expect(listed.credentials).toEqual([expect.objectContaining({ service: "linear", unusable: true })]);
+    expect(listed.credentials[0]?.dead).toBeUndefined();
+    const share = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST", headers: MEMBER_HEADERS, body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(share.status).toBe(201);
+  });
+
   // A team row is read with org-scoped 1Password tokens only, so a
   // personal-scope reference stored at team scope could never resolve.
   it("refuses a team-scope 1Password reference with a personal token, naming the fix", async () => {

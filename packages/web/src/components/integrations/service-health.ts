@@ -52,7 +52,7 @@ export function credentialRowHealth(row: Pick<CredentialSummary, "refreshFailedA
 
 /**
  * True for the team's own connection in a team list: not a member's share,
- * and not a `github` row that no run uses (`CredentialSummary.unusable`).
+ * and not a row that no run uses (`CredentialSummary.unusable`).
  * The delegate route refuses a new share of a service that has one.
  */
 export function isTeamOwnConnection(row: Pick<CredentialSummary, "delegatedFrom" | "unusable">): boolean {
