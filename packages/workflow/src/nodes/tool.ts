@@ -166,7 +166,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
         ...(payload.note !== undefined ? { note: payload.note } : {}),
       };
     } else if (existingCheckpoint?.effects?.accountConsentResolved === true && typeof existingCheckpoint.effects.gateId !== 'string'
-      && (await store.listSignals(run.runId)).some(signal => isLegacyAccountConsentLoop(signal, existingCheckpoint.effects))) {
+      && (await store.listSignals(run.runId)).some(signal => signal.signalType === signalType && isLegacyAccountConsentLoop(signal, existingCheckpoint.effects))) {
       return await failUnresolvedGate(args, invocationId, undefined, accountConsentRefusal(node));
     } else if (effects.timeoutAt !== undefined && clock() >= effects.timeoutAt) {
       await callGateResolved(onGateResolved, { run, node, iteration, invocationId, outcome: 'timeout', resolvedBy: 'timeout' });

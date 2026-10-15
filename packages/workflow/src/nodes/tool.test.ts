@@ -620,6 +620,32 @@ describe('policy gate', () => {
     expect(await executeTool({ ...args, existingCheckpoint: legacy })).toEqual({ status: 'completed', result: { done: true } });
   });
 
+  it('keeps a parallel legacy account gate open when only its sibling consumed the current share consent', async () => {
+    const store = new InMemoryWorkflowStore();
+    const definition: WorkflowDefinition = { version: 'dag/v1', nodes: [
+      { id: 't', type: 'trigger' },
+      { ...GATE_NODE, id: 'a' },
+      { ...GATE_NODE, id: 'b' },
+    ], edges: [{ from: 't', to: 'a' }, { from: 't', to: 'b' }] };
+    await store.createRun('parallel-legacy', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'parallel-legacy');
+    for (const nodeId of ['a', 'b']) await store.putIntent({ runId: 'parallel-legacy', nodeId, iteration: 0, status: 'intent', attempt,
+      createdAt: 1, effects: { gate: true, accountConsentResolved: true, provenance: 'shared_account',
+        approver: { userId: 'lender', shareGeneration: 'current-share', allowTeamConsent: true } } });
+    await store.insertSignal({ runId: 'parallel-legacy', signalId: 'approval:a:account:current-share:resolution', signalType: 'approval:a',
+      payload: { approved: true, resolvedBy: 'lender', scope: 'team_account' }, createdAt: 1, consumedAt: 2,
+      consumedBy: { nodeId: 'a', iteration: 0, attempt } });
+    await store.insertSignal({ runId: 'parallel-legacy', signalId: 'approval:b:account:old-share:resolution', signalType: 'approval:b',
+      payload: { approved: true, resolvedBy: 'lender', scope: 'team_account' }, createdAt: 1, consumedAt: 2,
+      consumedBy: { nodeId: 'b', iteration: 0, attempt } });
+    const run = await store.getRun('parallel-legacy');
+    if (!run) throw new Error('Missing run');
+    const existingCheckpoint = (await store.getCheckpoints('parallel-legacy')).find(cp => cp.nodeId === 'b');
+    expect(await executeTool({ run, node: { ...GATE_NODE, id: 'b' }, attempt, iteration: 0, store,
+      clock: () => 10, engine: makeEngine().engine, templateContext: { trigger: undefined, nodes: {} }, existingCheckpoint,
+    })).toEqual({ status: 'parked', waitingOn: [{ kind: 'signal', nodeId: 'b', signalType: 'approval:b' }] });
+  });
+
   it('denied signal with default onDeny fails the node naming the denier', async () => {
     const args = await makeArgs({
       engine: {
