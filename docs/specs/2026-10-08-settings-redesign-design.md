@@ -68,10 +68,12 @@ on these pages, not the switcher's.
 
   A plain member still sees only Teams and 1Password, as two rail items, and
   no tab bar.
-- While organizations are off, Personal workspace also lists Models and
-  MCP servers (`/settings/models`, `/settings/mcp-servers`). Each opens
-  the same page as its Organization tab, outside the organization route
-  guard.
+- While organizations are off, Personal workspace also lists Models
+  (`/settings/models`). For an org admin it also lists MCP servers
+  (`/settings/mcp-servers`), because `GET /api/org/mcp-servers` refuses a
+  plain member. Each opens the same page as its Organization tab, outside
+  the organization route guard. A plain member who opens
+  `/settings/mcp-servers` sees a notice to ask an organization admin.
 - Below `sm`, the rail becomes one menu with the same groups.
 
 ### 3. Visual language
@@ -186,15 +188,17 @@ skill has no permissions of its own.
 ## Testing
 
 - `settings-rail.test.tsx`: the four groups, teams by name through the typed
-  team route, the admin and member Organization items, Models and MCP
-  servers while organizations are off, the phone menu, and a rail that does
-  not change with the switcher.
+  team route, the admin and member Organization items, Models while
+  organizations are off, MCP servers for an admin but not a member while
+  organizations are off, the phone menu, and a rail that does not change
+  with the switcher.
 - `-settings.routes.test.tsx` (real router, real layout and scope provider):
   the redirects from `/settings/appearance`, `/settings/threads`, and
   `/settings/proxy`; Preferences with both parts; personal Policies pinned while
   the switcher holds a team; a team's API keys and proxy and Policies tabs;
-  the Organization tabs for an admin but not a member; and MCP servers
-  outside the organization route guard while organizations are off.
+  the Organization tabs for an admin but not a member; and, while
+  organizations are off, MCP servers outside the organization route guard
+  for an admin and the ask-an-admin notice for a member.
 - `-settings.team.test.tsx`: the team page pins its team, marks its tab,
   refuses a team the caller is not on, and drops a draft when another of the
   caller's teams opens; `/settings/team` redirects; the personal API keys and

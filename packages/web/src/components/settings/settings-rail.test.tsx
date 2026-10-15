@@ -130,12 +130,19 @@ describe("SettingsRail", () => {
     expect(groupLabels()).not.toContain("Organization");
   });
 
-  it("offers MCP servers under Personal workspace only while organizations are off", () => {
-    orgData = { callerRole: "member", features: { organizations: false } };
+  it("offers MCP servers under Personal workspace only to an admin while organizations are off", () => {
+    orgData = { callerRole: "admin", features: { organizations: false } };
     const gateOff = render(<SettingsRail />);
     const personal = within(rail()).getByRole("group", { name: "Personal workspace" });
     expect(within(personal).getByRole("link", { name: "MCP servers" }).getAttribute("href")).toBe("/settings/mcp-servers");
     gateOff.unmount();
+
+    // `GET /api/org/mcp-servers` 403s a non-admin, so a member gets no link.
+    orgData = { callerRole: "member", features: { organizations: false } };
+    const memberGateOff = render(<SettingsRail />);
+    const memberPersonal = within(rail()).getByRole("group", { name: "Personal workspace" });
+    expect(within(memberPersonal).queryByRole("link", { name: "MCP servers" })).toBeNull();
+    memberGateOff.unmount();
 
     orgData = { callerRole: "admin", features: { organizations: true } };
     render(<SettingsRail />);

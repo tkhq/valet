@@ -401,22 +401,28 @@ orgRouter.patch("/plugins/:name", async (c) => {
 
 // ── Config-declared MCP servers ──────────────────────────────────────────
 //
-// `GET /api/org/mcp-servers` → any member reads the instance config's
+// `GET /api/org/mcp-servers` → an org admin reads the instance config's
 // `mcpServers` list. Read-only: the operator changes servers in the config
 // file. Not tied to the `organizations` gate, for the same reason as
-// `/plugins`: a single-org deployment still runs these servers.
+// `/plugins`: a single-org deployment still runs these servers, and its
+// first user is an org admin.
 //
-// The membership check has the same reason as `/directory`'s: every
-// authenticated session resolves `orgId` with no `org_members` row, so a
-// removed user would otherwise still read the list. The URL goes out as
-// scheme, host, and path only (`configMcpDisplayUrl`), because an operator
-// can put a token in its userinfo or query.
+// Admin only, with the `isOrgAdmin` check that `requireOrgAdmin` uses: the
+// entries are deployment configuration, and the settings UI shows the page
+// to admins only. A user with no `org_members` row keeps its own 403 (as on
+// `/directory`, a session resolves `orgId` without one). The URL goes out
+// as scheme, host, and path only (`configMcpDisplayUrl`), because an
+// operator can put a token in its userinfo or query.
+
+const MCP_SERVERS_ADMIN_ERROR =
+  "Only an organization admin can view MCP servers. To see them, ask an organization admin.";
 
 orgRouter.get("/mcp-servers", async (c) => {
   const { db, configMcpServers, engineCredentials } = c.var.providers;
   const user = c.var.user;
-  if (!(await isOrgMember(db, user.orgId, user.id))) {
-    return c.json({ error: "org membership required" }, 403);
+  if (!(await isOrgAdmin(db, user.orgId, user.id))) {
+    const member = await isOrgMember(db, user.orgId, user.id);
+    return c.json({ error: member ? MCP_SERVERS_ADMIN_ERROR : "org membership required" }, 403);
   }
   const connected = new Set(
     (await engineCredentials.list({ type: "user", id: user.id })).map((cred) => cred.service),

@@ -3975,7 +3975,7 @@ export interface OrgMcpServerWire {
   connected: boolean | null;
 }
 
-/** `GET /api/org/mcp-servers` — any member reads. Config order. */
+/** `GET /api/org/mcp-servers` — org admin only (403 otherwise). Config order. */
 export interface OrgMcpServersResponse {
   servers: OrgMcpServerWire[];
 }

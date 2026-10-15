@@ -10,6 +10,7 @@ import type { McpServerDecl } from "../config/instance-config.js";
 import { users } from "../schema/index.js";
 import type { OrgMcpServersResponse } from "../wire/types.js";
 
+const ADMIN = "local-user";
 const MEMBER = "test-member";
 
 const SERVERS: McpServerDecl[] = [
@@ -44,9 +45,9 @@ describe("GET /api/org/mcp-servers", () => {
     await api?.cleanup();
   });
 
-  it("lists every config entry to a plain member, without secret-adjacent fields", async () => {
+  it("lists every config entry to an org admin, without secret-adjacent fields", async () => {
     api = await bootTestApi({ mcpServers: SERVERS });
-    const res = await getServers(api, MEMBER);
+    const res = await getServers(api, ADMIN);
     expect(res.status).toBe(200);
     const body = (await res.json()) as OrgMcpServersResponse;
 
@@ -94,18 +95,29 @@ describe("GET /api/org/mcp-servers", () => {
   it("reports the caller's own connection for a per-user auth entry", async () => {
     api = await bootTestApi({ mcpServers: SERVERS });
     await api.providers.engineCredentials.save(
-      { type: "user", id: MEMBER },
+      { type: "user", id: ADMIN },
       "metabase",
       { type: "oauth2", accessToken: "tok" },
     );
-    const body = (await (await getServers(api, MEMBER)).json()) as OrgMcpServersResponse;
+    const body = (await (await getServers(api, ADMIN)).json()) as OrgMcpServersResponse;
     expect(body.servers.find((s) => s.name === "metabase")?.connected).toBe(true);
   });
 
   it("returns an empty list when the deployment declares no servers", async () => {
     api = await bootTestApi();
-    const body = (await (await getServers(api, MEMBER)).json()) as OrgMcpServersResponse;
+    const body = (await (await getServers(api, ADMIN)).json()) as OrgMcpServersResponse;
     expect(body.servers).toEqual([]);
+  });
+
+  it("403s for a plain member and names who can see the list", async () => {
+    api = await bootTestApi({ mcpServers: SERVERS });
+    const res = await getServers(api, MEMBER);
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe(
+      "Only an organization admin can view MCP servers. To see them, ask an organization admin.",
+    );
+    expect(JSON.stringify(body)).not.toContain("metabase");
   });
 
   it("403s for an authenticated user with no org_members row", async () => {
@@ -140,7 +152,7 @@ describe("GET /api/org/mcp-servers", () => {
         },
       ],
     });
-    const res = await getServers(api, MEMBER);
+    const res = await getServers(api, ADMIN);
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).not.toContain("FAKE");

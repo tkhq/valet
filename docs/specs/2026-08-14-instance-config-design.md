@@ -517,13 +517,17 @@ Rules:
   assumed, because an unannotated tool would otherwise surface as
   `critical`. The mapping lives in `deriveRiskLevel`
   (`packages/sdk/src/mcp/action-plugin.ts`).
-- `GET /api/org/mcp-servers` lists every entry read-only to any org
-  member, in file order and with disabled entries included. It does not
-  read the `organizations` feature gate. It checks the live `org_members`
-  row and returns 403 to a user without one, because a session resolves
-  `orgId` without a membership row. Organization settings shows the list
-  as "MCP servers". While organizations are off, the same page opens at
-  `/settings/mcp-servers` from Personal workspace. The wire carries `name`,
+- `GET /api/org/mcp-servers` lists every entry read-only to an org admin,
+  in file order and with disabled entries included. The entries are
+  deployment configuration, so a plain member gets 403 with an error that
+  says to ask an organization admin. The route uses the `isOrgAdmin` check
+  of the other admin-only org routes. It does not read the `organizations`
+  feature gate: the first user of a deployment is its org admin. A user
+  with no live `org_members` row gets its own 403, because a session
+  resolves `orgId` without a membership row. Organization settings shows
+  the list as "MCP servers" to an admin. While organizations are off, the
+  same page opens at `/settings/mcp-servers`, and Personal workspace links
+  to it for an org admin only. The wire carries `name`,
   `displayName`, `url`, `auth`, `scopes`, `description`, `riskLevel`,
   `enabled`, and the caller's own `connected` state for `oauth` and
   `api_key` entries (`null` for `none` and `bearer`). `url` is the scheme,

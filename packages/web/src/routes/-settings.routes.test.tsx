@@ -246,6 +246,21 @@ describe("while organizations are off", () => {
     const personal = within(rail).getByRole("group", { name: "Personal workspace" });
     expect(within(personal).getByRole("link", { name: "MCP servers" }).getAttribute("aria-current")).toBe("page");
   });
+
+  it("MCP servers tells a member to ask an admin, with no list and no rail link", async () => {
+    organizationsOn = false;
+    orgRole = "member";
+    await mount("/settings/mcp-servers");
+    expect(
+      await within(content()).findByText(
+        "Only an organization admin can view MCP servers. To see them, ask an organization admin.",
+      ),
+    ).toBeTruthy();
+    expect(within(content()).queryByRole("listitem", { name: "Docs" })).toBeNull();
+    const rail = screen.getByRole("navigation", { name: "Settings" });
+    const personal = within(rail).getByRole("group", { name: "Personal workspace" });
+    expect(within(personal).queryByRole("link", { name: "MCP servers" })).toBeNull();
+  });
 });
 
 describe("a team's settings tabs", () => {
