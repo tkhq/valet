@@ -2,6 +2,7 @@ export * from "./types.js";
 export { toolScopeSchema } from "./tool-scope-schema.js";
 export { modelCallUsage, type ReportedUsage } from "./model-call-usage.js";
 export { parseResourceQuantity } from "@valet/shared";
+export { subjectService } from "./events/subjects.js";
 // pi-ai passthroughs, re-exported so downstream packages (e.g. @valet/eval)
 // can type model handles and run side completions without their own pi-ai
 // dependency edge (which pnpm may peer-fork into a second instance with its
@@ -213,6 +214,10 @@ export {
   type VerifiedEvent,
   type NormalizedEvent,
   type EventCatalogEntry,
+  type DeriveContext,
+  type DerivedEventDef,
+  type EventSubjects,
+  type StatusResolver,
   type FilterOption,
   type FilterOptionContext,
   type FilterOptionResolver,
