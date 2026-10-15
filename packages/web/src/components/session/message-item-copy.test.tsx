@@ -164,6 +164,28 @@ describe("MessageItem replies", () => {
   });
 });
 
+describe("empty assistant reply", () => {
+  it("names the provider error of a failed turn after a reload", () => {
+    renderItem(
+      msg({
+        stopReason: "error",
+        completed: false,
+        errorMessage: "429 Rate limit reached for m on tokens per min (TPM). Please try again in 2.5s.",
+      }),
+    );
+    expect(
+      screen.getByText(
+        "This turn failed: 429 Rate limit reached for m on tokens per min (TPM). Please try again in 2.5s. Try again or choose another model.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/No response/)).toBeNull();
+  });
+
+  it("keeps the generic text when the turn has no error text", () => {
+    renderItem(msg({ stopReason: "error", completed: false }));
+    expect(screen.getByText("No response. Try again or choose another model.")).toBeTruthy();
+  });
+});
 
 describe("structured assistant results", () => {
   const raw = JSON.stringify({ summary: "Found four cleanup candidates. No memory was changed.", candidates: [{ path: "notes.md", evidence: "Preserve unique history. ".repeat(100) }] });

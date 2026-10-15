@@ -9,7 +9,7 @@
  * attachments — the field is dropped for those.
  */
 import { describe, expect, it } from "vitest";
-import type { CommandResultEntry, CompactionEntry, MessageEntry } from "@valet/engine";
+import { MESSAGE_TURN_ERROR_KEY, type CommandResultEntry, type CompactionEntry, type MessageEntry } from "@valet/engine";
 import { entryToMessage } from "./messages.js";
 
 function baseEntry(overrides: Partial<MessageEntry> = {}): MessageEntry {
@@ -63,6 +63,20 @@ describe("entryToMessage — assistant completed flag", () => {
   it("marks an aborted assistant message not completed", () => {
     const entry = baseEntry({ role: "assistant", stopReason: "abort" });
     expect(entryToMessage(entry, "sess", "th")?.completed).toBe(false);
+  });
+
+  it("projects the provider error of a failed turn", () => {
+    const providerError = "429 Rate limit reached for m on tokens per min (TPM). Please try again in 2.5s.";
+    const entry = baseEntry({
+      role: "assistant",
+      content: "",
+      parts: [],
+      stopReason: "error",
+      metadata: { [MESSAGE_TURN_ERROR_KEY]: providerError },
+    });
+    expect(entryToMessage(entry, "sess", "th")?.errorMessage).toBe(providerError);
+    const success = entryToMessage(baseEntry({ role: "assistant", stopReason: "end_turn" }), "sess", "th");
+    expect(success && "errorMessage" in success).toBe(false);
   });
 });
 

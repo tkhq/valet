@@ -19,6 +19,7 @@ import { Hono, type Context } from "hono";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   dispatchCommand,
+  MESSAGE_TURN_ERROR_KEY,
   NotFoundError,
   parseReasoningLevel,
   ValidationError,
@@ -159,6 +160,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
   const wireAttachments = projectAttachments(e.attachments);
   const skill = skillInvocationFromMetadata(e.metadata, role);
   const author = authorFromEntry(e.author, role);
+  const errorMessage = turnErrorFromMetadata(e.metadata, role);
   return {
     id: e.id,
     sessionId,
@@ -175,8 +177,23 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     model: e.model,
     ...(skill ? { skill } : {}),
     ...(author ? { author } : {}),
+    ...(errorMessage ? { errorMessage } : {}),
     ...(wireAttachments.length > 0 ? { attachments: wireAttachments } : {}),
   };
+}
+
+/**
+ * Wire projection of the provider error that the engine keeps on the
+ * assistant entry of a failed turn. Without it, a reload shows an empty
+ * reply that does not say why the turn failed.
+ */
+function turnErrorFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+  role: MessageRole,
+): string | undefined {
+  if (role !== "assistant") return undefined;
+  const value = metadata?.[MESSAGE_TURN_ERROR_KEY];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 /**

@@ -13,9 +13,11 @@ import {
   Engine,
   InMemoryEventStream,
   InMemorySessionStore,
+  MESSAGE_TURN_ERROR_KEY,
   VirtualSandboxProvider,
   formatTransientRetryMessage,
   type BusEvent,
+  type MessageEntry,
   type PromptContent,
 } from "../src/index.js";
 
@@ -267,6 +269,34 @@ describe("turn-level transient retry (TKAI-319)", () => {
       events.some((e) => e.event.type === "error" && e.event.code === "turn_transient_retry"),
     ).toBe(false);
     expect(faux.getPendingResponseCount()).toBe(0);
+    faux.unregister();
+  });
+
+  it("keeps the provider error on the failed assistant entry for a reload", async () => {
+    const faux = registerFauxProvider({
+      provider: "retry-error-entry",
+      models: [{ id: "m", name: "m", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const providerError =
+      "429 Rate limit reached for m on tokens per min (TPM): Limit 30000, Used 29000, Requested 2500. Please try again in 2.5s.";
+    faux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: providerError })]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel("m")!,
+      purpose: "interactive",
+    });
+    const receipt = await session.prompt("do the thing");
+    await waitFor(() =>
+      events.some((e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId),
+    );
+    const entries = await session.readEntries(receipt.threadId);
+    const failed = entries.find((e): e is MessageEntry => e.type === "message" && e.role === "assistant");
+    expect(failed?.stopReason).toBe("error");
+    expect(failed?.metadata?.[MESSAGE_TURN_ERROR_KEY]).toBe(providerError);
     faux.unregister();
   });
 });
