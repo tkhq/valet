@@ -325,6 +325,9 @@ interface Build {
   nodeOfStep: Map<string, string>;
   /** Session nodes made from merged messages and commands. */
   messageSessions: string[];
+  /** Trigger variable → the if nodes that read it and the types they
+   * compare it to. `any` marks a truthiness test, which took any type. */
+  variables: Map<string, { ifIds: string[]; types: Set<WorkflowInputDefinition['type'] | 'any'> }>;
   /** True after a required decision. The schedule lines then say why the
    * workflow must not run on a schedule yet. */
   differs: boolean;
@@ -342,6 +345,7 @@ function convertWorkflow(row: V1WorkflowRow, triggers: V1TriggerRow[]): V1Conver
     outputOwners: new Map(),
     nodeOfStep: new Map(),
     messageSessions: [],
+    variables: new Map(),
     differs: false,
   };
 
@@ -365,6 +369,7 @@ function convertWorkflow(row: V1WorkflowRow, triggers: V1TriggerRow[]): V1Conver
   flush(lane, b);
   b.nodes.push({ id: 'stop', type: 'stop', outcome: 'success' });
   connect(lane.tails, 'stop', b);
+  declareInputs(b);
 
   if (b.messageSessions.length > 1) {
     // The shared V1 session took a message only after it finished the one
@@ -377,6 +382,16 @@ function convertWorkflow(row: V1WorkflowRow, triggers: V1TriggerRow[]): V1Conver
     requireDecision(
       b,
       `V1 sent every agent message and shell command in a run to one shared session. This import made ${b.messageSessions.length} session nodes (${b.messageSessions.map(quote).join(', ')}), and each one starts a new session. If a later node needs what an earlier one did, add that context to its prompt.${order}`,
+    );
+  }
+
+  const approvals = b.nodes.filter((n) => n.type === 'approval').map((n) => n.id);
+  if (approvals.length > 1) {
+    // V1's deadline ran from the start of the run (`getTimedOutApprovals`),
+    // not from each approval. V2 has no deadline for a whole run.
+    requireDecision(
+      b,
+      `V1 cancelled a run that still waited for an approval 24 hours after the run started. This import made ${approvals.length} approval nodes (${approvals.map(quote).join(', ')}), and V2 gives each one its own 24-hour timeout from the time the run reaches it. A run that passes more than one approval can therefore wait longer than V1 allowed. Decide the timeout of each approval node.`,
     );
   }
 
@@ -476,24 +491,39 @@ function v1CronDifference(cron: string): string | undefined {
 
 function convertTrigger(t: V1TriggerRow, b: Build): void {
   const type = t.config.type;
-  if (type === 'manual') return;
+  const fields = mappingText(t);
+  if (type === 'manual') {
+    // V1 ran a manual trigger with the request fields copied into the
+    // variables (`runTrigger`). V2 has no such copy, so a condition reads
+    // the variable name from the run input.
+    const first = Object.keys(t.variableMapping ?? {})[0];
+    if (first !== undefined) {
+      requireDecision(
+        b,
+        `V1 manual trigger "${t.name}" copied request fields into variables (${fields}). V2 does not copy them: each condition reads the variable name from the run input, such as ${triggerDataPath(first)}. Change the callers to send the variable names, or change the conditions to read the request fields.`,
+      );
+    }
+    return;
+  }
   if (type === 'webhook') {
     const method = stringField(t.config.method) || 'POST';
     const path = stringField(t.config.path);
     const off = t.enabled ? '' : ' It was turned off in V1, so do this only if you still need it.';
     const getNote = method === 'GET' ? ' The caller sends GET, so change its method too.' : '';
-    const mapping =
-      t.variableMapping !== undefined && Object.keys(t.variableMapping).length > 0
-        ? ` V1 copied request fields into variables (${Object.entries(t.variableMapping)
-            .map(([key, from]) => `${key} from ${String(from)}`)
-            .join(', ')}). Read those fields from trigger.data instead.`
-        : '';
+    const mapping = fields === '' ? '' : ` V1 copied request fields into variables (${fields}). Read those fields from trigger.data instead.`;
     b.checklist.push(
       `V1 started this workflow from webhook trigger "${t.name}" (${method} ${path}). Create a webhook for this workflow in Triggers, then change the caller to the new URL. V2 webhooks take POST with a JSON body.${getNote}${mapping}${off}`,
     );
     return;
   }
   b.checklist.push(`V1 trigger "${t.name}" has the unknown type ${JSON.stringify(type)}. The import did not create it.`);
+}
+
+/** `environment from $.target, repo from $.repo`, or '' for no mapping. */
+function mappingText(t: V1TriggerRow): string {
+  return Object.entries(t.variableMapping ?? {})
+    .map(([key, from]) => `${key} from ${String(from)}`)
+    .join(', ');
 }
 
 /** Builds nodes from steps. A step V1's compiler refused is left out
@@ -724,6 +754,27 @@ function addApproval(raw: Record<string, unknown>, id: string, lane: Lane, b: Bu
   );
 }
 
+/**
+ * Adds each trigger variable that the if nodes compare to one type to the
+ * run form. A declared type refuses a run whose value has another type.
+ * V1 compared with `===` and took a value of any type, so a variable that
+ * the if nodes compare to two types, or test for truthiness, stays out.
+ */
+function declareInputs(b: Build): void {
+  for (const [variable, { ifIds, types }] of b.variables) {
+    // A truthiness test already has its line (`addConditional`).
+    if (types.has('any')) continue;
+    const [type, ...others] = types;
+    if (type !== undefined && type !== 'any' && others.length === 0) {
+      b.inputs[variable] = { type, description: 'A V1 workflow variable.' };
+      continue;
+    }
+    b.checklist.push(
+      `The if nodes ${ifIds.map(quote).join(', ')} compare "${variable}" to values of more than one type (${[...types].join(', ')}). V1 took a value of any type, so the import does not add "${variable}" to the run form. To set it in a run you start by hand, add it as a trigger input. A trigger input has one type, so a run then cannot pass a value of another type.`,
+    );
+  }
+}
+
 /** Ends a scope: a denial inside it led to whatever follows the scope step. */
 function leaveScope(scope: Scope, lane: Lane, b: Build): void {
   if (scope.denials.length === 0) return;
@@ -768,14 +819,19 @@ function addConditional(raw: Record<string, unknown>, id: string, path: string, 
       b,
       `If node "${ifId}" reads "${condition.variable}", which V1 set from the output of step "${owner}"${now}. V2 reads a node's output as nodes.<id>.result. Change the condition to read that node.`,
     );
-  } else if (condition.inputType === undefined) {
-    // A declared type would refuse a run whose value has another type,
-    // and V1 took any value here.
-    b.checklist.push(
-      `If node "${ifId}" checks that "${condition.variable}" has a value, as V1 did. V1 took a value of any type, so the import does not add "${condition.variable}" to the run form. To set it in a run you start by hand, add it as a trigger input.`,
-    );
-  } else if (b.inputs[condition.variable] === undefined) {
-    b.inputs[condition.variable] = { type: condition.inputType, description: 'A V1 workflow variable.' };
+  } else {
+    // `declareInputs` adds the variable to the run form after the walk.
+    const seen = b.variables.get(condition.variable) ?? { ifIds: [], types: new Set() };
+    seen.ifIds.push(ifId);
+    seen.types.add(condition.inputType ?? 'any');
+    b.variables.set(condition.variable, seen);
+    if (condition.inputType === undefined) {
+      // A declared type would refuse a run whose value has another type,
+      // and V1 took any value here.
+      b.checklist.push(
+        `If node "${ifId}" checks that "${condition.variable}" has a value, as V1 did. V1 took a value of any type, so the import does not add "${condition.variable}" to the run form. To set it in a run you start by hand, add it as a trigger input.`,
+      );
+    }
   }
 
   const tails: Tail[] = [];
