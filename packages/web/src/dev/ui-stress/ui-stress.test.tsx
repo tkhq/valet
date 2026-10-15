@@ -2,22 +2,28 @@
 /**
  * The UI stress gallery route (`/dev/ui-stress`): in dev it renders every
  * section from fixtures alone, and the production gate answers 404. The page
- * is the real route's component under a memory router.
+ * is the real route's component under a memory router. The app shell tests
+ * put it under the real root layout too.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
-import { MutationObserver, QueryObserver } from "@tanstack/react-query";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MutationObserver, QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { TooltipProvider } from "~/components/primitives/tooltip";
+import type { ComposerFile } from "~/components/session/composer-files";
+import { Route as RootRoute } from "~/routes/__root";
 import { Route as UiStressRoute } from "~/routes/dev.ui-stress";
+import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 import { uiStressClient } from "./client";
 import { FrozenQueryClient, MUTATIONS_DISABLED, MissingFixtureError } from "./frozen-query-client";
 import { UI_STRESS_SECTIONS } from "./gallery";
 import { UI_STRESS_PATH, requireUiStress } from "./gate";
 
-function mount() {
+/** Mounts the gallery route at `path`. `appShell` uses the real root layout,
+ * which picks the app shell for the gallery, under the app's own client. */
+function mount({ path = UI_STRESS_PATH, appShell = false }: { path?: string; appShell?: boolean } = {}) {
   const root = createRootRoute({
-    component: () => <TooltipProvider><Outlet /></TooltipProvider>,
+    component: appShell ? RootRoute.options.component : () => <TooltipProvider><Outlet /></TooltipProvider>,
     notFoundComponent: () => <p>Page not found</p>,
   });
   const page = createRoute({
@@ -28,14 +34,20 @@ function mount() {
   });
   const router = createRouter({
     routeTree: root.addChildren([page]),
-    history: createMemoryHistory({ initialEntries: [UI_STRESS_PATH] }),
+    history: createMemoryHistory({ initialEntries: [path] }),
   });
-  render(<RouterProvider router={router} />);
+  const appClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={appClient}><RouterProvider router={router} /></QueryClientProvider>);
 }
 
-// Each of the two route tests renders the whole gallery inside the app
-// shell. That takes under a second locally and about six on a loaded CI
-// runner, so they wait longer than the 5 s test and 1 s findBy defaults.
+/** Records every request and answers none of them. */
+function blockFetch() {
+  return vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("The test blocks the network."));
+}
+
+// A route test that mounts the gallery renders all of it. That takes under a
+// second locally and about six on a loaded CI runner, so these tests wait
+// longer than the 5 s test and 1 s findBy defaults.
 const RENDER_TIMEOUT_MS = 20_000;
 const TEST_TIMEOUT_MS = 30_000;
 
@@ -48,6 +60,9 @@ beforeAll(async () => {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+  useComposerDraftStore.setState({ owner: "", byKey: {} });
+  localStorage.clear();
 });
 
 describe("/dev/ui-stress", () => {
@@ -87,6 +102,37 @@ describe("/dev/ui-stress", () => {
     // Gate and question buttons wrap their labels.
     const option = screen.getAllByRole("button").find((button) => /^Option 1: /.test(button.textContent ?? ""));
     expect(option?.className).toContain("whitespace-normal");
+  }, TEST_TIMEOUT_MS);
+
+  it("keeps the fixture account out of the real account's drafts", async () => {
+    const owner = JSON.stringify(["org-real", "member-real"]);
+    const store = useComposerDraftStore.getState();
+    store.activateOwner(owner);
+    const key = draftKey("real-session", "real-thread");
+    // Only the text persists. An unsent file lives in memory alone.
+    const file: ComposerFile = { id: "file-1", name: "notes.txt", bytes: 5, file: new File(["notes"], "notes.txt") };
+    store.setText(key, "Unsent message");
+    store.setFiles(key, [file]);
+    mount({ appShell: true });
+    await screen.findByRole("heading", { level: 1, name: "UI stress gallery" }, { timeout: RENDER_TIMEOUT_MS });
+    expect(useComposerDraftStore.getState().owner).toBe(owner);
+    expect(useComposerDraftStore.getState().byKey[key]?.files).toEqual([file]);
+  }, TEST_TIMEOUT_MS);
+
+  it("sends no request when Ask Valet opens the assistant", async () => {
+    const fetchSpy = blockFetch();
+    mount({ appShell: true });
+    fireEvent.click(await screen.findByRole("button", { name: "Ask Valet" }, { timeout: RENDER_TIMEOUT_MS }));
+    expect(await screen.findByText(MUTATIONS_DISABLED, {}, { timeout: RENDER_TIMEOUT_MS })).toBeTruthy();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  }, TEST_TIMEOUT_MS);
+
+  it("puts the app shell on the fixtures when the path ends in a slash", async () => {
+    const fetchSpy = blockFetch();
+    mount({ path: `${UI_STRESS_PATH}/`, appShell: true });
+    await screen.findByRole("heading", { level: 1, name: "UI stress gallery" }, { timeout: RENDER_TIMEOUT_MS });
+    expect(screen.getByRole("button", { name: "Ask Valet" })).toBeTruthy();
+    expect(fetchSpy).not.toHaveBeenCalled();
   }, TEST_TIMEOUT_MS);
 
   it("answers 404 in a production build", async () => {

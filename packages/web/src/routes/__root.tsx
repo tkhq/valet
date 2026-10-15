@@ -71,10 +71,10 @@ function sidebarForPath(pathname: string) {
   return null;
 }
 
-/** The development-only UI stress gallery. Always false in a production
- * build, where `UiStressShell` is null. */
+/** The development-only UI stress gallery, with or without a trailing
+ * slash. Always false in a production build, where `UiStressShell` is null. */
 function isUiStressPath(pathname: string): boolean {
-  return UiStressShell !== null && pathname === UI_STRESS_PATH && uiStressEnabled();
+  return UiStressShell !== null && pathname.replace(/\/+$/, "") === UI_STRESS_PATH && uiStressEnabled();
 }
 
 /** `/login`, `/signup`, and the shared-artifact reader `/a/$token` —
@@ -113,11 +113,9 @@ function RootLayout() {
 
   // Inside the signed-in branch only: the provider reads assistants and
   // teams, which a signed-out visitor cannot fetch.
-  const shell = (
-    <TooltipProvider>
-      <DraftAccountBoundary>
-      <WorkspaceScopeProvider>
-        <WorkspaceAssistantProvider>
+  const app = (
+    <WorkspaceScopeProvider>
+      <WorkspaceAssistantProvider>
         <SignedInEffects />
         <ProductAnnouncement />
         <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)} rightPanel={<WorkspaceAssistantDock />}>
@@ -125,17 +123,17 @@ function RootLayout() {
           <ChatKeybindingsHost />
           <Outlet />
         </AppShell>
-        </WorkspaceAssistantProvider>
-      </WorkspaceScopeProvider>
-      </DraftAccountBoundary>
-    </TooltipProvider>
+      </WorkspaceAssistantProvider>
+    </WorkspaceScopeProvider>
   );
   // The gallery puts the whole shell on its frozen fixture client, so the
-  // nav, the bell, and the sidebar show stress data too.
+  // nav, the bell, and the sidebar show stress data too. It skips
+  // DraftAccountBoundary: the fixture account must not replace the real
+  // account's drafts, which keep their attachments in memory only.
   if (UiStressShell && isUiStressPath(pathname)) {
-    return <Suspense fallback={null}><UiStressShell>{shell}</UiStressShell></Suspense>;
+    return <Suspense fallback={null}><UiStressShell><TooltipProvider>{app}</TooltipProvider></UiStressShell></Suspense>;
   }
-  return shell;
+  return <TooltipProvider><DraftAccountBoundary>{app}</DraftAccountBoundary></TooltipProvider>;
 }
 
 /**
