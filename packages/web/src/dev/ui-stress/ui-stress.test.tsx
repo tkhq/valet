@@ -119,6 +119,18 @@ describe("/dev/ui-stress", () => {
     expect(useComposerDraftStore.getState().byKey[key]?.files).toEqual([file]);
   }, TEST_TIMEOUT_MS);
 
+  // The fixture teams lack the tab's real team, so the scope falls back to
+  // Personal inside the gallery. That fallback must not replace the tab's
+  // saved workspace.
+  it("keeps the tab's saved workspace when the gallery falls back to Personal", async () => {
+    window.sessionStorage.setItem("valet:workspace", "team-real");
+    mount({ appShell: true });
+    await screen.findByRole("heading", { level: 1, name: "UI stress gallery" }, { timeout: RENDER_TIMEOUT_MS });
+    await waitFor(() => expect(uiStressClient.isFetching()).toBe(0), { timeout: RENDER_TIMEOUT_MS });
+    expect(window.sessionStorage.getItem("valet:workspace")).toBe("team-real");
+    window.sessionStorage.removeItem("valet:workspace");
+  }, TEST_TIMEOUT_MS);
+
   it("sends no request when Ask Valet opens the assistant", async () => {
     const fetchSpy = blockFetch();
     mount({ appShell: true });

@@ -113,8 +113,9 @@ function RootLayout() {
 
   // Inside the signed-in branch only: the provider reads assistants and
   // teams, which a signed-out visitor cannot fetch.
+  const gallery = UiStressShell !== null && isUiStressPath(pathname);
   const app = (
-    <WorkspaceScopeProvider>
+    <WorkspaceScopeProvider persist={!gallery}>
       <WorkspaceAssistantProvider>
         <SignedInEffects />
         <ProductAnnouncement />
@@ -130,7 +131,7 @@ function RootLayout() {
   // nav, the bell, and the sidebar show stress data too. It skips
   // DraftAccountBoundary: the fixture account must not replace the real
   // account's drafts, which keep their attachments in memory only.
-  if (UiStressShell && isUiStressPath(pathname)) {
+  if (UiStressShell && gallery) {
     return <Suspense fallback={null}><UiStressShell><TooltipProvider>{app}</TooltipProvider></UiStressShell></Suspense>;
   }
   return <TooltipProvider><DraftAccountBoundary>{app}</DraftAccountBoundary></TooltipProvider>;
