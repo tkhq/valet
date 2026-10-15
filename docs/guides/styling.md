@@ -227,6 +227,17 @@ at that breakpoint and above:
 <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
 ```
 
+## Long text and the UI stress gallery
+
+Ids, URLs, hashes, emails, and team names arrive as long unbroken words. The body sets `overflow-wrap: break-word`, so a word breaks only when it would overflow its line. Two cases still need a local rule:
+
+- A flex item keeps its content's minimum width. Give it `min-w-0`, and `[overflow-wrap:anywhere]` when its text is an id.
+- A `whitespace-nowrap` element never wraps. A button whose label comes from data (a service name, a question option) sets `h-auto whitespace-normal` and wraps.
+
+A badge truncates a long name only when a tooltip shows the full name. A compact list clamps a long title (`line-clamp-2`) and puts the full title in `title`.
+
+Check a change against `/dev/ui-stress` in a dev server at 375, 760, and 1280 px. It renders the real components with extreme fixtures (40 approvals, 200 threads, long team names, deep JSON). Its layout audit lists every element whose content passes its card, popover, or scroll container. The route does not exist in a production build.
+
 ## Accessibility
 
 Radix primitives bring keyboard handling, focus management, and ARIA wiring. You

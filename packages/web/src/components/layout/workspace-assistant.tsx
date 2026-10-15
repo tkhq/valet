@@ -1,6 +1,6 @@
 import { createContext, useContext, useRef, useState, type ReactNode } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Sparkles } from "lucide-react";
 import { qk } from "~/api/queries";
 import { api } from "~/api/client";
@@ -24,6 +24,9 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const qc = useQueryClient();
+  // A mutation, not a direct call: the UI stress gallery's frozen client
+  // refuses every mutation, so the gallery never sends this request.
+  const ensureConversation = useMutation({ mutationFn: (key: string) => api.ensureWorkspaceConversation(key) });
   const conversations = useRef(new Map<string, Promise<Conversation>>());
   const [opened, setOpened] = useState<string>();
   const [loaded, setLoaded] = useState<Record<string, Conversation>>({});
@@ -59,7 +62,7 @@ export function WorkspaceAssistantProvider({ children }: { children: ReactNode }
     let pending = conversations.current.get(workspace);
     if (!pending) {
       pending = (async () => {
-        const conversation = await api.ensureWorkspaceConversation(workspace);
+        const conversation = await ensureConversation.mutateAsync(workspace);
         await qc.invalidateQueries({ queryKey: qk.threads(conversation.sessionId) });
         return conversation;
       })();
