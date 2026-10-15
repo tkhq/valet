@@ -50,7 +50,7 @@ export function ApprovalCard({ runId, nodeId, prompt, summary, details, iteratio
           <p className="break-words text-sm font-medium text-ink">{prompt ?? `Approval required: ${nodeId}`}</p>
         </div>
       </div>
-      {summary && <p className="whitespace-pre-line text-sm leading-relaxed text-muted">{summary}</p>}
+      {summary && <p className="whitespace-pre-line text-sm leading-relaxed text-muted [overflow-wrap:anywhere]">{summary}</p>}
       {details != null && <div className="rounded border border-line bg-paper p-3 text-sm">
         {typeof details === "object" && !Array.isArray(details) ? <dl className="space-y-3">{Object.entries(details).map(([label, value]) => <div key={label}><dt className="mb-1 text-xs font-medium text-muted">{label}</dt><dd className="whitespace-pre-wrap break-words text-ink">{typeof value === "string" ? value : JSON.stringify(value, null, 2)}</dd></div>)}</dl> : <p className="whitespace-pre-wrap break-words">{typeof details === "string" ? details : JSON.stringify(details, null, 2)}</p>}
       </div>}

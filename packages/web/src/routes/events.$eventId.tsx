@@ -55,7 +55,7 @@ export function EventDetailBody({ data }: { data: GetEventResponse }) {
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="accent">{event.service}</Badge>
           <span className="break-all font-mono text-xs text-muted">{event.eventKey}</span>
-          {event.actor?.login && <span className="text-xs text-muted">{event.actor.login}</span>}
+          {event.actor?.login && <span className="min-w-0 text-xs text-muted [overflow-wrap:anywhere]">{event.actor.login}</span>}
         </div>
         <h1 className="mt-2 break-words font-display text-xl text-ink">{event.summary}</h1>
         <p className="mt-1 text-xs text-muted">

@@ -30,6 +30,10 @@ import { ComposerImageStrip } from "./composer-image-strip";
 // it's a server-internal constant (`policies/service.ts`'s
 // `GATE_ACTION_ALWAYS_ALLOW`), not part of the wire contract.
 const GATE_ACTION_ALWAYS_ALLOW = "always_allow";
+
+/** Gate buttons carry labels that can name a long service or a whole
+ * question option. They wrap within the card instead of overflowing it. */
+const WRAPPING_BUTTON = "h-auto min-h-8 max-w-full whitespace-normal py-1.5 text-left";
 const gateColumnClass = "mx-auto mt-3 w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8";
 const ALWAYS_ALLOW_TOOLTIP = "Only an org admin can always-allow this action.";
 
@@ -174,7 +178,9 @@ function DecisionGateResponse({
           {gate.actions.length > 0 && (
             <div className="px-5 pb-2 flex flex-wrap gap-2">
               {gate.actions.map((a) => (
-                <Button key={a.id} variant="secondary" size="sm" onClick={() => pickAction(a.id)} disabled={busy}>{a.label}</Button>
+                <Button key={a.id} variant="secondary" size="sm" className={WRAPPING_BUTTON} onClick={() => pickAction(a.id)} disabled={busy}>
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{a.label}</span>
+                </Button>
               ))}
             </div>
           )}
@@ -224,6 +230,7 @@ function DecisionGateResponse({
                 <Button
                   key={a.id}
                   size="sm"
+                  className={WRAPPING_BUTTON}
                   onClick={() => pickAction(a.id)}
                   disabled={disabled}
                   variant={
@@ -239,7 +246,7 @@ function DecisionGateResponse({
                   {resolve.isPending && resolve.variables?.gateId === gate.id && resolve.variables.body.actionId === a.id ? (
                     <Spinner size={14} />
                   ) : null}
-                  <span>{a.label}</span>
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{a.label}</span>
                 </Button>
               );
               // `isAdmin` reads `false` while `useMe()` is still loading —

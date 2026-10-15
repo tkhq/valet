@@ -57,6 +57,25 @@ describe("/dev/ui-stress", () => {
     expect(missing).toEqual([]);
   });
 
+  // jsdom cannot measure layout, so the gallery's layout audit is the
+  // visual check. These pin the markup each overflow fix depends on.
+  it("keeps the markup that stops long fixture text from overflowing", async () => {
+    mount();
+    await screen.findByRole("heading", { level: 2, name: UI_STRESS_SECTIONS[0]!.title });
+    await waitFor(() => expect(uiStressClient.isFetching()).toBe(0));
+    // A team badge shrinks and truncates instead of pushing past its card.
+    const teamLinks = [...document.querySelectorAll('a[href^="/chat?workspace="]')].filter((link) => link.querySelector(".truncate"));
+    expect(teamLinks.length).toBeGreaterThan(0);
+    for (const link of teamLinks) expect(link.className).not.toContain("shrink-0");
+    // A long workflow name is clamped in the approvals list, with the full name on hover.
+    const titles = [...document.querySelectorAll('[data-testid="action-required-item"] a[href^="/workflows/"]')].filter((link) => link.classList.contains("line-clamp-2"));
+    expect(titles.length).toBeGreaterThan(0);
+    for (const title of titles) expect(title.getAttribute("title")).toBe(title.textContent);
+    // Gate and question buttons wrap their labels.
+    const option = screen.getAllByRole("button").find((button) => /^Option 1: /.test(button.textContent ?? ""));
+    expect(option?.className).toContain("whitespace-normal");
+  });
+
   it("answers 404 in a production build", async () => {
     vi.stubEnv("DEV", false);
     mount();

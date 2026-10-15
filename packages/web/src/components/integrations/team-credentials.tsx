@@ -151,8 +151,8 @@ export function TeamCredentials({
                   const canReconnect = !row.delegatedFrom && row.type === "oauth2" && row.dead === true;
                   return (
                     <li key={row.delegatedFrom ?? "team"} className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-                      <div className="min-w-0">
-                        <p className="flex items-center gap-2 text-ink">
+                      <div className="min-w-0 max-w-full">
+                        <p className="flex min-w-0 items-center gap-2 text-ink">
                           <span className="truncate">{row.delegatedFrom ? `Shared by ${nameFor(row.delegatedFrom)}` : "Team connection"}</span>
                           {row.referenceBroken && <Badge variant="danger">Broken</Badge>}
                           {!row.referenceBroken && badge && <Badge variant={badge.variant}>{badge.label}</Badge>}
