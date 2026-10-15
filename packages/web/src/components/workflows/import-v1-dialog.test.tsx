@@ -4,7 +4,8 @@
  * converted workflow shows its checklist before anything is created, and
  * confirming creates the workflow and the editor message that carries the
  * checklist. The import creates no schedules: each V1 schedule is a
- * checklist line.
+ * checklist line. A failure after a workflow exists keeps the checklists on
+ * screen.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -40,7 +41,7 @@ const triage = { id: "triage", type: "agent_message", content: "Triage the open 
 // An "agent" step did nothing in V1, so the import leaves it out with a line.
 const V1_PASTE = v1Paste([triage, { id: "plan", type: "agent", goal: "Plan the week." }]);
 const SCHEDULE_LINE =
-  'The import creates no schedules, so it did not create V1 schedule "Every night" (0 3 * * *). Add it in Triggers after you finish the other items in this list.';
+  'The import creates no schedules, so it did not create V1 schedule "Every night" (0 3 * * *, UTC). Add it in Triggers after you finish the other items in this list. Set its time zone to UTC. V1 used UTC because the schedule named no time zone.';
 
 function paste(text: string): void {
   render(<ImportV1Dialog open onOpenChange={vi.fn()} />);
@@ -104,6 +105,26 @@ describe("ImportV1Dialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Import 1 workflow" }));
 
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain('Valet created the workflow "Nightly triage" before this error'));
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("keeps every checklist on screen when the second editor message fails", async () => {
+    createWorkflow.mockReset().mockResolvedValueOnce({ id: "wf_a" }).mockResolvedValueOnce({ id: "wf_b" });
+    vi.spyOn(api, "ensureWorkflowConversation").mockResolvedValue({ sessionId: "sess_1", threadId: "thr_1" });
+    vi.spyOn(api, "sendPrompt")
+      .mockResolvedValueOnce({ messageId: "m1", threadId: "thr_1", activityAt: 0 })
+      .mockRejectedValueOnce(new Error("the editor conversation is not ready"));
+    const workflow = (id: string, name: string, goal: string) => ({ id, name, enabled: true, data: { steps: [triage, { id: "plan", type: "agent", goal }] } });
+    paste(JSON.stringify({ workflows: [workflow("wf_1", "First", "Plan A."), workflow("wf_2", "Second", "Plan B.")] }));
+    fireEvent.click(screen.getByRole("button", { name: "Import 2 workflows" }));
+
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain('The editor conversation of "Second" did not get its checklist.'));
+    expect(createWorkflow).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("alert").textContent).toContain('Valet created the workflow "First", the workflow "Second" before this error');
+    expect(screen.getByText(/\("Plan A\."\)/)).toBeTruthy();
+    expect(screen.getByText(/\("Plan B\."\)/)).toBeTruthy();
+    // The workflows exist, so the dialog offers no second import.
+    expect(screen.queryByRole("button", { name: /^Import/ })).toBeNull();
     expect(navigate).not.toHaveBeenCalled();
   });
 });
