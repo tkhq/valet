@@ -491,12 +491,13 @@ function v1CronDifference(cron: string): string | undefined {
 
 function convertTrigger(t: V1TriggerRow, b: Build): void {
   const type = t.config.type;
-  const fields = mappingText(t);
+  const entries = Object.entries(t.variableMapping ?? {});
+  const fields = mappingText(entries);
   if (type === 'manual') {
     // V1 ran a manual trigger with the request fields copied into the
     // variables (`runTrigger`). V2 has no such copy, so a condition reads
     // the variable name from the run input.
-    const first = Object.keys(t.variableMapping ?? {})[0];
+    const first = entries[0]?.[0];
     if (first !== undefined) {
       requireDecision(
         b,
@@ -510,20 +511,43 @@ function convertTrigger(t: V1TriggerRow, b: Build): void {
     const path = stringField(t.config.path);
     const off = t.enabled ? '' : ' It was turned off in V1, so do this only if you still need it.';
     const getNote = method === 'GET' ? ' The caller sends GET, so change its method too.' : '';
-    const mapping = fields === '' ? '' : ` V1 copied request fields into variables (${fields}). Read those fields from trigger.data instead.`;
+    // `repo from $.repo` reads the same field in V2. A V2 webhook applies
+    // no mapping, so a condition on a variable mapped from another field
+    // reads the variable name from the body.
+    const same = entries.filter(([key, from]) => from === `$.${key}`);
+    const renamed = entries.filter(([key, from]) => from !== `$.${key}`);
+    const mapping =
+      same.length === 0
+        ? ''
+        : ` V1 copied request fields into variables of the same name (${mappingText(same)}). V2 reads them from trigger.data the same way.`;
     b.checklist.push(
       `V1 started this workflow from webhook trigger "${t.name}" (${method} ${path}). Create a webhook for this workflow in Triggers, then change the caller to the new URL. V2 webhooks take POST with a JSON body.${getNote}${mapping}${off}`,
     );
+    const firstRenamed = renamed[0]?.[0];
+    if (firstRenamed !== undefined) {
+      requireDecision(
+        b,
+        `V1 webhook trigger "${t.name}" copied request fields into variables with other names (${mappingText(renamed)}). A V2 webhook does not copy them: each condition reads the variable name from the JSON body, such as ${triggerDataPath(firstRenamed)}. Change the caller to send the variable names, or change the conditions to read the request fields.`,
+      );
+    }
+    // V1 set only the mapped variables from the request (`webhooks.ts` in
+    // `packages/worker/src/services`). A V2 webhook passes the whole body.
+    const unset = [...b.variables.keys()].filter((v) => !Object.prototype.hasOwnProperty.call(t.variableMapping ?? {}, v));
+    if (unset.length > 0) {
+      const them = unset.length === 1 ? 'it' : 'them';
+      requireDecision(
+        b,
+        `V1 webhook trigger "${t.name}" set only mapped variables from the request${fields === '' ? ', and it has no mapping' : ` (${fields})`}. V1 left ${unset.map(quote).join(', ')} unset, so each condition on ${them} took its false branch. A V2 webhook passes the JSON body as trigger.data, so these conditions read ${unset.map(triggerDataPath).join(', ')} from the request. Decide whether the conditions must read the request, then change the conditions or the caller.`,
+      );
+    }
     return;
   }
   b.checklist.push(`V1 trigger "${t.name}" has the unknown type ${JSON.stringify(type)}. The import did not create it.`);
 }
 
 /** `environment from $.target, repo from $.repo`, or '' for no mapping. */
-function mappingText(t: V1TriggerRow): string {
-  return Object.entries(t.variableMapping ?? {})
-    .map(([key, from]) => `${key} from ${String(from)}`)
-    .join(', ');
+function mappingText(entries: [string, unknown][]): string {
+  return entries.map(([key, from]) => `${key} from ${String(from)}`).join(', ');
 }
 
 /** Builds nodes from steps. A step V1's compiler refused is left out

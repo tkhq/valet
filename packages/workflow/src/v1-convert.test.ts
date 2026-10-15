@@ -637,6 +637,63 @@ describe('convertV1Workflows: workflows and triggers', () => {
     expect((await runInV2(wf, {}, { target: 'prod' })).status).toMatchObject({ deploy: 'skipped' });
   });
 
+  it('says a V1 webhook with no mapping left the condition variables unset, where V2 reads the request body', async () => {
+    const spawn = (id: string) => ({ id, type: 'tool', tool: 'spawn_session', arguments: { task: `Run ${id}.`, workspace: 'app' } });
+    const out = convert({
+      workflows: [
+        {
+          id: 'wf_5',
+          name: 'Issue closed',
+          enabled: true,
+          data: { steps: [{ id: 'closed', type: 'conditional', condition: { variable: 'action', equals: 'closed' }, then: [spawn('cleanup')], else: [spawn('noop')] }] },
+        },
+      ],
+      triggers: [{ name: 'Issues', enabled: true, workflowId: 'wf_5', config: { type: 'webhook', path: 'issues' } }],
+    });
+    const wf = out.workflows[0]!;
+    expect(wf.checklist).toEqual([
+      expect.stringContaining('webhook trigger "Issues" (POST issues)'),
+      'V1 webhook trigger "Issues" set only mapped variables from the request, and it has no mapping. V1 left "action" unset, so each condition on it took its false branch. A V2 webhook passes the JSON body as trigger.data, so these conditions read trigger.data.action from the request. Decide whether the conditions must read the request, then change the conditions or the caller.',
+    ]);
+    // V1 ran "noop" for this request. V2 reads the posted field and runs "cleanup".
+    expect((await runInV2(wf, {}, { action: 'closed' })).status).toMatchObject({ cleanup: 'completed', noop: 'skipped' });
+  });
+
+  it('requires a decision for a V1 webhook mapping from a field with another name, which V2 does not apply', async () => {
+    const out = convert({
+      workflows: [
+        {
+          id: 'wf_6',
+          name: 'Deploy hook',
+          enabled: true,
+          data: {
+            steps: [
+              {
+                id: 'env',
+                type: 'conditional',
+                condition: { variable: 'environment', equals: 'prod' },
+                then: [{ id: 'deploy', type: 'tool', tool: 'spawn_session', arguments: { task: 'Deploy.', workspace: 'app' } }],
+              },
+            ],
+          },
+        },
+      ],
+      triggers: [
+        { name: 'Deploys', enabled: true, workflowId: 'wf_6', config: { type: 'webhook', path: 'deploy' }, variableMapping: { environment: '$.target', repo: '$.repo' } },
+        { name: 'Nightly', enabled: true, workflowId: 'wf_6', config: { type: 'schedule', cron: '0 2 * * *', timezone: 'UTC' } },
+      ],
+    });
+    const wf = out.workflows[0]!;
+    expect(wf.checklist).toEqual([
+      'V1 started this workflow from webhook trigger "Deploys" (POST deploy). Create a webhook for this workflow in Triggers, then change the caller to the new URL. V2 webhooks take POST with a JSON body. V1 copied request fields into variables of the same name (repo from $.repo). V2 reads them from trigger.data the same way.',
+      'V1 webhook trigger "Deploys" copied request fields into variables with other names (environment from $.target). A V2 webhook does not copy them: each condition reads the variable name from the JSON body, such as trigger.data.environment. Change the caller to send the variable names, or change the conditions to read the request fields.',
+      // A required decision holds the schedule.
+      expect.stringContaining('This workflow does not do exactly what it did in V1, so it must not run on a schedule yet.'),
+    ]);
+    // V1 deployed for this request. V2 reads trigger.data.environment and skips the deploy.
+    expect((await runInV2(wf, {}, { target: 'prod' })).status).toMatchObject({ deploy: 'skipped' });
+  });
+
   it('refuses orchestrator schedules alone, and lists them to add by hand', () => {
     const result = convertV1Workflows({
       triggers: [{ name: 'Standup', enabled: true, config: { type: 'schedule', cron: '0 9 * * 1-5', target: 'orchestrator', prompt: 'Post the standup.' } }],

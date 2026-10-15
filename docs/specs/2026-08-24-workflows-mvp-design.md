@@ -538,6 +538,8 @@ When the import cannot do exactly what V1 did, the checklist line is a required 
 - an approval inside a `parallel` or a `conditional` step. A timeout there cancelled the V1 run, but in V2 it acts as a denial, and the run goes on after the step.
 - more than one approval node. V1 cancelled the whole run 24 hours after it started (`getTimedOutApprovals`), and V2 gives each approval its own 24-hour timeout. The line tells the person to decide the timeouts.
 - a manual trigger with a `variableMapping`. The line names each mapping, such as `environment from $.target`.
+- a webhook trigger that does not map a variable that a condition reads. V1 set only the mapped variables from the request (`packages/worker/src/services/webhooks.ts`), so the variable was unset and each condition on it took its false branch. A V2 webhook passes the whole JSON body as `trigger.data`, so the same condition reads the posted field.
+- a webhook trigger that maps a variable from a field with another name, such as `environment from $.target`. A V2 webhook applies no mapping, so a condition on `environment` reads `trigger.data.environment`, not the `target` field. A mapping from the field of the same name, such as `repo from $.repo`, reads the same value in V2 and gets only an information line.
 - a schedule whose cron expression V2 reads differently (see above).
 
 Other lines give information. They cover webhook triggers, steps listed out of id order, and `{{ }}` text. They also cover the `agent`, `loop` and `subworkflow` steps and the unknown tools that did nothing in V1. A variable that the run form does not show gets one too: a truthiness variable, or a variable that the conditions compare to more than one type.
