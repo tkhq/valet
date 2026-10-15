@@ -304,8 +304,12 @@ const MENTION_LOOKUP_TIMEOUT_MS = 3_000;
  * source is message text or parsed Block Kit JSON. The walk scans every
  * string for `<@U…>` mentions and adds the user_id of every rich-text `user`
  * element. It skips `plain_text` objects: Slack shows their text literally,
- * so a `<@U…>` there mentions no one.
+ * so a `<@U…>` there mentions no one. It also skips Block Kit fields that
+ * Slack never shows as message text: IDs, URLs, image alt text, and the
+ * `value` that a button or a select option sends back.
  */
+const UNRENDERED_KEYS = new Set(['action_id', 'block_id', 'callback_id', 'alt_text', 'url', 'image_url', 'value']);
+
 function mentionedUserIds(sources: unknown[]): Set<string> {
   const ids = new Set<string>();
   // A queue, not recursion: blocks are caller-supplied JSON of any depth.
@@ -321,7 +325,9 @@ function mentionedUserIds(sources: unknown[]): Set<string> {
       if ('type' in value && value.type === 'user' && 'user_id' in value && typeof value.user_id === 'string') {
         ids.add(value.user_id);
       }
-      for (const item of Object.values(value)) queue.push(item);
+      for (const [key, item] of Object.entries(value)) {
+        if (!UNRENDERED_KEYS.has(key)) queue.push(item);
+      }
     }
   }
   return ids;

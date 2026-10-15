@@ -1390,6 +1390,24 @@ describe('slack actions', () => {
       expect(messageWrites(fetchMock)).toHaveLength(1);
     });
 
+    // Slack never shows a button or option value, or image alt text, as
+    // message text, so an ID there is not a mention.
+    it('send_message skips button and option values and image alt text', async () => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const option = { text: { type: 'plain_text', text: 'Owner' }, value: `<@${unknownUser}>` };
+      const blocks = JSON.stringify([
+        { type: 'actions', elements: [
+          { type: 'button', text: { type: 'plain_text', text: 'Ack' }, action_id: 'ack', value: `<@${unknownUser}>` },
+          { type: 'static_select', action_id: 'owner', options: [option] },
+        ] },
+        { type: 'image', image_url: 'https://example.com/a.png', alt_text: `Chart for <@${unknownUser}>` },
+        { type: 'section', text: { type: 'mrkdwn', text: 'Ping <@U01AAAAAAA>' } },
+      ]);
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: 'Ack', blocks }, pluginCtx());
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(lookedUpUsers(fetchMock)).toEqual(['U01AAAAAAA']);
+    });
+
     it('send_message looks up each mentioned user once, labeled or not, and skips special mentions', async () => {
       mockSlackMethods(fetchMock, userFound);
       const text = 'Hi <@U01AAAAAAA|reviewer> and <@U01AAAAAAA>, <@W01BBBBBBB>. <!here> <!channel> <!subteam^S01CCCCCCC> <#C01DDDDDDD|general>';
