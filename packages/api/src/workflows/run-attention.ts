@@ -231,11 +231,14 @@ async function signalOrigin(
   const { thread, priorQueueItemId } = await resolveWorkflowReportTarget(deps,
     { type: assistant.ownerType, id: assistant.ownerId }, meta, source.session, sourceThread, dispatchId);
   if (priorQueueItemId) return;
+  // Execution inherits focus; reports inherit only the origin's authorization ceiling.
+  // Older runs did not record that ceiling, so retain their execution restriction.
+  const toolScope = run.params.originToolScope ?? run.params.toolScope;
   await thread.submitPrompt({ kind: "signal", ...(await signal()) }, { dispatchId, queueMode: "followup",
     // Continue with the starting member's authority, including private run evidence.
     // Signal turns remain non-interactive in the engine and retain normal access checks.
     author: { id: actorUserId, name: "Valet" },
-    ...(run.params.toolScope !== undefined ? { metadata: { toolScope: readToolScope(run.params.toolScope) } } : {}),
+    ...(toolScope !== undefined ? { metadata: { toolScope: readToolScope(toolScope) } } : {}),
   });
 }
 
