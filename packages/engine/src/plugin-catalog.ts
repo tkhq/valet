@@ -791,7 +791,9 @@ export async function invokeAction(
     // Pass `approves` through to the gate — DecisionAction persists it on
     // the row so denial stickiness classifies host rejection actions the
     // same way isApprovedResolution does.
-    const extras: DecisionAction[] = decision.approver ? [] : decision.extraGateActions ?? [];
+    const extras: DecisionAction[] = decision.approver
+      ? decision.approver.allowTeamConsent ? (decision.extraGateActions ?? []).filter(a => a.id === "always_allow_account") : []
+      : decision.extraGateActions ?? [];
     const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey, ctx);
     if (decision.approver?.shareGeneration) {
       const share = `:share:${decision.approver.shareGeneration}`;
@@ -803,7 +805,7 @@ export async function invokeAction(
     const borrowScope = ctx.sessionId.startsWith("wf:") ? "workflow run" : "thread";
     const label = entry.plugin.displayName ?? entry.service;
     const borrowed = decision.approver
-      ? { title: `Let a teammate use your ${label} account?`, body: `${summary}\n\nValet would use your ${label} account for "${entry.action.name}". If you allow it, later ${label} actions in this ${borrowScope} can use it too, including ones other teammates ask for. Only you can answer.` }
+      ? { title: `Let a teammate use your ${label} account?`, body: `${summary}\n\nValet would use your ${label} account for "${entry.action.name}". If you allow it, later ${label} actions in this ${borrowScope} can use it too, including ones other teammates ask for. Only you can answer.${decision.approver.allowTeamConsent ? " Always allow for this team covers future threads and runs until you choose Stop sharing in Integrations. Action approvals still apply." : ""}` }
       : {};
     const gateOutcome = await requestApprovalDecision(ctx, {
       ...baseReq,
@@ -861,6 +863,10 @@ export async function invokeAction(
       return onResolutionThrew
         ? { kind: "denied-approval", reason: "approval-processing-failed" }
         : { kind: "denied-approval" };
+    }
+    if (decision.approver && resolution.actionId === "always_allow_account") {
+      // Account consent never grants the action's separate policy permission.
+      return invokeAction(catalog, actionId, args, ctx, summary);
     }
     const availability = await checkServiceAvailability(
       catalog,

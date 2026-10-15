@@ -443,6 +443,7 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   PRIMARY KEY ("team_id", "service", "user_id")
 )` },
   { describe: "credential share generation", probe: { kind: "column", table: "credential_shares", column: "generation" }, sql: 'ALTER TABLE "credential_shares" ADD COLUMN IF NOT EXISTS "generation" text NOT NULL DEFAULT gen_random_uuid()::text' },
+  { describe: "credential share lasting consent", probe: { kind: "column", table: "credential_shares", column: "borrow_consent_at" }, sql: 'ALTER TABLE "credential_shares" ADD COLUMN IF NOT EXISTS "borrow_consent_at" bigint' },
   // A share used to be a team credential row with `metadata.delegatedFrom`,
   // one per team and service. Move each into its own share row. This runs
   // until the index below exists, so it lands once, before that index.

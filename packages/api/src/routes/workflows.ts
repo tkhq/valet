@@ -883,8 +883,8 @@ workflowsRouter.post("/runs/:runId/approvals/:nodeId", async (c) => {
   if ("grantActions" in body) {
     return c.json({ error: "grantActions is no longer supported; use scope instead" }, 400);
   }
-  if (body.scope !== undefined && !["once", "run", "always", "workflow"].includes(body.scope)) {
-    return c.json({ error: "scope must be one of: once, run, always, workflow" }, 400);
+  if (body.scope !== undefined && !["once", "run", "always", "workflow", "team_account"].includes(body.scope)) {
+    return c.json({ error: "scope must be one of: once, run, always, workflow, team_account" }, 400);
   }
   if (body.iteration !== undefined && (!Number.isInteger(body.iteration) || body.iteration < 0)) {
     return c.json({ error: "iteration must be a non-negative integer" }, 400);

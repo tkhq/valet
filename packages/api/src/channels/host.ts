@@ -1836,6 +1836,14 @@ export class ChannelHost {
       return;
     }
 
+    if (gateCallback.actionId === "always_allow_account" && (
+      channelType !== "slack" || !stored || !gateApprover(stored)
+      || !stored.actions.some(action => action.id === "always_allow_account")
+    )) {
+      await transport?.answerCallback?.(gateCallback.callbackId, "Open this account approval in Valet as the account owner to allow it for the team.");
+      return;
+    }
+
     // Resolve on the session the gate actually lives on. A gate prompt is
     // recorded from two senders — the channel-thread card (always the
     // sender's default assistant session) and an attention DM (any session

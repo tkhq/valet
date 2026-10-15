@@ -4,15 +4,15 @@
  * A team action uses the acting member's own shared account, then the team's
  * own connection (`credential-resolution.ts#readTeamCredential`). When only
  * another member's account would answer, that member is asked first, and
- * their approval is recorded here as a runtime grant: for one conversation
- * (thread) of a session, or for one workflow run. The host's credential read
- * borrows the account only while that grant stands.
+ * their approval covers one conversation (thread) or workflow run by default.
+ * Explicit lasting consent stays on the current share until it ends.
+ * The host checks that consent and current team authorization on each read.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { parseWorkflowSessionId } from "../workflows/engine-deps.js";
-import { agentSessions, credentialShares, runtimeGrants, workflowRuns } from "../schema/index.js";
+import { actionInvocations, agentSessions, credentialShares, runtimeGrants, workflowRuns } from "../schema/index.js";
 
 /** Where a borrow approval applies: a session's thread, or a workflow run
  * (a `wf:<runId>:<node>` session). */
@@ -102,12 +102,22 @@ export async function canBorrowCredential(
   scope: BorrowScope & { orgId: string; teamId: string; actorId?: string },
 ): Promise<boolean> {
   if (!scope.actorId) return false;
-  const key = await borrowKey(db, scope);
-  if (!key) return false;
   const runId = workflowRunOf(scope.sessionId);
   if (scope.sessionId.startsWith("wf:") && !runId) return false;
   const unattended = scope.actorId === `team:${scope.teamId}`;
   if (unattended && !runId && !scope.threadId) return false;
+  const memberAuthorization = sql`EXISTS (SELECT 1 FROM team_members m JOIN teams t ON t.id = m.team_id
+    WHERE m.team_id = ${scope.teamId} AND m.user_id = ${unattended ? scope.memberId : scope.actorId} AND t.org_id = ${scope.orgId})`;
+  const runtimeAuthorization = unattended ? (runId ? unattendedWorkflowOwner(scope, runId) : unattendedRuntimeOwner(scope)) : undefined;
+  const [consent] = await db.select({ generation: credentialShares.generation }).from(credentialShares).where(and(
+    eq(credentialShares.teamId, scope.teamId), eq(credentialShares.service, scope.service), eq(credentialShares.userId, scope.memberId),
+    isNotNull(credentialShares.borrowConsentAt), memberAuthorization, runtimeAuthorization,
+    sql`EXISTS (SELECT 1 FROM team_members m WHERE m.team_id = ${scope.teamId} AND m.user_id = ${scope.memberId})`,
+    sql`EXISTS (SELECT 1 FROM credentials c WHERE c.owner_type = 'user' AND c.owner_id = ${scope.memberId} AND c.service = ${scope.service})`,
+  )).limit(1);
+  if (consent) return true;
+  const key = await borrowKey(db, scope);
+  if (!key) return false;
   const rows = await db.select({ id: runtimeGrants.id }).from(runtimeGrants).where(and(
     eq(runtimeGrants.orgId, scope.orgId),
     runId ? eq(runtimeGrants.workflowExecutionId, runId) : eq(runtimeGrants.sessionId, scope.sessionId),
@@ -121,7 +131,25 @@ export async function canBorrowCredential(
 }
 
 /** Records `scope.memberId`'s approval. Approving again is a no-op. */
-export async function writeBorrowGrant(db: AppQueryable, orgId: string, scope: BorrowScope & { shareGeneration: string }, now = Date.now()): Promise<void> {
+export async function writeBorrowGrant(db: AppQueryable, orgId: string, scope: BorrowScope & { shareGeneration: string; consentScope?: "team" }, now = Date.now()): Promise<void> {
+  if (scope.consentScope === "team") return db.transaction(async tx => {
+    const updated = await tx.update(credentialShares).set({ borrowConsentAt: sql`COALESCE(${credentialShares.borrowConsentAt}, ${now})` }).where(and(
+      eq(credentialShares.teamId, scope.teamId), eq(credentialShares.service, scope.service), eq(credentialShares.userId, scope.memberId),
+      eq(credentialShares.generation, scope.shareGeneration),
+      sql`EXISTS (SELECT 1 FROM team_members m JOIN teams t ON t.id = m.team_id
+        WHERE m.team_id = ${scope.teamId} AND m.user_id = ${scope.memberId} AND t.org_id = ${orgId})`,
+      sql`EXISTS (SELECT 1 FROM credentials c WHERE c.owner_type = 'user' AND c.owner_id = ${scope.memberId} AND c.service = ${scope.service})`,
+    )).returning({ generation: credentialShares.generation });
+    if (updated.length === 0) throw new Error("This account share changed. Request account approval again.");
+    const runId = workflowRunOf(scope.sessionId);
+    await tx.insert(actionInvocations).values({
+      invocationId: `credential-consent:${scope.shareGeneration}`, createdAt: now,
+      service: scope.service, actionId: "credential.borrow", resolvedMode: "require_approval", status: "approved",
+      orgId, sessionId: runId ? null : scope.sessionId, threadId: scope.threadId ?? null,
+      workflowExecutionId: runId ?? null, userId: scope.memberId, resolvedBy: scope.memberId,
+      params: { scope: "team", teamId: scope.teamId, memberId: scope.memberId, shareGeneration: scope.shareGeneration },
+    }).onConflictDoNothing();
+  });
   const key = await borrowKey(db, scope);
   if (!key || key !== grantKey(scope, scope.shareGeneration)) throw new Error("This account share changed. Request account approval again.");
   const runId = workflowRunOf(scope.sessionId);

@@ -968,7 +968,7 @@ export async function sharedAccountApprover(
   ctx: ActionInvocationContext,
   teamId: string,
   service: string,
-): Promise<{ userId: string; name?: string; shareGeneration: string } | undefined> {
+): Promise<{ userId: string; name?: string; shareGeneration: string; allowTeamConsent: true } | undefined> {
   // An external call has no run to attach a member's approval to, so it
   // never borrows. It still reports whose approval the account needs, so the
   // caller hears to delegate with start_thread instead of "no credential".
@@ -997,7 +997,7 @@ export async function sharedAccountApprover(
   const [member] = await opts.db.select({ name: users.name }).from(users).where(eq(users.id, approvalFrom)).limit(1);
   const generation = await shareGeneration(opts.db, teamId, service, approvalFrom);
   if (!generation) return undefined;
-  return { shareGeneration: generation, userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
+  return { allowTeamConsent: true, shareGeneration: generation, userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
 }
 
 /**

@@ -255,4 +255,14 @@ describe("PolicyGateCard", () => {
     expect(mutate).toHaveBeenCalledExactlyOnceWith({ nodeId: "node_1", body: { approved: true, scope: "run" } });
   });
 
+  it("offers lasting consent only on new account gates and submits its distinct scope", () => {
+    const { rerender } = render(<PolicyGateCard runId="wfrun_1" gate={makeGate({ approver: { userId: "me" } })} />);
+    expect(screen.queryByRole("button", { name: "Always allow for this team" })).toBeNull();
+    rerender(<PolicyGateCard runId="wfrun_1" gate={makeGate({ serviceDisplayName: "Linear MCP", approver: { userId: "me", allowTeamConsent: true } })} />);
+    expect(screen.getByText(/use your Linear MCP account/)).toBeTruthy();
+    expect(screen.getByText(/Stop sharing/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Always allow for this team" }));
+    expect(mutate).toHaveBeenCalledExactlyOnceWith({ nodeId: "node_1", body: { approved: true, scope: "team_account" } });
+  });
+
 });

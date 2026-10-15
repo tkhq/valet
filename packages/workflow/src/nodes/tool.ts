@@ -91,6 +91,7 @@ function capJson(value: unknown): CapResult {
 // ─── Gate payload parsing ─────────────────────────────────────────────────────
 
 interface GatePayload {
+  accountConsent: boolean;
   approved: boolean;
   resolvedBy: string;
   note?: string;
@@ -108,6 +109,7 @@ function parseGatePayload(payload: unknown): GatePayload {
     throw new Error('gate resolution signal payload missing string "resolvedBy"');
   }
   return {
+    accountConsent: p.scope === 'team_account',
     approved: p.approved,
     resolvedBy: p.resolvedBy,
     note: typeof p.note === 'string' ? p.note : undefined,
@@ -158,7 +160,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
       if (!payload.approved) {
         return await denyOutcome(args, invocationId, payload.resolvedBy, payload.note, heldSignal);
       }
-      approval = {
+      if (!payload.accountConsent) approval = {
         resolvedBy: payload.resolvedBy,
         ...(payload.note !== undefined ? { note: payload.note } : {}),
       };
@@ -196,7 +198,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
         error: `approval was recorded but policy enforcement still requires approval for ${node.service}.${node.action} — the grant write may have failed; resolve the gate again or check org policies`,
       });
     }
-    return await openGate(args, invocationId, renderedParams, response.riskLevel, response.provenance, response.approver);
+    return await openGate(args, invocationId, renderedParams, response.riskLevel, response.provenance, response.approver, heldSignal);
   }
 
   if (!response.ok) {
@@ -218,7 +220,8 @@ async function openGate(
   renderedParams: Record<string, unknown>,
   riskLevel: string | undefined,
   provenance: string | undefined,
-  approver: { userId: string; name?: string; shareGeneration?: string } | undefined,
+  approver: { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true } | undefined,
+  accountSignal?: RunSignal,
 ): Promise<NodeExecuteResult> {
   const { run, node, attempt, iteration, store, clock, onApprovalPending } = args;
   const suffix = iterationSuffix(iteration);
@@ -250,6 +253,7 @@ async function openGate(
   const gateEffects: Record<string, unknown> = {
     invocationId,
     gate: true,
+    ...(accountSignal ? { accountConsentResolved: true } : {}),
     gateParams: gp.value,
     ...(gp.truncated ? { gateParamsTruncated: true } : {}),
     ...(gateItem !== undefined ? { gateItem } : {}),
@@ -261,15 +265,13 @@ async function openGate(
 
   // putIntent replaces an existing intent row (memory-store.ts:196) — this
   // is the documented way to grow effects on a re-entered intent.
-  await store.putIntent({
-    runId: run.runId,
-    nodeId: node.id,
-    iteration,
-    status: 'intent',
-    attempt,
-    createdAt: clock(),
-    effects: gateEffects,
-  });
+  const checkpoint: NodeCheckpoint = { runId: run.runId, nodeId: node.id, iteration,
+    status: 'intent', attempt, createdAt: clock(), effects: gateEffects };
+  if (accountSignal) {
+    await store.consumeSignalAndCheckpoint(accountSignal.signalId, { nodeId: node.id, iteration, attempt }, checkpoint);
+  } else {
+    await store.putIntent(checkpoint);
+  }
 
   // Fire onApprovalPending only on first gate open (effects.gate !== true
   // before this call — the check is done in the caller before entering
