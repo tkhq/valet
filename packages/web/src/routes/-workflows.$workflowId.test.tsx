@@ -467,6 +467,27 @@ describe("WorkflowEditorPage", () => {
     expect(navigate).not.toHaveBeenCalled();
   });
 
+  it("disables Test while the definition has unsaved edits, because the assistant tests the saved workflow", async () => {
+    const user = userEvent.setup();
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    const testButton = () => screen.getByRole("button", { name: "Test" }) as HTMLButtonElement;
+    expect(testButton().disabled).toBe(false);
+    expect(screen.queryByTitle(/Save your changes/)).toBeNull();
+
+    await openJsonMode(user);
+    const textarea = screen.getByLabelText("Definition (JSON)") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: textarea.value.replace('"success"', '"failure"') } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect(testButton().disabled).toBe(true);
+    // The disabled button takes no pointer events, so its wrapper carries the reason.
+    expect(screen.getByTitle("Save your changes first. Test checks the saved workflow.").contains(testButton())).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(testButton().disabled).toBe(false);
+    expect(screen.queryByTitle(/Save your changes/)).toBeNull();
+  });
+
   it("offers Leave without saving while a departure is held, and proceeds on confirm", () => {
     blocker = BLOCKED_BLOCKER;
     render(<WorkflowEditorPage workflowId="wf_1" />);

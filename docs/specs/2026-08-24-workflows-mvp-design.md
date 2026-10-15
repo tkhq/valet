@@ -480,7 +480,7 @@ One submitter sets no author and is not a person: an internal signal (`packages/
 
 ### Testing a workflow from the editor (2026-10-13)
 
-The editor has a **Test** button next to **Run**. Test does not start a run. It puts a test request in the editor conversation's composer and keeps the person in the editor. The editor guidance (`editor-thread-context.ts`) and the workflows skill define the procedure:
+The editor has a **Test** button next to **Run**. Test does not start a run. It puts a test request in the editor conversation's composer and keeps the person in the editor. The assistant previews and runs the saved workflow, so Test is disabled while the definition has unsaved edits. Its tooltip tells the person to save first. The editor guidance (`editor-thread-context.ts`) and the workflows skill define the procedure:
 
 1. State two to four concrete checks that the result must pass.
 2. Call `workflows.preview_workflow`. It uses the same `previewWorkflow()` function as `POST /api/workflows/:id/preview`. It runs only `trigger`, `set`, `if`, and `stop` steps and describes the other steps, so it has no side effects.

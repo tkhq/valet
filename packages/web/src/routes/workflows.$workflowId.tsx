@@ -131,6 +131,10 @@ export function WorkflowEditorPage({ workflowId, newTrigger }: { workflowId: str
  * own guidance (`editor-thread-context.ts`) says how to carry it out. */
 const TEST_REQUEST = "Test this workflow: state the checks, dry-run it, then ask me before a real run.";
 
+/** Why Test is off while the definition has unsaved edits: the assistant
+ * reads the saved workflow, so it would test something the canvas does not show. */
+const TEST_NEEDS_SAVE = "Save your changes first. Test checks the saved workflow.";
+
 /** Module scope so the blocker's effect does not re-register on each render.
  * `disabled` decides whether the blocker runs at all; when it runs, every
  * departure is blocked. */
@@ -351,9 +355,12 @@ function WorkflowEditorPane({
               {copy.isPending ? "Copying…" : "Copy"}
             </Button>
           )}
-          <Button size="sm" variant="secondary" onClick={handleTest} disabled={!assistant.sessionId || !assistant.threadId}>
-            Test
-          </Button>
+          {/* A disabled Button takes no pointer events, so the wrapper shows the reason. */}
+          <span className="inline-flex" title={definitionDirty ? TEST_NEEDS_SAVE : undefined}>
+            <Button size="sm" variant="secondary" onClick={handleTest} disabled={!assistant.sessionId || !assistant.threadId || definitionDirty}>
+              Test
+            </Button>
+          </span>
           <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
             {startRun.isPending ? "Starting…" : "Run"}
           </Button>
