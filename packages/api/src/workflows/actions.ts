@@ -16,7 +16,7 @@ import { TeamAdminRequiredError } from "../services/team-deletion-access.js";
 import { submitDeletionRequest } from "../services/team-deletion-requests.js";
 import { proposalResult } from "../events/proposals.js";
 import { ValetError } from "@valet/shared";
-import { WorkflowCursorError, type WorkflowDefinition, type WorkflowEdge } from "@valet/workflow";
+import { WorkflowCursorError, type WorkflowDefinition, type WorkflowEdge, type WorkflowRun } from "@valet/workflow";
 import type { Static, TSchema } from "typebox";
 import { Type } from "typebox";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
@@ -266,11 +266,32 @@ function uncheckedSteps(definition: unknown): Array<{ nodeId: string; type: stri
   return unchecked;
 }
 
-/** What resolve_approval tells the assistant after a person answers the card. */
+/** What resolve_approval tells the assistant after a person answers the card,
+ * when this conversation started the run, so the run's signals arrive here. */
 export const RESOLVED_GATE_NEXT =
   "The run continues. A workflow.settled signal reports its result in this thread, " +
   "and a workflow.approval_needed signal says when it waits again. " +
   "Tell the person the gate is resolved, then end your turn. Do not call get_run to wait for the result.";
+
+/** True when the run's signals reach this conversation. They go only to the
+ * thread that started the run (`signalOrigin` in run-attention.ts), and a
+ * sub-run reports nowhere. */
+export function runReportsToThread(
+  params: Pick<WorkflowRun["params"], "origin" | "parentRunId">,
+  sessionId: string | undefined,
+  threadId: string | undefined,
+): boolean {
+  const origin = params.origin;
+  return params.parentRunId === undefined && origin !== undefined
+    && origin.assistantSessionId === sessionId && origin.threadId === threadId;
+}
+
+/** The same, when another conversation started the run (or none did). The
+ * run's signals go only to the conversation that started it, so this one
+ * must read the result itself. */
+export const RESOLVED_GATE_NEXT_ELSEWHERE =
+  "The run continues, but its signals go to the conversation that started it, not this one. " +
+  "To tell the person the result here, call get_run when they ask or after a short wait.";
 
 export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): ActionPlugin {
   const copyToTeam = action(Type.Object({
@@ -673,9 +694,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Approve or deny a run's pending gate: an approval node, or a tool node that policy holds. " +
       "Call it when the user asks you to resolve a gate; never resolve one on your own judgment. " +
       "Valet shows the user a card for the gate, and the gate resolves as the person who confirms it. " +
-      "The run then continues. A workflow.settled signal reports its result in this thread, " +
-      "and a workflow.approval_needed signal says when it waits again. " +
-      "End your turn after the call and continue from that signal; do not poll.",
+      "The run then continues. If this conversation started the run, a workflow.settled signal reports its result here, " +
+      "and a workflow.approval_needed signal says when it waits again: end your turn after the call and continue from that signal; do not poll. " +
+      "The result's `next` field says which case applies.",
     // The call itself always asks a person (below), so the catalog's own
     // approval card would only ask twice. A policy cannot skip that question.
     riskLevel: "medium",
@@ -730,7 +751,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       // The result is what the assistant reads right after the card. Saying
       // here that the signal reports the run stops a get_run poll that
       // reports the run twice: once from the poll, once from the signal.
-      return { success: true, data: { runId: run_id, nodeId: node_id, approved, next: RESOLVED_GATE_NEXT } };
+      const next = runReportsToThread(run.params, ctx.sessionId, ctx.threadId) ? RESOLVED_GATE_NEXT : RESOLVED_GATE_NEXT_ELSEWHERE;
+      return { success: true, data: { runId: run_id, nodeId: node_id, approved, next } };
     },
   });
 

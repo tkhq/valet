@@ -238,11 +238,15 @@ Hardening (applies to approval-node resolutions too — shared route):
    invocation context (the synthetic `wf:invoke:` session id), so a workflow
    cannot approve its own or another run's gates. Updated 2026-10-14: before,
    the action refused policy gates, and an agent could only send the user to
-   the run page. Updated 2026-10-15: after the call, the assistant ends its
-   turn and continues from the next `workflow.settled` or
-   `workflow.approval_needed` signal, the same rule as after `start_run`. An
-   assistant that polled `get_run` after an approval reported a fast run
-   twice: once from the poll and once from the settle signal.
+   the run page. Updated 2026-10-15: the result's `next` field says what
+   follows. When the approving conversation started the run
+   (`runReportsToThread`), the run's `workflow.settled` and
+   `workflow.approval_needed` signals arrive there, so the assistant ends its
+   turn, the same rule as after `start_run`. An assistant that polled
+   `get_run` after an approval reported a fast run twice: once from the poll
+   and once from the settle signal. When another conversation started the
+   run, or none did, the signals do not arrive, so `next` tells the
+   assistant to read `get_run` instead.
 5. **Timeout.** After `timeoutAt` has passed, resolution returns 409
    `Gate timed out`.
 

@@ -6,6 +6,7 @@ import {
   findingKey,
   formatEditLintErrors,
   ownerFromContext,
+  runReportsToThread,
   workflowsActionPlugin,
 } from "./actions.js";
 import type { ActionPlugin, PluginActionContext, SessionEntry, ValetPlugin } from "@valet/engine";
@@ -80,6 +81,17 @@ describe("workflowsActionPlugin", () => {
       "workflows.update_schedule",
       "workflows.update_trigger",
     ]);
+  });
+
+  // The "end your turn" advice holds only when the run's signals reach the
+  // approving conversation; elsewhere the assistant must read get_run.
+  it("says a run reports to this thread only when this thread started it", () => {
+    const origin = { assistantSessionId: "s-a", threadId: "t-a" };
+    expect(runReportsToThread({ origin }, "s-a", "t-a")).toBe(true);
+    expect(runReportsToThread({ origin }, "s-a", "t-b")).toBe(false);
+    expect(runReportsToThread({ origin }, "s-b", "t-a")).toBe(false);
+    expect(runReportsToThread({}, "s-a", "t-a")).toBe(false);
+    expect(runReportsToThread({ origin, parentRunId: "run-parent" }, "s-a", "t-a")).toBe(false);
   });
 
   // An approval that settles the run fast tempted the assistant to poll
