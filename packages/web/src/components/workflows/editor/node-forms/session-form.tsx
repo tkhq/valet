@@ -27,7 +27,7 @@ export function SessionForm({
           emptyLabel="Use the runtime default"
           ariaLabel="Model"
         />
-        <LastRunModel models={lastRunModels} value={node.model} onPin={(model) => onChange({ model })} />
+        <LastRunModel models={lastRunModels} />
       </div>
       <JsonTextarea
         label="Output schema (JSON)"

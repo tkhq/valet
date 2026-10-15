@@ -5,14 +5,11 @@
  * sub-form (type switch + nested field edit) since it's the one place
  * that reuses the per-type forms recursively.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { ForeachNode, LlmNode, SessionNode, ToolNode, TriggerNode, WorkflowNode } from "@valet/workflow";
-import type { ModelInfo } from "@valet/api/wire";
-
-let catalog: ModelInfo[] = [];
 vi.mock("~/api/settings", () => ({
-  useModels: () => ({ data: { models: catalog }, isLoading: false, error: null }),
+  useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
   useModelTiers: () => ({ data: { xs: [], s: [], m: [], l: [], xl: [] }, isLoading: false, error: null }),
 }));
 
@@ -21,22 +18,10 @@ import { Inspector } from "./inspector";
 function noop() {}
 
 describe("Inspector", () => {
-  beforeEach(() => { catalog = []; });
-
-  it("shows the model a step called in the last run and pins it as the catalog model", () => {
-    catalog = [{
-      id: "anthropic/claude-sonnet-4-5", name: "Claude Sonnet 4.5", providerId: "anthropic", providerKind: "anthropic",
-      providerName: "Anthropic", active: true, approved: true,
-    }];
-    const onChange = vi.fn();
+  it("shows the model a step called in the last run", () => {
     const node: SessionNode = { id: "s-1", type: "session", mode: "start", prompt: "do it", model: "l" };
-    const { rerender } = render(<Inspector node={node} lastRunModels={["claude-sonnet-4-5"]} onChange={onChange} onRemove={noop} onDuplicate={noop} />);
+    render(<Inspector node={node} lastRunModels={["claude-sonnet-4-5"]} onChange={vi.fn()} onRemove={noop} onDuplicate={noop} />);
     expect(screen.getByText(/Last run used claude-sonnet-4-5\./)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Pin this model" }));
-    expect(onChange).toHaveBeenCalledWith({ model: "anthropic/claude-sonnet-4-5" });
-
-    rerender(<Inspector node={{ ...node, model: "anthropic/claude-sonnet-4-5" }} lastRunModels={["claude-sonnet-4-5"]} onChange={onChange} onRemove={noop} onDuplicate={noop} />);
-    expect(screen.queryByRole("button", { name: "Pin this model" })).toBeNull();
   });
 
   it("renders the llm form for an llm node and propagates a prompt edit", () => {

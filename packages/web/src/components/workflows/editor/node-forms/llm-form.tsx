@@ -27,7 +27,7 @@ export function LlmForm({
           emptyLabel="Choose a model"
           ariaLabel="Model"
         />
-        <LastRunModel models={lastRunModels} value={node.model} onPin={(model) => onChange({ model })} />
+        <LastRunModel models={lastRunModels} />
       </div>
       <LabeledTextarea label="System" value={node.system ?? ""} onChange={(value) => onChange({ system: value || undefined })} />
       <LabeledTextarea label="Prompt" value={node.prompt} onChange={(value) => onChange({ prompt: value })} />
