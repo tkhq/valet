@@ -145,6 +145,22 @@ export function Composer({
   const [preparing, setPreparing] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [selected, setSelected] = useState(false);
+  // True from a pointer press outside the composer that took focus from it
+  // until that press's click has fired. See `onBlurCapture`.
+  const [holdOpen, setHoldOpen] = useState(false);
+  const pointerPressed = useRef(false);
+  useEffect(() => {
+    const press = () => { pointerPressed.current = true; };
+    const release = () => { pointerPressed.current = false; };
+    window.addEventListener("pointerdown", press, true);
+    window.addEventListener("pointerup", release, true);
+    window.addEventListener("pointercancel", release, true);
+    return () => {
+      window.removeEventListener("pointerdown", press, true);
+      window.removeEventListener("pointerup", release, true);
+      window.removeEventListener("pointercancel", release, true);
+    };
+  }, []);
   useAutosizeTextarea(inputRef, text);
   useEffect(() => {
     if (replyTarget) inputRef.current?.focus();
@@ -779,6 +795,7 @@ export function Composer({
 
   const expanded =
     selected ||
+    holdOpen ||
     text.length > 0 ||
     images.length > 0 ||
     files.length > 0 ||
@@ -807,6 +824,20 @@ export function Composer({
         // Submission temporarily disables the input before restoring its focus.
         if (!event.currentTarget.contains(event.relatedTarget) && !send.isPending) {
           setSelected(false);
+          // A press outside blurs the composer on pointerdown. Collapsing then
+          // moves everything that rests on it, such as a decision card, so the
+          // release lands off the target and its click never fires. Stay open
+          // until the press ends; the click fires in the same task as pointerup.
+          if (pointerPressed.current) {
+            setHoldOpen(true);
+            const release = () => {
+              window.removeEventListener("pointerup", release, true);
+              window.removeEventListener("pointercancel", release, true);
+              setTimeout(() => setHoldOpen(false), 0);
+            };
+            window.addEventListener("pointerup", release, true);
+            window.addEventListener("pointercancel", release, true);
+          }
         }
       }}
       onSubmit={(e) => {
