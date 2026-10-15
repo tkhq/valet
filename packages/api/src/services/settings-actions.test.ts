@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { and, eq, sql } from "drizzle-orm";
 import type { PluginActionContext, Principal } from "@valet/engine";
 import { buildPluginCatalog, invokeAction } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { orgMembers, orgs, teamMembers, teams, users } from "../schema/index.js";
 import { settingsActionPlugin } from "./settings-actions.js";
+import { DEFAULT_TIER_MAP, setOrgDefaultTier, setOrgTierMap } from "./model-tiers.js";
+import { createLlmProvider } from "./llm-providers.js";
 
 function context(overrides: Partial<PluginActionContext> = {}): PluginActionContext {
   const unused = (): never => { throw new Error("Unexpected settings dependency"); };
@@ -24,7 +26,7 @@ function context(overrides: Partial<PluginActionContext> = {}): PluginActionCont
 describe("settings actions", () => {
   let api: TestApi;
   beforeEach(async () => { api = await bootTestApi(); });
-  afterEach(async () => { await api.cleanup(); });
+  afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllEnvs(); await api.cleanup(); });
 
   function action(id: string) {
     const found = settingsActionPlugin(api.providers.db, () => api.providers.engineCredentials).actions.find(a => a.id === `settings.${id}`);
@@ -93,6 +95,60 @@ describe("settings actions", () => {
     expect((await action("update_organization").execute({ name: "Denied" }, context({ orgId: "foreign-org" }))).success).toBe(false);
   });
 
+  it("rejects a NUL in the organization name without clearing the saved default tier", async () => {
+    const db = api.providers.db;
+    await setOrgDefaultTier(db, "local-org", "m");
+    const [before] = await db.select({ name: orgs.name }).from(orgs).where(eq(orgs.id, "local-org"));
+
+    const result = await action("update_organization").execute({ name: "Bad\u0000name", defaultTier: null }, context());
+
+    const [after] = await db.select({ name: orgs.name, defaultTier: orgs.defaultTier }).from(orgs).where(eq(orgs.id, "local-org"));
+    expect(after).toEqual({ name: before?.name, defaultTier: "m" });
+    expect(result).toMatchObject({ success: false, error: expect.stringMatching(/name.*NUL|NUL.*name/i) });
+  });
+
+  it("rolls back the default tier when the database rejects the organization rename", async () => {
+    const db = api.providers.db;
+    await setOrgDefaultTier(db, "local-org", "m");
+    const [before] = await db.select({ name: orgs.name }).from(orgs).where(eq(orgs.id, "local-org"));
+    await db.execute(sql`ALTER TABLE orgs ADD CONSTRAINT test_reject_rename CHECK (name <> 'Rejected organization')`);
+
+    await expect(action("update_organization").execute({ name: "Rejected organization", defaultTier: null }, context()))
+      .rejects.toMatchObject({ cause: { constraint: "test_reject_rename" } });
+
+    const [after] = await db.select({ name: orgs.name, defaultTier: orgs.defaultTier }).from(orgs).where(eq(orgs.id, "local-org"));
+    expect(after).toEqual({ name: before?.name, defaultTier: "m" });
+  });
+
+  it("saves the organization name and a usable default tier together", async () => {
+    const db = api.providers.db;
+    const provider = await createLlmProvider(db, { orgId: "local-org", kind: "anthropic", name: "Anthropic" });
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, `llm:${provider.id}`, { type: "api_key", apiKey: "test-anthropic-key" });
+
+    const result = await action("update_organization").execute({ name: "Renamed together", defaultTier: "m" }, context());
+
+    expect(result).toMatchObject({ success: true, data: { name: "Renamed together", defaultTier: "m" } });
+    const [after] = await db.select({ name: orgs.name, defaultTier: orgs.defaultTier, modelTiers: orgs.modelTiers }).from(orgs).where(eq(orgs.id, "local-org"));
+    expect(after).toEqual({ name: "Renamed together", defaultTier: "m", modelTiers: null });
+  });
+
+  it("keeps the organization name when a competing tier edit makes the requested default unusable", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    const db = api.providers.db;
+    const [before] = await db.select({ name: orgs.name }).from(orgs).where(eq(orgs.id, "local-org"));
+    const transaction = db.transaction.bind(db);
+    vi.spyOn(db, "transaction").mockImplementationOnce(async (callback) => {
+      await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, m: ["openai/gpt-4.1"] });
+      return transaction(callback);
+    });
+
+    const result = await action("update_organization").execute({ name: "Invalid default", defaultTier: "m" }, context());
+
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('serves tier "m"') });
+    const [after] = await db.select({ name: orgs.name, defaultTier: orgs.defaultTier }).from(orgs).where(eq(orgs.id, "local-org"));
+    expect(after).toEqual({ name: before?.name, defaultTier: null });
+  });
+
   it("keeps the catalog approval gate and rechecks authority after approval", async () => {
     const plugin = settingsActionPlugin(api.providers.db, () => api.providers.engineCredentials);
     let approvals = 0;
@@ -155,11 +211,13 @@ describe("settings actions", () => {
   });
 
   it("shares the organization default-tier validation with its HTTP route", async () => {
-    const patch = { defaultTier: "not-a-tier" };
-    const response = await fetch(`${api.baseUrl}/api/org/model-tiers`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+    const patch = { name: "Invalid default", defaultTier: "not-a-tier" };
+    const response = await fetch(`${api.baseUrl}/api/org/model-tiers`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ defaultTier: patch.defaultTier }) });
     expect(response.status).toBe(400);
     const body: unknown = await response.json();
     if (!body || typeof body !== "object" || !("error" in body)) throw new Error("Missing route error");
     expect(await action("update_organization").execute(patch, context())).toMatchObject({ success: false, error: body.error });
+    const [after] = await api.providers.db.select({ name: orgs.name, defaultTier: orgs.defaultTier }).from(orgs).where(eq(orgs.id, "local-org"));
+    expect(after).toEqual({ name: "Local Dev", defaultTier: null });
   });
 });
