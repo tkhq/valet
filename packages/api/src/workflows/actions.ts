@@ -666,7 +666,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     description:
       "Approve or deny a run's pending gate: an approval node, or a tool node that policy holds. " +
       "Call it when the user asks you to resolve a gate; never resolve one on your own judgment. " +
-      "Valet shows the user a card for the gate, and the gate resolves as the person who confirms it.",
+      "Valet shows the user a card for the gate, and the gate resolves as the person who confirms it. " +
+      "The run then continues. A workflow.settled signal reports its result in this thread, " +
+      "and a workflow.approval_needed signal says when it waits again. " +
+      "End your turn after the call and continue from that signal; do not poll.",
     // The call itself always asks a person (below), so the catalog's own
     // approval card would only ask twice. A policy cannot skip that question.
     riskLevel: "medium",

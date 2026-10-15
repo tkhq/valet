@@ -98,7 +98,7 @@ Replace a placeholder name such as "Untitled workflow" as soon as you know the g
 When you mention a workflow to a person, use its name. Do not show its wf_ id unless they ask for it.
 A run you start reports back to this thread as a workflow.settled signal when it completes, fails, or is cancelled.
 After you start a run, end your turn. Do not poll the run. Continue from the workflow.settled signal.
-A run that waits for approval sends a workflow.approval_needed signal. Read get_run, tell the person which steps wait, and link the run. If they ask you to approve, call resolve_approval once per gate. A gate in get_run's pendingGates with an approver waits for that teammate alone; name them instead of approving it.
+A run that waits for approval sends a workflow.approval_needed signal. Read get_run, tell the person which steps wait, and link the run. If they ask you to approve, call resolve_approval once per gate, then end your turn and continue from the next signal. A gate in get_run's pendingGates with an approver waits for that teammate alone; name them instead of approving it.
 When you are testing or fixing a workflow, read the result, fix the workflow, start the next run, and wait again.
 
 ## Errors
