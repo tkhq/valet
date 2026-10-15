@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { mintCliToken } from "../auth/cli-tokens.js";
 import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { getWorkflowRunDetail } from "../workflows/service.js";
 import type { ListNotificationDecisionsResponse } from "../wire/types.js";
@@ -252,4 +253,34 @@ it.each(["long question", "Unicode order"])("bounds inbox pages and roundtrips %
     headers: { "x-valet-test-user-id": "test-member" },
   })).status).toBe(400);
   list.mockRestore(); get.mockRestore();
+});
+
+
+it("requires a browser owner for lasting consent even when an API key names that owner", async () => {
+  api = await bootTestApi({ auth: true });
+  const signup = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "Lender", email: "lender@nowhere.test", password: "correct-horse-battery" }) });
+  const cookie = signup.headers.get("set-cookie")?.match(/better-auth\.session_token=[^;]+/)?.[0];
+  if (!cookie) throw new Error("Missing session cookie");
+  const me: unknown = await (await fetch(`${api.baseUrl}/api/me`, { headers: { cookie } })).json();
+  if (!me || typeof me !== "object" || !("id" in me) || typeof me.id !== "string" || !("orgId" in me) || typeof me.orgId !== "string") throw new Error("Missing user identity");
+  const key: unknown = await (await fetch(`${api.baseUrl}/api/auth/api-key/create`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ name: "Owner machine" }) })).json();
+  if (!key || typeof key !== "object" || !("key" in key) || typeof key.key !== "string") throw new Error("Missing API key");
+  const cli = await mintCliToken(api.providers.db, me.id, "test");
+  await api.providers.db.insert(teams).values({ id: "consent-auth", orgId: me.orgId, name: "Consent", createdAt: 1 });
+  await api.providers.db.insert(teamMembers).values({ teamId: "consent-auth", userId: me.id, role: "member" });
+  await api.providers.db.insert(agentSessions).values({ id: "consent-auth-session", userId: me.id, orgId: me.orgId, workspace: "/", ownerType: "team", ownerId: "consent-auth", createdAt: 1, updatedAt: 1 });
+  await api.providers.engineStore.saveThread("consent-auth-session", { id: "consent-auth-thread", sessionId: "consent-auth-session", key: "web:consent-auth", status: "active", queueMode: "steer", createdAt: 1, updatedAt: 1 });
+  await api.providers.engineStore.saveDecisionGate("consent-auth-session", "consent-auth-thread", {
+    id: "consent-auth-gate", sessionId: "consent-auth-session", threadId: "consent-auth-thread", queueItemId: "q", resumeKey: "auth", ordinal: 0,
+    type: "approval", title: "Use your account?", context: { approver: { userId: me.id, allowTeamConsent: true } },
+    actions: [{ id: "approve", label: "Allow" }, { id: "always_allow_account", label: "Always allow for this team", approves: true }], status: "pending", createdAt: 1, updatedAt: 1,
+  });
+  const answer = (headers: Record<string, string>) => fetch(`${api!.baseUrl}/api/threads/consent-auth-thread/decisions/consent-auth-gate/resolve`, {
+    method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ actionId: "always_allow_account" }),
+  });
+  expect((await answer({ "x-api-key": key.key })).status).toBe(403);
+  expect((await answer({ "x-api-key": cli.access_token })).status).toBe(403);
+  expect((await api.providers.engineStore.getDecisionGate("consent-auth-session", "consent-auth-gate"))?.status).toBe("pending");
+  expect((await answer({ cookie })).status).toBe(200);
 });

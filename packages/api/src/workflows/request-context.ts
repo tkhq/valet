@@ -25,6 +25,7 @@ export function workflowRequestContext(c: {
       userId: c.var.principal?.type === "team" ? `team:${c.var.principal.id}` : c.var.user.id,
       orgId: c.var.user.orgId,
       principal: c.var.principal,
+      humanAccountConsent: c.var.principal?.type === "user" && (c.var.authVia === "session" || c.var.authVia === "stub"),
       // An MCP app or a `valet login` CLI: a step change revokes grants.
       agentEditor: c.var.authVia !== undefined && isAgentCaller(c.var.authVia),
     },

@@ -53,6 +53,17 @@ describe("workspace singleton repair on an already migrated database", () => {
     await db.query("DELETE FROM credentials WHERE owner_id = 'team-s'");
   });
 
+  it("adds lasting account consent without approving existing shares", async () => {
+    await db.query("ALTER TABLE credential_shares DROP COLUMN IF EXISTS borrow_consent_at");
+    await db.query("INSERT INTO credential_shares(team_id, service, user_id, created_at) VALUES ('old-consent', 'linear', 'member', 1)");
+    await applyAppMigrations(db);
+    expect((await db.query("SELECT borrow_consent_at FROM credential_shares WHERE team_id = 'old-consent'")).rows).toEqual([{ borrow_consent_at: null }]);
+    await db.query("UPDATE credential_shares SET borrow_consent_at = 42 WHERE team_id = 'old-consent'");
+    await applyAppMigrations(db);
+    expect((await db.query("SELECT borrow_consent_at::text FROM credential_shares WHERE team_id = 'old-consent'")).rows).toEqual([{ borrow_consent_at: "42" }]);
+    await db.query("DELETE FROM credential_shares WHERE team_id = 'old-consent'");
+  });
+
   it("assigns stable distinct generations to shares on upgrade", async () => {
     await db.query("ALTER TABLE credential_shares DROP COLUMN generation");
     await db.query(`INSERT INTO credential_shares(team_id, service, user_id, created_at)

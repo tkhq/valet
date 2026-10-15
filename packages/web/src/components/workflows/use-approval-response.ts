@@ -5,7 +5,7 @@ import { useResolveApproval } from "~/api/workflows";
 type ApprovalResponse = Pick<ResolveWorkflowApprovalRequest, "approved" | "scope">;
 
 /** Shared submission state; each card owns its actions and confirmation copy. */
-export function useApprovalResponse(runId: string, nodeId: string, iteration?: number) {
+export function useApprovalResponse(runId: string, nodeId: string, iteration?: number, gateId?: string) {
   const [note, setNote] = useState("");
   const [confirmation, setConfirmation] = useState<ApprovalResponse | null>(null);
   const [submitted, setSubmitted] = useState<ApprovalResponse | null>(null);
@@ -15,7 +15,7 @@ export function useApprovalResponse(runId: string, nodeId: string, iteration?: n
     setSubmitted(response);
     resolve.mutate({
       nodeId,
-      body: { ...response, note: note.trim() || undefined, iteration },
+      body: { ...response, note: note.trim() || undefined, iteration, ...(gateId ? { gateId } : {}) },
     });
     setConfirmation(null);
   }

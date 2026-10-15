@@ -1,9 +1,9 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { DecisionGate } from "@valet/engine";
-import type { NodeCheckpoint, RunSettledInfo } from "@valet/workflow";
+import { InMemoryWorkflowStore, type NodeCheckpoint, type RunSettledInfo } from "@valet/workflow";
 import { applyAppMigrations, buildAppDb, buildAppQueryable, type AppDb } from "../lib/drizzle.js";
-import { assistantExecutions, notifications, sessionThreads, workflowDefinitions } from "../schema/index.js";
+import { assistantExecutions, notifications, orgMembers, sessionThreads, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
@@ -11,6 +11,7 @@ import { createTeam } from "../services/teams.js";
 import { buildWorkflowEngineDeps } from "./engine-deps.js";
 import {
   buildRunSettledAttention,
+  buildRunApprovalAttention,
   buildRunThreadArchive,
   failedNodeSummary,
   workflowApprovalHref,
@@ -142,6 +143,33 @@ describe("buildRunSettledAttention", () => {
     await notify(settled());
 
     expect(await db.select().from(notifications)).toHaveLength(1);
+  });
+
+  it("notifies the lender again for a fresh action gate, without duplicates on replay", async () => {
+    await db.insert(teams).values({ id: "attention-team", orgId: "org-1", name: "Team", createdAt: 1 });
+    await db.insert(teamMembers).values([
+      { teamId: "attention-team", userId: "requester", role: "member" },
+      { teamId: "attention-team", userId: "lender", role: "member" },
+    ]);
+    await db.insert(orgMembers).values([
+      { orgId: "org-1", userId: "requester", role: "member", createdAt: 1 },
+      { orgId: "org-1", userId: "lender", role: "member", createdAt: 1 },
+    ]);
+    const workflowStore = new InMemoryWorkflowStore();
+    await workflowStore.createRun("run-approval", { workflowId: "wf-1", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: "attention-team" });
+    const notify = buildRunApprovalAttention({ db, store: workflowStore });
+    const gate = { runId: "run-approval", nodeId: "step", kind: "policy_gate" as const, service: "demo", action: "ping" };
+    const accountGate = { ...gate, gateId: "approval:step:gate:1", approver: { userId: "lender" } };
+    const actionGate = { ...gate, gateId: "approval:step:gate:2" };
+    await notify(accountGate);
+    expect((await db.select().from(notifications)).map(row => row.userId)).toEqual(["lender"]);
+    await notify(accountGate);
+    await notify(actionGate);
+    await notify(actionGate);
+    const rows = await db.select().from(notifications);
+    expect(rows.filter(row => row.userId === "lender")).toHaveLength(2);
+    expect(rows.filter(row => row.userId === "requester")).toHaveLength(1);
   });
 
   it("stays silent for a child run, so a batch fan-out cannot flood the table", async () => {

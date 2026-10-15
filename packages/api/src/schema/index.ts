@@ -1434,6 +1434,7 @@ export const credentialShares = pgTable(
     userId: text("user_id").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     generation: text("generation").notNull().default(sql`gen_random_uuid()::text`),
+    borrowConsentAt: bigint("borrow_consent_at", { mode: "number" }),
   },
   (t) => [
     primaryKey({ columns: [t.teamId, t.service, t.userId] }),

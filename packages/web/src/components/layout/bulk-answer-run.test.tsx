@@ -96,3 +96,14 @@ it("ignores a second start while a run is in flight, and refreshes once at the e
   expect(refresh).toHaveBeenCalledTimes(1);
   expect(result.current.summary).toBe("Approved 1.");
 });
+
+it("keeps a newer gate visible when an earlier occurrence's answer completes", async () => {
+  const { client, wrapper } = harness();
+  const current = item("r1", "a");
+  current.gate.gateId = "approval:a:gate:2";
+  client.setQueryData<ListWorkflowActionRequiredResponse>(qkWorkflows.actionRequired(), { items: [current], count: 1 });
+  vi.spyOn(api, "resolveWorkflowApproval").mockResolvedValue({ ok: true });
+  const { result } = renderHook(() => useResolveWorkflowApprovals(), { wrapper });
+  await act(() => result.current.mutateAsync({ runId: "r1", nodeId: "a", body: { approved: true, gateId: "approval:a:gate:1" } }));
+  expect(client.getQueryData<ListWorkflowActionRequiredResponse>(qkWorkflows.actionRequired())?.items).toEqual([current]);
+});

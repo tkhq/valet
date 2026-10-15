@@ -369,8 +369,9 @@ export interface WorkflowStore {
 
   /**
    * Atomically CAS `consumedAt` on the signal (only if currently
-   * unconsumed) and write the terminal checkpoint — both succeed or
-   * neither does. Subject to the same checkpoint-row and run-level
+   * unconsumed) and write the checkpoint — both succeed or
+   * neither does. The checkpoint can retain an intent when account consent
+   * opens a separate action approval. Subject to the same checkpoint-row and run-level
    * `attempt` fences as `completeCheckpoint` (rejects a lower-attempt
    * write against an existing higher-attempt intent row, and rejects if
    * the write's `attempt` is lower than the run's current `attempt`).

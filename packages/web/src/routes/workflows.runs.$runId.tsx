@@ -234,7 +234,7 @@ export function RunDetailBody({
               iteration={gate.iteration}
             />
           ) : (
-            <PolicyGateCard key={`${gate.nodeId}:${gate.iteration ?? 0}`} runId={runId} gate={gate} />
+            <PolicyGateCard key={gate.gateId ?? `${gate.nodeId}:${gate.iteration ?? 0}`} runId={runId} gate={gate} />
           ),
         )}
 

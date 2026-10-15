@@ -508,6 +508,62 @@ describe('policy gate', () => {
     expect(pending[0]).toMatchObject({ kind: 'policy_gate', approver: { userId: 'bea', name: 'Bea' } });
   });
 
+  it('rechecks action policy after lasting account consent and parks on a separate approval', async () => {
+    const seen: WorkflowInvokeActionRequest[] = [];
+    const pending: Parameters<OnApprovalPending>[0][] = [];
+    const args = await makeArgs({ engine: { invokeAction: async req => {
+      seen.push(req);
+      return seen.length === 1 ? { ...GATE_RESPONSE, provenance: 'shared_account', approver: { userId: 'bea', allowTeamConsent: true } }
+        : seen.length === 2 ? GATE_RESPONSE : { ok: true, result: { id: 9 } };
+    } }, onApprovalPending: info => { pending.push(info); } });
+    await executeTool(args);
+    await args.store.insertSignal({ runId: args.run.runId, signalId: 'approval:t1:account:resolution', signalType: 'approval:t1',
+      payload: { approved: true, resolvedBy: 'bea', scope: 'team_account', gateId: 'approval:t1:gate:1' }, createdAt: 1 });
+    let cp = (await args.store.getCheckpoints(args.run.runId)).find(c => c.nodeId === 't1');
+    expect((await executeTool({ ...args, existingCheckpoint: cp })).status).toBe('parked');
+    expect(seen[1]?.approval).toBeUndefined();
+    expect(await args.store.listSignals(args.run.runId, { unconsumed: true })).toEqual([]);
+    cp = (await args.store.getCheckpoints(args.run.runId)).find(c => c.nodeId === 't1');
+    expect(cp?.effects?.approver).toBeUndefined();
+    expect(pending.map(info => info.gateId)).toEqual(['approval:t1:gate:1', 'approval:t1:gate:2']);
+    expect((await executeTool({ ...args, existingCheckpoint: cp })).status).toBe('parked');
+    expect(pending).toHaveLength(2);
+    await args.store.insertSignal({ runId: args.run.runId, signalId: 'approval:t1:resolution', signalType: 'approval:t1', payload: { approved: true, resolvedBy: 'u1', gateId: 'approval:t1:gate:2' }, createdAt: 2 });
+    expect(await executeTool({ ...args, existingCheckpoint: cp })).toEqual({ status: 'completed', result: { id: 9 } });
+    expect(seen[2]?.approval).toMatchObject({ resolvedBy: 'u1' });
+  });
+
+  it('fails instead of reopening the same account gate after lasting consent', async () => {
+    const resolved: Parameters<OnGateResolved>[0][] = [];
+    const args = await makeArgs({
+      engine: { invokeAction: async () => ({ ...GATE_RESPONSE, provenance: 'shared_account',
+        approver: { userId: 'bea', shareGeneration: 'share-1', allowTeamConsent: true } }) },
+      onGateResolved: info => { resolved.push(info); },
+    });
+    await executeTool(args);
+    await args.store.insertSignal({ runId: args.run.runId, signalId: 'account-answer', signalType: 'approval:t1',
+      payload: { approved: true, resolvedBy: 'bea', scope: 'team_account', gateId: 'approval:t1:gate:1' }, createdAt: 1 });
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find(c => c.nodeId === 't1');
+    const result = await executeTool({ ...args, existingCheckpoint: cp });
+    expect(result).toMatchObject({ status: 'failed', error: expect.stringMatching(/account.*consent.*still requires approval/i) });
+    expect(await args.store.listSignals(args.run.runId, { unconsumed: true })).toEqual([]);
+    expect(resolved).toEqual([expect.objectContaining({ outcome: 'error', error: expect.any(String) })]);
+  });
+
+  it('opens a fresh account gate when the share changed before consent resumed', async () => {
+    let generation = 'old-share';
+    const args = await makeArgs({ engine: { invokeAction: async () => ({ ...GATE_RESPONSE, provenance: 'shared_account',
+      approver: { userId: 'bea', shareGeneration: generation, allowTeamConsent: true } }) } });
+    await executeTool(args);
+    await args.store.insertSignal({ runId: args.run.runId, signalId: 'account-answer', signalType: 'approval:t1',
+      payload: { approved: true, resolvedBy: 'bea', scope: 'team_account', gateId: 'approval:t1:gate:1' }, createdAt: 1 });
+    generation = 'new-share';
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find(c => c.nodeId === 't1');
+    expect((await executeTool({ ...args, existingCheckpoint: cp })).status).toBe('parked');
+    const fresh = (await args.store.getCheckpoints(args.run.runId)).find(c => c.nodeId === 't1');
+    expect(fresh?.effects).toMatchObject({ gateId: 'approval:t1:gate:2', approver: { shareGeneration: 'new-share' } });
+  });
+
   it('approved signal: invokes with the approval field, then consumes signal atomically', async () => {
     const seen: WorkflowInvokeActionRequest[] = [];
     const args = await makeArgs({
@@ -523,7 +579,7 @@ describe('policy gate', () => {
       runId: args.run.runId,
       signalId: 'approval:t1:resolution',
       signalType: 'approval:t1',
-      payload: { approved: true, resolvedBy: 'u1', note: 'go' },
+      payload: { approved: true, resolvedBy: 'u1', note: 'go', gateId: 'approval:t1:gate:1' },
       createdAt: 1,
     });
     const cp = (await args.store.getCheckpoints(args.run.runId)).find((c) => c.nodeId === 't1');
@@ -532,6 +588,62 @@ describe('policy gate', () => {
     expect(seen[1]?.approval).toEqual({ resolvedBy: 'u1', note: 'go' });
     const signals = await args.store.listSignals(args.run.runId, { unconsumed: true });
     expect(signals).toHaveLength(0); // consumed with the terminal checkpoint
+  });
+
+  it.each([undefined, 'approval:t1:gate:0'])('ignores an answer for a different gate occurrence (%s)', async gateId => {
+    let calls = 0;
+    const args = await makeArgs({ engine: { invokeAction: async req => {
+      calls++;
+      return req.approval ? { ok: true, result: { done: true } } : GATE_RESPONSE;
+    } } });
+    await executeTool(args);
+    await args.store.insertSignal({ runId: args.run.runId, signalId: 'old-answer', signalType: 'approval:t1',
+      payload: { approved: true, resolvedBy: 'old-approver', gateId }, createdAt: 1 });
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find(c => c.nodeId === 't1');
+    expect((await executeTool({ ...args, existingCheckpoint: cp })).status).toBe('parked');
+    expect(calls).toBe(1);
+    await args.store.insertSignal({ runId: args.run.runId, signalId: 'current-answer', signalType: 'approval:t1',
+      payload: { approved: true, resolvedBy: 'current-approver', gateId: 'approval:t1:gate:1' }, createdAt: 2 });
+    expect(await executeTool({ ...args, existingCheckpoint: cp })).toEqual({ status: 'completed', result: { done: true } });
+    expect((await args.store.listSignals(args.run.runId, { unconsumed: true })).map(signal => signal.signalId)).toEqual(['old-answer']);
+  });
+
+  it('still consumes an untagged answer for a legacy checkpoint', async () => {
+    const args = await makeArgs({ engine: { invokeAction: async req => req.approval ? { ok: true, result: { done: true } } : GATE_RESPONSE } });
+    await executeTool(args);
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find(c => c.nodeId === 't1');
+    if (!cp) throw new Error('Missing checkpoint');
+    const legacy = { ...cp, effects: { ...cp.effects, gateId: undefined } };
+    await args.store.putIntent(legacy);
+    await args.store.insertSignal({ runId: args.run.runId, signalId: 'legacy-answer', signalType: 'approval:t1',
+      payload: { approved: true, resolvedBy: 'approver' }, createdAt: 1 });
+    expect(await executeTool({ ...args, existingCheckpoint: legacy })).toEqual({ status: 'completed', result: { done: true } });
+  });
+
+  it('keeps a parallel legacy account gate open when only its sibling consumed the current share consent', async () => {
+    const store = new InMemoryWorkflowStore();
+    const definition: WorkflowDefinition = { version: 'dag/v1', nodes: [
+      { id: 't', type: 'trigger' },
+      { ...GATE_NODE, id: 'a' },
+      { ...GATE_NODE, id: 'b' },
+    ], edges: [{ from: 't', to: 'a' }, { from: 't', to: 'b' }] };
+    await store.createRun('parallel-legacy', runParams(), definition, 'v1');
+    const attempt = await claimAttempt(store, 'parallel-legacy');
+    for (const nodeId of ['a', 'b']) await store.putIntent({ runId: 'parallel-legacy', nodeId, iteration: 0, status: 'intent', attempt,
+      createdAt: 1, effects: { gate: true, accountConsentResolved: true, provenance: 'shared_account',
+        approver: { userId: 'lender', shareGeneration: 'current-share', allowTeamConsent: true } } });
+    await store.insertSignal({ runId: 'parallel-legacy', signalId: 'approval:a:account:current-share:resolution', signalType: 'approval:a',
+      payload: { approved: true, resolvedBy: 'lender', scope: 'team_account' }, createdAt: 1, consumedAt: 2,
+      consumedBy: { nodeId: 'a', iteration: 0, attempt } });
+    await store.insertSignal({ runId: 'parallel-legacy', signalId: 'approval:b:account:old-share:resolution', signalType: 'approval:b',
+      payload: { approved: true, resolvedBy: 'lender', scope: 'team_account' }, createdAt: 1, consumedAt: 2,
+      consumedBy: { nodeId: 'b', iteration: 0, attempt } });
+    const run = await store.getRun('parallel-legacy');
+    if (!run) throw new Error('Missing run');
+    const existingCheckpoint = (await store.getCheckpoints('parallel-legacy')).find(cp => cp.nodeId === 'b');
+    expect(await executeTool({ run, node: { ...GATE_NODE, id: 'b' }, attempt, iteration: 0, store,
+      clock: () => 10, engine: makeEngine().engine, templateContext: { trigger: undefined, nodes: {} }, existingCheckpoint,
+    })).toEqual({ status: 'parked', waitingOn: [{ kind: 'signal', nodeId: 'b', signalType: 'approval:b' }] });
   });
 
   it('denied signal with default onDeny fails the node naming the denier', async () => {
@@ -549,7 +661,7 @@ describe('policy gate', () => {
       runId: args.run.runId,
       signalId: 'approval:t1:resolution',
       signalType: 'approval:t1',
-      payload: { approved: false, resolvedBy: 'u2' },
+      payload: { approved: false, resolvedBy: 'u2', gateId: 'approval:t1:gate:1' },
       createdAt: 1,
     });
     const cp = (await args.store.getCheckpoints(args.run.runId)).find((c) => c.nodeId === 't1');
@@ -571,7 +683,7 @@ describe('policy gate', () => {
       runId: args.run.runId,
       signalId: 'approval:t1:resolution',
       signalType: 'approval:t1',
-      payload: { approved: false, resolvedBy: 'u2' },
+      payload: { approved: false, resolvedBy: 'u2', gateId: 'approval:t1:gate:1' },
       createdAt: 1,
     });
     const cp = (await args.store.getCheckpoints(args.run.runId)).find((c) => c.nodeId === 't1');
@@ -626,7 +738,7 @@ describe('policy gate', () => {
       runId: args.run.runId,
       signalId: 'approval:t1:resolution',
       signalType: 'approval:t1',
-      payload: { approved: true, resolvedBy: 'u1', note: 'go' },
+      payload: { approved: true, resolvedBy: 'u1', note: 'go', gateId: 'approval:t1:gate:1' },
       createdAt: 1,
     });
     const cp = (await args.store.getCheckpoints(args.run.runId)).find((c) => c.nodeId === 't1');
