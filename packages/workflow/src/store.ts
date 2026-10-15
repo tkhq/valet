@@ -57,7 +57,10 @@ export interface WorkflowRunOrigin {
 
 /** Parameters to start a run. JSON-serializable. */
 export interface RunParams {
+  /** Delegated execution scope, including the starting thread's mutable focus. */
   toolScope?: ToolScope;
+  /** Origin authorization ceiling for reports. An empty scope records unrestricted authority. */
+  originToolScope?: ToolScope;
   workflowId: string;
   definitionVersionId: string;
   triggerId?: string;
