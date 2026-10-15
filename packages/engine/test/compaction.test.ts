@@ -276,7 +276,7 @@ describe("compaction: rehydrate replaces covered entries with the summary", () =
 });
 
 describe("compaction: auto-continue", () => {
-  it("after proactive compaction, runs an auto-continue turn tagged with compaction_continue", async () => {
+  it.each([undefined, "workflow"] as const)("after proactive compaction, continues with guidance for purpose=%s", async (purpose) => {
     const faux = registerFauxProvider({
       provider: "compact-autocontinue",
       models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
@@ -299,6 +299,7 @@ describe("compaction: auto-continue", () => {
       sandbox: {},
       model: faux.getModel("tiny")!,
       compaction: { tailTurns: 1 },
+      purpose,
     });
     const thread = session.thread();
     await store.appendEntries(session.id, thread.id, [
@@ -346,7 +347,7 @@ describe("compaction: auto-continue", () => {
     );
     expect(autoContinue).toBeDefined();
     if (autoContinue?.type === "message") {
-      expect(autoContinue.content).toContain("Continue if you have next steps");
+      expect(autoContinue.content).toContain(purpose === "workflow" ? "A progress recap is not completion" : "Continue if you have next steps");
       // The continuation answers the same reader as the turn it continues:
       // it inherits the interrupted item's channel mark, so the outbound
       // channel path does not classify it as a web prompt (TKAI-323).

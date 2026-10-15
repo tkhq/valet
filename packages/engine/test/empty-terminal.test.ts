@@ -8,6 +8,10 @@ import {
   registerFauxProvider,
   Type,
   type AssistantMessage,
+  type Model,
+  type Api,
+  type TranscriptContext,
+  type SimpleStreamOptions,
 } from "@earendil-works/pi-ai/compat";
 import {
   completedSubmissionOutcome,
@@ -56,21 +60,25 @@ describe("terminal result integrity", () => {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
     };
     let calls = 0;
-    const stream = () => {
+    const stream = (requestModel: Model<Api>, _context: TranscriptContext, options?: SimpleStreamOptions) => {
       calls++;
       const events = createAssistantMessageEventStream();
-      const partial = { ...message, content: [] };
-      events.push({ type: "start", partial });
-      if (test.delta) {
-        events.push({ type: "text_delta", contentIndex: 0, delta: test.delta,
-          partial: { ...message, content: [{ type: "text", text: test.delta }] } });
-      }
-      if (message.stopReason === "error" || message.stopReason === "aborted") {
-        events.push({ type: "error", reason: message.stopReason, error: message });
-      } else {
-        events.push({ type: "done", reason: message.stopReason === "length" ? "length" : "stop", message });
-      }
-      events.end(message);
+      void (async () => {
+        await options?.onPayload?.({ max_output_tokens: 8192, api_key: "REQUEST_SECRET" }, requestModel);
+        await options?.onResponse?.({ status: 200, headers: { "x-request-id": "request-1", authorization: "RESPONSE_SECRET" } }, requestModel);
+        const partial = { ...message, content: [] };
+        events.push({ type: "start", partial });
+        if (test.delta) {
+          events.push({ type: "text_delta", contentIndex: 0, delta: test.delta,
+            partial: { ...message, content: [{ type: "text", text: test.delta }] } });
+        }
+        if (message.stopReason === "error" || message.stopReason === "aborted") {
+          events.push({ type: "error", reason: message.stopReason, error: message });
+        } else {
+          events.push({ type: "done", reason: message.stopReason === "length" ? "length" : "stop", message });
+        }
+        events.end(message);
+      })();
       return events;
     };
     registerApiProvider({ api: faux.api, stream, streamSimple: stream });
@@ -91,10 +99,10 @@ describe("terminal result integrity", () => {
       expect(last && readModelResponseMetadata(last)).toMatchObject({
         stopReason: test.stopReason, rawStopReason: "native-stop", provider: model.provider, api: model.api,
         responseId: "response-1", thinkingPresent: test.name === "thinking only",
-        streamedTextLength: test.delta?.length ?? 0, effectiveMaxOutputTokens: null, requestId: null,
+        streamedTextLength: test.delta?.length ?? 0, effectiveMaxOutputTokens: 8192, outputLimitField: "max_output_tokens", requestId: "request-1",
         providerTerminalStatus: null, incompleteReason: null,
       });
-      expect(JSON.stringify(entries)).not.toContain("PRIVATE REASONING");
+      expect(JSON.stringify(entries)).not.toMatch(/PRIVATE REASONING|REQUEST_SECRET|RESPONSE_SECRET/);
       expect(last?.content).not.toContain("streamed answer");
       await thread.awaitResult(receipt.queueItemId);
       await session.reconcile();
