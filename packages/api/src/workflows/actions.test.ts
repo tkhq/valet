@@ -82,6 +82,17 @@ describe("workflowsActionPlugin", () => {
     ]);
   });
 
+  // An approval that settles the run fast tempted the assistant to poll
+  // get_run and report, and then the settle signal made it report again.
+  it("tells the assistant to end its turn after resolving a gate, like after starting a run", () => {
+    const actions = workflowsActionPlugin(noDeps).actions;
+    for (const id of ["workflows.start_run", "workflows.resolve_approval"]) {
+      const description = actions.find((a) => a.id === id)?.description ?? "";
+      expect(description).toContain("workflow.settled signal");
+      expect(description).toContain("do not poll");
+    }
+  });
+
   it("describes the explicit source, destination, and collision rule for team copies", () => {
     const copy = workflowsActionPlugin(noDeps).actions.find((a) => a.id === "workflows.copy_to_team");
     expect(copy?.description).toContain("Leaves the original and its triggers unchanged");
