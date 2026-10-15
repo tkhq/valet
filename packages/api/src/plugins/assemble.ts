@@ -45,6 +45,7 @@ import type {
   ToolDef,
 } from "@valet/engine";
 import { buildToolIndex } from "./action-id.js";
+import { serviceDisplayName } from "../lib/service-display-name.js";
 import { buildSkillTool, SKILL_TOOL_NAME, type SkillToolSession } from "./skill-tool.js";
 
 export interface AssembledPlugins {
@@ -203,7 +204,7 @@ export function pluginSessionExtras(
   pins: readonly PinnedActionSpec[] = [],
   catalogOptions: Omit<PluginCatalogOptions, "plugins" | "pins" | "reservedToolNames"> = {},
 ): PluginSessionExtras {
-  const actionPlugins = plugins.flatMap((p) => withCredentialRequirement(p));
+  const actionPlugins = plugins.flatMap((p) => withCredentialRequirement(p)).map(withServiceDisplayName);
   const tools = pluginCatalogTools({
     ...catalogOptions,
     plugins: actionPlugins,
@@ -298,6 +299,12 @@ function collectSkills(plugins: ValetPlugin[]): SkillSource[] {
  * silently lost the inference and `list_tools` listed their tools while
  * unconnected. Exported for its tests.
  */
+/** Gives an action plugin the product name approval cards show ("Linear"),
+ * not the service id ("linear"). A name the plugin sets itself wins. */
+export function withServiceDisplayName(plugin: ActionPlugin): ActionPlugin {
+  return plugin.displayName ? plugin : { ...plugin, displayName: serviceDisplayName(plugin.service) };
+}
+
 export function withCredentialRequirement(plugin: ValetPlugin): ActionPlugin[] {
   const credentialServices = new Set(
     (plugin.credentials ?? []).map((c) => c.service ?? plugin.name),

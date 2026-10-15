@@ -108,6 +108,9 @@ export type ApprovalMode = "allow" | "require_approval" | "deny";
 export interface ActionPlugin {
   /** Service id (e.g. "github"). Used as the credential service name and as a routing key. */
   service: string;
+  /** The product name people read in approval cards (e.g. "GitHub").
+   * Defaults to `service`. */
+  displayName?: string;
   description?: string;
   actions: PluginAction[];
   /** Override credential service name (defaults to `service`). */
@@ -785,8 +788,9 @@ export async function invokeAction(
     }
     // Another member's account: only they answer, so the gate asks them.
     const borrowScope = ctx.sessionId.startsWith("wf:") ? "workflow run" : "thread";
+    const label = entry.plugin.displayName ?? entry.service;
     const borrowed = decision.approver
-      ? { title: `Let a teammate use your ${entry.service} account?`, body: `${summary}\n\nValet would run ${entry.action.name} through your ${entry.service} account. Allowing this also permits later ${entry.service} actions in this ${borrowScope}, including actions requested by other teammates. Only you can answer.` }
+      ? { title: `Let a teammate use your ${label} account?`, body: `${summary}\n\nValet would use your ${label} account for "${entry.action.name}". If you allow it, later ${label} actions in this ${borrowScope} can use it too, including ones other teammates ask for. Only you can answer.` }
       : {};
     const gateOutcome = await requestApprovalDecision(ctx, {
       ...baseReq,
@@ -1042,8 +1046,9 @@ async function resolveDynamic(
     // Discovery can transmit a member's credential before any remote action
     // schema is known. Reuse the ordinary policy/gate/audit pipeline first.
     let discovered: PluginAction[] | undefined;
+    const label = plugin.displayName ?? plugin.service;
     const action: PluginAction = {
-      id: `${plugin.service}.${DISCOVERY_ACTION_NAME}`, name: `Discover ${plugin.service} tools`,
+      id: `${plugin.service}.${DISCOVERY_ACTION_NAME}`, name: `List ${label} tools`,
       description: "Read the tools available through this account.", riskLevel: "low",
       parameters: Type.Object({}),
       execute: async () => {
@@ -1054,7 +1059,7 @@ async function resolveDynamic(
     const entry: CatalogEntry = { service: plugin.service, plugin, action };
     const outcome = await invokeAction(
       { ...catalog, entries: [entry], byId: new Map([[action.id, entry]]), dynamicPlugins: [] },
-      action.id, {}, ctx, `Read available ${plugin.service} tools using this account.`,
+      action.id, {}, ctx, `Read the list of ${label} tools this account can use.`,
     );
     if (outcome.kind !== "ok" || !outcome.result.success || !discovered) {
       // Keep the cause. A connector error, a missing account, and a policy
