@@ -1,3 +1,5 @@
+import { saveTeamSettings } from "../services/team-settings.js";
+import { validateModelDefaults } from "../services/account-settings.js";
 import { deleteTeamResources } from "../services/team-resource-deletion.js";
 /**
  * Teams — org membership structure (orchestrator spec, "Identity").
@@ -60,9 +62,6 @@ import { listWorkflowSources } from "../services/content-sources.js";
 import { joinEligibleTeam, listSuggestedTeams } from "../services/team-join-eligibility.js";
 import { reapTeamWorkflows } from "../workflows/service.js";
 import { isOrgAdmin } from "../services/org.js";
-import { validateDefaultModelId } from "../services/model-catalog.js";
-import { assertModelSelectable } from "../services/approved-models.js";
-import { assertReasoningSelectable } from "../services/reasoning.js";
 import {
   addMember,
   canAdministerTeam,
@@ -420,44 +419,13 @@ teamsRouter.patch("/:id", async (c) => {
     }
     update.slackHomeChannelId = channel;
   }
-  if ("defaultModel" in raw) {
-    const defaultModel = raw.defaultModel;
-    if (defaultModel !== null && typeof defaultModel !== "string") {
-      return c.json(
-        { error: "defaultModel must be a model id from the model list (GET /api/models), or null to clear the override." },
-        400,
-      );
-    }
-    const invalid = await validateDefaultModelId(db, engineCredentials, user.orgId, defaultModel);
-    if (invalid) return c.json({ error: invalid }, 400);
-    if (defaultModel !== null) {
-      const isAdmin = await isOrgAdmin(db, user.orgId, user.id);
-      const err = await assertModelSelectable(db, user.orgId, isAdmin, defaultModel);
-      if (err) return c.json({ error: err }, 400);
-    }
-    update.defaultModel = defaultModel;
-  }
-  if ("defaultReasoning" in raw) {
-    const defaultReasoning = raw.defaultReasoning;
-    if (defaultReasoning !== null && typeof defaultReasoning !== "string") {
-      return c.json(
-        { error: "defaultReasoning must be a reasoning level string, or null to clear the override." },
-        400,
-      );
-    }
-    if (defaultReasoning === null) {
-      update.defaultReasoning = null;
-    } else {
-      const normalizedReasoning = defaultReasoning.trim().toLowerCase();
-      const err = await assertReasoningSelectable(db, user.orgId, normalizedReasoning);
-      if (err) return c.json({ error: err }, 400);
-      update.defaultReasoning = normalizedReasoning;
-    }
-  }
+  const defaults = await validateModelDefaults(db, engineCredentials, user, raw);
+  if ("error" in defaults) return c.json(defaults, 400);
+  Object.assign(update, defaults);
   if (Object.keys(update).length > 0) {
     let updated: (typeof teams.$inferSelect)[];
     try {
-      updated = await db.update(teams).set(update).where(eq(teams.id, id)).returning();
+      updated = await saveTeamSettings(db, user.orgId, id, update);
     } catch (err) {
       // Another team saved this name or home channel after the checks above.
       if (update.name !== undefined && isPgUniqueViolation(err)) {

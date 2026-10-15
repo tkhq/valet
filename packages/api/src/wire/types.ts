@@ -1297,6 +1297,8 @@ export interface AbortThreadRequest {
 }
 
 export interface SendPromptRequest {
+  /** Optional browser location for this Ask Valet message only. Never an authorization grant. */
+  appPageHint?: import("@valet/shared").AppPageHint;
   /**
    * Prompt text. Required unless `promoteItemId` is set — a promote
    * reuses the queued item's content and does not admit a new user entry.

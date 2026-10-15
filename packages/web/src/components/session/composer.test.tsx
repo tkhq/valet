@@ -13,6 +13,7 @@ import type { WireQueueState } from "@valet/api/wire";
 import type { StreamMessage } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { ApiError } from "~/api/client";
+import { AppPageHintContext } from "~/lib/app-page-hint";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
@@ -136,6 +137,23 @@ beforeEach(() => {
   resumeMutateAsync.mockClear();
   addUserMessage.mockClear();
   setMessageQueueItemId.mockClear();
+});
+
+it("sends the current Ask Valet page on each message while the panel stays mounted", async () => {
+  const client = new QueryClient();
+  const tree = (pathname: string) => <QueryClientProvider client={client}>
+    <AppPageHintContext.Provider value={{ pathname, workspace: "user" }}>
+      <Composer sessionId="assistant" threadId="thread-1" agentStatus="idle" />
+    </AppPageHintContext.Provider>
+  </QueryClientProvider>;
+  const view = render(tree("/settings/profile"));
+  fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Help here." } });
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Enter", code: "Enter" });
+  await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledWith(expect.objectContaining({ appPageHint: { pathname: "/settings/profile", workspace: "user" } })));
+  view.rerender(tree("/integrations"));
+  fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Help on this page." } });
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Enter", code: "Enter" });
+  await waitFor(() => expect(sendMutateAsync).toHaveBeenLastCalledWith(expect.objectContaining({ appPageHint: { pathname: "/integrations", workspace: "user" } })));
 });
 
 describe("Composer queued-message stack", () => {

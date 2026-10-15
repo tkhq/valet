@@ -185,6 +185,57 @@ Integrations has no panels, so a team workspace gets one link to the page. A
 stored or repository skill declares no integrations and keeps its note. A
 skill has no permissions of its own.
 
+## Ask Valet settings (2026-10-15)
+
+Ask Valet can read safe settings and apply a requested change through the
+ordinary action catalog. The `using-valet` skill supplies common product
+instructions and canonical Settings links. Advanced capability questions
+still require evidence from current product code.
+
+The host registers four actions under `settings`:
+
+- `get_settings` reads account, named team, or organization settings.
+- `update_account` changes the authenticated person's name, timezone,
+  default model, or default reasoning.
+- `update_team` changes a named team's default model or default reasoning.
+- `update_organization` changes the current organization's name or default
+  model tier. It cannot change tier mappings.
+
+Every write has high risk and retains the normal policy, approval, and audit
+path. Settings actions require a verified interactive actor in an assistant
+turn. External senders, automated turns, coding children, and workflow
+sessions cannot use them. Actions check current organization membership and
+team access at execution, including execution after approval. Team changes
+require a current team admin or organization admin. A team conversation
+cannot change another team. Organization changes require a current
+organization admin. User and organization IDs come from trusted tool
+context. A named team must belong to that organization.
+
+Account validation and writes live in `services/account-settings.ts`.
+The team route and action share model-default validation and scoped writes.
+The organization model-tier route and action share the existing validation
+and policy lock through `services/model-tier-settings.ts`. Existing threads
+keep their settings when saved defaults change.
+
+Read results contain only supported values and Settings links. Actions do
+not expose connection secrets or change credentials, memberships, policies,
+or public-access settings. Browser theme, palette, tool-card display, and
+sound remain device-local. The skill explains their controls instead of
+claiming to change them.
+
+The side panel supplies an optional page hint on each submitted message.
+The shared sanitizer accepts only bounded canonical paths and workspace
+keys. It rejects query strings, fragments, full URLs, and unknown paths.
+The client omits an unsupported hint. The API also drops unsafe hints
+without refusing the message. Only the viewer's own helper thread can
+retain a hint. No session field stores a mutable current page.
+
+The engine renders the hint for that message in live and restored context.
+It labels the hint as advisory. A Settings page's scope takes precedence
+over the switcher for guidance. Tools independently authorize the actor
+and target. A successful settings write refreshes Settings queries through
+the existing tool-completion stream.
+
 ## Testing
 
 - `settings-rail.test.tsx`: the four groups, teams by name through the typed

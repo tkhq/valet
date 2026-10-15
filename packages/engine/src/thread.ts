@@ -1,3 +1,4 @@
+import { renderAppPageHint } from "./app-page-hint.js";
 import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, readToolScope, toolInScope, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -6433,6 +6434,7 @@ export function renderReplyContext(
   text: string,
   metadata: Record<string, unknown> | undefined,
 ): string {
+  text = renderAppPageHint(text, metadata?.appPageHint);
   const ref = replyMetadata(metadata);
   if (!ref) return text;
   return [

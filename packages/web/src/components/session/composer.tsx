@@ -1,6 +1,8 @@
 import { usePageActive } from "~/lib/page-active";
+import { AppPageHintContext } from "~/lib/app-page-hint";
 import {
   useCallback,
+  useContext,
   useEffect,
   useRef,
   useState,
@@ -287,6 +289,7 @@ export function Composer({
     inputRef.current?.focus();
   }, [prefillNonce]);
   const send = useSendPrompt(sessionId);
+  const appPageHint = useContext(AppPageHintContext);
   const abort = useAbortThread(sessionId);
   const resume = useResumeThread(sessionId);
   // The textarea disables while a send is in flight, which drops focus to
@@ -586,6 +589,7 @@ export function Composer({
       const localId = addUserMessage(sessionId, t, target.threadId, attachments, replyTarget);
       const res = await send.mutateAsync({
         text: target.text,
+        ...(appPageHint ? { appPageHint } : {}),
         threadId: target.threadId,
         attachments,
         fileRefs: fileRefs.length > 0 ? fileRefs : undefined,

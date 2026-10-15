@@ -1,3 +1,4 @@
+import { readAppPageHint, type AppPageHint } from "@valet/shared";
 /**
  * Messages + threads routes — the agent loop entry points.
  *
@@ -998,6 +999,7 @@ export async function submitSessionPrompt(
   text: string,
   opts?: {
     threadId?: string;
+    appPageHint?: AppPageHint;
     attachments?: SendPromptRequest["attachments"];
     fileRefs?: SendPromptRequest["fileRefs"];
     queueMode?: "followup" | "steer";
@@ -1135,7 +1137,10 @@ export async function submitSessionPrompt(
     outcome?.kind === "expand" && outcome.skill
       ? { skill: outcome.skill.source.name, skillArgs: outcome.skill.args }
       : undefined;
+  const appPageHint = author && !author.externalSender && thread.key === `app-assistant:${author.id}`
+    ? readAppPageHint(opts?.appPageHint) : undefined;
   const continuationMetadata = {
+    ...(appPageHint ? { appPageHint } : {}),
     ...(opts?.toolScope ? { [TOOL_SCOPE_KEY]: opts.toolScope } : {}),
     ...(opts?.inheritToolScope ? { [INHERIT_TOOL_SCOPE_KEY]: true } : {}),
   };
@@ -1291,6 +1296,7 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
     // their messages apart.
     const resp = await submitSessionPrompt(c.var.providers, row, body.text ?? "", {
       threadId: body.threadId,
+      appPageHint: readAppPageHint(body.appPageHint),
       attachments: body.attachments,
       fileRefs: body.fileRefs,
       ...(body.queueMode ? { queueMode: body.queueMode } : {}),
