@@ -64,6 +64,7 @@ The complete web suite passed 2,977 tests. The final production build passed. Ta
 An empty, unfocused composer uses one input row on phones and desktops. Existing queue and working hints remain above that row. Selecting the message field expands the input above its action row.
 The composer stays expanded while it contains text, attachments, errors, or a pending submission. An empty composer collapses when focus leaves it.
 Focus movement between the input and its actions keeps the expanded layout stable. Attachment and Stop buttons remain usable from the compact row.
+A press outside the composer blurs it on pointerdown. The composer stays expanded until that press ends and its click fires. Otherwise the collapse moves the content above it, such as a decision card, and the release misses the target (2026-10-15).
 Preserve accessible action names, 44-pixel touch targets, 16-pixel input text, draft persistence, and bounded multiline scrolling.
 
 Validation plan: test focus and draft transitions, submission focus, and attachment actions. Check compact and expanded geometry in Chromium and WebKit.

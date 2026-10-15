@@ -236,6 +236,23 @@ describe("Composer — compact layout", () => {
     expect(input.closest("form")?.dataset.expanded).toBe("false");
   });
 
+  // A press on a card above the composer blurs it on pointerdown. Collapsing
+  // then moved the card, so the release missed the button and the first
+  // click on "Approve step" did nothing.
+  it("stays expanded through a press outside, then collapses after its click", async () => {
+    renderComposer();
+    const input = screen.getByRole("textbox", { name: "Message" });
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    act(() => input.focus());
+    fireEvent.pointerDown(outside);
+    act(() => input.blur());
+    expect(input.closest("form")?.dataset.expanded).toBe("true");
+    fireEvent.pointerUp(outside);
+    await waitFor(() => expect(input.closest("form")?.dataset.expanded).toBe("false"));
+    outside.remove();
+  });
+
   it("keeps a draft expanded after blur, then collapses when the draft is cleared", () => {
     renderComposer();
     const input = screen.getByRole("textbox", { name: "Message" });
