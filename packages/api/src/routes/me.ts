@@ -32,8 +32,10 @@ import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
 import type { GetMeResponse, MeResponse, NewThreadBehavior, PatchMeResponse, TeamMeResponse } from "../wire/types.js";
+import { threadProjectsRouter } from "./thread-projects.js";
 
 export const meRouter = new Hono<AppEnv>();
+meRouter.route("/thread-projects", threadProjectsRouter);
 
 const PATCH_FIELDS = new Set([
   "name",

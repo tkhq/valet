@@ -1,4 +1,5 @@
 import type { GetLinearConnectionResponse } from "@valet/api/wire";
+import type { ThreadProjectsOperation, ThreadProjectsResponse } from "@valet/shared";
 import type { ListTeamDeletionRequestsParams, ListTeamDeletionRequestsResponse, ListTeamDeletionTargetsResponse, SubmitTeamDeletionRequest } from "@valet/api/wire";
 /**
  * Typed REST client. Routes are documented inline; types come from
@@ -1109,6 +1110,9 @@ export const api = {
 
   // settings shell (split-settings design): per-user profile, org, models
   getMe: () => request<MeResponse>("GET", "/me"),
+  getThreadProjects: (sessionId: string, expectedViewerId: string, signal?: AbortSignal) => request<ThreadProjectsResponse>("GET", `/me/thread-projects/${encodeURIComponent(sessionId)}?expectedViewerId=${encodeURIComponent(expectedViewerId)}`, undefined, signal),
+  changeThreadProjects: (sessionId: string, operations: ThreadProjectsOperation[], expectedViewerId: string, signal?: AbortSignal) =>
+    request<ThreadProjectsResponse>("PATCH", `/me/thread-projects/${encodeURIComponent(sessionId)}`, { expectedViewerId, operations }, signal),
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
   uploadMyAvatar: (file: File) => uploadProfilePicture("/me/avatar", file),
   listModels: () => request<ListModelsResponse>("GET", "/models"),

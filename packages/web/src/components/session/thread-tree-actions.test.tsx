@@ -8,7 +8,8 @@
  * this file checks the DOM wiring.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, within, fireEvent, act } from "@testing-library/react";
+import { screen, within, fireEvent, act } from "@testing-library/react";
+import { renderWithThreadProjects as render } from "~/test/thread-projects-client";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { TooltipProvider } from "~/components/primitives";
