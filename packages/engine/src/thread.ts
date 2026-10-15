@@ -6026,7 +6026,7 @@ export class Thread {
       outcome.outcome === "superseded"
         ? resolvePartialSubmissionText(entries, item.id)
         : resolveSubmissionText(entries, item.id);
-    // Also validate historical completed rows. Reading a result never changes queue state.
+    // Check terminal semantics before applying the caller's optional output contract.
     const validated = outcome.outcome === "completed" ? completedSubmissionOutcome(entries, item.id) : outcome;
     const result: SubmissionResult = { queueItemId: item.id, outcome: validated.outcome, text };
     if (validated.error !== undefined) result.error = validated.error;

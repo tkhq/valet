@@ -416,7 +416,7 @@ export function resolveSubmissionText(entries: SessionEntry[], queueItemId: stri
   return text;
 }
 
-/** Validate the final response without selecting an earlier answer or replaying tools. */
+/** Validate transport completion, not whether a consumer requires text or structured output. */
 export function completedSubmissionOutcome(entries: SessionEntry[], queueItemId: string): SubmissionOutcome {
   const last = [...entries].reverse().find((entry): entry is MessageEntry =>
     entry.type === "message" && entry.role === "assistant" && entry.queueItemId === queueItemId);
@@ -427,9 +427,6 @@ export function completedSubmissionOutcome(entries: SessionEntry[], queueItemId:
   }
   if (last?.stopReason !== "end_turn" || (response && response.stopReason !== "stop")) {
     return { outcome: "failed", error: "The model did not record a complete terminal response. Inspect the node diagnostics before retrying." };
-  }
-  if (!last.content.trim()) {
-    return { outcome: "failed", error: "The model returned no terminal text. Inspect the node diagnostics before retrying." };
   }
   return { outcome: "completed" };
 }
