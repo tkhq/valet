@@ -333,11 +333,12 @@ export function removeResolvedWorkflowAction(
   runId: string,
   nodeId: string,
   iteration: number | undefined,
+  gateId?: string,
 ) {
   qc.setQueryData<ListWorkflowActionRequiredResponse>(qkWorkflows.actionRequired(), (current) => {
     if (current === undefined) return current;
     const items = current.items.filter(
-      (item) => item.runId !== runId || item.gate.nodeId !== nodeId || (item.gate.iteration ?? 0) !== (iteration ?? 0),
+      (item) => item.runId !== runId || item.gate.nodeId !== nodeId || (item.gate.iteration ?? 0) !== (iteration ?? 0) || item.gate.gateId !== gateId,
     );
     return { items, count: items.length };
   });
@@ -364,7 +365,7 @@ export function useResolveApproval(runId: string) {
   >({
     mutationFn: ({ nodeId, body }) => api.resolveWorkflowApproval(runId, nodeId, body),
     onSuccess: (_data, variables) => {
-      removeResolvedWorkflowAction(qc, runId, variables.nodeId, variables.body.iteration);
+      removeResolvedWorkflowAction(qc, runId, variables.nodeId, variables.body.iteration, variables.body.gateId);
     },
     onError: () => {
       // Invalidate on error too: a 409 "already resolved" means the run has
@@ -385,7 +386,7 @@ export function useResolveWorkflowApprovals() {
     { runId: string; nodeId: string; body: ResolveWorkflowApprovalRequest }
   >({
     mutationFn: ({ runId, nodeId, body }) => api.resolveWorkflowApproval(runId, nodeId, body),
-    onSuccess: (_data, { runId, nodeId, body }) => removeResolvedWorkflowAction(qc, runId, nodeId, body.iteration),
+    onSuccess: (_data, { runId, nodeId, body }) => removeResolvedWorkflowAction(qc, runId, nodeId, body.iteration, body.gateId),
     onError: (_error, { runId }) => invalidateWorkflowApprovalState(qc, runId),
   });
 }

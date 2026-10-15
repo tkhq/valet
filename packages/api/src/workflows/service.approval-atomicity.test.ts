@@ -1,23 +1,27 @@
 import { eq } from "drizzle-orm";
 import { afterEach, expect, it, vi } from "vitest";
+import { Type } from "typebox";
+import { driveUntilPark } from "@valet/workflow";
+import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { actionInvocations, credentials, credentialShares, runtimeGrants, teamMembers, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
+import { actionInvocations, actionPolicies, credentials, credentialShares, runtimeGrants, teamMembers, teams, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { revokeShare, shareCredential } from "../services/credential-shares.js";
 import * as borrow from "../services/credential-borrow.js";
 import * as policy from "../policies/service.js";
 import { getWorkflowRunDetail, listWorkflowActionRequired, resolveWorkflowApproval } from "./service.js";
+import { buildWorkflowEngineDeps } from "./engine-deps.js";
 
 let api: TestApi | undefined;
 afterEach(async () => { vi.restoreAllMocks(); await api?.cleanup(); api = undefined; });
 
-async function setup(sharedAccount = true) {
+async function setup(sharedAccount = true, actorUserId = "local-user") {
   api = await bootTestApi();
   const p = api.providers;
   await p.db.insert(teams).values({ id: "atomic-team", orgId: "local-org", name: "Atomic", createdAt: 1 });
   await p.db.insert(teamMembers).values({ teamId: "atomic-team", userId: "local-user", role: "member" });
   const definition = { version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" }, { id: "step", type: "tool", service: "demo", action: "ping", params: {} }], edges: [{ from: "trigger", to: "step" }] };
   await p.db.insert(workflowDefinitions).values({ id: "wf-atomic", orgId: "local-org", ownerType: "team", ownerId: "atomic-team", name: "Atomic", definition, createdAt: 1, updatedAt: 1 });
-  await p.workflowStore.createRun("run-atomic", { workflowId: "wf-atomic", definitionVersionId: "v1" }, definition, "v1", { ownerType: "team", ownerId: "atomic-team", actorUserId: "local-user" });
+  await p.workflowStore.createRun("run-atomic", { workflowId: "wf-atomic", definitionVersionId: "v1" }, definition, "v1", { ownerType: "team", ownerId: "atomic-team", actorUserId });
   await shareCredential(p.db, { teamId: "atomic-team", service: "demo", userId: "local-user", createdAt: 1 });
   if (sharedAccount) await p.workflowStore.putIntent({ runId: "run-atomic", nodeId: "step", iteration: 0, status: "intent", attempt: 1, createdAt: 1,
     effects: { gate: true, provenance: "shared_account", approver: { userId: "local-user", name: "Local User", shareGeneration: await borrow.shareGeneration(p.db, "atomic-team", "demo", "local-user") } } });
@@ -136,7 +140,7 @@ it.each([false, true])("grants lasting account consent only for a verified perso
   expect(await p.db.select().from(runtimeGrants)).toEqual([]);
   if (verified) {
     expect((await p.workflowStore.listSignals("run-atomic"))[0]).toMatchObject({ signalId: `approval:step:account:${await borrow.shareGeneration(p.db, "atomic-team", "demo", "local-user")}:resolution`, payload: { scope: "team_account" } });
-    expect((await p.db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "pol:wf:workflow:run-atomic:step")))[0]?.status).toBe("pending");
+    expect((await p.db.select().from(actionInvocations).where(eq(actionInvocations.invocationId, "pol:wf:workflow:run-atomic:step")))[0]).toMatchObject({ status: "pending", resolvedBy: null });
   }
 });
 
@@ -208,4 +212,87 @@ it("resolves a new account gate after revocation and re-sharing before workflow 
   expect(await answer()).toBe("ok");
   expect(await p.workflowStore.listSignals("run-atomic", { unconsumed: true })).toHaveLength(1);
   expect((await p.db.select().from(credentialShares))[0]?.borrowConsentAt).not.toBeNull();
+});
+
+it.each([false, true])("accepts a fresh same-share gate answer after consumed consent (approved=%s)", async approved => {
+  const { p } = await setup();
+  await p.db.insert(credentials).values({ ownerType: "user", ownerId: "local-user", service: "demo", type: "api_key", apiKeyEnc: "test", createdAt: 1, updatedAt: 1 });
+  const cp = (await p.workflowStore.getCheckpoints("run-atomic"))[0];
+  if (!cp) throw new Error("Missing checkpoint");
+  const approver = { userId: "local-user", allowTeamConsent: true, shareGeneration: await borrow.shareGeneration(p.db, "atomic-team", "demo", "local-user") };
+  await p.workflowStore.putIntent({ ...cp, effects: { ...cp.effects, gateId: "approval:step:gate:1", approver } });
+  const deps = { db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials, engineStore: p.engineStore };
+  const owner = { userId: "local-user", orgId: "local-org", humanAccountConsent: true };
+  const originalItems = await listWorkflowActionRequired(deps, owner);
+  expect(await resolveWorkflowApproval(deps, owner, { runId: "run-atomic", nodeId: "step", gateId: "approval:step:gate:1", approved: true, scope: "team_account", via: "web" })).toBe("ok");
+  const [signal] = await p.workflowStore.listSignals("run-atomic");
+  if (!signal) throw new Error("Missing signal");
+  await p.workflowStore.consumeSignalAndCheckpoint(signal.signalId, { nodeId: "step", iteration: 0, attempt: cp.attempt },
+    { ...cp, effects: { ...cp.effects, gateId: "approval:step:gate:2", approver, accountConsentResolved: true } });
+  expect((await getWorkflowRunDetail(deps, owner, "run-atomic"))?.pendingGates).toEqual([expect.objectContaining({ gateId: "approval:step:gate:2" })]);
+  const freshItems = await listWorkflowActionRequired(deps, owner);
+  expect(originalItems.items[0]?.id).toBe("run-atomic:approval:step:gate:1");
+  expect(freshItems.items[0]?.id).toBe("run-atomic:approval:step:gate:2");
+  expect(await resolveWorkflowApproval(deps, owner, { runId: "run-atomic", nodeId: "step", gateId: "approval:step:gate:2", approved, via: "web" })).toBe("ok");
+  expect(await p.workflowStore.listSignals("run-atomic", { unconsumed: true })).toEqual([expect.objectContaining({ payload: expect.objectContaining({ approved }) })]);
+});
+
+it.each(["actor_removed", "policy_deny", "credential_removed"])("settles after lasting consent and finalizes the action audit (%s)", async reason => {
+  const { p } = await setup(true, "requester");
+  await p.db.insert(teamMembers).values({ teamId: "atomic-team", userId: "requester", role: "member" });
+  await p.engineCredentials.save({ type: "user", id: "local-user" }, "demo", { type: "api_key", apiKey: "lender-key" });
+  const cp = (await p.workflowStore.getCheckpoints("run-atomic"))[0];
+  if (!cp) throw new Error("Missing checkpoint");
+  await p.workflowStore.putIntent({ ...cp, effects: { ...cp.effects, approver: {
+    userId: "local-user", allowTeamConsent: true, shareGeneration: await borrow.shareGeneration(p.db, "atomic-team", "demo", "local-user"),
+  } } });
+  if (reason === "actor_removed") await p.db.delete(teamMembers).where(eq(teamMembers.userId, "requester"));
+  const deps = { db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost, credentials: p.engineCredentials, engineStore: p.engineStore };
+  expect(await resolveWorkflowApproval(deps, { userId: "local-user", orgId: "local-org", humanAccountConsent: true },
+    { runId: "run-atomic", nodeId: "step", approved: true, scope: "team_account", via: "web" })).toBe("ok");
+  if (reason === "credential_removed") await p.db.delete(credentials).where(eq(credentials.service, "demo"));
+  if (reason === "policy_deny") await p.db.insert(actionPolicies).values({ id: "deny-demo", orgId: "local-org", principalType: "org", principalId: "local-org", service: "demo", mode: "deny", origin: "settings", createdAt: 1, updatedAt: 1 });
+  let calls = 0;
+  const actionPlugin: ActionPlugin = { service: "demo", actions: [{ id: "demo.ping", name: "Ping", description: "Ping", riskLevel: "low", parameters: Type.Object({}),
+    execute: async () => { calls++; return { success: true, data: {} }; } }] };
+  const plugin: ValetPlugin = { name: "demo", version: "1", actions: [actionPlugin], credentials: [{ type: "api_key", configKeys: ["apiKey"] }] };
+  const engine = buildWorkflowEngineDeps({ host: p.engineHost, store: p.workflowStore, db: p.db, engineStore: p.engineStore,
+    credentials: p.engineCredentials, actionPluginByService: new Map([["demo", { plugin, actionPlugin }]]) });
+  const claim = await p.workflowStore.claimRun("run-atomic", "test", 30_000);
+  if (!claim) throw new Error("Missing claim");
+  expect(await driveUntilPark("run-atomic", claim.attempt, { store: p.workflowStore, engine, clock: Date.now,
+    onGateResolved: info => policy.updateInvocationOutcome(p.db, `pol:wf:${info.invocationId}`, "local-org", { status: info.outcome, error: info.error, resolvedBy: info.resolvedBy }),
+  })).toMatchObject({ status: "settled", outcome: "failed" });
+  expect(calls).toBe(0);
+  expect(await p.workflowStore.listSignals("run-atomic", { unconsumed: true })).toEqual([]);
+  const rows = await p.db.select().from(actionInvocations);
+  expect(rows.find(row => row.invocationId === "pol:wf:workflow:run-atomic:step")).toMatchObject({
+    status: reason === "policy_deny" ? "denied" : "error", error: expect.any(String), resolvedBy: null,
+  });
+  expect(rows.find(row => row.actionId === "credential.borrow")).toMatchObject({ status: "approved", resolvedBy: "local-user" });
+});
+
+it.each([undefined, "approval:step:gate:1"])("rejects an old account card on the next action gate (gateId=%s)", async staleId => {
+  const { p } = await setup();
+  const baseUrl = api?.baseUrl;
+  if (!baseUrl) throw new Error("Missing API");
+  await p.engineCredentials.save({ type: "user", id: "local-user" }, "demo", { type: "api_key", apiKey: "lender-key" });
+  const cp = (await p.workflowStore.getCheckpoints("run-atomic"))[0];
+  if (!cp) throw new Error("Missing checkpoint");
+  await p.workflowStore.putIntent({ ...cp, effects: { ...cp.effects, gateId: "approval:step:gate:1", approver: {
+    userId: "local-user", allowTeamConsent: true, shareGeneration: await borrow.shareGeneration(p.db, "atomic-team", "demo", "local-user"),
+  } } });
+  const answer = (body: Record<string, unknown>) => fetch(`${baseUrl}/api/workflows/runs/run-atomic/approvals/step`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  expect((await answer({ approved: true, scope: "team_account", gateId: "approval:step:gate:1" })).status).toBe(200);
+  const [signal] = await p.workflowStore.listSignals("run-atomic");
+  if (!signal) throw new Error("Missing signal");
+  await p.workflowStore.consumeSignalAndCheckpoint(signal.signalId, { nodeId: "step", iteration: 0, attempt: cp.attempt },
+    { ...cp, effects: { gate: true, gateId: "approval:step:gate:2", accountConsentResolved: true, provenance: "org_policy" } });
+  expect((await answer({ approved: true, scope: "run", gateId: staleId })).status).toBe(409);
+  expect(await p.db.select().from(runtimeGrants)).toEqual([]);
+  expect(await p.workflowStore.listSignals("run-atomic", { unconsumed: true })).toEqual([]);
+  expect((await answer({ approved: true, scope: "run", gateId: "approval:step:gate:2" })).status).toBe(200);
+  expect(await p.db.select().from(runtimeGrants)).toHaveLength(1);
 });

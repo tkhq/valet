@@ -764,6 +764,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const run = (await canReadWorkflowRun(deps, owner, run_id)) ? await deps.workflowStore.getRun(run_id) : null;
       if (!run) return { success: false, error: `run not found: ${run_id}` };
       const node = findNodeInDefinition(run.definition, node_id);
+      const checkpoint = (await deps.workflowStore.getCheckpoints(run_id)).find(cp => cp.nodeId === node_id && cp.iteration === (iteration ?? 0) && cp.status === "intent");
+      const gateId = typeof checkpoint?.effects?.gateId === "string" ? checkpoint.effects.gateId : undefined;
       const step = node?.type === "tool" && typeof node.service === "string" && typeof node.action === "string"
         ? (node.action.includes(".") ? node.action : `${node.service}.${node.action}`)
         : `step ${node_id}`;
@@ -778,7 +780,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           { id: "approve", label: approved ? "Approve step" : "Deny step", style: approved ? "primary" : "danger" },
           { id: "cancel", label: "Cancel" },
         ],
-        resumeKey: `workflow-gate:${run_id}:${node_id}:${iteration ?? 0}:${approved ? "approve" : "deny"}`,
+        resumeKey: `workflow-gate:${run_id}:${node_id}:${iteration ?? 0}:${approved ? "approve" : "deny"}${gateId ? `:${gateId}` : ""}`,
       });
       if (decision.actionId !== "approve") {
         return { success: false, error: `Nobody confirmed the card, so ${node_id} on run ${run_id} still waits for a decision.` };
@@ -789,6 +791,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const result = await resolveWorkflowApproval(deps, person, {
         runId: run_id,
         nodeId: node_id,
+        gateId,
         approved,
         note,
         iteration,
@@ -796,6 +799,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       });
       if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
       if (result === "not_parked") return { success: false, error: `run ${run_id} is not parked on approval gate ${node_id}` };
+      if (result === "stale_gate") return { success: false, error: "This approval gate changed. Read the run and review its current approval." };
       if (result === "already_resolved") return { success: false, error: `approval gate ${node_id} on run ${run_id} has already been resolved` };
       if (result === "timed_out") return { success: false, error: `approval gate ${node_id} on run ${run_id} has timed out` };
       if (result === "not_approver") return { success: false, error: "This step would use another member's shared account. Only that member can answer it." };

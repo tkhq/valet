@@ -2112,6 +2112,8 @@ export interface WorkflowRunCheckpoint {
 
 /** One pending approval gate on a parked workflow run. */
 export interface WorkflowPendingGate {
+  /** The persisted occurrence shown by this card. Absent on older gates. */
+  gateId?: string;
   /** The one member who may answer: the step would use their shared account. */
   approver?: { userId: string; name?: string; allowTeamConsent?: true };
   /** Context supplied by the approval node in the run snapshot. */
@@ -2210,6 +2212,8 @@ export type GetWorkflowRunResponse = WorkflowRunDetail;
 
 export interface ResolveWorkflowApprovalRequest {
   approved: boolean;
+  /** Required when the pending gate supplies an occurrence ID. */
+  gateId?: string;
   note?: string;
   /** Approve scope (policy gates): 'once' (default) authorizes only this
    * invocation; 'run' writes a run-scoped grant for the gated action;

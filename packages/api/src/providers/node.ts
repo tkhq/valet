@@ -1,6 +1,5 @@
 import { settingsActionPlugin } from "../services/settings-actions.js";
 import { PGlite } from "@electric-sql/pglite";
-import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import { Pool } from "pg";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -13,7 +12,6 @@ import {
   createDefaultNodeExecutors,
   LocalRunHost,
   type OnApprovalGrant,
-  type OnApprovalPending,
   type OnGateResolved,
 } from "@valet/workflow";
 import { preserveLegacySandboxTokens } from "../auth/sandbox-tokens.js";
@@ -36,7 +34,6 @@ import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js"
 import { submitSessionPrompt } from "../routes/messages.js";
 import { resolveSecurityNudgeIntervalMs, resolveSecurityNudgeMaxStalls } from "./security-nudge.js";
 import { withSandboxCapacityGate } from "../engine/gated-sandbox-provider.js";
-import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { ensurePluginStoreIndexes } from "../services/plugin-store.js";
@@ -66,7 +63,7 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
-import { buildRunApprovalReport, buildRunOriginReport, buildRunSettledAttention, buildRunThreadArchive, workflowApprovalHref } from "../workflows/run-attention.js";
+import { buildRunApprovalAttention, buildRunApprovalReport, buildRunOriginReport, buildRunSettledAttention, buildRunThreadArchive } from "../workflows/run-attention.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
@@ -650,46 +647,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     onePassword,
   });
 
-  // Approval attention (decision 12): the FIRST park on an approval node
-  // routes through the Phase 4 notification system. `onApprovalPending`
-  // only receives `{runId, nodeId, prompt, summary?, details?}` — no owner
-  // — so it re-resolves the run's owner from the store itself.
-  const onApprovalPending: OnApprovalPending = async (info) => {
-    // Contained: the executor awaits this AFTER persisting the approval
-    // intent, so a throw here would abort the drive AND permanently skip the
-    // notification on the re-drive (intent already exists). A lost
-    // notification must degrade to log-only — the run stays resolvable via
-    // the API either way.
-    try {
-      const run = await workflowStore.getRun(info.runId);
-      const owner = principalFromOwner(run?.owner);
-      if (!owner) return; // no recorded owner: nothing to notify
-      const isPolicyGate = info.kind === "policy_gate";
-      await routeAttention(
-        { db, channels: [channelHost.attentionDeliverer()], access: { engineCredentials, onePassword } },
-        {
-          kind: "approval",
-          // A step that would use a member's shared account asks that member alone.
-          owner: info.approver ? { type: "user", id: info.approver.userId } : owner,
-          // A run started from a thread is that thread's audience's
-          // (`thread-access.ts`): a private thread's run notifies only them.
-          ...(run?.params.origin && !info.approver ? { sessionId: run.params.origin.assistantSessionId, threadId: run.params.origin.threadId } : {}),
-          // A run a Slack channel's event started reaches that channel's audience.
-          ...(run && !run.params.origin && runEventChannel(run.params) ? { audienceKey: slackEventsThreadKey(runEventChannel(run.params)!) } : {}),
-          title: info.summary ?? info.prompt ?? `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}`,
-          body: isPolicyGate
-            ? `Workflow run ${info.runId} is paused on ${info.nodeId}.`
-            : info.summary
-              ? info.prompt
-              : undefined,
-          href: workflowApprovalHref(info.runId, info.nodeId),
-          dedupeKey: `${info.runId}:${info.nodeId}${info.iteration !== undefined && info.iteration > 0 ? `:${info.iteration}` : ""}`,
-        },
-      );
-    } catch (err) {
-      console.error(`workflow approval notification failed for ${info.runId}:${info.nodeId}`, err);
-    }
-  };
+  const onApprovalPending = buildRunApprovalAttention({
+    db, store: workflowStore, channels: [channelHost.attentionDeliverer()],
+    access: { engineCredentials, onePassword },
+  });
 
   // "Grant the rest of this run" (action-policies plan, Task 3): an approval
   // resolved with `grantActions` writes one exec-scoped runtime grant per
@@ -738,7 +699,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         db,
         `pol:wf:workflow:${info.runId}:${info.nodeId}${suffix}`,
         orgId,
-        { status: info.outcome, resolvedBy: info.resolvedBy },
+        { status: info.outcome, resolvedBy: info.resolvedBy, error: info.error },
       );
     } catch (err) {
       console.error(`workflow gate resolved callback failed for ${info.runId}:${info.nodeId}`, err);

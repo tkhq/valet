@@ -36,7 +36,7 @@ interface PolicyGateCardProps {
 
 export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGateCardProps): ReactElement {
   const { note, setNote, confirmation, submitted, resolve, respond, confirm, onConfirmationOpenChange } =
-    useApprovalResponse(runId, gate.nodeId, gate.iteration);
+    useApprovalResponse(runId, gate.nodeId, gate.iteration, gate.gateId);
   const me = useMe();
 
   const service = gate.service ?? "";
@@ -227,7 +227,7 @@ export function PolicyGateCard({ runId, gate, confirmActions = false }: PolicyGa
           )}
           {is409AlreadyResolved && (
             <div className="text-xs text-muted">
-              This gate was already resolved. Refreshing…
+              This gate changed or was already resolved. Refreshing…
             </div>
           )}
           {errorMsg != null && (
