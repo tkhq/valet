@@ -790,16 +790,18 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       // The result is what the assistant reads right after the card. Saying
       // here that the signal reports the run stops a get_run poll that
       // reports the run twice: once from the poll, once from the signal.
-      let stillWaiting: WorkflowPendingGate[] = [];
+      let stillWaiting: WorkflowPendingGate[] | undefined;
       try {
-        const after = (await getWorkflowRunDetail(deps, owner, run_id))?.pendingGates ?? [];
-        stillWaiting = gatesStillWaiting(waitingBefore, { nodeId: node_id, iteration }, after);
+        const detail = await getWorkflowRunDetail(deps, owner, run_id);
+        if (detail) stillWaiting = gatesStillWaiting(waitingBefore, { nodeId: node_id, iteration }, detail.pendingGates);
       } catch (err) {
         // The approval is already recorded. A failed read only loses the
         // still-waiting list; it must not turn a success into a failure.
         console.warn(`resolve_approval: could not read run ${run_id} after the approval:`, err);
       }
-      const next = stillWaiting.length > 0
+      const next = stillWaiting === undefined
+        ? "The gate is resolved, but the run's waiting state could not be read. Call get_run to check for remaining approvals."
+        : stillWaiting.length > 0
         ? resolvedGateStillWaiting(stillWaiting)
         : runReportsToThread(run.params, ctx.sessionId, ctx.threadId) ? RESOLVED_GATE_NEXT : RESOLVED_GATE_NEXT_ELSEWHERE;
       return { success: true, data: { runId: run_id, nodeId: node_id, approved, next } };

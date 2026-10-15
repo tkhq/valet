@@ -252,7 +252,12 @@ Hardening (applies to approval-node resolutions too — shared route):
    would report them. The run wakes as soon as the approval is recorded, so
    `gatesStillWaiting` counts only gates that waited just before the
    approval and still wait after it; a gate the drive opens gets its own
-   signal. Known gap: a team run started before its thread moved
+   signal. The pending-gate projection keeps consumed answers, because the
+   drive can consume an answer before it replaces the run's waiting list.
+   If the status read fails after resolution, approval still succeeds.
+   The assistant must call `get_run` to check for remaining approvals.
+   An unknown waiting state must not tell it to wait for a signal.
+   Known gap: a team run started before its thread moved
    to an execution session stores the root session as its origin, while its
    reports go to the execution thread, so `next` there says to read
    `get_run`.
