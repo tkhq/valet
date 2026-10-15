@@ -400,4 +400,4 @@ The read decides which teams a row can name:
 - A team scope names only its own team. Another team's name depends on access to that team, and the team scope does not carry that access.
 - Every org member reads the home ranking. It names every team for an org admin, and only the viewer's own teams for anyone else.
 
-`byUser[].isTeam` marks a team row. The Usage page shows the workspace switcher's team icon before the team's name, so a team does not read as a person. The `userId` key keeps the actor id. The CSV export keeps its `user_id`, `owner_type`, and `owner_id` columns as stable ids.
+`byUser[].isTeam` and `org.members[].isTeam` mark a team row. The Usage page and the home usage card show the workspace switcher's team icon before the team's name, so a team does not read as a person. The `userId` key keeps the actor id. The CSV export keeps its `user_id`, `owner_type`, and `owner_id` columns as stable ids.
