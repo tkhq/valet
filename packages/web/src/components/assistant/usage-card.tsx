@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
+import { Users } from "lucide-react";
 import type { UsageMemberSummary, UsageWindow } from "@valet/api/wire";
 import { api } from "~/api/client";
 import { useMe } from "~/api/settings";
@@ -201,8 +202,11 @@ function MemberBar({
   const cost = windowCostDisplay(member);
   return (
     <div className="flex items-center gap-2 text-xs">
-      <span className={cn("w-24 truncate", isMe ? "text-ink font-medium" : "text-muted")}>
-        {isMe ? "You" : member.name}
+      <span className={cn("inline-flex w-24 min-w-0 items-center gap-1", isMe ? "text-ink font-medium" : "text-muted")} title={member.name}>
+        {/* A team's own work: the same team icon as the Usage page, so a
+            team does not read as a person. */}
+        {member.isTeam && <Users role="img" aria-label="Team" className="h-3 w-3 shrink-0" />}
+        <span className="truncate">{isMe ? "You" : member.name}</span>
       </span>
       <div className="flex-1 h-1.5 rounded-full bg-ink-wash overflow-hidden">
         {/* `bg-muted-wash`, never `bg-muted/50`: the slash modifier on a

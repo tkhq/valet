@@ -392,11 +392,13 @@ describe("GET /api/usage — member labels", () => {
     api = await bootTestApi();
     await seedActorSpend(api, Date.now());
     const admin = await (await fetch(`${api.baseUrl}/api/usage/summary`)).json() as UsageSummaryResponse;
+    // The home card marks a team row as a team, like the Usage page.
     expect(labels(admin.org?.members)).toMatchObject({
-      "team:team-x": { name: "Platform" },
-      "team:team-y": { name: "Research" },
-      "team:team-gone": { name: "Another team" },
-      "user-gone": { name: "Former member" },
+      "team:team-x": { name: "Platform", isTeam: true },
+      "team:team-y": { name: "Research", isTeam: true },
+      "team:team-gone": { name: "Another team", isTeam: true },
+      "org:local-org": { name: "Organization", isTeam: false },
+      "user-gone": { name: "Former member", isTeam: false },
     });
     // A plain member on no team: every team is "Another team", whether it
     // exists or not, the same existence hiding the team routes use.

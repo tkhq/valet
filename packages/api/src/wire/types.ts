@@ -3701,6 +3701,9 @@ export interface UsageWindow {
 export interface UsageMemberSummary extends UsageWindow {
   userId: string;
   name: string;
+  /** True when the row is a team's own work (its schedules, event
+   * subscriptions, and API keys), not a person. */
+  isTeam?: boolean;
 }
 
 /** A Valet activity kind, derived from the session id in `cost_entries`

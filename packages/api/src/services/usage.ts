@@ -813,7 +813,10 @@ async function queryUsageSummary(db: AppDb, opts: { orgId: string; userId: strin
     body.org = {
       windowDays: 30,
       members: memberAgg
-        .map((row) => ({ userId: row.user_id, name: label(row.user_id).name, ...toWindow(row) }))
+        .map((row) => {
+          const actor = label(row.user_id);
+          return { userId: row.user_id, name: actor.name, ...(actor.isTeam ? { isTeam: true } : {}), ...toWindow(row) };
+        })
         .sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens),
     };
   }
