@@ -42,6 +42,7 @@ Do not repeat an unchanged failing call. Follow its corrective action or inspect
 ## Apply a bounded repair
 
 Select repair focus before changing the definition. Keep the same success checks.
+Repair also permits automation proposals and corrections. Prefer disabled proposals until the person authorizes activation.
 Read the current definition before patching it. Change the first demonstrated cause.
 Use the organization tier policy. Escalate one step only when evidence supports a model capability gap.
 For missing facts, define an accepted abstain result and branch away from the dependent action.
@@ -59,4 +60,6 @@ Do not claim the import reconstructed behavior from logs alone.
 
 Attempt at most three repair and test cycles. If a check still fails, report its evidence and the next required fact.
 Report checks as passed, failed, or not verified. A valid definition, saved edit, or settled run alone does not prove success.
+Focused phases retain replies to the originating Slack or Telegram conversation. They do not permit posts to unrelated destinations.
+For other workflow management tasks, such as copying or deleting a workflow, select general focus.
 When the person changes to an unrelated task, select general focus. Inherited ceilings remain in force.
