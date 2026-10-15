@@ -8,7 +8,8 @@
  * screen.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { api } from "~/api/client";
 
 const navigate = vi.fn();
@@ -125,6 +126,38 @@ describe("ImportV1Dialog", () => {
     expect(screen.getByText(/\("Plan B\."\)/)).toBeTruthy();
     // The workflows exist, so the dialog offers no second import.
     expect(screen.queryByRole("button", { name: /^Import/ })).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it.each(["Escape", "outside click", "close button"])("keeps a pending import open after %s so a failed checklist stays visible", async (dismissal) => {
+    let rejectPrompt: (error: Error) => void = () => { throw new Error("the second prompt has not started"); };
+    const pendingPrompt = new Promise<never>((_resolve, reject) => { rejectPrompt = reject; });
+    createWorkflow.mockResolvedValueOnce({ id: "wf_a" }).mockResolvedValueOnce({ id: "wf_b" });
+    vi.spyOn(api, "ensureWorkflowConversation").mockResolvedValue({ sessionId: "sess_1", threadId: "thr_1" });
+    const send = vi.spyOn(api, "sendPrompt")
+      .mockResolvedValueOnce({ messageId: "m1", threadId: "thr_1", activityAt: 0 })
+      .mockReturnValueOnce(pendingPrompt);
+    function Host() {
+      const [open, setOpen] = useState(true);
+      return <ImportV1Dialog open={open} onOpenChange={setOpen} />;
+    }
+    render(<Host />);
+    fireEvent.change(screen.getByLabelText("V1 JSON"), { target: { value: JSON.stringify({ workflows: [
+      { id: "wf_1", name: "First", data: { steps: [{ id: "plan", type: "agent", goal: "Plan A." }] } },
+      { id: "wf_2", name: "Second", data: { steps: [{ id: "plan", type: "agent", goal: "Plan B." }] } },
+    ] }) } });
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    fireEvent.click(screen.getByRole("button", { name: "Import 2 workflows" }));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+
+    if (dismissal === "Escape") fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    else if (dismissal === "outside click") fireEvent.pointerDown(document.body);
+    else fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    await act(async () => { rejectPrompt(new Error("the editor conversation is not ready")); });
+    expect(screen.getByRole("alert").textContent).toContain('The editor conversation of "Second" did not get its checklist.');
+    expect(screen.getByText(/\("Plan B\."\)/)).toBeTruthy();
     expect(navigate).not.toHaveBeenCalled();
   });
 });

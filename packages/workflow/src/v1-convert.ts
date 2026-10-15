@@ -511,11 +511,15 @@ function convertTrigger(t: V1TriggerRow, b: Build): void {
     const path = stringField(t.config.path);
     const off = t.enabled ? '' : ' It was turned off in V1, so do this only if you still need it.';
     const getNote = method === 'GET' ? ' The caller sends GET, so change its method too.' : '';
-    // `repo from $.repo` reads the same field in V2. A V2 webhook applies
-    // no mapping, so a condition on a variable mapped from another field
-    // reads the variable name from the body.
-    const same = entries.filter(([key, from]) => from === `$.${key}`);
-    const renamed = entries.filter(([key, from]) => from !== `$.${key}`);
+    // V1 overwrote these mappings with built-in objects. Other mappings
+    // followed dot-separated payload paths into literal variable names.
+    const builtins = {
+      _payload: 'the whole request payload, including query parameters',
+      _trigger: 'webhook metadata (type, triggerId, path, method and timestamp)',
+    };
+    const mapped = entries.filter(([key]) => !Object.prototype.hasOwnProperty.call(builtins, key));
+    const same = mapped.filter(([key, from]) => !key.includes('.') && from === `$.${key}`);
+    const renamed = mapped.filter(([key, from]) => key.includes('.') || from !== `$.${key}`);
     const mapping =
       same.length === 0
         ? ''
@@ -527,12 +531,20 @@ function convertTrigger(t: V1TriggerRow, b: Build): void {
     if (firstRenamed !== undefined) {
       requireDecision(
         b,
-        `V1 webhook trigger "${t.name}" copied request fields into variables with other names (${mappingText(renamed)}). A V2 webhook does not copy them: each condition reads the variable name from the JSON body, such as ${triggerDataPath(firstRenamed)}. Change the caller to send the variable names, or change the conditions to read the request fields.`,
+        `V1 webhook trigger "${t.name}" copied request fields into variables (${mappingText(renamed)}). V1 read each path one field at a time. A V2 webhook does not copy them: each condition reads the variable name from the JSON body, such as ${triggerDataPath(firstRenamed)}. Change the caller to send the variable names, or change the conditions to read the request fields.`,
       );
     }
-    // V1 set only the mapped variables from the request (`webhooks.ts` in
-    // `packages/worker/src/services`). A V2 webhook passes the whole body.
-    const unset = [...b.variables.keys()].filter((v) => !Object.prototype.hasOwnProperty.call(t.variableMapping ?? {}, v));
+    for (const [variable, meaning] of Object.entries(builtins)) {
+      if (!b.variables.has(variable)) continue;
+      requireDecision(
+        b,
+        `V1 webhook trigger "${t.name}": V1 set "${variable}" to ${meaning}, after applying the variable mapping. An object value is truthy. A V2 webhook does not set this variable: its conditions read ${triggerDataPath(variable)} from the posted JSON instead. Change these conditions to read the V2 trigger, or change the caller to supply the required value.`,
+      );
+    }
+    // V1 set only mapped variables and built-ins (`webhooks.ts`). A V2
+    // webhook passes the whole body.
+    const unset = [...b.variables.keys()].filter((v) =>
+      !Object.prototype.hasOwnProperty.call(builtins, v) && !Object.prototype.hasOwnProperty.call(t.variableMapping ?? {}, v));
     if (unset.length > 0) {
       const them = unset.length === 1 ? 'it' : 'them';
       requireDecision(
@@ -593,9 +605,16 @@ function walk(steps: Located[], lane: Lane, b: Build, scope?: Scope): void {
 }
 
 function addMessage(raw: Record<string, unknown>, id: string, lane: Lane, b: Build): void {
-  // V1's precedence (`workflow-compiler.ts`): content, then message, then goal.
-  const text = (stringField(raw.content, false) || stringField(raw.message, false) || stringField(raw.goal, false)).trim();
-  if (text === '') return;
+  const text = v1MessageText(raw);
+  if (text === '') {
+    if ((stringField(raw.content, false) || stringField(raw.message, false) || stringField(raw.goal, false)).trim() !== '') {
+      requireDecision(
+        b,
+        `Step "${id}": V1 selected an empty message field before its fallback, so V1 failed a run at this step. The import leaves the step out. Decide whether later steps must run, then change this message or the workflow.`,
+      );
+    }
+    return;
+  }
   if (raw.interrupt === true) {
     requireDecision(
       b,
@@ -615,6 +634,16 @@ function addMessage(raw: Record<string, unknown>, id: string, lane: Lane, b: Bui
     lane,
     b,
   );
+}
+
+/** V1's runner chose the first string even when it was empty. Its compiler
+ * instead checked the first nonempty string (`collectRefusals`). */
+function v1MessageText(raw: Record<string, unknown>): string {
+  return (typeof raw.content === 'string'
+    ? raw.content
+    : typeof raw.message === 'string'
+      ? raw.message
+      : stringField(raw.goal, false)).trim();
 }
 
 /** How long V1 waited for an answer (`executeWorkflowAgentStep`): the
@@ -668,7 +697,7 @@ function addPending(item: Pending, lane: Lane, b: Build): void {
 }
 
 function addTool(raw: Record<string, unknown>, id: string, lane: Lane, b: Build): void {
-  const tool = stringField(raw.tool);
+  const tool = stringField(raw.tool, false);
   const args = isRecord(raw.arguments) ? raw.arguments : {};
   switch (tool) {
     case '':

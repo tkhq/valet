@@ -114,7 +114,9 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
   const reviewed = phase.kind === "confirm" ? phase.value : phase.kind === "error" ? phase.review : undefined;
 
   return (
-    <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : close())}>
+    <Dialog open={open} onOpenChange={(next) => {
+      if (!busy) next ? onOpenChange(true) : close();
+    }}>
       <DialogContent
         className="max-h-[85vh] max-w-lg overflow-y-auto"
         title="Import from V1"
