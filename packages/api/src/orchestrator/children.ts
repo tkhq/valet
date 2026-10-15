@@ -28,6 +28,7 @@ import {
   type ChannelOrigin,
   type ChildReader,
   type CompactionEntry,
+  type DecisionGate,
   type ChildSender,
   type ChildSpawner,
   type ChildStatusReader,
@@ -693,11 +694,18 @@ export class ChildWatcher {
    * origin with manual replies: the parent can mention it, never auto-post.
    * One signal per gate: the dispatchId makes a repeat a no-op.
    */
-  async reportGateOpened(childSessionId: string, gate: { id: string; title: string; type: string }): Promise<void> {
+  async reportGateOpened(childSessionId: string, gate: Pick<DecisionGate, "id" | "title" | "type" | "queueItemId" | "threadId">): Promise<void> {
     const watch = await activeChildWatch(this.deps.db, childSessionId);
     if (!watch) return;
     const childData = await this.deps.engineStore.getSession(childSessionId);
     if (!childData) return;
+    const [submission, thread] = await Promise.all([
+      this.deps.engineStore.getQueueItem(childSessionId, gate.queueItemId),
+      this.deps.engineStore.getThread(childSessionId, gate.threadId),
+    ]);
+    const toolScope = submission && thread
+      ? intersectToolScopes(readToolScope(childData.metadata?.[TOOL_SCOPE_KEY]), readToolScope(submission.metadata?.[TOOL_SCOPE_KEY]), readToolScope(thread.metadata?.[TOOL_SCOPE_KEY]))
+      : { tools: [], actions: [] };
     await admitSignal(this.deps, {
       from: { sessionId: childSessionId, owner: childData.owner },
       to: watch.parentSessionId,
@@ -712,6 +720,7 @@ export class ChildWatcher {
         attributes: { child_session_id: childSessionId, gate_id: gate.id, gate_type: gate.type },
         ...(watch.origin !== undefined ? { origin: { ...watch.origin, reply: "manual" } } : {}),
       },
+      toolScope,
       dispatchId: `gate-opened:${childSessionId}:${gate.id}`,
     });
   }

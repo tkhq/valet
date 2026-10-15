@@ -44,8 +44,11 @@
 - Dynamic team discovery retains its account approval. Canonical action IDs retain service aliases.
 - PostgreSQL thread saves now persist focus changes. The shared store contract reproduced the former failure.
 - Checks: 193 focused engine tests, 258 focused API tests, 122 inheritance tests, and 161 store tests passed.
-- Full E2E: 20 suites passed, one integration socket failure, and 16 environment skips. The complete integration suite passed on rerun.
+- Full E2E: the final complete run passed 21 suites with zero failures and 16 environment skips.
 - Live checks passed diagnosis, repair, preview, and run output for personal/team assistants with Haiku 4.5 and Opus 5.5. Restricted tasks refused writes. Both assistants asked for missing staff-meeting details without edits or runs.
 - Live team continuations exposed missing member authority for private run reads. The regression failed before the fix and passed after it. Other members and machine turns remain denied.
 - Live repair exposed an unsupported patch format accepted as an unchanged save. Strict patch parameters now reject it. Schema-recovery advice explicitly requests schemas.
-- The follow-up API checks passed 927 tests. Deployment and live rechecks of these final fixes remain pending.
+- The follow-up API checks passed 927 tests. These fixes were deployed for live rechecks.
+- The live rechecks passed all 12 personal/team-model checks, including private team result reads.
+- Adversarial review then demonstrated three missing scope paths: object-shaped foreach bodies, child gate notifications, and security dispatch/handoff. Five regression failures reproduced them. All 40 targeted tests pass after the fixes.
+- Full E2E after the adversarial fixes passed 21 suites with zero failures and 16 environment skips. Live rechecks of this last revision remain pending.
