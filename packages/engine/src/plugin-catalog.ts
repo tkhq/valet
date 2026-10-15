@@ -1448,7 +1448,7 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
       return { text: `denied: user did not approve ${toolId}` };
     case "invalid-args":
       return {
-        text: `invalid params for ${toolId}: ${outcome.error}. Call list_tools (service: "${toolId.split(".")[0]}") to read its parameter schema, then call ${toolId} again with params that match.`,
+        text: `invalid params for ${toolId}: ${outcome.error}. Call list_tools (service: "${toolId.split(".")[0]}", query: "${toolId}", detail: "schema") to read its parameter schema, then call ${toolId} again with params that match.`,
       };
     case "missing-credential":
       return {

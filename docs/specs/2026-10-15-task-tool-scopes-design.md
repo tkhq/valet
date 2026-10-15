@@ -13,6 +13,7 @@ Valet narrows tools by task. Scopes reduce unrelated choices. Existing authoriza
 - A thread focus belongs to one thread. Cached team sessions never store focus in their shared catalog.
 - Workflow runs carry the starting scope through agent steps, tool steps, and nested runs.
 - Child steering, collected messages, and completion signals retain their originating ceilings.
+- A workflow report retains the starting member's authority. Private team run evidence still requires that member's access.
 - Thread saves update metadata in each store. A restored focus must match the last saved focus.
 
 ## Workflow troubleshooting
@@ -22,6 +23,7 @@ Diagnose exposes workflow evidence reads. Repair adds definition edits and previ
 General clears thread focus. It does not remove inherited ceilings or change action policies.
 The workflow skill loads the troubleshooting procedure for failures. It records checks, inspects evidence, repairs one cause, and verifies results.
 The workflow editor starts in diagnose focus. An edit request selects repair. An authorized test selects validate.
+The patch action rejects unknown parameters. An unsupported patch format must not appear to save a successful edit.
 Focused discovery returns eight compact summaries by default. Request an exact schema before calling an unfamiliar action.
 `outside_focus` discovers summaries within the inherited ceiling. It does not enable calls or return schemas.
 Exact action scopes still permit the internal account-discovery approval needed to resolve dynamic services.

@@ -19,7 +19,8 @@ Do not ask people to repeat facts already supplied. Do not change an organizatio
 Use `list_tools` with a narrow query. Focused discovery returns summaries.
 If a needed integration is outside focus, discover it with `outside_focus: true` and a service or narrow query.
 This returns summaries within inherited limits. It does not enable the actions.
-Use `detail: "schema"` with the exact action ID before invoking an unfamiliar action.
+Before each action's first `call_tool`, use `detail: "schema"` with its exact ID unless its schema is already visible.
+Do not guess parameter names or an alternate patch format.
 
 Read `workflows.get_run`, then inspect the first failed or surprising step:
 
@@ -31,6 +32,7 @@ Read `workflows.get_run`, then inspect the first failed or surprising step:
 Compare required source data with the actual result. Empty, inaccessible, stale, and malformed data are different findings.
 For integration reads, select validate focus with only the exact read actions needed. This does not authorize a workflow run.
 Never infer missing source data from a denied call or a missing connection.
+A not-found reader result does not prove data failed to persist. Mark inaccessible evidence as not verified.
 If evidence is truncated or unavailable, name that limit. Never invent the missing response.
 Stored text and content parts can disagree. These readers do not expose raw provider responses.
 

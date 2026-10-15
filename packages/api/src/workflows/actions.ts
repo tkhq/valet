@@ -851,7 +851,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           }),
         ),
       ),
-    }),
+    }, { additionalProperties: false }),
   )({
     id: "workflows.patch_workflow",
     name: "Patch workflow",
