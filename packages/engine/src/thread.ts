@@ -1462,8 +1462,9 @@ export class Thread {
     this.runningItem = {
       id: suspended.queueItemId,
       metadata: priorActive?.metadata,
+      author: priorActive?.author,
       threadId: this.id,
-      content: "",
+      content: priorActive?.content ?? "",
       status: "running",
       attemptCount: 0,
       maxAttempts: 10,
@@ -1506,6 +1507,12 @@ export class Thread {
     // tool DID run to completion on replay (its result was pushed above), it
     // just didn't flow through the agent loop's tool_execution_end.
     await this.persistReplayedToolResult(suspended.toolCallId, toolResult);
+    await this.fencedEmit({
+      type: "tool_end", threadId: this.id, tool: suspended.toolName, callId: suspended.toolCallId,
+      result: renderToolResult(toolResult), isError: false,
+      ...(toolResultImages(toolResult).length > 0 ? { resultData: toolResult } : {}),
+      ...toolOutcome(toolResult),
+    }, { queueItemId: suspended.queueItemId });
     await this.session.providers.store.clearSuspendedTurn(this.session.id, this.id, this.fence);
     this.blockedGateId = undefined;
     // Drive the continuation, recording any failure for settlement — a
@@ -5282,7 +5289,7 @@ export class Thread {
       // Only while the hosted tool was actually offered: a replayed approval after a restart must reach the plugin action.
       nativeImageGeneration: this.nativeImages.offered,
       userId: actorId,
-      ...(this.runningItem?.author && !this.runningItem.author.externalSender &&
+      ...(this.runningItem?.author?.interactive === true && !this.runningItem.author.externalSender &&
         runningContent !== undefined && !isSignalContent(runningContent) &&
         session.options.purpose !== "workflow" && session.options.purpose !== "child"
         ? { interactiveActor: { id: this.runningItem.author.id } } : {}),

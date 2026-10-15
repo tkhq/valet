@@ -202,8 +202,18 @@ The host registers four actions under `settings`:
   model tier. It cannot change tier mappings.
 
 Every write has high risk and retains the normal policy, approval, and audit
-path. Settings actions require a verified interactive actor in an assistant
-turn. External senders, automated turns, coding children, and workflow
+path. Each settings approval belongs to the verified human who submitted the
+request. Another team member cannot answer it or create lasting grants.
+The catalog checks that identity before approval side effects. Actions
+still check the author's current authority after approval.
+
+Settings actions require a verified interactive actor in an assistant turn.
+Only browser sessions and local development authentication mark direct human
+prompts. CLI tokens, MCP tokens, API keys, and older unmarked authors cannot
+use settings actions, including through a lasting grant. Restart replay
+preserves the original submission's author, provenance, and signal content.
+Forwarded artifact comments retain their authentication source.
+External senders, automated turns, coding children, and workflow
 sessions cannot use them. Actions check current organization membership and
 team access at execution, including execution after approval. Team changes
 require a current team admin or organization admin. A team conversation
@@ -234,7 +244,9 @@ The engine renders the hint for that message in live and restored context.
 It labels the hint as advisory. A Settings page's scope takes precedence
 over the switcher for guidance. Tools independently authorize the actor
 and target. A successful settings write refreshes Settings queries through
-the existing tool-completion stream.
+the existing tool-completion stream. If the panel closes during approval,
+its reopened stream recovers pending writes from retained tool parts.
+Restart replay publishes the same completion event after it saves the result.
 
 ## Testing
 

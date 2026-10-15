@@ -16,7 +16,7 @@ const defaults = { defaultModel: optionalModel, defaultReasoning: optionalModel 
 const refused = { success: false, error: "Open Ask Valet in your own or an accessible team workspace. Settings changes require a signed-in person." };
 
 function action<T extends TSchema>(parameters: T, details: {
-  id: string; name: string; description: string; riskLevel: PluginAction["riskLevel"];
+  id: string; name: string; description: string; riskLevel: PluginAction["riskLevel"]; approvalScope?: "actor";
   execute: (args: Static<T>, ctx: PluginActionContext) => Promise<PluginActionResult>;
 }): PluginAction<T> { return { parameters, ...details }; }
 
@@ -72,7 +72,7 @@ export function settingsActionPlugin(db: AppDb, credentials: () => CredentialSto
     },
   });
   const account = action(Type.Object({ name: Type.Optional(Type.String()), timezone: optionalModel, ...defaults }, { additionalProperties: false, minProperties: 1 }), {
-    id: "settings.update_account", name: "Change your Valet settings", riskLevel: "high",
+    id: "settings.update_account", name: "Change your Valet settings", riskLevel: "high", approvalScope: "actor",
     description: "Change the signed-in person's name, IANA timezone, or saved default model/reasoning, only when requested. Read settings first. Null clears an override. Defaults apply to new personal threads; existing threads keep their settings. Report success only after this action succeeds.",
     execute: async (args, ctx) => {
       const actor = await actorFor(db, ctx);
@@ -82,7 +82,7 @@ export function settingsActionPlugin(db: AppDb, credentials: () => CredentialSto
     },
   });
   const team = action(Type.Object({ team_id: Type.String(), ...defaults }, { additionalProperties: false, minProperties: 2 }), {
-    id: "settings.update_team", name: "Change team thread defaults", riskLevel: "high",
+    id: "settings.update_team", name: "Change team thread defaults", riskLevel: "high", approvalScope: "actor",
     description: "Change default model/reasoning for the named team only when requested. Read its settings first. Requires current team-admin or org-admin authority. A team workspace can change only its own team. Null clears an override. Existing threads keep their settings.",
     execute: async ({ team_id, ...args }, ctx) => {
       const actor = await actorFor(db, ctx);
@@ -97,7 +97,7 @@ export function settingsActionPlugin(db: AppDb, credentials: () => CredentialSto
     },
   });
   const organization = action(Type.Object({ name: Type.Optional(Type.String()), defaultTier: optionalModel }, { additionalProperties: false, minProperties: 1 }), {
-    id: "settings.update_organization", name: "Change organization settings", riskLevel: "high",
+    id: "settings.update_organization", name: "Change organization settings", riskLevel: "high", approvalScope: "actor",
     description: "Change the current organization's name or saved default model tier (xs/s/m/l/xl, or null), only when requested. Read its settings first. Requires current organization-admin authority. Does not change tier mappings, provider keys, permissions, memberships, policies or public access.",
     execute: async (args, ctx) => {
       const actor = await actorFor(db, ctx);
