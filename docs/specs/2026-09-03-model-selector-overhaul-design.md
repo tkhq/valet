@@ -233,7 +233,10 @@ A tier target must be a model, not a tier token. The catalog accepts tier
 tokens as model specs, so before this rule `{ "m": ["m"] }` saved a tier
 whose resolution recursed without end. The PATCH now refuses a tier token
 as a target, and the error names the fix. A map saved before the rule can
-still hold one, so the tier walk follows a tier-token target into its
+still hold one. The PATCH accepts a tier token that the same tier's stored
+list already holds, so the Models page, which sends a tier's full list on
+each edit, can add a model to that tier and then remove the token. No
+request can add a new tier-to-tier link. The tier walk follows a tier-token target into its
 tier and keeps a set of the tiers it has entered. A tier that the walk
 enters twice is a cycle: that branch resolves to nothing, and the walk
 continues to the next target. The walk never returns a tier token, so

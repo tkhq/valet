@@ -6,7 +6,8 @@
  *
  * Each spec in a tier's list must exist in the org catalog and be approved.
  * A tier token is not a valid target: a tier that names itself, or two
- * tiers that name each other, have no model to resolve to.
+ * tiers that name each other, have no model to resolve to. A tier can keep
+ * a tier token that its stored list already holds.
  * `defaultTier` takes a tier token, or null to clear it. A tier token must
  * reach a provider this org holds a key for (`resolvableTiers`).
  */
@@ -113,6 +114,7 @@ modelTiersRouter.patch("/", async (c) => {
   }
 
   // Validate and narrow to PatchModelTiersRequest.
+  const stored = await getOrgTierMap(db, user.orgId);
   const validated: Record<string, string[]> = {};
   for (const tier of TIER_TOKENS) {
     if (tier in raw) {
@@ -125,7 +127,10 @@ modelTiersRouter.patch("/", async (c) => {
       }
       // The catalog accepts tier tokens as model specs, so this check comes
       // first. Without it, `{ "m": ["m"] }` saves a tier with no model.
-      const tierTarget = val.find((v) => isSizeTier(v.trim().toLowerCase()));
+      // A map saved before this check can hold a tier token. The tier that
+      // holds it can keep it, so the Models page can add a model to that
+      // tier and then remove the token. This adds no new tier-to-tier link.
+      const tierTarget = val.find((v) => isSizeTier(v.trim().toLowerCase()) && !stored[tier].includes(v));
       if (tierTarget !== undefined) {
         return c.json({
           error: `Tier "${tier}" cannot target the tier token "${tierTarget}". Pick a model from the model list (GET /api/models) for each target.`,
@@ -152,7 +157,7 @@ modelTiersRouter.patch("/", async (c) => {
   const editedDefault = savedDefault !== null && savedDefault in validated ? savedDefault : null;
   const checkedDefault = isSizeTier(defaultTier) ? defaultTier : editedDefault;
   if (checkedDefault !== null) {
-    const proposed = applyTierPatch(await getOrgTierMap(db, user.orgId), patch);
+    const proposed = applyTierPatch(stored, patch);
     const usable = await resolvableTiers(db, engineCredentials, user.orgId, proposed);
     if (!usable.has(checkedDefault)) {
       const error = editedDefault

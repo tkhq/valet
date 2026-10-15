@@ -135,6 +135,24 @@ describe("/api/org/model-tiers defaultTier", () => {
     expect(await getOrgDefaultTier(api.providers.db, "local-org")).toBeNull();
   });
 
+  it("lets the Models page replace a tier token that the tier already held", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    api = await bootTestApi();
+    const { db } = api.providers;
+    // Saved directly: a map saved before the PATCH refused tier tokens.
+    await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, m: ["s"] });
+    const model = "anthropic/claude-sonnet-4-6";
+
+    // The page sends the full list: first it adds a model, then it removes "s".
+    expect((await patchTiers(api.baseUrl, { m: ["s", model] })).status).toBe(200);
+    expect((await getOrgTierMap(db, "local-org")).m).toEqual(["s", model]);
+    expect((await patchTiers(api.baseUrl, { m: [model] })).status).toBe(200);
+    expect((await getOrgTierMap(db, "local-org")).m).toEqual([model]);
+
+    // The tier no longer holds "s", so the PATCH refuses it again.
+    expect((await patchTiers(api.baseUrl, { m: ["s", model] })).status).toBe(400);
+  });
+
   it("refuses a tier edit that leaves the saved default tier with no provider that has a key", async () => {
     // A zero-config OpenRouter key puts OpenRouter models in the catalog,
     // so the catalog check accepts the target. The tier walk does not count
