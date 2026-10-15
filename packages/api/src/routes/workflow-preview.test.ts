@@ -17,7 +17,7 @@ import {
   orderNodes,
   staticShape,
 } from "./workflow-preview.js";
-import type { PluginAction, PluginActionContext } from "@valet/engine";
+import { encodeToolOutput, type PluginAction, type PluginActionContext } from "@valet/engine";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import type { CreateWorkflowResponse, PreviewWorkflowResponse } from "../wire/types.js";
 
@@ -646,6 +646,59 @@ describe("workflows.preview_workflow", () => {
     const result = await action.execute({ workflow_id: created.id, node_id: "nope" }, ctx);
     expect(result.success).toBe(false);
     expect(result.error).toContain("omit nodeId");
+  });
+
+  it("cuts long sample values so the tool result keeps the get_node_result budget", async () => {
+    api = await bootTestApi();
+    const { action, ctx } = previewAction(api);
+    // The preview repeats the draft's text five times: as the draft's
+    // observed example, as the copy step's field, output and example, and
+    // in the hand-off prompt.
+    const created = await createWorkflow(api.baseUrl, {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "draft", type: "llm", model: MODEL, prompt: "Write the report" },
+        { id: "copy", type: "set", values: { text: "{{nodes.draft.result.text}}" } },
+        { id: "hand-off", type: "orchestrator", prompt: "Review: {{nodes.copy.result.text}}" },
+      ],
+      edges: [
+        { from: "trigger", to: "draft" },
+        { from: "draft", to: "copy" },
+        { from: "copy", to: "hand-off" },
+      ],
+    });
+    const runId = "wfr_preview_large";
+    const store = api.providers.workflowStore;
+    await store.createRun(
+      runId,
+      { workflowId: created.id, definitionVersionId: "v1", input: {} },
+      created.definition,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    const attempt = (await store.claimRun(runId, "test", 60_000))?.attempt ?? 1;
+    const checkpoint = { runId, nodeId: "draft", iteration: 0, attempt, createdAt: Date.now() };
+    await store.putIntent({ ...checkpoint, status: "intent" });
+    await store.completeCheckpoint(runId, "draft", 0, attempt, {
+      ...checkpoint,
+      status: "completed",
+      result: { text: "x".repeat(200_000) },
+    });
+
+    // The editor's route keeps every copy.
+    expect(JSON.stringify(await preview(api.baseUrl, created.id)).length).toBeGreaterThan(1_000_000);
+
+    const result = await action.execute({ workflow_id: created.id }, ctx);
+    expect(result.success).toBe(true);
+    // Measure what the model reads, encoded the way the engine encodes it.
+    const text = encodeToolOutput(result.data);
+    expect(text.length).toBeLessThan(20_000);
+    expect(JSON.stringify(result.data).length).toBeLessThan(20_000);
+    expect(text).toContain("truncated: true");
+    expect(text).toContain("call get_node_result");
+    // Only the values are cut. Every step still reports on itself.
+    for (const nodeId of ["trigger", "draft", "copy", "hand-off"]) expect(text).toContain(`nodeId: ${nodeId}`);
   });
 });
 

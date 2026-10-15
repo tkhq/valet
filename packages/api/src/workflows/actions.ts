@@ -20,6 +20,7 @@ import type { Static, TSchema } from "typebox";
 import { Type } from "typebox";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import { previewWorkflow } from "../routes/workflow-preview.js";
+import type { PreviewWorkflowResponse } from "../wire/types.js";
 import {
   appendRemovedEdgeHint,
   applyWorkflowModelPatch,
@@ -989,7 +990,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             iteration: cp.iteration,
             status: cp.status,
             error: cp.error,
-            result: presentResult(cp.result, 20_000),
+            result: presentResult(cp.result, TOOL_RESULT_CHARS),
           })),
         },
       };
@@ -1062,8 +1063,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           messages: transcript.messages,
         },
       };
-      },
-    });
+    },
+  });
 
   const previewWorkflowAction = action(
     Type.Object({
@@ -1084,13 +1085,14 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "(fidelity 'executed'). Every other step is described from its shape and never called " +
       "(fidelity 'described'). Each step lists its resolved template fields, the `unresolved` " +
       "paths that render to nothing, its output paths and warnings. Use it before a real run " +
-      "to catch template and structure errors.",
+      "to catch template and structure errors. A long value comes back as " +
+      "{ truncated: true, jsonPrefix, note }; pass node_id to give one step more room.",
     riskLevel: "low",
     execute: async ({ workflow_id, input, sample, node_id }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const outcome = await previewWorkflow(getDeps(), owner, workflow_id, { input, sample, nodeId: node_id });
-      if (outcome.ok) return { success: true, data: { workflowId: workflow_id, ...outcome.response } };
+      if (outcome.ok) return { success: true, data: presentPreview(workflow_id, outcome.response, TOOL_RESULT_CHARS) };
       switch (outcome.reason) {
         case "not_found":
           return { success: false, error: `workflow not found: ${workflow_id}` };
@@ -1541,22 +1543,65 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
 const TRANSCRIPT_PAGE = 20;
 const TRANSCRIPT_PAGE_MAX = 50;
 
+/** The most one `get_node_result` checkpoint holds, and the most one whole
+ * `preview_workflow` reply holds. */
+const TOOL_RESULT_CHARS = 20_000;
+
+/** The least room one preview value keeps, however many values share the budget. */
+const PREVIEW_VALUE_MIN_CHARS = 200;
+
+const PREVIEW_CUT_NOTE =
+  "Cut to fit the tool result. Pass node_id to preview one step with more room, " +
+  "or call get_node_result for the full result of a step in the sample run.";
+
 /**
  * Return a checkpoint result verbatim when its JSON fits `maxChars`, so the
  * agent sees the same structured value templates read via
  * `nodes.<id>.result`. An oversized result becomes a `{ truncated: true,
  * jsonPrefix }` stub so a giant payload can't blow up the LLM context.
+ * `note`, when given, goes on the stub and tells the agent where to read more.
  * (An earlier always-stringified wrapper here read as the checkpoint's own
  * shape and convinced agents the data was unreachable.)
  */
-function presentResult(value: unknown, maxChars: number): unknown {
+function presentResult(value: unknown, maxChars: number, note?: string): unknown {
   let json: string;
   try {
     json = JSON.stringify(value) ?? "null";
   } catch (err) {
     json = `<unserializable: ${err instanceof Error ? err.message : String(err)}>`;
-    return { truncated: true, jsonPrefix: json };
+    return { truncated: true, jsonPrefix: json, ...(note ? { note } : {}) };
   }
   if (json.length <= maxChars) return value;
-  return { truncated: true, jsonPrefix: json.slice(0, maxChars) };
+  return { truncated: true, jsonPrefix: json.slice(0, maxChars), ...(note ? { note } : {}) };
+}
+
+/**
+ * Fit a preview into one tool result. A preview repeats sample values: a
+ * step's output, its observed example, and each downstream field that reads
+ * it. So one 200,000-character checkpoint made a 1,000,000-character result.
+ * The values share half of `maxChars`, and {@link presentResult} cuts each
+ * value that is longer than its share. A reply that still does not fit is
+ * cut as a whole. The HTTP route gives the editor the full preview.
+ */
+function presentPreview(workflowId: string, response: PreviewWorkflowResponse, maxChars: number): unknown {
+  const valueCount = response.nodes.reduce(
+    (count, node) =>
+      count + node.fields.length + (node.output === undefined ? 0 : 1) + (node.outputShape.example === undefined ? 0 : 1),
+    0,
+  );
+  const valueChars = Math.max(PREVIEW_VALUE_MIN_CHARS, Math.floor(maxChars / 2 / Math.max(valueCount, 1)));
+  const cut = (value: unknown): unknown => presentResult(value, valueChars, PREVIEW_CUT_NOTE);
+  const nodes = response.nodes.map((node) => ({
+    ...node,
+    fields: node.fields.map((field) => ({ ...field, resolved: cut(field.resolved) })),
+    ...(node.output === undefined ? {} : { output: cut(node.output) }),
+    outputShape: node.outputShape.example === undefined
+      ? node.outputShape
+      : { ...node.outputShape, example: cut(node.outputShape.example) },
+  }));
+  const presented = { workflowId, ...response, nodes };
+  if (JSON.stringify(presented).length <= maxChars) return presented;
+  // The cut reply is JSON inside JSON, so each quote in it is escaped again.
+  // Half the room keeps the escaped prefix inside the budget.
+  return presentResult(presented, Math.floor(maxChars / 2), PREVIEW_CUT_NOTE);
 }

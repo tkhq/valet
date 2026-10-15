@@ -488,4 +488,6 @@ The editor has a **Test** button next to **Run**. Test does not start a run. It 
 4. Read the result in the `workflow.settled` report and with `get_node_result`. Fix the workflow and run it again, at most three times.
 5. End with each check marked passed or failed.
 
+A preview repeats sample values: a step's output, its observed example, and each downstream field that reads it. One 200,000-character checkpoint once gave a 1,000,000-character tool result. So `workflows.preview_workflow` keeps its tool result under 20,000 characters, the same budget as `get_node_result`. The values share half of that budget. The `presentResult` helper that `get_node_result` uses cuts each longer value to a `{ truncated: true, jsonPrefix, note }` stub. The note tells the assistant to pass `node_id` for one step, or to call `get_node_result`. If the reply still does not fit, `presentResult` cuts it as a whole. The HTTP route still gives the editor the full preview.
+
 Outside a test, the editor still does not run a workflow unless the person asks. A test mode that holds outbound actions for review is a follow-up.
