@@ -5,10 +5,12 @@ import { workflowTemplates } from "./templates.js";
 
 const workflowsMd = readFileSync(fileURLToPath(new URL("../skills/workflows/SKILL.md", import.meta.url)), "utf8");
 
+const troubleshootingMd = readFileSync(fileURLToPath(new URL("../skills/workflow-troubleshooting/SKILL.md", import.meta.url)), "utf8");
+
 const plugin: ValetPlugin = {
   name: "workflows",
   version: "0.1.0",
-  skills: [loadSkillFromMarkdown(workflowsMd, "plugin", "workflows")],
+  skills: [loadSkillFromMarkdown(workflowsMd, "plugin", "workflows"), loadSkillFromMarkdown(troubleshootingMd, "plugin", "workflow-troubleshooting")],
   templates: workflowTemplates,
 };
 

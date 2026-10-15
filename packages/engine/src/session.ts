@@ -1,3 +1,4 @@
+import { intersectToolScopes, readToolScope, TOOL_SCOPE_KEY } from "@valet/shared";
 import { Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
 import { uid } from "./ids.js";
 import { builtinTools } from "./builtin-tools/index.js";
@@ -536,6 +537,7 @@ export class Session {
     attachment: SandboxAttachment,
     policySandbox?: PolicySandbox,
   ): Promise<Session> {
+    options.toolScope = intersectToolScopes(readToolScope(data.metadata?.[TOOL_SCOPE_KEY]), options.toolScope);
     const session = new Session(data.id, options, providers, sandbox, attachment, policySandbox);
     // The host's restore-time options usually don't re-supply `owner` (it's
     // not something callers round-trip through CreateSessionOptions on
@@ -833,7 +835,8 @@ export class Session {
         initial?.reasoning === null ? THREAD_REASONING_DISABLED : initial?.reasoning,
       // Stamped with `createdAt` and never rewritten: a later timezone change
       // must not alter this thread's prompt (TKAI-584).
-      metadata: { [THREAD_USER_TIMEZONE_KEY]: this.latestUserTimezone ?? null },
+      metadata: { [THREAD_USER_TIMEZONE_KEY]: this.latestUserTimezone ?? null,
+        ...(this.options.initialToolFocus?.({ key }) ? { [TOOL_SCOPE_KEY]: this.options.initialToolFocus({ key }) } : {}) },
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -1162,6 +1165,9 @@ export class Session {
   private buildCommandToolContext(thread: Thread): ToolContext {
     const requestDecision = this.options.commandRequestDecision;
     return {
+      get toolScope() { return thread.effectiveToolScope(); },
+      get toolScopeCeiling() { return thread.toolScopeCeiling(); },
+      setToolFocus: (scope) => thread.setToolFocus(scope),
       userId: this.options.userId,
       orgId: this.options.orgId,
       sessionId: this.id,
@@ -1638,6 +1644,7 @@ export class Session {
       model: this.options.modelSpec ?? this.options.model.id,
       reasoning: this.options.sampling?.reasoning,
       startRef: this.options.startRef,
+      ...(this.options.toolScope ? { metadata: { [TOOL_SCOPE_KEY]: this.options.toolScope } } : {}),
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };

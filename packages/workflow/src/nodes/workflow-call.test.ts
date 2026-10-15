@@ -136,6 +136,7 @@ describe('workflow node (sub-workflow call)', () => {
     const engine = resolvingEngine();
     const params = parentParams();
     params.origin = { assistantSessionId: 'assistant:origin', threadId: 'th-origin' };
+    params.toolScope = { actions: ['github.get_issue'] };
     await store.createRun('wfrun_origin', params, parentDefinition(), 'v1', {
       ownerType: 'team', ownerId: 'team-a', actorUserId: 'u1',
     });
@@ -145,6 +146,7 @@ describe('workflow node (sub-workflow call)', () => {
     if (wait.kind !== 'run') throw new Error('expected a run wait');
     const child = await store.getRun(wait.runId);
     expect(child?.params.origin).toEqual(params.origin);
+    expect(child?.params.toolScope).toEqual({ actions: ['github.get_issue'] });
     expect(child?.actorUserId).toBe('u1');
   });
 

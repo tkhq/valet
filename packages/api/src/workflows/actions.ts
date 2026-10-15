@@ -516,7 +516,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!owner) return NO_OWNER;
       const deps = getDeps();
       const origin = await workflowActionOrigin(deps, owner, ctx.sessionId, ctx.threadId, ctx.owner);
-      const started = await startWorkflowRun(deps, owner, workflow_id, input, origin);
+      const started = await startWorkflowRun(deps, owner, workflow_id, input, origin, "manual", ctx.toolScope);
       if (!started) return { success: false, error: `workflow not found: ${workflow_id}` };
       if ("invalidInput" in started) {
         return {
@@ -851,7 +851,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           }),
         ),
       ),
-    }),
+    }, { additionalProperties: false }),
   )({
     id: "workflows.patch_workflow",
     name: "Patch workflow",

@@ -12,6 +12,7 @@ import {
 } from "./actions.js";
 import type { ActionPlugin, PluginActionContext, SessionEntry, ValetPlugin } from "@valet/engine";
 import { Type } from "typebox";
+import { Value } from "typebox/value";
 import {
   createWorkflowDefinition,
   getWorkflowDefinition,
@@ -45,6 +46,13 @@ function ctx(overrides?: Partial<PluginActionContext>): PluginActionContext {
 }
 
 describe("workflowsActionPlugin", () => {
+  it("rejects an unsupported patch format instead of accepting an unchanged save", () => {
+    const patch = workflowsActionPlugin(noDeps).actions.find((item) => item.id === "workflows.patch_workflow");
+    if (!patch) throw new Error("patch action missing");
+    expect(Value.Check(patch.parameters, { workflow_id: "wf-test", changes: [{ op: "replace", path: "/nodes/1/values/marker", value: "blue" }] })).toBe(false);
+    expect(Value.Check(patch.parameters, { workflow_id: "wf-test", upsert_nodes: [{ id: "marker", type: "set", values: { marker: "blue" } }] })).toBe(true);
+  });
+
   it("exposes every workflow action under a workflows.* id", () => {
     const plugin = workflowsActionPlugin(noDeps);
     expect(plugin.service).toBe("workflows");
@@ -508,8 +516,9 @@ describe("DB-backed actions", () => {
       await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v",
         definition: {}, params: {}, ownerType: "user", ownerId: "user1", createdAt: 1, updatedAt: 1 });
       const start = workflowsActionPlugin(() => deps).actions.find(action => action.id === "workflows.start_run")!;
-      expect(await start.execute({ workflow_id: workflowId }, ctx({ sessionId, threadId: "invoke" }))).toMatchObject({ success: true });
+      expect(await start.execute({ workflow_id: workflowId }, ctx({ sessionId, threadId: "invoke", toolScope: { actions: ["demo.echo"] } }))).toMatchObject({ success: true });
       expect(runHost.started.at(-1)?.[1].origin).toBeUndefined();
+      expect(runHost.started.at(-1)?.[1].toolScope).toEqual({ actions: ["demo.echo"] });
     },
   );
 

@@ -1,3 +1,4 @@
+import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, readToolScope, toolInScope, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { uid } from "./ids.js";
@@ -589,7 +590,7 @@ export class Thread {
   private readonly threadCreatedAt: number;
   /** Creation-time user timezone from persisted thread state (TKAI-584). */
   private readonly threadUserTimezone: string | undefined;
-  private readonly threadMetadata: Record<string, unknown> | undefined;
+  private threadMetadata: Record<string, unknown> | undefined;
   /** Durable leaf used to link each new entry into the active transcript path. */
   private activeLeafEntryId: string | undefined;
 
@@ -610,7 +611,9 @@ export class Thread {
     this.reasoningDisabled = data.reasoning === THREAD_REASONING_DISABLED;
     this.paused = data.paused ?? false;
     this.threadCreatedAt = data.createdAt || Date.now();
-    this.threadMetadata = data.metadata;
+    const initialFocus = session.options.initialToolFocus?.({ key: data.key });
+    this.threadMetadata = data.metadata?.[TOOL_SCOPE_KEY] !== undefined || !initialFocus
+      ? data.metadata : { ...data.metadata, [TOOL_SCOPE_KEY]: initialFocus };
     const persistedTimezone = data.metadata?.[THREAD_USER_TIMEZONE_KEY];
     this.threadUserTimezone = typeof persistedTimezone === "string" ? persistedTimezone : undefined;
     this.activeLeafEntryId = data.activeLeafEntryId;
@@ -826,7 +829,7 @@ export class Thread {
       model: newest.model,
       role: newest.role,
       author: newest.author,
-      metadata: { overheardDigest: digest, ...(presence ? { presence } : {}) },
+      metadata: { overheardDigest: digest, ...(presence ? { presence } : {}), ...scopeMetadata(coalescible.map((item) => item.metadata)) },
     });
     const { item: admittedMerged } = await store.admitSubmission(this.session.id, this.id, merged);
     for (const constituent of coalescible) {
@@ -1083,7 +1086,8 @@ export class Thread {
         channel: collecting[0].channel,
         replyTarget: collecting[0].replyTarget,
         model: collecting[0].model,
-        metadata: { collect: { constituentIds: collecting.map((i) => i.id) } },
+        metadata: { collect: { constituentIds: collecting.map((i) => i.id) },
+          ...scopeMetadata(collecting.map((item) => item.metadata)) },
       });
       const { item: admittedMerged } = await store.admitSubmission(this.session.id, this.id, merged);
       for (const constituent of collecting) {
@@ -1433,7 +1437,7 @@ export class Thread {
     resolution: DecisionResolution;
   }): Promise<void> {
     const { suspended, resolution } = args;
-    const tools = this.buildTools();
+    const tools = this.buildTools(true);
     const tool = tools.find((t) => t.name === suspended.toolName);
     if (!tool) {
       this.emitError(
@@ -1465,6 +1469,7 @@ export class Thread {
     const fakeAbort = new AbortController();
     let toolResult;
     try {
+      await this.persistContinuationToolScope();
       toolResult = await tool.execute(
         suspended.toolCallId,
         suspended.toolArgs,
@@ -3446,6 +3451,7 @@ export class Thread {
     let turnError: unknown;
     const baselineModel = this.agent.state.model;
     try {
+      await this.persistContinuationToolScope();
       // Rest-state repair FIRST — before appending any recovery output.
       await this.repairRestState(item, fence, repairMessage);
 
@@ -3772,6 +3778,7 @@ export class Thread {
    * nest automatically through the host's context manager.
    */
   private async runItem(item: QueueItem): Promise<void> {
+    await this.persistContinuationToolScope();
     await this.ensureTranscript();
     return this.inSubmissionContext(() =>
       withSpan(
@@ -4979,7 +4986,7 @@ export class Thread {
    * visible instead, and `invokeAction` applies and audits them as usual.
    */
   private async nativeImageGenerationPermitted(signal: AbortSignal | undefined): Promise<boolean> {
-    if (this.runningItem?.author?.externalSender) return false;
+    if (this.runningItem?.author?.externalSender || !toolInScope(this.effectiveToolScope(), NATIVE_IMAGE_RESULT_TOOL)) return false;
     const catalog = this.session.options.pluginCatalog;
     if (!catalog) return false;
     const ctx = this.buildToolContext({
@@ -5152,7 +5159,7 @@ export class Thread {
       // turn that called it: the tool moved the model, and the loop kept
       // streaming against the model it started on. Returning the live state
       // here is what makes "takes effect on the next LLM call" true.
-      prepareNextTurn: () => ({ model: this.agent.state.model }),
+      prepareNextTurnWithContext: ({ context }) => ({ model: this.agent.state.model, context: { ...context, tools: this.buildTools() } }),
       prepareRequest: async ({ context, model }, signal) => {
         const fitted = await this.fitContextAfterModelChange(context, model, signal);
         return fitted ? { context: fitted } : undefined;
@@ -5199,13 +5206,42 @@ export class Thread {
     return base ? `${base}\n\n${fragmentText}` : fragmentText;
   }
 
-  private buildTools(): AgentTool[] {
+  private buildTools(includeRestricted = false): AgentTool[] {
     const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseOutsideAuthors);
-    return all.map((def) =>
+    return all.filter((def) => includeRestricted || def.name === "focus_tools" || (def.scopeAction
+      ? actionInScope(this.effectiveToolScope(), def.scopeAction)
+      : toolInScope(this.effectiveToolScope(), def.name))).map((def) =>
       toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
         this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
       ),
     );
+  }
+
+  private async persistContinuationToolScope(): Promise<void> {
+    const scope = this.toolScopeCeiling();
+    if (!scope && this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY] === undefined) return;
+    const metadata = { ...this.threadMetadata, [CONTINUATION_TOOL_SCOPE_KEY]: scope ?? {} };
+    await this.session.providers.store.saveThread(this.session.id, { ...this.toThreadData(), metadata });
+    this.threadMetadata = metadata;
+  }
+
+  toolScopeCeiling(): ToolScope | undefined {
+    return intersectToolScopes(this.session.options.toolScope, readToolScope(this.runningItem?.metadata?.[TOOL_SCOPE_KEY]),
+      this.runningItem?.metadata?.[INHERIT_TOOL_SCOPE_KEY] === true ? readToolScope(this.threadMetadata?.[CONTINUATION_TOOL_SCOPE_KEY]) : undefined);
+  }
+
+  effectiveToolScope(): ToolScope | undefined {
+    return intersectToolScopes(this.toolScopeCeiling(),
+      readToolScope(this.threadMetadata?.[TOOL_SCOPE_KEY]));
+  }
+
+  async setToolFocus(scope: ToolScope | undefined): Promise<void> {
+    // Write before publishing the change. A failed save cannot expand live access.
+    const metadata = { ...this.threadMetadata, [TOOL_SCOPE_KEY]: scope ?? {} };
+    await this.session.providers.store.saveThread(this.session.id, { ...this.toThreadData(), metadata });
+    this.threadMetadata = metadata;
+    this.nativeImages.invalidatePermission();
+    this.agent.state.tools = this.buildTools();
   }
 
   private buildToolContext(args: {
@@ -5224,7 +5260,11 @@ export class Thread {
         ? `team:${session.owner.id}` : session.options.userId);
     const origin =
       runningContent !== undefined && isSignalContent(runningContent) ? runningContent.origin : undefined;
+    const thread = this;
     return {
+      get toolScope() { return thread.effectiveToolScope(); },
+      get toolScopeCeiling() { return thread.toolScopeCeiling(); },
+      setToolFocus: (scope) => this.setToolFocus(scope),
       // Author is persisted with the submission; session credentials stay fixed.
       invocationId: toolCallId,
       // Only while the hosted tool was actually offered: a replayed approval after a restart must reach the plugin action.
@@ -6594,4 +6634,9 @@ function refuseOutsideAuthors(def: ToolDef): ToolDef {
       return def.execute(args, ctx);
     },
   };
+}
+
+function scopeMetadata(items: (Record<string, unknown> | undefined)[]): Record<string, unknown> {
+  const toolScope = intersectToolScopes(...items.map((metadata) => readToolScope(metadata?.[TOOL_SCOPE_KEY])));
+  return toolScope ? { [TOOL_SCOPE_KEY]: toolScope } : {};
 }

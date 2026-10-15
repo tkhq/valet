@@ -1,4 +1,5 @@
 import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError, withSpan } from "@valet/engine";
+import { continuationToolScope, INHERIT_TOOL_SCOPE_KEY, TOOL_SCOPE_KEY } from "@valet/shared";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -357,6 +358,7 @@ export class PgSessionStore implements SessionStore {
          model = EXCLUDED.model,
          reasoning = EXCLUDED.reasoning,
          summary = EXCLUDED.summary,
+         metadata = EXCLUDED.metadata,
          updated_at = EXCLUDED.updated_at`,
       [
         thread.id,
@@ -995,17 +997,22 @@ export class PgSessionStore implements SessionStore {
 
   async claimSubmission(claim: SubmissionClaim): Promise<QueueItem | null> {
     const now = Date.now();
-    const result = await this.db.query(CLAIM_SQL, [
-      claim.attemptId,
-      claim.ownerId,
-      now + (claim.leaseDurationMs ?? DEFAULT_LEASE_MS),
-      now,
-      claim.itemId,
-      claim.sessionId,
-      claim.threadId,
-    ]);
-    if (result.rowCount === 0) return null;
-    return this.getQueueItem(claim.sessionId, claim.itemId);
+    return this.db.transaction(async (tx) => {
+      const result = await tx.query(`${CLAIM_SQL} RETURNING *`, [
+        claim.attemptId, claim.ownerId, now + (claim.leaseDurationMs ?? DEFAULT_LEASE_MS), now,
+        claim.itemId, claim.sessionId, claim.threadId,
+      ]);
+      const row = result.rows[0];
+      if (!row) return null;
+      const item = queueItemRowToItem(rawToQueueItemRow(row));
+      if (item.metadata?.[INHERIT_TOOL_SCOPE_KEY] === true) {
+        const threads = await tx.query("SELECT * FROM engine_threads WHERE session_id = $1", [claim.sessionId]);
+        const scope = continuationToolScope(item.metadata, threads.rows.map((thread) => rowToThread(rawToThreadRow(thread))));
+        item.metadata = { ...item.metadata, [TOOL_SCOPE_KEY]: scope ?? {} };
+        await tx.query("UPDATE engine_queue_items SET metadata = $1 WHERE session_id = $2 AND id = $3", [jsonOrNull(item.metadata), claim.sessionId, claim.itemId]);
+      }
+      return item;
+    });
   }
 
   async replaceSubmissionAttempt(
