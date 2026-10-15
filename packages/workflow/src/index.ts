@@ -74,13 +74,7 @@ export type {
 } from './file.js';
 
 export { convertV1Workflows, readV1Paste, v1ChecklistPrompt } from './v1-convert.js';
-export type {
-  V1Conversion,
-  V1ConvertedWorkflow,
-  V1ConvertResult,
-  V1ImportSchedule,
-  V1PromptSchedule,
-} from './v1-convert.js';
+export type { V1Conversion, V1ConvertedWorkflow, V1ConvertResult } from './v1-convert.js';
 
 export { WorkflowCursorError, WorkflowFenceError, decodeRunCursor, encodeRunCursor, splitRunOwner } from './store.js';
 export type {

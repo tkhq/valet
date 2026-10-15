@@ -1,7 +1,8 @@
 /**
  * The V1 converter. Each case pastes what V1 returned and checks the graph
  * and the checklist. Every definition the converter returns must pass the
- * validator, so `convert` asserts that once for every case.
+ * validator, so `convert` asserts that once for every case. Where a case is
+ * about what a run does, it runs the definition in the real interpreter.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -9,11 +10,13 @@ import { renderTemplate } from './dag/expression.js';
 import type { WorkflowNode } from './dag/nodes.js';
 import { resolveTriggerInput, triggerDataSchema } from './dag/trigger-input.js';
 import { validateWorkflowDefinition } from './dag/validate.js';
+import type { WorkflowEngineDeps } from './engine-deps.js';
+import { driveUntilPark } from './interpreter.js';
+import { InMemoryWorkflowStore } from './memory-store.js';
 import {
   convertV1Workflows,
   readV1Paste,
   v1ChecklistPrompt,
-  v1CronDifference,
   type V1Conversion,
   type V1ConvertedWorkflow,
 } from './v1-convert.js';
@@ -64,6 +67,73 @@ function prompt(n: WorkflowNode): string {
   if (n.type !== 'session' && n.type !== 'approval') throw new Error(`${n.id} is a ${n.type} node`);
   return String(renderTemplate(n.prompt, {}));
 }
+
+/** Session nodes finish at once; other engine calls fail the test. */
+const engine: WorkflowEngineDeps = {
+  createSession: async (opts) => ({ id: opts.id }),
+  prompt: async () => ({ threadId: 'thread', queueItemId: 'queue' }),
+  awaitResult: async () => ({ queueItemId: 'queue', outcome: 'completed' as const, text: 'done' }),
+  abort: async () => {},
+  isSettled: async () => true,
+  llmComplete: async () => {
+    throw new Error('the V1 import makes no llm node');
+  },
+  promptOrchestrator: async () => {
+    throw new Error('the V1 import makes no orchestrator node');
+  },
+  invokeAction: async () => {
+    throw new Error('the V1 import makes no tool node');
+  },
+};
+
+/**
+ * Runs the workflow in the real interpreter. Each approval node gets its
+ * answer from `answers`. Returns the run outcome and the status of each
+ * node that has a checkpoint.
+ */
+async function runInV2(
+  wf: V1ConvertedWorkflow,
+  answers: Record<string, boolean>,
+): Promise<{ outcome: string | undefined; status: Record<string, string> }> {
+  const store = new InMemoryWorkflowStore();
+  const input = { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: {}, metadata: {} };
+  await store.createRun('run', { workflowId: 'wf', definitionVersionId: 'v1', input }, wf.definition, 'v1');
+  for (let drive = 0; drive < 20; drive++) {
+    const claim = await store.claimRun('run', `owner-${drive}`, 30_000);
+    if (!claim) throw new Error('could not claim the run');
+    const park = await driveUntilPark('run', claim.attempt, { store, engine, clock: () => 1_000 });
+    if (park.status === 'settled') {
+      const checkpoints = await store.getCheckpoints('run');
+      return { outcome: park.outcome, status: Object.fromEntries(checkpoints.map((cp) => [cp.nodeId, cp.status])) };
+    }
+    for (const wait of park.waitingOn) {
+      if (wait.kind !== 'signal') continue;
+      const approved = answers[wait.nodeId];
+      if (approved === undefined) throw new Error(`no answer for approval node ${wait.nodeId}`);
+      await store.insertSignal({
+        runId: 'run',
+        signalId: `${wait.signalType}:answer`,
+        signalType: wait.signalType,
+        payload: { approved, resolvedBy: 'tester' },
+        createdAt: 1_000,
+      });
+    }
+  }
+  throw new Error('the run did not settle');
+}
+
+/** A parallel step with an approval, then a deploy after it. */
+const RELEASE = [
+  {
+    id: 'release',
+    type: 'parallel',
+    steps: [
+      { id: 'z_notes', type: 'agent_message', content: 'Write release notes.' },
+      { id: 'a_gate', type: 'approval', prompt: 'Ship it?' },
+    ],
+  },
+  { id: 'deploy', type: 'tool', tool: 'spawn_session', arguments: { task: 'Deploy to prod.', workspace: 'app' } },
+];
 
 describe('convertV1Workflows: steps', () => {
   const cases: { name: string; steps: unknown[]; check: (wf: V1ConvertedWorkflow) => void }[] = [
@@ -207,9 +277,12 @@ describe('convertV1Workflows: steps', () => {
         },
       ],
       check: (wf) => {
-        expect(edges(wf)).toContain('a-first->b-second');
+        expect(edges(wf)).toContain('a-first->b-second:true');
         expect(reachableWithout(wf, 'a-first')).not.toContain('b-second');
-        expect(wf.checklist).toEqual([expect.stringContaining('in id order ("a-first", "b-second"), not in the order listed. The import keeps the V1 order.')]);
+        expect(wf.checklist).toEqual([
+          expect.stringContaining('in id order ("a-first", "b-second"), not in the order listed. The import keeps the V1 order.'),
+          expect.stringContaining('Approval node "a-first" is inside step "c".'),
+        ]);
       },
     },
     {
@@ -231,23 +304,12 @@ describe('convertV1Workflows: steps', () => {
       },
     },
     {
-      name: 'a denied approval inside a parallel step still stops the deploy after it',
-      steps: [
-        {
-          id: 'release',
-          type: 'parallel',
-          steps: [
-            { id: 'z_notes', type: 'agent_message', content: 'Write release notes.' },
-            { id: 'a_gate', type: 'approval', prompt: 'Ship it?' },
-          ],
-        },
-        { id: 'deploy', type: 'tool', tool: 'spawn_session', arguments: { task: 'Deploy to prod.', workspace: 'app' } },
-      ],
+      name: 'a denial inside a parallel step skips the rest of that step and goes on after it, as in V1',
+      steps: RELEASE,
       check: (wf) => {
-        // V1 sorted a_gate first and cancelled the run on a denial. A
-        // failed approval activates no edge, so nothing after it may start.
-        expect(edges(wf)).toEqual(['trigger->a_gate', 'a_gate->z_notes', 'z_notes->deploy', 'deploy->stop']);
-        expect(reachableWithout(wf, 'a_gate')).toEqual(['trigger']);
+        // V1 sorted a_gate first. A denial skipped z_notes, and the run went on to deploy.
+        expect(edges(wf)).toEqual(['trigger->a_gate', 'a_gate->z_notes:true', 'z_notes->deploy', 'a_gate->deploy:false', 'deploy->stop']);
+        expect(node(wf, 'a_gate')).toMatchObject({ onDeny: 'skip' });
       },
     },
     {
@@ -330,6 +392,65 @@ describe('convertV1Workflows: steps', () => {
   }
 });
 
+describe('convertV1Workflows: approvals and limits in a V2 run', () => {
+  it('goes on after a parallel step when an approval inside it is denied, as V1 did', async () => {
+    const wf = one(RELEASE);
+    const denied = await runInV2(wf, { a_gate: false });
+    expect(denied.outcome).toBe('completed');
+    expect(denied.status).toMatchObject({ a_gate: 'completed', z_notes: 'skipped', deploy: 'completed', stop: 'completed' });
+
+    const approved = await runInV2(wf, { a_gate: true });
+    expect(approved.status).toMatchObject({ z_notes: 'completed', deploy: 'completed', stop: 'completed' });
+  });
+
+  it('goes on after a conditional step when the approval that ends a branch is denied', async () => {
+    const wf = one([
+      { id: 'c', type: 'conditional', condition: true, then: [{ id: 'gate', type: 'approval', prompt: 'Go?' }] },
+      { id: 'after', type: 'agent_message', content: 'Report.' },
+    ]);
+    expect(edges(wf)).toEqual(['trigger->gate', 'gate->after', 'after->stop']);
+    expect((await runInV2(wf, { gate: false })).status).toMatchObject({ gate: 'completed', after: 'completed' });
+  });
+
+  it('stops the run when a top-level approval is denied, as V1 cancelled it', async () => {
+    const wf = one([
+      { id: 'gate', type: 'approval', prompt: 'Deploy?' },
+      { id: 'deploy', type: 'agent_message', content: 'Deploy to prod.' },
+    ]);
+    const denied = await runInV2(wf, { gate: false });
+    expect(denied.outcome).toBe('failed');
+    expect(denied.status.gate).toBe('failed');
+    expect(denied.status.deploy).not.toBe('completed');
+  });
+
+  it('gives every approval the 24 hours V1 waited before it cancelled the run', () => {
+    const wf = one([{ id: 'top', type: 'approval' }, ...RELEASE]);
+    expect(node(wf, 'top')).toEqual({ id: 'top', type: 'approval', prompt: 'Approval required for step top', timeout: '24h' });
+    expect(node(wf, 'a_gate')).toMatchObject({ timeout: '24h', onDeny: 'skip' });
+    // V1 cancelled the whole run on that timeout, and V2 goes on after the parallel step.
+    expect(wf.checklist).toContainEqual(
+      expect.stringContaining('Approval node "a_gate" is inside step "release". If the run still waited for it 24 hours after the run started, V1 cancelled the run.'),
+    );
+  });
+
+  const message = (i: number) => ({ id: `s${String(i).padStart(2, '0')}`, type: 'agent_message', content: `Step ${i}.` });
+  const messages = (n: number) => Array.from({ length: n }, (_, i) => message(i));
+  const branch = (n: number) => ({ id: 'c', type: 'conditional', condition: { variable: 'go' }, then: messages(n).map((m) => ({ ...m, id: `c_${m.id}` })) });
+
+  it.each([
+    ['50 steps', messages(50), undefined],
+    ['51 steps', messages(51), 51],
+    ['48 steps and a conditional step that runs 1', [...messages(48), branch(1)], undefined],
+    ['48 steps and a conditional step that runs 2', [...messages(48), branch(2)], 51],
+    ['a parallel step with 50 steps in it', [{ id: 'p', type: 'parallel', steps: messages(50) }], 51],
+    ['a loop step with 60 steps in it, which V1 never ran', [{ id: 'l', type: 'loop', steps: messages(60) }], undefined],
+  ])('counts the steps of %s as V1 did', (_name, steps, reached) => {
+    const line = one(steps).checklist.find((l) => l.includes('max_steps_exceeded:50'));
+    if (reached === undefined) expect(line).toBeUndefined();
+    else expect(line).toContain(`A V1 run of this workflow can reach ${reached} steps.`);
+  });
+});
+
 describe('convertV1Workflows: workflows and triggers', () => {
   const nightly = {
     id: 'wf_1',
@@ -339,50 +460,67 @@ describe('convertV1Workflows: workflows and triggers', () => {
     data: { steps: [{ id: 'triage', type: 'agent_message', content: 'Triage.' }] },
   };
 
-  it('attaches schedules and webhooks to their workflow, and keeps orchestrator prompts apart', () => {
+  it('creates no schedule, and lists each V1 schedule after the other items', () => {
     const out = convert({
       workflows: [nightly],
       triggers: [
-        { name: 'Every night', enabled: true, workflowId: 'wf_1', config: { type: 'schedule', cron: '0 3 * * *', timezone: 'UTC' } },
+        { name: 'Every night', enabled: true, workflowId: 'wf_1', config: { type: 'schedule', cron: '0 3 * * *', timezone: 'Europe/Berlin' } },
         { name: 'Paused', enabled: false, workflowId: 'wf_1', config: { type: 'schedule', cron: '0 4 * * *' } },
         { name: 'Hook', enabled: true, workflowId: 'wf_1', config: { type: 'webhook', path: 'triage', method: 'GET' }, variableMapping: { repo: '$.repo' } },
         { name: 'Run it', enabled: true, workflowId: 'wf_1', config: { type: 'manual' } },
-        { name: 'Standup', enabled: true, config: { type: 'schedule', cron: '0 9 * * 1-5', target: 'orchestrator', prompt: 'Post the standup.' } },
+        { name: 'Weekend', enabled: true, config: { type: 'schedule', cron: '0 9 * * 6-7/7', timezone: 'UTC', target: 'orchestrator', prompt: 'Post the digest.' } },
         { name: 'Orphan', enabled: true, workflowId: 'wf_gone', workflowName: 'Old sync', config: { type: 'schedule', cron: '* * * * *' } },
       ],
     });
+    expect(out.workflows).toHaveLength(1);
     const wf = out.workflows[0]!;
     expect(wf.name).toBe('Nightly triage');
-    expect(wf.schedules).toEqual([{ name: 'Every night', cron: '0 3 * * *', timezone: 'UTC' }]);
+    expect(wf).not.toHaveProperty('schedules');
+    expect(out).not.toHaveProperty('promptSchedules');
     expect(wf.checklist).toEqual([
-      expect.stringContaining('"Paused" (0 4 * * *) was turned off'),
       expect.stringContaining('webhook trigger "Hook" (GET triage)'),
+      'The import creates no schedules, so it did not create V1 schedule "Every night" (0 3 * * *, Europe/Berlin). Add it in Triggers after you finish the other items in this list.',
+      'V1 schedule "Paused" (0 4 * * *) was turned off. If you still need it, add it in Triggers after you finish the other items in this list.',
     ]);
-    expect(wf.checklist[1]).toContain('change its method too');
-    expect(wf.checklist[1]).toContain('repo from $.repo');
-    expect(out.promptSchedules).toEqual([{ name: 'Standup', cron: '0 9 * * 1-5', prompt: 'Post the standup.' }]);
-    expect(out.notes).toEqual([expect.stringContaining('belongs to workflow "Old sync"')]);
+    expect(wf.checklist[0]).toContain('change its method too');
+    expect(wf.checklist[0]).toContain('repo from $.repo');
+    expect(out.notes).toEqual([
+      'The import creates no schedules, so it did not create V1 schedule "Weekend" (0 9 * * 6-7/7, UTC), which sent the prompt "Post the digest." to the assistant. Add it in Triggers with the same prompt after you finish the checklists of the imported workflows.',
+      expect.stringContaining('belongs to workflow "Old sync"'),
+    ]);
   });
 
-  it('reads a raw database row, and does not arm the schedule of a workflow V1 had turned off', () => {
+  it('refuses orchestrator schedules alone, and lists them to add by hand', () => {
+    const result = convertV1Workflows({
+      triggers: [{ name: 'Standup', enabled: true, config: { type: 'schedule', cron: '0 9 * * 1-5', target: 'orchestrator', prompt: 'Post the standup.' } }],
+    });
+    expect(result).toEqual({
+      ok: false,
+      errors: [expect.stringContaining('holds no V1 workflow'), expect.stringContaining('did not create V1 schedule "Standup" (0 9 * * 1-5)')],
+    });
+  });
+
+  it('reads a raw database row, and says the schedule of a workflow V1 had turned off did not run', () => {
     const row = { id: 'wf_2', name: 'Off', enabled: 0, data: JSON.stringify({ steps: [] }) };
     const trigger = { name: 'Daily', enabled: 1, workflow_id: 'wf_2', config: JSON.stringify({ type: 'schedule', cron: '0 1 * * *' }) };
     const wf = convert([{ workflow: row }, { trigger }]).workflows[0]!;
     expect(wf.definition.nodes.map((n) => n.id)).toEqual(['trigger', 'stop']);
-    expect(wf.schedules).toEqual([]);
-    expect(wf.checklist).toEqual([expect.stringContaining('The V1 workflow was turned off')]);
+    expect(wf.checklist).toEqual([
+      'The V1 workflow was turned off, so V1 schedule "Daily" (0 1 * * *) did not run. If you still need it, add it in Triggers.',
+    ]);
   });
 
   /** One enabled V1 workflow with a nightly schedule, converted. */
-  function scheduled(steps: unknown[], cron = '0 2 * * *'): V1ConvertedWorkflow {
+  function scheduled(steps: unknown[]): V1ConvertedWorkflow {
     const out = convert({
       workflows: [{ id: 'wf_3', name: 'Cleanup', enabled: true, data: { steps } }],
-      triggers: [{ name: 'Nightly', enabled: true, workflowId: 'wf_3', config: { type: 'schedule', cron, timezone: 'UTC' } }],
+      triggers: [{ name: 'Nightly', enabled: true, workflowId: 'wf_3', config: { type: 'schedule', cron: '0 2 * * *', timezone: 'UTC' } }],
     });
     return out.workflows[0]!;
   }
 
-  const HELD = 'The import did not create V1 schedule "Nightly" (0 2 * * *, UTC). This workflow does not do exactly what it did in V1';
+  const HELD =
+    'The import creates no schedules, so it did not create V1 schedule "Nightly" (0 2 * * *, UTC). This workflow does not do exactly what it did in V1, so it must not run on a schedule yet.';
   const work = { id: 'clean', type: 'agent_message', content: 'Delete stale branches.' };
 
   it.each([
@@ -395,66 +533,28 @@ describe('convertV1Workflows: workflows and triggers', () => {
     ],
     ['an interrupt that is not true or false', [{ ...work, interrupt: 'yes' }], 'has an "interrupt" that is not true or false'],
     ['a branch that is not a list', [work, { id: 'c', type: 'conditional', condition: { variable: 'a', equals: 'b' }, then: 'x' }], 'Step "c" has a "then" that is not a list'],
-  ])('creates no schedule for a workflow V1 refused to run: %s', (_name, steps, refusal) => {
+  ])('says the schedule must wait for a workflow V1 refused to run: %s', (_name, steps, refusal) => {
     const wf = scheduled(steps);
-    expect(wf.schedules).toEqual([]);
     expect(wf.checklist).toContainEqual(expect.stringContaining(refusal));
     expect(wf.checklist.at(-1)).toContain(HELD);
   });
 
-  it('creates no schedule when a failed command no longer stops the run', () => {
+  it('says the schedule must wait when a failed command no longer stops the run', () => {
     const wf = scheduled([
       { id: 'test', type: 'bash', command: 'make test' },
       { id: 'ok', type: 'approval', prompt: 'Deploy?' },
       { id: 'deploy', type: 'tool', tool: 'spawn_session', arguments: { task: 'Deploy to prod.', workspace: 'app' } },
     ]);
-    expect(wf.schedules).toEqual([]);
     expect(wf.checklist).toEqual([
       expect.stringContaining('Session node "test" runs the shell commands of steps "test". V1 stopped the run when a command failed.'),
-      expect.stringContaining(HELD),
+      `${HELD} Add it in Triggers after you finish the other items in this list.`,
     ]);
   });
 
-  it('keeps the schedule of a workflow that does what it did in V1', () => {
-    expect(scheduled([work]).schedules).toEqual([{ name: 'Nightly', cron: '0 2 * * *', timezone: 'UTC' }]);
-  });
-
-  it('creates no schedule whose cron expression V2 reads differently, and says why', () => {
-    const wf = scheduled([work], '0 9 1-7 * 1');
-    expect(wf.schedules).toEqual([]);
-    expect(wf.checklist).toEqual([
-      expect.stringContaining('V1 schedule "Nightly" (0 9 1-7 * 1) does not run at the same times in V2. V1 ran it only on days that match both'),
+  it('lists the schedule of a workflow that does what it did in V1', () => {
+    expect(scheduled([work]).checklist).toEqual([
+      'The import creates no schedules, so it did not create V1 schedule "Nightly" (0 2 * * *, UTC). Add it in Triggers.',
     ]);
-    const out = convert({
-      workflows: [nightly],
-      triggers: [{ name: 'Standup', enabled: true, config: { type: 'schedule', cron: '0 9 * * MON-FRI', target: 'orchestrator', prompt: 'Post the standup.' } }],
-    });
-    expect(out.promptSchedules).toEqual([]);
-    expect(out.notes).toEqual([expect.stringContaining('V1 and V2 read "MON-FRI" in the day of the week field differently')]);
-  });
-
-  it.each([
-    ['0 9 * * 1', undefined],
-    ['*/15 * * * *', undefined],
-    ['0 9 1,15 * *', undefined],
-    ['0 9 * * 5-7', undefined],
-    ['0-30/10 9 * 1-6/2 *', undefined],
-    ['0 9 1-7 * 1', 'match both the day of the month and the day of the week'],
-    ['0 9 * * MON', 'read "MON" in the day of the week field'],
-    ['0 9 */2 * *', 'read "*/2" in the day of the month field'],
-    ['5/15 * * * *', 'read "5/15" in the minute field'],
-    ['0 9 * * 8', 'read "8" in the day of the week field'],
-    ['0 0 9 * * *', 'V1 read only cron expressions with 5 fields'],
-    ['0 9 31 2 *', 'names no date that exists'],
-    ['0 9 30-31 2 *', 'names no date that exists'],
-    ['0 9 31 2,4 *', 'names no date that exists'],
-    ['0 9 30-31 2,4 *', undefined],
-    ['0 9 29 2 *', undefined],
-    ['0 9 31 1-2 *', undefined],
-  ])('v1CronDifference(%j)', (cron, difference) => {
-    const found = v1CronDifference(cron);
-    if (difference === undefined) expect(found).toBeUndefined();
-    else expect(found).toContain(difference);
   });
 
   it('refuses a value that is neither a workflow nor a trigger, naming the item', () => {
@@ -469,7 +569,7 @@ describe('convertV1Workflows: workflows and triggers', () => {
   });
 
   it('builds the editor message from the checklist', () => {
-    const text = v1ChecklistPrompt({ name: 'X', definition: { version: 'dag/v1', nodes: [], edges: [] }, schedules: [], checklist: ['Do A.', 'Do B.'] });
+    const text = v1ChecklistPrompt({ name: 'X', definition: { version: 'dag/v1', nodes: [], edges: [] }, checklist: ['Do A.', 'Do B.'] });
     expect(text).toContain('imported this workflow from V1');
     expect(text.endsWith('- Do A.\n- Do B.')).toBe(true);
   });
@@ -503,8 +603,7 @@ describe("V1 export details", () => {
     });
     if (!result.ok) throw new Error(result.errors.join("; "));
     const [wf] = result.value.workflows;
-    expect(wf?.schedules).toHaveLength(1);
-    expect(wf?.checklist.join("\n")).not.toContain("unknown type");
+    expect(wf?.checklist).toEqual([expect.stringContaining('V1 schedule "Monday" (0 9 * * 1, UTC). Add it in Triggers.')]);
   });
 
   it("lists one problem once when two V1 rows have it", () => {

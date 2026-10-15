@@ -7,10 +7,11 @@
  * workflow with its checklist before anything is created, the same review
  * step the file import uses.
  *
- * On confirm it calls the existing routes only: create the workflow, create
- * its schedules, then send the checklist as the first message of the
- * workflow's editor conversation, so the editor assistant finishes the items
- * that need a decision.
+ * On confirm it calls the existing routes only: create the workflow, then
+ * send the checklist as the first message of the workflow's editor
+ * conversation, so the editor assistant finishes the items that need a
+ * decision. It creates no schedules: each V1 schedule is a checklist line
+ * for the person to add in Triggers.
  */
 import { useId, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
@@ -22,7 +23,7 @@ import {
   type WorkflowDefinition,
 } from "@valet/workflow";
 import { api } from "~/api/client";
-import { useCreateSchedule, useCreateWorkflow } from "~/api/workflows";
+import { useCreateWorkflow } from "~/api/workflows";
 import { Badge, Button, Dialog, DialogContent, DialogFooter, Label, Spinner, Textarea } from "~/components/primitives";
 import { errorMessages } from "~/lib/error-text";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
@@ -37,7 +38,6 @@ type Phase =
 export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenChange: (next: boolean) => void }) {
   const navigate = useNavigate();
   const createWorkflow = useCreateWorkflow();
-  const createSchedule = useCreateSchedule();
   const scope = useWorkspaceScope();
   const fieldId = useId();
   const [text, setText] = useState("");
@@ -64,17 +64,10 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
         const { id } = await createWorkflow.mutateAsync({ name: wf.name, definition: wf.definition, ...team });
         created.push(`the workflow "${wf.name}"`);
         firstId ??= id;
-        for (const s of wf.schedules) {
-          await createSchedule.mutateAsync({ name: s.name, cron: s.cron, timezone: s.timezone, target: { kind: "workflow", workflowId: id } });
-        }
         if (wf.checklist.length > 0) {
           const conversation = await api.ensureWorkflowConversation(id);
           await api.sendPrompt(conversation.sessionId, { text: v1ChecklistPrompt(wf), threadId: conversation.threadId });
         }
-      }
-      for (const s of value.promptSchedules) {
-        await createSchedule.mutateAsync({ name: s.name, cron: s.cron, timezone: s.timezone, ...team, target: { kind: "orchestrator", prompt: s.prompt } });
-        created.push(`the schedule "${s.name}"`);
       }
     } catch (err) {
       const already =
@@ -85,8 +78,8 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
       return;
     }
     close();
+    // The converter returns at least one workflow, so the import created one.
     if (firstId !== undefined) void navigate({ to: "/workflows/$workflowId", params: { workflowId: firstId } });
-    else void navigate({ to: "/workflows", search: { tab: "scheduled" } });
   }
 
   function close(): void {
@@ -103,7 +96,7 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
       <DialogContent
         className="max-h-[85vh] max-w-lg overflow-y-auto"
         title="Import from V1"
-        description="Converts V1 workflows and their schedules. Anything that needs your decision goes to each workflow's editor assistant."
+        description="Converts V1 workflows. Anything that needs your decision, such as each V1 schedule, goes to each workflow's editor assistant."
       >
         {phase.kind === "confirm" ? (
           <V1Review value={phase.value} />
@@ -120,8 +113,8 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
               className="font-mono text-xs"
             />
             <p className="text-xs text-muted">
-              Open /api/workflows on V1 and paste the response. To bring schedules, also paste the
-              response of /api/triggers below it.
+              Open /api/workflows on V1 and paste the response. To list its schedules and webhooks in
+              the checklists, also paste the response of /api/triggers below it.
             </p>
           </div>
         )}
@@ -149,7 +142,7 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
                 Back
               </Button>
               <Button onClick={() => void commit(phase.value)}>
-                {count === 0 ? "Import" : `Import ${count} workflow${count === 1 ? "" : "s"}`}
+                {`Import ${count} workflow${count === 1 ? "" : "s"}`}
               </Button>
             </>
           ) : (
@@ -168,7 +161,7 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
   );
 }
 
-/** Each converted workflow with what it still needs, then the prompts and notes. */
+/** Each converted workflow with what it still needs, then the notes. */
 function V1Review({ value }: { value: V1Conversion }) {
   return (
     <div className="grid gap-4">
@@ -184,12 +177,7 @@ function V1Review({ value }: { value: V1Conversion }) {
                   ? <Badge variant="warning" className="shrink-0">{wf.checklist.length} to finish</Badge>
                   : <Badge variant="success" className="shrink-0">Ready</Badge>}
               </div>
-              <p className="text-xs text-muted">
-                {steps || "No steps"}
-                {wf.schedules.map((s, j) => (
-                  <span key={j}> · {s.name} <code className="font-mono text-[11px]">{s.cron}</code></span>
-                ))}
-              </p>
+              <p className="text-xs text-muted">{steps || "No steps"}</p>
               {wf.checklist.length > 0 && (
                 <div className="mt-1 grid gap-1">
                   <p className="text-xs font-medium text-ink">The editor assistant will ask you about</p>
@@ -203,25 +191,15 @@ function V1Review({ value }: { value: V1Conversion }) {
         })}
       </ul>
 
-      {value.promptSchedules.length > 0 && (
+      {value.notes.length > 0 && (
         <div className="grid gap-1 border-t border-line pt-3">
-          <p className="text-xs font-medium text-ink">Schedules that prompt the assistant</p>
-          <ul className="space-y-1 text-xs text-muted">
-            {value.promptSchedules.map((s, i) => (
-              <li key={i} className="break-words">
-                {s.name} <code className="font-mono text-[11px]">{s.cron}</code>: {s.prompt}
-              </li>
+          <p className="text-xs font-medium text-ink">Copy these items. No workflow checklist holds them.</p>
+          <ul className="list-disc space-y-1 pl-4 text-xs leading-relaxed text-muted">
+            {value.notes.map((note, i) => (
+              <li key={i} className="break-words">{note}</li>
             ))}
           </ul>
         </div>
-      )}
-
-      {value.notes.length > 0 && (
-        <ul className="list-disc space-y-1 pl-4 text-xs text-muted">
-          {value.notes.map((note, i) => (
-            <li key={i}>{note}</li>
-          ))}
-        </ul>
       )}
     </div>
   );

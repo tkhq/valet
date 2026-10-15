@@ -17,55 +17,50 @@
  *   - A `conditional` read `{ variable, equals }` from the run's variables.
  *     In V2 those are the trigger input, `trigger.data`.
  *   - V1 ran the steps inside a `conditional` or a `parallel` one after
- *     another, sorted by id (`asStepArray`). An approval among them paused
- *     the whole run, and a denial cancelled it.
+ *     another, sorted by id (`asStepArray`). A denied approval among them
+ *     skipped the rest of that list, and the run went on after the step.
+ *     A denied approval anywhere else cancelled the run.
+ *   - V1 cancelled a run that still waited for an approval 24 hours after
+ *     it started (`expireWaitingApprovalExecutions` in
+ *     `packages/worker/src/index.ts`).
+ *   - V1 failed a run at its 51st step (`maxSteps` in `executeSteps`).
  *   - V1 rendered no templates. A `{{name}}` in a message reached the agent
  *     as written, so the import keeps it as literal text.
  *
  * What needs a person's judgment becomes a checklist line, never a silent
  * drop. The import dialog shows the checklist and sends it to the
  * workflow's editor conversation. When the import cannot do exactly what
- * V1 did, it fails closed: the line is a required decision
- * (`requireDecision`), and the workflow gets no schedule until a person
- * adds one.
+ * V1 did, the line is a required decision (`requireDecision`).
+ *
+ * The import creates no schedules. V1 matched cron expressions itself, and
+ * V2 reads many of them differently or refuses them. Each V1 schedule
+ * becomes a line that tells the person to add it in Triggers after the
+ * other items.
  */
 
 import type { ApprovalNode, IfCondition, IfNode, SessionNode, WorkflowNode } from './dag/nodes.js';
 import type { WorkflowDefinition, WorkflowEdge, WorkflowInputDefinition } from './dag/shape.js';
 import { validateWorkflowDefinition } from './dag/validate.js';
 
-export interface V1ImportSchedule {
-  name: string;
-  cron: string;
-  timezone?: string;
-}
-
-/** A V1 schedule that sent a prompt to the orchestrator. It starts no workflow. */
-export interface V1PromptSchedule extends V1ImportSchedule {
-  prompt: string;
-}
-
 export interface V1ConvertedWorkflow {
   name: string;
   definition: WorkflowDefinition;
-  /** Schedules that start this workflow. Empty when a required decision
-   * says the workflow does not do what it did in V1. */
-  schedules: V1ImportSchedule[];
-  /** Each item the import could not decide, one line each. */
+  /** Each item the import could not decide, one line each. The V1
+   * schedules of the workflow come last. */
   checklist: string[];
 }
 
 export interface V1Conversion {
   workflows: V1ConvertedWorkflow[];
-  promptSchedules: V1PromptSchedule[];
-  /** Pasted items that belong to no converted workflow. */
+  /** Pasted items that belong to no converted workflow, such as the V1
+   * schedules that sent a prompt to the orchestrator. */
   notes: string[];
 }
 
 export type V1ConvertResult = { ok: true; value: V1Conversion } | { ok: false; errors: string[] };
 
 const PASTE_HINT =
-  "Paste the JSON that V1's GET /api/workflows returned, and the JSON from GET /api/triggers to bring schedules.";
+  "Paste the JSON that V1's GET /api/workflows returned. To list the V1 schedules and webhooks too, paste the JSON from GET /api/triggers after it.";
 
 /**
  * Pasted text → one JSON value. A person who copies both V1 responses
@@ -151,22 +146,18 @@ export function convertV1Workflows(input: unknown): V1ConvertResult {
   }
   if (errors.length > 0) return { ok: false, errors };
 
-  const promptSchedules: V1PromptSchedule[] = [];
   const notes: string[] = [];
   for (const t of found.triggers) {
     if (claimed.has(t)) continue;
     if (isScheduleToOrchestrator(t)) {
       const prompt = stringField(t.config.prompt);
       const cron = stringField(t.config.cron);
-      const difference = v1CronDifference(cron);
-      if (!t.enabled) {
-        notes.push(`V1 schedule "${t.name}" was turned off, so the import did not create it.`);
-      } else if (prompt === '' || cron === '') {
+      if (prompt === '' || cron === '') {
         notes.push(`V1 schedule "${t.name}" has no prompt or no cron expression, so the import did not create it.`);
-      } else if (difference !== undefined) {
-        notes.push(cronLine(t.name, cron, difference));
+      } else if (!t.enabled) {
+        notes.push(`${scheduleLabel(t, cron)} sent the prompt "${prompt}" to the assistant and was turned off. If you still need it, add it in Triggers after you finish the checklists of the imported workflows.`);
       } else {
-        promptSchedules.push({ name: t.name, cron, ...timezoneOf(t), prompt });
+        notes.push(`The import creates no schedules, so it did not create ${scheduleLabel(t, cron)}, which sent the prompt "${prompt}" to the assistant. Add it in Triggers with the same prompt after you finish the checklists of the imported workflows.`);
       }
       continue;
     }
@@ -177,10 +168,10 @@ export function convertV1Workflows(input: unknown): V1ConvertResult {
     );
   }
 
-  if (workflows.length === 0 && promptSchedules.length === 0) {
+  if (workflows.length === 0) {
     return { ok: false, errors: [`The pasted JSON holds no V1 workflow. ${PASTE_HINT}`, ...notes] };
   }
-  return { ok: true, value: { workflows, promptSchedules, notes } };
+  return { ok: true, value: { workflows, notes } };
 }
 
 /** The first message of an imported workflow's editor conversation. */
@@ -301,6 +292,14 @@ interface Lane {
   pending: Pending[];
 }
 
+/** The innermost `parallel` or `conditional` step around the steps being
+ * walked, and the `false` tails of the approvals inside it. A V1 denial
+ * there skipped the rest of the list and went on after the step. */
+interface Scope {
+  stepId: string;
+  denials: Tail[];
+}
+
 interface Build {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
@@ -313,7 +312,8 @@ interface Build {
   nodeOfStep: Map<string, string>;
   /** Session nodes made from merged messages and commands. */
   messageSessions: string[];
-  /** True after a required decision. The workflow then gets no schedule. */
+  /** True after a required decision. The schedule lines then say why the
+   * workflow must not run on a schedule yet. */
   differs: boolean;
 }
 
@@ -339,6 +339,13 @@ function convertWorkflow(row: V1WorkflowRow, triggers: V1TriggerRow[]): V1Conver
   const top = (i: number) => `step[${i}]`;
   collectRefusals(steps ?? [], top, b);
   collectOutputOwners(steps ?? [], top, b);
+  const visits = v1StepVisits(steps ?? []);
+  if (visits > V1_MAX_STEPS) {
+    requireDecision(
+      b,
+      `A V1 run of this workflow can reach ${visits} steps. V1 counted every step it ran, including each conditional and parallel step, and failed a run at step ${V1_MAX_STEPS + 1} with the error max_steps_exceeded:${V1_MAX_STEPS}. V2 has no step limit, so it runs the steps that V1 never reached. Decide which steps this workflow must run.`,
+    );
+  }
 
   const lane: Lane = { tails: [{ from: 'trigger' }], pending: [] };
   walk(located(steps ?? [], top), lane, b);
@@ -353,48 +360,45 @@ function convertWorkflow(row: V1WorkflowRow, triggers: V1TriggerRow[]): V1Conver
     );
   }
 
-  const schedules: V1ImportSchedule[] = [];
-  for (const t of triggers) convertTrigger(t, row, schedules, b);
-  // A workflow that does not do what V1 did must not start on its own.
-  if (b.differs) {
-    for (const s of schedules.splice(0)) {
-      const zone = s.timezone === undefined ? '' : `, ${s.timezone}`;
-      b.checklist.push(
-        `The import did not create V1 schedule "${s.name}" (${s.cron}${zone}). This workflow does not do exactly what it did in V1, so it must not run on a schedule yet. Finish the items above, then add the schedule in Triggers.`,
-      );
-    }
+  const schedules = triggers.filter((t) => t.config.type === 'schedule');
+  for (const t of triggers) {
+    if (t.config.type !== 'schedule') convertTrigger(t, b);
   }
+  // The schedule lines come last, because they wait for every other item.
+  const after = b.checklist.length > 0 ? ' after you finish the other items in this list' : '';
+  for (const t of schedules) b.checklist.push(scheduleLine(t, row, after, b));
 
   const trigger: WorkflowNode =
     Object.keys(b.inputs).length > 0 ? { id: 'trigger', type: 'trigger', dataSchema: b.inputs } : { id: 'trigger', type: 'trigger' };
   return {
     name,
     definition: { version: 'dag/v1', nodes: [trigger, ...b.nodes], edges: b.edges },
-    schedules,
     // Two V1 rows with the same problem read the same; list it once.
     checklist: [...new Set(b.checklist)],
   };
 }
 
-function convertTrigger(t: V1TriggerRow, row: V1WorkflowRow, schedules: V1ImportSchedule[], b: Build): void {
+/** The line for one V1 schedule of this workflow. The import creates no
+ * schedules, so the line names it for the person to add in Triggers. */
+function scheduleLine(t: V1TriggerRow, row: V1WorkflowRow, after: string, b: Build): string {
+  const cron = stringField(t.config.cron);
+  if (cron === '') return `V1 schedule "${t.name}" has no cron expression, so the import did not create it.`;
+  const label = scheduleLabel(t, cron);
+  if (!t.enabled) return `${label} was turned off. If you still need it, add it in Triggers${after}.`;
+  if (!row.enabled) return `The V1 workflow was turned off, so ${label} did not run. If you still need it, add it in Triggers${after}.`;
+  const why = b.differs ? ' This workflow does not do exactly what it did in V1, so it must not run on a schedule yet.' : '';
+  return `The import creates no schedules, so it did not create ${label}.${why} Add it in Triggers${after}.`;
+}
+
+/** `V1 schedule "Nightly" (0 2 * * *, UTC)`. */
+function scheduleLabel(t: V1TriggerRow, cron: string): string {
+  const timezone = stringField(t.config.timezone);
+  return `V1 schedule "${t.name}" (${cron}${timezone === '' ? '' : `, ${timezone}`})`;
+}
+
+function convertTrigger(t: V1TriggerRow, b: Build): void {
   const type = t.config.type;
   if (type === 'manual') return;
-  if (type === 'schedule') {
-    const cron = stringField(t.config.cron);
-    const difference = v1CronDifference(cron);
-    if (cron === '') {
-      b.checklist.push(`V1 schedule "${t.name}" has no cron expression, so the import did not create it.`);
-    } else if (!t.enabled) {
-      b.checklist.push(`V1 schedule "${t.name}" (${cron}) was turned off, so the import did not create it. Add it in Triggers if you still need it.`);
-    } else if (!row.enabled) {
-      b.checklist.push(`The V1 workflow was turned off, so the import did not create its schedule "${t.name}" (${cron}). Add it in Triggers if you still need it.`);
-    } else if (difference !== undefined) {
-      b.checklist.push(cronLine(t.name, cron, difference));
-    } else {
-      schedules.push({ name: t.name, cron, ...timezoneOf(t) });
-    }
-    return;
-  }
   if (type === 'webhook') {
     const method = stringField(t.config.method) || 'POST';
     const path = stringField(t.config.path);
@@ -415,8 +419,9 @@ function convertTrigger(t: V1TriggerRow, row: V1WorkflowRow, schedules: V1Import
 }
 
 /** Builds nodes from steps. A step V1's compiler refused is left out
- * without a line, because `collectRefusals` already listed it. */
-function walk(steps: Located[], lane: Lane, b: Build): void {
+ * without a line, because `collectRefusals` already listed it. `scope` is
+ * undefined for the top-level steps. */
+function walk(steps: Located[], lane: Lane, b: Build, scope?: Scope): void {
   steps.forEach(({ raw, path }) => {
     if (!isRecord(raw)) return;
     const id = v1StepId(raw, path);
@@ -429,7 +434,7 @@ function walk(steps: Located[], lane: Lane, b: Build): void {
       case 'tool':
         return addTool(raw, id, lane, b);
       case 'approval':
-        return addApproval(raw, id, lane, b);
+        return addApproval(raw, id, lane, b, scope);
       case 'conditional':
         return addConditional(raw, id, path, lane, b);
       case 'parallel':
@@ -560,25 +565,58 @@ function addSpawnSession(args: Record<string, unknown>, id: string, lane: Lane, 
   }
 }
 
-function addApproval(raw: Record<string, unknown>, id: string, lane: Lane, b: Build): void {
+/** V1 cancelled a run that waited 24 hours for an approval. A timeout
+ * acts as a denial in V2 (`nodes/approval.ts`). */
+const V1_APPROVAL_TIMEOUT = '24h';
+
+function addApproval(raw: Record<string, unknown>, id: string, lane: Lane, b: Build, scope: Scope | undefined): void {
   flush(lane, b);
   const prompt = stringField(raw.prompt) || `Approval required for step ${id}`;
-  const node: ApprovalNode = { id: newId(id, b), type: 'approval', prompt: literalTemplate(prompt) };
-  addNode(node, lane, b);
+  const node: ApprovalNode = { id: newId(id, b), type: 'approval', prompt: literalTemplate(prompt), timeout: V1_APPROVAL_TIMEOUT };
   b.nodeOfStep.set(id, node.id);
+  if (scope === undefined) {
+    // A denial fails the node and stops the run, as V1 cancelled it.
+    addNode(node, lane, b);
+    return;
+  }
+  // A denial completes the node with `approved: false`. The `true` edge
+  // goes on in the list, and the `false` edge goes past the scope step.
+  node.onDeny = 'skip';
+  addNode(node, lane, b);
+  lane.tails = [{ from: node.id, fromOutput: 'true' }];
+  scope.denials.push({ from: node.id, fromOutput: 'false' });
+  requireDecision(
+    b,
+    `Approval node "${node.id}" is inside step "${scope.stepId}". If the run still waited for it 24 hours after the run started, V1 cancelled the run. Here a timeout acts as a denial, so the run goes on after step "${scope.stepId}". Decide whether a timeout must stop the run.`,
+  );
+}
+
+/** Ends a scope: a denial inside it led to whatever follows the scope step. */
+function leaveScope(scope: Scope, lane: Lane, b: Build): void {
+  if (scope.denials.length === 0) return;
+  // The waiting text belongs to the scope's list, which a denial skipped.
+  flush(lane, b);
+  // An approval that ends the list goes on either way: one plain edge.
+  const last = new Set(lane.tails.filter((t) => scope.denials.some((d) => d.from === t.from)).map((t) => t.from));
+  lane.tails = dedupeTails([
+    ...lane.tails.map((t) => (last.has(t.from) ? { from: t.from } : t)),
+    ...scope.denials.filter((d) => !last.has(d.from)),
+  ]);
 }
 
 function addConditional(raw: Record<string, unknown>, id: string, path: string, lane: Lane, b: Build): void {
   const branches = { then: Array.isArray(raw.then) ? raw.then : [], else: Array.isArray(raw.else) ? raw.else : [] };
   const condition = readCondition(raw.condition);
 
+  const scope: Scope = { stepId: id, denials: [] };
   if (condition.kind === 'constant') {
     // V1 decided the branch without reading anything, so only that branch ever ran.
     const taken = condition.value ? 'then' : 'else';
     b.checklist.push(
       `Step "${id}" has the condition ${JSON.stringify(raw.condition ?? null)}, which ${condition.reason}. V1 always ran its "${taken}" steps, so the import keeps only those.`,
     );
-    walk(branchInV1Order(id, taken, branches[taken], path, b), lane, b);
+    walk(branchInV1Order(id, taken, branches[taken], path, b), lane, b, scope);
+    leaveScope(scope, lane, b);
     return;
   }
 
@@ -610,11 +648,12 @@ function addConditional(raw: Record<string, unknown>, id: string, path: string, 
   const tails: Tail[] = [];
   for (const key of ['then', 'else'] as const) {
     const branch: Lane = { tails: [{ from: ifId, fromOutput: key === 'then' ? 'true' : 'false' }], pending: [] };
-    walk(branchInV1Order(id, key, branches[key], path, b), branch, b);
+    walk(branchInV1Order(id, key, branches[key], path, b), branch, b, scope);
     flush(branch, b);
     tails.push(...branch.tails);
   }
   lane.tails = dedupeTails(tails);
+  leaveScope(scope, lane, b);
 }
 
 /** V1 ran a parallel step's children one after another, so the import puts
@@ -627,7 +666,9 @@ function addParallel(raw: Record<string, unknown>, id: string, path: string, lan
       `Step "${id}" is a "parallel" step, but V1 ran its ${children.length} steps one after another, in id order (${children.map((s) => quote(idOf(s))).join(', ')}). The import does the same.`,
     );
   }
-  walk(children, lane, b);
+  const scope: Scope = { stepId: id, denials: [] };
+  walk(children, lane, b, scope);
+  leaveScope(scope, lane, b);
 }
 
 type ReadCondition =
@@ -748,79 +789,34 @@ function collectRefusals(steps: unknown[], pathOf: (index: number) => string, b:
 
 const V1_STEP_TYPES = new Set(['agent', 'agent_message', 'tool', 'bash', 'conditional', 'loop', 'parallel', 'subworkflow', 'approval']);
 
+/** V1's default `maxSteps` (`executeWorkflowRun`). The V1 workflow executor
+ * (`buildWorkflowRunPayload`) never set another. */
+const V1_MAX_STEPS = 50;
+
 /**
- * Why a V1 cron expression does not fire at the same minutes in V2, or
- * undefined when it does. V1 matched cron itself (`cronMatchesNow` in
- * `packages/worker/src/index.ts`): it took numbers only, counted a step on
- * `*` from 0, ignored a step on a single number, and needed the day of the
- * month AND the day of the week to match. V2 uses cron-parser, which matches
- * either day field. Only the subset that both read the same way passes.
+ * The most steps one V1 run reaches, counted as V1's `executeSteps` did: one
+ * for each step it ran, a `conditional` or `parallel` step included, plus
+ * the steps of the branch or list it ran. A `loop` step counts once, because
+ * V1 ran none of its steps.
  */
-export function v1CronDifference(cron: string): string | undefined {
-  const fields = cron.trim().split(/\s+/);
-  if (fields.length !== 5) return 'V1 read only cron expressions with 5 fields, so it never ran this schedule.';
-  for (const [i, field] of fields.entries()) {
-    const [name, min, max] = CRON_FIELDS[i]!;
-    for (const part of field.split(',')) {
-      if (!sameCronPart(part, min, max)) return `V1 and V2 read "${part}" in the ${name} field differently.`;
+function v1StepVisits(steps: unknown[]): number {
+  let visits = 0;
+  for (const raw of steps) {
+    visits += 1;
+    if (!isRecord(raw)) continue;
+    const type = typeof raw.type === 'string' ? raw.type.trim() : '';
+    const list = (key: string) => {
+      const value = raw[key];
+      return v1StepVisits(Array.isArray(value) ? value : []);
+    };
+    if (type === 'parallel') visits += list('steps');
+    if (type === 'conditional') {
+      const condition = readCondition(raw.condition);
+      if (condition.kind === 'constant') visits += list(condition.value ? 'then' : 'else');
+      else visits += Math.max(list('then'), list('else'));
     }
   }
-  if (fields[2] !== '*' && fields[4] !== '*') {
-    return 'V1 ran it only on days that match both the day of the month and the day of the week. V2 runs it on days that match either one.';
-  }
-  // A date that no month has (February 31) never fired in V1, and V2 refuses
-  // to save the schedule, so the import would stop part way.
-  if (fields[2] !== '*' && fields[3] !== '*') {
-    const days = cronValues(fields[2]!, 1, 31);
-    const months = cronValues(fields[3]!, 1, 12);
-    if (!months.some((month) => days.some((day) => day <= DAYS_IN_MONTH[month - 1]!))) {
-      return 'It names no date that exists, so V1 never ran it.';
-    }
-  }
-  return undefined;
-}
-
-/** The longest each month gets, February in a leap year. */
-const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-/** The values a field that passed `sameCronPart` selects. */
-function cronValues(field: string, min: number, max: number): number[] {
-  const values: number[] = [];
-  for (const part of field.split(',')) {
-    const star = /^\*\/(\d+)$/.exec(part);
-    const range = /^(\d+)(?:-(\d+)(?:\/(\d+))?)?$/.exec(part);
-    const start = star ? min : Number(range?.[1] ?? min);
-    const end = star ? max : range?.[2] === undefined ? start : Number(range[2]);
-    const step = Number(star?.[1] ?? range?.[3] ?? 1);
-    for (let value = start; value <= end; value += step) values.push(value);
-  }
-  return values;
-}
-
-const CRON_FIELDS: [name: string, min: number, max: number][] = [
-  ['minute', 0, 59],
-  ['hour', 0, 23],
-  ['day of the month', 1, 31],
-  ['month', 1, 12],
-  ['day of the week', 0, 7],
-];
-
-/** One comma part that V1 and cron-parser read the same way: `*`, `N`,
- * `N-M`, `N-M/S`, or `*\/S` on a field that starts at 0. */
-function sameCronPart(part: string, min: number, max: number): boolean {
-  if (part === '*') return true;
-  const star = /^\*\/(\d+)$/.exec(part);
-  if (star !== null) return min === 0 && Number(star[1]) > 0 && Number(star[1]) <= max;
-  const range = /^(\d+)(?:-(\d+)(?:\/(\d+))?)?$/.exec(part);
-  if (range === null) return false;
-  const start = Number(range[1]);
-  const end = range[2] === undefined ? start : Number(range[2]);
-  const step = range[3] === undefined ? 1 : Number(range[3]);
-  return min <= start && start <= end && end <= max && step > 0;
-}
-
-function cronLine(name: string, cron: string, difference: string): string {
-  return `V1 schedule "${name}" (${cron}) does not run at the same times in V2. ${difference} The import did not create it. Decide when it must run, then add it in Triggers.`;
+  return visits;
 }
 
 function collectOutputOwners(steps: unknown[], pathOf: (index: number) => string, b: Build): void {
@@ -866,7 +862,8 @@ function flush(lane: Lane, b: Build): void {
 }
 
 /** A checklist line for a place where the import does not do exactly what
- * V1 did. The workflow then gets no schedule (`convertWorkflow`). */
+ * V1 did. The schedule lines of the workflow then say that it must not run
+ * on a schedule yet (`scheduleLine`). */
 function requireDecision(b: Build, line: string): void {
   b.checklist.push(line);
   b.differs = true;
@@ -932,11 +929,6 @@ function literalTemplate(text: string): string {
 function goalHint(raw: Record<string, unknown>): string {
   const goal = stringField(raw.goal);
   return goal === '' ? '' : ` If you want its goal ("${excerpt(goal, 80)}") done, add a session node for it.`;
-}
-
-function timezoneOf(t: V1TriggerRow): { timezone?: string } {
-  const timezone = stringField(t.config.timezone);
-  return timezone === '' ? {} : { timezone };
 }
 
 // ─── Value helpers ────────────────────────────────────────────────────────
