@@ -184,6 +184,15 @@ const CREDENTIAL_RELEASE_BACKOFF_MS = 4_000;
 const AUTO_CONTINUE_PROMPT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
 
+const WORKFLOW_AUTO_CONTINUE_PROMPT = [
+  "Continue the remaining authorized, actionable work for this unattended workflow.",
+  "A progress recap is not task completion.",
+  "Honor the original scope, allowed tools, safety and approval boundaries, constraints, and required output contract.",
+  "Stop only after completing the requested work and output, or reporting a genuine blocking failure truthfully.",
+  "Do not ask routine optional questions.",
+  "Do not fabricate output, bypass approvals, or expand scope.",
+].join("\n");
+
 /** Turn-local guidance for manual-delivery Slack messages. `reply: "manual"`
  * prevents automatic posting but does not decide whether content is addressed.
  * A two-participant follow-up remains addressed by the channel convention.
@@ -4437,6 +4446,9 @@ export class Thread {
     if (!item) {
       throw new Error("Compaction continuation has no active submission.");
     }
+    const prompt = this.session.options.purpose === "workflow"
+      ? WORKFLOW_AUTO_CONTINUE_PROMPT
+      : AUTO_CONTINUE_PROMPT;
     const entry: MessageEntry = {
       id: uid("e"),
       sessionId: this.session.id,
@@ -4444,7 +4456,7 @@ export class Thread {
       parentId: null,
       type: "message",
       role: "user",
-      content: AUTO_CONTINUE_PROMPT,
+      content: prompt,
       channel: item.channel,
       metadata: { compaction_continue: true, synthetic: true },
       queueItemId: item.id,
@@ -4452,7 +4464,7 @@ export class Thread {
     };
     await this.fencedWrite(() => this.appendEntry(entry, this.fence));
     if (this.staleFenceDetected) return;
-    await this.runAgent(AUTO_CONTINUE_PROMPT);
+    await this.runAgent(prompt);
   }
 
   private shouldCompactProactive(): boolean {

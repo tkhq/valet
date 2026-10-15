@@ -326,8 +326,13 @@ function buildRepairPrompt(schema: Record<string, unknown>, validationError: str
     '',
     'Reuse prior successful tool results. Do not repeat actions with side effects during format repair.',
     'Do not invent empty arrays or default values to hide failed or incomplete inspection.',
-    'If the work failed, report that failure truthfully instead of fabricating a successful result.',
-    'Otherwise respond with ONLY the corrected JSON, matching the schema exactly.',
+    'Incomplete work is not a blocking failure when remaining authorized work is actionable with the existing allowed tools.',
+    'If that work remains, continue it before returning the complete output.',
+    'Stay within the original scope, permissions, constraints, and approval boundaries.',
+    'Do not repeat completed actions or automatically replay side effects.',
+    'If the work genuinely failed or is blocked, report that failure truthfully instead of fabricating a successful result.',
+    'Otherwise return complete JSON matching the schema exactly.',
+    'JSON-only applies to the final answer, not intervening authorized tool calls.',
   ].join('\n');
 }
 
