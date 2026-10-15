@@ -363,6 +363,8 @@ Approval eligibility and subsequent credential borrowing use the same durable ow
 Only the account owner can approve. Existing team membership, share generation, and workflow grant scope checks still apply.
 Tool nodes retain their run-only approval scope. Workflow download, origin, and private-thread visibility rules remain unchanged.
 
+The approval card names the product, such as "Let a teammate use your Linear account?". The API sets `ActionPlugin.displayName` from `serviceDisplayName` (`withServiceDisplayName`), and the engine falls back to the service id. Discovery appears as "List Linear tools". The card shows no policy-source line for a shared account, because the title already names whose account it is (2026-10-15).
+
 A failed discovery keeps its cause. `resolveDynamic` (`packages/engine/src/plugin-catalog.ts`) reports `<service> tool discovery failed:` followed by the same text `call_tool` gives for that outcome.
 A connector error keeps the upstream message. A missing account names the Integrations page. A shared-account denial says that the caller cannot ask the account owner for approval, and does not call it an org policy.
 Before 2026-10-08, every failure read `Tool discovery requires permitted account access: <outcome kind>`. That text dropped the connector message, and it hid whether a policy or the connector was at fault.
