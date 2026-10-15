@@ -252,7 +252,7 @@ export function usePauseSession(sessionId: string) {
       qc.invalidateQueries({ queryKey: qk.sessions() });
     },
     // A forced pause can stop background work and still fail (a turn
-    // started), so the badge refreshes on every outcome.
+    // started), so the background work list refreshes on every outcome.
     onSettled: () => qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) }),
   });
 }
@@ -279,8 +279,10 @@ export function useReplaceSandbox(sessionId: string) {
 }
 
 /** GET /:id/wakeups: the session's open background work (wakeups and
- * leases). Nothing pushes changes over the stream, so the header badge
- * polls once a minute while it is mounted. */
+ * leases). Nothing pushes changes over the stream. A `queue.state` frame
+ * invalidates the key (`useInvalidateMessagesOnQueueState`), and the query
+ * polls once a minute while the composer status line, the thread card, or
+ * the thread list reads it. */
 export function useSessionWakeups(sessionId: string | undefined) {
   return useQuery<ListSessionWakeupsResponse>({
     queryKey: qk.wakeups(sessionId ?? ""),

@@ -3,7 +3,7 @@ import type { BackgroundWorkConflict, BackgroundWorkItem } from "@valet/api/wire
 import { ApiError, backgroundWorkConflict } from "~/api/client";
 import { Button, Dialog, DialogContent, DialogFooter } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
-import { itemDetail } from "./background-work-badge";
+import { itemDetail } from "./background-work";
 
 /** The words of one guarded action. */
 export interface GuardedAction {

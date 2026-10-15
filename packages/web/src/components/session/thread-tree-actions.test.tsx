@@ -20,6 +20,7 @@ import type {
   GetModelTiersResponse,
   ModelInfo,
   ChildWorkSummary,
+  ListSessionWakeupsResponse,
   ThreadSummary,
 } from "@valet/api/wire";
 
@@ -43,6 +44,7 @@ let pendingGates: Record<string, DecisionGate> = {};
 let sessionModel: string | undefined;
 let models: ModelInfo[] = [];
 let tierMap: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
+let wakeups: ListSessionWakeupsResponse | undefined;
 
 const markThreadsReadMutate = vi.fn();
 vi.mock("@tanstack/react-router", () => ({
@@ -79,6 +81,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     // The gate seed (usePendingGatesSeed) stays inert: with no data the
     // effect never touches the store. Gates enter through `pendingGates`.
     useDecisions: () => ({ data: undefined, isLoading: false, error: null }),
+    useSessionWakeups: () => ({ data: wakeups }),
   };
 });
 
@@ -185,6 +188,7 @@ beforeEach(() => {
   sessionModel = undefined;
   models = [];
   tierMap = { xs: [], s: [], m: [], l: [], xl: [] };
+  wakeups = undefined;
 });
 
 describe("ThreadTree progressive loading", () => {
@@ -810,4 +814,31 @@ it("keeps the selected search thread when content matches arrive", async () => {
   fireEvent.keyDown(input, { key: "Enter" });
   const navigateOptions = navigate.mock.calls.at(-1)?.[0];
   expect(navigateOptions.search({})).toMatchObject({ thread: "chosen" });
+});
+
+describe("ThreadTree: timer wait line", () => {
+  it("shows a quiet line on a thread with an active timer, and none on the others", () => {
+    threads = [thread({ id: "thread-1", title: "Plan the launch" }), thread({ id: "thread-2", title: "Fix the build" })];
+    const now = Date.now();
+    wakeups = {
+      wakeups: [
+        { id: "wk_1", threadId: "thread-1", kind: "timer", status: "pending", reason: "check CI", fireAt: now + 26 * 60_000 + 10_000, createdAt: now },
+        // A process gets no row line: only timers do.
+        { id: "wk_2", threadId: "thread-2", kind: "process", status: "running", reason: "build", deadlineAt: now + 3_600_000, createdAt: now },
+      ],
+      leases: [{ id: "ls_1", threadId: "thread-2", ownerKind: "hold", reason: "terminal", deadlineAt: now + 3_600_000, createdAt: now }],
+    };
+    renderTree();
+    const lines = screen.getAllByText(/^Waiting · next wakeup/);
+    expect(lines.map((l) => l.textContent)).toEqual(["Waiting · next wakeup in 26m"]);
+    // The line sits under its own thread's row.
+    const row = screen.getByText("Plan the launch").closest("a")?.parentElement?.parentElement;
+    expect(row?.contains(lines[0] ?? null)).toBe(true);
+  });
+
+  it("shows no line without timers", () => {
+    wakeups = { wakeups: [], leases: [] };
+    renderTree();
+    expect(screen.queryByText(/^Waiting · next wakeup/)).toBeNull();
+  });
 });

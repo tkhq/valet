@@ -1,7 +1,7 @@
 /** The thread sidebar: 200 threads with long titles, every origin, pull
  * requests, shares, questions, unread dots, and many children under a few
  * threads. */
-import type { ChildWorkResponse, DecisionGate, ListDecisionsResponse, ListThreadsResponse, ThreadSummary } from "@valet/api/wire";
+import type { ChildWorkResponse, DecisionGate, ListDecisionsResponse, ListSessionWakeupsResponse, ListThreadsResponse, ThreadSummary } from "@valet/api/wire";
 import { threadOriginBucket, type ThreadOriginBucket } from "~/lib/thread-origin";
 import { EMOJI, HEX_300, HOUR, MINUTE, NOW, RTL_HEBREW, TITLE_400, unbroken } from "./common";
 import { decisionGate, stressTitle } from "./approvals";
@@ -110,4 +110,18 @@ export const stressChildWork: ChildWorkResponse = {
     outcome: i % 3 === 0 ? (i % 2 === 0 ? `failed: ${HEX_300}` : "completed") : undefined,
     createdAt: NOW - i * MINUTE,
   })),
+};
+
+/** Background work in the sidebar session: timers give rows 1 and 11 (a
+ * 400-character title) the wait line, and a process and a hold on row 2
+ * give it none. */
+export const stressSidebarWakeups: ListSessionWakeupsResponse = {
+  wakeups: [
+    { id: "wk_stress_1", threadId: "sidebar-thread-1", kind: "timer", status: "pending", reason: TITLE_400, fireAt: NOW + 26 * MINUTE, createdAt: NOW },
+    { id: "wk_stress_11", threadId: "sidebar-thread-11", kind: "timer", status: "pending", reason: "check CI", fireAt: NOW + 47 * HOUR, createdAt: NOW },
+    { id: "wk_stress_2", threadId: "sidebar-thread-2", kind: "process", status: "running", reason: "full proof build", deadlineAt: NOW + 30 * HOUR, createdAt: NOW - HOUR },
+  ],
+  leases: [
+    { id: "ls_stress_2", threadId: "sidebar-thread-2", ownerKind: "hold", reason: "terminal work", deadlineAt: NOW + 3 * HOUR, createdAt: NOW },
+  ],
 };

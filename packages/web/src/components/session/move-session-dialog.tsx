@@ -13,7 +13,7 @@ import { useOrg, useTeams } from "~/api/settings";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { errorText } from "~/lib/error-text";
 import { PERSONAL } from "~/lib/workspace-scope";
-import { backgroundItems } from "./background-work-badge";
+import { backgroundItems } from "./background-work";
 import { BackgroundWorkList } from "./background-work-confirm";
 
 /**

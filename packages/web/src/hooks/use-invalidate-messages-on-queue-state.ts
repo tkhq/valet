@@ -46,6 +46,11 @@ export function useInvalidateMessagesOnQueueState(
       // query for the session. Relying on that TanStack default instead of
       // enumerating thread ids here.
       qc.invalidateQueries({ queryKey: qk.messages(sessionId, threadId) });
+      // A turn that ends can start or end background work (a timer, a
+      // process, a hold), and nothing pushes those changes. The same cue
+      // refreshes the composer status line, the thread card section, and
+      // the thread list line. The query's poll is the fallback.
+      qc.invalidateQueries({ queryKey: qk.wakeups(sessionId) });
     }, delayMs);
     debouncerRef.current = debouncer;
     return () => debouncer.cancel();
