@@ -249,7 +249,10 @@ Hardening (applies to approval-node resolutions too — shared route):
    assistant to read `get_run` instead. When other gates were already
    waiting, `next` names them (`resolvedGateStillWaiting`): a drive that
    only resolves gates opens none, so no `workflow.approval_needed` signal
-   would report them. Known gap: a team run started before its thread moved
+   would report them. The run wakes as soon as the approval is recorded, so
+   `gatesStillWaiting` counts only gates that waited just before the
+   approval and still wait after it; a gate the drive opens gets its own
+   signal. Known gap: a team run started before its thread moved
    to an execution session stores the root session as its origin, while its
    reports go to the execution thread, so `next` there says to read
    `get_run`.

@@ -6,6 +6,7 @@ import {
   findingKey,
   formatEditLintErrors,
   ownerFromContext,
+  gatesStillWaiting,
   runReportsToThread,
   workflowsActionPlugin,
 } from "./actions.js";
@@ -92,6 +93,20 @@ describe("workflowsActionPlugin", () => {
     expect(runReportsToThread({ origin }, "s-b", "t-a")).toBe(false);
     expect(runReportsToThread({}, "s-a", "t-a")).toBe(false);
     expect(runReportsToThread({ origin, parentRunId: "run-parent" }, "s-a", "t-a")).toBe(false);
+  });
+
+  // The read after an approval races the drive the approval wakes.
+  it("counts only gates that waited before the approval and still wait", () => {
+    const signal = (signalType: string) => ({ kind: "signal", signalType });
+    const before = [signal("approval:a"), signal("approval:b"), signal("approval:each:2")];
+    // The drive consumed `a` but has not parked again: `a` still shows.
+    expect(gatesStillWaiting(before, { nodeId: "a" }, [{ nodeId: "a" }, { nodeId: "b" }])).toEqual([{ nodeId: "b" }]);
+    // The drive already opened `c`, which gets its own signal.
+    expect(gatesStillWaiting(before, { nodeId: "a" }, [{ nodeId: "b" }, { nodeId: "c" }])).toEqual([{ nodeId: "b" }]);
+    // Iterations after the first carry their suffix.
+    expect(gatesStillWaiting(before, { nodeId: "b" }, [{ nodeId: "each", iteration: 2 }, { nodeId: "each", iteration: 3 }]))
+      .toEqual([{ nodeId: "each", iteration: 2 }]);
+    expect(gatesStillWaiting([signal("approval:only")], { nodeId: "only" }, [{ nodeId: "only" }])).toEqual([]);
   });
 
   // An approval that settles the run fast tempted the assistant to poll
