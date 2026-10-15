@@ -16,6 +16,12 @@
  */
 import { Label, Textarea } from "~/components/primitives";
 
+/** Examples that fit any event the rule selects. A rule can listen to
+ * Slack, Linear, or GitHub, so the examples use only the variables every
+ * event carries, never one source's payload fields. */
+export const SYSTEM_PROMPT_PLACEHOLDER = "Summarize this event in one sentence.";
+export const USER_PROMPT_PLACEHOLDER = "{{event.key}}: {{event.summary}}";
+
 export interface PromptFieldsValue {
   systemPrompt: string;
   userPromptTemplate: string;
@@ -75,7 +81,7 @@ export function PromptFields({
           rows={2}
           value={value.systemPrompt}
           onChange={(e) => onChange({ ...value, systemPrompt: e.target.value })}
-          placeholder="Triage this pull request. Answer in one sentence."
+          placeholder={SYSTEM_PROMPT_PLACEHOLDER}
         />
       </div>
       <div className="grid gap-1">
@@ -88,7 +94,7 @@ export function PromptFields({
           rows={2}
           value={value.userPromptTemplate}
           onChange={(e) => onChange({ ...value, userPromptTemplate: e.target.value })}
-          placeholder="{{payload.sender}} opened {{payload.repo}}: {{event.summary}}"
+          placeholder={USER_PROMPT_PLACEHOLDER}
         />
       </div>
       <p className="text-xs text-muted">
