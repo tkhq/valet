@@ -39,6 +39,22 @@ Stored text and content parts can disagree. These readers do not expose raw prov
 Distinguish trigger or template errors, access and approval problems, missing data, model or schema problems, and failed result delivery.
 Do not repeat an unchanged failing call. Follow its corrective action or inspect different evidence.
 
+## Read response diagnostics
+
+- `selected.stopReason` is the stored transcript mapping. `modelResponse.stopReason` is the adapter's normalized stop. `modelResponse.rawStopReason` is the raw stop label exposed by the adapter.
+- An awaited submission's adapted `length`, `error`, or `aborted` stop fails completion, even when partial JSON matches the schema. A mapped transcript `end_turn` does not override it.
+- Null effective limits, request IDs, provider terminal status, and incomplete reasons mean unavailable evidence. They do not establish provider behavior. A requested token limit does not establish the effective limit. Report null limits as unknown without inventing a default or an adapter explanation.
+- Compare stored text, text parts, adapted response text, and streamed text lengths. Equal lengths show consistency across those recorded layers. They do not prove capture of the full provider response. Different lengths identify a boundary to inspect, not the source of the loss.
+- Text lengths count JavaScript UTF-16 code units, not bytes.
+
+Use this report format:
+
+1. **Observed:** Name each recorded stop, text length, and requested limit. A null requested limit means "no requested limit recorded."
+2. **Inference:** State whether recorded text layers agree or differ. State the transport and schema outcomes separately.
+3. **Unknown:** Name each unavailable field, including `incompleteReason`. If the raw response is unavailable, include "Full provider-response capture: not verified."
+
+Keep conclusions within those fields. Equal lengths support "recorded lengths agree." The cause of an unavailable field remains unknown.
+
 ## Apply a bounded repair
 
 Select repair focus before changing the definition. Keep the same success checks.
