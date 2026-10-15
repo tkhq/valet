@@ -3254,6 +3254,11 @@ export interface CredentialSummary {
    * past expiry (`isDeadConnection`). Any team member may reconnect a dead
    * team connection. */
   dead?: boolean;
+  /** Team-scope rows only. True when no run uses the team's own row: a
+   * `github` row that `isUsableGithubUserRow` refuses, or an OAuth row past
+   * expiry with no refresh token that is not `dead`. It does not block a
+   * member's share (`POST /:service/delegate`). */
+  unusable?: boolean;
   /** `metadata.onepassword.reference`, when this credential resolves via a
    * 1Password reference instead of an inline secret (1Password credential
    * provider plan, Task 3). Display-only — never secret material. */

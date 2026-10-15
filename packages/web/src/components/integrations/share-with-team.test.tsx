@@ -127,6 +127,23 @@ describe("ShareWithTeam", () => {
     );
   });
 
+  it("will not share with a team that has its own connection, and says why", () => {
+    teamCreds = [{ service: "linear", type: "api_key", connectedAt: "2026-09-01T00:00:00Z" }];
+    openMenu();
+    expect(screen.getByText("Has its own connection, and teammates use it.")).toBeTruthy();
+    const share = screen.getByRole("button", { name: "Share Linear with Engineering" });
+    expect((share as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(share);
+    expect(delegateMutate).not.toHaveBeenCalled();
+  });
+
+  it("sends the member to reconnect a team connection that stopped working", () => {
+    teamCreds = [{ service: "linear", type: "oauth2", connectedAt: "2026-09-01T00:00:00Z", dead: true }];
+    openMenu();
+    expect(screen.getByText("Its own connection stopped working. Reconnect it in the team's Integrations.")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Share Linear with Engineering" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("stops a share the caller already made, under the label the panel uses", async () => {
     teamCreds = SHARED_BY_ME;
     openMenu();

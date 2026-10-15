@@ -6,7 +6,7 @@ import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/
 import { errorText } from "~/lib/error-text";
 import { CardHeading } from "./integration-card";
 import { displayName } from "./display-name";
-import { credentialRowHealth, healthBadge, healthNote, needsReauth, type ServiceHealth } from "./service-health";
+import { credentialRowHealth, healthBadge, healthNote, isTeamOwnConnection, needsReauth, type ServiceHealth } from "./service-health";
 import { TeamConnectionDialog } from "./team-connection-setup";
 
 /**
@@ -102,8 +102,11 @@ export function TeamCredentials({
       return `A team admin approves or declines the request. Team actions keep using ${service} until then.`;
     }
     if (row.delegatedFrom) {
-      return `Team actions stop using ${nameFor(row.delegatedFrom)}'s ${service} account. They keep their own ` +
-        `${service} connection and can share it with the team again from Integrations.`;
+      const kept = `Team actions stop using ${nameFor(row.delegatedFrom)}'s ${service} account. They keep their own ${service} connection.`;
+      // The delegate route refuses a new share beside the team's own connection.
+      return rows.some((other) => other.service === row.service && isTeamOwnConnection(other))
+        ? `${kept} While ${team.name} has its own ${service} connection, they cannot share theirs again.`
+        : `${kept} They can share it with the team again from Integrations.`;
     }
     if (row.service === "slack" || row.service === "github") {
       return `This deletes the ${service} credential stored on ${team.name}. Team Integrations cannot recreate this connection. ` +
