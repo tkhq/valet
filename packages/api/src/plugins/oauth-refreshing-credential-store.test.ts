@@ -3,6 +3,10 @@ import type { CredentialStore, CredentialOwner, StoredCredential, ValetPlugin } 
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { startFakeOAuthServer, type FakeOAuthServer } from "../test-helpers/oauth-fixture.js";
 import { mcpOauthClients } from "../schema/index.js";
+import { isUnusableOAuthCredential } from "../services/credential-resolution.js";
+import { PgCredentialStore } from "./credential-store.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
+import type { PgQueryable } from "@valet/store-postgres";
 import { OAuthRefreshingCredentialStore } from "./oauth-refreshing-credential-store.js";
 
 const OWNER: CredentialOwner = { type: "user", id: "u1" };
@@ -17,6 +21,11 @@ function memoryStore(): CredentialStore & { rows: Map<string, StoredCredential> 
     },
     async save(owner, service, credential) {
       rows.set(`${owner.type}:${owner.id}:${service}`, credential);
+    },
+    async compareAndSwap(owner, service, expected, next) {
+      if (rows.get(`${owner.type}:${owner.id}:${service}`) !== expected) return false;
+      rows.set(`${owner.type}:${owner.id}:${service}`, next);
+      return true;
     },
     async delete(owner, service) {
       rows.delete(`${owner.type}:${owner.id}:${service}`);
@@ -167,6 +176,58 @@ describe("OAuthRefreshingCredentialStore", () => {
     } finally {
       tokenCall.mockRestore();
     }
+  });
+
+  for (const mutation of ["reconnect", "delete"] as const) {
+    for (const refused of [false, true]) {
+      it(`does not ${mutation === "delete" ? "resurrect a deletion" : "overwrite a reconnect"} between the final read and ${refused ? "failure stamp" : "refresh save"}`, async () => {
+        await seedMcpClient();
+        const normal = new PgCredentialStore(testDb.pgdb, deriveSecretKey("race-key"));
+        await normal.save(OWNER, "linear", { type: "oauth2", accessToken: "old", refreshToken: "old-rt", expiresAt: NOW - 1 });
+        const replacement: StoredCredential = { type: "oauth2", accessToken: "reconnected", refreshToken: "new-rt", expiresAt: NOW + 3_600_000, metadata: { login: "new-user" } };
+        let reads = 0;
+        const interleaved: PgQueryable = {
+          async query(sql, params) {
+            const result = await testDb.pgdb.query(sql, params);
+            if (sql.startsWith("SELECT * FROM credentials") && ++reads === 3) {
+              if (mutation === "delete") await normal.delete(OWNER, "linear");
+              else await normal.save(OWNER, "linear", replacement);
+            }
+            return result;
+          },
+        };
+        fake.tokenFailure = refused ? 400 : undefined;
+        fake.tokenResponse = { access_token: "refreshed-old-grant", expires_in: 3600 };
+        const store = new OAuthRefreshingCredentialStore(new PgCredentialStore(interleaved, deriveSecretKey("race-key")), {
+          db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW,
+        });
+        const got = await store.get(OWNER, "linear");
+        expect(reads).toBeGreaterThanOrEqual(3);
+        if (mutation === "delete") {
+          expect(got).toBeNull();
+          expect(await normal.get(OWNER, "linear")).toBeNull();
+        } else {
+          expect(got).toMatchObject(replacement);
+          expect(await normal.get(OWNER, "linear")).toMatchObject(replacement);
+        }
+      });
+    }
+  }
+
+  it("treats an empty refresh token returned by the provider as unusable after expiry", async () => {
+    await seedMcpClient();
+    const inner = new PgCredentialStore(testDb.pgdb, deriveSecretKey("empty-token"));
+    const team: CredentialOwner = { type: "team", id: "team-empty-token" };
+    await inner.save(team, "linear", { type: "oauth2", accessToken: "old", refreshToken: "old-rt", expiresAt: NOW });
+    fake.tokenResponse = { access_token: "short-lived", refresh_token: "", expires_in: 1 };
+    const store = new OAuthRefreshingCredentialStore(inner, { db: testDb.appDb, plugins: mcpPlugins(), env: {}, now: () => NOW });
+    const fresh = await store.get(team, "linear");
+    expect(fresh?.refreshToken).toBe("");
+    if (!fresh) throw new Error("Missing refreshed credential");
+    expect(isUnusableOAuthCredential(fresh, NOW + 1000)).toBe(true);
+    const persisted = await inner.get(team, "linear");
+    if (!persisted) throw new Error("Missing persisted credential");
+    expect(isUnusableOAuthCredential(persisted, NOW + 1000)).toBe(true);
   });
 
   it("never refreshes github (excluded service)", async () => {

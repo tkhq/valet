@@ -40,6 +40,9 @@ export class TeamCredentialStore implements CredentialStore {
     return this.inner.save(owner, service, credential);
   }
 
+  compareAndSwap(owner: CredentialOwner, service: string, expected: StoredCredential, next: StoredCredential): Promise<boolean> {
+    return this.inner.compareAndSwap(owner, service, expected, next);
+  }
   delete(owner: CredentialOwner, service: string): Promise<void> {
     return this.inner.delete(owner, service);
   }

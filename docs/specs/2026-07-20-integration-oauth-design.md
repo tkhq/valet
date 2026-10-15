@@ -221,4 +221,16 @@ Provider fixtures test protocol handling only. Live provider authorization, secr
 resolution, and inbound delivery require configured accounts in the local demo.
 
 
-Team credential saves recheck authority inside the write transaction after provider validation. The transaction holds the team ownership lock and shared locks on the team and membership rows. Role changes and member removal cannot commit between that check and the credential write. This applies to OAuth callbacks and direct token writes. Personal credential storage keeps its existing behavior.
+Team credential saves recheck authority inside the write transaction after provider validation. The transaction holds the team ownership lock and shared locks on the team and membership rows. Role changes and member removal cannot commit between that check and the credential write. This applies to OAuth callbacks, direct token writes, and 1Password reference writes. Personal credential storage keeps its existing behavior.
+
+
+### Refresh write ordering (2026-10-15)
+
+`CredentialStore.compareAndSwap` replaces an existing credential only when its value still matches the expected snapshot. It never inserts a missing row.
+The OAuth decorator uses this operation for both refreshed tokens and refresh failure metadata. If it loses the comparison, it reads the current row.
+A reconnect keeps its new tokens and metadata. A disconnect remains deleted.
+Postgres compares the persisted ciphertext and all credential fields in the conditional update. Random encryption nonces distinguish reconnects even when timestamps match.
+The in-memory store and each credential decorator implement the same contract. No schema change is required.
+
+Regression tests pause between the final credential read and the update. Both successful refreshes and refused refreshes preserve reconnects and deletions.
+Real Postgres tests also hold a competing row mutation open until the conditional update blocks, then commit it.

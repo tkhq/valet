@@ -12,6 +12,11 @@ function makeStore(seed: Record<string, StoredCredential> = {}): CredentialStore
     async save(owner, service, cred) {
       map.set(key(owner, service), cred);
     },
+    async compareAndSwap(owner, service, expected, next) {
+      if (map.get(key(owner, service)) !== expected) return false;
+      map.set(key(owner, service), next);
+      return true;
+    },
     async delete(owner, service) {
       map.delete(key(owner, service));
     },

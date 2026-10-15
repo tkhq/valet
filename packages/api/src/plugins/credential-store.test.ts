@@ -1,8 +1,11 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, describe, expect, it } from "vitest";
-import type { CredentialOwner } from "@valet/engine";
+import { InMemoryCredentialStore, type CredentialOwner } from "@valet/engine";
 import { pgDbFromPglite, type PgDb } from "@valet/store-postgres";
-import { applyAppMigrations } from "../lib/drizzle.js";
+import { TeamCredentialStore } from "./team-credential-store.js";
+import { OAuthRefreshingCredentialStore } from "./oauth-refreshing-credential-store.js";
+import { LinearAppTokenStore } from "./linear-app-token-store.js";
+import { applyAppMigrations, buildAppDb } from "../lib/drizzle.js";
 import { decryptSecret, deriveSecretKey, encryptSecret } from "../lib/secret-crypto.js";
 import { describeCredentialStoreContract } from "./credential-store-contract.js";
 import { PgCredentialStore } from "./credential-store.js";
@@ -37,6 +40,13 @@ describe("PgCredentialStore", () => {
   }
 
   describeCredentialStoreContract(() => freshStore());
+  describe("in-memory implementation", () => describeCredentialStoreContract(() => new InMemoryCredentialStore()));
+  describe("team decorator", () => describeCredentialStoreContract(async () => new TeamCredentialStore(await freshStore())));
+  describe("OAuth decorator", () => describeCredentialStoreContract(async () => new OAuthRefreshingCredentialStore(await freshStore(), {
+    db: buildAppDb(pglite), plugins: [], env: {},
+  })));
+  describe("Linear app decorator", () => describeCredentialStoreContract(async () => new LinearAppTokenStore(await freshStore(), { env: {} })));
+
 
   it("overwrites on save (upsert) and updates updated_at; still exactly one row", async () => {
     let now = 1_000;

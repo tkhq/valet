@@ -11,6 +11,11 @@ class MemoryStore implements CredentialStore {
   rows = new Map<string, StoredCredential>();
   async get(owner: CredentialOwner, service: string) { return this.rows.get(`${owner.type}:${owner.id}:${service}`) ?? null; }
   async save(owner: CredentialOwner, service: string, credential: StoredCredential) { this.rows.set(`${owner.type}:${owner.id}:${service}`, credential); }
+  async compareAndSwap(owner: CredentialOwner, service: string, expected: StoredCredential, next: StoredCredential): Promise<boolean> {
+    if (this.rows.get(`${owner.type}:${owner.id}:${service}`) !== expected) return false;
+    this.rows.set(`${owner.type}:${owner.id}:${service}`, next);
+    return true;
+  }
   async delete(owner: CredentialOwner, service: string) { this.rows.delete(`${owner.type}:${owner.id}:${service}`); }
   async list() { return []; }
 }

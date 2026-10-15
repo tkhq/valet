@@ -1285,6 +1285,7 @@ describe("workflow collector", () => {
           return credentials.get(owner, service);
         },
         save: (owner, service, credential) => credentials.save(owner, service, credential),
+        compareAndSwap: (owner, service, expected, next) => credentials.compareAndSwap(owner, service, expected, next),
         delete: (owner, service) => credentials.delete(owner, service),
         list: (owner) => credentials.list(owner),
       };
