@@ -37,6 +37,7 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
   const initial = useMemo(() => read(stored(`${key}:cache-v1`) ? `${key}:cache-v1` : key), [key]);
   const queryKey = ["thread-projects", viewerId, sessionId];
   const [write, setWrite] = useState<{ key: string; pending: number; error?: string }>({ key, pending: 0 });
+  const [migration, setMigration] = useState<{ key: string; error: string }>();
   const queue = useRef<Promise<void>>(Promise.resolve());
   const failed = useRef<{ key: string; operations: ThreadProjectsOperation[] } | undefined>(undefined);
   const identity = useRef({ key, epoch: 0 });
@@ -63,21 +64,27 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
       const check = () => { if (signal.aborted || !isCurrent()) throw new CancelledError({ silent: true }); };
       let response = await api.getThreadProjects(sessionId, viewerId, signal);
       check();
-      if (!stored(`${key}:synced-v1`)) {
-        const legacy = stored(key);
-        if (legacy) {
-          let raw: unknown;
-          try { raw = JSON.parse(legacy); }
-          catch { throw new Error("Saved project folders could not be read. Export the browser data before you reset it."); }
-          const parsed = schema.safeParse(raw);
-          if (!parsed.success) throw new Error("Saved project folders could not be read. Export the browser data before you reset it.");
-          if (parsed.data.projects.length || parsed.data.pinned.length || Object.keys(parsed.data.assignments).length) {
-            check();
-            response = await api.changeThreadProjects(sessionId, [{ type: "import", value: parsed.data }], viewerId, signal);
-            check();
+      try {
+        if (!stored(`${key}:synced-v1`)) {
+          const legacy = stored(key);
+          if (legacy) {
+            let raw: unknown;
+            try { raw = JSON.parse(legacy); }
+            catch { throw new Error("Saved project folders could not be read. Download the saved folders before resetting browser data."); }
+            const parsed = schema.safeParse(raw);
+            if (!parsed.success) throw new Error("Saved project folders could not be read. Download the saved folders before resetting browser data.");
+            if (parsed.data.projects.length || parsed.data.pinned.length || Object.keys(parsed.data.assignments).length) {
+              check();
+              response = await api.changeThreadProjects(sessionId, [{ type: "import", value: parsed.data }], viewerId, signal);
+              check();
+            }
           }
+          remember(`${key}:synced-v1`, "1");
         }
-        remember(`${key}:synced-v1`, "1");
+        if (isCurrent()) setMigration(undefined);
+      } catch (error) {
+        check();
+        setMigration({ key, error: errorText(error) });
       }
       const latest = client.getQueryData<ThreadProjectsResponse>(queryKey);
       const current = latest && latest.revision > response.revision ? latest : response;
@@ -100,6 +107,7 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
         const previous = client.getQueryData<ThreadProjectsResponse>(queryKey) ?? query.data;
         operations = typeof change === "function" ? threadProjectsChanges(previous.value, change(previous.value)) : change;
         if (!operations.length) return previous.value;
+        if (previous.generation) operations = operations.map(op => op.type === "create" && op.generation === undefined ? { ...op, generation: previous.generation } : op);
         const response = await mutation.mutateAsync({ sessionId, viewerId, key, epoch, operations, continuation });
         const latest = client.getQueryData<ThreadProjectsResponse>(queryKey);
         const current = latest && latest.revision > response.revision ? latest : response;
@@ -112,7 +120,7 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
         if (!isCurrent()) return undefined;
         const conflict = error instanceof ApiError && error.status === 409;
         if (conflict) failed.current = undefined;
-        else if (operations.length) failed.current = { key, operations };
+        else if (operations.length) failed.current = { key, operations: operations.map(op => op.type === "create" ? { ...op, generation: op.generation ?? 0 } : op) };
         setWrite(previous => previous.key === key ? { ...previous, error: errorText(error) } : previous);
         if (conflict) await query.refetch();
         return undefined;
@@ -128,12 +136,21 @@ export function useThreadProjects(viewerId: string, sessionId: string) {
     beginOperation: () => ({
       update: (change: ((previous: ThreadProjects) => ThreadProjects) | ThreadProjectsOperation[]) => enqueue(change, true),
       readCurrent: () => client.getQueryData<ThreadProjectsResponse>(queryKey)?.value ?? value,
+      refresh: async () => {
+        const response = await api.getThreadProjects(sessionId, viewerId);
+        const latest = client.getQueryData<ThreadProjectsResponse>(queryKey);
+        const current = latest && latest.revision > response.revision ? latest : response;
+        client.setQueryData(queryKey, current);
+        remember(`${key}:cache-v1`, JSON.stringify(current.value));
+        return current.value;
+      },
     }),
     readCurrent: () => client.getQueryData<ThreadProjectsResponse>(queryKey)?.value ?? value,
     isLoading: query.isPending,
     isReady: query.data !== undefined,
     isSaving: write.key === key && write.pending > 0,
-    error: write.key === key && write.error ? write.error : query.error ? errorText(query.error) : undefined,
+    unsyncedLegacy: migration?.key === key ? stored(key) : null,
+    error: write.key === key && write.error ? write.error : query.error ? errorText(query.error) : migration?.key === key ? migration.error : undefined,
     retry: () => {
       if (failed.current?.key === key) return enqueue(failed.current.operations);
       setWrite(previous => previous.key === key ? { ...previous, error: undefined } : previous);
@@ -154,6 +171,6 @@ export function removeArchivedProject(value: ThreadProjects, projectId: string, 
     ...value,
     projects: value.projects.filter(project => project.id !== projectId),
     assignments: Object.fromEntries(Object.entries(value.assignments).filter(([, id]) => id !== projectId)),
-    pinned: value.pinned.filter(id => !archivedIds.has(id)),
+    pinned: value.pinned.filter(id => value.assignments[id] !== projectId),
   };
 }

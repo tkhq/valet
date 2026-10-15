@@ -148,6 +148,8 @@ project**; chats already archived remain archived. A new assignment from another
 tab during the operation also keeps the folder for retry. Deletion uses the
 original workspace even if the user switches workspaces while it runs, and does
 not navigate or change preferences in the new workspace. Archiving uses the existing chat access checks.
+Before each archive starts, the client reads current folder membership from the server.
+It skips chats already moved elsewhere and keeps their assignments and pins. A failed membership read stops archiving and keeps the folder.
 
 ### Project folders across devices
 
@@ -169,6 +171,13 @@ An import never replaces a server rename, move, explicit unpin, or deletion with
 The server retains deletion and change markers for that purpose. Repeated imports produce the same organization.
 The browser retains the original local data. It records a migration marker only after the server acknowledges the import.
 A separate local cache stores acknowledged server data. A failed import or unavailable browser storage does not delete the original data.
+A failed import still loads the server folders and leaves organizing controls available. The warning offers **Download saved folders** and **Retry sync**.
+An import that exceeds storage limits fails atomically. The viewer can remove unused server folders and retry without losing local data.
+Imported duplicate names receive a unique numeric suffix; project IDs and assignments remain distinct.
+The server removes stale references to archived or deleted chats in bounded batches.
+If history markers reach their bound, the server closes legacy imports and compacts the history.
+A generation check rejects stale create operations after compaction. New operations use the current server generation.
+A browser whose legacy import is closed retains its original data and can download it; normal server folder controls remain available.
 
 The sidebar shows loading and saving states. A failed read or write keeps the last available folders visible and offers **Retry sync**.
 Offline requests fail visibly instead of remaining paused. A migration stops if its viewer or runtime changes before it sends the import.

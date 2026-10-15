@@ -1,10 +1,11 @@
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, pluginStore, sessionThreads } from "../schema/index.js";
 import { orgs, teams, teamMembers } from "../schema/index.js";
 import type { ThreadProjects, ThreadProjectsOperation, ThreadProjectsResponse } from "@valet/shared";
 import { z } from "zod";
-import { threadProjectsSchema } from "../services/thread-projects-schema.js";
+import { threadProjectsDocumentSchema, threadProjectsSchema } from "../services/thread-projects-schema.js";
+import { and, eq, sql } from "drizzle-orm";
 
 let api: TestApi | undefined;
 afterEach(async () => { await api?.cleanup(); api = undefined; });
@@ -23,7 +24,7 @@ function patch(url: string, operations: ThreadProjectsOperation[], userId?: stri
 async function read(url: string, userId?: string): Promise<ThreadProjectsResponse> {
   const response = await fetch(url, { headers: userId ? { "x-valet-test-user-id": userId } : {} });
   expect(response.status).toBe(200);
-  return z.object({ value: threadProjectsSchema, revision: z.number() }).parse(await response.json());
+  return z.object({ value: threadProjectsSchema, revision: z.number(), generation: z.number().optional() }).parse(await response.json());
 }
 
 it("keeps a project created by one device available to another device", async () => {
@@ -131,4 +132,69 @@ it("rejects invalid, oversized, and tenant-supplied preference payloads", async 
     body: JSON.stringify({ expectedViewerId: "local-user", operations: [{ type: "create", id: "p", name: "x".repeat(2 * 1024 * 1024) }] }),
   })).status).toBe(413);
   expect((await read(url)).value.projects).toEqual([]);
+});
+
+it("returns a recoverable import conflict while keeping server organization available", async () => {
+  api = await bootTestApi();
+  const url = await runtime(api);
+  const value: ThreadProjects = { projects: Array.from({ length: 150 }, (_, i) => ({ id: `server-${i}`, name: `Server ${i}`, collapsed: false })),
+    assignments: {}, pinned: [], grouped: true, collapsed: false };
+  expect((await patch(url, [{ type: "import", value }])).status).toBe(200);
+  const response = await patch(url, [{ type: "import", value: { ...value,
+    projects: Array.from({ length: 60 }, (_, i) => ({ id: `local-${i}`, name: `Local ${i}`, collapsed: false })) } }]);
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({ code: "import-limit" });
+  expect((await read(url)).value.projects).toHaveLength(150);
+  expect((await patch(url, [{ type: "rename", id: "server-0", name: "Ready" }])).status).toBe(200);
+});
+
+it("exposes the compacted create generation and an explicit closed import conflict", async () => {
+  api = await bootTestApi();
+  const url = await runtime(api);
+  await patch(url, [{ type: "create", id: "p", name: "P" }]);
+  const [row] = await api.providers.db.select().from(pluginStore).where(and(eq(pluginStore.collection, "thread-projects"), eq(pluginStore.scopeId, "local-user"))).limit(1);
+  if (!row) throw new Error("Missing saved folders");
+  const document = threadProjectsDocumentSchema.parse(row.doc);
+  document.touchedPins = Array.from({ length: 20000 }, (_, i) => `old-${i}`);
+  await api.providers.db.update(pluginStore).set({ doc: document }).where(eq(pluginStore.id, row.id));
+  expect((await read(url)).generation).toBe(1);
+  const legacy = await patch(url, [{ type: "import", value: { projects: [], assignments: {}, pinned: ["chat-a"], grouped: true, collapsed: false } }]);
+  expect(legacy.status).toBe(409);
+  expect(await legacy.json()).toMatchObject({ code: "import-closed" });
+  expect((await patch(url, [{ type: "create", id: "old", name: "Old" }])).status).toBe(409);
+  expect((await patch(url, [{ type: "create", id: "new", name: "New", generation: 1 }])).status).toBe(200);
+});
+
+it("removes archived and deleted live references in batches without changing another runtime", async () => {
+  api = await bootTestApi();
+  const url = await runtime(api);
+  const other = await runtime(api, "other-runtime");
+  await api.providers.engineStore.saveThread("other-runtime", { id: "other-chat", sessionId: "other-runtime", key: "web:other-chat", status: "active", queueMode: "steer", createdAt: 1, updatedAt: 1 });
+  await patch(url, [{ type: "create", id: "p", name: "P" }]);
+  expect((await patch(other, [{ type: "create", id: "other", name: "Other" }, { type: "assign", threadId: "other-chat", projectId: "other" }, { type: "pin", threadId: "other-chat", pinned: true }])).status).toBe(200);
+  const ids = Array.from({ length: 101 }, (_, i) => `archived-${i}`);
+  const [row] = await api.providers.db.select().from(pluginStore).where(and(eq(pluginStore.scopeId, "local-user"), eq(pluginStore.key, JSON.stringify(["local-org", "sidebar-runtime"])))).limit(1);
+  if (!row) throw new Error("Missing saved folders");
+  const document = threadProjectsDocumentSchema.parse(row.doc);
+  document.value.assignments = Object.fromEntries([...ids, "chat-b", "still-active"].map(id => [id, "p"]));
+  document.value.pinned = [...ids, "chat-b", "still-active"];
+  await api.providers.db.update(pluginStore).set({ doc: document }).where(eq(pluginStore.id, row.id));
+  for (const id of [...ids, "still-active"]) {
+    await api.providers.engineStore.saveThread("sidebar-runtime", { id, sessionId: "sidebar-runtime", key: `web:${id}`, status: "active", queueMode: "steer", createdAt: 1, updatedAt: 1 });
+  }
+  await api.providers.db.insert(sessionThreads).values(ids.map(id => ({ id, sessionId: "sidebar-runtime", createdAt: 1, archivedAt: 2 })));
+  await api.providers.db.execute(sql`DELETE FROM engine_threads WHERE session_id = ${"sidebar-runtime"} AND id = ${"chat-b"}`);
+  const pruned = await read(url);
+  expect(pruned.value.assignments).toEqual({ "still-active": "p" });
+  expect(pruned.value.pinned).toEqual(["still-active"]);
+  expect((await read(other)).value).toMatchObject({ assignments: { "other-chat": "other" }, pinned: ["other-chat"] });
+  const [saved] = await api.providers.db.select().from(pluginStore).where(eq(pluginStore.id, row.id)).limit(1);
+  const cleaned = threadProjectsDocumentSchema.parse(saved?.doc);
+  expect(cleaned.value.assignments).toEqual({ "still-active": "p" });
+  expect(cleaned.touchedAssignments).toContain("archived-100");
+  expect(cleaned.touchedPins).toContain("chat-b");
+  await api.providers.db.update(sessionThreads).set({ archivedAt: null }).where(and(eq(sessionThreads.id, "archived-100"), eq(sessionThreads.sessionId, "sidebar-runtime")));
+  expect((await patch(url, [{ type: "import", value: document.value }])).status).toBe(200);
+  expect((await read(url)).value).toEqual(pruned.value);
+  expect((await patch(url, [{ type: "pin", threadId: "archived-0", pinned: true }])).status).toBe(404);
 });

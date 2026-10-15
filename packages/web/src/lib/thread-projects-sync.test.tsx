@@ -65,7 +65,8 @@ it("keeps pending legacy folders and offers retry after an import fails", async 
   remote.change.mockRejectedValueOnce(new Error("Offline. Reconnect and retry."));
   const hook = renderHook(() => useThreadProjects("viewer", "runtime"), { wrapper: client().wrapper });
   await waitFor(() => expect(hook.result.current.error).toContain("Offline"));
-  expect(hook.result.current.value.projects).toEqual([project]);
+  expect(hook.result.current.isReady).toBe(true);
+  expect(hook.result.current.value.projects).toEqual([]);
   expect(localStorage.getItem(key)).toBe(original);
   expect(localStorage.getItem(`${key}:synced-v1`)).toBeNull();
   remote.change.mockResolvedValue({ value: { ...empty, projects: [project] }, revision: 2 });
@@ -213,4 +214,47 @@ it("refreshes after a conflict and requires a fresh delete operation instead of 
   remote.change.mockResolvedValueOnce({ value: empty, revision: 4 });
   await act(async () => { await hook.result.current.update(value => ({ ...value, projects: [], assignments: {} })); });
   expect(remote.change).toHaveBeenLastCalledWith("runtime", [{ type: "delete", id: "reports", archivedThreadIds: ["first", "added"] }], "viewer");
+});
+
+it("keeps server folders usable and original data recoverable after an oversized import", async () => {
+  const key = "valet:thread-projects:viewer:runtime";
+  const original = JSON.stringify({ ...empty, projects: [project] });
+  const desktop = { id: "desktop", name: "Desktop", collapsed: false };
+  localStorage.setItem(key, original);
+  remote.read.mockResolvedValue({ value: { ...empty, projects: [desktop] }, revision: 3 });
+  remote.change.mockRejectedValueOnce(new ApiError(409, "Import limit", { error: "Remove unused server folders and retry importing.", code: "import-limit" }));
+  const hook = renderHook(() => useThreadProjects("viewer", "runtime"), { wrapper: client().wrapper });
+  await waitFor(() => expect(hook.result.current.error).toContain("Remove unused"));
+  expect(hook.result.current.isReady).toBe(true);
+  expect(hook.result.current.value.projects).toEqual([desktop]);
+  expect(hook.result.current.unsyncedLegacy).toBe(original);
+  expect(localStorage.getItem(key)).toBe(original);
+  expect(localStorage.getItem(`${key}:synced-v1`)).toBeNull();
+  remote.change.mockResolvedValue({ value: { ...empty, projects: [{ ...desktop, name: "Renamed" }] }, revision: 4 });
+  await act(async () => { await hook.result.current.update(value => ({ ...value, projects: [{ ...desktop, name: "Renamed" }] })); });
+  expect(remote.change).toHaveBeenLastCalledWith("runtime", [{ type: "rename", id: "desktop", name: "Renamed" }], "viewer");
+});
+
+it("stamps a new folder with the server generation after history compaction", async () => {
+  remote.read.mockResolvedValue({ value: empty, revision: 3, generation: 2 });
+  remote.change.mockResolvedValue({ value: { ...empty, projects: [project] }, revision: 4, generation: 2 });
+  const hook = renderHook(() => useThreadProjects("viewer", "runtime"), { wrapper: client().wrapper });
+  await waitFor(() => expect(hook.result.current.isReady).toBe(true));
+  await act(async () => { await hook.result.current.update(value => ({ ...value, projects: [project] })); });
+  expect(remote.change).toHaveBeenLastCalledWith("runtime", [{ type: "create", ...project, generation: 2 }], "viewer");
+});
+
+it("does not upgrade a failed create retry into a generation that can resurrect its deleted ID", async () => {
+  const device = client();
+  remote.change.mockRejectedValueOnce(new Error("Response lost"));
+  const hook = renderHook(() => useThreadProjects("viewer", "runtime"), { wrapper: device.wrapper });
+  await waitFor(() => expect(hook.result.current.isReady).toBe(true));
+  await act(async () => { await hook.result.current.update(value => ({ ...value, projects: [project] })); });
+  const compacted = { value: empty, revision: 10, generation: 1 };
+  act(() => device.queryClient.setQueryData(["thread-projects", "viewer", "runtime"], compacted));
+  remote.read.mockResolvedValue(compacted);
+  remote.change.mockRejectedValueOnce(new ApiError(409, "Stale create", { error: "Refresh and create a new folder." }));
+  await act(async () => { await hook.result.current.retry(); });
+  expect(remote.change).toHaveBeenLastCalledWith("runtime", [{ type: "create", ...project, generation: 0 }], "viewer");
+  expect(hook.result.current.value.projects).toEqual([]);
 });

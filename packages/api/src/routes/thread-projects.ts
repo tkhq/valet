@@ -7,7 +7,7 @@ import type { AppEnv } from "../env.js";
 import { requireActingUser } from "../middleware/auth.js";
 import { agentSessions } from "../schema/index.js";
 import { canViewSession } from "../services/session-access.js";
-import { changeThreadProjects, readThreadProjects, ThreadProjectsConflict } from "../services/thread-projects.js";
+import { changeThreadProjects, readThreadProjects, ThreadProjectsConflict, ThreadProjectsImportConflict } from "../services/thread-projects.js";
 import { threadProjectsMutationSchema } from "../services/thread-projects-schema.js";
 import { spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
 
@@ -26,6 +26,21 @@ async function access(c: Context<AppEnv>) {
   return { scope: { orgId: user.orgId, userId: user.id, sessionId }, session };
 }
 
+async function activeThreads(c: Context<AppEnv>, session: { id: string; ownerType: string }, ids: string[]): Promise<Set<string>> {
+  const visible = new Set<string>();
+  const canSee = threadsVisibleTo(c, session);
+  for (let offset = 0; offset < ids.length; offset += 100) {
+    const batch = ids.slice(offset, offset + 100);
+    const result = await c.var.providers.db.execute(sql`SELECT t.id, t.key FROM engine_threads t
+      LEFT JOIN session_threads m ON m.id = t.id AND m.session_id = t.session_id
+      WHERE t.session_id = ${session.id} AND m.archived_at IS NULL
+      AND t.id IN (${sql.join(batch.map(id => sql`${id}`), sql`, `)}) LIMIT 100`);
+    const { rows } = z.object({ rows: z.array(z.object({ id: z.string(), key: z.string().nullable() })) }).parse(result);
+    for (const thread of rows) if (await canSee(thread.key)) visible.add(thread.id);
+  }
+  return visible;
+}
+
 threadProjectsRouter.get("/:sessionId", async c => {
   const allowed = await access(c);
   if ("error" in allowed) return allowed.error;
@@ -33,7 +48,7 @@ threadProjectsRouter.get("/:sessionId", async c => {
   if (expected !== undefined && expected !== allowed.scope.userId) {
     return c.json({ error: "Your signed-in account changed. Refresh the page to load your project folders." }, 403);
   }
-  return c.json(await readThreadProjects(c.var.providers.db, allowed.scope));
+  return c.json(await readThreadProjects(c.var.providers.db, allowed.scope, ids => activeThreads(c, allowed.session, ids)));
 });
 
 threadProjectsRouter.patch("/:sessionId", async c => {
@@ -57,16 +72,7 @@ threadProjectsRouter.patch("/:sessionId", async c => {
     }
   }
   if (requested.size > 5000) return c.json({ error: "Too many chats in one sidebar change. Save at most 5000 chats at one time." }, 400);
-  const visible = new Set<string>();
-  const ids = [...requested];
-  const canSee = threadsVisibleTo(c, allowed.session);
-  for (let offset = 0; offset < ids.length; offset += 100) {
-    const batch = ids.slice(offset, offset + 100);
-    const result = await c.var.providers.db.execute(sql`SELECT id, key FROM engine_threads
-      WHERE session_id = ${allowed.scope.sessionId} AND id IN (${sql.join(batch.map(id => sql`${id}`), sql`, `)}) LIMIT 100`);
-    const { rows } = z.object({ rows: z.array(z.object({ id: z.string(), key: z.string().nullable() })) }).parse(result);
-    for (const thread of rows) if (await canSee(thread.key)) visible.add(thread.id);
-  }
+  const visible = await activeThreads(c, allowed.session, [...requested]);
   const operations: ThreadProjectsOperation[] = [];
   for (const op of parsed.data.operations) {
     if ((op.type === "assign" || op.type === "pin") && !visible.has(op.threadId)) {
@@ -78,8 +84,9 @@ threadProjectsRouter.patch("/:sessionId", async c => {
     } });
     else operations.push(op);
   }
-  try { return c.json(await changeThreadProjects(c.var.providers.db, allowed.scope, operations)); }
+  try { return c.json(await changeThreadProjects(c.var.providers.db, allowed.scope, operations, ids => activeThreads(c, allowed.session, ids))); }
   catch (error) {
+    if (error instanceof ThreadProjectsImportConflict) return c.json({ error: error.message, code: error.code }, 409);
     if (error instanceof ThreadProjectsConflict) return c.json({ error: error.message }, 409);
     if (error instanceof z.ZodError) return c.json({ error: "Sidebar storage limit reached. Contact support to save this change." }, 400);
     throw error;
