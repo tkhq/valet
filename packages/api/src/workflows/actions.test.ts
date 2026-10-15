@@ -508,8 +508,9 @@ describe("DB-backed actions", () => {
       await db.insert(workflowRuns).values({ id: "parent", workflowId, definitionVersionId: "v",
         definition: {}, params: {}, ownerType: "user", ownerId: "user1", createdAt: 1, updatedAt: 1 });
       const start = workflowsActionPlugin(() => deps).actions.find(action => action.id === "workflows.start_run")!;
-      expect(await start.execute({ workflow_id: workflowId }, ctx({ sessionId, threadId: "invoke" }))).toMatchObject({ success: true });
+      expect(await start.execute({ workflow_id: workflowId }, ctx({ sessionId, threadId: "invoke", toolScope: { actions: ["demo.echo"] } }))).toMatchObject({ success: true });
       expect(runHost.started.at(-1)?.[1].origin).toBeUndefined();
+      expect(runHost.started.at(-1)?.[1].toolScope).toEqual({ actions: ["demo.echo"] });
     },
   );
 

@@ -357,6 +357,7 @@ export class PgSessionStore implements SessionStore {
          model = EXCLUDED.model,
          reasoning = EXCLUDED.reasoning,
          summary = EXCLUDED.summary,
+         metadata = EXCLUDED.metadata,
          updated_at = EXCLUDED.updated_at`,
       [
         thread.id,

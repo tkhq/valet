@@ -5,6 +5,11 @@ description: Valet DAG workflow operations. Use when creating, updating, inspect
 
 # Workflows
 
+For a failure, unexpected output, missing data, or a missing report, load `workflow-troubleshooting` first.
+Select repair focus before editing. Before an authorized test, select validate with the exact actions and native tools needed.
+Focused discovery returns summaries. Use `list_tools` with `detail: "schema"` and an exact query to read parameters.
+Select general focus when the person changes to another task. Existing approval policies always apply.
+
 Workflows are dag/v1 definitions: a flat list of `nodes` plus directed `edges`. Runs execute on the server's checkpointed interpreter — they park on waits/approvals and resume on signals. Users see workflows as node diagrams in chat and at `/workflows`.
 
 ## Use the workflow tools, not raw API calls

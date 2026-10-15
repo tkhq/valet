@@ -26,6 +26,7 @@
  */
 
 import type { WorkflowInputDefinition } from './shape.js';
+import type { ToolScope } from '@valet/shared';
 
 export interface TriggerNode {
   id: string;
@@ -72,6 +73,7 @@ export interface ApprovalNode {
 
 // Session node — start-mode only this phase (decision 3).
 export interface SessionNode {
+  toolScope?: ToolScope;
   id: string;
   type: 'session';
   mode: 'start';
@@ -124,6 +126,7 @@ export interface LlmNode {
 
 // Thread node — trimmed per decision 1 (same trims as SessionNode).
 export interface ThreadNode {
+  toolScope?: ToolScope;
   id: string;
   type: 'orchestrator';
   prompt: string;

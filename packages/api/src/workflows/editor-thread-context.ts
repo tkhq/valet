@@ -13,6 +13,7 @@ export function workflowEditorThreadContext(thread: { key: string }): string | u
   return [
     `This conversation is the visual editor for workflow ${match[1]}. Read that workflow before answering questions or making changes.`,
     "If it still has a placeholder name such as \"Untitled workflow\" and only start and stop steps, the person is creating it: give it a name that says what it does, based on their request.",
+    "This editor starts with diagnosis tools. Call focus_tools with repair before editing, or validate before an authorized test. Name the exact actions and native tools that the test needs. Load workflow-troubleshooting for failures or unexpected results.",
     "Before the first step, restate the plan in two or three lines: what starts it, what each step does, and where the result goes.",
     "If a gap would change the build, such as which event, channel, repo, or account to use, call ask_question once with the plan as `detail` and the likely answers as `options`.",
     "Otherwise, build it and list what you assumed.",

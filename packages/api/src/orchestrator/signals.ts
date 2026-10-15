@@ -1,3 +1,4 @@
+import { readToolScope, type ToolScope } from "@valet/shared";
 /**
  * Signal edge ACL (Phase 4 decision 16). `admitSignal` is the ONLY path
  * through which host code admits a `SignalContent` on another session's
@@ -41,6 +42,7 @@ export interface AdmitSignalDeps {
 }
 
 export interface AdmitSignalArgs {
+  toolScope?: ToolScope;
   from: { sessionId: string; owner: Principal };
   /** Recipient session id. */
   to: string;
@@ -251,6 +253,7 @@ export async function admitSignal(deps: AdmitSignalDeps, args: AdmitSignalArgs):
 
   try {
     return await thread.submitPrompt(args.content, {
+      ...(args.toolScope !== undefined ? { metadata: { toolScope: readToolScope(args.toolScope) } } : {}),
       dispatchId: args.dispatchId,
       // Internal signals always queue behind in-flight work. User-owned
       // orchestrator threads run queueMode 'steer' (decision 17) — without

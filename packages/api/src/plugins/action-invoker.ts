@@ -1,3 +1,4 @@
+import { actionInScope, scopeRefusal, type ToolScope } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 /**
  * Headless ActionInvoker (plugin-system-v2 plan Task 6) — the real
@@ -84,6 +85,7 @@ const ACTION_TIMEOUT_MS = 120_000;
  * resolves this from the run and passes it in.
  */
 export interface ActionInvocationContext {
+  toolScope?: ToolScope;
   presence?: Presence;
   /** The assistant this invocation belongs to, when the caller can name
    * one. It keys the carried-over sender profile (`workspaceSenderIdentity`). */
@@ -202,6 +204,8 @@ export function buildActionInvoker(opts: ActionInvokerOpts): ActionInvoker {
   const clock = opts.clock ?? Date.now;
 
   return async (req, ctx) => {
+    const actionId = req.action.includes(".") ? req.action : `${req.service}.${req.action}`;
+    if (!actionInScope(ctx.toolScope, actionId)) return { ok: false, error: scopeRefusal(actionId) };
     const existing = await selectStoredResult(opts.db, req.invocationId);
     if (existing) return existing;
 
@@ -1172,6 +1176,7 @@ function buildActionContext(
   const sessionId = `wf:invoke:${req.invocationId}`;
   const presence = mergePresence(readPresence(ctx.presence));
   return {
+    toolScope: ctx.toolScope,
     userId: ctx.userId,
     orgId: ctx.orgId,
     sessionId,

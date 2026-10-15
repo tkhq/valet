@@ -1,3 +1,5 @@
+import { workflowStepToolScope } from "./tool-scope.js";
+import { actionInScope, scopeRefusal } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 /**
  * `WorkflowEngineDeps` (Phase 5 plan decision 15) implemented over
@@ -342,7 +344,10 @@ async function ensureSession(opts: WorkflowEngineDepsOpts, sessionId: string, ti
   const workspace = workspaceFor(parts);
   await mkdir(workspace, { recursive: true });
   const assistantId = await runAssistantId(opts, ctx);
+  const run = await opts.store.getRun(parts.runId);
+  const toolScope = run ? workflowStepToolScope(run.params, run.definition, parts.nodeId) : undefined;
   return opts.host.workflowSessionFor(sessionId, {
+    toolScope,
     actorUserId: ctx.actorUserId,
     orgId: ctx.orgId,
     owner: ctx.owner,
@@ -527,6 +532,9 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         );
       }
       const ctx = await resolveRunContext(opts, runId);
+      const scopedRun = await opts.store.getRun(runId);
+      const nodeId = promptOpts.dispatchId.split(":")[2];
+      const toolScope = scopedRun ? workflowStepToolScope(scopedRun.params, scopedRun.definition, nodeId) : undefined;
       // An origin runtime cannot represent the intersection of a conversation
       // and a Slack-event audience. Reusing it could publish channel-private
       // inputs through shared memory. Do not dispatch until both can be carried.
@@ -630,7 +638,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         attributes: { runId },
       };
       const receipt = await thread.submitPrompt(content, {
-        ...(ctx.presence ? { metadata: { presence: ctx.presence } } : {}),
+        metadata: { ...(ctx.presence ? { presence: ctx.presence } : {}), ...(toolScope ? { toolScope } : {}) },
         dispatchId: promptOpts.dispatchId,
         queueMode: promptOpts.queueMode,
       });
@@ -652,10 +660,15 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
     async invokeAction(req: WorkflowInvokeActionRequest): Promise<WorkflowInvokeActionResult> {
       const runId = parseWorkflowDispatchId(req.invocationId);
       const ctx = await resolveRunContext(opts, runId);
+      const scopedRun = await opts.store.getRun(runId);
+      const scope = scopedRun ? workflowStepToolScope(scopedRun.params, scopedRun.definition) : undefined;
+      const actionId = req.action.includes(".") ? req.action : `${req.service}.${req.action}`;
+      if (!actionInScope(scope, actionId)) return { ok: false, error: scopeRefusal(actionId) };
       // `workflowExecutionId: runId` scopes `appliesIn: "workflow"` policy
       // enforcement + exec-scoped grant matching (action-policies plan, T3).
       const assistantId = await runAssistantId(opts, ctx);
       return invokeActionImpl(req, {
+        toolScope: scope,
         userId: ctx.actorUserId,
         orgId: ctx.orgId,
         owner: ctx.owner,

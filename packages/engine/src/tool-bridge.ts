@@ -1,3 +1,4 @@
+import { actionInScope, toolInScope, scopeRefusal } from "@valet/shared";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { TextContent, ImageContent } from "@earendil-works/pi-ai/compat";
 import type { ToolDef, ToolContext, ToolResult, ToolAttachment } from "./types.js";
@@ -42,6 +43,10 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
         toolName: def.name,
         toolArgs: params as Record<string, unknown>,
       });
+      if (def.name !== "focus_tools" && !(def.scopeAction
+        ? actionInScope(ctx.toolScope, def.scopeAction) : toolInScope(ctx.toolScope, def.name))) {
+        return toAgentToolResult({ text: scopeRefusal(def.scopeAction ?? def.name), ok: false }, def.name);
+      }
       // Every engine tool call funnels through this bridge — one span per
       // execution, a child of the running agent.turn via the active context.
       // A decision-gate suspension throws out of execute; the span ends with
