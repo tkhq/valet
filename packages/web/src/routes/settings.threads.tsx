@@ -1,9 +1,10 @@
 import { Navigate, createFileRoute } from "@tanstack/react-router";
-import { useMe, usePatchMe, useOrg } from "~/api/settings";
+import { useMe, useModelTiers, usePatchMe, useOrg } from "~/api/settings";
 import { FieldRow } from "~/components/settings/field-row";
 import { ModelCombobox } from "~/components/settings/model-combobox";
 import { ReasoningSelect } from "~/components/settings/reasoning-select";
 import { Section } from "~/components/settings/section";
+import { fallbackLabel } from "~/lib/model-tiers";
 
 /** Personal defaults for new threads. Rendered on Preferences; the old path
  * redirects there. */
@@ -15,6 +16,7 @@ export function ThreadDefaultsPage() {
   const meQ = useMe();
   const patchMe = usePatchMe();
   const org = useOrg();
+  const tiersQ = useModelTiers();
   const defaultSource = org.data?.features.organizations ? "Organization default" : "Valet default";
 
   return (
@@ -27,7 +29,7 @@ export function ThreadDefaultsPage() {
           value={meQ.data?.defaultModel ?? null}
           onSelect={(id) => patchMe.mutate({ defaultModel: id })}
           onClear={() => patchMe.mutate({ defaultModel: null })}
-          emptyLabel={defaultSource}
+          emptyLabel={fallbackLabel(defaultSource, tiersQ.data)}
         />
       </FieldRow>
 

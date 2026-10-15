@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  fallbackLabel,
+  fallbackTier,
   isSizeTier,
   resolveTierModel,
   selectionLabel,
@@ -34,6 +36,28 @@ describe("isSizeTier", () => {
   it("rejects null and undefined", () => {
     expect(isSizeTier(null)).toBe(false);
     expect(isSizeTier(undefined)).toBe(false);
+  });
+});
+
+describe("fallbackTier / fallbackLabel", () => {
+  const empty: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
+
+  it("names Small when the org has no default tier", () => {
+    expect(fallbackTier({ ...empty, defaultTier: null, defaultTierResolvable: false })).toBe("s");
+    expect(fallbackLabel("Organization default", undefined)).toBe("Organization default");
+  });
+
+  it("names the org default tier when a provider with a key serves it", () => {
+    const tiers: GetModelTiersResponse = { ...empty, defaultTier: "m", defaultTierResolvable: true };
+    expect(fallbackTier(tiers)).toBe("m");
+    expect(fallbackLabel("Organization default", tiers)).toBe("Medium (Organization default)");
+  });
+
+  it("names Small when new sessions skip the saved default tier", () => {
+    const tiers: GetModelTiersResponse = { ...empty, defaultTier: "m", defaultTierResolvable: false };
+    expect(fallbackTier(tiers)).toBe("s");
+    expect(fallbackLabel("Organization default", tiers)).toBe("Small (Organization default)");
+    expect(fallbackTier({ ...empty, defaultTier: "m" })).toBe("s");
   });
 });
 

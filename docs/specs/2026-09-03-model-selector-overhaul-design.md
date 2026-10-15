@@ -196,7 +196,71 @@ drops the `orgPreferredModel` tier and its final fallback becomes the `s`
 tier token:
 
 `existing?.model → overrideId → assistantDefault → childDefault →
-userDefault → teamDefault → opts.defaultModelId → "s"`.
+userDefault → teamDefault → orgDefaultTier → opts.defaultModelId → "s"`.
+
+`orgDefaultTier` is `orgs.default_tier`, a tier token that an org admin
+sets as "Default tier for new threads" on the org Models page
+(`PATCH /api/org/model-tiers` with `defaultTier`, null clears it). Without
+it, an orchestrator with no personal or team default ran on `s`, and
+teams set an expensive concrete model as the team default to avoid that.
+A workflow session step without its own model has no `childDefault`, so
+it also falls to this tier; delegated children stay on `s`. The setting's
+hint says both. When the column is null, the cascade is unchanged. The Models page
+select has a "No organization default" option that sends
+`defaultTier: null`.
+
+One test decides whether new sessions can run a tier:
+`resolvableTiers`. The PATCH, the cascade, and the GET response all use
+it. It takes the one target that the tier walk picks and asks the
+resolver itself (`canRunSpec`): the provider must be enabled, the model
+must still exist on it, and the key must not be blank. A provider test
+alone is not enough. A custom provider can stay enabled and keyed after
+its model leaves its `models` list, and session start treats a key of
+only spaces as no key.
+
+The PATCH refuses a `defaultTier` that fails the test, checked against
+the tier map that the same request writes. On every tier edit, it also
+checks the saved default against the resulting map: a map saved before
+the tier-token rule can resolve the default through another tier. The
+PATCH refuses an edit that breaks a saved default that worked. Clearing
+the default instead would move every new thread to `s` as a side effect
+of a tier edit, so the PATCH refuses and the error names both fixes. A
+saved default that an earlier key or provider change broke does not
+block tier edits, and the response reports it as unusable.
+
+The PATCH runs every check under the org policy lock, against the tier
+map and default tier that it then writes over, so a save that another
+save overtook checks the newer state. PGlite runs one query at a time,
+so no credential read can happen inside that transaction. The PATCH
+copies the org's provider keys before the lock (`orgKeySnapshot`), and
+the locked check reads the copy.
+
+A later provider, key, or tier-map change can still leave the saved tier
+unusable, for example when an enabled provider loses its org key. The
+cascade then skips the tier with a warning and continues to `s`, as it
+does for an inactive team default. A child passes
+`childDefault: "s"`, so delegated work stays on `s` whatever the org
+default tier is.
+
+`GET /api/org/model-tiers` returns `defaultTierResolvable`, the result of
+the same test. The personal and team pickers label their clear state with
+the tier it falls to, for example "Medium (Organization default)". When
+the saved default is unusable, the label names Small, and the Models page
+shows a warning under the select. Provider and key changes refresh the
+tier map read, so the label and the warning follow them.
+
+A tier target must be a model, not a tier token. The catalog accepts tier
+tokens as model specs, so before this rule `{ "m": ["m"] }` saved a tier
+whose resolution recursed without end. The PATCH now refuses a tier token
+as a target, and the error names the fix. A map saved before the rule can
+still hold one. The PATCH accepts a tier token that the same tier's stored
+list already holds, so the Models page, which sends a tier's full list on
+each edit, can add a model to that tier and then remove the token. No
+request can add a new tier-to-tier link. The tier walk follows a tier-token target into its
+tier and keeps a set of the tiers it has entered. A tier that the walk
+enters twice is a cycle: that branch resolves to nothing, and the walk
+continues to the next target. The walk never returns a tier token, so
+`resolveModelSpec` recurses at most once.
 
 `resolveModelSpec` already resolves tier tokens and persists the token as
 the canonical id, so the fallback works exactly like an explicit tier pick:
