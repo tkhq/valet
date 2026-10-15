@@ -904,7 +904,7 @@ export const taskTool = defineTool({
         scratch: Type.Optional(
           Type.String({
             description:
-              'Node-local /scratch size for the child as a Kubernetes quantity, such as "200Gi". Wiped when the child\'s sandbox stops. Bounded by the deploy agent cap.',
+              'Node-local /scratch size for the child, in whole bytes or with a Ki, Mi, Gi, or Ti suffix, such as "200Gi". Other forms, such as "500G", are refused. Wiped when the child\'s sandbox stops. Bounded by the deploy agent cap.',
           }),
         ),
       }),

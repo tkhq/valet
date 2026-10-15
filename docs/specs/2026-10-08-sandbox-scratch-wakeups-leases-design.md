@@ -1336,6 +1336,12 @@ with an earlier entry, the entry below wins.
 - **Local test, whole-line tails.** A terminal signal's 4 KB log tail was
   cut at a byte boundary, so a `watch.exited` body could open with a line
   fragment such as `-2490`. A cut tail now starts after its first newline.
+- **Local test, prompt gaps.** Asked to watch a running process, an
+  agent ran the command a second time, because `watch` starts its own
+  command. The coding prompt and the `watch` description now say so, and
+  the prompt names `wakeup_cancel` and `wakeup_list` and says an agent's
+  own cancel sends no signal. The `task` scratch field names the accepted
+  forms: whole bytes or a Ki, Mi, Gi, or Ti suffix.
 - **PR review, EXIT after the log drain.** The kubernetes kickoff saves
   the job's status, waits for the capping filter, then writes `.exit`.
   A poll that sees `.exit` reads a complete log.

@@ -96,7 +96,9 @@ export const watchTool = defineTool({
     "signal starts a full turn, so print only the lines you will act on, " +
     "for example through grep. A watch whose command prints new lines in " +
     "nearly every poll for an hour is stopped. The sandbox stays awake until " +
-    "the command exits or `max_hours` passes; then it is killed.",
+    "the command exits or `max_hours` passes; then it is killed. `watch` " +
+    "starts its own command; it cannot attach to a process that `bash` " +
+    "already started.",
   parameters: Type.Object({
     command: Type.String(),
     reason: Type.String(),
