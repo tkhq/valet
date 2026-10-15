@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { InMemorySessionStore, resolveSubmissionText, type MessageEntry } from "@valet/engine";
+import { InMemorySessionStore, MODEL_RESPONSE_METADATA_KEY, resolveSubmissionText, type MessageEntry } from "@valet/engine";
 import type { NodeCheckpoint } from "@valet/workflow";
 import { readNodeDiagnostics } from "./node-diagnostics.js";
 
@@ -87,4 +87,25 @@ it("identifies a merged submission without selecting its local output", async ()
   }] });
   expect(result.submissions[0]).not.toHaveProperty("selected");
   expect(result.submissions[0]).toHaveProperty("selectedMessageId", undefined);
+});
+
+
+it("exposes bounded terminal metadata for original and repair queues without response content", async () => {
+  const store = await fixture();
+  const response = { stopReason: "length", api: "test-api", provider: "test-provider", model: "test-model",
+    blockTypes: ["thinking"], thinkingPresent: true, textLength: 0, streamedTextLength: 7,
+    responseId: "r".repeat(1000), privateReasoning: "PRIVATE REASONING" };
+  await store.appendEntries("s", "t", [
+    message("original", { stopReason: "end_turn", metadata: { [MODEL_RESPONSE_METADATA_KEY]: response } }),
+    message("repair", { queueItemId: "repair-q", stopReason: "end_turn" }),
+  ]);
+  const result = await readNodeDiagnostics(store, { ...checkpoint,
+    effects: { sessionId: "s", firstQueueItemId: "q", repairAttempted: true, receipt: { threadId: "t", queueItemId: "repair-q" } } });
+  expect(result.submissions).toMatchObject([
+    { phase: "original", selected: { modelResponse: { stopReason: "length", api: "test-api", provider: "test-provider",
+      thinkingPresent: true, effectiveMaxOutputTokens: null, providerTerminalStatus: null, incompleteReason: null, requestId: null } } },
+    { phase: "repair", selected: { modelResponse: null } },
+  ]);
+  expect(JSON.stringify(result)).not.toContain("PRIVATE REASONING");
+  expect(JSON.stringify(result).length).toBeLessThan(6000);
 });

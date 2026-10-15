@@ -50,6 +50,7 @@ export {
   deriveQueueState,
   decideReconciliation,
   resolveSubmissionText,
+  completedSubmissionOutcome,
   resolvePartialSubmissionText,
   originFromEntries,
   validateSignalTagName,
@@ -314,3 +315,5 @@ export { nestedKubernetesDecision, NESTED_KUBERNETES_IDENTITY, NESTED_KUBERNETES
 export { validatePluginHttpRoutes, MAX_PLUGIN_HTTP_BODY_BYTES, type PluginHttpRoute, type PluginHttpRequest, type PluginHttpCaller, type PluginIngressVerification } from "./plugin-http.js";
 
 export { MAX_IMAGE_BYTES, IMAGE_FORMATS, imageDecoder, validateImage, imageAttachment, decodeImageBase64 } from "./image-output.js";
+
+export { MODEL_RESPONSE_METADATA_KEY, modelResponseMetadata, readModelResponseMetadata } from "./model-response.js";
