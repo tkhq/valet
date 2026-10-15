@@ -45,4 +45,7 @@
 - PostgreSQL thread saves now persist focus changes. The shared store contract reproduced the former failure.
 - Checks: 193 focused engine tests, 258 focused API tests, 122 inheritance tests, and 161 store tests passed.
 - Full E2E: 20 suites passed, one integration socket failure, and 16 environment skips. The complete integration suite passed on rerun.
-- Live validation and deployment remain pending.
+- Live checks passed diagnosis, repair, preview, and run output for personal/team assistants with Haiku 4.5 and Opus 5.5. Restricted tasks refused writes. Both assistants asked for missing staff-meeting details without edits or runs.
+- Live team continuations exposed missing member authority for private run reads. The regression failed before the fix and passed after it. Other members and machine turns remain denied.
+- Live repair exposed an unsupported patch format accepted as an unchanged save. Strict patch parameters now reject it. Schema-recovery advice explicitly requests schemas.
+- The follow-up API checks passed 927 tests. Deployment and live rechecks of these final fixes remain pending.

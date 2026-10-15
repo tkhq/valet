@@ -1484,7 +1484,7 @@ describe("pluginCatalogTools: call_tool param validation", () => {
       makeCtx(),
     );
     expect(result.text).toContain("invalid params for test.needs_num");
-    expect(result.text).toContain('Call list_tools (service: "test") to read its parameter schema');
+    expect(result.text).toContain('Call list_tools (service: "test", query: "test.needs_num", detail: "schema") to read its parameter schema');
     expect(executeCalled).toBe(false);
   });
 

@@ -2,8 +2,8 @@ import { afterEach, expect, it } from "vitest";
 import { LocalRunHost, type NodeCheckpoint, type WorkflowRun } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assistants/service.js";
-import { createTeam } from "../services/teams.js";
-import { createWorkflowDefinition } from "./service.js";
+import { addMember, createTeam } from "../services/teams.js";
+import { createWorkflowDefinition, getWorkflowRunDetail } from "./service.js";
 import { buildWorkflowEngineDeps } from "./engine-deps.js";
 import { readRunFollowUp } from "./run-follow-up.js";
 import { approvalReport, buildRunApprovalReport, buildRunOriginReport, runReport } from "./run-attention.js";
@@ -98,6 +98,34 @@ it("says a run waits for approval and where to read who can approve it", () => {
   expect(text).toContain('Workflow "Dashboard" is waiting for approval.');
   expect(text).toContain("pendingGates lists every step that waits");
   expect(text).toContain("/workflows/runs/run-1");
+});
+
+it("lets a team completion inspect its private run as the starting member", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  await p.workflowRunHost.stopHost();
+  const team = await createTeam(p.db, { orgId: "local-org", name: "Private report", creatorUserId: "local-user" });
+  await addMember(p.db, { teamId: team.id, userId: "test-member", role: "member" });
+  const owner = { type: "team", id: team.id } as const;
+  const meta = { actorUserId: "local-user", orgId: "local-org" };
+  const deps = { ...p, credentials: p.engineCredentials };
+  const definition = { version: "dag/v1", nodes: [{ id: "trigger", type: "trigger" }, { id: "stop", type: "stop" }], edges: [{ from: "trigger", to: "stop" }] };
+  const workflow = await createWorkflowDefinition(deps, { userId: "local-user", orgId: "local-org", principal: owner, requireTeamMembership: true }, { name: "Private evidence", definition, teamId: team.id });
+  const key = `workflow:${workflow.id}:local-user`;
+  const root = await ensureDefaultAssistantSession(p, owner, meta);
+  const source = await root.session.createThread(key);
+  const execution = await ensureAssistantExecution(p, owner, meta, key);
+  const target = await execution.session.createThread(key);
+  await target.pause();
+  await p.workflowStore.createRun("private-evidence", { workflowId: workflow.id, definitionVersionId: "v1", origin: { assistantSessionId: root.sessionId, threadId: source.id } }, definition, "v1", { ownerType: "team", ownerId: team.id, actorUserId: "local-user" });
+  await p.workflowStore.settleRun("private-evidence", "completed");
+  await buildRunOriginReport({ db: p.db, engineHost: p.engineHost, store: p.workflowStore })({ runId: "private-evidence", workflowId: workflow.id, outcome: "completed", settledAt: 2 });
+  const [continuation] = await p.engineStore.listUnsettledSubmissions(execution.sessionId);
+  const actorId = continuation?.author?.id ?? `team:${team.id}`;
+  expect(await getWorkflowRunDetail(deps, { userId: actorId, orgId: "local-org", principal: owner, requireTeamMembership: actorId !== `team:${team.id}` }, "private-evidence")).not.toBeNull();
+  // A machine turn still cannot inspect the member's private run.
+  expect(await getWorkflowRunDetail(deps, { userId: `team:${team.id}`, orgId: "local-org", principal: owner }, "private-evidence")).toBeNull();
+  expect(await getWorkflowRunDetail(deps, { userId: "test-member", orgId: "local-org", principal: owner, requireTeamMembership: true }, "private-evidence")).toBeNull();
 });
 
 it("queues one approval signal per drive behind the person's messages", async () => {

@@ -11,6 +11,7 @@ import {
 } from "./actions.js";
 import type { ActionPlugin, PluginActionContext, SessionEntry, ValetPlugin } from "@valet/engine";
 import { Type } from "typebox";
+import { Value } from "typebox/value";
 import {
   createWorkflowDefinition,
   getWorkflowDefinition,
@@ -44,6 +45,13 @@ function ctx(overrides?: Partial<PluginActionContext>): PluginActionContext {
 }
 
 describe("workflowsActionPlugin", () => {
+  it("rejects an unsupported patch format instead of accepting an unchanged save", () => {
+    const patch = workflowsActionPlugin(noDeps).actions.find((item) => item.id === "workflows.patch_workflow");
+    if (!patch) throw new Error("patch action missing");
+    expect(Value.Check(patch.parameters, { workflow_id: "wf-test", changes: [{ op: "replace", path: "/nodes/1/values/marker", value: "blue" }] })).toBe(false);
+    expect(Value.Check(patch.parameters, { workflow_id: "wf-test", upsert_nodes: [{ id: "marker", type: "set", values: { marker: "blue" } }] })).toBe(true);
+  });
+
   it("exposes every workflow action under a workflows.* id", () => {
     const plugin = workflowsActionPlugin(noDeps);
     expect(plugin.service).toBe("workflows");
