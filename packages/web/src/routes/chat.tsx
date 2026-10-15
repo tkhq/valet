@@ -4,7 +4,6 @@ import { useTeams } from "~/api/settings";
 import { Button, Spinner } from "~/components/primitives";
 import { ChildPanel } from "~/components/session/child-panel";
 import { SessionView } from "~/components/session/session-view";
-import { useInvalidateMessagesOnQueueState } from "~/hooks/use-invalidate-messages-on-queue-state";
 import { useWorkspaceConversation } from "~/hooks/use-workspace-conversation";
 import { usePageTitle } from "~/lib/page-title";
 import { errorText } from "~/lib/error-text";
@@ -39,7 +38,6 @@ function ChatPage() {
   const sessionId = active?.sessionId ?? runtimeId;
   const activeKey = active?.key;
   usePageTitle(active?.title || "Chat");
-  useInvalidateMessagesOnQueueState(sessionId, thread);
   if (conversation.error) return <div role="alert" className="p-8 text-sm text-danger-500">
     Couldn’t open this workspace’s threads. {errorText(conversation.error)}
     <button className="ml-2 underline" onClick={() => void conversation.refetch()}>Retry</button>

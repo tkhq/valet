@@ -37,6 +37,7 @@ import { SessionHeader } from "~/components/session/session-header";
 import { useMe } from "~/api/settings";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
+import { useInvalidateMessagesOnQueueState } from "~/hooks/use-invalidate-messages-on-queue-state";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { Button, Spinner } from "~/components/primitives";
 import type { MessageReplyReference } from "@valet/api/wire";
@@ -123,6 +124,10 @@ export function SessionView({
   // engine persists the CompactionEntry before emitting `compaction_end`,
   // and this refetch is what pulls it into the transcript.
   useInvalidateMessagesOnCompaction(sessionId);
+  // Signal turns (child.settled, process.exited, timer.fired, watch.event)
+  // reach the client through REST only. A queue change is the cue to
+  // refetch, in every view that renders a session, not only the assistant chat.
+  useInvalidateMessagesOnQueueState(sessionId, activeThreadId);
   const [localTab, setLocalTab] = useState<SandboxTabId>("chat");
   const setTab = onTabChange ?? setLocalTab;
   const viewRef = useRef<HTMLDivElement>(null);
