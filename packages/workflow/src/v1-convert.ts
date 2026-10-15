@@ -35,7 +35,9 @@
  * The import creates no schedules. V1 matched cron expressions itself, and
  * V2 reads many of them differently or refuses them. Each V1 schedule
  * becomes a line that tells the person to add it in Triggers after the
- * other items.
+ * other items, with the time zone V1 used (UTC when it named none). If V2
+ * reads the expression differently (`v1CronDifference`), the line says what
+ * V1 did and tells the person not to copy the expression.
  */
 
 import type { ApprovalNode, IfCondition, IfNode, SessionNode, WorkflowNode } from './dag/nodes.js';
@@ -155,9 +157,9 @@ export function convertV1Workflows(input: unknown): V1ConvertResult {
       if (prompt === '' || cron === '') {
         notes.push(`V1 schedule "${t.name}" has no prompt or no cron expression, so the import did not create it.`);
       } else if (!t.enabled) {
-        notes.push(`${scheduleLabel(t, cron)} sent the prompt "${prompt}" to the assistant and was turned off. If you still need it, add it in Triggers after you finish the checklists of the imported workflows.`);
+        notes.push(`${scheduleLabel(t, cron)} sent the prompt "${prompt}" to the assistant and was turned off.${cronWarning(cron)} If you still need it, add it in Triggers after you finish the checklists of the imported workflows.${zoneStep(t)}`);
       } else {
-        notes.push(`The import creates no schedules, so it did not create ${scheduleLabel(t, cron)}, which sent the prompt "${prompt}" to the assistant. Add it in Triggers with the same prompt after you finish the checklists of the imported workflows.`);
+        notes.push(`The import creates no schedules, so it did not create ${scheduleLabel(t, cron)}, which sent the prompt "${prompt}" to the assistant.${cronWarning(cron)} Add it in Triggers with the same prompt after you finish the checklists of the imported workflows.${zoneStep(t)}`);
       }
       continue;
     }
@@ -384,16 +386,74 @@ function scheduleLine(t: V1TriggerRow, row: V1WorkflowRow, after: string, b: Bui
   const cron = stringField(t.config.cron);
   if (cron === '') return `V1 schedule "${t.name}" has no cron expression, so the import did not create it.`;
   const label = scheduleLabel(t, cron);
-  if (!t.enabled) return `${label} was turned off. If you still need it, add it in Triggers${after}.`;
-  if (!row.enabled) return `The V1 workflow was turned off, so ${label} did not run. If you still need it, add it in Triggers${after}.`;
+  const steps = (add: string) => `${cronWarning(cron)} ${add}${after}.${zoneStep(t)}`;
+  if (!t.enabled) return `${label} was turned off.${steps('If you still need it, add it in Triggers')}`;
+  if (!row.enabled) return `The V1 workflow was turned off, so ${label} did not run.${steps('If you still need it, add it in Triggers')}`;
   const why = b.differs ? ' This workflow does not do exactly what it did in V1, so it must not run on a schedule yet.' : '';
-  return `The import creates no schedules, so it did not create ${label}.${why} Add it in Triggers${after}.`;
+  return `The import creates no schedules, so it did not create ${label}.${why}${steps('Add it in Triggers')}`;
 }
 
-/** `V1 schedule "Nightly" (0 2 * * *, UTC)`. */
+/** `V1 schedule "Nightly" (0 2 * * *, UTC)`. V1 used UTC for a schedule
+ * that named no time zone (`cronMatchesNow`). */
 function scheduleLabel(t: V1TriggerRow, cron: string): string {
+  return `V1 schedule "${t.name}" (${cron}, ${stringField(t.config.timezone) || 'UTC'})`;
+}
+
+/** The time zone to set in Triggers. The Triggers form starts with the
+ * browser's time zone, so the line names UTC too. */
+function zoneStep(t: V1TriggerRow): string {
   const timezone = stringField(t.config.timezone);
-  return `V1 schedule "${t.name}" (${cron}${timezone === '' ? '' : `, ${timezone}`})`;
+  return timezone === ''
+    ? ' Set its time zone to UTC. V1 used UTC because the schedule named no time zone.'
+    : ` Set its time zone to ${timezone}.`;
+}
+
+/** A required decision for a cron expression that V2 reads differently,
+ * or nothing when V2 reads it as V1 did. */
+function cronWarning(cron: string): string {
+  const difference = v1CronDifference(cron);
+  if (difference === undefined) return '';
+  return ` V2 reads its cron expression differently from V1. ${difference} Do not add the expression as written. Decide when the schedule must run, and write an expression for those times.`;
+}
+
+const CRON_FIELDS = ['minute', 'hour', 'day of the month', 'month', 'day of the week'] as const;
+
+/**
+ * What V1 did with `cron` where V2's cron-parser reads it differently, or
+ * undefined when the two agree. V1 matched cron itself (`cronMatchesNow` in
+ * `packages/worker/src/index.ts`): it read only numbers, ranges and steps,
+ * and a day had to match both day fields. Any part outside the forms both
+ * read the same way is reported, even when its V1 meaning is not known.
+ */
+function v1CronDifference(cron: string): string | undefined {
+  const fields = cron.trim().split(/\s+/);
+  if (fields.length !== 5) return `V1 read only expressions with 5 fields, so it never ran this schedule.`;
+  const sentences: string[] = [];
+  if (fields[2] !== '*' && fields[4] !== '*') {
+    sentences.push(
+      'V1 ran it only on a day that matched both the day of the month and the day of the week. V2 runs it on a day that matches either one.',
+    );
+  }
+  const unread: string[] = [];
+  const other: string[] = [];
+  fields.forEach((field, i) => {
+    for (const part of field.split(',')) {
+      const step = /^\*\/(\d+)$/.exec(part);
+      if (part !== '*' && !/\d/.test(part)) unread.push(quote(part));
+      else if (step !== null && Number(step[1]) > 1 && (i === 2 || i === 3)) {
+        // V1 tested `value % step === 0`. cron-parser counts from 1 in these fields.
+        sentences.push(
+          `In the ${CRON_FIELDS[i]}, V1 read "${part}" as each value that divides by ${step[1]}. V2 counts from 1.`,
+        );
+      } else if (!/^(\*|\d+|\d+-\d+(\/\d+)?|\*\/\d+)$/.test(part)) other.push(quote(part));
+    }
+  });
+  if (unread.length > 0) {
+    const never = fields.some((field) => field.split(',').every((part) => part !== '*' && !/\d/.test(part)));
+    sentences.push(`V1 read only numbers, so it never matched ${unread.join(', ')}.${never ? ' V1 never ran this schedule.' : ''}`);
+  }
+  if (other.length > 0) sentences.push(`V1 and V2 read ${other.join(', ')} differently.`);
+  return sentences.length > 0 ? sentences.join(' ') : undefined;
 }
 
 function convertTrigger(t: V1TriggerRow, b: Build): void {
@@ -540,12 +600,16 @@ function addSpawnSession(args: Record<string, unknown>, id: string, lane: Lane, 
   flush(lane, b);
   const nodeId = newId(id, b);
   const title = stringField(args.title);
+  // V1 went on to the next step when the session started, and the session
+  // ran beside the later steps. Wait mode `none` does the same. An unset
+  // mode waits until the session is idle (`nodes/submission-node.ts`).
   const node: SessionNode = {
     id: nodeId,
     type: 'session',
     mode: 'start',
     prompt: literalTemplate(task),
     ...(title === '' ? {} : { title: literalTemplate(title) }),
+    wait: { mode: 'none' },
   };
   addNode(node, lane, b);
   b.nodeOfStep.set(id, nodeId);
@@ -622,7 +686,7 @@ function addConditional(raw: Record<string, unknown>, id: string, path: string, 
 
   flush(lane, b);
   const ifId = newId(id, b);
-  const node: IfNode = { id: ifId, type: 'if', conditions: [condition.condition] };
+  const node: IfNode = { id: ifId, type: 'if', conditions: condition.conditions };
   b.nodes.push(node);
   connect(lane.tails, ifId, b);
   b.nodeOfStep.set(id, ifId);
@@ -676,12 +740,12 @@ type ReadCondition =
   | {
       kind: 'variable';
       variable: string;
-      condition: IfCondition;
+      conditions: IfCondition[];
       /** Undefined when V1 took a value of any type. */
       inputType?: WorkflowInputDefinition['type'];
     };
 
-/** `evaluateCondition` in V1's `workflow-engine.ts`, as an if-node condition. */
+/** `evaluateCondition` in V1's `workflow-engine.ts`, as if-node conditions. */
 function readCondition(raw: unknown): ReadCondition {
   if (typeof raw === 'boolean') return { kind: 'constant', value: raw, reason: 'is a constant' };
   if (!isRecord(raw) || typeof raw.variable !== 'string' || raw.variable === '') {
@@ -695,22 +759,33 @@ function readCondition(raw: unknown): ReadCondition {
     return {
       kind: 'variable',
       variable,
-      condition: { left, dataType: 'boolean', operation: 'equals', right: true },
+      conditions: [{ left, dataType: 'boolean', operation: 'equals', right: true }],
     };
   }
   const expected = raw.equals;
   if (typeof expected === 'string') {
-    return { kind: 'variable', variable, condition: { left, dataType: 'string', operation: 'equals', right: expected }, inputType: 'string' };
+    return { kind: 'variable', variable, conditions: [{ left, dataType: 'string', operation: 'equals', right: expected }], inputType: 'string' };
   }
   if (typeof expected === 'number') {
-    return { kind: 'variable', variable, condition: { left, dataType: 'number', operation: 'equals', right: expected }, inputType: 'number' };
+    // A number `equals` reads "0" as 0, and a webhook run skips the trigger
+    // input schema. `exists` passes only a real number, so the two
+    // conditions together compare strictly, as V1's `===` did.
+    return {
+      kind: 'variable',
+      variable,
+      conditions: [
+        { left, dataType: 'number', operation: 'exists' },
+        { left, dataType: 'number', operation: 'equals', right: expected },
+      ],
+      inputType: 'number',
+    };
   }
   if (typeof expected === 'boolean') {
     // isTrue/isFalse compare strictly, as V1's `===` did.
     return {
       kind: 'variable',
       variable,
-      condition: { left, dataType: 'boolean', operation: expected ? 'isTrue' : 'isFalse' },
+      conditions: [{ left, dataType: 'boolean', operation: expected ? 'isTrue' : 'isFalse' }],
       inputType: 'boolean',
     };
   }

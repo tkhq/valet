@@ -12,6 +12,10 @@
  * conversation, so the editor assistant finishes the items that need a
  * decision. It creates no schedules: each V1 schedule is a checklist line
  * for the person to add in Triggers.
+ *
+ * If a call fails after a workflow exists, the review stays on screen with
+ * the error. A workflow whose editor conversation did not get its checklist
+ * has no other copy of it.
  */
 import { useId, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
@@ -33,7 +37,8 @@ type Phase =
   | { kind: "idle" }
   | { kind: "busy" }
   | { kind: "confirm"; value: V1Conversion }
-  | { kind: "error"; messages: string[] };
+  /** `review` is set when the import created a workflow before the error. */
+  | { kind: "error"; messages: string[]; review?: V1Conversion };
 
 export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenChange: (next: boolean) => void }) {
   const navigate = useNavigate();
@@ -58,6 +63,8 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
     const team = scope.teamId === undefined ? {} : { teamId: scope.teamId };
     // What exists so far, so a failure part way says what not to import twice.
     const created: string[] = [];
+    // A created workflow whose checklist has not reached its editor yet.
+    let unsent: string | undefined;
     let firstId: string | undefined;
     try {
       for (const wf of value.workflows) {
@@ -65,16 +72,30 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
         created.push(`the workflow "${wf.name}"`);
         firstId ??= id;
         if (wf.checklist.length > 0) {
+          unsent = wf.name;
           const conversation = await api.ensureWorkflowConversation(id);
           await api.sendPrompt(conversation.sessionId, { text: v1ChecklistPrompt(wf), threadId: conversation.threadId });
+          unsent = undefined;
         }
       }
     } catch (err) {
-      const already =
-        created.length === 0
+      if (created.length === 0) {
+        setPhase({ kind: "error", messages: errorMessages(err) });
+        return;
+      }
+      const lost =
+        unsent === undefined
           ? []
-          : [`Valet created ${created.join(", ")} before this error. Remove those from the pasted JSON, then import again.`];
-      setPhase({ kind: "error", messages: [...errorMessages(err), ...already] });
+          : [`The editor conversation of "${unsent}" did not get its checklist. Copy its checklist from the list above, and finish the items in that workflow.`];
+      setPhase({
+        kind: "error",
+        review: value,
+        messages: [
+          ...errorMessages(err),
+          `Valet created ${created.join(", ")} before this error. Remove those from the pasted JSON, then import again.`,
+          ...lost,
+        ],
+      });
       return;
     }
     close();
@@ -90,6 +111,7 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
 
   const busy = phase.kind === "busy";
   const count = phase.kind === "confirm" ? phase.value.workflows.length : 0;
+  const reviewed = phase.kind === "confirm" ? phase.value : phase.kind === "error" ? phase.review : undefined;
 
   return (
     <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : close())}>
@@ -98,8 +120,8 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
         title="Import from V1"
         description="Converts V1 workflows. Anything that needs your decision, such as each V1 schedule, goes to each workflow's editor assistant."
       >
-        {phase.kind === "confirm" ? (
-          <V1Review value={phase.value} />
+        {reviewed !== undefined ? (
+          <V1Review value={reviewed} />
         ) : (
           <div className="grid gap-2">
             <Label htmlFor={`${fieldId}-text`}>V1 JSON</Label>
@@ -144,6 +166,14 @@ export function ImportV1Dialog({ open, onOpenChange }: { open: boolean; onOpenCh
               <Button onClick={() => void commit(phase.value)}>
                 {`Import ${count} workflow${count === 1 ? "" : "s"}`}
               </Button>
+            </>
+          ) : reviewed !== undefined ? (
+            // No import button: the workflows above may exist already.
+            <>
+              <Button variant="ghost" onClick={() => setPhase({ kind: "idle" })}>
+                Back
+              </Button>
+              <Button onClick={close}>Close</Button>
             </>
           ) : (
             <>

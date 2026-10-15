@@ -88,15 +88,17 @@ const engine: WorkflowEngineDeps = {
 
 /**
  * Runs the workflow in the real interpreter. Each approval node gets its
- * answer from `answers`. Returns the run outcome and the status of each
- * node that has a checkpoint.
+ * answer from `answers`. `data` reaches the run as written, as a webhook
+ * payload does: no trigger input schema checks it. Returns the run outcome
+ * and the status of each node that has a checkpoint.
  */
 async function runInV2(
   wf: V1ConvertedWorkflow,
   answers: Record<string, boolean>,
+  data: Record<string, unknown> = {},
 ): Promise<{ outcome: string | undefined; status: Record<string, string> }> {
   const store = new InMemoryWorkflowStore();
-  const input = { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data: {}, metadata: {} };
+  const input = { type: 'manual', timestamp: '2026-01-01T00:00:00Z', data, metadata: {} };
   await store.createRun('run', { workflowId: 'wf', definitionVersionId: 'v1', input }, wf.definition, 'v1');
   for (let drive = 0; drive < 20; drive++) {
     const claim = await store.claimRun('run', `owner-${drive}`, 30_000);
@@ -323,11 +325,33 @@ describe('convertV1Workflows: steps', () => {
         },
       ],
       check: (wf) => {
-        expect(node(wf, 'child')).toEqual({ id: 'child', type: 'session', mode: 'start', prompt: 'Bump deps.', title: 'Deps' });
+        expect(node(wf, 'child')).toEqual({
+          id: 'child',
+          type: 'session',
+          mode: 'start',
+          prompt: 'Bump deps.',
+          title: 'Deps',
+          wait: { mode: 'none' },
+        });
         expect(wf.checklist).toEqual([
           expect.stringContaining('on https://github.com/acme/api at main'),
           expect.stringContaining('asked for the model "anthropic/claude-sonnet-4"'),
         ]);
+      },
+    },
+    {
+      name: 'spawn_session goes on when its session starts, as V1 did, with no checklist line',
+      steps: [
+        { id: 'a', type: 'tool', tool: 'spawn_session', arguments: { task: 'Fix A.', workspace: 'app' } },
+        { id: 'b', type: 'tool', tool: 'spawn_session', arguments: { task: 'Fix B.', workspace: 'app' } },
+        { id: 'ok', type: 'approval', prompt: 'Merge?' },
+      ],
+      check: (wf) => {
+        // V1 started both sessions and asked for the approval at once.
+        expect(edges(wf)).toEqual(['trigger->a', 'a->b', 'b->ok', 'ok->stop']);
+        expect(node(wf, 'a')).toMatchObject({ wait: { mode: 'none' } });
+        expect(node(wf, 'b')).toMatchObject({ wait: { mode: 'none' } });
+        expect(wf.checklist).toEqual([]);
       },
     },
     {
@@ -412,6 +436,23 @@ describe('convertV1Workflows: approvals and limits in a V2 run', () => {
     expect((await runInV2(wf, { gate: false })).status).toMatchObject({ gate: 'completed', after: 'completed' });
   });
 
+  it('compares a number condition strictly, as V1 did, when a webhook sends a string', async () => {
+    const wf = one([
+      {
+        id: 'zero',
+        type: 'conditional',
+        condition: { variable: 'count', equals: 0 },
+        then: [{ id: 'none', type: 'agent_message', content: 'Nothing to do.' }],
+        else: [{ id: 'some', type: 'agent_message', content: 'Work the queue.' }],
+      },
+    ]);
+    // A number `equals` alone takes all of these as 0.
+    for (const count of ['0', '', ' 0 ', '0x0']) {
+      expect((await runInV2(wf, {}, { count })).status, JSON.stringify(count)).toMatchObject({ none: 'skipped', some: 'completed' });
+    }
+    expect((await runInV2(wf, {}, { count: 0 })).status).toMatchObject({ none: 'completed', some: 'skipped' });
+  });
+
   it('stops the run when a top-level approval is denied, as V1 cancelled it', async () => {
     const wf = one([
       { id: 'gate', type: 'approval', prompt: 'Deploy?' },
@@ -479,13 +520,13 @@ describe('convertV1Workflows: workflows and triggers', () => {
     expect(out).not.toHaveProperty('promptSchedules');
     expect(wf.checklist).toEqual([
       expect.stringContaining('webhook trigger "Hook" (GET triage)'),
-      'The import creates no schedules, so it did not create V1 schedule "Every night" (0 3 * * *, Europe/Berlin). Add it in Triggers after you finish the other items in this list.',
-      'V1 schedule "Paused" (0 4 * * *) was turned off. If you still need it, add it in Triggers after you finish the other items in this list.',
+      'The import creates no schedules, so it did not create V1 schedule "Every night" (0 3 * * *, Europe/Berlin). Add it in Triggers after you finish the other items in this list. Set its time zone to Europe/Berlin.',
+      'V1 schedule "Paused" (0 4 * * *, UTC) was turned off. If you still need it, add it in Triggers after you finish the other items in this list. Set its time zone to UTC. V1 used UTC because the schedule named no time zone.',
     ]);
     expect(wf.checklist[0]).toContain('change its method too');
     expect(wf.checklist[0]).toContain('repo from $.repo');
     expect(out.notes).toEqual([
-      'The import creates no schedules, so it did not create V1 schedule "Weekend" (0 9 * * 6-7/7, UTC), which sent the prompt "Post the digest." to the assistant. Add it in Triggers with the same prompt after you finish the checklists of the imported workflows.',
+      'The import creates no schedules, so it did not create V1 schedule "Weekend" (0 9 * * 6-7/7, UTC), which sent the prompt "Post the digest." to the assistant. Add it in Triggers with the same prompt after you finish the checklists of the imported workflows. Set its time zone to UTC.',
       expect.stringContaining('belongs to workflow "Old sync"'),
     ]);
   });
@@ -496,7 +537,7 @@ describe('convertV1Workflows: workflows and triggers', () => {
     });
     expect(result).toEqual({
       ok: false,
-      errors: [expect.stringContaining('holds no V1 workflow'), expect.stringContaining('did not create V1 schedule "Standup" (0 9 * * 1-5)')],
+      errors: [expect.stringContaining('holds no V1 workflow'), expect.stringContaining('did not create V1 schedule "Standup" (0 9 * * 1-5, UTC)')],
     });
   });
 
@@ -506,7 +547,7 @@ describe('convertV1Workflows: workflows and triggers', () => {
     const wf = convert([{ workflow: row }, { trigger }]).workflows[0]!;
     expect(wf.definition.nodes.map((n) => n.id)).toEqual(['trigger', 'stop']);
     expect(wf.checklist).toEqual([
-      'The V1 workflow was turned off, so V1 schedule "Daily" (0 1 * * *) did not run. If you still need it, add it in Triggers.',
+      'The V1 workflow was turned off, so V1 schedule "Daily" (0 1 * * *, UTC) did not run. If you still need it, add it in Triggers. Set its time zone to UTC. V1 used UTC because the schedule named no time zone.',
     ]);
   });
 
@@ -547,14 +588,53 @@ describe('convertV1Workflows: workflows and triggers', () => {
     ]);
     expect(wf.checklist).toEqual([
       expect.stringContaining('Session node "test" runs the shell commands of steps "test". V1 stopped the run when a command failed.'),
-      `${HELD} Add it in Triggers after you finish the other items in this list.`,
+      `${HELD} Add it in Triggers after you finish the other items in this list. Set its time zone to UTC.`,
     ]);
   });
 
   it('lists the schedule of a workflow that does what it did in V1', () => {
     expect(scheduled([work]).checklist).toEqual([
-      'The import creates no schedules, so it did not create V1 schedule "Nightly" (0 2 * * *, UTC). Add it in Triggers.',
+      'The import creates no schedules, so it did not create V1 schedule "Nightly" (0 2 * * *, UTC). Add it in Triggers. Set its time zone to UTC.',
     ]);
+  });
+
+  it('names UTC for a V1 schedule with no time zone, because V1 ran it in UTC', () => {
+    const out = convert({
+      workflows: [nightly],
+      triggers: [
+        { name: 'Early', enabled: true, workflowId: 'wf_1', config: { type: 'schedule', cron: '0 6 * * *' } },
+        { name: 'Digest', enabled: true, config: { type: 'schedule', cron: '0 7 * * *', target: 'orchestrator', prompt: 'Post the digest.' } },
+      ],
+    });
+    const utc = 'Set its time zone to UTC. V1 used UTC because the schedule named no time zone.';
+    expect(out.workflows[0]!.checklist).toEqual([
+      `The import creates no schedules, so it did not create V1 schedule "Early" (0 6 * * *, UTC). Add it in Triggers. ${utc}`,
+    ]);
+    expect(out.notes).toEqual([expect.stringMatching(/V1 schedule "Digest" \(0 7 \* \* \*, UTC\).*Set its time zone to UTC\. V1 used UTC/)]);
+  });
+
+  it('says not to copy a cron expression that V2 reads differently, and what V1 did with it', () => {
+    const schedule = (name: string, cron: string) => ({ name, enabled: true, workflowId: 'wf_1', config: { type: 'schedule', cron, timezone: 'UTC' } });
+    const out = convert({
+      workflows: [nightly],
+      triggers: [
+        // V1: the first Monday of the month. cron-parser: days 1 to 7 and every Monday.
+        schedule('First Monday', '0 9 1-7 * 1'),
+        schedule('Mondays', '0 9 * * MON'),
+        schedule('Odd', '0 9 5/15 * *'),
+        { name: 'Every other day', enabled: true, config: { type: 'schedule', cron: '0 9 */2 * *', target: 'orchestrator', prompt: 'Check.' } },
+      ],
+    });
+    const [firstMonday, mondays, odd] = out.workflows[0]!.checklist;
+    const decide = 'Do not add the expression as written. Decide when the schedule must run, and write an expression for those times.';
+    expect(firstMonday).toBe(
+      `The import creates no schedules, so it did not create V1 schedule "First Monday" (0 9 1-7 * 1, UTC). V2 reads its cron expression differently from V1. V1 ran it only on a day that matched both the day of the month and the day of the week. V2 runs it on a day that matches either one. ${decide} Add it in Triggers. Set its time zone to UTC.`,
+    );
+    expect(mondays).toContain('V1 read only numbers, so it never matched "MON". V1 never ran this schedule.');
+    expect(mondays).toContain(decide);
+    expect(odd).toContain('V1 and V2 read "5/15" differently.');
+    expect(out.notes[0]).toContain('In the day of the month, V1 read "*/2" as each value that divides by 2. V2 counts from 1.');
+    expect(out.notes[0]).toContain(decide);
   });
 
   it('refuses a value that is neither a workflow nor a trigger, naming the item', () => {
