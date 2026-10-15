@@ -1,3 +1,4 @@
+import { actionInScope, scopeRefusal } from "@valet/shared";
 import { IsObject, ObjectOptions, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { Static, TSchema } from "typebox";
@@ -503,7 +504,7 @@ export async function resolveUngatedAction(
   ctx: ToolContext,
   params: Record<string, unknown>,
 ): Promise<HostedActionGrant | undefined> {
-  if (ctx.externalSender) return undefined;
+  if (ctx.externalSender || !actionInScope(ctx.toolScope, actionId)) return undefined;
   const entry = catalog.byId.get(actionId);
   if (!entry) return undefined;
   const availability = await checkServiceAvailability(catalog, entry.service, entry.plugin.requiresCredential === true);
@@ -586,6 +587,7 @@ export async function invokeAction(
   ctx: ToolContext,
   summary: string,
 ): Promise<InvokeActionResult> {
+  if (!actionInScope(ctx.toolScope, actionId)) return { kind: "error", message: scopeRefusal(actionId) };
   if (ctx.nativeImageGeneration && actionId === "openai.generate_image") {
     return { kind: "unknown", toolId: actionId };
   }
@@ -1059,7 +1061,7 @@ async function resolveDynamic(
     const entry: CatalogEntry = { service: plugin.service, plugin, action };
     const outcome = await invokeAction(
       { ...catalog, entries: [entry], byId: new Map([[action.id, entry]]), dynamicPlugins: [] },
-      action.id, {}, ctx, `Read the list of ${label} tools this account can use.`,
+      action.id, {}, ctx.toolScope?.actions ? { ...ctx, toolScope: { ...ctx.toolScope, actions: [...ctx.toolScope.actions, action.id] } } : ctx, `Read the list of ${label} tools this account can use.`,
     );
     if (outcome.kind !== "ok" || !outcome.result.success || !discovered) {
       // Keep the cause. A connector error, a missing account, and a policy
@@ -1148,12 +1150,14 @@ function makeListTool(
     name: "list_tools",
     description:
       "List integration actions only. Native tools are already on your own tool list and are not listed here. " +
-      "Filter by service or search by name/description. Returns tool_ids plus parameter schemas; use call_tool to invoke one." +
+      "Filter by service or search by name/description. Focused tasks return compact summaries. Use detail: schema with an exact query before calling an action." +
       serviceLine +
       " If a request could be covered by one of these services, check here before " +
       "you say it is not possible. A service that is not connected is reported " +
       "here with the corrective action, so a check is never wasted.",
     parameters: Type.Object({
+      outside_focus: Type.Optional(Type.Boolean({ description: "Discover compact summaries outside thread focus, within the inherited ceiling. This does not enable calls or return schemas." })),
+      detail: Type.Optional(Type.Union([Type.Literal("summary"), Type.Literal("schema")], { description: "Summary lists IDs and descriptions. Schema also returns parameters. Focused tasks default to summary." })),
       service: Type.Optional(
         Type.String({
           description:
@@ -1175,8 +1179,11 @@ function makeListTool(
       ),
     }),
     execute: async (args, ctx): Promise<ToolResult> => {
-      const a = args as { service?: string; query?: string; limit?: number };
-      const limit = clamp(a.limit ?? LIST_LIMIT_DEFAULT, 1, LIST_LIMIT_MAX);
+      const a = args as { service?: string; query?: string; limit?: number; detail?: "summary" | "schema"; outside_focus?: boolean };
+      const discoveryScope = a.outside_focus ? ctx.toolScopeCeiling : ctx.toolScope;
+      const discoveryCtx: ToolContext = a.outside_focus ? { ...ctx, toolScope: discoveryScope } : ctx;
+      const withSchemas = !a.outside_focus && (a.detail === "schema" || (a.detail !== "summary" && ctx.toolScope === undefined));
+      const limit = clamp(a.limit ?? (ctx.toolScope ? 8 : LIST_LIMIT_DEFAULT), 1, LIST_LIMIT_MAX);
       const query = parseSearchQuery(a.query ?? "");
       const actionFields = (action: PluginAction): string[] => [
         action.id,
@@ -1186,7 +1193,7 @@ function makeListTool(
       const matchesQuery = (action: PluginAction): boolean =>
         matchesSearchQuery(query, actionFields(action));
 
-      let entries = catalog.entries;
+      let entries = catalog.entries.filter((entry) => actionInScope(discoveryScope, qualifiedId(entry)));
       if (a.service) entries = entries.filter((e) => e.service === a.service);
       if (query.hasInput) entries = entries.filter((e) => matchesQuery(e.action));
 
@@ -1232,14 +1239,15 @@ function makeListTool(
       for (const plugin of catalog.dynamicPlugins) {
         if (unavailable.some((item) => item.service === plugin.service)) continue;
         if (a.service && plugin.service !== a.service) continue;
+        if (discoveryScope?.actions && !discoveryScope.actions.some((id) => id.startsWith(`${plugin.service}.`))) continue;
         dynamicServicesConsidered.add(plugin.service);
         try {
-          const resolvedDyn = await resolveDynamic(catalog, plugin, ctx);
+          const resolvedDyn = await resolveDynamic(catalog, plugin, discoveryCtx);
           const dynEntries =
             query.hasInput
               ? resolvedDyn.entries.filter((e) => matchesQuery(e.action))
               : resolvedDyn.entries;
-          entries = entries.concat(dynEntries);
+          entries = entries.concat(dynEntries.filter((entry) => actionInScope(discoveryScope, qualifiedId(entry))));
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           warnings.push({ service: plugin.service, reason: `action discovery failed: ${message}` });
@@ -1302,6 +1310,7 @@ function makeListTool(
         entries = rankSearchResults(query, entries, (entry) => actionFields(entry.action));
       }
 
+      entries = entries.filter((entry) => actionInScope(discoveryScope, qualifiedId(entry)));
       const tools = entries.slice(0, limit).map((e) => {
         const toolId = qualifiedId(e);
         const directTool = pinnedNames.get(toolId);
@@ -1311,7 +1320,7 @@ function makeListTool(
           name: e.action.name,
           description: e.action.description,
           riskLevel: e.action.riskLevel,
-          params: e.action.parameters,
+          ...(withSchemas ? { params: e.action.parameters } : {}),
           ...(directTool ? { direct_tool: directTool } : {}),
         };
       });
@@ -1640,6 +1649,7 @@ function makePinnedTool(
   // sends no summary or the schema cannot carry one.
   const derivedSummary = `${entry.action.name} (${name})`;
   return {
+    scopeAction: actionId,
     policyChecked: true,
     name,
     description: parts.join(" "),

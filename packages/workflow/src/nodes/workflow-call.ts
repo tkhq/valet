@@ -1,3 +1,4 @@
+import { readToolScope } from "@valet/shared";
 /**
  * `workflow` node executor (batch-fanout design decision 1) — starts a
  * child run of another workflow definition and parks until it settles.
@@ -120,6 +121,7 @@ export async function executeWorkflowCall(args: NodeExecutorArgs<WorkflowCallNod
   const rendered = node.input !== undefined ? renderJsonTemplates(node.input, resolveTemplateContext(args)) : undefined;
   const data = isPlainObject(rendered) ? rendered : rendered === undefined ? {} : { value: rendered };
   const params: RunParams = {
+    ...(run.params.toolScope !== undefined ? { toolScope: readToolScope(run.params.toolScope) } : {}),
     workflowId: node.workflowId,
     definitionVersionId: resolved.definitionVersionId,
     input: { type: 'workflow', timestamp: clock(), data },

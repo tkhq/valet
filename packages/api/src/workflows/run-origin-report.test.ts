@@ -36,7 +36,7 @@ it("reports a settled run to the thread that started it, once", async () => {
   const run = (origin?: WorkflowRun["params"]["origin"]): WorkflowRun => ({
     runId: "run-1", status: "settled", outcome: "failed", waitingOn: [], updatedAt: 2, attempt: 1, wakeRequested: false, createdAt: 1,
     definition: { version: "dag/v1" }, definitionVersionId: "v1", actorUserId: "local-user",
-    params: { workflowId: "wf-1", definitionVersionId: "v1", ...(origin ? { origin } : {}) },
+    params: { workflowId: "wf-1", definitionVersionId: "v1", toolScope: { actions: ["workflows.get_run"] }, ...(origin ? { origin } : {}) },
   });
   let current = run({ assistantSessionId: sessionId, threadId: thread.id });
   const report = buildRunOriginReport({
@@ -53,6 +53,7 @@ it("reports a settled run to the thread that started it, once", async () => {
   await report(info);
   const queued = (await api.providers.engineStore.listUnsettledSubmissions(sessionId)).filter((item) => item.threadId === thread.id);
   expect(queued).toHaveLength(1);
+  expect(queued[0]?.metadata?.toolScope).toEqual({ actions: ["workflows.get_run"] });
   expect(JSON.stringify(queued[0])).toContain("workflow.settled");
   expect(JSON.stringify(queued[0])).toContain("GitHub 404");
 

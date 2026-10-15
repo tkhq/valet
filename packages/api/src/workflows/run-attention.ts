@@ -1,3 +1,4 @@
+import { readToolScope } from "@valet/shared";
 /**
  * What the api does when a workflow run settles. Two observers live here,
  * both driven by `LocalRunHost`'s `onRunSettled` hook: the failed-run
@@ -200,7 +201,9 @@ async function signalOrigin(
   const { thread, priorQueueItemId } = await resolveWorkflowReportTarget(deps,
     { type: assistant.ownerType, id: assistant.ownerId }, meta, source.session, sourceThread, dispatchId);
   if (priorQueueItemId) return;
-  await thread.submitPrompt({ kind: "signal", ...(await signal()) }, { dispatchId, queueMode: "followup" });
+  await thread.submitPrompt({ kind: "signal", ...(await signal()) }, { dispatchId, queueMode: "followup",
+    ...(run.params.toolScope !== undefined ? { metadata: { toolScope: readToolScope(run.params.toolScope) } } : {}),
+  });
 }
 
 export type RunApprovalReportDeps = RunOriginReportDeps;

@@ -1,4 +1,5 @@
 export * from "./types.js";
+export { toolScopeSchema } from "./tool-scope-schema.js";
 export { modelCallUsage, type ReportedUsage } from "./model-call-usage.js";
 export { parseResourceQuantity } from "@valet/shared";
 // pi-ai passthroughs, re-exported so downstream packages (e.g. @valet/eval)

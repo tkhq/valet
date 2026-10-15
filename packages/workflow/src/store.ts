@@ -1,4 +1,5 @@
 import type { Presence } from "@valet/shared";
+import type { ToolScope } from "@valet/shared";
 
 /**
  * The `WorkflowStore` port — checkpoints, signals, run ownership.
@@ -56,6 +57,7 @@ export interface WorkflowRunOrigin {
 
 /** Parameters to start a run. JSON-serializable. */
 export interface RunParams {
+  toolScope?: ToolScope;
   workflowId: string;
   definitionVersionId: string;
   triggerId?: string;

@@ -39,6 +39,7 @@ function plugins(): ValetPlugin[] {
     },
   };
   return [
+    { name: "workspace-alias", version: "1", actions: [{ service: "google_workspace", actions: [{ id: "drive.search_files", name: "Search", description: "Search", riskLevel: "low", parameters: Type.Object({}), execute: async () => ({ success: true, data: { files: [] } }) }] }] },
     { name: "demo", version: "0.0.1", actions: [{ service: "demo", actions: [echo] }],
       credentials: [{ service: "demo", type: "api_key", configKeys: ["apiKey"], connectLabel: "Demo" }] },
     { name: "remote", version: "0.0.1", actions: [{ service: "remote", actions: [], resolveActions: async () => [
@@ -75,6 +76,29 @@ function invoke(token: string, toolId: string, params: Record<string, unknown> =
 }
 
 describe("POST /api/sandbox/actions/:toolId/invoke", () => {
+  it("keeps a canonical action alias within its exact scope", async () => {
+    const token = await seed();
+    if (!api) throw new Error("test API missing");
+    await api.providers.engineStore.saveSession({ id: SESSION, userId: "local-user", orgId: "local-org", owner: { type: "team", id: TEAM }, workspace: "/", purpose: "workflow", status: "running", createdAt: 1, updatedAt: 1, metadata: { toolScope: { actions: ["drive.search_files"] } } });
+    const result = await invoke(token, "drive.search_files");
+    expect(result.status).toBe(200);
+    expect(await result.json()).toMatchObject({ status: "completed", result: { files: [] } });
+  });
+
+  it("refuses a script action outside its persisted step ceiling", async () => {
+    const token = await seed();
+    if (!api) throw new Error("test API missing");
+    await api.providers.engineStore.saveSession({
+      id: SESSION, userId: "local-user", orgId: "local-org", owner: { type: "team", id: TEAM },
+      workspace: "/", purpose: "workflow", status: "running", createdAt: 1, updatedAt: 1,
+      metadata: { toolScope: { actions: ["remote.lookup"] } },
+    });
+    const denied = await invoke(token, "demo.echo");
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toMatchObject({ error: expect.stringContaining("outside this task") });
+    expect(echoCalls).toBe(0);
+    expect(await (await invoke(token, "remote.lookup")).json()).toMatchObject({ status: "completed" });
+  });
   it("runs as the workflow run's owner, finds dynamic tools, and writes the Action Log row", async () => {
     const token = await seed();
     const res = await invoke(token, "demo.echo", { text: "hi" });

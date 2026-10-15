@@ -109,6 +109,16 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect((await store.getThread("sess-1", "th-1"))?.reasoning).toBeUndefined();
     });
 
+    it("saveThread updates and clears tool focus metadata", async () => {
+      await store.saveSession(newSession());
+      const t = newThread("sess-1");
+      await store.saveThread("sess-1", { ...t, metadata: { userTimezone: "UTC" } });
+      await store.saveThread("sess-1", { ...t, metadata: { userTimezone: "UTC", toolScope: { actions: ["workflows.get_run"] } } });
+      expect((await store.getThread("sess-1", "th-1"))?.metadata).toEqual({ userTimezone: "UTC", toolScope: { actions: ["workflows.get_run"] } });
+      await store.saveThread("sess-1", { ...t, metadata: { userTimezone: "UTC", toolScope: {} } });
+      expect((await store.getThread("sess-1", "th-1"))?.metadata).toEqual({ userTimezone: "UTC", toolScope: {} });
+    });
+
     it("saveThread + listThreads round-trips", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1", "task:A", "th-1"));

@@ -1,3 +1,5 @@
+import { actionInScope, intersectToolScopes, readToolScope, scopeRefusal, TOOL_SCOPE_KEY } from "@valet/shared";
+import { workflowStepToolScope } from "../workflows/tool-scope.js";
 /**
  * `POST /api/sandbox/actions/:toolId/invoke`: a workflow step's script calls
  * an integration action with the same power as the step's agent.
@@ -63,11 +65,17 @@ sandboxActionsRouter.post("/actions/:toolId/invoke", async (c) => {
   if (!run || (run.status !== "running" && run.status !== "parked")) {
     return c.json({ error: "This workflow run has finished, so its steps can call no more actions." }, 409);
   }
+  const session = await c.var.providers.engineStore.getSession(sandbox.sessionId);
+  const threads = await c.var.providers.engineStore.listThreads(sandbox.sessionId);
+  const scope = intersectToolScopes(workflowStepToolScope(run.params, run.definition, nodeId), readToolScope(session?.metadata?.[TOOL_SCOPE_KEY]),
+    ...threads.map((thread) => readToolScope(thread.metadata?.[TOOL_SCOPE_KEY])));
+  if (!actionInScope(scope, toolId)) return c.json({ error: scopeRefusal(toolId) }, 403);
   // A key is namespaced by run, step, tool, and params, as the broker does.
   const invocationId = `wf:${runId}:${nodeId}:script:${typeof key === "string" ? `${toolId}:${paramsDigest(params)}:${key}` : randomUUID()}`;
   const result = await invokeOnce(c.var.providers.db, invocationId, typeof key === "string", (id) => buildActionInvoker(invokerOpts(c))(
     { service: parsed.service, action: parsed.action, params: Object.fromEntries(Object.entries(params)), invocationId: id },
     {
+      toolScope: scope,
       userId: run.actorUserId ?? actorUserIdFor(owner), orgId: sandbox.orgId, owner,
       external: { client: "workflow-script", attempt: randomUUID() },
     },

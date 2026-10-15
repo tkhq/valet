@@ -91,6 +91,12 @@ export class NativeImageBridge {
   /** True while the most recent request offered the hosted tool, so duplicate plugin actions hide only then. */
   offered = false;
 
+  invalidatePermission(): void {
+    this.permitted = undefined;
+    this.withheld = false;
+    this.offered = false;
+  }
+
   beginTurn(): void {
     this.savedInRequest = false;
     this.unavailable = false;

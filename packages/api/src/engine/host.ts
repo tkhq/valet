@@ -1,3 +1,5 @@
+import { buildToolFocusTool, workflowToolFocus } from "../plugins/tool-focus.js";
+import type { ToolScope } from "@valet/shared";
 import { assistantMemoryNamespace } from "../services/memory-scope.js";
 import { assistantExecutions } from "../schema/index.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
@@ -1472,7 +1474,7 @@ export class EngineHost {
     };
     const serviceAvailability = await resolveServiceAvailability();
     const catalogOptions = {
-      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", ...(this.opts.blobs && this.opts.db ? ["file_attach"] : []), ...appendedNativeToolNames],
+      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", "focus_tools", ...(this.opts.blobs && this.opts.db ? ["file_attach"] : []), ...appendedNativeToolNames],
       serviceAvailability,
       resolveServiceAvailability,
     };
@@ -1485,6 +1487,7 @@ export class EngineHost {
       effectivePins,
       catalogOptions,
     );
+    extras.tools.push(buildToolFocusTool());
     if (this.opts.blobs && this.opts.db) extras.tools.push(buildFileAttachTool(this.opts.db, this.opts.blobs, publicUrlFromEnv(process.env)));
     return extras;
   }
@@ -2803,6 +2806,7 @@ export class EngineHost {
         readOnlyReason: "This legacy team conversation is read-only. Start a new conversation to use an isolated working directory.",
       } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
+      initialToolFocus: ({ key }: { key: string }) => /^workflow:wf_/.test(key) ? workflowToolFocus("diagnose") : undefined,
       threadSystemContext: workflowThreadContext,
       // A team or org orchestrator is shared, so no one timezone applies.
       ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
@@ -3660,6 +3664,7 @@ export class EngineHost {
   async childSessionFor(
     childSessionId: string,
     opts: {
+      toolScope?: ToolScope;
       parentSessionId: string;
       parentThreadId: string;
       actorUserId: string;
@@ -3701,6 +3706,7 @@ export class EngineHost {
   private async buildChildSession(
     childSessionId: string,
     opts: {
+      toolScope?: ToolScope;
       parentSessionId: string;
       parentThreadId: string;
       actorUserId: string;
@@ -3876,6 +3882,7 @@ export class EngineHost {
       orgId: opts.orgId,
       workspace: opts.workspace,
       purpose: "child" as const,
+      toolScope: opts.toolScope,
       ...(await this.userTimezoneOptions(opts.actorUserId)),
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
@@ -3981,6 +3988,7 @@ export class EngineHost {
   async workflowSessionFor(
     sessionId: string,
     opts: {
+      toolScope?: ToolScope;
       actorUserId: string;
       orgId: string;
       owner: Principal;
@@ -4007,6 +4015,7 @@ export class EngineHost {
   private async buildWorkflowSession(
     sessionId: string,
     opts: {
+      toolScope?: ToolScope;
       actorUserId: string;
       orgId: string;
       owner: Principal;
@@ -4072,6 +4081,7 @@ export class EngineHost {
       orgId: opts.orgId,
       workspace,
       purpose: "workflow" as const,
+      toolScope: opts.toolScope,
       ...(await this.userTimezoneOptions(opts.actorUserId)),
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(specProvider ? { specProvider } : {}),
