@@ -2,13 +2,17 @@ import type { SessionNode } from "@valet/workflow";
 import { JsonTextarea, LabeledInput, LabeledTextarea, SelectField } from "../fields";
 import { Label } from "~/components/primitives";
 import { ModelCombobox } from "~/components/settings/model-combobox";
+import { LastRunModel } from "./last-run-model";
 
 export function SessionForm({
   node,
   onChange,
+  lastRunModels,
 }: {
   node: SessionNode;
   onChange: (patch: Record<string, unknown>) => void;
+  /** The models this step called in the workflow's last run. */
+  lastRunModels?: string[];
 }) {
   return (
     <div className="flex flex-col gap-3">
@@ -23,6 +27,7 @@ export function SessionForm({
           emptyLabel="Use the runtime default"
           ariaLabel="Model"
         />
+        <LastRunModel models={lastRunModels} />
       </div>
       <JsonTextarea
         label="Output schema (JSON)"

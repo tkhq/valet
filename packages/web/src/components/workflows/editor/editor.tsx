@@ -122,6 +122,9 @@ export interface EditorProps {
   /** Per-node policy predictions for the canvas cards, keyed by node id.
    * The page owns the query (it is per stored workflow, not per draft). */
   gateByNodeId?: ReadonlyMap<string, "require_approval" | "deny">;
+  /** The models each step called in the workflow's last run, keyed by node
+   * id. The page owns the query, like `gateByNodeId`. */
+  lastRunModels?: ReadonlyMap<string, string[]>;
   /** A mirrored workflow is edited in its file. Disable definition changes
    * and hide Save and the JSON hatch. */
   readOnly?: boolean;
@@ -141,6 +144,7 @@ function EditorDraft({
   onCancelExternal,
   onDirtyChange,
   gateByNodeId,
+  lastRunModels,
   readOnly = false,
   ref,
 }: EditorProps) {
@@ -374,6 +378,7 @@ function EditorDraft({
       readOnly={readOnly}
       key={selectedNode.id}
       node={selectedNode}
+      lastRunModels={lastRunModels?.get(selectedNode.id)}
       onChange={(patch) => handleNodeChange(selectedNode.id, patch)}
       onRemove={() => handleRemoveNode(selectedNode.id)}
       onDuplicate={() => handleDuplicateNode(selectedNode.id)}

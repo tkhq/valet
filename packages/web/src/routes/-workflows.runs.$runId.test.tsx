@@ -285,6 +285,17 @@ describe("RunDetailBody", () => {
     expect(screen.getByText("$0.0100 model spend")).toBeTruthy();
   });
 
+  it("says at the top when a step's model changed without an edit", () => {
+    const data = baseRun({ status: "settled", outcome: "completed" });
+    const props = { runId: "wfrun_1", onCancel: vi.fn(), cancelPending: false, onRetry: vi.fn(), retryPending: false };
+    const { unmount } = render(<RunDetailBody {...props} data={data} />);
+    expect(screen.queryByText(/The model changed/)).toBeNull();
+    unmount();
+    data.modelChanges = [{ nodeId: "draft", previous: ["sol-5.6"], current: ["sol-6.1"] }];
+    render(<RunDetailBody {...props} data={data} />);
+    expect(screen.getByRole("status").textContent).toBe("The model changed for 1 step since the last run. The workflow was not edited.");
+  });
+
   it("renders checkpoints with status and a result preview", () => {
     const data = baseRun({ status: "settled", outcome: "completed" });
     data.checkpoints = [

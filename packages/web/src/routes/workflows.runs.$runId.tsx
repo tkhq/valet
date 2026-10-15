@@ -117,6 +117,7 @@ export function RunDetailBody({
   const [diagramOpen, setDiagramOpen] = useState(false);
   const { run, checkpoints } = data;
   const stepCosts = data.stepCosts ?? [];
+  const modelChanges = data.modelChanges ?? [];
   const pendingGates = data.pendingGates ?? [];
   const needsApproval = runNeedsApproval(run, pendingGates);
   const nonTerminal = run.status !== "settled";
@@ -191,6 +192,15 @@ export function RunDetailBody({
       />
 
       <div className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
+        {/* Above the answer: with no edit, a changed model is the likely
+            reason a result differs from the last run. The Steps list marks
+            the changed steps. */}
+        {modelChanges.length > 0 && (
+          <p role="status" className="rounded border border-line bg-warning-wash px-3 py-2 text-sm text-ink">
+            The model changed for {modelChanges.length} {modelChanges.length === 1 ? "step" : "steps"} since the last run. The workflow was not edited.
+          </p>
+        )}
+
         {/* The settled answer comes first. Everything below it explains how
             the run reached that answer. */}
         {result && <RunResultPanel result={result} />}
@@ -244,7 +254,7 @@ export function RunDetailBody({
               </span>
             )}
           </h2>
-          <CheckpointList checkpoints={checkpoints} promotedNodeId={result?.nodeId} nodeStatuses={nodeStatuses.status} nodeOrder={nodeOrder} stepCosts={stepCosts} />
+          <CheckpointList checkpoints={checkpoints} promotedNodeId={result?.nodeId} nodeStatuses={nodeStatuses.status} nodeOrder={nodeOrder} stepCosts={stepCosts} modelChanges={modelChanges} />
         </div>
         {definition && (
           <details onToggle={(event) => setDiagramOpen(event.currentTarget.open)}>

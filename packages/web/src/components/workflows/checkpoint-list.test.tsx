@@ -26,9 +26,36 @@ describe("CheckpointList", () => {
     );
     const [draft, each, notify] = screen.getAllByRole("listitem");
     expect(draft.textContent).toContain("$0.0421");
-    expect(draft.textContent).toContain("1.5k tokens over 2 calls · claude");
+    expect(draft.textContent).toContain("1.5k tokens over 2 calls");
     expect(each.textContent).toContain("$0.0050+");
     expect(notify.textContent).not.toContain("$");
+  });
+
+  it("shows each step's models as text and marks only the first row of a step whose model changed", () => {
+    const cost = { costUsd: 0.01, turns: 1, unpricedTurns: 0, totalTokens: 10 };
+    render(
+      <CheckpointList
+        checkpoints={[
+          { nodeId: "draft", iteration: 0, status: "completed" },
+          { nodeId: "draft", iteration: 1, status: "completed" },
+          { nodeId: "review", iteration: 0, status: "completed" },
+        ]}
+        stepCosts={[
+          { ...cost, nodeId: "draft", iteration: 0, models: ["sol-6.1"] },
+          { ...cost, nodeId: "draft", iteration: 1, models: ["sol-6.1"] },
+          { ...cost, nodeId: "review", iteration: 0, models: ["claude-haiku-4-5"] },
+        ]}
+        modelChanges={[{ nodeId: "draft", previous: ["sol-5.6"], current: ["sol-6.1"] }]}
+      />,
+    );
+    const chip = "Model changed since the last run: sol-5.6 → sol-6.1. The workflow was not edited.";
+    expect(screen.getAllByText(chip)).toHaveLength(1);
+    const [first, second, review] = screen.getAllByRole("listitem");
+    expect(first.textContent).toContain(chip);
+    expect(screen.getAllByText("sol-6.1")).toHaveLength(2);
+    expect(second.textContent).not.toContain("Model changed");
+    expect(review.textContent).toContain("claude-haiku-4-5");
+    expect(review.textContent).not.toContain("Model changed");
   });
 
   it("keeps every status but Completed visible on a phone, where the glyph alone shows a denied step as done", () => {

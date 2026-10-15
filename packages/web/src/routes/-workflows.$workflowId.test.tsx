@@ -110,6 +110,7 @@ vi.mock("~/api/workflows", () => ({
   }),
   // A page with `nextCursor` set: the workflow has more runs than this page
   // holds, which is what the count and the drawer notice must say.
+  useRunDetail: () => ({ data: undefined }),
   useWorkflowRuns: () => ({
     data: {
       runs: [{ runId: "wfrun_0", workflowId: "wf_1", status: "settled", outcome: "completed", createdAt: 1, updatedAt: 1 }],
