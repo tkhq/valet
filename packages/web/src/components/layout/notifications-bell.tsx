@@ -88,8 +88,8 @@ export function NotificationsBell({ defaultOpen = false }: { defaultOpen?: boole
           {decisionCursor && <button className="text-sm underline" onClick={() => setDecisionCursor(undefined)}>First approvals</button>}
           {moreDecisions && <button className="text-sm underline" onClick={() => setDecisionCursor(moreDecisions)}>Next approvals</button>}
           {decisions.data?.items.map(item => <article key={item.gate.id} className="min-w-0 rounded-lg border border-line bg-paper">
-            <div className="flex min-w-0 items-center justify-between gap-3 px-4 pt-3">
-              <span className="min-w-0 truncate text-xs text-muted" title={item.title}>{item.title}</span>
+            <div className="flex min-w-0 items-start justify-between gap-3 px-4 pt-3">
+              <span className="min-w-0 break-words text-xs text-muted [overflow-wrap:anywhere]">{item.title}</span>
               {item.canOpenThread !== false && <a className="inline-flex shrink-0 items-center gap-1 text-xs text-muted hover:text-ink hover:underline" href={`/threads/${encodeURIComponent(item.gate.threadId)}`}>
                 Open thread <ArrowUpRight aria-hidden className="h-3 w-3" />
               </a>}

@@ -241,7 +241,7 @@ function DecisionGateResponse({
           </div>
           </>
         ) : (
-          <div className={cn(inset, "flex flex-wrap items-center justify-end gap-2", inNotification ? "pb-4 pt-1" : "pb-3")}>
+          <div className={cn(inset, "flex flex-wrap items-center gap-2", inNotification ? "justify-start pb-4 pt-1" : "justify-end pb-3")}>
             {gate.actions.map((a) => {
               const isAlwaysAllow = a.id === GATE_ACTION_ALWAYS_ALLOW;
               const disabled = busy || (isAlwaysAllow && !isAdmin);
