@@ -493,3 +493,53 @@ A preview repeats sample values: a step's output, its observed example, and each
 A preview reads the workflow's five newest runs. It takes its sample from the newest one that the caller can read and that completed a step. It skips each run that fails `canReadWorkflowRun`, the check that `get_run` and `get_node_result` use. A team run started from a private thread or a private Slack channel belongs to that audience, so its trigger payload and step results never become another viewer's sample. If no run qualifies, the preview uses only the sample input. The route and the action both apply this rule, because both call `previewWorkflow()`.
 
 Outside a test, the editor still does not run a workflow unless the person asks. A test mode that holds outbound actions for review is a follow-up.
+
+### Import from V1 (2026-10-13)
+
+A person moved each V1 workflow by hand: they gave the agent the V1 logs and rebuilt the graph, which took 30 to 60 minutes per workflow. "Import from V1" in the Automation menu replaces that step. The person pastes the JSON that V1's `GET /api/workflows` and `GET /api/triggers` return, one after the other. No new route reads V1.
+
+`convertV1Workflows` (`packages/workflow/src/v1-convert.ts`) is a pure function. It accepts the two list responses, one `{ workflow }` response, a workflow row, a bare `{ steps }` object, trigger rows, or an array of these. It follows what the V1 runner did (`packages/runner/src/workflow-engine.ts`), not what the step types suggest:
+
+- V1 sent every `agent_message` in a run to one shared session, and `bash` ran in the same sandbox. A run of consecutive `agent_message`, `bash` and `tool: bash` steps becomes one `session` node. Its prompt lists the steps in order, and a command becomes an instruction to run it.
+- V1 waited for an `agent_message` only when the step set `await_response`. Without it, V1 sent the message with `prompt_async` and went on at once: later steps ran while the agent worked, and an agent failure did not fail the run. A session node made only of such messages has `wait: { mode: "none" }`. A node that holds a command or a message with `await_response` has `wait: { mode: "until_idle" }`.
+- A session node has one wait mode, so the import starts a new node where one mode cannot do what V1 did. A message without `await_response` after a step that V1 waited for starts a new node. A command after a message without `await_response` also starts one, because V1 ran the command beside the agent's work and waited only for the command. A message with `await_response` joins the messages before it, because V1 waited until the shared session was idle.
+- `approval` becomes `approval` with `timeout: "24h"`. V1 cancelled a run that still waited for an approval 24 hours after the run started (`expireWaitingApprovalExecutions` in `packages/worker/src/index.ts`). V2 counts the 24 hours from the time the run reaches the approval, so a run with two approvals can wait longer than in V1. The import does not copy a deadline for the whole run.
+- A denied top-level approval cancelled the V1 run. The imported node keeps the default `onDeny: "fail"`, so a denial or a timeout stops the run.
+- `tool: spawn_session` becomes a `session` node with the task as its prompt and `wait: { mode: "none" }`. V1 went on to the next step when the session started, and the session ran beside the later steps. Wait mode `none` does the same. An unset wait mode would wait until the session is idle.
+- `conditional` with `{ variable, equals }` becomes an `if` node on `trigger.data.<variable>`, with `true` and `false` edges. The import declares the variable in the trigger's `dataSchema` with the type of the `equals` value, so a manual run asks for it. A webhook run skips that schema, and V1 compared with `===`. A number `equals` reads `"0"` as 0, so a number condition also gets a number `exists` condition, and the two together compare strictly. A condition with no `equals` tests truthiness and declares nothing, because V1 took a value of any type there. The import declares a variable only when every condition on it compares it to one type. If one condition compares `limit` to `0` and another to `"all"`, a number input refuses `"all"` before the run starts, so the import declares nothing for `limit`. Each condition then compares strictly, as V1 did. A constant condition keeps only the branch V1 always ran.
+- V1 ran the steps inside a `parallel` or a `conditional` branch one after another, sorted by id. The import keeps that order. A `parallel` step therefore becomes a sequence, so an approval among its steps still blocks the steps after it.
+- A denied approval inside a `parallel` or a `conditional` step did not cancel the V1 run. V1 skipped the rest of that step's list and went on after the step. The imported node has `onDeny: "skip"`. Its `true` edge goes on in the list, and its `false` edge goes to the node after the step. An approval at the end of the list gets one plain edge, because the run goes on either way.
+- A manual trigger needs nothing, unless it has a `variableMapping`. V1 copied the mapped request fields into the variables (`runTrigger` in `packages/worker/src/services/triggers.ts`). V2 has no such copy, so a condition reads the variable name from the run input.
+- V1 rendered no templates, so a `{{ }}` in a message stays literal text in the prompt.
+
+Each item that needs a decision becomes a checklist line, never a silent drop. Every definition must pass `validateWorkflowDefinition`; a conversion that does not pass is refused as a bug.
+
+The import creates no schedules. V1 matched cron itself (`cronMatchesNow` in `packages/worker/src/index.ts`), and V2 uses cron-parser. The two read many expressions differently, and cron-parser refuses some that V1 took. Each V1 schedule of a workflow therefore becomes the last lines of its checklist. A line names the schedule, its cron expression and its time zone, and tells the person to add it in Triggers after the other items. A V1 schedule that sent a prompt to the orchestrator belongs to no workflow. Its line goes to the notes and includes the prompt.
+
+Each schedule line tells the person which time zone to set. V1 used UTC for a schedule that named no time zone, and the Triggers form starts with the browser's time zone, so the line names UTC.
+
+`v1CronDifference` checks each expression against the forms that V1 and cron-parser read the same way: `*`, a number, a range, a range with a step, and `*/n`. If an expression is outside these forms, the line is a required decision. It tells the person not to add the expression as written, and it gives the V1 meaning when the import knows it:
+
+- An expression without 5 fields. V1 never ran it.
+- A restricted day of the month and a restricted day of the week. V1 ran only on a day that matched both. cron-parser runs on a day that matches either one.
+- A part without a digit, such as `MON` or `?`. V1 read only numbers and never matched it. If a whole field is such parts, V1 never ran the schedule.
+- `*/n` in the day of the month or the month. V1 matched each value that divides by n. cron-parser counts from 1.
+- Any other part, such as `5/15` or `1#2`. The line says that V1 and V2 read it differently.
+
+When the import cannot do exactly what V1 did, the checklist line is a required decision. The schedule lines of that workflow then also say that it must not run on a schedule yet. Required decisions are:
+
+- a step V1's compiler refused, anywhere in the tree, including loops and branches the import does not convert. V1 never ran such a workflow.
+- a step that failed every V1 run: `spawn_session` without a task or a workspace, `send_message` without a target or content, and `tool: bash` without a command.
+- a shell command. V1 stopped the run when a command failed. A session only reports the failure, and the work after it can still run.
+- a message with `await_response`. V1 waited up to `await_timeout_ms` for the answer (2 minutes when unset, 15 minutes at most) and failed the run when the agent took longer. The validator refuses a session `wait.timeout`, so the node waits with no time limit.
+- more than one session node made from merged messages. When one of them does not wait, the line also says that a later session node can start before its work is done. V1's shared session did each message only after the one before it.
+- `interrupt`, `send_message`, `run_workflow`, a condition that reads an `outputVariable`, and repository context or a model on `spawn_session`.
+- a run that can reach more than 50 steps. V1 failed such a run at step 51 with `max_steps_exceeded:50` (`executeSteps`), and V2 has no step limit. The import counts as V1 did: one for each step, a `conditional` or `parallel` step included, plus the steps of the branch or list it ran. It takes the longer branch of a condition that reads a variable. A `loop` step counts once, because V1 ran none of its steps.
+- an approval inside a `parallel` or a `conditional` step. A timeout there cancelled the V1 run, but in V2 it acts as a denial, and the run goes on after the step.
+- more than one approval node. V1 cancelled the whole run 24 hours after it started (`getTimedOutApprovals`), and V2 gives each approval its own 24-hour timeout. The line tells the person to decide the timeouts.
+- a manual trigger with a `variableMapping`. The line names each mapping, such as `environment from $.target`.
+- a schedule whose cron expression V2 reads differently (see above).
+
+Other lines give information. They cover webhook triggers, steps listed out of id order, and `{{ }}` text. They also cover the `agent`, `loop` and `subworkflow` steps and the unknown tools that did nothing in V1. A variable that the run form does not show gets one too: a truthiness variable, or a variable that the conditions compare to more than one type.
+
+The dialog shows each workflow, its checklist and the notes before it creates anything. On confirm, it calls `POST /api/workflows` for each workflow. It then sends the checklist as the first message of the workflow's editor conversation, so the editor assistant finishes the items. It creates no schedule. If a call fails part way, the error names what Valet already created. If Valet created a workflow before the error, the dialog keeps the review on screen and shows no import button. The error names the workflow whose editor conversation did not get its checklist, so the person can copy the checklist from the review.

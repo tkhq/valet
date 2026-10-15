@@ -17,6 +17,7 @@ import { WorkflowCreation } from "~/components/workflows/workflow-creation";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "~/components/primitives/dropdown-menu";
 import { OwnerBadge } from "~/components/owner-badge";
 import { Button, ConfirmDialog, Spinner, Switch, TabBar } from "~/components/primitives";
+import { ImportV1Dialog } from "~/components/workflows/import-v1-dialog";
 import { ImportWorkflowDialog } from "~/components/workflows/import-workflow-dialog";
 import { NewWorkflowDialog } from "~/components/workflows/new-workflow-dialog";
 import { RunWorkflowDialog } from "~/components/workflows/run-workflow-dialog";
@@ -61,6 +62,7 @@ export function WorkflowsIndexPage() {
   const [creating, setCreating] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [v1Open, setV1Open] = useState(false);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -77,6 +79,7 @@ export function WorkflowsIndexPage() {
               <DropdownMenuTrigger asChild><Button size="sm" variant="ghost" aria-label="Workflow options"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem onSelect={() => setImportOpen(true)}>Import workflow</DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setV1Open(true)}>Import from V1</DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => setNewOpen(true)}>Manual setup</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -95,6 +98,7 @@ export function WorkflowsIndexPage() {
 
       <NewWorkflowDialog open={newOpen} onOpenChange={setNewOpen} />
       <ImportWorkflowDialog open={importOpen} onOpenChange={setImportOpen} />
+      <ImportV1Dialog open={v1Open} onOpenChange={setV1Open} />
 
       <div className="mx-auto flex min-h-0 w-full min-w-0 max-w-5xl flex-1 flex-col overflow-y-auto px-4 py-6 sm:px-6">
         {tab === "workflows" && <WorkflowsTab creating={creating} onBegin={() => setCreating(true)} onBack={() => setCreating(false)} />}
