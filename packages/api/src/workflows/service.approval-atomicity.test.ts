@@ -296,3 +296,50 @@ it.each([undefined, "approval:step:gate:1"])("rejects an old account card on the
   expect((await answer({ approved: true, scope: "run", gateId: "approval:step:gate:2" })).status).toBe(200);
   expect(await p.db.select().from(runtimeGrants)).toHaveLength(1);
 });
+
+it.each([
+  { previousGateId: undefined, nextGateId: undefined },
+  { previousGateId: "approval:step:gate:1", nextGateId: "approval:step:gate:2" },
+])("does not use an earlier private-run lender exception for a later gate ($previousGateId)", async ({ previousGateId, nextGateId }) => {
+  const { p, wake } = await setup(true, "requester");
+  await p.db.update(workflowRuns).set({ params: { workflowId: "wf-atomic", definitionVersionId: "v1",
+    origin: { assistantSessionId: "missing-session", threadId: "missing-thread" } } }).where(eq(workflowRuns.id, "run-atomic"));
+  const cp = (await p.workflowStore.getCheckpoints("run-atomic"))[0];
+  if (!cp) throw new Error("Missing checkpoint");
+  await p.workflowStore.putIntent({ ...cp, effects: { ...cp.effects, gateId: previousGateId } });
+  await p.workflowStore.insertSignal({ runId: "run-atomic", signalId: "old-account-answer", signalType: "approval:step",
+    payload: { approved: true, resolvedBy: "local-user", scope: "team_account", gateId: previousGateId }, createdAt: 1 });
+  const getCheckpoints = p.workflowStore.getCheckpoints.bind(p.workflowStore);
+  let reads = 0;
+  vi.spyOn(p.workflowStore, "getCheckpoints").mockImplementation(async (...args) => {
+    if (++reads === 2) await p.workflowStore.consumeSignalAndCheckpoint("old-account-answer", { nodeId: "step", iteration: 0, attempt: cp.attempt },
+      { ...cp, effects: { gate: true, gateId: nextGateId, provenance: "org_policy", accountConsentResolved: true } });
+    return getCheckpoints(...args);
+  });
+  const result = await resolveWorkflowApproval({ db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost,
+    credentials: p.engineCredentials, engineStore: p.engineStore }, { userId: "local-user", orgId: "local-org" },
+    { runId: "run-atomic", nodeId: "step", gateId: nextGateId, approved: true, scope: "run", via: "web" });
+  expect(result).toBe("not_found");
+  expect(await p.db.select().from(runtimeGrants)).toEqual([]);
+  expect(wake).not.toHaveBeenCalled();
+});
+
+it.each([
+  { previousGateId: undefined, gateId: undefined },
+  { previousGateId: undefined, gateId: "approval:step:gate:2" },
+  { previousGateId: "approval:step:gate:1", gateId: "approval:step:gate:2" },
+])("accepts the current gate answer despite an older unconsumed answer ($gateId,$previousGateId)", async ({ previousGateId, gateId }) => {
+  const { p } = await setup(false);
+  await p.workflowStore.putIntent({ runId: "run-atomic", nodeId: "step", iteration: 0, status: "intent", attempt: 1,
+    createdAt: 1, effects: { gate: true, gateId, provenance: "org_policy", accountConsentResolved: true } });
+  await p.workflowStore.insertSignal({ runId: "run-atomic", signalId: "old-answer", signalType: "approval:step",
+    payload: { approved: true, resolvedBy: "local-user", scope: "team_account", gateId: previousGateId }, createdAt: 1 });
+  const deps = { db: p.db, workflowStore: p.workflowStore, workflowRunHost: p.workflowRunHost,
+    credentials: p.engineCredentials, engineStore: p.engineStore };
+  expect((await getWorkflowRunDetail(deps, { userId: "local-user", orgId: "local-org" }, "run-atomic"))?.pendingGates).toHaveLength(1);
+  expect(await resolveWorkflowApproval(deps, { userId: "local-user", orgId: "local-org" },
+    { runId: "run-atomic", nodeId: "step", gateId, approved: false, via: "web" })).toBe("ok");
+  expect((await p.workflowStore.listSignals("run-atomic", { unconsumed: true })).map(signal => signal.signalId)).toEqual([
+    "old-answer", `${gateId ?? "approval:step"}:resolution`,
+  ]);
+});

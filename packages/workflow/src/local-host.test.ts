@@ -148,6 +148,118 @@ describe('LocalRunHost crashAt "terminalizing"', () => {
 // ─── crashed, re-armed by a fresh process's sweep with zero prior knowledge ─
 
 describe('LocalRunHost sweep survives a process restart', () => {
+  it('fails a preview run already parked on the same account after consumed consent', async () => {
+    const store = new InMemoryWorkflowStore();
+    const engine = makeRunHostFixtureEngine();
+    await store.createRun('legacy-account-loop', runParams(), { version: 'dag/v1', nodes: [
+      { id: 'step', type: 'tool', service: 'demo', action: 'ping', params: {} },
+    ], edges: [] }, 'v1');
+    const claim = await store.claimRun('legacy-account-loop', 'old-host', 30_000);
+    if (!claim) throw new Error('Missing claim');
+    await store.putIntent({ runId: 'legacy-account-loop', nodeId: 'step', iteration: 0, status: 'intent', attempt: claim.attempt,
+      createdAt: 1, effects: { gate: true, accountConsentResolved: true, provenance: 'shared_account',
+        approver: { userId: 'lender', shareGeneration: 'share-1', allowTeamConsent: true } } });
+    await store.insertSignal({ runId: 'legacy-account-loop', signalId: 'approval:step:account:share-1:resolution', signalType: 'approval:step',
+      payload: { approved: true, resolvedBy: 'lender', scope: 'team_account' }, createdAt: 1, consumedAt: 1,
+      consumedBy: { nodeId: 'step', iteration: 0, attempt: claim.attempt } });
+    await store.parkRun('legacy-account-loop', claim.attempt, [{ kind: 'signal', signalType: 'approval:step', nodeId: 'step' }]);
+    const host = new LocalRunHost({ store, engine, pollMs: 100_000, sweepMs: 20 });
+    host.startHost();
+    try {
+      await waitFor(async () => (await store.getRun('legacy-account-loop'))?.status === 'settled');
+      expect((await store.getRun('legacy-account-loop'))?.outcome).toBe('failed');
+      expect((await store.getCheckpoints('legacy-account-loop'))[0]?.error).toContain('account still requires approval');
+      expect((await store.listSignals('legacy-account-loop'))[0]?.consumedAt).toBe(1);
+    } finally { await host.stopHost(); }
+  });
+
+  it.each([false, true])('keeps a preview-format action gate open after legacy consent (consumed=%s)', async consumed => {
+    const store = new InMemoryWorkflowStore();
+    const engine = makeRunHostFixtureEngine();
+    let calls = 0;
+    engine.invokeAction = async req => {
+      calls++;
+      return req.approval ? { ok: true, result: {} } : { ok: false, requiresApproval: true, provenance: 'org_policy' };
+    };
+    await store.createRun('legacy-action', runParams(), { version: 'dag/v1', nodes: [
+      { id: 'step', type: 'tool', service: 'demo', action: 'ping', params: {} },
+    ], edges: [] }, 'v1');
+    const claim = await store.claimRun('legacy-action', 'old-host', 30_000);
+    if (!claim) throw new Error('Missing claim');
+    await store.putIntent({ runId: 'legacy-action', nodeId: 'step', iteration: 0, status: 'intent', attempt: claim.attempt,
+      createdAt: 1, effects: { gate: true, accountConsentResolved: true, provenance: 'org_policy' } });
+    await store.insertSignal({ runId: 'legacy-action', signalId: 'legacy-account-answer', signalType: 'approval:step',
+      payload: { approved: true, resolvedBy: 'lender', scope: 'team_account' }, createdAt: 1,
+      ...(consumed ? { consumedAt: 1, consumedBy: { nodeId: 'step', iteration: 0, attempt: claim.attempt } } : {}) });
+    await store.parkRun('legacy-action', claim.attempt, [{ kind: 'signal', signalType: 'approval:step', nodeId: 'step' }]);
+    let sweeps = 0;
+    const listParked = store.listParked.bind(store);
+    store.listParked = async limit => { sweeps++; return listParked(limit); };
+    const host = new LocalRunHost({ store, engine, pollMs: 100_000, sweepMs: 20 });
+    host.startHost();
+    try {
+      await waitFor(() => sweeps >= 3);
+      expect(calls).toBe(0);
+      expect((await store.getRun('legacy-action'))?.status).toBe('parked');
+      expect((await store.listSignals('legacy-action'))[0]?.consumedAt !== undefined).toBe(consumed);
+      await store.insertSignal({ runId: 'legacy-action', signalId: 'legacy-action-answer', signalType: 'approval:step',
+        payload: { approved: true, resolvedBy: 'requester' }, createdAt: 2 });
+      await waitFor(async () => (await store.getRun('legacy-action'))?.status === 'settled');
+      expect((await store.getRun('legacy-action'))?.outcome).toBe('completed');
+      expect(calls).toBe(1);
+    } finally { await host.stopHost(); }
+  });
+
+  it.each([false, true])('keeps multiple account answers consumed across later gates (legacy=%s)', async legacy => {
+    const store = new InMemoryWorkflowStore();
+    const engine = makeRunHostFixtureEngine();
+    let calls = 0;
+    engine.invokeAction = async req => {
+      calls++;
+      if (req.approval) return { ok: true, result: { done: true } };
+      return calls < 3
+        ? { ok: false, requiresApproval: true, provenance: 'shared_account', approver: { userId: 'lender', shareGeneration: `share-${calls}`, allowTeamConsent: true } }
+        : { ok: false, requiresApproval: true, provenance: 'org_policy' };
+    };
+    const definition: WorkflowDefinition = { version: 'dag/v1', nodes: [
+      { id: 't', type: 'trigger' }, { id: 'step', type: 'tool', service: 'demo', action: 'ping', params: {} },
+    ], edges: [{ from: 't', to: 'step' }] };
+    let sweeps = 0;
+    const listParked = store.listParked.bind(store);
+    store.listParked = async limit => { sweeps++; return listParked(limit); };
+    const host = new LocalRunHost({ store, engine, pollMs: 100_000, sweepMs: 20 });
+    host.startHost();
+    try {
+      await host.start('run-consent-sweep', runParams(), definition);
+      await waitFor(async () => (await store.getRun('run-consent-sweep'))?.status === 'parked');
+      if (legacy) {
+        const cp = (await store.getCheckpoints('run-consent-sweep')).find(c => c.nodeId === 'step');
+        if (!cp) throw new Error('Missing checkpoint');
+        await store.putIntent({ ...cp, effects: { ...cp.effects, gateId: undefined, gateSequence: undefined } });
+      }
+      for (const signalId of ['consent:first', 'consent:second']) {
+        const cp = (await store.getCheckpoints('run-consent-sweep')).find(c => c.nodeId === 'step');
+        await store.insertSignal({ runId: 'run-consent-sweep', signalId, signalType: 'approval:step',
+          payload: { approved: true, resolvedBy: 'lender', scope: 'team_account', gateId: cp?.effects?.gateId }, createdAt: Date.now() });
+        await host.wake('run-consent-sweep');
+        const expectedCalls = signalId === 'consent:first' ? 2 : 3;
+        await waitFor(async () => calls >= expectedCalls && (await store.getRun('run-consent-sweep'))?.status === 'parked');
+      }
+      const beforeSweeps = sweeps;
+      await waitFor(() => sweeps >= beforeSweeps + 3);
+      const checkpoint = (await store.getCheckpoints('run-consent-sweep')).find(c => c.nodeId === 'step');
+      const gateId = legacy ? 'approval:step:gate:2' : 'approval:step:gate:3';
+      expect(checkpoint?.effects?.gateId).toBe(gateId);
+      expect(calls).toBe(3);
+      expect(await store.listSignals('run-consent-sweep', { unconsumed: true })).toEqual([]);
+      await store.insertSignal({ runId: 'run-consent-sweep', signalId: 'action:answer', signalType: 'approval:step',
+        payload: { approved: true, resolvedBy: 'requester', gateId }, createdAt: Date.now() });
+      await waitFor(async () => (await store.getRun('run-consent-sweep'))?.status === 'settled');
+      expect((await store.getRun('run-consent-sweep'))?.outcome).toBe('completed');
+      expect(calls).toBe(4);
+    } finally { await host.stopHost(); }
+  });
+
   it('wakes a run parked on a submission wait that a fresh host never start()ed or wake()d', async () => {
     // This is the finding-1 regression verbatim: the sweep used to
     // enumerate a host-local `knownRunIds` set, populated only by

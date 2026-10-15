@@ -18,7 +18,13 @@ The credential share has a nullable consent timestamp. Existing shares default t
 
 New tool gates store an occurrence ID in their intent checkpoint. Signal and notification IDs include that occurrence ID. Account resolution IDs also include the share generation. Replays use the stored occurrence ID. Fresh gates cannot reuse consumed answers or suppress new notifications. Existing pending gates keep their resolution IDs.
 
+Each tool checkpoint retains the IDs of gate signals it consumed. Recovery accepts these receipts even when account consent advances into another intent checkpoint. It still redelivers a signal whose consumption has no checkpoint proof. The executor, recovery sweep, resolver, and pending-gate projection match answers to the current occurrence.
+
+Preview checkpoints can have an account-consent transition marker without occurrence IDs or receipts. Recovery preserves their consumed consent. Old consent cannot answer a later action gate, including consent that an earlier sweep already redelivered. A changed share still accepts its own account answer. A preview run already waiting on the same account after consent fails explicitly.
+
 New approval cards submit their occurrence ID. The server rejects missing or stale IDs before it writes grants or signals. Thread cards also use the occurrence ID in their resume key. A card for account borrowing cannot resolve a later action gate on the same node. Legacy pending gates accept their existing requests.
+
+A private run's lender exception applies only to the requested account occurrence. Action gates require the run's normal audience authorization, including legacy transitions without occurrence IDs.
 
 Run and inbox cards use the occurrence ID as their component key. Completing one card removes only that occurrence from the inbox.
 
