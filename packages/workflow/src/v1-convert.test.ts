@@ -637,6 +637,108 @@ describe('convertV1Workflows: workflows and triggers', () => {
     expect((await runInV2(wf, {}, { target: 'prod' })).status).toMatchObject({ deploy: 'skipped' });
   });
 
+  it('says a V1 webhook with no mapping left the condition variables unset, where V2 reads the request body', async () => {
+    const spawn = (id: string) => ({ id, type: 'tool', tool: 'spawn_session', arguments: { task: `Run ${id}.`, workspace: 'app' } });
+    const out = convert({
+      workflows: [
+        {
+          id: 'wf_5',
+          name: 'Issue closed',
+          enabled: true,
+          data: { steps: [{ id: 'closed', type: 'conditional', condition: { variable: 'action', equals: 'closed' }, then: [spawn('cleanup')], else: [spawn('noop')] }] },
+        },
+      ],
+      triggers: [{ name: 'Issues', enabled: true, workflowId: 'wf_5', config: { type: 'webhook', path: 'issues' } }],
+    });
+    const wf = out.workflows[0]!;
+    expect(wf.checklist).toEqual([
+      expect.stringContaining('webhook trigger "Issues" (POST issues)'),
+      'V1 webhook trigger "Issues" set only mapped variables from the request, and it has no mapping. V1 left "action" unset, so each condition on it took its false branch. A V2 webhook passes the JSON body as trigger.data, so these conditions read trigger.data.action from the request. Decide whether the conditions must read the request, then change the conditions or the caller.',
+    ]);
+    // V1 ran "noop" for this request. V2 reads the posted field and runs "cleanup".
+    expect((await runInV2(wf, {}, { action: 'closed' })).status).toMatchObject({ cleanup: 'completed', noop: 'skipped' });
+  });
+
+  it('requires a decision for a V1 webhook mapping from a field with another name, which V2 does not apply', async () => {
+    const out = convert({
+      workflows: [
+        {
+          id: 'wf_6',
+          name: 'Deploy hook',
+          enabled: true,
+          data: {
+            steps: [
+              {
+                id: 'env',
+                type: 'conditional',
+                condition: { variable: 'environment', equals: 'prod' },
+                then: [{ id: 'deploy', type: 'tool', tool: 'spawn_session', arguments: { task: 'Deploy.', workspace: 'app' } }],
+              },
+            ],
+          },
+        },
+      ],
+      triggers: [
+        { name: 'Deploys', enabled: true, workflowId: 'wf_6', config: { type: 'webhook', path: 'deploy' }, variableMapping: { environment: '$.target', repo: '$.repo' } },
+        { name: 'Nightly', enabled: true, workflowId: 'wf_6', config: { type: 'schedule', cron: '0 2 * * *', timezone: 'UTC' } },
+      ],
+    });
+    const wf = out.workflows[0]!;
+    expect(wf.checklist).toEqual([
+      'V1 started this workflow from webhook trigger "Deploys" (POST deploy). Create a webhook for this workflow in Triggers, then change the caller to the new URL. V2 webhooks take POST with a JSON body. V1 copied request fields into variables of the same name (repo from $.repo). V2 reads them from trigger.data the same way.',
+      'V1 webhook trigger "Deploys" copied request fields into variables (environment from $.target). V1 read each path one field at a time. A V2 webhook does not copy them: each condition reads the variable name from the JSON body, such as trigger.data.environment. Change the caller to send the variable names, or change the conditions to read the request fields.',
+      // A required decision holds the schedule.
+      expect.stringContaining('This workflow does not do exactly what it did in V1, so it must not run on a schedule yet.'),
+    ]);
+    // V1 deployed for this request. V2 reads trigger.data.environment and skips the deploy.
+    expect((await runInV2(wf, {}, { target: 'prod' })).status).toMatchObject({ deploy: 'skipped' });
+  });
+
+  it('requires a decision when a same-name webhook mapping reads a nested request path', async () => {
+    const wf = convert({
+      workflows: [{ id: 'wf', data: { steps: [{
+        id: 'merged', type: 'conditional', condition: { variable: 'pr.merged', equals: true },
+        then: [{ id: 'deploy', type: 'tool', tool: 'spawn_session', arguments: { task: 'Deploy.', workspace: 'app' } }],
+      }] } }],
+      triggers: [
+        { name: 'Hook', workflowId: 'wf', config: { type: 'webhook', path: 'merge' }, variableMapping: { 'pr.merged': '$.pr.merged' } },
+        { name: 'Nightly', workflowId: 'wf', enabled: true, config: { type: 'schedule', cron: '0 2 * * *' } },
+      ],
+    }).workflows[0]!;
+
+    expect(wf.checklist).toContainEqual(expect.stringContaining('V1 read each path one field at a time.'));
+    expect(wf.checklist).toContainEqual(expect.stringContaining('trigger.data["pr.merged"]'));
+    expect(wf.checklist.join('\n')).not.toContain('V2 reads them from trigger.data the same way.');
+    expect(wf.checklist.at(-1)).toContain('must not run on a schedule yet');
+    // V1 copied the nested value into variables["pr.merged"]. V2 reads a literal body key.
+    expect((await runInV2(wf, {}, { pr: { merged: true } })).status.deploy).toBe('skipped');
+    expect((await runInV2(wf, {}, { 'pr.merged': true })).status.deploy).toBe('completed');
+  });
+
+  it.each([
+    ['_payload', false], ['_payload', true], ['_trigger', false], ['_trigger', true],
+  ])('requires a decision for the built-in webhook variable %s (same-name mapping: %s)', async (variable, hasMapping) => {
+    const wf = convert({
+      workflows: [{ id: 'wf', data: { steps: [{
+        id: 'present', type: 'conditional', condition: { variable },
+        then: [{ id: 'deploy', type: 'tool', tool: 'spawn_session', arguments: { task: 'Deploy.', workspace: 'app' } }],
+      }] } }],
+      triggers: [
+        { name: 'Hook', workflowId: 'wf', config: { type: 'webhook', path: 'merge' }, ...(hasMapping ? { variableMapping: { [variable]: `$.${variable}` } } : {}) },
+        { name: 'Nightly', workflowId: 'wf', enabled: true, config: { type: 'schedule', cron: '0 2 * * *' } },
+      ],
+    }).workflows[0]!;
+
+    expect(wf.checklist).toContainEqual(expect.stringContaining(variable === '_payload'
+      ? 'V1 set "_payload" to the whole request payload'
+      : 'V1 set "_trigger" to webhook metadata'));
+    expect(wf.checklist.join('\n')).not.toContain(`V1 left "${variable}" unset`);
+    expect(wf.checklist.join('\n')).not.toContain('V2 reads them from trigger.data the same way.');
+    expect(wf.checklist.at(-1)).toContain('must not run on a schedule yet');
+    // V1 overwrote the mapping with a truthy object. V2 sees only the posted field.
+    expect((await runInV2(wf, {}, { [variable]: false })).status.deploy).toBe('skipped');
+  });
+
   it('refuses orchestrator schedules alone, and lists them to add by hand', () => {
     const result = convertV1Workflows({
       triggers: [{ name: 'Standup', enabled: true, config: { type: 'schedule', cron: '0 9 * * 1-5', target: 'orchestrator', prompt: 'Post the standup.' } }],
@@ -665,6 +767,52 @@ describe('convertV1Workflows: workflows and triggers', () => {
     });
     return out.workflows[0]!;
   }
+
+  it.each([
+    { content: '', message: 'Deploy prod.' },
+    { message: '', goal: 'Deploy prod.' },
+  ])('does not execute a fallback when V1 selected an empty message field: %j', async (fields) => {
+    const wf = scheduled([
+      { id: 'empty', type: 'agent_message', ...fields },
+      { id: 'later', type: 'tool', tool: 'spawn_session', arguments: { task: 'Continue.', workspace: 'app' } },
+    ]);
+    const sent: string[] = [];
+    await runInV2(wf, {}, {}, { ...engine, prompt: async (_id, text) => {
+      sent.push(text);
+      return { threadId: 'thread', queueItemId: 'queue' };
+    } });
+
+    expect(sent).toEqual(['Continue.']);
+    expect(wf.checklist).toContainEqual(expect.stringContaining('V1 selected an empty message field before its fallback'));
+    // The omitted message failed the V1 run before "later", so this still needs a decision.
+    expect(wf.checklist.at(-1)).toContain('must not run on a schedule yet');
+  });
+
+  it.each(['bash ', ' spawn_session'])('leaves the untrimmed unknown tool %j as a no-op, as V1 did', async (tool) => {
+    const wf = scheduled([
+      { id: 'unknown', type: 'tool', tool, arguments: { command: 'Deploy prod.', task: 'Deploy prod.', workspace: 'app' } },
+      { id: 'later', type: 'agent_message', content: 'Continue.' },
+    ]);
+    const sent: string[] = [];
+    await runInV2(wf, {}, {}, { ...engine, prompt: async (_id, text) => {
+      sent.push(text);
+      return { threadId: 'thread', queueItemId: 'queue' };
+    } });
+
+    expect(sent).toEqual(['Continue.']);
+    expect(wf.checklist).toContainEqual(expect.stringContaining(`tool "${tool}", which did nothing in V1`));
+    expect(wf.checklist.at(-1)).not.toContain('must not run on a schedule yet');
+  });
+
+  it('does not flag a message runtime failure in a branch that V1 never ran', () => {
+    const wf = scheduled([{ id: 'never', type: 'conditional', condition: false,
+      then: [{ id: 'empty', type: 'agent_message', content: '', message: 'Deploy prod.' }],
+    }]);
+
+    expect(wf.definition.nodes.map((n) => n.type)).toEqual(['trigger', 'stop']);
+    expect(wf.checklist.join('\n')).not.toContain('empty message field');
+    expect(wf.checklist.at(-1)).not.toContain('must not run on a schedule yet');
+  });
 
   const HELD =
     'The import creates no schedules, so it did not create V1 schedule "Nightly" (0 2 * * *, UTC). This workflow does not do exactly what it did in V1, so it must not run on a schedule yet.';
@@ -823,4 +971,3 @@ describe("V1 export details", () => {
     expect(result.value.workflows[0]?.checklist.join("\n")).toContain("no target session or content, so it failed in V1");
   });
 });
-
