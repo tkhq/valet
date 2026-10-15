@@ -1,10 +1,11 @@
-import { useRouterState } from "@tanstack/react-router";
 import type { NotificationKind, NotificationSummary } from "@valet/api/wire";
 import { useEffect, useRef } from "react";
 import { useNotifications } from "~/api/queries";
+import { cardId } from "./card-context";
+import { usePageActive } from "./page-active";
 import { usePageTitleCount } from "./page-title";
 export { titleWithCount } from "./page-title";
-import { playAttentionChime } from "./notification-sound";
+import { playAttentionChime, unlock } from "./notification-sound";
 import { useWorkspaceScope } from "./workspace-scope";
 
 /**
@@ -93,11 +94,31 @@ export function hrefMatchesLocation(href: string, pathname: string, search: stri
   return thread === null || thread === current.get("thread");
 }
 
+/** A page location that can show a notification's target. */
+export type PageLocation = Omit<PingContext, "tabVisible">;
+
+/** Tabs cards that a person can act in now. Only the deck in the top page adds them. */
+const cardsOnScreen = new Map<string, PageLocation>();
+
+/** Count a Tabs card as on screen until the returned cleanup runs. */
+export function showCardOnScreen(id: string, page: PageLocation): () => void {
+  cardsOnScreen.set(id, page);
+  return () => { cardsOnScreen.delete(id); };
+}
+
+/**
+ * The top page plays the chime for the whole browser tab. A Tabs card is a
+ * separate page with its own poll and audio, so a card never plays it, and
+ * one notification gives one chime. The pages on screen are the top page
+ * while Tabs does not cover it, and every card a person can act in. The hook
+ * reads `window.location`, not the router, because the standalone `/deck`
+ * page runs it without a router.
+ */
 export function useAttentionPing(): void {
   const notificationsQ = useNotifications();
   const { key: workspace } = useWorkspaceScope();
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const search = useRouterState({ select: (s) => s.location.searchStr });
+  const pageActive = usePageActive();
+  useUnlockAudioOnFirstGesture();
 
   // Ids we have already considered. Seeded from the FIRST response without
   // pinging: everything unread at load is backlog, and announcing it would
@@ -114,7 +135,7 @@ export function useAttentionPing(): void {
   const notifications = notificationsQ.data?.notifications;
 
   useEffect(() => {
-    if (!notifications) return;
+    if (!notifications || cardId()) return;
 
     if (seen.current === null) {
       seen.current = new Set(notifications.map((n) => n.id));
@@ -126,20 +147,37 @@ export function useAttentionPing(): void {
     seen.current = new Set(notifications.map((n) => n.id));
     if (fresh.length === 0) return;
 
-    const ctx: PingContext = {
-      pathname,
-      search,
-      workspace,
-      tabVisible: typeof document !== "undefined" && document.visibilityState === "visible",
-    };
-    if (!fresh.some((n) => shouldPing(n, ctx))) return;
+    const tabVisible = document.visibilityState === "visible";
+    const own: PageLocation = { pathname: window.location.pathname, search: window.location.search, workspace };
+    const onScreen = [...(pageActive ? [own] : []), ...cardsOnScreen.values()];
+    if (!fresh.some((n) => isActionable(n) && onScreen.every((page) => shouldPing(n, { ...page, tabVisible })))) return;
     if (!isAttentionSoundEnabled()) return;
 
     const now = Date.now();
     if (now - lastPingAt.current < PING_COOLDOWN_MS) return;
     lastPingAt.current = now;
     playAttentionChime();
-  }, [notifications, pathname, search, workspace]);
+  }, [notifications, workspace, pageActive]);
 
   usePageTitleCount((notifications ?? []).filter(isActionable).length);
+}
+
+/**
+ * Browsers refuse to play audio until the page has seen a real user
+ * gesture, so the first time the assistant needs you could be silent — the
+ * one time it matters most. Resume the context on the first interaction of
+ * the session, then stop listening.
+ */
+function useUnlockAudioOnFirstGesture() {
+  useEffect(() => {
+    const events: (keyof WindowEventMap)[] = ["pointerdown", "keydown"];
+    const onGesture = () => {
+      unlock();
+      for (const e of events) window.removeEventListener(e, onGesture);
+    };
+    for (const e of events) window.addEventListener(e, onGesture, { once: false });
+    return () => {
+      for (const e of events) window.removeEventListener(e, onGesture);
+    };
+  }, []);
 }

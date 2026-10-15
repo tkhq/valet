@@ -7,7 +7,10 @@ never unmounts a card. Each card uses a same-origin frame, preserving the existi
 router, portals, query cache, and live connections without a second page renderer.
 
 The deck stores card IDs and latest page URLs in session storage. Text drafts use
-card-specific storage keys. Ordinary browser tabs keep their current storage keys.
+card-specific keys in session storage, not local storage. A duplicated browser tab
+copies the card IDs and drafts once, and then the two tabs cannot overwrite each
+other's drafts. Sidebar width and collapse state also use card-specific keys.
+Ordinary browser tabs keep their current storage keys.
 Closing a card discards access to its unsent drafts, attachments, and open forms.
 A reload restores pages and saved text; pending uploads and transient dialogs do
 not survive a reload. Closing a card asks for confirmation and never deletes a
@@ -26,6 +29,14 @@ Back to page hides the deck without unmounting it. The underlying normal page al
 stays mounted, so its drafts and scroll state survive opening and closing Tabs.
 
 Hidden pages disable global keyboard shortcuts while retaining mounted state. Escape cannot interrupt a hidden chat or close its child panel.
+
+The top page plays the attention chime for the whole browser tab, so one
+notification plays one chime. Cards never play it. The top page stays quiet when
+its own visible page or a card that a person can act in shows the target. The
+standalone `/deck` page runs the same check for its cards.
+
+In Focus, the neighbor cards sit off screen. A click on their edge still focuses
+them, but their controls are not in the keyboard tab order.
 
 
 ## Review branch behavior

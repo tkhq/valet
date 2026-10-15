@@ -1,4 +1,4 @@
-import { cardStorageKey } from "~/lib/card-context";
+import { cardId, cardStorageKey } from "~/lib/card-context";
 /**
  * Per-thread composer drafts: text, attachments, and intake errors, keyed
  * by the signed-in account and `draftKey(sessionId, threadId)`.
@@ -16,6 +16,11 @@ import { cardStorageKey } from "~/lib/card-context";
  * The text also persists to localStorage, so a draft survives a reload and
  * shows in another window. Attachments stay in memory: they are uploads in
  * flight, not text that can be written back.
+ *
+ * A Tabs card persists its text to sessionStorage instead. Duplicating a
+ * browser tab copies its card ids, so shared localStorage would let the two
+ * tabs overwrite each other's drafts. The copy gets the drafts once and then
+ * keeps its own.
  */
 import { create } from "zustand";
 import type { ComposerImage } from "~/components/session/composer-images";
@@ -96,12 +101,17 @@ interface ComposerDraftStore {
  * that cannot be saved still works for this tab. */
 const STORAGE_PREFIX = cardStorageKey("valet:composer-draft:v2:");
 
+function draftStorage(): Storage {
+  return cardId() ? sessionStorage : localStorage;
+}
+
 function storedDrafts(owner: string): Record<string, ComposerDraft> {
   const byKey: Record<string, ComposerDraft> = {};
   try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const name = localStorage.key(i);
-      const text = name?.startsWith(STORAGE_PREFIX + owner + "\u0000") ? localStorage.getItem(name) : null;
+    const storage = draftStorage();
+    for (let i = 0; i < storage.length; i++) {
+      const name = storage.key(i);
+      const text = name?.startsWith(STORAGE_PREFIX + owner + "\u0000") ? storage.getItem(name) : null;
       if (name && text) byKey[name.slice(STORAGE_PREFIX.length)] = { ...EMPTY_DRAFT, text };
     }
   } catch { /* nothing stored */ }
@@ -111,8 +121,8 @@ function storedDrafts(owner: string): Record<string, ComposerDraft> {
 function storeText(key: string, text: string): void {
   try {
     if (!useComposerDraftStore.getState().owner) return;
-    if (text) localStorage.setItem(STORAGE_PREFIX + key, text);
-    else localStorage.removeItem(STORAGE_PREFIX + key);
+    if (text) draftStorage().setItem(STORAGE_PREFIX + key, text);
+    else draftStorage().removeItem(STORAGE_PREFIX + key);
   } catch { /* keep the in-memory draft */ }
 }
 
@@ -176,11 +186,11 @@ useComposerDraftStore.subscribe((state, prev) => {
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (event) => {
     if (!event.key?.startsWith(STORAGE_PREFIX)) return;
-    if (event.storageArea !== localStorage) return;
     // Storage events can queue behind newer keystrokes or a sent-message clear.
     // Never replay an obsolete value, or echo a remote update to other tabs.
     try {
-      if (localStorage.getItem(event.key) !== event.newValue) return;
+      const storage = draftStorage();
+      if (event.storageArea !== storage || storage.getItem(event.key) !== event.newValue) return;
     } catch { return; }
     applyingRemoteDraft = true;
     try {

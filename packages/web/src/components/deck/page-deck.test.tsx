@@ -49,6 +49,16 @@ describe("persistent page cards", () => {
     expect(container.querySelector('[data-slot="left"] iframe')?.getAttribute("name")).toBe("valet-card:one");
     expect(container.querySelector('[data-slot="right"] iframe')?.getAttribute("name")).toBe("valet-card:two");
   });
+  it("keeps off-screen neighbor cards out of the Focus tab order but lets a click focus them", () => {
+    sessionStorage.setItem(DECK_KEY, JSON.stringify({ cards: ["one", "two", "three"].map((id) => ({ id, url: "/events", title: id })), active: "two", mode: "focus" }));
+    const { container } = render(<PageDeck />);
+    const tabbable = (slot: string) => [...container.querySelectorAll<HTMLElement>(`[data-slot="${slot}"] :is(a, button, iframe)`)].filter((el) => !el.closest("[inert]") && el.tabIndex >= 0);
+    expect(tabbable("center")).toContain(screen.getByRole("button", { name: "Close two" }));
+    expect(tabbable("before")).toEqual([]);
+    expect(tabbable("after")).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Focus three" }));
+    expect(container.querySelector('[data-slot="center"]')?.getAttribute("aria-label")).toBe("three");
+  });
   it("keeps the same browsing contexts through focus, overview, comparison, and trusted navigation updates", () => {
     sessionStorage.setItem(DECK_KEY, JSON.stringify({ cards: [{ id: "one", url: "/chat?workspace=team-a", title: "First" }, { id: "two", url: "/events?workspace=team-b", title: "Second" }], active: "one", mode: "focus" }));
     const { container } = render(<PageDeck />);

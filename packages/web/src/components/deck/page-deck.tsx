@@ -1,4 +1,6 @@
 import { cardStorageKey } from "~/lib/card-context";
+import { unlock } from "~/lib/notification-sound";
+import { showCardOnScreen } from "~/lib/use-attention-ping";
 import { useEffect, useRef, useState } from "react";
 import { Columns2, Grid2X2, Maximize2, Plus, X, ArrowUpRight, ChevronLeft, ChevronRight, Layers3, ArrowLeft } from "lucide-react";
 import { ConfirmDialog } from "~/components/primitives/confirm-dialog";
@@ -9,9 +11,20 @@ function loadDeck() {
   try { return restoreDeck(sessionStorage.getItem(DECK_KEY)); } catch { return restoreDeck(null); }
 }
 
+/** The workspace a card last used, which its URL can omit. */
+function cardWorkspace(id: string): string | undefined {
+  try { return sessionStorage.getItem(cardStorageKey("valet:workspace", id)) ?? undefined; } catch { return undefined; }
+}
+
 function LivePage({ card, interactive, register }: { card: PageCard; interactive: boolean; register: (id: string, frame: HTMLIFrameElement | null) => void }) {
   // Navigation updates the saved URL, never the mounted frame's src.
   const [initialUrl] = useState(card.url);
+  // A card a person can act in suppresses the attention chime for its own page.
+  useEffect(() => {
+    if (!interactive) return;
+    const url = new URL(card.url, location.origin);
+    return showCardOnScreen(card.id, { pathname: url.pathname, search: url.search, workspace: cardWorkspace(card.id) });
+  }, [interactive, card.id, card.url]);
   return <iframe ref={(frame) => register(card.id, frame)} name={`valet-card:${card.id}`} src={initialUrl}
     title={card.title} inert={!interactive} className="deck-frame" allow="clipboard-write; microphone" />;
 }
@@ -37,7 +50,8 @@ export function PageDeck({ onClose, visible = true }: { onClose?: () => void; vi
       const id = [...frames.current].find(([, frame]) => frame.contentWindow === event.source)?.[0];
       const data: unknown = event.data;
       if (!id || typeof data !== "object" || data === null || !("type" in data)) return;
-      if (data.type === "valet:focus") { setDeck((prev) => prev.active === id ? prev : { ...prev, active: id }); return; }
+      // A gesture in a card also activates this page, so its chime can play.
+      if (data.type === "valet:focus") { unlock(); setDeck((prev) => prev.active === id ? prev : { ...prev, active: id }); return; }
       if (data.type !== "valet:page" || !("url" in data) || !("title" in data)) return;
       const url = internalPage(data.url);
       const title = typeof data.title === "string" ? data.title.slice(0, 200) : "Valet page";
@@ -54,8 +68,7 @@ export function PageDeck({ onClose, visible = true }: { onClose?: () => void; vi
     setDeck((prev) => ({ ...prev, active: id, mode: prev.mode === "overview" ? "focus" : prev.mode })); }
   function add() {
     if (deck.cards.length >= MAX_CARDS) return;
-    let workspace = new URL(active.url, location.origin).searchParams.get("workspace") ?? "user";
-    try { workspace = sessionStorage.getItem(cardStorageKey("valet:workspace", active.id)) ?? workspace; } catch { /* Keep the explicit page scope. */ }
+    const workspace = cardWorkspace(active.id) ?? new URL(active.url, location.origin).searchParams.get("workspace") ?? "user";
     const card = newCard(`/chat?workspace=${encodeURIComponent(workspace)}`);
     setDeck((prev) => ({ ...prev, cards: [...prev.cards, card], active: card.id, mode: "focus" }));
   }
@@ -82,16 +95,18 @@ export function PageDeck({ onClose, visible = true }: { onClose?: () => void; vi
       {deck.cards.map((card, index) => {
         const selected = card.id === deck.active;
         const slot = deck.mode === "overview" ? `overview-${index}` : deck.mode === "compare" && deck.cards.length > 1 ? index === pairStart ? "left" : index === pairStart + 1 ? "right" : "parked" : selected ? "center" : index < activeIndex ? "before" : "after";
+        // In Focus, neighbor cards sit off screen. A click on their edge still works, but their controls leave the tab order.
+        const peeking = slot === "before" || slot === "after";
         return <section key={card.id} className="deck-card" data-slot={slot} data-active={selected} aria-label={card.title}
-          inert={slot === "parked" || slot === "before" && index !== activeIndex - 1 || slot === "after" && index !== activeIndex + 1}>
-          <div className="deck-card-bar">
+          inert={slot === "parked" || peeking && Math.abs(index - activeIndex) > 1}>
+          <div className="deck-card-bar" inert={peeking}>
             <button className="deck-card-name" onClick={() => focus(card.id)}><span className="deck-dot" />{card.title.replace(/ · Valet$/, "")}</button>
             <a href={card.url} target="_blank" rel="noreferrer" aria-label={`Open ${card.title} in a browser tab`}><ArrowUpRight size={15} /></a>
             <button onClick={() => setClosing(card.id)} aria-label={`Close ${card.title}`}><X size={15} /></button>
           </div>
           <div className="deck-page">
             <LivePage card={card} interactive={visible && deck.mode !== "overview" && (selected || slot === "left" || slot === "right")} register={(id, frame) => { if (frame) frames.current.set(id, frame); else frames.current.delete(id); }} />
-            {(deck.mode === "overview" || !selected && deck.mode !== "compare") && <button className="deck-card-cover" aria-label={`Focus ${card.title}`} onClick={() => focus(card.id)} />}
+            {(deck.mode === "overview" || !selected && deck.mode !== "compare") && <button className="deck-card-cover" aria-label={`Focus ${card.title}`} tabIndex={peeking ? -1 : undefined} onClick={() => focus(card.id)} />}
           </div>
         </section>;
       })}

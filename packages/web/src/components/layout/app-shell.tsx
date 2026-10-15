@@ -15,6 +15,7 @@ import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 
 const COLLAPSED_KEY = cardStorageKey("valet:sidebar-collapsed");
+const WIDTH_KEY = cardStorageKey("valet:sidebar-width");
 
 /**
  * The sidebar's open/closed state, published so the TOP NAV can own the
@@ -96,7 +97,7 @@ export function AppShell({
 }) {
   const { open: mobileOpen, setOpen: setMobileOpen } = useResponsiveOverlay("md");
   const sidebarPane = useResizablePane({
-    storageKey: "valet:sidebar-width", cssVar: "--sidebar-width",
+    storageKey: WIDTH_KEY, cssVar: "--sidebar-width",
     defaultWidth: 288, min: 200, max: 480, side: "left",
     ariaLabel: "Resize thread sidebar",
   });
