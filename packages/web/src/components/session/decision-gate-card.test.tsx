@@ -186,6 +186,19 @@ describe("DecisionGateCard — another member's shared account", () => {
     expect(screen.queryByRole("button", { name: "Allow" })).toBeNull();
   });
 
+  it("describes an actor-only approval as a review request", () => {
+    meData = { id: "al", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current", timezone: null, timezoneReportDone: false };
+    renderCard({ ...borrow, title: "Approve Update account?" });
+    expect(screen.getByText("Valet is waiting for Bea to review this request.")).toBeTruthy();
+    expect(screen.queryByText(/shared account/)).toBeNull();
+  });
+
+  it("keeps the account context for shared-account approval requests", () => {
+    meData = { id: "al", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current", timezone: null, timezoneReportDone: false };
+    renderCard({ ...borrow, provenance: { baseMode: "allow", source: "shared_account" } });
+    expect(screen.getByText(/This needs Bea's shared account/)).toBeTruthy();
+  });
+
   // The raw source id showed as "Gated by policy (shared_account)." under a
   // title that already says whose account it is.
   it("shows no raw policy source on the account owner's card", () => {
