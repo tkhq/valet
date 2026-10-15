@@ -109,6 +109,35 @@ describe("settings actions", () => {
     expect(row?.name).not.toBe("Late edit");
   });
 
+  it.each(["approve", "approve_session"])("rejects another member's %s before policy grant side effects", async (actionId) => {
+    let grants = 0;
+    const result = await invokeAction(buildPluginCatalog([settingsActionPlugin(api.providers.db, () => api.providers.engineCredentials)]),
+      "settings.update_organization", { name: "Unauthorized approval" }, context({
+        policyResolver: {
+          resolve: async () => ({ mode: "require_approval", provenance: { baseMode: "require_approval", source: "risk_default" }, extraGateActions: [{ id: "approve_session", label: "Approve for this session", approves: true }] }),
+          onResolution: async () => { grants++; },
+        },
+        requestDecision: async () => ({ actionId, resolvedBy: "test-member", resolvedAt: Date.now() }),
+      }), "Rename organization");
+    expect(result.kind).toBe("denied-approval");
+    expect(grants).toBe(0);
+    const [row] = await api.providers.db.select().from(orgs).where(eq(orgs.id, "local-org"));
+    expect(row?.name).not.toBe("Unauthorized approval");
+  });
+
+  it("binds default catalog approval to the original verified human", async () => {
+    const result = await invokeAction(buildPluginCatalog([settingsActionPlugin(api.providers.db, () => api.providers.engineCredentials)]),
+      "settings.update_account", { name: "Unauthorized approval" }, context({
+        requestDecision: async (request) => {
+          expect(request.context?.approver).toEqual({ userId: "local-user" });
+          return { actionId: "approve", resolvedBy: "test-member", resolvedAt: Date.now() };
+        },
+      }), "Change my name");
+    expect(result.kind).toBe("denied-approval");
+    const [row] = await api.providers.db.select().from(users).where(eq(users.id, "local-user"));
+    expect(row?.name).not.toBe("Unauthorized approval");
+  });
+
   it("rejects arbitrary account/org targets and privileged fields at the catalog boundary", async () => {
     const catalog = buildPluginCatalog([settingsActionPlugin(api.providers.db, () => api.providers.engineCredentials)]);
     for (const params of [{ name: "Oops", user_id: "test-member" }, { allowPublicArtifacts: true }, { credentials: "secret" }]) {

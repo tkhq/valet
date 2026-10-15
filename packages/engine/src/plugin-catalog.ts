@@ -67,6 +67,8 @@ export interface PluginAction<TParams extends TSchema = TSchema> {
   name: string;
   description: string;
   riskLevel: RiskLevel;
+  /** Only the verified prompt author may answer this action's approval gate. */
+  approvalScope?: "actor";
   parameters: TParams;
   execute: (
     args: Static<TParams>,
@@ -452,6 +454,7 @@ function approvalGateRequest(
   args: Record<string, unknown> | undefined,
   summary: string,
   resumeKey: string,
+  ctx: ToolContext,
 ): DecisionGateRequest {
   return {
     type: "approval",
@@ -470,8 +473,15 @@ function approvalGateRequest(
       // Approvals are not sticky (`findStickyTerminalGate`): a later call
       // opens a new gate. The policy path clears this for a borrow gate.
       oneShot: true,
+      ...(entry.action.approvalScope === "actor" && ctx.interactiveActor
+        ? { approver: { userId: ctx.interactiveActor.id } } : {}),
     },
   };
+}
+
+function approvalActorMatches(entry: CatalogEntry, ctx: ToolContext, resolution: DecisionResolution): boolean {
+  return entry.action.approvalScope !== "actor" ||
+    (ctx.interactiveActor !== undefined && resolution.resolvedBy === ctx.interactiveActor.id);
 }
 
 /**
@@ -654,7 +664,7 @@ export async function invokeAction(
     if (approvalMode === "require_approval") {
       const gateOutcome = await requestApprovalDecision(
         ctx,
-        approvalGateRequest(entry, actionId, args, summary, resumeKey),
+        approvalGateRequest(entry, actionId, args, summary, resumeKey, ctx),
       );
       if (gateOutcome.kind === "expired") return { kind: "expired-approval" };
       const resolution = gateOutcome.resolution;
@@ -662,6 +672,7 @@ export async function invokeAction(
       // yet been decided — distinct from an outright deny.
       if (resolution.actionId === "pending") return { kind: "pending-approval" };
       if (resolution.actionId !== "approve") return { kind: "denied-approval" };
+      if (!approvalActorMatches(entry, ctx, resolution)) return { kind: "denied-approval" };
       const availability = await checkServiceAvailability(
         catalog,
         entry.service,
@@ -781,7 +792,7 @@ export async function invokeAction(
     // the row so denial stickiness classifies host rejection actions the
     // same way isApprovedResolution does.
     const extras: DecisionAction[] = decision.approver ? [] : decision.extraGateActions ?? [];
-    const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey);
+    const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey, ctx);
     if (decision.approver?.shareGeneration) {
       const share = `:share:${decision.approver.shareGeneration}`;
       baseReq.dedupeKey = `${qualifiedId(entry)}${share}`;
@@ -828,8 +839,9 @@ export async function invokeAction(
     gateOrdinal = resolution.gateOrdinal;
     // onResolution is awaited BEFORE the outcome is interpreted; a throw
     // fails the approval closed (treated as not-approved).
+    const approverMatches = approvalActorMatches(entry, ctx, resolution);
     let onResolutionThrew = false;
-    if (resolver.onResolution) {
+    if (resolver.onResolution && approverMatches) {
       try {
         await resolver.onResolution(input, decision, resolution);
       } catch {
@@ -837,7 +849,7 @@ export async function invokeAction(
       }
     }
     const approved =
-      !onResolutionThrew && isApprovedResolution(resolution, decision.extraGateActions);
+      approverMatches && !onResolutionThrew && isApprovedResolution(resolution, decision.extraGateActions);
     if (!approved) {
       emitInvocation(resolver, {
         ...baseRecord,

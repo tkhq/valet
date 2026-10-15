@@ -136,6 +136,8 @@ async function userFromSession(auth: ValetAuth, db: AppDb, headers: Headers): Pr
 export interface RequestIdentity {
   user: AuthUser;
   principal: RequestPrincipal;
+  /** Retained by optional-auth surfaces that forward a user's submission. */
+  authVia?: AuthVia;
   /** A `valet login` CLI token (`auth/cli-tokens.ts`), not an API key. */
   cli?: boolean;
 }
@@ -230,9 +232,12 @@ export async function resolveOptionalIdentity(
   const { auth, db } = opts;
   if (auth) {
     const sessionUser = await userFromSession(auth, db, c.req.raw.headers);
-    if (sessionUser) return { user: sessionUser, principal: userPrincipal(sessionUser.id) };
+    if (sessionUser) return { user: sessionUser, principal: userPrincipal(sessionUser.id), authVia: "session" };
     const apiKeyHeader = c.req.header("x-api-key");
-    if (apiKeyHeader) return identityFromApiKey(auth, db, apiKeyHeader);
+    if (apiKeyHeader) {
+      const identity = await identityFromApiKey(auth, db, apiKeyHeader);
+      return identity ? { ...identity, authVia: identity.cli ? "cli" : "apiKey" } : undefined;
+    }
     return undefined;
   }
 
@@ -257,11 +262,11 @@ export async function resolveOptionalIdentity(
           role: row.role,
           orgId: LOCAL_ORG.id,
         };
-        return { user: impersonated, principal: userPrincipal(impersonated.id) };
+        return { user: impersonated, principal: userPrincipal(impersonated.id), authVia: "stub" };
       }
     }
     const stub = stubUser();
-    return { user: stub, principal: userPrincipal(stub.id) };
+    return { user: stub, principal: userPrincipal(stub.id), authVia: "stub" };
   }
 
   return undefined;
