@@ -5,12 +5,14 @@ import { Button } from "~/components/primitives";
 /**
  * The catalog id of a model that a run recorded. A run records the
  * provider's own id (`claude-sonnet-4-5`), and a step names a catalog id
- * (`anthropic/claude-sonnet-4-5`). Gives nothing unless exactly one approved
- * model matches.
+ * (`anthropic/claude-sonnet-4-5`). Gives nothing unless exactly one catalog
+ * model matches and it is approved. The match count includes unapproved
+ * models: when two providers expose the same id, the run does not say which
+ * one it called, so the step must not pin either.
  */
 function catalogModelId(catalog: ModelInfo[], recorded: string): string | undefined {
-  const matches = catalog.filter((model) => model.approved && (model.id === recorded || model.id.endsWith(`/${recorded}`)));
-  return matches.length === 1 ? matches[0].id : undefined;
+  const matches = catalog.filter((model) => model.id === recorded || model.id.endsWith(`/${recorded}`));
+  return matches.length === 1 && matches[0].approved ? matches[0].id : undefined;
 }
 
 /**
