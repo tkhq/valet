@@ -181,6 +181,24 @@ describe("SubscriptionsPanel", () => {
     expect(openAssistant).toHaveBeenCalledWith(expect.stringContaining("save a paused proposal for me to review before enabling it"));
   });
 
+  it("names the subscription a proposal replaces in its review", () => {
+    subscriptionsData = { subscriptions: [
+      subscription({ id: "sub_live", name: "Replies v1" }),
+      subscription({ id: "sub_next", name: "Replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_live" } }),
+    ] };
+    render(<TooltipProvider><SubscriptionsPanel reviewId="sub_next" /></TooltipProvider>);
+    expect(screen.getByText("Replaces").nextElementSibling?.textContent).toBe("Replies v1. Enabling this subscription turns that one off.");
+  });
+
+  it("does not promise to turn off a version that is already off", () => {
+    subscriptionsData = { subscriptions: [
+      subscription({ id: "sub_live", name: "Replies v1", enabled: false }),
+      subscription({ id: "sub_next", name: "Replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_live" } }),
+    ] };
+    render(<TooltipProvider><SubscriptionsPanel reviewId="sub_next" /></TooltipProvider>);
+    expect(screen.getByText("Replaces").nextElementSibling?.textContent).toBe("Replies v1, which is already off.");
+  });
+
   it("resets the organization filter when the workspace changes", () => {
     subscriptionsData = { subscriptions: [
       subscription({ id: "org", name: "Org watch", ownerType: "org", ownerId: "org_1" }),

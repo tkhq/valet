@@ -274,6 +274,35 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   workflow targets on different workflows never collide (intentional
   fan-out); a workflow↔orchestrator pair warns but never blocks. Disabled
   rows are skipped — they cannot fire — and enabling one re-runs the gate.
+- Replacement proposals: `events.propose_subscription` takes an optional
+  `replaces`, the ID of an enabled assistant subscription
+  (`target.kind: "orchestrator"`) with the same owner, and stores it as
+  `target.replaces`. The action refuses an unknown ID, an ID from another
+  workspace, a workflow trigger, and a disabled subscription. When a person
+  enables the proposal, the PATCH route disables the replaced subscription in
+  the same transaction and leaves it out of the collision gate, so one version
+  replies. The PATCH lookup applies the same owner and kind checks. The
+  disable requires the replaced subscription to still be on. If it is off,
+  the enable is refused with 409. The message tells the person to delete the
+  proposal and, to change the subscription that replies now, ask for a new
+  proposal that replaces it. It never advises turning the old version back
+  on: a successor, a later version that replaced the successor, or a
+  rollback can each make that leave two versions replying, and the rows do
+  not keep that history reliably. If the old version was removed, the
+  message tells the person to delete the proposal and ask for a new one. Deliveries already
+  queued for the replaced version when it turns off are skipped at dispatch,
+  as for any disabled subscription, and the replacement gets no delivery for
+  an event ingested before it was on. A swap can therefore miss an event
+  that arrives during it. The review dialog
+  says when the replaced version is already off instead of promising to turn
+  it off. The enable clears `target.replaces` and records the ID as
+  `target.replaced`, so turning the new version off and on later leaves the
+  old one alone. A repeated proposal key returns the stored proposal before it
+  checks `replaces`; a retry matches the spent form only when `replaced`
+  names the same ID, so adding `replaces` to a proposal stored without one is
+  a key conflict. The review dialog names the
+  replaced subscription. An agent still cannot enable or change a live
+  subscription.
 - Workflow editor: an "event" trigger node type whose save/update syncs an
   `event_subscriptions` row.
 

@@ -100,6 +100,17 @@ function describeTarget(
   return "Notify your assistant";
 }
 
+/** What enabling `sub` does to the subscription it replaces, named, or by ID
+ * when the list does not hold it. Undefined when `sub` replaces nothing. A
+ * version that is already off is not turned off again, so the note says so. */
+function replacementNote(sub: EventSubscriptionWire, subscriptions: EventSubscriptionWire[]): string | undefined {
+  const id = sub.target.kind === "orchestrator" ? sub.target.replaces : undefined;
+  if (id === undefined) return undefined;
+  const replaced = subscriptions.find((s) => s.id === id);
+  if (replaced && !replaced.enabled) return `${replaced.name}, which is already off.`;
+  return `${replaced?.name ?? id}. Enabling this subscription turns that one off.`;
+}
+
 /**
  * Event subscriptions: the rules that turn an ingested event into action —
  * a workflow run or an orchestrator prompt. List with enable/disable,
@@ -202,6 +213,7 @@ export function SubscriptionsPanel({ reviewId, onReviewClose }: { reviewId?: str
               teamNames={teamNames}
               viewerId={meQ.data?.id}
               mutable={canMutate(sub, meQ.data?.id, memberTeamIds)}
+              replacesNote={replacementNote(sub, subscriptions)}
             />
           ))}
         </div>
@@ -213,7 +225,7 @@ export function SubscriptionsPanel({ reviewId, onReviewClose }: { reviewId?: str
           load. */}
       {creating && <AutomationWizard open onOpenChange={setCreating} />}
       {reviewId && subsQ.data && !proposed && <ErrorRow>This proposal is not in the selected workspace. Switch to its workspace and reopen the review link.</ErrorRow>}
-      {proposed && canMutate(proposed, meQ.data?.id, memberTeamIds) && <EditSubscriptionDialog key={proposed.id} open review sub={proposed}
+      {proposed && canMutate(proposed, meQ.data?.id, memberTeamIds) && <EditSubscriptionDialog key={proposed.id} open review sub={proposed} replacesNote={replacementNote(proposed, subscriptions)}
         targetLabel={describeTarget(proposed.target, workflowNames, teamNames)} onOpenChange={(open) => { if (!open) onReviewClose?.(); }} />}
 
     </div>
@@ -226,6 +238,7 @@ function SubscriptionRow({
   teamNames,
   viewerId,
   mutable,
+  replacesNote,
 }: {
   sub: EventSubscriptionWire;
   workflowNames: Map<string, string>;
@@ -234,6 +247,7 @@ function SubscriptionRow({
   viewerId: string | undefined;
   /** False for a colleague's personal subscription — visible, not actionable. */
   mutable: boolean;
+  replacesNote?: string;
 }) {
   const patch = usePatchEventSubscription();
   const del = useDeleteEventSubscription();
@@ -328,6 +342,7 @@ function SubscriptionRow({
           onOpenChange={setEditing}
           sub={sub}
           review={!sub.enabled}
+          replacesNote={replacesNote}
           targetLabel={describeTarget(sub.target, workflowNames, teamNames)}
         />
       )}

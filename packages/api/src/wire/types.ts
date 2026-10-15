@@ -4634,6 +4634,19 @@ export type EventSubscriptionTargetWire =
        * write that names anything else is refused.
        */
       userPromptTemplate?: string;
+      /**
+       * The ID of a subscription with the same owner that this rule updates.
+       * `events.propose_subscription` sets it. When a person enables this
+       * rule, the server disables that subscription in the same transaction,
+       * so one version replies.
+       */
+      replaces?: string;
+      /**
+       * The ID that `replaces` named, recorded when an enable turned that
+       * subscription off and cleared the link. It changes nothing; a retried
+       * proposal reads it to tell a spent link from one that never existed.
+       */
+      replaced?: string;
     };
 
 /**

@@ -11,7 +11,7 @@ import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import type { RunHost } from "@valet/workflow";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
@@ -2157,5 +2157,156 @@ describe("subscription collision gate (TKAI-294)", () => {
       body: JSON.stringify({ name: "still parked" }),
     });
     expect(rename.status).toBe(200);
+  });
+});
+
+describe("replacement proposals", () => {
+  const MATCH = {
+    eventKeys: ["github.pull_request.opened"],
+    filters: [{ field: "repo", op: "eq" as const, value: "acme/widgets" }],
+  };
+
+  /** The caller's live rule and a disabled proposal that replaces it, with
+   * the same match, so they would collide if both were enabled. */
+  async function seedReplacement(a: TestApi): Promise<void> {
+    const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH };
+    await seedSubscriptionRow(a, "sub_live", "local-org", { ...mine, name: "replies v1" });
+    await seedSubscriptionRow(a, "sub_next", "local-org", {
+      ...mine, name: "replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_live" },
+    });
+  }
+
+  async function enabledById(a: TestApi): Promise<Record<string, boolean>> {
+    const rows = await a.providers.db.select().from(eventSubscriptions);
+    return Object.fromEntries(rows.map((r) => [r.id, r.enabled]));
+  }
+
+  it("enabling a replacement disables the replaced subscription, never one in another workspace", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    // A hand-written link to a colleague's rule is refused: from this
+    // workspace the rule does not exist, and the colleague's rule stays on.
+    await seedSubscriptionRow(a, "sub_colleague", "local-org", {
+      ...MATCH, filters: [{ field: "repo", op: "eq", value: "acme/colleague" }],
+    });
+    await seedSubscriptionRow(a, "sub_stray", "local-org", {
+      ownerType: "user", ownerId: "local-user", enabled: false, eventKeys: MATCH.eventKeys,
+      filters: [{ field: "repo", op: "eq", value: "acme/stray" }], target: { kind: "orchestrator", replaces: "sub_colleague" },
+    });
+    expect((await patchSubscription(a.baseUrl, "sub_stray", { enabled: true })).status).toBe(409);
+    expect(await enabledById(a)).toMatchObject({ sub_colleague: true, sub_stray: false });
+    // A link to a workflow trigger is refused too: a trigger is not an assistant version.
+    await seedSubscriptionRow(a, "sub_trigger", "local-org", {
+      ownerType: "user", ownerId: "local-user", eventKeys: MATCH.eventKeys,
+      filters: [{ field: "repo", op: "eq", value: "acme/trigger" }], target: { kind: "workflow", workflowId: "wf-1" },
+    });
+    await seedSubscriptionRow(a, "sub_takeover", "local-org", {
+      ownerType: "user", ownerId: "local-user", enabled: false, eventKeys: MATCH.eventKeys,
+      filters: [{ field: "repo", op: "eq", value: "acme/takeover" }], target: { kind: "orchestrator", replaces: "sub_trigger" },
+    });
+    expect((await patchSubscription(a.baseUrl, "sub_takeover", { enabled: true })).status).toBe(409);
+    expect(await enabledById(a)).toMatchObject({ sub_trigger: true, sub_takeover: false });
+
+    // The replaced rule is not a collision peer, so no override is needed.
+    const res = await patchSubscription(a.baseUrl, "sub_next", { enabled: true });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as PatchEventSubscriptionResponse;
+    expect(body.enabled).toBe(true);
+    expect(body.collisions).toBeUndefined();
+    expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: true });
+    // The link is spent and recorded: turning the new version off and on leaves the old one alone.
+    expect(body.target).not.toHaveProperty("replaces");
+    expect(body.target).toMatchObject({ replaced: "sub_live" });
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: false })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: true })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true, allowCollision: true })).status).toBe(200);
+    expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: true });
+  });
+
+  // Whatever turned the replaced version off, the 409 sends the reviewer to
+  // the version that replies now and never says to turn the old one back on:
+  // its history decides whether that leaves two versions replying.
+  async function expectStale(a: TestApi, id: string): Promise<void> {
+    const stale = await patchSubscription(a.baseUrl, id, { enabled: true, allowCollision: true });
+    expect(stale.status).toBe(409);
+    const message = ((await stale.json()) as { error: string }).error;
+    expect(message).toContain("Delete this proposal.");
+    expect(message).not.toContain("back on");
+  }
+
+  it("refuses a replacement whose version a sibling already replaced", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    await seedSubscriptionRow(a, "sub_sibling", "local-org", {
+      ownerType: "user", ownerId: "local-user", ...MATCH, name: "replies v3", enabled: false, target: { kind: "orchestrator", replaces: "sub_live" },
+    });
+    expect((await patchSubscription(a.baseUrl, "sub_sibling", { enabled: true })).status).toBe(200);
+    await expectStale(a, "sub_next");
+    expect(await enabledById(a)).toMatchObject({ sub_live: false, sub_next: false, sub_sibling: true });
+  });
+
+  it("refuses a replacement of a version that was rolled back, and of one rolled back and then paused", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH, enabled: false };
+    await seedSubscriptionRow(a, "sub_v3", "local-org", { ...mine, name: "replies v3", target: { kind: "orchestrator", replaces: "sub_next" } });
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(200);
+    // Roll back by hand: the new version off, the original on.
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: false })).status).toBe(200);
+    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: true, allowCollision: true })).status).toBe(200);
+    await expectStale(a, "sub_v3");
+    expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: false, sub_v3: false });
+    // A proposal for the restored original works while it is on; once it is paused, it is stale too.
+    await seedSubscriptionRow(a, "sub_q", "local-org", { ...mine, name: "replies q", target: { kind: "orchestrator", replaces: "sub_live" } });
+    expect((await patchSubscription(a.baseUrl, "sub_live", { enabled: false })).status).toBe(200);
+    await expectStale(a, "sub_q");
+  });
+
+  it("refuses a stale replacement after the version that replaced it is deleted, and writes nothing onto the replaced row", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    const [before] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_live"));
+    const mine = { ownerType: "user" as const, ownerId: "local-user", ...MATCH, enabled: false };
+    await seedSubscriptionRow(a, "sub_old", "local-org", { ...mine, name: "replies v2b", target: { kind: "orchestrator", replaces: "sub_live" } });
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(200);
+    // The replaced row keeps its own target, so a retried proposal for it still matches.
+    const [after] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_live"));
+    expect(after.target).toEqual(before.target);
+    await a.providers.db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_next"));
+    await expectStale(a, "sub_old");
+  });
+
+  it("refuses a replacement whose version was removed, and keeps its link", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_orphan", "local-org", {
+      ownerType: "user", ownerId: "local-user", ...MATCH, name: "replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_gone" },
+    });
+    const refused = await patchSubscription(a.baseUrl, "sub_orphan", { enabled: true });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: expect.stringContaining("Delete this proposal") });
+    const [orphan] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, "sub_orphan"));
+    expect(orphan).toMatchObject({ enabled: false, target: { replaces: "sub_gone" } });
+  });
+
+  it("stores no replacement link on a direct create", async () => {
+    const a = await boot();
+    const created = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { ...VALID_BODY.target, replaces: "sub_live" } });
+    expect(created.status).toBe(201);
+    expect((await created.json() as CreateEventSubscriptionResponse).target).not.toHaveProperty("replaces");
+  });
+
+  it("rolls back the enable when the replaced subscription cannot be disabled", async () => {
+    const a = await boot();
+    await seedReplacement(a);
+    // Fail only the second write of the transaction: the disable of sub_live.
+    await a.providers.db.execute(sql`
+      CREATE FUNCTION refuse_live_disable() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'refused'; END $$`);
+    await a.providers.db.execute(sql`
+      CREATE TRIGGER refuse_live_disable BEFORE UPDATE ON event_subscriptions
+      FOR EACH ROW WHEN (OLD.id = 'sub_live') EXECUTE FUNCTION refuse_live_disable()`);
+
+    expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(500);
+    expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: false });
   });
 });
