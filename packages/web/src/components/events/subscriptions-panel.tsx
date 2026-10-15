@@ -100,15 +100,18 @@ function describeTarget(
   return "Notify your assistant";
 }
 
-/** What enabling `sub` does to the subscription it replaces, named, or by ID
- * when the list does not hold it. Undefined when `sub` replaces nothing. A
- * version that is already off is not turned off again, so the note says so. */
+/** What enabling `sub` does to the subscription it replaces. Undefined when
+ * `sub` replaces nothing. The list holds every subscription of `sub`'s owner,
+ * and a replacement names only one of those, so an ID the list lacks was
+ * removed: the server refuses that enable, and the note says so. A version
+ * that is already off is not turned off again. */
 function replacementNote(sub: EventSubscriptionWire, subscriptions: EventSubscriptionWire[]): string | undefined {
   const id = sub.target.kind === "orchestrator" ? sub.target.replaces : undefined;
   if (id === undefined) return undefined;
   const replaced = subscriptions.find((s) => s.id === id);
-  if (replaced && !replaced.enabled) return `${replaced.name}, which is already off.`;
-  return `${replaced?.name ?? id}. Enabling this subscription turns that one off.`;
+  if (!replaced) return "A subscription that was removed. Delete this proposal, then ask the assistant for a new one.";
+  if (!replaced.enabled) return `${replaced.name}, which is already off.`;
+  return `${replaced.name}. Enabling this subscription turns that one off.`;
 }
 
 /**

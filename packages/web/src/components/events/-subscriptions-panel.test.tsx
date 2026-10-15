@@ -190,6 +190,15 @@ describe("SubscriptionsPanel", () => {
     expect(screen.getByText("Replaces").nextElementSibling?.textContent).toBe("Replies v1. Enabling this subscription turns that one off.");
   });
 
+  it("says a removed replaced subscription was removed, instead of promising to turn it off", () => {
+    subscriptionsData = { subscriptions: [
+      subscription({ id: "sub_next", name: "Replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_gone" } }),
+    ] };
+    render(<TooltipProvider><SubscriptionsPanel reviewId="sub_next" /></TooltipProvider>);
+    expect(screen.getByText("Replaces").nextElementSibling?.textContent)
+      .toBe("A subscription that was removed. Delete this proposal, then ask the assistant for a new one.");
+  });
+
   it("does not promise to turn off a version that is already off", () => {
     subscriptionsData = { subscriptions: [
       subscription({ id: "sub_live", name: "Replies v1", enabled: false }),
