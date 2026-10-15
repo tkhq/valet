@@ -3773,8 +3773,15 @@ export interface UsageBreakdownResponse {
   byModel: (UsageBucket & { model: string | null })[];
   /** Org scope always; team scope when the caller administers the team. */
   byUser?: (UsageBucket & {
+    /** The actor id: a user id, `"shared"` for no actor, or a workspace
+     * principal (`team:{teamId}`, `org:{orgId}`) for unattended work. */
     userId: string;
+    /** Display label. Never a raw id: a deleted or hidden team reads
+     * "Another team", and a deleted user reads "Former member". */
     name: string;
+    /** True when the actor is a team (its schedules, event subscriptions,
+     * and API keys), not a person. */
+    isTeam?: boolean;
     /** Team admins only. Distinct session-days divided by dailyAgentWindow.days. */
     avgDailyActiveAgents?: number;
   })[];

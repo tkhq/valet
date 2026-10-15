@@ -329,6 +329,86 @@ describe("GET /api/usage — scope=team", () => {
   });
 });
 
+describe("GET /api/usage — member labels", () => {
+  /** Unattended team work (a schedule, an event subscription, a team API
+   * key) runs as the team principal `team:{teamId}`, so a session's user can
+   * be a team. Each session below has one billable turn, owned by team-x. */
+  async function seedActorSpend(api: TestApi, now: number): Promise<void> {
+    const db = api.providers.db;
+    await db.execute(sql`UPDATE orgs SET features = features || '{"organizations": true}'::jsonb`);
+    await db.insert(teams).values([
+      { id: "team-x", orgId: "local-org", name: "Platform", createdAt: now },
+      { id: "team-y", orgId: "local-org", name: "Research", createdAt: now },
+    ]);
+    await db.insert(teamMembers).values({ teamId: "team-x", userId: "local-user", role: "admin" });
+    const owned = { orgId: "local-org", workspace: "/w", status: "active" as const, ownerType: "team" as const, ownerId: "team-x", createdAt: now, updatedAt: now };
+    await db.insert(agentSessions).values([
+      { ...owned, id: "s-scheduled", userId: "team:team-x" },
+      // Moved in from a team the viewer is not on, and from one since deleted.
+      { ...owned, id: "s-from-other", userId: "team:team-y" },
+      { ...owned, id: "s-from-deleted", userId: "team:team-gone" },
+      { ...owned, id: "s-org-workflow", userId: "org:local-org" },
+      { ...owned, id: "s-person", userId: "test-member" },
+      { ...owned, id: "s-former", userId: "user-gone" },
+    ]);
+    for (const id of ["s-scheduled", "s-from-other", "s-from-deleted", "s-org-workflow", "s-person", "s-former"]) {
+      await seedEngineEntry(api, `e-${id}`, id, now);
+    }
+  }
+
+  function labels(rows: { userId: string; name: string; isTeam?: boolean }[] | undefined) {
+    return Object.fromEntries((rows ?? []).map((row) => [row.userId, { name: row.name, isTeam: row.isTeam === true }]));
+  }
+
+  it("names a team's own work by the team, never by its id, in team and org scope", async () => {
+    api = await bootTestApi();
+    await seedActorSpend(api, Date.now());
+
+    const team = await (await fetch(`${api.baseUrl}/api/usage/breakdown?scope=team&teamId=team-x&window=7d`)).json() as UsageBreakdownResponse;
+    // A team view names only its own team: another team's name depends on
+    // access to that team, which the team scope does not carry.
+    expect(labels(team.byUser)).toEqual({
+      "team:team-x": { name: "Platform", isTeam: true },
+      "team:team-y": { name: "Another team", isTeam: true },
+      "team:team-gone": { name: "Another team", isTeam: true },
+      "org:local-org": { name: "Organization", isTeam: false },
+      "test-member": { name: "Test Member", isTeam: false },
+      "user-gone": { name: "Former member", isTeam: false },
+    });
+
+    // An org admin sees every team of the org by name; a deleted team stays neutral.
+    const org = await (await fetch(`${api.baseUrl}/api/usage/breakdown?scope=org&window=7d`)).json() as UsageBreakdownResponse;
+    expect(labels(org.byUser)).toMatchObject({
+      "team:team-x": { name: "Platform", isTeam: true },
+      "team:team-y": { name: "Research", isTeam: true },
+      "team:team-gone": { name: "Another team", isTeam: true },
+    });
+    for (const row of [...(team.byUser ?? []), ...(org.byUser ?? [])]) {
+      expect(row.name).not.toMatch(/team-|org:|user-gone/);
+    }
+  });
+
+  it("names only the viewer's own teams in the home ranking", async () => {
+    api = await bootTestApi();
+    await seedActorSpend(api, Date.now());
+    const admin = await (await fetch(`${api.baseUrl}/api/usage/summary`)).json() as UsageSummaryResponse;
+    expect(labels(admin.org?.members)).toMatchObject({
+      "team:team-x": { name: "Platform" },
+      "team:team-y": { name: "Research" },
+      "team:team-gone": { name: "Another team" },
+      "user-gone": { name: "Former member" },
+    });
+    // A plain member on no team: every team is "Another team", whether it
+    // exists or not, the same existence hiding the team routes use.
+    const member = await (await fetch(`${api.baseUrl}/api/usage/summary`, { headers: { "x-valet-test-user-id": "test-member" } })).json() as UsageSummaryResponse;
+    expect(labels(member.org?.members)).toMatchObject({
+      "team:team-x": { name: "Another team" },
+      "team:team-y": { name: "Another team" },
+      "team:team-gone": { name: "Another team" },
+    });
+  });
+});
+
 describe("GET /api/usage/tool-efficiency", () => {
   it("counts tool calls when a different result field contains a NUL", async () => {
     api = await bootTestApi();

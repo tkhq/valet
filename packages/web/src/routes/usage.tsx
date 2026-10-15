@@ -20,6 +20,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
+import { Users } from "lucide-react";
 import { useUsageBreakdown, useUsageItems, useUsageOutcomes, useUsageToolEfficiency } from "~/api/usage";
 import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
 import { useOrg } from "~/api/settings";
@@ -842,7 +843,17 @@ export function UsagePage() {
                           className="border-b border-line last:border-0 hover:bg-ink-wash"
                         >
                           <td className="px-3 py-2 text-ink truncate max-w-[14rem]" title={row.name}>
-                            {row.name || <span className="text-muted italic">unknown</span>}
+                            {/* A team's own work (schedules, event rules, API
+                                keys): the switcher's team icon tells it
+                                apart from a person. */}
+                            {row.isTeam ? (
+                              <span className="inline-flex min-w-0 max-w-full items-center gap-1">
+                                <Users role="img" aria-label="Team" className="h-3.5 w-3.5 shrink-0 text-muted" />
+                                <span className="truncate">{row.name}</span>
+                              </span>
+                            ) : (
+                              row.name || <span className="text-muted italic">unknown</span>
+                            )}
                           </td>
                           {dailyAgentWindow && (
                             <td className="px-3 py-2 text-right tabular-nums text-muted">

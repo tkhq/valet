@@ -694,6 +694,34 @@ describe("UsagePage — By-member table (org scope)", () => {
     expect(screen.getByText("Bob Jones")).toBeTruthy();
   });
 
+  it("labels a team's own work by the team's name with a team marker, never by its id", () => {
+    const person = mockBreakdownOrgScope.byUser?.[0];
+    if (!person) throw new Error("Missing member fixture");
+    breakdownResult = {
+      data: {
+        ...mockBreakdownOrgScope,
+        byUser: [
+          person,
+          { ...person, userId: "team:team-x", name: "Platform", isTeam: true },
+          // A deleted team, or one the viewer is not on.
+          { ...person, userId: "team:team-gone", name: "Another team", isTeam: true },
+        ],
+      },
+      isLoading: false,
+      error: null,
+    };
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
+    for (const name of ["Platform", "Another team"]) {
+      const row = screen.getByRole("row", { name: new RegExp(name) });
+      expect(within(row).getByRole("img", { name: "Team" })).toBeTruthy();
+    }
+    const personRow = screen.getByRole("row", { name: new RegExp(person.name) });
+    expect(within(personRow).queryByRole("img", { name: "Team" })).toBeNull();
+    // Not as text, and not in a tooltip either.
+    expect(document.body.innerHTML).not.toContain("team:team-");
+  });
+
   it("does not show By-member table in me scope", () => {
     render(<UsagePage />);
     fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
