@@ -24,6 +24,7 @@ import { IntegrationsPage } from "~/routes/integrations";
 import { UsagePage } from "~/routes/usage";
 import { RunDetailBody } from "~/routes/workflows.runs.$runId";
 import { uiStressClient } from "./client";
+import { LayoutAuditPanel } from "./layout-audit-panel";
 import { DECISION_FIRST_PAGE_COUNT, WORKFLOW_APPROVAL_COUNT } from "./fixtures/approvals";
 import { stressMe } from "./fixtures/common";
 import { EVENT_DELIVERY_COUNT, EVENT_LOG_COUNT, stressEventDetail } from "./fixtures/events";
@@ -100,6 +101,7 @@ export default function UiStressGallery() {
             rows, emoji, and right-to-left text. The top nav, the bell, and the thread sidebar use the same fixtures.
             Approve, Deny, and other changes fail on purpose. Nothing reaches the server.
           </p>
+          <LayoutAuditPanel />
           <nav aria-label="Gallery sections">
             <ul className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
               {UI_STRESS_SECTIONS.map((section) => (
