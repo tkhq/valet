@@ -48,6 +48,7 @@ import {
   useReplaceSandbox,
   useMarkThreadsRead,
   useSetThreadArchived,
+  useSessionWakeups,
   useSidebarThreads,
   useThreadSearch,
 } from "~/api/queries";
@@ -58,6 +59,7 @@ import { projectThreadIds, removeArchivedProject, useThreadProjects } from "~/li
 import { backgroundWorkConflict } from "~/api/client";
 import { errorText } from "~/lib/error-text";
 import { useBackgroundWorkGuard, type GuardedAction } from "./background-work-confirm";
+import { ThreadTimerLine, threadTimerWaits } from "./background-work";
 
 const STOP_AND_ARCHIVE: GuardedAction = {
   title: "Stop background work and archive?",
@@ -347,6 +349,9 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   // `refetch()` fires even on a disabled query, so gate the live-update
   // hook too rather than relying on `enabled` alone.
   useInvalidateChildrenOnQueueState(sessionId, showChildren ? childrenQ.refetch : NO_REFETCH);
+  // One query for the session, shared with the composer status line through
+  // the query cache: a row line never costs its own request.
+  const timerWaits = threadTimerWaits(useSessionWakeups(sessionId).data);
   const createThread = useCreateThread(sessionId);
   const setArchived = useSetThreadArchived(sessionId);
   const renameThread = useRenameThread(sessionId);
@@ -568,6 +573,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               isDefault={t.id === defaultId}
               active={t.id === activeThreadId}
               hasPendingGate={gatedThreadIds.has(t.id)}
+              timerFireAt={timerWaits.get(t.id)}
               childSessions={grouped.get(t.id) ?? []}
               activeChildId={search.child}
               projects={projects.value.projects}
@@ -807,8 +813,11 @@ function ThreadNode({
   pinned,
   onPin,
   organizingDisabled,
+  timerFireAt,
 }: {
   organizingDisabled: boolean;
+  /** When the thread's soonest timer fires. Only timers get a row line. */
+  timerFireAt?: number;
   pinned: boolean;
   onPin: () => void;
   projects: Array<{ id: string; name: string }>;
@@ -1038,6 +1047,7 @@ function ThreadNode({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+      {timerFireAt !== undefined && <ThreadTimerLine fireAt={timerFireAt} className="-mt-1.5 pb-1.5 pl-9 pr-2" />}
       {childSessions.length > 0 && !collapsed && (
         <ul className="ml-8 mt-0.5 mb-1 border-l border-line/60 pl-2 space-y-0.5">
           {childSessions.map((c) => (

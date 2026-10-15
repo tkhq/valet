@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Message } from "@valet/api/wire";
 import { api } from "~/api/client";
@@ -85,4 +85,38 @@ it("keeps a child's report out of Sources while keeping links people shared", ()
   const sources = within(screen.getByRole("region", { name: "Sources" }));
   expect(sources.getByRole("link", { name: "the image guide" })).toBeTruthy();
   expect(sources.queryByRole("link", { name: "PR #852" })).toBeNull();
+});
+
+it("lists this thread's background work in its own section, and Cancel asks first", async () => {
+  vi.spyOn(api, "listArtifacts").mockResolvedValue({ artifacts: [] });
+  vi.spyOn(api, "listSessionWakeups").mockResolvedValue({
+    wakeups: [
+      { id: "wk_1", threadId: "t1", kind: "timer", status: "pending", reason: "check CI", fireAt: Date.now() + 2 * 3_600_000, createdAt: Date.now() },
+      { id: "wk_2", threadId: "t2", kind: "process", status: "running", reason: "other thread build", deadlineAt: Date.now() + 3_600_000, createdAt: Date.now() },
+    ],
+    leases: [],
+  });
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <ThreadContextPanel owner={{ ownerType: "user", ownerId: "u" }} sessionId="s1" threadId="t1" messages={[]} busy={false}
+        canCancelWork onCreate={() => {}} onAttach={() => {}} onReveal={() => {}} />
+    </QueryClientProvider>,
+  );
+  const region = await screen.findByRole("region", { name: "Background work" });
+  const section = within(region);
+  expect(section.getByText("check CI")).toBeTruthy();
+  expect(section.getByText("Timer · waiting · fires in 2h")).toBeTruthy();
+  expect(section.queryByText("other thread build")).toBeNull();
+  // The section sits after Active tools and before Sources.
+  const regions = screen.getAllByRole("region").map((r) => r.getAttribute("aria-label"));
+  expect(regions).toEqual(["Outputs", "Active tools", "Background work", "Sources"]);
+  fireEvent.click(section.getByRole("button", { name: "Cancel check CI" }));
+  expect(await screen.findByRole("dialog", { name: "Stop this background work?" })).toBeTruthy();
+});
+
+it("hides the background work section when the thread has none", async () => {
+  const list = vi.spyOn(api, "listSessionWakeups").mockResolvedValue({ wakeups: [], leases: [] });
+  renderPanel([]);
+  await waitFor(() => expect(list).toHaveBeenCalled());
+  expect(screen.queryByRole("region", { name: "Background work" })).toBeNull();
 });

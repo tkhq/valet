@@ -32,6 +32,8 @@ import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tab
 import { BrowserOverlay } from "~/components/session/browser/browser-overlay";
 import { useBrowserWatch } from "~/components/session/browser/use-browser-watch";
 import { ThreadContextPanel } from "~/components/session/thread-context-panel";
+import { BackgroundWorkStatusLine } from "~/components/session/background-work";
+import { useCanAdministerSession } from "~/components/session/use-can-administer-session";
 import { draftKey, useComposerDraftStore } from "~/stores/composer-drafts";
 import { SessionHeader } from "~/components/session/session-header";
 import { useMe } from "~/api/settings";
@@ -141,6 +143,8 @@ export function SessionView({
     setTab(next);
   }
   const threads = useThreads(sessionId, undefined, activeThreadId);
+  // Stopping background work is a lifecycle control, like pause.
+  const canCancelWork = useCanAdministerSession(session.data?.owner);
   // Open the WS — pipes events into the store keyed by sessionId.
   useSessionWebSocket(sessionId);
   const stream = useSessionStream(sessionId);
@@ -282,6 +286,7 @@ export function SessionView({
                   key={`${sessionId}:${effectiveThreadId}`}
                   owner={{ ownerType: session.data.owner.type, ownerId: session.data.owner.id }}
                   sessionId={sessionId} threadId={effectiveThreadId} messages={stream.messages} busy={agentBusy}
+                  canCancelWork={canCancelWork}
                   pullRequests={helperThread?.pullRequests}
                   onCreate={() => {
                     const key = draftKey(sessionId, effectiveThreadId);
@@ -387,6 +392,14 @@ export function SessionView({
             queuedItemCount={threadQueueState?.pendingIds.length ?? 0}
             replyTarget={replyTarget}
             onCancelReply={() => setReplyTarget(undefined)}
+            statusLine={
+              <BackgroundWorkStatusLine
+                sessionId={sessionId}
+                threadId={effectiveThreadId}
+                canCancel={canCancelWork}
+                className="mt-1.5 self-start"
+              />
+            }
           />}
         </PageDropTarget>
         </div>

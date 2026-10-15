@@ -52,7 +52,7 @@ import {
   type AgentStatus,
   type ConnectionStatus,
 } from "~/stores/stream";
-import { BackgroundWorkBadge } from "./background-work-badge";
+import { canAdministerSession } from "./use-can-administer-session";
 import { useBackgroundWorkGuard, type GuardedAction } from "./background-work-confirm";
 import { ModelPicker } from "./model-picker";
 import { MoveSessionDialog } from "./move-session-dialog";
@@ -311,8 +311,7 @@ export function SessionHeader({
   // team shares, so they are a team-admin power — the API enforces the
   // same rule; this only hides controls that would 404. Personal sessions
   // are unaffected.
-  const canAdminister =
-    teamId === null || team?.callerRole === "admin" || me.data?.orgRole === "admin";
+  const canAdminister = canAdministerSession(owner, teams.data, me.data);
   const workspaceHint = session.workspace ? `workspace: ${session.workspace}` : title;
   const modelScopeHint = threadScoped
     ? "Model for this thread (pinned at creation). New threads use the workspace default."
@@ -459,7 +458,6 @@ export function SessionHeader({
         {modelSaving && (
           <span role="status" className="text-xs text-neutral-500">Saving model…</span>
         )}
-        <BackgroundWorkBadge sessionId={session.id} canCancel={canAdminister} />
         {canShare && (
           <Tooltip content="Share this thread with your organization">
             <Button variant="ghost" size="sm" onClick={() => setSharing(true)} aria-label="Share thread">
