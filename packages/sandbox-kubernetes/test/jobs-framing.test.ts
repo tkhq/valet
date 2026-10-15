@@ -116,7 +116,10 @@ describe("jobKickoffCommand", () => {
   it("with maxOutputBytes, connects the job to a head/cat capping filter through a fifo instead of a direct redirect", () => {
     const cmd = jobKickoffCommand("job-1", "echo hi", 1024);
     expect(cmd).toContain(`mkfifo ${shQuote(`${JOBS_DIR}/job-1.fifo`)}`);
-    expect(cmd).toContain(`head -c 1024 > ${shQuote(`${JOBS_DIR}/job-1.out`)}`);
+    expect(cmd).toContain(`head -c 1024; fi > ${shQuote(`${JOBS_DIR}/job-1.out`)}`);
+    // GNU head writes through stdio, which buffers a file in 4 KB blocks:
+    // unbuffered output is what lets a poll see a running job's lines.
+    expect(cmd).toContain("then stdbuf -o0 head -c 1024; else head -c 1024; fi");
     // `cat > /dev/null` keeps draining (discarding) output past the cap so
     // the job's process never sees a broken pipe / SIGPIPE.
     expect(cmd).toContain("cat > /dev/null");
@@ -207,8 +210,8 @@ describe("jobKickoffCommand", () => {
   });
 
   it("floors and clamps a fractional/negative maxOutputBytes to a safe non-negative integer", () => {
-    expect(jobKickoffCommand("job-1", "echo hi", 10.9)).toContain("head -c 10 >");
-    expect(jobKickoffCommand("job-1", "echo hi", -5)).toContain("head -c 0 >");
+    expect(jobKickoffCommand("job-1", "echo hi", 10.9)).toContain("head -c 10; fi >");
+    expect(jobKickoffCommand("job-1", "echo hi", -5)).toContain("head -c 0; fi >");
   });
 });
 

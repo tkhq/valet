@@ -18,6 +18,7 @@ import {
   cancelCommand,
   decodeUtf8HoldingTail,
   execJobInPod,
+  jobCappingFilter,
   jobKickoffCommand,
   parseJobStatus,
   pollCommand,
@@ -530,6 +531,36 @@ describe("job file reuse guards (fix wave 2)", () => {
       expect(child.exitCode).toBeNull();
     } finally {
       child.kill("SIGKILL");
+    }
+  });
+});
+
+// Local test on the kubernetes backend: a running job's log stayed empty,
+// because GNU head buffers its file output until 4 KB or EOF. Only a
+// machine with GNU head and stdbuf (Linux CI) runs the unbuffered branch;
+// BSD head on macOS also buffers its input, so the check skips there.
+const hasGnuStdbufHead =
+  spawnSync("/bin/sh", ["-c", "command -v stdbuf && head --version | grep -q GNU"], { stdio: "ignore" }).status === 0;
+describe.skipIf(!hasGnuStdbufHead)("capping filter streams output while the job runs", () => {
+  it("writes a line to OUT before the writer closes the pipe", async () => {
+    const dir = `/tmp/valet-cap-${randomUUID()}`;
+    await mkdir(dir, { recursive: true });
+    const fifo = `${dir}/f`;
+    const out = `${dir}/out`;
+    try {
+      expect(sh(`mkfifo '${fifo}'`).status).toBe(0);
+      const filter = spawn("/bin/sh", ["-c", `( ${jobCappingFilter(1024, out, "[capped]")} ) < '${fifo}'`]);
+      const writer = spawn("/bin/sh", ["-c", `{ echo first-line; sleep 3; } > '${fifo}'`]);
+      let seen = "";
+      for (let i = 0; i < 40 && seen === ""; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        seen = await readFile(out, "utf8").catch(() => "");
+      }
+      expect(seen).toBe("first-line\n");
+      writer.kill("SIGKILL");
+      filter.kill("SIGKILL");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });

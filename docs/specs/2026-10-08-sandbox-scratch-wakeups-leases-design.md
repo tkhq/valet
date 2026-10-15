@@ -1342,6 +1342,12 @@ with an earlier entry, the entry below wins.
   the prompt names `wakeup_cancel` and `wakeup_list` and says an agent's
   own cancel sends no signal. The `task` scratch field names the accepted
   forms: whole bytes or a Ki, Mi, Gi, or Ti suffix.
+- **Local cluster test, streamed job logs.** On the kubernetes backend, a
+  running background job's log stayed empty: the capping filter's GNU
+  `head` buffered its file output until 4 KB or exit, so `process_read`,
+  `watch`, and the cancel tail saw nothing. The filter now runs
+  `stdbuf -o0 head` when the image has `stdbuf`. A BusyBox image has no
+  `stdbuf` and keeps the buffered behavior.
 - **PR review, EXIT after the log drain.** The kubernetes kickoff saves
   the job's status, waits for the capping filter, then writes `.exit`.
   A poll that sees `.exit` reads a complete log.
