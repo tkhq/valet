@@ -7,8 +7,8 @@ import type { AppDb } from "../lib/drizzle.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
 import { loadAccountSettings, patchAccountSettings, validateModelDefaults, type SettingsActor } from "./account-settings.js";
 import { getOrgDefaultTier } from "./model-tiers.js";
-import { patchModelTiers } from "./model-tier-settings.js";
-import { isOrgAdmin, renameOrg } from "./org.js";
+import { patchOrganizationSettings } from "./organization-settings.js";
+import { isOrgAdmin } from "./org.js";
 import { canAdministerTeam, canViewTeam, getTeamInOrg } from "./teams.js";
 
 const optionalModel = Type.Optional(Type.Union([Type.String(), Type.Null()]));
@@ -103,11 +103,8 @@ export function settingsActionPlugin(db: AppDb, credentials: () => CredentialSto
       const actor = await actorFor(db, ctx);
       if (!actor) return refused;
       if (!await isOrgAdmin(db, actor.orgId, actor.id)) return { success: false, error: "Organization-admin access is required. Ask an organization admin." };
-      if (args.defaultTier !== undefined) {
-        const updated = await patchModelTiers(db, credentials(), actor, { defaultTier: args.defaultTier });
-        if ("error" in updated) return { success: false, error: updated.error };
-      }
-      if (args.name !== undefined) await renameOrg(db, actor.orgId, args.name);
+      const updated = await patchOrganizationSettings(db, credentials(), actor.orgId, args);
+      if ("error" in updated) return { success: false, error: updated.error };
       return organizationView(actor);
     },
   });
