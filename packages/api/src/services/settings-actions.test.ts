@@ -114,6 +114,26 @@ describe("settings actions", () => {
     expect((await action("update_organization").execute({ name: "Denied" }, context({ orgId: "foreign-org" }))).success).toBe(false);
   });
 
+  it.each(["", "   ", " \t\r\n", "\u00a0\u2003"])("rejects blank organization name %j without changing either setting", async (name) => {
+    const db = api.providers.db;
+    await setOrgDefaultTier(db, "local-org", "m");
+    const [before] = await db.select({ name: orgs.name }).from(orgs).where(eq(orgs.id, "local-org"));
+
+    const result = await action("update_organization").execute({ name, defaultTier: null }, context());
+
+    const [after] = await db.select({ name: orgs.name, defaultTier: orgs.defaultTier }).from(orgs).where(eq(orgs.id, "local-org"));
+    expect(after).toEqual({ name: before?.name, defaultTier: "m" });
+    expect(result).toMatchObject({ success: false, error: expect.stringMatching(/name.*blank|blank.*name/i) });
+  });
+
+  it("preserves surrounding whitespace in a nonblank organization name", async () => {
+    const result = await action("update_organization").execute({ name: "  Named organization  " }, context());
+
+    expect(result).toMatchObject({ success: true, data: { name: "  Named organization  " } });
+    const [org] = await api.providers.db.select({ name: orgs.name }).from(orgs).where(eq(orgs.id, "local-org"));
+    expect(org?.name).toBe("  Named organization  ");
+  });
+
   it("rejects a NUL in the organization name without clearing the saved default tier", async () => {
     const db = api.providers.db;
     await setOrgDefaultTier(db, "local-org", "m");
