@@ -1170,7 +1170,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
    * definition directly into the DB to bypass the save-time validator (which
    * rejects unknown services in environments without a plugin catalog). */
   async function setupRun(
-    opts: { nodeType?: string; service?: string; action?: string } = {},
+    opts: { nodeType?: string; service?: string; action?: string; origin?: { assistantSessionId: string; threadId: string } } = {},
   ) {
     const stub = new StubRunHost();
     const localApi = await bootTestApi({ workflowRunHost: stub });
@@ -1237,7 +1237,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     const { runId } = (await startRes.json()) as StartWorkflowRunResponse;
     await localApi.providers.workflowStore.createRun(
       runId,
-      { workflowId: wfId, definitionVersionId: "v1" },
+      { workflowId: wfId, definitionVersionId: "v1", ...(opts.origin ? { origin: opts.origin } : {}) },
       definition,
       "v1",
       { ownerType: "user", ownerId: "local-user" },
@@ -1498,8 +1498,8 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
   });
 
   describe("workflows.resolve_approval asks a person in the thread", () => {
-    async function parkedPolicyGate() {
-      const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke" });
+    async function parkedPolicyGate(origin?: { assistantSessionId: string; threadId: string }) {
+      const { localApi, runId } = await setupRun({ nodeType: "tool", service: "widgets", action: "nuke", origin });
       api = localApi;
       await localApi.providers.workflowStore.parkRun(runId, 1, [
         { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
@@ -1548,6 +1548,55 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       const signals = await localApi.providers.workflowStore.listSignals(runId);
       expect(signals.find((sig) => sig.signalType === "approval:gate")?.payload)
         .toMatchObject({ approved: true, resolvedBy: "local-user", resolvedVia: "thread" });
+    });
+
+    it("does not resurrect a sibling whose answer the drive consumed before re-parking", async () => {
+      const { localApi, runId, resolve } = await parkedPolicyGate();
+      const store = localApi.providers.workflowStore;
+      await store.parkRun(runId, 2, [
+        { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+        { kind: "signal", signalType: "approval:second", nodeId: "second" },
+      ]);
+      await store.insertSignal({ runId, signalId: "second-answer", signalType: "approval:second", payload: { approved: true }, createdAt: 1 });
+      // Pause at the drive boundary after consumption, before waitingOn changes.
+      vi.spyOn(localApi.providers.workflowRunHost, "wake").mockImplementation(async () => {
+        const claim = await store.claimRun(runId, "race-test", 30_000);
+        if (!claim) throw new Error("claim failed");
+        for (const signal of await store.listSignals(runId, { unconsumed: true })) {
+          const nodeId = signal.signalType === "approval:second" ? "second" : "gate";
+          await store.putIntent({ runId, nodeId, iteration: 0, status: "intent", attempt: claim.attempt, createdAt: 1 });
+          await store.consumeSignalAndCheckpoint(signal.signalId, { nodeId, iteration: 0, attempt: claim.attempt },
+            { runId, nodeId, iteration: 0, status: "completed", attempt: claim.attempt, createdAt: 1, result: { approved: true } });
+        }
+      });
+      const result = await resolve.execute({ run_id: runId, node_id: "gate", approved: true }, threadCtx("approve"));
+      expect(await store.listSignals(runId, { unconsumed: true })).toEqual([]);
+      expect(result).toMatchObject({ success: true, data: { next: RESOLVED_GATE_NEXT_ELSEWHERE } });
+      const { db, workflowRunHost, engineStore, engineCredentials } = localApi.providers;
+      const detail = await getWorkflowRunDetail({ db, workflowStore: store, workflowRunHost, engineStore, credentials: engineCredentials },
+        { userId: "local-user", orgId: "local-org" }, runId);
+      expect(detail?.pendingGates).toEqual([]);
+    });
+
+    it("keeps approval success but asks for a status check when the follow-up read fails", async () => {
+      const origin = { assistantSessionId: "assistant", threadId: "thread" };
+      const { localApi, runId, resolve } = await parkedPolicyGate(origin);
+      const store = localApi.providers.workflowStore;
+      await store.parkRun(runId, 2, [
+        { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+        { kind: "signal", signalType: "approval:second", nodeId: "second" },
+      ]);
+      // Resolution has committed before this read fails.
+      vi.spyOn(localApi.providers.workflowRunHost, "wake").mockImplementation(async () => {
+        vi.spyOn(store, "getCheckpoints").mockRejectedValueOnce(new Error("injected status read failure"));
+      });
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const result = await resolve.execute({ run_id: runId, node_id: "gate", approved: true },
+        { ...threadCtx("approve"), sessionId: origin.assistantSessionId, threadId: origin.threadId });
+      expect(result).toMatchObject({ success: true, data: { next: expect.stringContaining("Call get_run") } });
+      expect(result.data).toMatchObject({ next: expect.stringContaining("could not be read") });
+      expect((await store.listSignals(runId)).some(signal => signal.signalType === "approval:gate")).toBe(true);
+      warning.mockRestore();
     });
 
     it("leaves the gate open when the person does not confirm", async () => {
@@ -2839,4 +2888,3 @@ describe("GET/POST/DELETE /api/workflows/:id/schedules", () => {
     expect(rows).toEqual([]);
   });
 });
-

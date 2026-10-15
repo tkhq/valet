@@ -21,7 +21,7 @@ import type { Static, TSchema } from "typebox";
 import { Type } from "typebox";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import { previewWorkflow } from "../routes/workflow-preview.js";
-import type { PreviewWorkflowResponse } from "../wire/types.js";
+import type { PreviewWorkflowResponse, WorkflowPendingGate } from "../wire/types.js";
 import {
   appendRemovedEdgeHint,
   applyWorkflowModelPatch,
@@ -294,6 +294,30 @@ export function runReportsToThread(
 export const RESOLVED_GATE_NEXT_ELSEWHERE =
   "The run continues, but its signals go to the conversation that started it, not this one. " +
   "To tell the person the result here, call get_run when they ask or after a short wait.";
+
+/** The approval signal a gate waits on: `approval:{nodeId}`, with
+ * `:{iteration}` only after the first item (`resolveWorkflowApproval`). */
+function approvalSignalType(nodeId: string, iteration: number | undefined): string {
+  const iter = iteration ?? 0;
+  return `approval:${nodeId}${iter > 0 ? `:${iter}` : ""}`;
+}
+
+/**
+ * The gates that waited before this approval and still wait after it. The
+ * run wakes as soon as the approval is recorded, so the read after it can
+ * race the drive: it can still list the approved gate, or list a gate the
+ * drive just opened. The approved gate is not waiting, and a newly opened
+ * gate gets its own workflow.approval_needed signal, so both are left out.
+ */
+export function gatesStillWaiting<G extends { nodeId: string; iteration?: number }>(
+  waitingBefore: readonly { kind: string; signalType?: string }[],
+  resolved: { nodeId: string; iteration?: number },
+  pendingAfter: readonly G[],
+): G[] {
+  const before = new Set(waitingBefore.flatMap((w) => (w.kind === "signal" && w.signalType ? [w.signalType] : [])));
+  before.delete(approvalSignalType(resolved.nodeId, resolved.iteration));
+  return pendingAfter.filter((gate) => before.has(approvalSignalType(gate.nodeId, gate.iteration)));
+}
 
 /** The same, when other approvals were already waiting on the run. A
  * workflow.approval_needed signal reports only a gate a drive opens, so no
@@ -760,6 +784,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         return { success: false, error: `Nobody confirmed the card, so ${node_id} on run ${run_id} still waits for a decision.` };
       }
       const person: WorkflowOwner = { userId: decision.resolvedBy, orgId: owner.orgId, principal: { type: "user", id: decision.resolvedBy } };
+      // Read just before the approval: what already waits, for `next`.
+      const waitingBefore = (await deps.workflowStore.getRun(run_id))?.waitingOn ?? [];
       const result = await resolveWorkflowApproval(deps, person, {
         runId: run_id,
         nodeId: node_id,
@@ -778,9 +804,18 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       // The result is what the assistant reads right after the card. Saying
       // here that the signal reports the run stops a get_run poll that
       // reports the run twice: once from the poll, once from the signal.
-      // An answered gate leaves pendingGates, so what remains still waits.
-      const stillWaiting = (await getWorkflowRunDetail(deps, owner, run_id))?.pendingGates ?? [];
-      const next = stillWaiting.length > 0
+      let stillWaiting: WorkflowPendingGate[] | undefined;
+      try {
+        const detail = await getWorkflowRunDetail(deps, owner, run_id);
+        if (detail) stillWaiting = gatesStillWaiting(waitingBefore, { nodeId: node_id, iteration }, detail.pendingGates);
+      } catch (err) {
+        // The approval is already recorded. A failed read only loses the
+        // still-waiting list; it must not turn a success into a failure.
+        console.warn(`resolve_approval: could not read run ${run_id} after the approval:`, err);
+      }
+      const next = stillWaiting === undefined
+        ? "The gate is resolved, but the run's waiting state could not be read. Call get_run to check for remaining approvals."
+        : stillWaiting.length > 0
         ? resolvedGateStillWaiting(stillWaiting)
         : runReportsToThread(run.params, ctx.sessionId, ctx.threadId) ? RESOLVED_GATE_NEXT : RESOLVED_GATE_NEXT_ELSEWHERE;
       return { success: true, data: { runId: run_id, nodeId: node_id, approved, next } };

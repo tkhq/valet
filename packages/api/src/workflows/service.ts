@@ -2134,13 +2134,13 @@ async function projectWorkflowRun(
 ): Promise<GetWorkflowRunResponse> {
   const [checkpoints, signals] = await Promise.all([
     deps.workflowStore.getCheckpoints(run.runId),
-    deps.workflowStore.listSignals(run.runId, { unconsumed: true }),
+    deps.workflowStore.listSignals(run.runId),
   ]);
 
   // Build pendingGates from run.waitingOn entries that are approval signals.
   const pendingGates: WorkflowPendingGate[] = [];
-  // An answered gate waits only for the run to read its answer. It is not
-  // pending: listing it again would invite a second answer that 409s.
+  // Keep consumed answers too: the drive can consume a sibling's answer
+  // before it replaces waitingOn. That gate must not appear pending again.
   const answered = new Set(signals.map((sig) => sig.signalType));
   for (const w of run.waitingOn) {
     if (w.kind !== "signal" || !w.signalType.startsWith("approval:") || answered.has(w.signalType)) continue;

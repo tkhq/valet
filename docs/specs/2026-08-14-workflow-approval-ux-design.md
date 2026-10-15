@@ -249,7 +249,15 @@ Hardening (applies to approval-node resolutions too — shared route):
    assistant to read `get_run` instead. When other gates were already
    waiting, `next` names them (`resolvedGateStillWaiting`): a drive that
    only resolves gates opens none, so no `workflow.approval_needed` signal
-   would report them. Known gap: a team run started before its thread moved
+   would report them. The run wakes as soon as the approval is recorded, so
+   `gatesStillWaiting` counts only gates that waited just before the
+   approval and still wait after it; a gate the drive opens gets its own
+   signal. The pending-gate projection keeps consumed answers, because the
+   drive can consume an answer before it replaces the run's waiting list.
+   If the status read fails after resolution, approval still succeeds.
+   The assistant must call `get_run` to check for remaining approvals.
+   An unknown waiting state must not tell it to wait for a signal.
+   Known gap: a team run started before its thread moved
    to an execution session stores the root session as its origin, while its
    reports go to the execution thread, so `next` there says to read
    `get_run`.
@@ -445,12 +453,6 @@ place). Run `make dev-clean` and restart the stack.
 The notification decision inbox scans at most 100 pending gates per page. An indexed creation-time/ID cursor advances past hidden gates. Cursors are encrypted and bound to the caller and organization. Authorization and private-thread checks still apply. The bell offers Next approvals and First approvals; a plus sign marks a partial count.
 
 ## Bulk answers in the bell
-
-The notification inbox uses one bordered surface for each thread request.
-The conversation label and Open thread link share a compact header above the request.
-`DecisionGateCard` uses its notification placement inside that surface, without a second border or the thread column's outer padding.
-The request title, details, response field, and actions share one left edge.
-The request type is a plain label. Permission scope and account-owner restrictions remain visible.
 
 Added 2026-10-09. The bell's "Needs action" heading has **Approve all** and **Deny all**. The buttons show only when at least one listed item is eligible. A bulk answer covers only the items listed in the bell now. When the decision inbox has more pages, the buttons read "Approve N listed" and "Deny N listed", and the dialog says that other pages are not included. A bulk answer never loads or answers an item the user has not seen.
 
