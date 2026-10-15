@@ -16,12 +16,18 @@
  *     `executeWorkflowToolStep`). The runner recorded them and moved on.
  *   - A `conditional` read `{ variable, equals }` from the run's variables.
  *     In V2 those are the trigger input, `trigger.data`.
+ *   - V1 ran the steps inside a `conditional` or a `parallel` one after
+ *     another, sorted by id (`asStepArray`). An approval among them paused
+ *     the whole run, and a denial cancelled it.
  *   - V1 rendered no templates. A `{{name}}` in a message reached the agent
  *     as written, so the import keeps it as literal text.
  *
  * What needs a person's judgment becomes a checklist line, never a silent
  * drop. The import dialog shows the checklist and sends it to the
- * workflow's editor conversation.
+ * workflow's editor conversation. When the import cannot do exactly what
+ * V1 did, it fails closed: the line is a required decision
+ * (`requireDecision`), and the workflow gets no schedule until a person
+ * adds one.
  */
 
 import type { ApprovalNode, IfCondition, IfNode, SessionNode, WorkflowNode } from './dag/nodes.js';
@@ -42,7 +48,8 @@ export interface V1PromptSchedule extends V1ImportSchedule {
 export interface V1ConvertedWorkflow {
   name: string;
   definition: WorkflowDefinition;
-  /** Schedules that start this workflow. */
+  /** Schedules that start this workflow. Empty when a required decision
+   * says the workflow does not do what it did in V1. */
   schedules: V1ImportSchedule[];
   /** Each item the import could not decide, one line each. */
   checklist: string[];
@@ -151,10 +158,13 @@ export function convertV1Workflows(input: unknown): V1ConvertResult {
     if (isScheduleToOrchestrator(t)) {
       const prompt = stringField(t.config.prompt);
       const cron = stringField(t.config.cron);
+      const difference = v1CronDifference(cron);
       if (!t.enabled) {
         notes.push(`V1 schedule "${t.name}" was turned off, so the import did not create it.`);
       } else if (prompt === '' || cron === '') {
         notes.push(`V1 schedule "${t.name}" has no prompt or no cron expression, so the import did not create it.`);
+      } else if (difference !== undefined) {
+        notes.push(cronLine(t.name, cron, difference));
       } else {
         promptSchedules.push({ name: t.name, cron, ...timezoneOf(t), prompt });
       }
@@ -275,6 +285,14 @@ interface Pending {
   text: string;
   /** Message text with `{{`, which V1 sent as written. */
   braces?: boolean;
+  /** A shell command, whose failure stopped the V1 run. */
+  command?: boolean;
+}
+
+/** A V1 step and its V1 path, such as `step[2].then[0]`. */
+interface Located {
+  raw: unknown;
+  path: string;
 }
 
 /** One sequence of steps: its open ends, and the session text not yet written. */
@@ -295,6 +313,8 @@ interface Build {
   nodeOfStep: Map<string, string>;
   /** Session nodes made from merged messages and commands. */
   messageSessions: string[];
+  /** True after a required decision. The workflow then gets no schedule. */
+  differs: boolean;
 }
 
 function convertWorkflow(row: V1WorkflowRow, triggers: V1TriggerRow[]): V1ConvertedWorkflow {
@@ -309,28 +329,41 @@ function convertWorkflow(row: V1WorkflowRow, triggers: V1TriggerRow[]): V1Conver
     outputOwners: new Map(),
     nodeOfStep: new Map(),
     messageSessions: [],
+    differs: false,
   };
 
   const steps = isRecord(data) && Array.isArray(data.steps) ? data.steps : undefined;
   if (steps === undefined) {
-    b.checklist.push('The V1 workflow has no "steps" list, so V1 could not run it. The import made an empty workflow.');
+    requireDecision(b, 'The V1 workflow has no "steps" list, so V1 could not run it. The import made an empty workflow.');
   }
-  collectOutputOwners(steps ?? [], (i) => `step[${i}]`, b);
+  const top = (i: number) => `step[${i}]`;
+  collectRefusals(steps ?? [], top, b);
+  collectOutputOwners(steps ?? [], top, b);
 
   const lane: Lane = { tails: [{ from: 'trigger' }], pending: [] };
-  walk(steps ?? [], (i) => `step[${i}]`, lane, b);
+  walk(located(steps ?? [], top), lane, b);
   flush(lane, b);
   b.nodes.push({ id: 'stop', type: 'stop', outcome: 'success' });
   connect(lane.tails, 'stop', b);
 
   if (b.messageSessions.length > 1) {
-    b.checklist.push(
+    requireDecision(
+      b,
       `V1 sent every agent message and shell command in a run to one shared session. This import made ${b.messageSessions.length} session nodes (${b.messageSessions.map(quote).join(', ')}), and each one starts a new session. If a later node needs what an earlier one did, add that context to its prompt.`,
     );
   }
 
   const schedules: V1ImportSchedule[] = [];
   for (const t of triggers) convertTrigger(t, row, schedules, b);
+  // A workflow that does not do what V1 did must not start on its own.
+  if (b.differs) {
+    for (const s of schedules.splice(0)) {
+      const zone = s.timezone === undefined ? '' : `, ${s.timezone}`;
+      b.checklist.push(
+        `The import did not create V1 schedule "${s.name}" (${s.cron}${zone}). This workflow does not do exactly what it did in V1, so it must not run on a schedule yet. Finish the items above, then add the schedule in Triggers.`,
+      );
+    }
+  }
 
   const trigger: WorkflowNode =
     Object.keys(b.inputs).length > 0 ? { id: 'trigger', type: 'trigger', dataSchema: b.inputs } : { id: 'trigger', type: 'trigger' };
@@ -348,12 +381,15 @@ function convertTrigger(t: V1TriggerRow, row: V1WorkflowRow, schedules: V1Import
   if (type === 'manual') return;
   if (type === 'schedule') {
     const cron = stringField(t.config.cron);
+    const difference = v1CronDifference(cron);
     if (cron === '') {
       b.checklist.push(`V1 schedule "${t.name}" has no cron expression, so the import did not create it.`);
     } else if (!t.enabled) {
       b.checklist.push(`V1 schedule "${t.name}" (${cron}) was turned off, so the import did not create it. Add it in Triggers if you still need it.`);
     } else if (!row.enabled) {
       b.checklist.push(`The V1 workflow was turned off, so the import did not create its schedule "${t.name}" (${cron}). Add it in Triggers if you still need it.`);
+    } else if (difference !== undefined) {
+      b.checklist.push(cronLine(t.name, cron, difference));
     } else {
       schedules.push({ name: t.name, cron, ...timezoneOf(t) });
     }
@@ -378,20 +414,18 @@ function convertTrigger(t: V1TriggerRow, row: V1WorkflowRow, schedules: V1Import
   b.checklist.push(`V1 trigger "${t.name}" has the unknown type ${JSON.stringify(type)}. The import did not create it.`);
 }
 
-function walk(steps: unknown[], pathOf: (index: number) => string, lane: Lane, b: Build): void {
-  steps.forEach((raw, index) => {
-    const path = pathOf(index);
-    if (!isRecord(raw)) {
-      b.checklist.push(`Item ${path} is not a step object, so V1 refused to run this workflow. The import leaves it out.`);
-      return;
-    }
+/** Builds nodes from steps. A step V1's compiler refused is left out
+ * without a line, because `collectRefusals` already listed it. */
+function walk(steps: Located[], lane: Lane, b: Build): void {
+  steps.forEach(({ raw, path }) => {
+    if (!isRecord(raw)) return;
     const id = v1StepId(raw, path);
     const type = typeof raw.type === 'string' ? raw.type.trim() : '';
     switch (type) {
       case 'agent_message':
         return addMessage(raw, id, lane, b);
       case 'bash':
-        return addCommand(stringField(raw.command), raw.cwd, id, lane, b, 'refused');
+        return addCommand(stringField(raw.command), raw.cwd, id, lane);
       case 'tool':
         return addTool(raw, id, lane, b);
       case 'approval':
@@ -417,10 +451,6 @@ function walk(steps: unknown[], pathOf: (index: number) => string, lane: Lane, b
           `Step "${id}" is a "subworkflow" step, which did nothing in V1. The import leaves it out. To call another workflow, import it, then add a workflow node.`,
         );
         return;
-      default:
-        b.checklist.push(
-          `Step "${id}" has the unknown type ${JSON.stringify(raw.type)}, so V1 refused to run this workflow. The import leaves the step out.`,
-        );
     }
   });
 }
@@ -428,39 +458,24 @@ function walk(steps: unknown[], pathOf: (index: number) => string, lane: Lane, b
 function addMessage(raw: Record<string, unknown>, id: string, lane: Lane, b: Build): void {
   // V1's precedence (`workflow-compiler.ts`): content, then message, then goal.
   const text = (stringField(raw.content, false) || stringField(raw.message, false) || stringField(raw.goal, false)).trim();
-  if (text === '') {
-    b.checklist.push(`Step "${id}" is an agent message with no text, so V1 refused to run this workflow. The import leaves it out.`);
-    return;
-  }
+  if (text === '') return;
   if (raw.interrupt === true) {
-    b.checklist.push(
+    requireDecision(
+      b,
       `Step "${id}" set "interrupt", which stopped the message before it in V1. The import runs every message in order.`,
     );
   }
   lane.pending.push({ stepId: id, text, ...(text.includes('{{') ? { braces: true } : {}) });
 }
 
-function addCommand(
-  command: string,
-  cwd: unknown,
-  id: string,
-  lane: Lane,
-  b: Build,
-  ifMissing: 'refused' | 'failed',
-): void {
-  if (command === '') {
-    b.checklist.push(
-      ifMissing === 'refused'
-        ? `Step "${id}" is a bash step with no command, so V1 refused to run this workflow. The import leaves it out.`
-        : `Step "${id}" ran the bash tool with no command, so every V1 run failed at this step. The import leaves it out.`,
-    );
-    return;
-  }
+function addCommand(command: string, cwd: unknown, id: string, lane: Lane): void {
+  if (command === '') return;
   const dir = stringField(cwd);
   const where = dir === '' ? '' : ` Run it in ${dir}.`;
   lane.pending.push({
     stepId: id,
     text: `Run this shell command.${where} If it fails, stop and report the error.\n\n\`\`\`sh\n${command}\n\`\`\``,
+    command: true,
   });
 }
 
@@ -469,23 +484,29 @@ function addTool(raw: Record<string, unknown>, id: string, lane: Lane, b: Build)
   const args = isRecord(raw.arguments) ? raw.arguments : {};
   switch (tool) {
     case '':
-      b.checklist.push(`Step "${id}" is a tool step with no tool name, so V1 refused to run this workflow. The import leaves it out.`);
       return;
-    case 'bash':
-      return addCommand(stringField(args.command), args.cwd, id, lane, b, 'failed');
+    case 'bash': {
+      const command = stringField(args.command);
+      if (command === '') {
+        requireDecision(b, `Step "${id}" ran the bash tool with no command, so every V1 run failed at this step. The import leaves it out.`);
+        return;
+      }
+      return addCommand(command, args.cwd, id, lane);
+    }
     case 'spawn_session':
       return addSpawnSession(args, id, lane, b);
     case 'send_message': {
       const target = stringField(args.targetSessionId);
       const content = stringField(args.content);
-      b.checklist.push(target && content
+      requireDecision(b, target && content
         ? `Step "${id}" sent "${excerpt(content, 80)}" to V1 session ${target}, which does not exist in V2. The import leaves it out. To send the message somewhere, add a tool node, such as a Slack message.`
         : `Step "${id}" is a send_message step with no target session or content, so it failed in V1. The import leaves it out.`);
       return;
     }
     case 'run_workflow': {
       const target = stringField(args.workflowId) || 'another workflow';
-      b.checklist.push(
+      requireDecision(
+        b,
         `Step "${id}" started V1 workflow ${target}. The import leaves it out. Import that workflow too, then add a workflow node that calls it.`,
       );
       return;
@@ -505,7 +526,8 @@ function addSpawnSession(args: Record<string, unknown>, id: string, lane: Lane, 
   const task = stringField(args.task);
   const workspace = stringField(args.workspace);
   if (task === '' || workspace === '') {
-    b.checklist.push(
+    requireDecision(
+      b,
       `Step "${id}" called spawn_session without a task or a workspace, so every V1 run failed at this step. The import leaves it out.`,
     );
     return;
@@ -527,13 +549,14 @@ function addSpawnSession(args: Record<string, unknown>, id: string, lane: Lane, 
   // changes what the child works on, and a V2 session node takes none.
   const repo = [stringField(args.repoUrl), stringField(args.branch) || stringField(args.ref)].filter((s) => s !== '');
   if (repo.length > 0) {
-    b.checklist.push(
+    requireDecision(
+      b,
       `Session node "${nodeId}" came from step "${id}", which started its session on ${repo.join(' at ')}. A V2 session node does not clone a repository. Name the repository and the branch in its prompt.`,
     );
   }
   const model = stringField(args.model);
   if (model !== '') {
-    b.checklist.push(`Step "${id}" asked for the model "${model}". Choose a model for session node "${nodeId}".`);
+    requireDecision(b, `Step "${id}" asked for the model "${model}". Choose a model for session node "${nodeId}".`);
   }
 }
 
@@ -555,8 +578,7 @@ function addConditional(raw: Record<string, unknown>, id: string, path: string, 
     b.checklist.push(
       `Step "${id}" has the condition ${JSON.stringify(raw.condition ?? null)}, which ${condition.reason}. V1 always ran its "${taken}" steps, so the import keeps only those.`,
     );
-    noteRunOrder(id, taken, branches[taken], path, b);
-    walk(branches[taken], (i) => `${path}.${taken}[${i}]`, lane, b);
+    walk(branchInV1Order(id, taken, branches[taken], path, b), lane, b);
     return;
   }
 
@@ -571,8 +593,15 @@ function addConditional(raw: Record<string, unknown>, id: string, path: string, 
   if (owner !== undefined) {
     const nodeId = b.nodeOfStep.get(owner);
     const now = nodeId === undefined ? '' : ` (now node "${nodeId}")`;
-    b.checklist.push(
+    requireDecision(
+      b,
       `If node "${ifId}" reads "${condition.variable}", which V1 set from the output of step "${owner}"${now}. V2 reads a node's output as nodes.<id>.result. Change the condition to read that node.`,
+    );
+  } else if (condition.inputType === undefined) {
+    // A declared type would refuse a run whose value has another type,
+    // and V1 took any value here.
+    b.checklist.push(
+      `If node "${ifId}" checks that "${condition.variable}" has a value, as V1 did. V1 took a value of any type, so the import does not add "${condition.variable}" to the run form. To set it in a run you start by hand, add it as a trigger input.`,
     );
   } else if (b.inputs[condition.variable] === undefined) {
     b.inputs[condition.variable] = { type: condition.inputType, description: 'A V1 workflow variable.' };
@@ -580,37 +609,36 @@ function addConditional(raw: Record<string, unknown>, id: string, path: string, 
 
   const tails: Tail[] = [];
   for (const key of ['then', 'else'] as const) {
-    noteRunOrder(id, key, branches[key], path, b);
     const branch: Lane = { tails: [{ from: ifId, fromOutput: key === 'then' ? 'true' : 'false' }], pending: [] };
-    walk(branches[key], (i) => `${path}.${key}[${i}]`, branch, b);
+    walk(branchInV1Order(id, key, branches[key], path, b), branch, b);
     flush(branch, b);
     tails.push(...branch.tails);
   }
   lane.tails = dedupeTails(tails);
 }
 
+/** V1 ran a parallel step's children one after another, so the import puts
+ * them in sequence. Branches that run at the same time would let a later
+ * child run while an approval before it still waits or after a denial. */
 function addParallel(raw: Record<string, unknown>, id: string, path: string, lane: Lane, b: Build): void {
-  const children = Array.isArray(raw.steps) ? raw.steps : [];
-  if (children.length === 0) return;
-  flush(lane, b);
-  const tails: Tail[] = [];
-  children.forEach((child, i) => {
-    const branch: Lane = { tails: lane.tails, pending: [] };
-    walk([child], () => `${path}.steps[${i}]`, branch, b);
-    flush(branch, b);
-    tails.push(...branch.tails);
-  });
-  lane.tails = dedupeTails(tails);
+  const children = inV1Order(Array.isArray(raw.steps) ? raw.steps : [], path, 'steps');
   if (children.length > 1) {
     b.checklist.push(
-      `Step "${id}" is a "parallel" step. V1 ran its ${children.length} steps one after another, and V2 runs each branch at the same time. Make sure no branch needs the work of another.`,
+      `Step "${id}" is a "parallel" step, but V1 ran its ${children.length} steps one after another, in id order (${children.map((s) => quote(idOf(s))).join(', ')}). The import does the same.`,
     );
   }
+  walk(children, lane, b);
 }
 
 type ReadCondition =
   | { kind: 'constant'; value: boolean; reason: string }
-  | { kind: 'variable'; variable: string; condition: IfCondition; inputType: WorkflowInputDefinition['type'] };
+  | {
+      kind: 'variable';
+      variable: string;
+      condition: IfCondition;
+      /** Undefined when V1 took a value of any type. */
+      inputType?: WorkflowInputDefinition['type'];
+    };
 
 /** `evaluateCondition` in V1's `workflow-engine.ts`, as an if-node condition. */
 function readCondition(raw: unknown): ReadCondition {
@@ -621,12 +649,12 @@ function readCondition(raw: unknown): ReadCondition {
   const variable = raw.variable;
   const left = triggerDataPath(variable);
   if (!Object.prototype.hasOwnProperty.call(raw, 'equals')) {
-    // V1 tested `Boolean(value)`. A boolean `equals true` is the same test.
+    // V1 tested `Boolean(value)`. A boolean `equals true` is the same test:
+    // it compares `Boolean(left)` for a value of any type (`nodes/if.ts`).
     return {
       kind: 'variable',
       variable,
       condition: { left, dataType: 'boolean', operation: 'equals', right: true },
-      inputType: 'boolean',
     };
   }
   const expected = raw.equals;
@@ -648,14 +676,125 @@ function readCondition(raw: unknown): ReadCondition {
   return { kind: 'constant', value: false, reason: 'compares to a value V1 never matched' };
 }
 
-/** V1 ran nested steps sorted by id (`asStepArray`), not in the listed order. */
-function noteRunOrder(id: string, key: string, steps: unknown[], path: string, b: Build): void {
-  const ids = steps.flatMap((s, i) => (isRecord(s) ? [v1StepId(s, `${path}.${key}[${i}]`)] : []));
-  const sorted = [...ids].sort((x, y) => x.localeCompare(y));
-  if (ids.every((value, i) => value === sorted[i])) return;
-  b.checklist.push(
-    `V1 ran the "${key}" steps of step "${id}" in id order (${sorted.map(quote).join(', ')}), not in the order listed. The import keeps the listed order. Make sure that order is correct.`,
-  );
+/** The steps under `key` of the step at `path`, in the order V1 ran them:
+ * sorted by id (`asStepArray`), not in the listed order. */
+function inV1Order(steps: unknown[], path: string, key: string): Located[] {
+  return located(steps, (i) => `${path}.${key}[${i}]`).sort((x, y) => idOf(x).localeCompare(idOf(y)));
+}
+
+/** `inV1Order` for a branch of conditional step `id`, with a line when V1's
+ * order is not the listed order. */
+function branchInV1Order(id: string, key: string, steps: unknown[], path: string, b: Build): Located[] {
+  const ordered = inV1Order(steps, path, key);
+  if (ordered.some((s, i) => s.path !== `${path}.${key}[${i}]`)) {
+    b.checklist.push(
+      `V1 ran the "${key}" steps of step "${id}" in id order (${ordered.map((s) => quote(idOf(s))).join(', ')}), not in the order listed. The import keeps the V1 order.`,
+    );
+  }
+  return ordered;
+}
+
+function idOf(step: Located): string {
+  return isRecord(step.raw) ? v1StepId(step.raw, step.path) : step.path;
+}
+
+function located(steps: unknown[], pathOf: (index: number) => string): Located[] {
+  return steps.map((raw, index) => ({ raw, path: pathOf(index) }));
+}
+
+/**
+ * Lists what made V1's compiler (`normalizeStep` in `workflow-compiler.ts`)
+ * refuse these steps. V1 never ran a workflow it refused, so each problem
+ * is a required decision. This reads every nested list, including the
+ * branches and loops that the walk does not convert.
+ */
+function collectRefusals(steps: unknown[], pathOf: (index: number) => string, b: Build): void {
+  steps.forEach((raw, index) => {
+    const path = pathOf(index);
+    if (!isRecord(raw)) {
+      requireDecision(b, `Item ${path} is not a step object, so V1 refused to run this workflow. The import leaves it out.`);
+      return;
+    }
+    const id = v1StepId(raw, path);
+    // `dropped` is set when the walk leaves the step out, too.
+    const refused = (problem: string, dropped = '') =>
+      requireDecision(b, `Step "${id}" ${problem}, so V1 refused to run this workflow.${dropped}`);
+    const type = typeof raw.type === 'string' ? raw.type.trim() : '';
+    if (!V1_STEP_TYPES.has(type)) {
+      refused(`has the unknown type ${JSON.stringify(raw.type)}`, ' The import leaves the step out.');
+      return;
+    }
+    if (type === 'bash' && stringField(raw.command) === '') refused('is a bash step with no command', ' The import leaves it out.');
+    if (type === 'tool' && stringField(raw.tool) === '') refused('is a tool step with no tool name', ' The import leaves it out.');
+    if (type === 'agent_message') {
+      if ((stringField(raw.content, false) || stringField(raw.message, false) || stringField(raw.goal, false)).trim() === '') {
+        refused('is an agent message with no text', ' The import leaves it out.');
+      }
+      if (raw.interrupt !== undefined && typeof raw.interrupt !== 'boolean') refused('has an "interrupt" that is not true or false');
+      const awaitResponse = raw.await_response !== undefined ? raw.await_response : raw.awaitResponse;
+      if (awaitResponse !== undefined && typeof awaitResponse !== 'boolean') refused('has an "await_response" that is not true or false');
+      const timeout = raw.await_timeout_ms !== undefined ? raw.await_timeout_ms : raw.awaitTimeoutMs;
+      if (timeout !== undefined && !(typeof timeout === 'number' && Number.isFinite(timeout) && timeout >= 1000)) {
+        refused('has an "await_timeout_ms" that is not a number of 1000 or more');
+      }
+    }
+    for (const key of ['then', 'else', 'steps'] as const) {
+      const nested = raw[key];
+      if (Array.isArray(nested)) collectRefusals(nested, (i) => `${path}.${key}[${i}]`, b);
+      else if (nested !== undefined && nested !== null) refused(`has a "${key}" that is not a list`);
+    }
+  });
+}
+
+const V1_STEP_TYPES = new Set(['agent', 'agent_message', 'tool', 'bash', 'conditional', 'loop', 'parallel', 'subworkflow', 'approval']);
+
+/**
+ * Why a V1 cron expression does not fire at the same minutes in V2, or
+ * undefined when it does. V1 matched cron itself (`cronMatchesNow` in
+ * `packages/worker/src/index.ts`): it took numbers only, counted a step on
+ * `*` from 0, ignored a step on a single number, and needed the day of the
+ * month AND the day of the week to match. V2 uses cron-parser, which matches
+ * either day field. Only the subset that both read the same way passes.
+ */
+export function v1CronDifference(cron: string): string | undefined {
+  const fields = cron.trim().split(/\s+/);
+  if (fields.length !== 5) return 'V1 read only cron expressions with 5 fields, so it never ran this schedule.';
+  for (const [i, field] of fields.entries()) {
+    const [name, min, max] = CRON_FIELDS[i]!;
+    for (const part of field.split(',')) {
+      if (!sameCronPart(part, min, max)) return `V1 and V2 read "${part}" in the ${name} field differently.`;
+    }
+  }
+  if (fields[2] !== '*' && fields[4] !== '*') {
+    return 'V1 ran it only on days that match both the day of the month and the day of the week. V2 runs it on days that match either one.';
+  }
+  return undefined;
+}
+
+const CRON_FIELDS: [name: string, min: number, max: number][] = [
+  ['minute', 0, 59],
+  ['hour', 0, 23],
+  ['day of the month', 1, 31],
+  ['month', 1, 12],
+  ['day of the week', 0, 7],
+];
+
+/** One comma part that V1 and cron-parser read the same way: `*`, `N`,
+ * `N-M`, `N-M/S`, or `*\/S` on a field that starts at 0. */
+function sameCronPart(part: string, min: number, max: number): boolean {
+  if (part === '*') return true;
+  const star = /^\*\/(\d+)$/.exec(part);
+  if (star !== null) return min === 0 && Number(star[1]) > 0 && Number(star[1]) <= max;
+  const range = /^(\d+)(?:-(\d+)(?:\/(\d+))?)?$/.exec(part);
+  if (range === null) return false;
+  const start = Number(range[1]);
+  const end = range[2] === undefined ? start : Number(range[2]);
+  const step = range[3] === undefined ? 1 : Number(range[3]);
+  return min <= start && start <= end && end <= max && step > 0;
+}
+
+function cronLine(name: string, cron: string, difference: string): string {
+  return `V1 schedule "${name}" (${cron}) does not run at the same times in V2. ${difference} The import did not create it. Decide when it must run, then add it in Triggers.`;
 }
 
 function collectOutputOwners(steps: unknown[], pathOf: (index: number) => string, b: Build): void {
@@ -690,7 +829,21 @@ function flush(lane: Lane, b: Build): void {
       `Session node "${node.id}" has text in {{ }}. V1 sent it to the agent as written, and the import keeps it as written. To fill in a value when the workflow runs, change it to a V2 template such as {{trigger.data.name}}.`,
     );
   }
+  const commands = lane.pending.filter((p) => p.command === true).map((p) => quote(p.stepId));
+  if (commands.length > 0) {
+    requireDecision(
+      b,
+      `Session node "${node.id}" runs the shell commands of steps ${commands.join(', ')}. V1 stopped the run when a command failed. Here the session only reports the failure, and the work after it can still run. Decide how the workflow stops when a command fails.`,
+    );
+  }
   lane.pending = [];
+}
+
+/** A checklist line for a place where the import does not do exactly what
+ * V1 did. The workflow then gets no schedule (`convertWorkflow`). */
+function requireDecision(b: Build, line: string): void {
+  b.checklist.push(line);
+  b.differs = true;
 }
 
 function addNode(node: WorkflowNode, lane: Lane, b: Build): void {
