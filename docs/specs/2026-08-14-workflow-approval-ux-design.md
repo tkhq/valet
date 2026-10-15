@@ -238,7 +238,29 @@ Hardening (applies to approval-node resolutions too — shared route):
    invocation context (the synthetic `wf:invoke:` session id), so a workflow
    cannot approve its own or another run's gates. Updated 2026-10-14: before,
    the action refused policy gates, and an agent could only send the user to
-   the run page.
+   the run page. Updated 2026-10-15: the result's `next` field says what
+   follows. When the approving conversation started the run
+   (`runReportsToThread`), the run's `workflow.settled` and
+   `workflow.approval_needed` signals arrive there, so the assistant ends its
+   turn, the same rule as after `start_run`. An assistant that polled
+   `get_run` after an approval reported a fast run twice: once from the poll
+   and once from the settle signal. When another conversation started the
+   run, or none did, the signals do not arrive, so `next` tells the
+   assistant to read `get_run` instead. When other gates were already
+   waiting, `next` names them (`resolvedGateStillWaiting`): a drive that
+   only resolves gates opens none, so no `workflow.approval_needed` signal
+   would report them. The run wakes as soon as the approval is recorded, so
+   `gatesStillWaiting` counts only gates that waited just before the
+   approval and still wait after it; a gate the drive opens gets its own
+   signal. The pending-gate projection keeps consumed answers, because the
+   drive can consume an answer before it replaces the run's waiting list.
+   If the status read fails after resolution, approval still succeeds.
+   The assistant must call `get_run` to check for remaining approvals.
+   An unknown waiting state must not tell it to wait for a signal.
+   Known gap: a team run started before its thread moved
+   to an execution session stores the root session as its origin, while its
+   reports go to the execution thread, so `next` there says to read
+   `get_run`.
 5. **Timeout.** After `timeoutAt` has passed, resolution returns 409
    `Gate timed out`.
 

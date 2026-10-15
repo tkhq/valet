@@ -6,6 +6,8 @@ import {
   findingKey,
   formatEditLintErrors,
   ownerFromContext,
+  gatesStillWaiting,
+  runReportsToThread,
   workflowsActionPlugin,
 } from "./actions.js";
 import type { ActionPlugin, PluginActionContext, SessionEntry, ValetPlugin } from "@valet/engine";
@@ -81,6 +83,42 @@ describe("workflowsActionPlugin", () => {
       "workflows.update_schedule",
       "workflows.update_trigger",
     ]);
+  });
+
+  // The "end your turn" advice holds only when the run's signals reach the
+  // approving conversation; elsewhere the assistant must read get_run.
+  it("says a run reports to this thread only when this thread started it", () => {
+    const origin = { assistantSessionId: "s-a", threadId: "t-a" };
+    expect(runReportsToThread({ origin }, "s-a", "t-a")).toBe(true);
+    expect(runReportsToThread({ origin }, "s-a", "t-b")).toBe(false);
+    expect(runReportsToThread({ origin }, "s-b", "t-a")).toBe(false);
+    expect(runReportsToThread({}, "s-a", "t-a")).toBe(false);
+    expect(runReportsToThread({ origin, parentRunId: "run-parent" }, "s-a", "t-a")).toBe(false);
+  });
+
+  // The read after an approval races the drive the approval wakes.
+  it("counts only gates that waited before the approval and still wait", () => {
+    const signal = (signalType: string) => ({ kind: "signal", signalType });
+    const before = [signal("approval:a"), signal("approval:b"), signal("approval:each:2")];
+    // The drive consumed `a` but has not parked again: `a` still shows.
+    expect(gatesStillWaiting(before, { nodeId: "a" }, [{ nodeId: "a" }, { nodeId: "b" }])).toEqual([{ nodeId: "b" }]);
+    // The drive already opened `c`, which gets its own signal.
+    expect(gatesStillWaiting(before, { nodeId: "a" }, [{ nodeId: "b" }, { nodeId: "c" }])).toEqual([{ nodeId: "b" }]);
+    // Iterations after the first carry their suffix.
+    expect(gatesStillWaiting(before, { nodeId: "b" }, [{ nodeId: "each", iteration: 2 }, { nodeId: "each", iteration: 3 }]))
+      .toEqual([{ nodeId: "each", iteration: 2 }]);
+    expect(gatesStillWaiting([signal("approval:only")], { nodeId: "only" }, [{ nodeId: "only" }])).toEqual([]);
+  });
+
+  // An approval that settles the run fast tempted the assistant to poll
+  // get_run and report, and then the settle signal made it report again.
+  it("tells the assistant to end its turn after resolving a gate, like after starting a run", () => {
+    const actions = workflowsActionPlugin(noDeps).actions;
+    for (const id of ["workflows.start_run", "workflows.resolve_approval"]) {
+      const description = actions.find((a) => a.id === id)?.description ?? "";
+      expect(description).toContain("workflow.settled signal");
+      expect(description).toContain("do not poll");
+    }
   });
 
   it("describes the explicit source, destination, and collision rule for team copies", () => {

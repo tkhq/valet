@@ -16,12 +16,12 @@ import { TeamAdminRequiredError } from "../services/team-deletion-access.js";
 import { submitDeletionRequest } from "../services/team-deletion-requests.js";
 import { proposalResult } from "../events/proposals.js";
 import { ValetError } from "@valet/shared";
-import { WorkflowCursorError, type WorkflowDefinition, type WorkflowEdge } from "@valet/workflow";
+import { WorkflowCursorError, type WorkflowDefinition, type WorkflowEdge, type WorkflowRun } from "@valet/workflow";
 import type { Static, TSchema } from "typebox";
 import { Type } from "typebox";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import { previewWorkflow } from "../routes/workflow-preview.js";
-import type { PreviewWorkflowResponse } from "../wire/types.js";
+import type { PreviewWorkflowResponse, WorkflowPendingGate } from "../wire/types.js";
 import {
   appendRemovedEdgeHint,
   applyWorkflowModelPatch,
@@ -266,6 +266,70 @@ function uncheckedSteps(definition: unknown): Array<{ nodeId: string; type: stri
     if (["session", "llm", "orchestrator", "workflow"].includes(type)) unchecked.push({ nodeId: node.id, type });
   }
   return unchecked;
+}
+
+/** What resolve_approval tells the assistant after a person answers the card,
+ * when this conversation started the run, so the run's signals arrive here. */
+export const RESOLVED_GATE_NEXT =
+  "The run continues. A workflow.settled signal reports its result in this thread, " +
+  "and a workflow.approval_needed signal says when it waits again. " +
+  "Tell the person the gate is resolved, then end your turn. Do not call get_run to wait for the result.";
+
+/** True when the run's signals reach this conversation. They go only to the
+ * thread that started the run (`signalOrigin` in run-attention.ts), and a
+ * sub-run reports nowhere. */
+export function runReportsToThread(
+  params: Pick<WorkflowRun["params"], "origin" | "parentRunId">,
+  sessionId: string | undefined,
+  threadId: string | undefined,
+): boolean {
+  const origin = params.origin;
+  return params.parentRunId === undefined && origin !== undefined
+    && origin.assistantSessionId === sessionId && origin.threadId === threadId;
+}
+
+/** The same, when another conversation started the run (or none did). The
+ * run's signals go only to the conversation that started it, so this one
+ * must read the result itself. */
+export const RESOLVED_GATE_NEXT_ELSEWHERE =
+  "The run continues, but its signals go to the conversation that started it, not this one. " +
+  "To tell the person the result here, call get_run when they ask or after a short wait.";
+
+/** The approval signal a gate waits on: `approval:{nodeId}`, with
+ * `:{iteration}` only after the first item (`resolveWorkflowApproval`). */
+function approvalSignalType(nodeId: string, iteration: number | undefined): string {
+  const iter = iteration ?? 0;
+  return `approval:${nodeId}${iter > 0 ? `:${iter}` : ""}`;
+}
+
+/**
+ * The gates that waited before this approval and still wait after it. The
+ * run wakes as soon as the approval is recorded, so the read after it can
+ * race the drive: it can still list the approved gate, or list a gate the
+ * drive just opened. The approved gate is not waiting, and a newly opened
+ * gate gets its own workflow.approval_needed signal, so both are left out.
+ */
+export function gatesStillWaiting<G extends { nodeId: string; iteration?: number }>(
+  waitingBefore: readonly { kind: string; signalType?: string }[],
+  resolved: { nodeId: string; iteration?: number },
+  pendingAfter: readonly G[],
+): G[] {
+  const before = new Set(waitingBefore.flatMap((w) => (w.kind === "signal" && w.signalType ? [w.signalType] : [])));
+  before.delete(approvalSignalType(resolved.nodeId, resolved.iteration));
+  return pendingAfter.filter((gate) => before.has(approvalSignalType(gate.nodeId, gate.iteration)));
+}
+
+/** The same, when other approvals were already waiting on the run. A
+ * workflow.approval_needed signal reports only a gate a drive opens, so no
+ * signal names these steps: the assistant must name them now. */
+export function resolvedGateStillWaiting(gates: { nodeId: string; iteration?: number; approver?: { name?: string } }[]): string {
+  const steps = gates.map((gate) => {
+    const step = gate.iteration === undefined ? gate.nodeId : `${gate.nodeId} (item ${gate.iteration})`;
+    return gate.approver?.name ? `${step}, which ${gate.approver.name} must approve` : step;
+  });
+  return `The run still waits for approval at ${steps.join("; ")}. ` +
+    "These steps were already waiting, so no new signal reports them. " +
+    "Tell the person which steps still wait and who must approve each. Do not say the run continues.";
 }
 
 export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): ActionPlugin {
@@ -680,7 +744,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     description:
       "Approve or deny a run's pending gate: an approval node, or a tool node that policy holds. " +
       "Call it when the user asks you to resolve a gate; never resolve one on your own judgment. " +
-      "Valet shows the user a card for the gate, and the gate resolves as the person who confirms it.",
+      "Valet shows the user a card for the gate, and the gate resolves as the person who confirms it. " +
+      "The run then continues. If this conversation started the run, a workflow.settled signal reports its result here, " +
+      "and a workflow.approval_needed signal says when it waits again: end your turn after the call and continue from that signal; do not poll. " +
+      "The result's `next` field says which case applies.",
     // The call itself always asks a person (below), so the catalog's own
     // approval card would only ask twice. A policy cannot skip that question.
     riskLevel: "medium",
@@ -717,6 +784,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         return { success: false, error: `Nobody confirmed the card, so ${node_id} on run ${run_id} still waits for a decision.` };
       }
       const person: WorkflowOwner = { userId: decision.resolvedBy, orgId: owner.orgId, principal: { type: "user", id: decision.resolvedBy } };
+      // Read just before the approval: what already waits, for `next`.
+      const waitingBefore = (await deps.workflowStore.getRun(run_id))?.waitingOn ?? [];
       const result = await resolveWorkflowApproval(deps, person, {
         runId: run_id,
         nodeId: node_id,
@@ -732,7 +801,24 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (result === "not_approver") return { success: false, error: "This step would use another member's shared account. Only that member can answer it." };
       if (result === "forbidden_always") return { success: false, error: "scope=always requires an org admin" };
       if (result === "org_mismatch") return { success: false, error: "not a member of this workflow's org" };
-      return { success: true, data: { runId: run_id, nodeId: node_id, approved } };
+      // The result is what the assistant reads right after the card. Saying
+      // here that the signal reports the run stops a get_run poll that
+      // reports the run twice: once from the poll, once from the signal.
+      let stillWaiting: WorkflowPendingGate[] | undefined;
+      try {
+        const detail = await getWorkflowRunDetail(deps, owner, run_id);
+        if (detail) stillWaiting = gatesStillWaiting(waitingBefore, { nodeId: node_id, iteration }, detail.pendingGates);
+      } catch (err) {
+        // The approval is already recorded. A failed read only loses the
+        // still-waiting list; it must not turn a success into a failure.
+        console.warn(`resolve_approval: could not read run ${run_id} after the approval:`, err);
+      }
+      const next = stillWaiting === undefined
+        ? "The gate is resolved, but the run's waiting state could not be read. Call get_run to check for remaining approvals."
+        : stillWaiting.length > 0
+        ? resolvedGateStillWaiting(stillWaiting)
+        : runReportsToThread(run.params, ctx.sessionId, ctx.threadId) ? RESOLVED_GATE_NEXT : RESOLVED_GATE_NEXT_ELSEWHERE;
+      return { success: true, data: { runId: run_id, nodeId: node_id, approved, next } };
     },
   });
 
