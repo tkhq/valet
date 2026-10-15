@@ -23,8 +23,9 @@ import plugin18 from "@valet/plugin-telegram/plugin";
 import plugin19 from "@valet/plugin-typefully/plugin";
 import plugin20 from "@valet/plugin-valet/plugin";
 import plugin21 from "@valet/plugin-workflows/plugin";
+import plugin22 from "@valet/plugin-xors-brain/plugin";
 
-export const bundledPlugins: ValetPlugin[] = [plugin0, plugin1, plugin2, plugin3, plugin4, plugin5, plugin6, plugin7, plugin8, plugin9, plugin10, plugin11, plugin12, plugin13, plugin14, plugin15, plugin16, plugin17, plugin18, plugin19, plugin20, plugin21];
+export const bundledPlugins: ValetPlugin[] = [plugin0, plugin1, plugin2, plugin3, plugin4, plugin5, plugin6, plugin7, plugin8, plugin9, plugin10, plugin11, plugin12, plugin13, plugin14, plugin15, plugin16, plugin17, plugin18, plugin19, plugin20, plugin21, plugin22];
 
 /** Brand slug per plugin, from each manifest's `iconSlug`. The connect UI
  * maps a slug to a brand mark; a plugin with no entry keeps the fallback
