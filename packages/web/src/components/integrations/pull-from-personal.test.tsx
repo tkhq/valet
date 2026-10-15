@@ -77,6 +77,14 @@ describe("PullFromPersonal", () => {
     expect(delegateMutate).toHaveBeenCalledWith({ service: "linear", body: { teamId: "t1" } });
   });
 
+  it("tells the member to reconnect a team connection that stopped working", async () => {
+    teamCreds = [cred({ dead: true })];
+    const user = await openPicker();
+    await user.click(screen.getByRole("checkbox"));
+    expect(screen.getByText("The team's own connection for this stopped working. Reconnect it on this page.")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Share Linear with Platform" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("will not share a service the team has its own connection for", async () => {
     teamCreds = [cred()];
     const user = await openPicker();
@@ -111,24 +119,24 @@ describe("PullFromPersonal", () => {
 // Both are refused by the route; saying so in the picker saves the trip.
 describe("blockedReason", () => {
   it("blocks the reserved 1Password token row and points at a team service account", () => {
-    expect(blockedReason(cred({ service: "onepassword" }), new Set(), new Set())).toMatch(
+    expect(blockedReason(cred({ service: "onepassword" }), new Set(), new Map())).toMatch(
       /Connect a team service account instead/,
     );
   });
 
   it("blocks a personal-scope 1Password reference", () => {
     expect(
-      blockedReason(cred({ onepasswordRef: "op://V/I/f", onepasswordTokenScope: "personal" }), new Set(), new Set()),
+      blockedReason(cred({ onepasswordRef: "op://V/I/f", onepasswordTokenScope: "personal" }), new Set(), new Map()),
     ).toMatch(/a team cannot use/);
   });
 
   it("allows an org-scope 1Password reference", () => {
     expect(
-      blockedReason(cred({ onepasswordRef: "op://V/I/f", onepasswordTokenScope: "org" }), new Set(), new Set()),
+      blockedReason(cred({ onepasswordRef: "op://V/I/f", onepasswordTokenScope: "org" }), new Set(), new Map()),
     ).toBeNull();
   });
 
   it("allows an ordinary stored credential", () => {
-    expect(blockedReason(cred(), new Set(), new Set())).toBeNull();
+    expect(blockedReason(cred(), new Set(), new Map())).toBeNull();
   });
 });

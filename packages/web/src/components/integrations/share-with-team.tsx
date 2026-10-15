@@ -97,10 +97,13 @@ function TeamShareRow({
   const myRow = rows.find((c) => c.delegatedFrom === me.data?.id);
   const mine = myRow !== undefined;
   const others = rows.filter((c) => c.delegatedFrom && c.delegatedFrom !== me.data?.id).length;
-  const teamOwn = rows.some((c) => !c.delegatedFrom);
+  // The share route refuses a share beside the team's own connection.
+  const teamOwn = rows.find((c) => !c.delegatedFrom);
   const pending = delegate.isPending || revoke.isPending;
   const err = delegate.error ?? revoke.error;
-  const context = [teamOwn ? "Has its own connection." : null,
+  const context = [teamOwn === undefined ? null : teamOwn.dead
+      ? "Its own connection stopped working. Reconnect it in the team's Integrations."
+      : "Has its own connection, and teammates use it.",
     others > 0 ? `${others === 1 ? "1 other member shares" : `${others} other members share`} theirs.` : null].filter(Boolean).join(" ");
 
   return (
@@ -136,7 +139,7 @@ function TeamShareRow({
         <Button
           size="sm"
           className="shrink-0"
-          disabled={!acknowledged || pending || credsQ.isLoading || !!credsQ.error || !credsQ.data}
+          disabled={!acknowledged || pending || teamOwn !== undefined || credsQ.isLoading || !!credsQ.error || !credsQ.data}
           aria-label={`Share ${title} with ${team.name}`}
           onClick={() => delegate.mutate({ service, body: { teamId: team.id } })}
         >
