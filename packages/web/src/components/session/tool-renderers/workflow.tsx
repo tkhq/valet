@@ -19,7 +19,10 @@
  */
 import { Link } from "@tanstack/react-router";
 import { ArrowUpRight, Workflow } from "lucide-react";
+import { ApiError } from "~/api/client";
 import { useRunDetail, useWorkflow } from "~/api/workflows";
+import { Badge } from "~/components/primitives/badge";
+import { textLinkClass } from "~/components/primitives/button";
 import { ApprovalCard } from "~/components/workflows/approval-card";
 import {
   findApprovalPrompt,
@@ -28,6 +31,7 @@ import {
 } from "~/components/workflows/run-detail-helpers";
 import { WorkflowPreview } from "~/components/workflows/preview";
 import { isWorkflowDefinitionShape } from "~/components/workflows/editor-model";
+import { cn } from "~/lib/cn";
 import { relativeTime } from "~/lib/relative-time";
 import { resultText, structuredResult, type ToolRenderer, type ToolRendererProps } from "./types";
 import { ToolBody } from "./tool-shell";
@@ -185,6 +189,59 @@ export function workflowToolSuffix(args: unknown, toolName: string): string | un
     : toolId;
 }
 
+function StartedRunPreview({ runId, followUpRegistered }: { runId: string; followUpRegistered?: boolean }) {
+  const { data, isPending, error } = useRunDetail(runId);
+  const active = !error && data && data.run.status !== "settled";
+  return (
+    <div
+      role="status"
+      aria-label="Workflow run status"
+      className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-line bg-paper px-3 py-2 text-xs"
+    >
+      <Workflow
+        aria-hidden
+        className={cn("h-4 w-4 shrink-0 text-moss", active && "animate-pulse motion-reduce:animate-none")}
+      />
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-medium text-ink">{active ? "Background workflow" : "Workflow run"}</span>
+          {!isPending && !error && data && (
+            <StatusPill
+              status={data.run.status}
+              outcome={data.run.status === "settled" ? data.run.outcome : undefined}
+            />
+          )}
+        </div>
+        <p className="text-muted">
+          {isPending ? "Loading run status…" : error || !data
+            ? error instanceof ApiError && error.status === 404
+              ? "Run not found or no longer accessible. Open the run to check access."
+              : "Run status unavailable. Open the run to try again."
+            : followUpRegistered === true
+              ? "Completion follow-up registered."
+              : followUpRegistered === false
+                ? "No automatic chat follow-up registered."
+                : "Open the run to check progress."}
+        </p>
+      </div>
+      <Link to="/workflows/runs/$runId" params={{ runId }} className={cn(textLinkClass, "shrink-0")}>
+        Open run <ArrowUpRight className="h-3 w-3" aria-hidden />
+      </Link>
+    </div>
+  );
+}
+
+function WorkflowToolPreview({ args, result, status, error, toolName }: ToolRendererProps) {
+  if (status !== "completed" || error || workflowToolSuffix(args, toolName) !== "start_run") return null;
+  const data = parsedResultData(result);
+  const runId = data?.runId;
+  if (typeof runId !== "string" || !runId.trim()) return null;
+  const followUp = data?.followUp;
+  const registered = isRecord(followUp) && typeof followUp.registered === "boolean"
+    ? followUp.registered : undefined;
+  return <StartedRunPreview runId={runId} followUpRegistered={registered} />;
+}
+
 function RunBody({ runId }: { runId: string }) {
   const { data, isLoading, error } = useRunDetail(runId);
   if (isLoading) return <Skeleton label="Loading run…" />;
@@ -316,22 +373,17 @@ function LintErrorsBody({ lines, attempted }: { lines: LintReportLine[]; attempt
 }
 
 function StatusPill({ status, outcome }: { status: string; outcome?: string }) {
-  const label = outcome ?? status;
-  const tone =
+  const variant =
     outcome === "completed"
-      ? "bg-moss-wash text-moss"
+      ? "success"
       : outcome === "failed"
-        ? "bg-danger-500/10 text-danger-500"
+        ? "danger"
         : status === "parked"
-          ? "bg-amber/10 text-amber"
+          ? "warning"
           : status === "running"
-            ? "bg-moss-wash text-moss"
-            : "bg-neutral-500/10 text-muted";
-  return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${tone}`}>
-      {label}
-    </span>
-  );
+            ? "accent"
+            : "neutral";
+  return <Badge variant={variant}>{outcome ?? status}</Badge>;
 }
 
 function DefinitionBody({ workflowId }: { workflowId: string }) {
@@ -449,4 +501,5 @@ export const workflowRenderer: ToolRenderer = {
     return refs.runId ?? refs.workflowId;
   },
   Body: WorkflowToolBody,
+  Preview: WorkflowToolPreview,
 };
