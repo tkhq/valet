@@ -4,7 +4,7 @@
  * section from fixtures alone, and the production gate answers 404. The page
  * is the real route's component under a memory router.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import { MutationObserver, QueryObserver } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
@@ -33,6 +33,13 @@ function mount() {
   render(<RouterProvider router={router} />);
 }
 
+// The route loads the gallery lazily. Its first import compiles every
+// component it renders, which can take longer than a `findBy` waits on a
+// loaded CI runner, so load it once before the tests mount the route.
+beforeAll(async () => {
+  await import("./gallery");
+}, 60_000);
+
 afterEach(() => {
   vi.unstubAllEnvs();
 });
@@ -45,7 +52,7 @@ describe("/dev/ui-stress", () => {
   it("renders every section from fixtures, with no key left unseeded", async () => {
     mount();
     for (const section of UI_STRESS_SECTIONS) {
-      expect(await screen.findByRole("heading", { level: 2, name: section.title })).toBeTruthy();
+      expect(await screen.findByRole("heading", { level: 2, name: section.title }, { timeout: 5000 })).toBeTruthy();
     }
     // The bell opens on load with 20 workflow items and a first decision
     // page of 20 that has a next page.
@@ -61,7 +68,7 @@ describe("/dev/ui-stress", () => {
   // visual check. These pin the markup each overflow fix depends on.
   it("keeps the markup that stops long fixture text from overflowing", async () => {
     mount();
-    await screen.findByRole("heading", { level: 2, name: UI_STRESS_SECTIONS[0]!.title });
+    await screen.findByRole("heading", { level: 2, name: UI_STRESS_SECTIONS[0]!.title }, { timeout: 5000 });
     await waitFor(() => expect(uiStressClient.isFetching()).toBe(0));
     // A team badge shrinks and truncates instead of pushing past its card.
     const teamLinks = [...document.querySelectorAll('a[href^="/chat?workspace="]')].filter((link) => link.querySelector(".truncate"));
