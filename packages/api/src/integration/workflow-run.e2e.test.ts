@@ -205,10 +205,12 @@ function waitingOnHas(waitingOn: unknown[], kind: string, nodeId: string): boole
 }
 
 async function resolveApproval(baseUrl: string, runId: string, nodeId: string, approved: boolean): Promise<void> {
+  const detail = await getRun(baseUrl, runId);
+  const gateId = detail.pendingGates.find(gate => gate.nodeId === nodeId)?.gateId;
   const r = await fetch(`${baseUrl}/api/workflows/runs/${runId}/approvals/${nodeId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ approved }),
+    body: JSON.stringify({ approved, gateId }),
   });
   if (!r.ok) throw new Error(`resolveApproval failed: ${r.status} ${await r.text()}`);
 }

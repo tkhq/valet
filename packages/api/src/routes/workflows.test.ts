@@ -1550,6 +1550,24 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
         .toMatchObject({ approved: true, resolvedBy: "local-user", resolvedVia: "thread" });
     });
 
+    it("keeps a thread card bound to the gate shown before the person answers", async () => {
+      const { localApi, runId, resolve } = await parkedPolicyGate();
+      const store = localApi.providers.workflowStore;
+      const checkpoint = { runId, nodeId: "gate", iteration: 0, status: "intent" as const, attempt: 1, createdAt: 1 };
+      await store.putIntent({ ...checkpoint, effects: { gate: true, gateId: "approval:gate:gate:1" } });
+      const result = await resolve.execute({ run_id: runId, node_id: "gate", approved: true }, {
+        ...threadCtx("approve"),
+        requestDecision: async request => {
+          asked.push(request);
+          await store.putIntent({ ...checkpoint, effects: { gate: true, gateId: "approval:gate:gate:2" } });
+          return { actionId: "approve", resolvedBy: "local-user", resolvedAt: Date.now() };
+        },
+      });
+      expect(result).toMatchObject({ success: false, error: expect.stringContaining("changed") });
+      expect(asked[0]?.resumeKey).toContain("approval:gate:gate:1");
+      expect(await store.listSignals(runId)).toEqual([]);
+    });
+
     it("does not resurrect a sibling whose answer the drive consumed before re-parking", async () => {
       const { localApi, runId, resolve } = await parkedPolicyGate();
       const store = localApi.providers.workflowStore;

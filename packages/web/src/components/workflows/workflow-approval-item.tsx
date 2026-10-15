@@ -76,7 +76,7 @@ export function WorkflowApprovalItem({
         <div className="mt-3">
       {policy && <p className="mb-3 text-xs text-muted">{reason}</p>}
       {policy ? (
-        <PolicyGateCard runId={item.runId} gate={gate} confirmActions />
+        <PolicyGateCard key={gate.gateId ?? `${gate.nodeId}:${gate.iteration ?? 0}`} runId={item.runId} gate={gate} confirmActions />
       ) : (
         <ApprovalCard
           runId={item.runId}

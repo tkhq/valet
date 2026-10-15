@@ -510,11 +510,12 @@ describe('policy gate', () => {
 
   it('rechecks action policy after lasting account consent and parks on a separate approval', async () => {
     const seen: WorkflowInvokeActionRequest[] = [];
+    const pending: Parameters<OnApprovalPending>[0][] = [];
     const args = await makeArgs({ engine: { invokeAction: async req => {
       seen.push(req);
       return seen.length === 1 ? { ...GATE_RESPONSE, provenance: 'shared_account', approver: { userId: 'bea', allowTeamConsent: true } }
         : seen.length === 2 ? GATE_RESPONSE : { ok: true, result: { id: 9 } };
-    } } });
+    } }, onApprovalPending: info => { pending.push(info); } });
     await executeTool(args);
     await args.store.insertSignal({ runId: args.run.runId, signalId: 'approval:t1:account:resolution', signalType: 'approval:t1',
       payload: { approved: true, resolvedBy: 'bea', scope: 'team_account' }, createdAt: 1 });
@@ -524,9 +525,43 @@ describe('policy gate', () => {
     expect(await args.store.listSignals(args.run.runId, { unconsumed: true })).toEqual([]);
     cp = (await args.store.getCheckpoints(args.run.runId)).find(c => c.nodeId === 't1');
     expect(cp?.effects?.approver).toBeUndefined();
+    expect(pending.map(info => info.gateId)).toEqual(['approval:t1:gate:1', 'approval:t1:gate:2']);
+    expect((await executeTool({ ...args, existingCheckpoint: cp })).status).toBe('parked');
+    expect(pending).toHaveLength(2);
     await args.store.insertSignal({ runId: args.run.runId, signalId: 'approval:t1:resolution', signalType: 'approval:t1', payload: { approved: true, resolvedBy: 'u1' }, createdAt: 2 });
     expect(await executeTool({ ...args, existingCheckpoint: cp })).toEqual({ status: 'completed', result: { id: 9 } });
     expect(seen[2]?.approval).toMatchObject({ resolvedBy: 'u1' });
+  });
+
+  it('fails instead of reopening the same account gate after lasting consent', async () => {
+    const resolved: Parameters<OnGateResolved>[0][] = [];
+    const args = await makeArgs({
+      engine: { invokeAction: async () => ({ ...GATE_RESPONSE, provenance: 'shared_account',
+        approver: { userId: 'bea', shareGeneration: 'share-1', allowTeamConsent: true } }) },
+      onGateResolved: info => { resolved.push(info); },
+    });
+    await executeTool(args);
+    await args.store.insertSignal({ runId: args.run.runId, signalId: 'account-answer', signalType: 'approval:t1',
+      payload: { approved: true, resolvedBy: 'bea', scope: 'team_account' }, createdAt: 1 });
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find(c => c.nodeId === 't1');
+    const result = await executeTool({ ...args, existingCheckpoint: cp });
+    expect(result).toMatchObject({ status: 'failed', error: expect.stringMatching(/account.*consent.*still requires approval/i) });
+    expect(await args.store.listSignals(args.run.runId, { unconsumed: true })).toEqual([]);
+    expect(resolved).toEqual([expect.objectContaining({ outcome: 'error', error: expect.any(String) })]);
+  });
+
+  it('opens a fresh account gate when the share changed before consent resumed', async () => {
+    let generation = 'old-share';
+    const args = await makeArgs({ engine: { invokeAction: async () => ({ ...GATE_RESPONSE, provenance: 'shared_account',
+      approver: { userId: 'bea', shareGeneration: generation, allowTeamConsent: true } }) } });
+    await executeTool(args);
+    await args.store.insertSignal({ runId: args.run.runId, signalId: 'account-answer', signalType: 'approval:t1',
+      payload: { approved: true, resolvedBy: 'bea', scope: 'team_account' }, createdAt: 1 });
+    generation = 'new-share';
+    const cp = (await args.store.getCheckpoints(args.run.runId)).find(c => c.nodeId === 't1');
+    expect((await executeTool({ ...args, existingCheckpoint: cp })).status).toBe('parked');
+    const fresh = (await args.store.getCheckpoints(args.run.runId)).find(c => c.nodeId === 't1');
+    expect(fresh?.effects).toMatchObject({ gateId: 'approval:t1:gate:2', approver: { shareGeneration: 'new-share' } });
   });
 
   it('approved signal: invokes with the approval field, then consumes signal atomically', async () => {

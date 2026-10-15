@@ -189,14 +189,18 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
 
   // ─── Gate raised ─────────────────────────────────────────────────────────
   if (!response.ok && 'requiresApproval' in response && response.requiresApproval) {
+    if (heldSignal && parseGatePayload(heldSignal.payload).accountConsent
+      && response.provenance === 'shared_account'
+      && sameAccountApprover(existingCheckpoint?.effects?.approver, response.approver)) {
+      return await failUnresolvedGate(args, invocationId, heldSignal,
+        `Account borrowing consent was recorded but this account still requires approval for ${node.service}.${node.action}. Check team membership and account sharing. Then start a new run.`);
+    }
     if (approval !== undefined) {
       // Spec §1: approval was provided but enforcement still requires it —
       // the grant write may have failed. Fail loudly; never livelock.
       // The signal must still be consumed so it can't re-deliver.
-      return await writeTerminal(args, invocationId, heldSignal, {
-        status: 'failed',
-        error: `approval was recorded but policy enforcement still requires approval for ${node.service}.${node.action} — the grant write may have failed; resolve the gate again or check org policies`,
-      });
+      return await failUnresolvedGate(args, invocationId, heldSignal,
+        `approval was recorded but policy enforcement still requires approval for ${node.service}.${node.action} — the grant write may have failed; resolve the gate again or check org policies`);
     }
     return await openGate(args, invocationId, renderedParams, response.riskLevel, response.provenance, response.approver, heldSignal);
   }
@@ -226,6 +230,9 @@ async function openGate(
   const { run, node, attempt, iteration, store, clock, onApprovalPending } = args;
   const suffix = iterationSuffix(iteration);
   const signalType = `approval:${node.id}${suffix}`;
+  const previousSequence = args.existingCheckpoint?.effects?.gateSequence;
+  const gateSequence = typeof previousSequence === 'number' ? previousSequence + 1 : 1;
+  const gateId = `${signalType}:gate:${gateSequence}`;
 
   let timeoutAt: number | undefined;
   if (node.approvalTimeout !== undefined) {
@@ -253,6 +260,8 @@ async function openGate(
   const gateEffects: Record<string, unknown> = {
     invocationId,
     gate: true,
+    gateId,
+    gateSequence,
     ...(accountSignal ? { accountConsentResolved: true } : {}),
     gateParams: gp.value,
     ...(gp.truncated ? { gateParamsTruncated: true } : {}),
@@ -273,13 +282,12 @@ async function openGate(
     await store.putIntent(checkpoint);
   }
 
-  // Fire onApprovalPending only on first gate open (effects.gate !== true
-  // before this call — the check is done in the caller before entering
-  // openGate, which is only called when effects.gate is falsy).
+  // Replays keep this checkpoint. Only a fresh gate occurrence notifies.
   await onApprovalPending?.({
     runId: run.runId,
     nodeId: node.id,
     kind: 'policy_gate',
+    gateId,
     service: node.service,
     action: node.action,
     params: gp.value,
@@ -344,6 +352,15 @@ async function denyOutcome(
 
 // ─── Terminal checkpoint write ────────────────────────────────────────────────
 
+async function failUnresolvedGate(args: NodeExecutorArgs<ToolNode>, invocationId: string, signal: RunSignal | undefined, error: string): Promise<NodeExecuteResult> {
+  const payload = signal ? parseGatePayload(signal.payload) : undefined;
+  await callGateResolved(args.onGateResolved, {
+    run: args.run, node: args.node, iteration: args.iteration, invocationId, outcome: 'error', error,
+    ...(payload && !payload.accountConsent ? { resolvedBy: payload.resolvedBy } : {}),
+  });
+  return writeTerminal(args, invocationId, signal, { status: 'failed', error });
+}
+
 type TerminalOutcome =
   | { status: 'completed'; result: unknown }
   | { status: 'failed'; error: string };
@@ -383,8 +400,9 @@ async function callGateResolved(
     node: ToolNode;
     iteration: number;
     invocationId: string;
-    outcome: 'denied' | 'timeout';
-    resolvedBy: string;
+    outcome: 'denied' | 'timeout' | 'error';
+    resolvedBy?: string;
+    error?: string;
   },
 ): Promise<void> {
   if (onGateResolved === undefined) return;
@@ -396,6 +414,7 @@ async function callGateResolved(
       invocationId: info.invocationId,
       outcome: info.outcome,
       resolvedBy: info.resolvedBy,
+      ...(info.error !== undefined ? { error: info.error } : {}),
     });
   } catch {
     // Best-effort — a throw must not abort the node.
@@ -403,6 +422,12 @@ async function callGateResolved(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function sameAccountApprover(previous: unknown, next: { userId: string; shareGeneration?: string } | undefined): boolean {
+  if (!next || previous === null || typeof previous !== 'object' || !('userId' in previous) || previous.userId !== next.userId) return false;
+  const generation = 'shareGeneration' in previous ? previous.shareGeneration : undefined;
+  return generation === next?.shareGeneration;
+}
 
 function mintInvocationId(runId: string, nodeId: string, iteration: number): string {
   return `workflow:${runId}:${nodeId}${iterationSuffix(iteration)}`;

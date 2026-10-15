@@ -318,6 +318,10 @@ export async function recordAttemptAudit(
     params: req.params,
     createdAt: (opts.clock ?? Date.now)(),
   });
+  if (!parked) await updateInvocationOutcome(opts.db, key, ctx.orgId, {
+    status: result.ok ? "completed" : "error",
+    ...(!result.ok && "error" in result ? { error: result.error } : {}),
+  });
 }
 
 /**
@@ -713,6 +717,7 @@ async function enforceWorkflowPolicy(
   }
 
   if (decision.mode === "deny") {
+    const error = `${req.service}.${req.action} is blocked by ${decision.provenance.source === "team_policy" ? "team" : "org"} policy`;
     await persist({
       invocationId: key,
       service: req.service,
@@ -731,7 +736,8 @@ async function enforceWorkflowPolicy(
       params,
       createdAt: now,
     });
-    return { ok: false, error: `${req.service}.${req.action} is blocked by ${decision.provenance.source === "team_policy" ? "team" : "org"} policy` };
+    await updateInvocationOutcome(opts.db, key, ctx.orgId, { status: "denied", error });
+    return { ok: false, error };
   }
 
   // decision.mode === "require_approval"
