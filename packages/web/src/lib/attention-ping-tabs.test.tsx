@@ -41,10 +41,12 @@ function deliver(pageActive: boolean) {
   const view = renderHook(() => useAttentionPing(), { wrapper });
   h.notifications = [approval("n1")];
   view.rerender();
+  return view;
 }
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   h.card = undefined;
   h.chime.mockClear();
   sessionStorage.clear();
@@ -61,6 +63,21 @@ describe("attention chime with Tabs", () => {
   it("plays when Tabs covers a normal page that shows the target", () => {
     history.replaceState(null, "", TARGET);
     deliver(false);
+    expect(h.chime).toHaveBeenCalledOnce();
+  });
+
+  // The notification list is per person, not per workspace. So the poll of a
+  // personal top page also holds the notifications of a card in a team.
+  it("plays once for a team card's notification while the top page is personal", () => {
+    history.replaceState(null, "", "/chat?workspace=user");
+    sessionStorage.setItem(DECK_KEY, JSON.stringify({ cards: [{ id: "one", url: "/chat?workspace=team-a&thread=t9", title: "Chat" }], active: "one", mode: "focus" }));
+    render(<PageDeck />);
+    const view = deliver(false);
+    expect(h.chime).toHaveBeenCalledOnce();
+    // A later poll that still lists the same id does not play it again.
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+    h.notifications = [approval("n1")];
+    view.rerender();
     expect(h.chime).toHaveBeenCalledOnce();
   });
 

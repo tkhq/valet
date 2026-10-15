@@ -33,7 +33,9 @@ Hidden pages disable global keyboard shortcuts while retaining mounted state. Es
 The top page plays the attention chime for the whole browser tab, so one
 notification plays one chime. Cards never play it. The top page stays quiet when
 its own visible page or a card that a person can act in shows the target. The
-standalone `/deck` page runs the same check for its cards.
+standalone `/deck` page runs the same check for its cards. The notification list
+is per person and holds every workspace, so the top page's poll also covers a card
+in a team workspace. A card does not forward its notifications to the top page.
 
 In Focus, the neighbor cards sit off screen. A click on their edge still focuses
 them, but their controls are not in the keyboard tab order.

@@ -109,10 +109,12 @@ export function showCardOnScreen(id: string, page: PageLocation): () => void {
 /**
  * The top page plays the chime for the whole browser tab. A Tabs card is a
  * separate page with its own poll and audio, so a card never plays it, and
- * one notification gives one chime. The pages on screen are the top page
- * while Tabs does not cover it, and every card a person can act in. The hook
- * reads `window.location`, not the router, because the standalone `/deck`
- * page runs it without a router.
+ * one notification gives one chime. The notification list is per person, not
+ * per workspace, so the top page's poll also holds the notifications of a
+ * card in another workspace. A card does not forward its notifications.
+ * The pages on screen are the top page while Tabs does not cover it, and
+ * every card a person can act in. The hook reads `window.location`, not the
+ * router, because the standalone `/deck` page runs it without a router.
  */
 export function useAttentionPing(): void {
   const notificationsQ = useNotifications();
