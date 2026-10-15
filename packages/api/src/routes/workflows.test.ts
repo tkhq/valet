@@ -8,7 +8,7 @@
  */
 import type { RunHost, WorkflowDefinition } from "@valet/workflow";
 import type { DecisionGateRequest, PluginActionContext } from "@valet/engine";
-import { workflowsActionPlugin } from "../workflows/actions.js";
+import { RESOLVED_GATE_NEXT, workflowsActionPlugin } from "../workflows/actions.js";
 import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveDefaultAssistant } from "../assistants/service.js";
@@ -1527,7 +1527,7 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
     it("resolves a policy gate as the person who confirms the card", async () => {
       const { localApi, runId, resolve } = await parkedPolicyGate();
       const result = await resolve.execute({ run_id: runId, node_id: "gate", approved: true }, threadCtx("approve"));
-      expect(result).toMatchObject({ success: true });
+      expect(result).toMatchObject({ success: true, data: { next: RESOLVED_GATE_NEXT } });
       expect(asked).toHaveLength(1);
       expect(asked[0]?.title).toBe("Approve widgets.nuke on this workflow run?");
       const signals = await localApi.providers.workflowStore.listSignals(runId);

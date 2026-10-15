@@ -266,6 +266,12 @@ function uncheckedSteps(definition: unknown): Array<{ nodeId: string; type: stri
   return unchecked;
 }
 
+/** What resolve_approval tells the assistant after a person answers the card. */
+export const RESOLVED_GATE_NEXT =
+  "The run continues. A workflow.settled signal reports its result in this thread, " +
+  "and a workflow.approval_needed signal says when it waits again. " +
+  "Tell the person the gate is resolved, then end your turn. Do not call get_run to wait for the result.";
+
 export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): ActionPlugin {
   const copyToTeam = action(Type.Object({
     workflow_id: Type.String({ description: "Explicit personal workflow ID to copy." }),
@@ -721,7 +727,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (result === "not_approver") return { success: false, error: "This step would use another member's shared account. Only that member can answer it." };
       if (result === "forbidden_always") return { success: false, error: "scope=always requires an org admin" };
       if (result === "org_mismatch") return { success: false, error: "not a member of this workflow's org" };
-      return { success: true, data: { runId: run_id, nodeId: node_id, approved } };
+      // The result is what the assistant reads right after the card. Saying
+      // here that the signal reports the run stops a get_run poll that
+      // reports the run twice: once from the poll, once from the signal.
+      return { success: true, data: { runId: run_id, nodeId: node_id, approved, next: RESOLVED_GATE_NEXT } };
     },
   });
 
