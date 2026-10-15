@@ -133,6 +133,21 @@ export function linkGitHubReferencesInMarkdown(text: string): string {
   return text;
 }
 
+/** A code block between two triple-backtick runs. Slack mrkdwn does not
+ * need the runs on their own lines, so a block can open and close mid-line. */
+const CODE_BLOCK = /```(?:\w*\n)?([\s\S]*?)```/g;
+
+/** An inline code span: a backtick run that a run of the same length closes. */
+const INLINE_CODE = /(?<!`)(`+)(?!`)([\s\S]*?)(?<!`)\1(?!`)/g;
+
+/** The text with each code block and inline code span replaced by a space.
+ * Slack shows code literally, so a `<@U…>` in code mentions no one. The
+ * space stops the text on the two sides of a span from joining into a token.
+ */
+export function stripCode(text: string): string {
+  return text.replace(CODE_BLOCK, " ").replace(INLINE_CODE, " ");
+}
+
 /** Convert CommonMark to Slack mrkdwn.
  *
  * Apply this function exactly once. A second application treats Slack's
@@ -158,13 +173,13 @@ export function markdownToSlackMrkdwn(
     codeBlocks.push(lines.slice(index + 1, end).join("\n").trimEnd());
     lines.splice(index, Math.min(end + 1, lines.length) - index, `\x00CB${codeBlocks.length - 1}\x00`);
   }
-  let result = lines.join("\n").replace(/```(?:\w*\n)?([\s\S]*?)```/g, (_, code: string) => {
+  let result = lines.join("\n").replace(CODE_BLOCK, (_, code: string) => {
     codeBlocks.push(code.trimEnd());
     return `\x00CB${codeBlocks.length - 1}\x00`;
   });
 
   const inlineCodes: string[] = [];
-  result = result.replace(/(?<!`)(`+)(?!`)([\s\S]*?)(?<!`)\1(?!`)/g, (span: string) => {
+  result = result.replace(INLINE_CODE, (span: string) => {
     inlineCodes.push(span);
     return `\x00IC${inlineCodes.length - 1}\x00`;
   });

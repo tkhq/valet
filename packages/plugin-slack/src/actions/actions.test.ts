@@ -1408,6 +1408,32 @@ describe('slack actions', () => {
       expect(lookedUpUsers(fetchMock)).toEqual(['U01AAAAAAA']);
     });
 
+    // Slack shows code literally, so a mention example in code is not a
+    // mention. The mention outside the code is still checked.
+    it('send_message skips mentions in inline code and code blocks', async () => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const text = `Write \`<@${unknownUser}>\` to mention someone. Ask <@U01AAAAAAA>.\n\`\`\`\n<@${unknownUser}>\n\`\`\``;
+      const result = await action('slack.send_message').execute({ channel: 'C1', text }, mentionCtx());
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(lookedUpUsers(fetchMock)).toEqual(['U01AAAAAAA']);
+      expect(messageWrites(fetchMock)).toHaveLength(1);
+    });
+
+    // Slack shows rich-text text and link text literally. A rich-text
+    // mention is a separate user element, which is still checked.
+    it('send_message skips mention syntax in rich-text text and link elements', async () => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const blocks = JSON.stringify([{ type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [
+        { type: 'text', text: `Literal <@${unknownUser}> ` },
+        { type: 'link', url: 'https://example.com', text: `Profile of <@${unknownUser}>` },
+        { type: 'user', user_id: 'U01AAAAAAA' },
+      ] }] }]);
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: 'Mention syntax', blocks }, pluginCtx());
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(lookedUpUsers(fetchMock)).toEqual(['U01AAAAAAA']);
+      expect(messageWrites(fetchMock)).toHaveLength(1);
+    });
+
     it('send_message looks up each mentioned user once, labeled or not, and skips special mentions', async () => {
       mockSlackMethods(fetchMock, userFound);
       const text = 'Hi <@U01AAAAAAA|reviewer> and <@U01AAAAAAA>, <@W01BBBBBBB>. <!here> <!channel> <!subteam^S01CCCCCCC> <#C01DDDDDDD|general>';

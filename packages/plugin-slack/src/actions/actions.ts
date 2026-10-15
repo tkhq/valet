@@ -26,7 +26,7 @@ import { cachedChannelName, rememberChannelName, resolveChannelName } from "./ch
 import { buildContentBlocks, hasTableBlock, needsContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 import { SlackApi, SlackApiError } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
-import { markdownToSlackMrkdwn } from "../transport/format.js";
+import { markdownToSlackMrkdwn, stripCode } from "../transport/format.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -299,17 +299,22 @@ const MAX_CHECKED_MENTIONS = 20;
  *  slower lookup counts as failed, and the post goes out unchecked. */
 const MENTION_LOOKUP_TIMEOUT_MS = 3_000;
 
+/** Block Kit fields that Slack never shows as message text: IDs, URLs, image
+ *  alt text, and the `value` that a button or a select option sends back. */
+const UNRENDERED_KEYS = new Set(['action_id', 'block_id', 'callback_id', 'alt_text', 'url', 'image_url', 'value']);
+
+/** Block Kit object types whose text Slack shows literally: `plain_text`
+ *  objects, and rich-text `text` and `link` elements. A rich-text mention is
+ *  a separate `user` element. */
+const LITERAL_TEXT_TYPES = new Set(['plain_text', 'text', 'link']);
+
 /**
  * The user IDs that message content mentions, in first-seen order. Each
  * source is message text or parsed Block Kit JSON. The walk scans every
- * string for `<@U…>` mentions and adds the user_id of every rich-text `user`
- * element. It skips `plain_text` objects: Slack shows their text literally,
- * so a `<@U…>` there mentions no one. It also skips Block Kit fields that
- * Slack never shows as message text: IDs, URLs, image alt text, and the
- * `value` that a button or a select option sends back.
+ * string for `<@U…>` mentions outside code and adds the user_id of every
+ * rich-text `user` element. It skips objects of a LITERAL_TEXT_TYPES type
+ * and fields in UNRENDERED_KEYS: a `<@U…>` there mentions no one.
  */
-const UNRENDERED_KEYS = new Set(['action_id', 'block_id', 'callback_id', 'alt_text', 'url', 'image_url', 'value']);
-
 function mentionedUserIds(sources: unknown[]): Set<string> {
   const ids = new Set<string>();
   // A queue, not recursion: blocks are caller-supplied JSON of any depth.
@@ -317,11 +322,11 @@ function mentionedUserIds(sources: unknown[]): Set<string> {
   for (let i = 0; i < queue.length; i++) {
     const value = queue[i];
     if (typeof value === 'string') {
-      for (const m of value.matchAll(SLACK_USER_MENTION_RE)) ids.add(m[1]);
+      for (const m of stripCode(value).matchAll(SLACK_USER_MENTION_RE)) ids.add(m[1]);
     } else if (Array.isArray(value)) {
       for (const item of value) queue.push(item);
     } else if (typeof value === 'object' && value !== null) {
-      if ('type' in value && value.type === 'plain_text') continue;
+      if ('type' in value && typeof value.type === 'string' && LITERAL_TEXT_TYPES.has(value.type)) continue;
       if ('type' in value && value.type === 'user' && 'user_id' in value && typeof value.user_id === 'string') {
         ids.add(value.user_id);
       }
