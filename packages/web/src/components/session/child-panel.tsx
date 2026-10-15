@@ -1,3 +1,4 @@
+import { usePageActive } from "~/lib/page-active";
 import { useEffect, useRef } from "react";
 import { SessionView } from "./session-view";
 
@@ -21,6 +22,7 @@ export function ChildPanel({
   childId: string;
   onClose: () => void;
 }) {
+  const pageActive = usePageActive();
   const panelRef = useRef<HTMLDivElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
 
@@ -34,6 +36,7 @@ export function ChildPanel({
   }, [onClose]);
 
   useEffect(() => {
+    if (!pageActive) return;
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
         // Claim the event (capture phase + preventDefault) so the
@@ -66,7 +69,7 @@ export function ChildPanel({
     // bubble-phase interrupt listener, regardless of mount order.
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, []);
+  }, [pageActive]);
 
   // Focus the panel on open, restore focus to whatever triggered it on close.
   useEffect(() => {

@@ -16,7 +16,6 @@ import { AssistantRail } from "~/components/session/assistant-rail";
 import { KeyboardShortcutsDialog } from "~/components/session/keyboard-shortcuts-dialog";
 import { useChatKeybindings } from "~/hooks/use-chat-keybindings";
 import { useAttentionPing } from "~/lib/use-attention-ping";
-import { unlock } from "~/lib/notification-sound";
 import { UI_STRESS_PATH, UiStressShell, uiStressEnabled } from "~/dev/ui-stress/gate";
 
 interface RouterContext {
@@ -146,7 +145,6 @@ function RootLayout() {
  */
 function SignedInEffects() {
   useAttentionPing();
-  useUnlockAudioOnFirstGesture();
   return null;
 }
 
@@ -157,26 +155,6 @@ function SignedInEffects() {
 function ChatKeybindingsHost() {
   const { helpOpen, setHelpOpen } = useChatKeybindings();
   return <KeyboardShortcutsDialog open={helpOpen} onOpenChange={setHelpOpen} />;
-}
-
-/**
- * Browsers refuse to play audio until the page has seen a real user
- * gesture, so the first time the assistant needs you could be silent — the
- * one time it matters most. Resume the context on the first interaction of
- * the session, then stop listening.
- */
-function useUnlockAudioOnFirstGesture() {
-  useEffect(() => {
-    const events: (keyof WindowEventMap)[] = ["pointerdown", "keydown"];
-    const onGesture = () => {
-      unlock();
-      for (const e of events) window.removeEventListener(e, onGesture);
-    };
-    for (const e of events) window.addEventListener(e, onGesture, { once: false });
-    return () => {
-      for (const e of events) window.removeEventListener(e, onGesture);
-    };
-  }, []);
 }
 
 /** Mount composers only after their draft namespace matches the authenticated account. */
