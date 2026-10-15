@@ -1,5 +1,7 @@
+import { Link } from "@tanstack/react-router";
 import type { EventDeliveryWire } from "@valet/api/wire";
-import { Badge } from "~/components/primitives";
+import { Badge, textLinkClass } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 import { formatWhen } from "~/lib/format-when";
 import { deliveryStatusLine } from "./delivery-copy";
 
@@ -16,10 +18,13 @@ const DELIVERY_VARIANT: Record<EventDeliveryWire["status"], "neutral" | "success
   skipped: "neutral",
 };
 
+const destinationLinkClass = cn(textLinkClass, "min-h-11 text-xs sm:min-h-0");
+
 /**
  * The delivery attempts made for one event: what each one was trying to
  * reach, where it got to, and when it tries again. Shared by the feed row
- * and the event page so the two never drift.
+ * and the event page so the two never drift. A delivery links to the thread
+ * or the workflow run it reached, when the API sends one.
  */
 export function DeliveryList({
   deliveries,
@@ -47,6 +52,16 @@ export function DeliveryList({
             <span className="text-xs text-muted">{deliveryStatusLine(d, now)}</span>
             {d.deliveredAt !== null && (
               <span className="text-xs text-muted">delivered {formatWhen(d.deliveredAt)}</span>
+            )}
+            {d.thread && (
+              <Link to="/threads/$threadId" params={{ threadId: d.thread.threadId }} className={destinationLinkClass}>
+                Open thread
+              </Link>
+            )}
+            {d.runId && (
+              <Link to="/workflows/runs/$runId" params={{ runId: d.runId }} className={destinationLinkClass}>
+                Open run
+              </Link>
             )}
           </div>
           {d.status !== "skipped" && d.lastError != null && d.lastError.length > 0 && (

@@ -19,6 +19,7 @@ import { Hono, type Context } from "hono";
 import { randomUUID } from "node:crypto";
 import type { AppEnv } from "../env.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
+import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
 import { allCatalogEntries, catalogForService } from "../events/ingest.js";
 import type { SubscriptionFilter } from "../events/match.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
@@ -31,6 +32,7 @@ import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError } from "../services/onepassword.js";
 import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
 import type {
+  EventDeliveryWire,
   EventLogResponse,
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
@@ -48,9 +50,10 @@ import type {
   PatchEventSubscriptionResponse,
   RedeliverEventResponse,
 } from "../wire/types.js";
-import { armableDefinitionRow } from "../workflows/service.js";
+import { workflowRequestContext } from "../workflows/request-context.js";
+import { armableDefinitionRow, canReadWorkflowRun } from "../workflows/service.js";
 import { isOrgAdminUser } from "./_org-admin.js";
-import { channelsVisibleTo } from "./_thread-access.js";
+import { channelsVisibleTo, threadEntry, threadsVisibleTo } from "./_thread-access.js";
 import { slackEventChannel } from "../services/thread-access.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog } from "../services/event-log.js";
@@ -399,6 +402,57 @@ async function eventVisibleTo(c: Context<AppEnv>, row: { service: string; refs: 
   return channel === undefined || channelsVisibleTo(c)(`slack:${channel}`);
 }
 
+/**
+ * The assistant thread each delivery was admitted to, by delivery id. The
+ * dispatcher admits a delivery under `eventDeliveryDispatchId`, and the engine
+ * keeps that id on the queue item, so one query finds every thread. A thread
+ * stays only when this request may open it at `/threads/:threadId`
+ * (`routes/threads.ts`), by the same two checks: `threadEntry` (a viewer of
+ * the session, or a member the thread's share admits), then `threadsVisibleTo`
+ * on the thread's key.
+ */
+async function deliveryThreads(
+  c: Context<AppEnv>,
+  deliveryIds: string[],
+): Promise<Map<string, { sessionId: string; threadId: string }>> {
+  const found = new Map<string, { sessionId: string; threadId: string }>();
+  if (deliveryIds.length === 0) return found;
+  const { db } = c.var.providers;
+  const byDispatchId = new Map(deliveryIds.map((id) => [eventDeliveryDispatchId(id), id]));
+  const result = await db.execute(sql`
+    SELECT q.dispatch_id, q.session_id, q.thread_id, t.key, s.org_id, s.status, s.user_id, s.owner_type, s.owner_id
+    FROM engine_queue_items q
+    JOIN agent_sessions s ON s.id = q.session_id
+    JOIN engine_threads t ON t.session_id = q.session_id AND t.id = q.thread_id
+    WHERE q.dispatch_id IN (${sql.join([...byDispatchId.keys()].map((id) => sql`${id}`), sql`, `)})
+      AND s.org_id = ${c.var.user.orgId} AND s.status <> 'deleted'
+    ORDER BY q.created_at`) as {
+    rows: Array<{
+      dispatch_id: string; session_id: string; thread_id: string; key: string;
+      org_id: string; status: string; user_id: string; owner_type: string; owner_id: string;
+    }>;
+  };
+  // An event has few deliveries, so each thread is checked on its own.
+  for (const row of result.rows) {
+    const deliveryId = byDispatchId.get(row.dispatch_id);
+    if (deliveryId === undefined || found.has(deliveryId)) continue;
+    const session = { id: row.session_id, orgId: row.org_id, status: row.status, userId: row.user_id, ownerType: row.owner_type, ownerId: row.owner_id };
+    if (!await threadEntry(c, session, row.thread_id) || !await threadsVisibleTo(c, session)(row.key)) continue;
+    found.set(deliveryId, { sessionId: row.session_id, threadId: row.thread_id });
+  }
+  return found;
+}
+
+/** The workflow run each delivery started, by delivery id, when this request
+ * may open it: the check the run page applies (`canReadWorkflowRun`). A
+ * delivery that started no run has no run to read. */
+async function deliveryRuns(c: Context<AppEnv>, deliveryIds: string[]): Promise<Map<string, string>> {
+  const { deps, owner } = workflowRequestContext(c);
+  const runs = deliveryIds.map((id) => [id, eventDeliveryRunId(id)] as const);
+  const readable = await Promise.all(runs.map(([, runId]) => canReadWorkflowRun(deps, owner, runId)));
+  return new Map(runs.filter((_, index) => readable[index]));
+}
+
 eventsRouter.get("/events/:id", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
@@ -426,11 +480,24 @@ eventsRouter.get("/events/:id", async (c) => {
       lastError: eventDeliveries.lastError,
       deliveredAt: eventDeliveries.deliveredAt,
       nextAttemptAt: eventDeliveries.nextAttemptAt,
+      target: eventSubscriptions.target,
     })
     .from(eventDeliveries)
     .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
     .where(and(eq(eventDeliveries.eventId, id), eq(eventSubscriptions.orgId, user.orgId)))
     .orderBy(desc(eventDeliveries.createdAt));
+  // `target` is validated jsonb, the same narrowing as `rowToSubscription`.
+  const idsFor = (kind: EventSubscriptionTargetWire["kind"]) =>
+    deliveryRows.filter((d) => (d.target as EventSubscriptionTargetWire).kind === kind).map((d) => d.id);
+  const [threads, runs] = await Promise.all([
+    deliveryThreads(c, idsFor("orchestrator")),
+    deliveryRuns(c, idsFor("workflow")),
+  ]);
+  const destination = (id: string): Pick<EventDeliveryWire, "thread" | "runId"> => {
+    const thread = threads.get(id);
+    const runId = runs.get(id);
+    return { ...(thread ? { thread } : {}), ...(runId ? { runId } : {}) };
+  };
 
   const resp: GetEventResponse = {
     event: { ...rowToEventSummary(row), payload: row.payload },
@@ -448,6 +515,7 @@ eventsRouter.get("/events/:id", async (c) => {
       // attempt is really coming, or the UI promises a retry that the
       // dispatcher will never make.
       nextAttemptAt: d.status === "pending" || d.status === "failed" ? d.nextAttemptAt : null,
+      ...destination(d.id),
     })),
   };
   return c.json(resp);
