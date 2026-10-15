@@ -16,6 +16,9 @@ Valet narrows tools by task. Scopes reduce unrelated choices. Existing authoriza
 - Child steering, collected messages, and completion signals retain their originating ceilings.
 - Child gate notifications retain the gate submission's scope. Missing source records permit no tools or actions.
 - Security dispatch and handoff carry the active submission scope through their HTTP route into the child spawner.
+- Each thread retains its last started task ceiling in durable metadata. A new task replaces that continuation ceiling without changing the session ceiling.
+- Security driver nudges and stall reports intersect the session ceiling, thread focus, and durable continuation ceilings. They cannot recover broader access by starting a new turn or pruning queue history.
+- Continuations recheck all session thread ceilings when they claim a turn. The claim atomically persists the result on the queue item, closing races with newer scoped tasks and preserving scope for restart and signal readers.
 - A workflow report retains the starting member's authority. Private team run evidence still requires that member's access.
 - Thread saves update metadata in each store. A restored focus must match the last saved focus.
 

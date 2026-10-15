@@ -21,6 +21,8 @@
  * runner pages a human instead of looping forever.
  */
 import { and, count, eq, or } from "drizzle-orm";
+import type { SessionStore } from "@valet/engine";
+import { continuationToolScope, type ToolScope } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import {
@@ -64,6 +66,7 @@ export const SUBMIT_STALL_TEXT =
 export type RunnerSubmit = (
   row: typeof agentSessions.$inferSelect,
   text: string,
+  toolScope?: ToolScope,
 ) => Promise<unknown>;
 
 /** Per-engagement stall budget. In-memory only: a restart resets the budget,
@@ -93,7 +96,7 @@ const DEFAULT_MAX_SUBMIT_FAILURES = 3;
 
 export interface SecurityRunnerDriverDeps {
   db: AppDb;
-  engineStore: {
+  engineStore: Pick<SessionStore, "getSession" | "listThreads"> & {
     listUnsettledSubmissions(sessionId: string): Promise<unknown[]>;
   };
   /** The submit seam. The real binding is `submitSessionPrompt({db, engineHost},
@@ -136,8 +139,16 @@ export class SecurityRunnerDriver {
     runnerRow: typeof agentSessions.$inferSelect,
     text: string,
   ): Promise<boolean> {
+    const [session, threads] = await Promise.all([
+      this.deps.engineStore.getSession(runnerRow.id),
+      this.deps.engineStore.listThreads(runnerRow.id),
+    ]);
+    if (session && session.orgId !== runnerRow.orgId) throw new Error("security runner org mismatch");
+    // A sweep has no originating queue item. Keep every thread's durable
+    // continuation ceiling so it cannot broaden a task after queue pruning.
+    const toolScope = continuationToolScope(session?.metadata, threads);
     try {
-      await this.deps.submit(runnerRow, text);
+      await this.deps.submit(runnerRow, text, toolScope);
       const state = this.stalls.get(engagementId);
       if (state) {
         state.submitFailures = 0;
@@ -154,7 +165,7 @@ export class SecurityRunnerDriver {
           // Best-effort human ask over the SAME failing seam: if this throws
           // too, the metric already fired, so the alert is not lost.
           try {
-            await this.deps.submit(runnerRow, SUBMIT_STALL_TEXT);
+            await this.deps.submit(runnerRow, SUBMIT_STALL_TEXT, toolScope);
           } catch (askErr) {
             console.error(
               `SecurityRunnerDriver: submit-stall human ask also failed for ${engagementId}:`,
