@@ -383,3 +383,21 @@ Usage → Breakdown → Workflows lists one row per workflow, linked to its page
 `GET /api/workflows/runs/:runId` returns `stepCosts`, and only that route computes it. The run reads behind the approval inbox and the agent's workflow tools leave it out, so they do not walk sub-runs. `stepCosts` lists cost, calls, unpriced calls, tokens, and models per step and iteration, read from `usage_entry_facts`. A `workflow` step includes the runs it started, up to five levels deep, found through the checkpoints' `childRunId`. The Steps list shows each step's cost and the run total. A `+` marks a step with unpriced calls, whose cost is a lower bound, and marks the run total when any step has one. Costs show four decimals, and a cost below that precision shows as `<$0.0001`.
 
 Child sessions that a session step spawns keep their own ids and do not roll up into the step.
+
+## Member labels (2026-10-14)
+
+Unattended work runs as its workspace principal. A team's schedules, event subscriptions, and team API keys act as `team:{teamId}`. Org-owned work acts as `org:{orgId}`. That id becomes the session user or the prompt author, so a By member row can belong to a team instead of a person.
+
+The By member rows and the home ranking never show a raw id as a label. `memberLabels` in `services/usage.ts` resolves each actor id:
+
+- A person shows their name, or their email when the name is empty. A deleted user shows "Former member".
+- A team shows its current name. A team the viewer cannot name shows "Another team", the label the channel list uses. One label covers a deleted team and a hidden team, so the label does not tell the viewer which teams exist.
+- The org principal shows "Organization".
+
+The read decides which teams a row can name:
+
+- Org scope requires an org admin, so it names every team of the org.
+- A team scope names only its own team. Another team's name depends on access to that team, and the team scope does not carry that access.
+- Every org member reads the home ranking. It names every team for an org admin, and only the viewer's own teams for anyone else.
+
+`byUser[].isTeam` and `org.members[].isTeam` mark a team row. The Usage page and the home usage card show the workspace switcher's team icon before the team's name, so a team does not read as a person. The `userId` key keeps the actor id. The CSV export keeps its `user_id`, `owner_type`, and `owner_id` columns as stable ids.

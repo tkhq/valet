@@ -5,13 +5,14 @@
  * raw `llm_proxy_requests` for the proxy harness drill-down), so the dashboard
  * and Grafana cannot drift.
  */
-import { eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { parsePrincipal } from "@valet/engine";
 import { usageRead } from "./usage-read.js";
 import { getMemberAgentDays, scopedAgentActivity } from "./usage-member-activity.js";
 import { getActionToolCalls, getActionOutcomes, getSkillBreakdown } from "./usage-aux-rollups.js";
 import { proxyPeriodRows, usagePeriodRows, HOURLY_BUCKET_COLS } from "./usage-hourly.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { orgs, users } from "../schema/index.js";
+import { orgs, teamMembers, teams, users } from "../schema/index.js";
 import { isOrgAdmin } from "./org.js";
 import type { ResolvedUsagePeriod } from "./usage-period.js";
 import { canAdministerTeam, getTeamInOrg, isTeamMember } from "./teams.js";
@@ -136,6 +137,69 @@ function scopeWhere(prefix: "" | "ce.", period: ResolvedUsagePeriod, s: UsageSco
     case "org":
       return base;
   }
+}
+
+// ── Member labels ────────────────────────────────────────────────────────────
+
+/** The label of a team the viewer cannot name: a deleted team, or one the
+ * viewer is not on. One label for both keeps a hidden team
+ * indistinguishable from a deleted one. The channel list uses the same words. */
+const UNNAMED_TEAM = "Another team";
+/** The label of a member row whose user record is gone. */
+const FORMER_MEMBER = "Former member";
+
+interface MemberLabel { name: string; isTeam: boolean }
+
+/** Which teams a member row may name: every team of the org (an org scope,
+ * read by an org admin), only the team of a team scope, or the teams a
+ * viewer can see (an org admin sees all of them, anyone else their own). */
+type TeamNaming =
+  | { kind: "org" }
+  | { kind: "team"; teamId: string }
+  | { kind: "viewer"; userId: string };
+
+async function nameableTeams(
+  db: AppDb, orgId: string, teamIds: string[], naming: TeamNaming,
+): Promise<{ id: string; name: string }[]> {
+  const where = [eq(teams.orgId, orgId), inArray(teams.id, teamIds)];
+  if (naming.kind === "team") where.push(eq(teams.id, naming.teamId));
+  if (naming.kind === "viewer" && !(await isOrgAdmin(db, orgId, naming.userId))) {
+    where.push(inArray(teams.id, db.select({ id: teamMembers.teamId }).from(teamMembers)
+      .where(eq(teamMembers.userId, naming.userId))));
+  }
+  return db.select({ id: teams.id, name: teams.name }).from(teams).where(and(...where));
+}
+
+/**
+ * Labels for member rows, by actor id. Unattended work (a schedule, an event
+ * subscription, a team API key) runs as its workspace principal, so an actor
+ * id can be `team:{teamId}` or `org:{orgId}` instead of a person's id. A
+ * label never shows a raw id: a team reads as its name or `UNNAMED_TEAM`,
+ * the org as "Organization", and a person as their name or email, or
+ * `FORMER_MEMBER` once the user record is gone.
+ */
+async function memberLabels(
+  db: AppDb, orgId: string, ids: readonly string[], naming: TeamNaming,
+): Promise<(id: string) => MemberLabel> {
+  const userIds: string[] = [];
+  const teamIds: string[] = [];
+  for (const id of ids) {
+    const principal = parsePrincipal(id);
+    if (principal === null || principal.type === "user") userIds.push(principal?.id ?? id);
+    else if (principal.type === "team") teamIds.push(principal.id);
+  }
+  const [userRows, teamRows] = await Promise.all([
+    userIds.length === 0 ? [] : db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, userIds)),
+    teamIds.length === 0 ? [] : nameableTeams(db, orgId, teamIds, naming),
+  ]);
+  const userNames = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
+  const teamNames = new Map(teamRows.map((t) => [t.id, t.name] as const));
+  return (id) => {
+    const principal = parsePrincipal(id);
+    if (principal?.type === "team") return { name: teamNames.get(principal.id) ?? UNNAMED_TEAM, isTeam: true };
+    if (principal?.type === "org") return { name: "Organization", isTeam: false };
+    return { name: userNames.get(principal?.id ?? id) ?? FORMER_MEMBER, isTeam: false };
+  };
 }
 
 // ── Buckets (token-type split + unpriced, shared by every aggregate) ─────────
@@ -356,21 +420,28 @@ async function queryUsageBreakdown(
   const totals = groups(15)[0];
   const total = toBucket(totals);
   let byUserOut: UsageBreakdownResponse["byUser"];
-  if (opts.scope.scope === "org" || (opts.scope.scope === "team" && opts.scope.byMember)) {
+  const scope = opts.scope;
+  if (scope.scope === "org" || (scope.scope === "team" && scope.byMember)) {
     const memberBuckets = new Map(groups(14).map((r) => [r.user_id, toBucket(r)]));
     const agentDaysByUser = new Map(agentDays.map((r) => [r.actor_id, toNum(r.agent_days)]));
     // Prompt actors can differ from the member billed for a shared session.
     // Keep their activity even when they have no attributed spend.
     for (const r of agentDays) if (!memberBuckets.has(r.actor_id)) memberBuckets.set(r.actor_id, toBucket(undefined));
     const ids = [...memberBuckets.keys()].filter((id): id is string => id !== null);
-    const userRows = ids.length === 0 ? [] : await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, ids));
-    const nameById = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
-    byUserOut = [...memberBuckets].map(([userId, bucket]) => ({
-      userId: userId ?? "shared",
-      name: userId === null ? "Team / shared" : (nameById.get(userId) ?? userId),
-      ...bucket,
-      ...(agentWindow ? { avgDailyActiveAgents: (agentDaysByUser.get(userId) ?? 0) / agentWindow.days } : {}),
-    })).sort((a, b) => b.costUsd - a.costUsd || a.userId.localeCompare(b.userId));
+    // A team view names only its own team: naming another team would depend
+    // on the viewer's access to it, which a team scope does not carry.
+    const label = await memberLabels(db, scope.orgId, ids,
+      scope.scope === "team" ? { kind: "team", teamId: scope.teamId } : { kind: "org" });
+    byUserOut = [...memberBuckets].map(([userId, bucket]) => {
+      const actor = userId === null ? { name: "Team / shared", isTeam: false } : label(userId);
+      return {
+        userId: userId ?? "shared",
+        name: actor.name,
+        ...(actor.isTeam ? { isTeam: true } : {}),
+        ...bucket,
+        ...(agentWindow ? { avgDailyActiveAgents: (agentDaysByUser.get(userId) ?? 0) / agentWindow.days } : {}),
+      };
+    }).sort((a, b) => b.costUsd - a.costUsd || a.userId.localeCompare(b.userId));
   }
 
   return {
@@ -736,13 +807,16 @@ async function queryUsageSummary(db: AppDb, opts: { orgId: string; userId: strin
     const memberAgg = await windowAggregate(db, orgId, now - 30 * DAY_MS);
     // Look up exactly the ids the aggregate returned — bounded (not every user
     // in the deployment) AND complete (keeps a since-left member's name).
-    const spenderIds = memberAgg.map((row) => row.user_id);
-    const userRows = spenderIds.length === 0 ? [] : await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, spenderIds));
-    const nameById = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
+    // Every org member reads this ranking, so a team is named only for a
+    // viewer who can see it.
+    const label = await memberLabels(db, orgId, memberAgg.map((row) => row.user_id), { kind: "viewer", userId });
     body.org = {
       windowDays: 30,
       members: memberAgg
-        .map((row) => ({ userId: row.user_id, name: nameById.get(row.user_id) ?? row.user_id, ...toWindow(row) }))
+        .map((row) => {
+          const actor = label(row.user_id);
+          return { userId: row.user_id, name: actor.name, ...(actor.isTeam ? { isTeam: true } : {}), ...toWindow(row) };
+        })
         .sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens),
     };
   }
