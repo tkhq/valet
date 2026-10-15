@@ -52,10 +52,10 @@ function gate(overrides: Partial<DecisionGate> = {}): DecisionGate {
   };
 }
 
-function renderCard(g: DecisionGate = gate()) {
+function renderCard(g: DecisionGate = gate(), placement?: "thread" | "notification") {
   return render(
     <TooltipProvider>
-      <DecisionGateCard sessionId="sess_1" gate={g} />
+      <DecisionGateCard sessionId="sess_1" gate={g} placement={placement} />
     </TooltipProvider>,
   );
 }
@@ -79,6 +79,30 @@ describe("DecisionGateCard — action rendering", () => {
     expect(screen.getByRole("button", { name: "Approve once" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Always allow" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+  });
+});
+
+describe("DecisionGateCard — notification placement", () => {
+  it.each(["approval", "credential_request"] as const)("aligns %s actions with the request content", (type) => {
+    renderCard(gate({ type, body: "Review this request before you allow it." }), "notification");
+    const header = screen.getByRole("heading").closest("header");
+    const details = screen.getByRole("region", { name: "Request details" });
+    const actions = screen.getByRole("button", { name: "Approve once" }).parentElement;
+    expect(header?.classList.contains("px-4")).toBe(true);
+    expect(details.classList.contains("px-4")).toBe(true);
+    expect(actions?.classList.contains("px-4")).toBe(true);
+    expect(actions?.classList.contains("justify-start")).toBe(true);
+    expect(actions?.classList.contains("justify-end")).toBe(false);
+  });
+
+  it("keeps the default thread surface and right-aligned actions", () => {
+    renderCard();
+    const dialog = screen.getByRole("dialog");
+    const actions = screen.getByRole("button", { name: "Approve once" }).parentElement;
+    expect(dialog.classList.contains("border")).toBe(true);
+    expect(dialog.parentElement?.classList.contains("sm:px-8")).toBe(true);
+    expect(actions?.classList.contains("px-5")).toBe(true);
+    expect(actions?.classList.contains("justify-end")).toBe(true);
   });
 });
 
