@@ -44,6 +44,7 @@ import type {
   SkillSource,
   ToolDef,
 } from "@valet/engine";
+import { buildToolIndex } from "./action-id.js";
 import { buildSkillTool, SKILL_TOOL_NAME, type SkillToolSession } from "./skill-tool.js";
 
 export interface AssembledPlugins {
@@ -65,6 +66,10 @@ export interface AssembledPlugins {
  * `ActionPlugin` for the same `service` IS an error (ambiguous routing for
  * that service's credentials and catalog entries) — throws naming both
  * plugins.
+ *
+ * Tool id rule: every static action's canonical id must name one service
+ * (`buildToolIndex`). Two actions with one id, or an id that starts with
+ * another service's name, throws naming both plugins.
  *
  * Within a single source, two plugins sharing a `name` is a hard error (the
  * loader that produced them is broken); across sources it's the expected
@@ -107,6 +112,8 @@ export function assemblePlugins(sources: ValetPlugin[][]): AssembledPlugins {
     }
   }
 
+  // Each tool id must name exactly one service (`buildToolIndex` throws).
+  buildToolIndex(actionPluginByService);
   return { plugins, actionPluginByService };
 }
 

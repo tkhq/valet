@@ -36,6 +36,7 @@ import {
 } from "../plugins/action-invoker.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { buildToolIndex, type ToolIndexEntry } from "../plugins/action-id.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 import { actionInvocations } from "../schema/index.js";
 import type { ActionDescribeResponse, ActionInvokeResponse, ActionSearchResponse, ActionToolSummary } from "../wire/types.js";
@@ -114,9 +115,26 @@ async function callerContext(c: Context<AppEnv>, workspace: string | undefined):
   return { userId: c.var.user.id, orgId: c.var.user.orgId, owner, external: { client: externalClient(c), attempt: randomUUID() } };
 }
 
-/** Split `service.action` on the longest registered service prefix. */
+type ProviderActionPlugins = Context<AppEnv>["var"]["providers"]["actionPluginByService"];
+/** One tool index per assembled plugin set. Assembly already checked it. */
+const toolIndexes = new WeakMap<ProviderActionPlugins, Map<string, ToolIndexEntry>>();
+
+/**
+ * Resolve a tool id to its service and action. A static action resolves by
+ * its canonical id (`buildToolIndex`), which does not always start with the
+ * service. A tool that a service discovers at run time resolves by the
+ * longest registered service prefix.
+ */
 export function parseToolId(c: Context<AppEnv>, toolId: string): { service: string; action: string } | undefined {
-  const services = [...c.var.providers.actionPluginByService.keys()].sort((a, b) => b.length - a.length);
+  const byService = c.var.providers.actionPluginByService;
+  let index = toolIndexes.get(byService);
+  if (!index) {
+    index = buildToolIndex(byService);
+    toolIndexes.set(byService, index);
+  }
+  const entry = index.get(toolId);
+  if (entry) return { service: entry.service, action: entry.actionId };
+  const services = [...byService.keys()].sort((a, b) => b.length - a.length);
   const service = services.find((s) => toolId.startsWith(`${s}.`));
   return service ? { service, action: toolId.slice(service.length + 1) } : undefined;
 }
@@ -151,9 +169,10 @@ actionsRouter.get("/", async (c) => {
 });
 
 async function loadTool(c: Context<AppEnv>, ctx: ActionInvocationContext, toolId: string) {
-  const refused = externalServiceRefusal(toolId.split(".")[0] ?? "");
-  if (refused) return { error: refused };
   const parsed = parseToolId(c, toolId);
+  // Check the resolved service too: a tool id does not always start with it.
+  const refused = externalServiceRefusal(toolId.split(".")[0] ?? "") ?? (parsed && externalServiceRefusal(parsed.service));
+  if (refused) return { error: refused };
   if (!parsed) return { error: `Unknown tool "${toolId}". Use search_tools to find a tool_id.` };
   const opts = invokerOpts(c);
   let listed = await discoverCached(opts, ctx, parsed.service);
