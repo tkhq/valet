@@ -1340,6 +1340,26 @@ describe('slack actions', () => {
       expect(messageWrites(fetchMock)).toHaveLength(0);
     });
 
+    // The formatter turns a Markdown link to @U… into <@U…|label>. A check of
+    // the input text found no mention, and the converted mention went out.
+    it.each([
+      'slack.send_message',
+      'slack.reply_to_origin',
+      'slack.reply_file_to_origin',
+      'slack.dm_owner',
+      'slack.dm_user',
+      'slack.update_message',
+    ])('%s refuses a Markdown link to an unknown user and sends nothing', async (id) => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const text = `Ask [Reviewer](@${unknownUser}) to review.`;
+      const result = await action(id).execute(
+        { channel: 'C1', user: 'U01AAAAAAA', ts: '1.2', path: '/workspace/report.pdf', text, caption: text },
+        mentionCtx(),
+      );
+      expect(result).toEqual({ success: false, error: unknownUserError });
+      expect(messageWrites(fetchMock)).toHaveLength(0);
+    });
+
     // Slack reads the parsed blocks. A scan of the raw JSON string missed a
     // rich-text user element and a mention whose "<" was JSON-escaped.
     it.each([
@@ -1354,6 +1374,20 @@ describe('slack actions', () => {
       const result = await action('slack.send_message').execute({ channel: 'C1', text: 'Ping', blocks }, pluginCtx());
       expect(result).toEqual({ success: false, error: unknownUserError });
       expect(messageWrites(fetchMock)).toHaveLength(0);
+    });
+
+    // Slack shows plain_text literally, so a mention example in a header is
+    // not a mention. The mrkdwn section is still checked.
+    it('send_message skips plain_text when it checks blocks', async () => {
+      mockSlackMethods(fetchMock, unknownUserNotFound);
+      const blocks = JSON.stringify([
+        { type: 'header', text: { type: 'plain_text', text: `Mention syntax: <@${unknownUser}>` } },
+        { type: 'section', text: { type: 'mrkdwn', text: 'Ping <@U01AAAAAAA>' } },
+      ]);
+      const result = await action('slack.send_message').execute({ channel: 'C1', text: 'Mention syntax', blocks }, pluginCtx());
+      expect(result).toEqual({ success: true, data: { ts: '1.2', channel: 'C1' } });
+      expect(lookedUpUsers(fetchMock)).toEqual(['U01AAAAAAA']);
+      expect(messageWrites(fetchMock)).toHaveLength(1);
     });
 
     it('send_message looks up each mentioned user once, labeled or not, and skips special mentions', async () => {

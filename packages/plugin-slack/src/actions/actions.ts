@@ -303,7 +303,8 @@ const MENTION_LOOKUP_TIMEOUT_MS = 3_000;
  * The user IDs that message content mentions, in first-seen order. Each
  * source is message text or parsed Block Kit JSON. The walk scans every
  * string for `<@U…>` mentions and adds the user_id of every rich-text `user`
- * element.
+ * element. It skips `plain_text` objects: Slack shows their text literally,
+ * so a `<@U…>` there mentions no one.
  */
 function mentionedUserIds(sources: unknown[]): Set<string> {
   const ids = new Set<string>();
@@ -316,6 +317,7 @@ function mentionedUserIds(sources: unknown[]): Set<string> {
     } else if (Array.isArray(value)) {
       for (const item of value) queue.push(item);
     } else if (typeof value === 'object' && value !== null) {
+      if ('type' in value && value.type === 'plain_text') continue;
       if ('type' in value && value.type === 'user' && 'user_id' in value && typeof value.user_id === 'string') {
         ids.add(value.user_id);
       }
@@ -329,14 +331,24 @@ function mentionedUserIds(sources: unknown[]): Set<string> {
  * The error for outgoing message content that mentions a user ID Slack does
  * not know, or undefined when the content can go out. Slack accepts such a
  * post and shows a broken mention, so a mistyped ID otherwise fails with no
- * signal. Every action that posts or edits message content calls this before
- * it writes. Each source is message text or parsed Block Kit JSON.
+ * signal.
+ *
+ * Every action that posts or edits message content calls this once, right
+ * before it writes, on the content it sends: the converted text, the blocks
+ * after any block-budget slice, and the fallback blocks it can send instead.
+ * The conversion can add a mention: a Markdown link `[label](@U…)` becomes
+ * `<@U…|label>`. Each source is message text or parsed Block Kit JSON.
+ * `linkedUserId` is the owner's linked Slack user ID, which the attribution
+ * block mentions. Valet adds that mention and Slack identity linking supplied
+ * the ID, so the check skips it.
  */
 async function unknownMentionError(
   token: string,
-  ...sources: unknown[]
+  sources: unknown[],
+  linkedUserId?: string,
 ): Promise<PluginActionResult | undefined> {
   const ids = mentionedUserIds(sources);
+  if (linkedUserId) ids.delete(linkedUserId);
   const results = await Promise.all([...ids].slice(0, MAX_CHECKED_MENTIONS).map(async (id) => {
     // Only Slack's definite user_not_found refuses the post. The check exists
     // to catch a mistyped ID. A lookup that fails for another reason (rate
@@ -458,7 +470,7 @@ async function openAndSendDM(
     fallbackBlocks = markdownFallbackBlocks(body.blocks as Record<string, unknown>[], text, formattedText, SLACK_MAX_BLOCKS);
   }
 
-  const mentionError = await unknownMentionError(token, text);
+  const mentionError = await unknownMentionError(token, [body.text, body.blocks, fallbackBlocks]);
   if (mentionError) return mentionError;
   const { res, data } = await postActionMessage(token, body, ctx, sender, fallbackBlocks);
   if (!res.ok) return slackError(res);
@@ -1237,7 +1249,7 @@ const sendMessage = action(Type.Object({
       body.blocks = userBlocks;
     }
 
-    const mentionError = await unknownMentionError(token, p.text, userBlocks);
+    const mentionError = await unknownMentionError(token, [body.text, body.blocks, fallbackBlocks], ownerSlackId);
     if (mentionError) return mentionError;
     const { res, data } = await postActionMessage(token, body, ctx, p, fallbackBlocks);
     if (!res.ok || !data.ok) {
@@ -1289,14 +1301,15 @@ const replyToOrigin = action(Type.Object({
   execute: async (args, ctx) => {
     const o = await resolveSlackOrigin(ctx);
     if ('error' in o) return { success: false, error: o.error };
-    const mentionError = await unknownMentionError(o.token, args.text);
-    if (mentionError) return mentionError;
-    const { res, data } = await postActionMessage(o.token, {
+    const body = {
       channel: o.channelId,
       thread_ts: o.threadTs,
       text: markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true }),
       mrkdwn: true,
-    }, ctx, args);
+    };
+    const mentionError = await unknownMentionError(o.token, [body.text]);
+    if (mentionError) return mentionError;
+    const { res, data } = await postActionMessage(o.token, body, ctx, args);
     if (!res.ok) return slackError(res);
     if (!data.ok) return slackError(res, data);
     return { success: true, data: { channel: o.channelId, ts: data.ts } };
@@ -1327,7 +1340,12 @@ const replyFileToOrigin = action(Type.Object({
     if (!stat.isFile) {
       return { success: false, error: 'The upload path is not a file. Choose a file in the sandbox and retry.' };
     }
-    const mentionError = await unknownMentionError(o.token, args.caption);
+    // completeUploadExternal posts this same conversion of the caption. The
+    // check runs before the upload, so a refused caption leaves no file behind.
+    const caption = args.caption === undefined
+      ? undefined
+      : markdownToSlackMrkdwn(args.caption, { preserveSlackNativeSpans: true });
+    const mentionError = await unknownMentionError(o.token, [caption]);
     if (mentionError) return mentionError;
     const data = await ctx.sandbox.readBinary(args.path);
     const name = args.name ?? args.path.split('/').filter(Boolean).at(-1) ?? 'file';
@@ -1410,7 +1428,7 @@ const updateMessage = action(Type.Object({
       body.blocks = [];
     }
 
-    const mentionError = await unknownMentionError(token, args.text);
+    const mentionError = await unknownMentionError(token, [body.text, body.blocks, fallbackBlocks]);
     if (mentionError) return mentionError;
     type UpdateData = { ok: boolean; error?: string; ts?: string; channel?: string; text?: string };
     let res = await slackFetch('chat.update', token, body);
