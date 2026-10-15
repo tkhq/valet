@@ -1131,11 +1131,11 @@ export interface PolicyDecision {
   extraGateActions?: (DecisionAction & { approves: boolean })[];
   /**
    * The one person who may answer this gate: the member whose shared account
-   * the action would use. The gate offers approve and deny only, and carries
+   * the action would use. New gates can offer explicit team account consent. The gate carries
    * the approver in its `context.approver` so the host routes and authorizes
    * it to them alone.
    */
-  approver?: { userId: string; name?: string; shareGeneration?: string };
+  approver?: { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true };
 }
 
 /**

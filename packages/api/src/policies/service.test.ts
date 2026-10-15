@@ -17,7 +17,7 @@ import slackPlugin from "@valet/plugin-slack/plugin";
 import { upsertOverride } from "./admin.js";
 import { qualifiedActionId } from "../plugins/action-id.js";
 import { applyAppMigrations, buildAppDb, type AppDb } from "../lib/drizzle.js";
-import { assistants, agentSessions, actionInvocations, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, teams, users } from "../schema/index.js";
+import { assistants, agentSessions, actionInvocations, credentials as credentialRows, actionPolicies, actionPolicyOverrides, orgMembers, orgs, runtimeGrants, teams, users } from "../schema/index.js";
 import {
   AlwaysAllowNotAdminError,
   alwaysAllowPolicyId,
@@ -588,6 +588,22 @@ describe("another member's shared account", () => {
     expect(fresh.approver?.shareGeneration).not.toBe(decision.approver?.shareGeneration);
     await resolver.onResolution!(input, fresh, { actionId: "approve", resolvedBy: MEMBER, resolvedAt: 3 });
     expect((await resolver.resolve(input)).approver).toBeUndefined();
+  });
+
+  it("saves explicit account consent without allowing a separate action policy", async () => {
+    const resolver = await sharedByMember();
+    await db.insert(credentialRows).values({ ownerType: "user", ownerId: MEMBER, service: "linear", type: "api_key", apiKeyEnc: "test", createdAt: 1, updatedAt: 1 }).onConflictDoNothing();
+    await db.insert(actionPolicies).values({ id: "account-still-asks", orgId: ORG, principalType: "org", principalId: ORG, service: "linear", mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
+    const decision = await resolver.resolve(input);
+    expect(decision.approver?.allowTeamConsent).toBe(true);
+    const answer: DecisionResolution = { actionId: "always_allow_account", resolvedBy: MEMBER, resolvedAt: 1, source: { channelType: "web" } };
+    await expect(resolver.onResolution?.(input, decision, { ...answer, resolvedBy: ADMIN })).rejects.toThrow(/Only Member/);
+    await expect(resolver.onResolution?.(input, decision, { ...answer, source: undefined })).rejects.toThrow(/Open this account approval/);
+    await resolver.onResolution?.(input, decision, answer);
+    const later = await resolver.resolve({ ...input, threadId: "later-thread" });
+    expect(later.approver).toBeUndefined();
+    expect(later).toMatchObject({ mode: "require_approval", provenance: { source: "org_policy" } });
+    expect(await db.select().from(runtimeGrants)).toEqual([]);
   });
 
   it("lets a live unattended workspace runtime ask its lender and reuse only that thread's consent", async () => {

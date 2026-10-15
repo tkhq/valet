@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, assistants, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
+import { actionInvocations, agentSessions, assistants, credentials, credentialShares, teamMembers, teams, workflowDefinitions } from "../schema/index.js";
 import { getWorkflowRunDetail, resolveWorkflowApproval } from "../workflows/service.js";
 import { shareCredential, revokeShare } from "./credential-shares.js";
 import { shareGeneration, canBorrowCredential, writeBorrowGrant } from "./credential-borrow.js";
@@ -58,7 +58,7 @@ it("does not reuse a borrow grant across organizations or conversations", async 
   expect(await canBorrowCredential(db, { ...borrower, threadId: "two" })).toBe(false);
 });
 
-it("lets an unattended workflow borrow only for its stored team and current lender", async () => {
+it.each([false, true])("lets an unattended workflow borrow only for its stored team and current lender (lasting=%s)", async lasting => {
   api = await bootTestApi();
   const { db, workflowStore } = api.providers;
   await db.insert(teams).values({ id: "unattended", orgId: "local-org", name: "Unattended", createdAt: 1 });
@@ -70,7 +70,8 @@ it("lets an unattended workflow borrow only for its stored team and current lend
     orgId: "local-org", teamId: "unattended", actorId: "team:unattended" };
   expect(await canBorrowCredential(db, scope)).toBe(false);
   await shareCredential(db, { teamId: scope.teamId, service: scope.service, userId: scope.memberId, createdAt: 1 });
-  await writeBorrowGrant(db, "local-org", { ...scope, shareGeneration: (await shareGeneration(db, scope.teamId, scope.service, scope.memberId))! });
+  if (lasting) await db.insert(credentials).values({ ownerType: "user", ownerId: scope.memberId, service: scope.service, type: "api_key", apiKeyEnc: "test", createdAt: 1, updatedAt: 1 });
+  await writeBorrowGrant(db, "local-org", { ...scope, consentScope: lasting ? "team" : undefined, shareGeneration: (await shareGeneration(db, scope.teamId, scope.service, scope.memberId))! });
   expect(await canBorrowCredential(db, scope)).toBe(true);
   expect(await canBorrowCredential(db, { ...scope, orgId: "elsewhere" })).toBe(false);
   expect(await canBorrowCredential(db, { ...scope, teamId: "elsewhere", actorId: "team:elsewhere" })).toBe(false);
@@ -102,23 +103,57 @@ it.each(["session", "wf:run:step"])("requires fresh approval after revocation an
 });
 
 
-it("binds unattended runtime grants to the live team, lender and thread", async () => {
+it.each([false, true])("binds unattended runtime consent to the live team and lender (lasting=%s)", async lasting => {
   api = await bootTestApi(); const db = api.providers.db;
   const scope = { teamId: "runtime-team", orgId: "local-org", actorId: "team:runtime-team", sessionId: "runtime-borrow", threadId: "scheduled", service: "linear", memberId: "test-member" };
   await db.insert(teams).values({ id: scope.teamId, orgId: scope.orgId, name: "Runtime", createdAt: 1 });
   await db.insert(teamMembers).values({ teamId: scope.teamId, userId: scope.memberId, role: "member" });
   await db.insert(agentSessions).values({ id: scope.sessionId, orgId: scope.orgId, ownerType: "team", ownerId: scope.teamId, userId: scope.actorId, workspace: "test", createdAt: 1, updatedAt: 1 });
   await shareCredential(db, { teamId: scope.teamId, userId: scope.memberId, service: scope.service, createdAt: 1 });
-  await writeBorrowGrant(db, scope.orgId, { ...scope, shareGeneration: (await shareGeneration(db, scope.teamId, scope.service, scope.memberId))! });
+  if (lasting) await db.insert(credentials).values({ ownerType: "user", ownerId: scope.memberId, service: scope.service, type: "api_key", apiKeyEnc: "test", createdAt: 1, updatedAt: 1 });
+  await writeBorrowGrant(db, scope.orgId, { ...scope, consentScope: lasting ? "team" : undefined, shareGeneration: (await shareGeneration(db, scope.teamId, scope.service, scope.memberId))! });
   expect(await canBorrowCredential(db, scope)).toBe(false);
   await db.insert(assistants).values({ id: "runtime-assistant", orgId: scope.orgId, ownerType: "team", ownerId: scope.teamId, sessionId: scope.sessionId, createdAt: 1 });
   expect(await canBorrowCredential(db, scope)).toBe(true);
-  expect(await canBorrowCredential(db, { ...scope, threadId: "other" })).toBe(false);
+  expect(await canBorrowCredential(db, { ...scope, threadId: "other" })).toBe(lasting);
   expect(await canBorrowCredential(db, { ...scope, orgId: "other" })).toBe(false);
   expect(await canBorrowCredential(db, { ...scope, actorId: "team:other" })).toBe(false);
   await db.update(agentSessions).set({ status: "deleted" }).where(eq(agentSessions.id, scope.sessionId));
   expect(await canBorrowCredential(db, scope)).toBe(false);
   await db.update(agentSessions).set({ status: "active" }).where(eq(agentSessions.id, scope.sessionId));
   await db.delete(teamMembers).where(eq(teamMembers.teamId, scope.teamId));
+  expect(await canBorrowCredential(db, scope)).toBe(false);
+});
+
+
+it("persists explicit team account consent across threads and runs without widening other shares", async () => {
+  api = await bootTestApi(); const db = api.providers.db;
+  const scope = { teamId: "lasting", orgId: "local-org", actorId: "local-user", sessionId: "first", threadId: "one", service: "linear", memberId: "test-member" };
+  await db.insert(teams).values([{ id: "lasting", orgId: "local-org", name: "Lasting", createdAt: 1 }, { id: "other-team", orgId: "local-org", name: "Other", createdAt: 1 }]);
+  await db.insert(teamMembers).values([{ teamId: "lasting", userId: "local-user", role: "member" }, { teamId: "lasting", userId: "test-member", role: "member" }]);
+  await db.insert(credentials).values({ ownerType: "user", ownerId: "test-member", service: "linear", type: "api_key", apiKeyEnc: "test", createdAt: 1, updatedAt: 1 });
+  const share = { teamId: scope.teamId, service: scope.service, userId: scope.memberId, createdAt: 1 };
+  await shareCredential(db, share);
+  const generation = (await shareGeneration(db, scope.teamId, scope.service, scope.memberId))!;
+  await writeBorrowGrant(db, scope.orgId, { ...scope, shareGeneration: generation, consentScope: "team" }, 42);
+  await writeBorrowGrant(db, scope.orgId, { ...scope, shareGeneration: generation, consentScope: "team" }, 99);
+  expect(await canBorrowCredential(db, { ...scope, sessionId: "second", threadId: "two" })).toBe(true);
+  expect(await canBorrowCredential(db, { ...scope, sessionId: "wf:another-run:step" })).toBe(true);
+  expect(await canBorrowCredential(db, { ...scope, orgId: "elsewhere" })).toBe(false);
+  expect(await canBorrowCredential(db, { ...scope, teamId: "other-team" })).toBe(false);
+  expect(await canBorrowCredential(db, { ...scope, actorId: "outsider" })).toBe(false);
+  expect(await canBorrowCredential(db, { ...scope, service: "slack" })).toBe(false);
+  expect((await db.select().from(credentialShares))[0]).toMatchObject({ borrowConsentAt: 42 });
+  expect(await db.select().from(actionInvocations)).toContainEqual(expect.objectContaining({ actionId: "credential.borrow", status: "approved", resolvedBy: "test-member", params: { scope: "team", teamId: "lasting", memberId: "test-member", shareGeneration: generation } }));
+  await revokeShare(db, share);
+  expect(await canBorrowCredential(db, scope)).toBe(false);
+  await shareCredential(db, share);
+  expect(await canBorrowCredential(db, scope)).toBe(false);
+  await expect(writeBorrowGrant(db, scope.orgId, { ...scope, shareGeneration: generation, consentScope: "team" })).rejects.toThrow(/share changed/);
+  await writeBorrowGrant(db, scope.orgId, { ...scope, shareGeneration: (await shareGeneration(db, scope.teamId, scope.service, scope.memberId))!, consentScope: "team" });
+  await db.delete(teamMembers).where(eq(teamMembers.userId, "test-member"));
+  expect(await canBorrowCredential(db, scope)).toBe(false);
+  await db.insert(teamMembers).values({ teamId: scope.teamId, userId: "test-member", role: "member" });
+  await db.delete(credentials).where(eq(credentials.ownerId, "test-member"));
   expect(await canBorrowCredential(db, scope)).toBe(false);
 });
