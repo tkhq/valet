@@ -382,6 +382,8 @@ describe('executeSession: schema validation failure triggers exactly one repair'
     expect(repairText).toContain('Reuse prior successful tool results');
     expect(repairText).toContain('Do not repeat actions with side effects');
     expect(repairText).toContain('Do not invent empty arrays');
+    expect(repairText).toContain('If work remains incomplete but actionable');
+    expect(repairText).toContain('JSON-only applies to your final reply');
     const primary = calls.find((call) => call.kind === 'prompt' && call.dispatchId === 'workflow:run-7:s');
     expect(String(primary?.text)).toContain(JSON.stringify(outputSchema));
     expect(String(primary?.text)).toContain('End it with one fenced ```json block');
