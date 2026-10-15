@@ -246,7 +246,13 @@ Hardening (applies to approval-node resolutions too — shared route):
    `get_run` after an approval reported a fast run twice: once from the poll
    and once from the settle signal. When another conversation started the
    run, or none did, the signals do not arrive, so `next` tells the
-   assistant to read `get_run` instead.
+   assistant to read `get_run` instead. When other gates were already
+   waiting, `next` names them (`resolvedGateStillWaiting`): a drive that
+   only resolves gates opens none, so no `workflow.approval_needed` signal
+   would report them. Known gap: a team run started before its thread moved
+   to an execution session stores the root session as its origin, while its
+   reports go to the execution thread, so `next` there says to read
+   `get_run`.
 5. **Timeout.** After `timeoutAt` has passed, resolution returns 409
    `Gate timed out`.
 

@@ -8,7 +8,7 @@
  */
 import type { RunHost, WorkflowDefinition } from "@valet/workflow";
 import type { DecisionGateRequest, PluginActionContext } from "@valet/engine";
-import { RESOLVED_GATE_NEXT_ELSEWHERE, workflowsActionPlugin } from "../workflows/actions.js";
+import { RESOLVED_GATE_NEXT_ELSEWHERE, resolvedGateStillWaiting, workflowsActionPlugin } from "../workflows/actions.js";
 import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveDefaultAssistant } from "../assistants/service.js";
@@ -1523,6 +1523,20 @@ describe("resolveWorkflowApproval — outcome coverage", () => {
       };
       return context as PluginActionContext;
     }
+
+    // A drive that only resolves some gates opens none, so no signal names
+    // the step that still waits. The result must name it.
+    it("names the steps that still wait instead of saying the run continues", async () => {
+      const { localApi, runId, resolve } = await parkedPolicyGate();
+      await localApi.providers.workflowStore.parkRun(runId, 2, [
+        { kind: "signal", signalType: "approval:gate", nodeId: "gate" },
+        { kind: "signal", signalType: "approval:second", nodeId: "second" },
+      ]);
+      const result = await resolve.execute({ run_id: runId, node_id: "gate", approved: true }, threadCtx("approve"));
+      expect(result).toMatchObject({ success: true, data: { next: resolvedGateStillWaiting([{ nodeId: "second" }]) } });
+      if (!result.success) throw new Error("resolve failed");
+      expect(JSON.stringify(result.data)).not.toContain("The run continues");
+    });
 
     it("resolves a policy gate as the person who confirms the card", async () => {
       const { localApi, runId, resolve } = await parkedPolicyGate();
