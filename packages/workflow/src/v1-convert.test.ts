@@ -445,6 +445,12 @@ describe('convertV1Workflows: workflows and triggers', () => {
     ['5/15 * * * *', 'read "5/15" in the minute field'],
     ['0 9 * * 8', 'read "8" in the day of the week field'],
     ['0 0 9 * * *', 'V1 read only cron expressions with 5 fields'],
+    ['0 9 31 2 *', 'names no date that exists'],
+    ['0 9 30-31 2 *', 'names no date that exists'],
+    ['0 9 31 2,4 *', 'names no date that exists'],
+    ['0 9 30-31 2,4 *', undefined],
+    ['0 9 29 2 *', undefined],
+    ['0 9 31 1-2 *', undefined],
   ])('v1CronDifference(%j)', (cron, difference) => {
     const found = v1CronDifference(cron);
     if (difference === undefined) expect(found).toBeUndefined();
