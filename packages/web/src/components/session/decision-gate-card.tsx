@@ -194,8 +194,9 @@ function DecisionGateResponse({
             <ComposerImageStrip images={images} onRemove={(id) => { if (!busy) setImages((current) => current.filter((image) => image.id !== id)); }} />
             <input ref={picker} type="file" accept={IMAGE_ACCEPT_ATTRIBUTE} multiple className="sr-only" aria-label="Attach images to answer" disabled={busy}
               onChange={(event) => { void addImages(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
-            <div className="flex items-end gap-2">
-            <Button variant="ghost" size="icon" aria-label="Attach images" disabled={busy} onClick={() => picker.current?.click()}><Paperclip className="h-4 w-4" /></Button>
+            {/* The answer field spans the card, so it lines up with the title and
+                the options above it. Attach and Submit sit on the row below, as in
+                the message box. */}
             <Textarea
               value={value}
               onChange={(e) => setValue(e.target.value)}
@@ -209,19 +210,23 @@ function DecisionGateResponse({
               aria-label="Your answer"
               placeholder={gate.actions.length > 0 ? "Or type a different answer…" : "Your answer…"}
               rows={2}
-              className="flex-1"
+              className="w-full"
               disabled={busy}
             />
-            <Button
-              size="sm"
-              aria-label="Submit"
-              onClick={submitValue}
-              title={`Submit answer (${formatChord({ code: "Enter", key: "Enter" })})`}
-              aria-keyshortcuts="Meta+Enter Control+Enter"
-              disabled={busy || (value.trim().length === 0 && images.length === 0)}
-            >
-              {busy ? <Spinner size={14} /> : "Submit"}
-            </Button>
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <Button variant="ghost" size="icon" aria-label="Attach images" disabled={busy} onClick={() => picker.current?.click()} className="-ml-2">
+                <Paperclip className="h-4 w-4" />
+              </Button>
+              <Button
+                size="sm"
+                aria-label="Submit"
+                onClick={submitValue}
+                title={`Submit answer (${formatChord({ code: "Enter", key: "Enter" })})`}
+                aria-keyshortcuts="Meta+Enter Control+Enter"
+                disabled={busy || (value.trim().length === 0 && images.length === 0)}
+              >
+                {busy ? <Spinner size={14} /> : "Submit"}
+              </Button>
             </div>
           </div>
           </>

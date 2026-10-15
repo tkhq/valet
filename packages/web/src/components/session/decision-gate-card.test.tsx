@@ -179,6 +179,22 @@ describe("DecisionGateCard — another member's shared account", () => {
 });
 
 
+describe("question answer layout", () => {
+  // The paperclip sat beside the field and pushed it out of line with the
+  // title and the options. The field now spans the card, with Attach and
+  // Submit on one row below it.
+  it("puts Attach and Submit on one row below a full-width answer field", () => {
+    renderCard(gate({ type: "question", actions: [{ id: "yes", label: "Yes" }] }));
+    const field = screen.getByRole("textbox", { name: "Your answer" });
+    const attach = screen.getByRole("button", { name: "Attach images" });
+    const submit = screen.getByRole("button", { name: "Submit" });
+    expect(field.className).toContain("w-full");
+    expect(attach.parentElement).toBe(submit.parentElement);
+    expect(field.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(attach.parentElement?.contains(field)).toBe(false);
+  });
+});
+
 describe("question keyboard confirmation", () => {
   it.each(["metaKey", "ctrlKey"])("submits a typed answer with %s + Enter", async (modifier) => {
     renderCard(gate({ type: "question", actions: [] }));
