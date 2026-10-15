@@ -144,10 +144,13 @@ import type {
   ToolResult,
   WriteFence,
 } from "./types.js";
-import { THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { MESSAGE_TURN_ERROR_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
 
 /** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
 const MAX_MERGE_DELEGATION_DEPTH = 5;
+
+/** Bound on the provider error text a failed turn keeps on its assistant entry. */
+const TURN_ERROR_MAX_CHARS = 1_000;
 
 /**
  * Credential-less claim attempts before settling `failed` (2 releases + 1
@@ -5480,6 +5483,12 @@ export class Thread {
               : event.message.stopReason === "stop" || event.message.stopReason === "length"
               ? "end_turn"
               : undefined; // toolUse (mid-turn) carries no stopReason
+          // The live `error` event is gone after a reload. Keep the provider's
+          // reason on the entry, so the transcript can show why the turn failed.
+          const turnError =
+            event.message.stopReason === "error" && event.message.errorMessage
+              ? attrTruncate(event.message.errorMessage, TURN_ERROR_MAX_CHARS)
+              : undefined;
           const entry: MessageEntry = {
             id: this.currentAssistantMessageId,
             sessionId: this.session.id,
@@ -5492,6 +5501,7 @@ export class Thread {
             model: event.message.model,
             queueItemId: this.runningItem?.id,
             stopReason,
+            ...(turnError ? { metadata: { [MESSAGE_TURN_ERROR_KEY]: turnError } } : {}),
             createdAt: Date.now(),
           };
           if (this.checkpointEntry?.id === entry.id) {

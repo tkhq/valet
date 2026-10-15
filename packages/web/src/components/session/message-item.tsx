@@ -152,8 +152,8 @@ export const MessageItem = memo(function MessageItem({
               />
             ))}
             {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (
-              <p className="text-xs italic text-muted">
-                No response. Try again or choose another model.
+              <p className="text-xs italic text-muted [overflow-wrap:anywhere]">
+                {emptyReplyNotice(message)}
               </p>
             )}
           </div>
@@ -181,6 +181,18 @@ export function isEmptyAssistantMessage(message: StreamMessage): boolean {
     !message.content &&
     !message.signal
   );
+}
+
+/**
+ * The muted line for an empty assistant reply. A failed turn names the
+ * provider's error, which REST keeps after a reload. Other empty replies
+ * keep the generic text.
+ */
+function emptyReplyNotice(message: StreamMessage): string {
+  const error = message.errorMessage?.trim();
+  if (!error) return "No response. Try again or choose another model.";
+  const sentence = /[.!?…]$/.test(error) ? error : `${error}.`;
+  return `This turn failed: ${sentence} Try again or choose another model.`;
 }
 
 /**

@@ -443,6 +443,13 @@ export interface MessageCost {
   total: number;
 }
 
+/**
+ * Key in an assistant `MessageEntry.metadata` that holds the provider error
+ * text of a turn that ended with `stopReason: "error"`. The engine truncates
+ * the text before it writes the entry.
+ */
+export const MESSAGE_TURN_ERROR_KEY = "turnError";
+
 export interface MessageEntry extends BaseEntry {
   type: "message";
   role: "user" | "assistant" | "tool" | "system";

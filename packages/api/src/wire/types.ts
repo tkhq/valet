@@ -1213,6 +1213,12 @@ export interface Message {
   completed?: boolean;
   /** Terminal assistant state, preserved for live and reloaded interruption handling. */
   stopReason?: "end_turn" | "error" | "abort";
+  /**
+   * Provider error text of a failed turn (`stopReason: "error"`). The engine
+   * truncates it to 1000 characters. Set only on REST-fetched assistant
+   * messages, from the entry's `metadata.turnError`.
+   */
+  errorMessage?: string;
   /** Assistant message that this user message addresses. */
   replyTo?: MessageReplyReference;
   /**
