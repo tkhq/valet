@@ -1183,6 +1183,8 @@ function buildActionContext(
   const presence = mergePresence(readPresence(ctx.presence));
   return {
     toolScope: ctx.toolScope,
+    // Headless actions have no mutable focus. Their delegated scope is the ceiling.
+    toolScopeCeiling: ctx.toolScope,
     userId: ctx.userId,
     orgId: ctx.orgId,
     sessionId,

@@ -7,7 +7,7 @@ import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflo
  * that to 404) so an owned row and a missing row stay indistinguishable.
  */
 import type { ActionPlugin, Principal, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
-import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
+import { NotFoundError, RepoOwnedWorkflowError, ValidationError, readToolScope } from "@valet/shared";
 import { matchesGateOccurrence, normalizeLegacyDefinition, type RunHost, type RunWaitCondition } from "@valet/workflow";
 import { writeBorrowGrant } from "../services/credential-borrow.js";
 import {
@@ -1409,6 +1409,7 @@ export async function startWorkflowRun(
   origin?: WorkflowRunOrigin,
   triggerType: "manual" | "event" = "manual",
   toolScope?: import("@valet/shared").ToolScope,
+  originToolScope?: import("@valet/shared").ToolScope,
 ): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
@@ -1435,6 +1436,7 @@ export async function startWorkflowRun(
   };
   const params: RunParams = {
     ...(toolScope ? { toolScope } : {}),
+    ...(validOrigin && originToolScope !== undefined ? { originToolScope } : {}),
     workflowId,
     definitionVersionId: versionId,
     input: trigger,
@@ -1952,6 +1954,8 @@ export async function retryWorkflowRun(
     // Event provenance also carries the private-channel audience.
     typeof run.params.input === "object" && run.params.input !== null
       && "type" in run.params.input && run.params.input.type === "event" ? "event" : "manual",
+    readToolScope(run.params.toolScope),
+    readToolScope(run.params.originToolScope),
   );
   if (!started) return "workflow_deleted";
   return started;

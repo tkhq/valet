@@ -20,6 +20,10 @@ Valet narrows tools by task. Scopes reduce unrelated choices. Existing authoriza
 - Security driver nudges and stall reports intersect the session ceiling, thread focus, and durable continuation ceilings. They cannot recover broader access by starting a new turn or pruning queue history.
 - Continuations recheck all session thread ceilings when they claim a turn. The claim atomically persists the result on the queue item, closing races with newer scoped tasks and preserving scope for restart and signal readers.
 - A workflow report retains the starting member's authority. Private team run evidence still requires that member's access.
+- Workflow approval and completion reports inherit `originToolScope`, the starting task's authorization ceiling. The run's `toolScope` separately includes mutable thread focus.
+- An empty `originToolScope` records an unrestricted starting task. Older runs without this field retain their execution scope as the report ceiling.
+- A headless tool action has no mutable focus. Nested starts use its delegated execution scope as the origin ceiling.
+- A retry preserves both stored scopes. Legacy retries keep their execution scope as the report ceiling.
 - Thread saves update metadata in each store. A restored focus must match the last saved focus.
 
 ## Workflow troubleshooting
@@ -43,6 +47,8 @@ Scopes constrain tools and brokered integration actions. They do not restrict ne
 Do not describe a tool scope as a sandbox firewall.
 
 A run started by a scoped task inherits its effective scope, including nested runs.
+Its approval and completion reports can change from validate focus to repair focus within the captured origin ceiling.
+This change does not widen the run's execution scope or remove inherited authorization limits.
 Saving a definition does not bind future independent UI, schedule, event, or webhook runs to the authoring task's ceiling.
 Those runs are new executions under their existing owner and action policies. Scopes do not constrain every future use of an edited configuration.
 
