@@ -209,25 +209,45 @@ hint says both. When the column is null, the cascade is unchanged. The Models pa
 select has a "No organization default" option that sends
 `defaultTier: null`.
 
-One test decides whether a provider with a key serves a tier:
+One test decides whether new sessions can run a tier:
 `resolvableTiers`. The PATCH, the cascade, and the GET response all use
-it. The PATCH refuses a `defaultTier` that no provider with a key serves,
-checked against the tier map that the same request writes. It also
-refuses an edit to the saved default's own tier when the edit leaves that
-tier unserved. Clearing the default instead would move every new thread
-to `s` as a side effect of a tier edit, so the PATCH refuses and the
-error names both fixes. A later provider, key, or tier-map change can
-still leave the saved tier unserved, for example when an enabled provider
-loses its org key. The cascade then skips the tier with a warning and
-continues to `s`, as it does for an inactive team default. A child passes
+it. It takes the one target that the tier walk picks and asks the
+resolver itself (`canRunSpec`): the provider must be enabled, the model
+must still exist on it, and the key must not be blank. A provider test
+alone is not enough. A custom provider can stay enabled and keyed after
+its model leaves its `models` list, and session start treats a key of
+only spaces as no key.
+
+The PATCH refuses a `defaultTier` that fails the test, checked against
+the tier map that the same request writes. On every tier edit, it also
+checks the saved default against the resulting map: a map saved before
+the tier-token rule can resolve the default through another tier. The
+PATCH refuses an edit that breaks a saved default that worked. Clearing
+the default instead would move every new thread to `s` as a side effect
+of a tier edit, so the PATCH refuses and the error names both fixes. A
+saved default that an earlier key or provider change broke does not
+block tier edits, and the response reports it as unusable.
+
+The PATCH runs every check under the org policy lock, against the tier
+map and default tier that it then writes over, so a save that another
+save overtook checks the newer state. PGlite runs one query at a time,
+so no credential read can happen inside that transaction. The PATCH
+copies the org's provider keys before the lock (`orgKeySnapshot`), and
+the locked check reads the copy.
+
+A later provider, key, or tier-map change can still leave the saved tier
+unusable, for example when an enabled provider loses its org key. The
+cascade then skips the tier with a warning and continues to `s`, as it
+does for an inactive team default. A child passes
 `childDefault: "s"`, so delegated work stays on `s` whatever the org
 default tier is.
 
 `GET /api/org/model-tiers` returns `defaultTierResolvable`, the result of
 the same test. The personal and team pickers label their clear state with
 the tier it falls to, for example "Medium (Organization default)". When
-the saved default is unserved, the label names Small, and the Models page
-shows a warning under the select.
+the saved default is unusable, the label names Small, and the Models page
+shows a warning under the select. Provider and key changes refresh the
+tier map read, so the label and the warning follow them.
 
 A tier target must be a model, not a tier token. The catalog accepts tier
 tokens as model specs, so before this rule `{ "m": ["m"] }` saved a tier

@@ -8,8 +8,10 @@
  * A tier token is not a valid target: a tier that names itself, or two
  * tiers that name each other, have no model to resolve to. A tier can keep
  * a tier token that its stored list already holds.
- * `defaultTier` takes a tier token, or null to clear it. A tier token must
- * reach a provider this org holds a key for (`resolvableTiers`).
+ * `defaultTier` takes a tier token, or null to clear it. The default tier
+ * must resolve to a model that new sessions can run (`resolvableTiers`), in
+ * the tier map that the request leaves behind. The PATCH runs these checks
+ * under the org policy lock, against the state that it then writes over.
  */
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
@@ -20,6 +22,7 @@ import {
   getOrgDefaultTier,
   getOrgTierMap,
   isSizeTier,
+  orgKeySnapshot,
   resolvableTiers,
   setOrgDefaultTier,
   setOrgTierMap,
@@ -114,7 +117,6 @@ modelTiersRouter.patch("/", async (c) => {
   }
 
   // Validate and narrow to PatchModelTiersRequest.
-  const stored = await getOrgTierMap(db, user.orgId);
   const validated: Record<string, string[]> = {};
   for (const tier of TIER_TOKENS) {
     if (tier in raw) {
@@ -125,57 +127,41 @@ modelTiersRouter.patch("/", async (c) => {
       if (val.length === 0) {
         return c.json({ error: `${tier} must have at least one model spec` }, 400);
       }
-      // The catalog accepts tier tokens as model specs, so this check comes
-      // first. Without it, `{ "m": ["m"] }` saves a tier with no model.
-      // A map saved before this check can hold a tier token. The tier that
-      // holds it can keep it, so the Models page can add a model to that
-      // tier and then remove the token. This adds no new tier-to-tier link.
-      const tierTarget = val.find((v) => isSizeTier(v.trim().toLowerCase()) && !stored[tier].includes(v));
-      if (tierTarget !== undefined) {
-        return c.json({
-          error: `Tier "${tier}" cannot target the tier token "${tierTarget}". Pick a model from the model list (GET /api/models) for each target.`,
-        }, 400);
-      }
       validated[tier] = val as string[];
     }
   }
   const patch = validated as PatchModelTiersRequest;
 
-  // Validate every spec against the org catalog. A body with only
-  // `defaultTier` leaves the stored tier map alone, so it skips this.
+  // These reads use the credential store, so they run before the
+  // transaction: PGlite runs one query at a time, and a credential read
+  // inside the transaction would wait for the transaction to end. A body
+  // with only `defaultTier` leaves the stored tier map alone, so it skips
+  // the catalog check. The key copy serves the default-tier check below.
   const changesTiers = TIER_TOKENS.some((tier) => tier in validated);
   const validIds = changesTiers ? catalogValidIds(await buildOrgCatalog(db, engineCredentials, user.orgId)) : null;
-
-  // A default tier must reach a provider this org holds a key for, in the
-  // tier map this request leaves behind, or new sessions skip it. The check
-  // covers a new default and an edit to the saved default's own tier. An
-  // edit that empties the default is refused, not allowed with the default
-  // cleared: clearing would move every new thread to "s" as a side effect
-  // of a tier edit, with no sign to the admin. This reads credentials, so it
-  // runs before the transaction, like the catalog check.
-  const savedDefault = defaultTier === undefined ? await getOrgDefaultTier(db, user.orgId) : null;
-  const editedDefault = savedDefault !== null && savedDefault in validated ? savedDefault : null;
-  const checkedDefault = isSizeTier(defaultTier) ? defaultTier : editedDefault;
-  if (checkedDefault !== null) {
-    const proposed = applyTierPatch(stored, patch);
-    const usable = await resolvableTiers(db, engineCredentials, user.orgId, proposed);
-    if (!usable.has(checkedDefault)) {
-      const error = editedDefault
-        ? `This change leaves tier "${editedDefault}", the organization default tier, with no provider this ` +
-          `organization holds a key for. Put a target whose provider has a key first in the tier, ` +
-          `or choose another default tier before you change it.`
-        : `No provider this organization holds a key for serves tier "${checkedDefault}". ` +
-          `Point the tier's first target at a provider with a key in Settings → Organization → Models, ` +
-          `or choose another default tier.`;
-      return c.json({ error }, 400);
-    }
-  }
+  const keys = changesTiers || isSizeTier(defaultTier) ? await orgKeySnapshot(db, engineCredentials, user.orgId) : null;
 
   const result = await db.transaction(async (tx) => {
     await lockOrgModelPolicy(tx, user.orgId);
-    // Build the merged tier map under the same row lock used by approved
-    // model writes, so neither policy can validate against stale state.
-    const merged = applyTierPatch(await getOrgTierMap(tx, user.orgId), patch);
+    // Every check reads the tier map and the default tier under the same
+    // row lock that approved-model writes use. A request that another save
+    // overtook checks that save's result, not the state it first read.
+    const current = await getOrgTierMap(tx, user.orgId);
+
+    // The catalog accepts tier tokens as model specs, so this check comes
+    // first. Without it, `{ "m": ["m"] }` saves a tier with no model.
+    // A map saved before this check can hold a tier token. The tier that
+    // holds it can keep it, so the Models page can add a model to that
+    // tier and then remove the token. This adds no new tier-to-tier link.
+    for (const tier of TIER_TOKENS) {
+      const tierTarget = patch[tier]?.find((v) => isSizeTier(v.trim().toLowerCase()) && !current[tier].includes(v));
+      if (tierTarget !== undefined) {
+        return {
+          error: `Tier "${tier}" cannot target the tier token "${tierTarget}". Pick a model from the model list (GET /api/models) for each target.`,
+        };
+      }
+    }
+    const merged = applyTierPatch(current, patch);
 
     if (validIds) {
       for (const tier of TIER_TOKENS) {
@@ -188,11 +174,37 @@ modelTiersRouter.patch("/", async (c) => {
 
       const approvalErr = tierTargetsNotApproved(merged, await getApprovedModels(tx, user.orgId));
       if (approvalErr) return { error: approvalErr };
-
-      await setOrgTierMap(tx, user.orgId, merged);
     }
+
+    // The default tier must resolve in the tier map this request leaves
+    // behind, or new sessions skip it. The check covers a new default, and
+    // the saved default on every tier edit: a saved default can resolve
+    // through another tier when a map saved before the tier-token rule
+    // holds one. An edit that breaks a working saved default is refused,
+    // not saved with the default cleared: clearing would move every new
+    // thread to "s" as a side effect of a tier edit, with no sign to the
+    // admin. A saved default that a key or provider change already broke
+    // does not block tier edits. The response reports it as unusable.
+    const effectiveDefault = defaultTier === undefined ? await getOrgDefaultTier(tx, user.orgId) : defaultTier;
+    if (keys && effectiveDefault !== null) {
+      const mustBeUsable =
+        defaultTier !== undefined || (await resolvableTiers(tx, keys, user.orgId, current)).has(effectiveDefault);
+      if (mustBeUsable && !(await resolvableTiers(tx, keys, user.orgId, merged)).has(effectiveDefault)) {
+        return {
+          error: defaultTier === undefined
+            ? `This change leaves tier "${effectiveDefault}", the organization default tier, with no provider this ` +
+              `organization holds a key for. Put a target whose provider has a key first in the tier, ` +
+              `or choose another default tier before you change it.`
+            : `No provider this organization holds a key for serves tier "${effectiveDefault}". ` +
+              `Point the tier's first target at a provider with a key in Settings → Organization → Models, ` +
+              `or choose another default tier.`,
+        };
+      }
+    }
+
+    if (validIds) await setOrgTierMap(tx, user.orgId, merged);
     if (defaultTier !== undefined) await setOrgDefaultTier(tx, user.orgId, defaultTier);
-    return { tierMap: merged, defaultTier: await getOrgDefaultTier(tx, user.orgId) };
+    return { tierMap: merged, defaultTier: effectiveDefault };
   });
   if ("error" in result) return c.json({ error: result.error }, 400);
   return c.json<GetModelTiersResponse>(

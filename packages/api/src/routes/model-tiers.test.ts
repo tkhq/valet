@@ -5,6 +5,7 @@
  * keys before each test, so a test that saves a tier stubs a key first.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CredentialOwner } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createLlmProvider, updateLlmProvider } from "../services/llm-providers.js";
 import {
@@ -180,6 +181,80 @@ describe("/api/org/model-tiers defaultTier", () => {
     const cleared = await patchTiers(api.baseUrl, { m: [target], defaultTier: null });
     expect(cleared.status).toBe(200);
     expect(await getOrgDefaultTier(api.providers.db, "local-org")).toBeNull();
+  });
+
+  it("refuses an edit to a tier that the saved default tier resolves through", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openrouter-key");
+    api = await bootTestApi();
+    const { db } = api.providers;
+    // Saved directly: a map saved before the PATCH refused tier tokens.
+    await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, m: ["l"] });
+    await setOrgDefaultTier(db, "local-org", "m");
+
+    const target = `openrouter/${OPENROUTER_DEFAULT_MODEL_IDS[0]}`;
+    const res = await patchTiers(api.baseUrl, { l: [target] });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/^This change leaves tier "m", the organization default tier/);
+    expect((await getOrgTierMap(db, "local-org")).l).toEqual(DEFAULT_TIER_MAP.l);
+
+    // A default that an earlier change already broke does not block other
+    // tier edits. The response reports it as unusable.
+    await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, m: ["l"], l: [target] });
+    const other = await patchTiers(api.baseUrl, { xs: ["anthropic/claude-haiku-4-5"] });
+    expect(other.status).toBe(200);
+    expect(((await other.json()) as GetModelTiersResponse).defaultTierResolvable).toBe(false);
+  });
+
+  it("refuses a default tier whose provider key is only whitespace", async () => {
+    // The Anthropic key keeps the other tiers valid. No OpenAI env key is set.
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    api = await bootTestApi();
+    const { db, engineCredentials } = api.providers;
+    const row = await createLlmProvider(db, { orgId: "local-org", kind: "openai", name: "OpenAI" });
+    const owner: CredentialOwner = { type: "org", id: "local-org" };
+    await engineCredentials.save(owner, `llm:${row.id}`, { type: "api_key", apiKey: "   " });
+
+    const res = await patchTiers(api.baseUrl, { l: ["openai/gpt-4.1"], defaultTier: "l" });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/serves tier "l"/);
+    expect(await getOrgDefaultTier(db, "local-org")).toBeNull();
+  });
+
+  // Each case runs a competing PATCH after this request starts and before
+  // it takes the org policy lock. The checks must see the competing write.
+  it.each([
+    {
+      name: "a competing edit leaves the new default tier unserved",
+      seed: DEFAULT_TIER_MAP,
+      competing: { m: [`openrouter/${OPENROUTER_DEFAULT_MODEL_IDS[0]}`] },
+      request: { defaultTier: "m" },
+      error: /serves tier "m"/,
+    },
+    {
+      name: "a competing edit removes the tier token that this request keeps",
+      seed: { ...DEFAULT_TIER_MAP, m: ["s", "anthropic/claude-sonnet-4-6"] },
+      competing: { m: ["anthropic/claude-sonnet-4-6"] },
+      request: { m: ["s", "anthropic/claude-sonnet-4-6"] },
+      error: /^Tier "m" cannot target the tier token "s"/,
+    },
+  ])("checks the state under the lock when $name", async ({ seed, competing, request, error }) => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openrouter-key");
+    api = await bootTestApi();
+    const { baseUrl, providers: { db } } = api;
+    await setOrgTierMap(db, "local-org", seed);
+
+    const transaction = db.transaction.bind(db);
+    vi.spyOn(db, "transaction").mockImplementationOnce(async (callback) => {
+      expect((await patchTiers(baseUrl, competing)).status).toBe(200);
+      return transaction(callback);
+    });
+    const res = await patchTiers(baseUrl, request);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(error);
+    expect(await getOrgDefaultTier(db, "local-org")).toBeNull();
+    expect((await getOrgTierMap(db, "local-org")).m).toEqual(competing.m);
   });
 
   it("403s for a non-admin org member", async () => {

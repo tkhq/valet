@@ -11,12 +11,12 @@
  * column means "use built-in defaults".
  */
 import { eq } from "drizzle-orm";
-import { getEnvApiKey } from "@earendil-works/pi-ai/compat";
-import type { CredentialStore } from "@valet/engine";
+import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { orgs, type LlmProviderRow } from "../schema/index.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
 import { hasOrgKey } from "./model-catalog.js";
+import { canRunSpec, type CredentialReader } from "./model-resolution.js";
 
 /** The five size tiers, in order. */
 export const TIER_TOKENS = ["xs", "s", "m", "l", "xl"] as const;
@@ -110,8 +110,8 @@ const ENV_FALLBACK_KINDS: readonly string[] = ["anthropic", "openai", "google"];
  *
  * The test asks nothing about keys for a known kind. A run therefore stops
  * at the first ACTIVE entry whether or not a key exists for it, which is why
- * `resolvableTiers` key-tests that one spec rather than searching the list
- * for any spec that would work.
+ * `resolvableTiers` tests that one spec rather than searching the list for
+ * any spec that would work.
  *
  * A target that is itself a tier token continues the walk in that tier.
  * `PATCH /api/org/model-tiers` refuses such a target, but a map saved before
@@ -121,7 +121,7 @@ const ENV_FALLBACK_KINDS: readonly string[] = ["anthropic", "openai", "google"];
  * most once.
  */
 async function firstActiveSpec(
-  credentials: CredentialStore,
+  credentials: CredentialReader,
   orgId: string,
   rows: LlmProviderRow[],
   tierMap: TierMap,
@@ -178,62 +178,64 @@ export async function resolveTier(
 }
 
 /**
- * Can this org reach the provider behind `namespace` with a key right now?
- * The test mirrors `buildOrgCatalog`'s own `active` rule:
- *   - Known kind with no row → usable only when the deployment env holds a
- *     key for it (the zero-config path).
- *   - Known kind with a row → usable when the row is enabled AND a key
- *     exists, either the org's own or the deployment env's.
- *   - Custom (`openai_compatible`) → usable when the row is enabled AND the
- *     org holds a key (no env fallback for custom providers).
- */
-async function isNamespaceUsable(
-  credentials: CredentialStore,
-  orgId: string,
-  rows: LlmProviderRow[],
-  namespace: string,
-): Promise<boolean> {
-  const row = rows.find((r) => providerNamespace(r) === namespace);
-  if (!row) return ENV_FALLBACK_KINDS.includes(namespace) && Boolean(getEnvApiKey(namespace));
-  if (!row.enabled) return false;
-  if (row.kind === "openai_compatible") return hasOrgKey(credentials, orgId, row.id);
-  return (await hasOrgKey(credentials, orgId, row.id)) || Boolean(getEnvApiKey(row.kind));
-}
-
-/**
  * Every tier this org can run today, mapped to the spec it would use. A tier
  * token is always "approved", so save-time validation asks this before it
  * accepts one: without the check a preset stores a tier that resolves to a
  * provider the org holds no key for, and the run fails with no credentials.
  *
- * The key test applies to the ONE spec `resolveTier` would pick, not to the
+ * The test applies to the ONE spec `resolveTier` would pick, not to the
  * list. A run never walks past an active-but-keyless entry to a later usable
- * one, so neither does the gate. One tier-map read, one provider-row read
- * and at most one key test per namespace serve all five tiers.
+ * one, so neither does the gate. The test is `canRunSpec`, which asks the
+ * resolver itself: the model must still exist on its provider, and the key
+ * must not be blank. The org default tier, the PATCH that saves it, and
+ * workflow validation all ask this, so a tier that they accept is one that
+ * session creation can resolve. One tier-map read, one provider-row read
+ * and at most one resolver test per spec serve all five tiers.
  *
  * `proposed` replaces the stored tier map, so a save can check the map it
  * is about to write.
  */
 export async function resolvableTiers(
   db: AppQueryable,
-  credentials: CredentialStore,
+  credentials: CredentialReader,
   orgId: string,
   proposed?: TierMap,
 ): Promise<Map<SizeTier, string>> {
   const tierMap = proposed ?? (await getOrgTierMap(db, orgId));
   const rows = await listLlmProviders(db, orgId);
-  const usableByNamespace = new Map<string, boolean>();
+  const runnable = new Map<string, boolean>();
   const usable = new Map<SizeTier, string>();
   for (const tier of TIER_TOKENS) {
     const spec = await firstActiveSpec(credentials, orgId, rows, tierMap, tier);
     if (spec === undefined) continue;
-    const { namespace } = parseModelId(spec);
-    let ok = usableByNamespace.get(namespace);
+    let ok = runnable.get(spec);
     if (ok === undefined) {
-      ok = await isNamespaceUsable(credentials, orgId, rows, namespace);
-      usableByNamespace.set(namespace, ok);
+      ok = await canRunSpec(rows, credentials, orgId, spec);
+      runnable.set(spec, ok);
     }
     if (ok) usable.set(tier, spec);
   }
   return usable;
+}
+
+/**
+ * A copy of this org's provider keys that answers `get` from memory. A check
+ * that runs inside an app-db transaction reads keys through it: PGlite runs
+ * one query at a time, so a credential-store read inside the transaction
+ * waits for the transaction to end. A provider added after the copy reads
+ * as keyless.
+ */
+export async function orgKeySnapshot(
+  db: AppQueryable,
+  credentials: CredentialReader,
+  orgId: string,
+): Promise<CredentialReader> {
+  const owner: CredentialOwner = { type: "org", id: orgId };
+  const keys = new Map<string, StoredCredential | null>();
+  for (const row of await listLlmProviders(db, orgId)) {
+    keys.set(`llm:${row.id}`, await credentials.get(owner, `llm:${row.id}`));
+  }
+  return {
+    get: async (o, service) => (o.type === owner.type && o.id === owner.id ? keys.get(service) ?? null : null),
+  };
 }

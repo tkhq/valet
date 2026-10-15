@@ -853,6 +853,31 @@ describe("EngineHost model resolution wiring", () => {
       expect(keyless.options.model.id).toBe("claude-haiku-4-5");
     });
 
+    it("falls through to \"s\" when a keyed custom provider no longer lists the default tier's model", async () => {
+      api = await bootTestApi();
+      const { db, engineCredentials, engineHost } = api.providers;
+      const row = await createLlmProvider(db, {
+        orgId: "local-org",
+        kind: "openai_compatible",
+        name: "Custom",
+        baseUrl: "https://x/v1",
+        models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
+      });
+      await engineCredentials.save({ type: "org", id: "local-org" }, `llm:${row.id}`, { type: "api_key", apiKey: "org-custom" });
+      await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, l: [`${row.id}/m1`] });
+      await setOrgDefaultTier(db, "local-org", "l");
+      // The provider stays enabled and keyed. Only its model list changes.
+      await updateLlmProvider(db, "local-org", row.id, { models: [{ id: "m2", name: "M2", contextWindow: 8000 }] });
+
+      const session = await engineHost.sessionFor("org-tier-model-gone", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(session.options.modelSpec).toBe("s");
+      expect(session.options.model.id).toBe("claude-haiku-4-5");
+    });
+
     it("a user default beats the org default tier", async () => {
       api = await bootTestApi();
       const { db } = api.providers;

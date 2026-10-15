@@ -3413,21 +3413,22 @@ export class EngineHost {
   }
 
   /**
-   * `orgs.default_tier` when a provider this org holds a key for serves it,
-   * else `undefined`. Like a team default, it applies to people who did not
-   * pick it. The PATCH route refuses a tier that no provider with a key
-   * serves, but a later provider, key, or tier-map change can still empty
-   * it. Such a tier falls through to the next default instead of failing
-   * every new session. The test is `resolvableTiers`, the same one the save
-   * path applies: an enabled provider that lost its key does not count.
-   * Uncached, same as `userDefaultModel`.
+   * `orgs.default_tier` when session creation can resolve it, else
+   * `undefined`. Like a team default, it applies to people who did not pick
+   * it. The PATCH route refuses a tier that new sessions cannot run, but a
+   * later provider, key, or tier-map change can still break it. Such a tier
+   * falls through to the next default instead of failing every new
+   * session. The test is `resolvableTiers`, the same one the save path
+   * applies: it asks the resolver, so an enabled provider that lost its key
+   * or no longer lists the model does not count. Uncached, same as
+   * `userDefaultModel`.
    */
   private async orgDefaultTier(orgId: string): Promise<SizeTier | undefined> {
     if (!this.opts.db) return undefined;
     const tier = await getOrgDefaultTier(this.opts.db, orgId);
     if (!tier) return undefined;
     if ((await resolvableTiers(this.opts.db, this.opts.engineCredentials, orgId)).has(tier)) return tier;
-    console.warn(`[engine-host] no provider with a key serves org default tier "${tier}"; using the next default`);
+    console.warn(`[engine-host] new sessions cannot run org default tier "${tier}"; using the next default`);
     return undefined;
   }
 

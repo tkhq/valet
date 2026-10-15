@@ -3667,8 +3667,9 @@ export type GetModelTiersResponse = WireTierMap & {
   /** Tier for new sessions that no personal or team default covers. Null
    * means unset: those sessions use the "s" tier. */
   defaultTier?: WireSizeTier | null;
-  /** True when a provider the org holds a key for serves `defaultTier`.
-   * When false or absent, new sessions skip `defaultTier` and use "s". */
+  /** True when new sessions can run `defaultTier`: its target's provider
+   * is enabled, has a key, and still lists the model. When false or absent,
+   * new sessions skip `defaultTier` and use "s". */
   defaultTierResolvable?: boolean;
 };
 
