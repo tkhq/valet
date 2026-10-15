@@ -126,6 +126,15 @@ it("refuses a CLI-authored settings write even when that user has a lasting sess
   expect(await local.providers.engineStore.listDecisionGates(sessionId, undefined, "pending")).toHaveLength(0);
   settingsResponse(model, "settings.update_account", { name: "Browser edit" });
   await submit(local, threadId, { cookie });
+  const gate = await pendingGate(local, sessionId);
+  expect(gate.context?.approver).toEqual({ userId: person.id });
+  expect(gate.actions.map(action => action.id)).toEqual(["approve", "deny"]);
+  const [beforeApproval] = await local.providers.db.select().from(users).where(eq(users.id, person.id));
+  expect(beforeApproval?.name).not.toBe("Browser edit");
+  const approved = await fetch(`${local.baseUrl}/api/threads/${threadId}/decisions/${encodeURIComponent(gate.id)}/resolve`, {
+    method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ actionId: "approve" }),
+  });
+  expect(approved.status).toBe(200);
   await vi.waitFor(async () => {
     const [changed] = await local.providers.db.select().from(users).where(eq(users.id, person.id));
     expect(changed?.name).toBe("Browser edit");

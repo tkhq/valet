@@ -40,6 +40,49 @@ import {
   type ToolContext,
 } from "../src/index.js";
 
+describe("actor-scoped action consent", () => {
+  const plugin: ActionPlugin = { service: "settings", defaultApprovalMode: "allow", actions: [{
+    id: "settings.change", name: "Change settings", description: "Change settings", riskLevel: "low", approvalScope: "actor",
+    parameters: Type.Object({}), execute: async () => ({ success: true, data: { changed: true } }),
+  }] };
+
+  it.each([false, true])("requires one-shot consent despite an allow decision (resolver: %s)", async (withResolver) => {
+    const catalog = buildPluginCatalog([plugin]);
+    const requests: DecisionGateRequest[] = [];
+    const resolutions: DecisionResolution[] = [];
+    const records: PolicyInvocationRecord[] = [];
+    const policyResolver: PolicyResolver = {
+      resolve: async () => ({ mode: "allow", provenance: { baseMode: "allow", source: "org_policy" } }),
+      onResolution: async (_input, _decision, resolution) => { resolutions.push(resolution); },
+      onInvocation: async (record) => { records.push(record); },
+    };
+    const ctx = makeCtx({ userId: "author", interactiveActor: { id: "author" }, ...(withResolver ? { policyResolver } : {}),
+      requestDecision: async (request) => {
+        requests.push(request);
+        return { actionId: "approve", resolvedBy: "author", resolvedAt: 1 };
+      },
+    });
+
+    expect(await actionRunsUngated(catalog, "settings.change", ctx)).toBe(false);
+    expect(await invokeAction(catalog, "settings.change", {}, ctx, "Change settings"))
+      .toMatchObject({ kind: "ok", result: { success: true, data: { changed: true } } });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.context).toMatchObject({ approver: { userId: "author" }, oneShot: true });
+    expect(resolutions).toHaveLength(withResolver ? 1 : 0);
+    expect(records).toEqual(withResolver ? [expect.objectContaining({ status: "completed", resolvedMode: "require_approval" })] : []);
+  });
+
+  it("refuses a mismatched interactive author before requesting consent", async () => {
+    let gates = 0;
+    const result = await invokeAction(buildPluginCatalog([plugin]), "settings.change", {}, makeCtx({
+      userId: "author", interactiveActor: { id: "different-author" },
+      requestDecision: async () => { gates++; return { actionId: "approve", resolvedBy: "different-author", resolvedAt: 1 }; },
+    }), "Change settings");
+    expect(result).toMatchObject({ kind: "error", message: expect.stringMatching(/verified.*author/i) });
+    expect(gates).toBe(0);
+  });
+});
+
 it("scopes live availability reads for actions and filtered discovery", async () => {
   const plugin: ActionPlugin = {
     service: "one",

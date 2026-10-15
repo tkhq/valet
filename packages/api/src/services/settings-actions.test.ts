@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
-import type { PluginActionContext, Principal } from "@valet/engine";
+import type { DecisionGateRequest, PluginActionContext, Principal } from "@valet/engine";
 import { buildPluginCatalog, invokeAction } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { orgMembers, orgs, teamMembers, teams, users } from "../schema/index.js";
+import { actionPolicies, agentSessions, orgMembers, orgs, runtimeGrants, teamMembers, teams, users } from "../schema/index.js";
+import { buildPolicyResolver, writeSessionGrant } from "../policies/service.js";
 import { settingsActionPlugin } from "./settings-actions.js";
 import { DEFAULT_TIER_MAP, setOrgDefaultTier, setOrgTierMap } from "./model-tiers.js";
 import { createLlmProvider } from "./llm-providers.js";
@@ -32,6 +33,24 @@ describe("settings actions", () => {
     const found = settingsActionPlugin(api.providers.db, () => api.providers.engineCredentials).actions.find(a => a.id === `settings.${id}`);
     if (!found) throw new Error(`Missing settings action ${id}`);
     return found;
+  }
+
+  async function sharedTeamPolicy() {
+    const db = api.providers.db;
+    await db.insert(teams).values({ id: "settings-team", orgId: "local-org", name: "Settings team", createdAt: 1 });
+    await db.insert(teamMembers).values([
+      { teamId: "settings-team", userId: "local-user", role: "admin" },
+      { teamId: "settings-team", userId: "test-member", role: "admin" },
+    ]);
+    await db.update(orgMembers).set({ role: "admin" }).where(and(eq(orgMembers.orgId, "local-org"), eq(orgMembers.userId, "test-member")));
+    await db.insert(agentSessions).values({ id: "assistant", userId: "local-user", orgId: "local-org", workspace: "test",
+      ownerType: "team", ownerId: "settings-team", createdAt: 1, updatedAt: 1 });
+    const owner: Principal = { type: "team", id: "settings-team" };
+    return {
+      owner,
+      catalog: buildPluginCatalog([settingsActionPlugin(db, () => api.providers.engineCredentials)]),
+      policyResolver: buildPolicyResolver({ db, actionPluginByService: api.providers.actionPluginByService }),
+    };
   }
 
   it("changes only the authenticated account and returns a safe settings projection", async () => {
@@ -192,6 +211,119 @@ describe("settings actions", () => {
     expect(result.kind).toBe("denied-approval");
     const [row] = await api.providers.db.select().from(users).where(eq(users.id, "local-user"));
     expect(row?.name).not.toBe("Unauthorized approval");
+  });
+
+  it.each(["approve_session", "always_allow", "always_allow_owner"])("refuses actor %s grants before another teammate can reuse them", async (answer) => {
+    const { catalog, owner, policyResolver } = await sharedTeamPolicy();
+    const gates: DecisionGateRequest[] = [];
+    const first = await invokeAction(catalog, "settings.update_account", { name: "First actor" }, context({
+      owner, policyResolver, requestDecision: async (request) => {
+        gates.push(request);
+        return { actionId: answer, resolvedBy: "local-user", resolvedAt: 1 };
+      },
+    }), "Change my name");
+    const second = await invokeAction(catalog, "settings.update_account", { name: "Unapproved teammate" }, context({
+      owner, policyResolver, userId: "test-member", interactiveActor: { id: "test-member" },
+      requestDecision: async (request) => {
+        gates.push(request);
+        return { actionId: "deny", resolvedBy: "test-member", resolvedAt: 2 };
+      },
+    }), "Change my name");
+
+    const [person] = await api.providers.db.select({ name: users.name }).from(users).where(eq(users.id, "test-member"));
+    expect(person?.name).not.toBe("Unapproved teammate");
+    expect(first.kind).toBe("denied-approval");
+    expect(second.kind).toBe("denied-approval");
+    expect(gates).toHaveLength(2);
+    expect(gates[0]?.actions?.map((action) => action.id)).toEqual(["approve", "deny"]);
+    expect(await api.providers.db.select().from(runtimeGrants).where(eq(runtimeGrants.sessionId, "assistant"))).toEqual([]);
+    expect(await api.providers.db.select().from(actionPolicies).where(eq(actionPolicies.actionId, "settings.update_account"))).toEqual([]);
+  });
+
+  it.each([
+    { id: "settings.update_account", params: { name: "Unapproved teammate" }, expected: { name: "Unapproved teammate" } },
+    { id: "settings.update_team", params: { team_id: "settings-team", defaultModel: "m" }, expected: { teamId: "settings-team", defaultModel: "m" } },
+    { id: "settings.update_organization", params: { name: "Unapproved organization" }, expected: { name: "Unapproved organization" } },
+  ])("requires fresh actor approval despite an existing session grant for $id", async ({ id, params, expected }) => {
+    const { catalog, owner, policyResolver } = await sharedTeamPolicy();
+    const db = api.providers.db;
+    await writeSessionGrant(db, "assistant", { orgId: "local-org", service: "settings", actionId: id, grantedBy: "local-user", now: 1 });
+    const gates: DecisionGateRequest[] = [];
+    const result = await invokeAction(catalog, id, params, context({
+      owner, policyResolver, userId: "test-member", interactiveActor: { id: "test-member" },
+      requestDecision: async (request) => {
+        gates.push(request);
+        return { actionId: "deny", resolvedBy: "test-member", resolvedAt: 2 };
+      },
+    }), "Change settings");
+
+    expect(result.kind).toBe("denied-approval");
+    expect(gates).toHaveLength(1);
+    expect(gates[0]?.context?.approver).toEqual({ userId: "test-member" });
+    const [person] = await db.select({ name: users.name }).from(users).where(eq(users.id, "test-member"));
+    const [team] = await db.select({ defaultModel: teams.defaultModel }).from(teams).where(eq(teams.id, "settings-team"));
+    const [org] = await db.select({ name: orgs.name }).from(orgs).where(eq(orgs.id, "local-org"));
+    expect(person?.name).not.toBe("Unapproved teammate");
+    expect(team?.defaultModel).toBeNull();
+    expect(org?.name).toBe("Local Dev");
+
+    const approved = await invokeAction(catalog, id, params, context({
+      owner, policyResolver, userId: "test-member", interactiveActor: { id: "test-member" },
+      requestDecision: async (request) => {
+        gates.push(request);
+        return { actionId: "approve", resolvedBy: "test-member", resolvedAt: 3 };
+      },
+    }), "Change settings");
+    expect(approved).toMatchObject({ kind: "ok", result: { success: true, data: expected } });
+    expect(gates).toHaveLength(2);
+    expect(gates[1]?.context?.approver).toEqual({ userId: "test-member" });
+  });
+
+  it.each([false, true])("refuses an unverified actor before opening a gate (resolver: %s)", async (withResolver) => {
+    const { catalog, policyResolver } = await sharedTeamPolicy();
+    let gates = 0;
+    const result = await invokeAction(catalog, "settings.update_account", { name: "Unverified" }, context({
+      interactiveActor: undefined, ...(withResolver ? { policyResolver } : {}),
+      requestDecision: async () => {
+        gates++;
+        return { actionId: "approve", resolvedBy: "local-user", resolvedAt: 1 };
+      },
+    }), "Change my name");
+
+    expect(gates).toBe(0);
+    expect(result).toMatchObject({ kind: "error", message: expect.stringMatching(/verified.*author/i) });
+    const [person] = await api.providers.db.select({ name: users.name }).from(users).where(eq(users.id, "local-user"));
+    expect(person?.name).not.toBe("Unverified");
+  });
+
+  it.each(["org", "team"] satisfies Array<"org" | "team">)("retains %s deny policies despite an actor's existing grant", async (scope) => {
+    const { catalog, owner, policyResolver } = await sharedTeamPolicy();
+    const db = api.providers.db;
+    await writeSessionGrant(db, "assistant", { orgId: "local-org", service: "settings", actionId: "settings.update_account", grantedBy: "local-user", now: 1 });
+    await db.insert(actionPolicies).values({ id: "settings-deny", orgId: "local-org", principalType: scope,
+      principalId: scope === "org" ? "local-org" : "settings-team", actionId: "settings.update_account", mode: "deny",
+      paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
+    let gates = 0;
+    const result = await invokeAction(catalog, "settings.update_account", { name: "Denied" }, context({
+      owner, policyResolver, requestDecision: async () => { gates++; return { actionId: "approve", resolvedBy: "local-user", resolvedAt: 2 }; },
+    }), "Change my name");
+
+    expect(result).toMatchObject({ kind: "denied-policy", ...(scope === "team" ? { scope: "team" } : {}) });
+    expect(gates).toBe(0);
+    const [person] = await db.select({ name: users.name }).from(users).where(eq(users.id, "local-user"));
+    expect(person?.name).not.toBe("Denied");
+  });
+
+  it("keeps ordinary read grants reusable by teammates without actor approval", async () => {
+    const { catalog, owner, policyResolver } = await sharedTeamPolicy();
+    const db = api.providers.db;
+    await db.insert(actionPolicies).values({ id: "settings-read-approval", orgId: "local-org", principalType: "org", principalId: "local-org",
+      actionId: "settings.get_settings", mode: "require_approval", paramMatchers: [], appliesIn: "any", origin: "admin", createdAt: 1, updatedAt: 1 });
+    await writeSessionGrant(db, "assistant", { orgId: "local-org", service: "settings", actionId: "settings.get_settings", grantedBy: "local-user", now: 1 });
+    const result = await invokeAction(catalog, "settings.get_settings", { scope: "organization" }, context({
+      owner, policyResolver, userId: "test-member", interactiveActor: { id: "test-member" },
+    }), "Read organization settings");
+    expect(result).toMatchObject({ kind: "ok", result: { success: true, data: { name: "Local Dev" } } });
   });
 
   it("rejects arbitrary account/org targets and privileged fields at the catalog boundary", async () => {
