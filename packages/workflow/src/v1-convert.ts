@@ -768,7 +768,33 @@ export function v1CronDifference(cron: string): string | undefined {
   if (fields[2] !== '*' && fields[4] !== '*') {
     return 'V1 ran it only on days that match both the day of the month and the day of the week. V2 runs it on days that match either one.';
   }
+  // A date that no month has (February 31) never fired in V1, and V2 refuses
+  // to save the schedule, so the import would stop part way.
+  if (fields[2] !== '*' && fields[3] !== '*') {
+    const days = cronValues(fields[2]!, 1, 31);
+    const months = cronValues(fields[3]!, 1, 12);
+    if (!months.some((month) => days.some((day) => day <= DAYS_IN_MONTH[month - 1]!))) {
+      return 'It names no date that exists, so V1 never ran it.';
+    }
+  }
   return undefined;
+}
+
+/** The longest each month gets, February in a leap year. */
+const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/** The values a field that passed `sameCronPart` selects. */
+function cronValues(field: string, min: number, max: number): number[] {
+  const values: number[] = [];
+  for (const part of field.split(',')) {
+    const star = /^\*\/(\d+)$/.exec(part);
+    const range = /^(\d+)(?:-(\d+)(?:\/(\d+))?)?$/.exec(part);
+    const start = star ? min : Number(range?.[1] ?? min);
+    const end = star ? max : range?.[2] === undefined ? start : Number(range[2]);
+    const step = Number(star?.[1] ?? range?.[3] ?? 1);
+    for (let value = start; value <= end; value += step) values.push(value);
+  }
+  return values;
 }
 
 const CRON_FIELDS: [name: string, min: number, max: number][] = [
