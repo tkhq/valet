@@ -1,7 +1,7 @@
 import { AUTH_CHANGE_KEY } from "~/lib/auth-navigation";
 import { WorkspaceAssistantProvider, WorkspaceAssistantDock } from "~/components/layout/workspace-assistant";
 import { ApiError } from "~/api/client";
-import { useEffect, useState, type ReactNode } from "react";
+import { Suspense, useEffect, useState, type ReactNode } from "react";
 import { useMe } from "~/api/settings";
 import { useReportTimezoneOnce } from "~/lib/report-timezone";
 import { useComposerDraftStore } from "~/stores/composer-drafts";
@@ -17,6 +17,7 @@ import { KeyboardShortcutsDialog } from "~/components/session/keyboard-shortcuts
 import { useChatKeybindings } from "~/hooks/use-chat-keybindings";
 import { useAttentionPing } from "~/lib/use-attention-ping";
 import { unlock } from "~/lib/notification-sound";
+import { UI_STRESS_PATH, UiStressShell, uiStressEnabled } from "~/dev/ui-stress/gate";
 
 interface RouterContext {
   queryClient: QueryClient;
@@ -66,8 +67,14 @@ function NotFound() {
  *   used to cover this "everything else" bucket is dead — deleted.
  */
 function sidebarForPath(pathname: string) {
-  if (pathname === "/chat") return <AssistantRail />;
+  if (pathname === "/chat" || isUiStressPath(pathname)) return <AssistantRail />;
   return null;
+}
+
+/** The development-only UI stress gallery. Always false in a production
+ * build, where `UiStressShell` is null. */
+function isUiStressPath(pathname: string): boolean {
+  return UiStressShell !== null && pathname === UI_STRESS_PATH && uiStressEnabled();
 }
 
 /** `/login`, `/signup`, and the shared-artifact reader `/a/$token` —
@@ -106,7 +113,7 @@ function RootLayout() {
 
   // Inside the signed-in branch only: the provider reads assistants and
   // teams, which a signed-out visitor cannot fetch.
-  return (
+  const shell = (
     <TooltipProvider>
       <DraftAccountBoundary>
       <WorkspaceScopeProvider>
@@ -123,6 +130,12 @@ function RootLayout() {
       </DraftAccountBoundary>
     </TooltipProvider>
   );
+  // The gallery puts the whole shell on its frozen fixture client, so the
+  // nav, the bell, and the sidebar show stress data too.
+  if (UiStressShell && isUiStressPath(pathname)) {
+    return <Suspense fallback={null}><UiStressShell>{shell}</UiStressShell></Suspense>;
+  }
+  return shell;
 }
 
 /**
