@@ -75,6 +75,7 @@ export const ORG_SECTIONS: ReadonlyArray<{ label: string; icon: LucideIcon; rout
     icon: Blocks,
     routes: [
       { to: "/settings/organization/plugins", label: "Plugins" },
+      { to: "/settings/organization/mcp-servers", label: "MCP servers" },
       { to: "/settings/organization/github", label: "GitHub" },
       { to: "/settings/organization/slack", label: "Slack" },
       { to: "/settings/organization/linear", label: "Linear" },
@@ -159,6 +160,17 @@ const PERSONAL_ITEMS: RailItem[] = [
  * every section on that page reads org-admin-only APIs. */
 const MODELS_ITEM: RailItem = { to: "/settings/models", label: "Models", icon: Cpu, active: exact("/settings/models") };
 
+/** Single-user-mode stand-in for Organization · MCP servers, shown only
+ * while the org gate is OFF and only to an org admin. The API answers with
+ * the gate off but returns 403 to a non-admin. The first user of a
+ * deployment is its org admin. */
+const MCP_SERVERS_ITEM: RailItem = {
+  to: "/settings/mcp-servers",
+  label: "MCP servers",
+  icon: Blocks,
+  active: exact("/settings/mcp-servers"),
+};
+
 const MEMBER_ORG_ITEMS: RailItem[] = [
   { to: ORG_TEAMS_PATH, label: "Teams", icon: Users, active: (p) => onRoute(p, ORG_TEAMS_PATH) },
   { to: ORG_ONEPASSWORD_PATH, label: "1Password", icon: KeyRound, active: exact(ORG_ONEPASSWORD_PATH) },
@@ -179,9 +191,10 @@ export function SettingsRail() {
   const organizationsOn = orgQ.data?.features.organizations === true;
   const orgAdmin = orgQ.data?.callerRole === "admin";
 
-  // Wait for `useOrg()` before adding Models, so an org-mode admin never
-  // sees it appear and then vanish.
-  const personalItems = orgQ.data && !organizationsOn ? [...PERSONAL_ITEMS, MODELS_ITEM] : PERSONAL_ITEMS;
+  // Wait for `useOrg()` before adding Models and MCP servers, so an
+  // org-mode admin never sees them appear and then vanish.
+  const singleUserItems = orgQ.data && !organizationsOn ? [MODELS_ITEM, ...(orgAdmin ? [MCP_SERVERS_ITEM] : [])] : [];
+  const personalItems = [...PERSONAL_ITEMS, ...singleUserItems];
   const teams = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations)
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name));

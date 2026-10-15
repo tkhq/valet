@@ -72,6 +72,7 @@ import { loadAuthConfig } from "../auth/config.js";
 import { buildAuthHooks } from "../auth/provisioning.js";
 import { buildAuth } from "../auth/index.js";
 import { createAutoTitleHost } from "../sessions/auto-title-host.js";
+import type { McpServerDecl } from "../config/instance-config.js";
 
 export interface TestApi {
   baseUrl: string;
@@ -119,6 +120,9 @@ export interface BootTestApiOpts {
    * `true`.
    */
   omitSecurityPlugin?: boolean;
+  /** The instance config's `mcpServers` entries, as `main.ts` passes them to
+   * `buildNodeProviders`. Default `[]`. */
+  mcpServers?: McpServerDecl[];
   /**
    * Boots with a real better-auth instance instead of stub-only mode: sets
    * `BETTER_AUTH_SECRET=test-secret` and unsets `VALET_LOCAL_AUTH` (both
@@ -576,6 +580,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     eventDispatcher,
     contentSync,
     plugins,
+    configMcpServers: opts.mcpServers ?? [],
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
     prebuildService,

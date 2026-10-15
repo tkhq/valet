@@ -24,6 +24,7 @@ import { useWorkspaceScope } from "~/lib/workspace-scope";
 
 type Role = "admin" | "member";
 let orgRole: Role = "admin";
+let organizationsOn = true;
 const teams = [
   { id: "t1", name: "platform", callerRole: "member" as const },
   { id: "t2", name: "support", callerRole: "admin" as const },
@@ -46,7 +47,7 @@ function useMembershipLoaded(): boolean {
 
 vi.mock("~/api/settings", () => ({
   useOrg: () => useMembershipLoaded()
-    ? { data: { callerRole: orgRole, features: { organizations: true } }, isLoading: false, error: null }
+    ? { data: { callerRole: orgRole, features: { organizations: organizationsOn } }, isLoading: false, error: null }
     : { data: undefined, isLoading: true, error: null },
   useTeams: () => useMembershipLoaded()
     ? { data: { teams }, isLoading: false, error: null }
@@ -54,6 +55,16 @@ vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u1", orgRole, defaultModel: null, defaultReasoning: null }, isLoading: false, error: null }),
   usePatchMe: () => ({ mutate: vi.fn() }),
   useOrgDirectory: () => ({ data: { users: [] }, isLoading: false, error: null }),
+  useOrgMcpServers: () => ({
+    data: {
+      servers: [{
+        name: "docs", displayName: "Docs", url: "https://docs.example.com/mcp", auth: "none", scopes: [],
+        description: null, riskLevel: "medium", enabled: true, connected: null,
+      }],
+    },
+    isLoading: false,
+    error: null,
+  }),
 }));
 vi.mock("~/api/api-keys", () => ({
   useApiKeys: () => ({ data: [], isLoading: false, error: null }),
@@ -94,6 +105,7 @@ import { Route as ProxyRoute } from "./settings.proxy";
 import { Route as PreferencesRoute } from "./settings.preferences";
 import { Route as PoliciesRoute } from "./settings.policies";
 import { Route as ApiKeysRoute } from "./settings.api-keys";
+import { Route as McpServersRoute } from "./settings.mcp-servers";
 import { TeamSettingsShell } from "./settings.teams.$teamId";
 import { Route as TeamAccessRoute } from "./settings.teams.$teamId.access";
 import { Route as TeamPoliciesRoute } from "./settings.teams.$teamId.policies";
@@ -138,6 +150,7 @@ async function mount(initial: string) {
       child("preferences", componentOf(PreferencesRoute)),
       child("policies", componentOf(PoliciesRoute)),
       child("api-keys", componentOf(ApiKeysRoute)),
+      child("mcp-servers", componentOf(McpServersRoute)),
       team.addChildren([
         createRoute({ getParentRoute: () => team, path: "/", component: stub("team general") }),
         createRoute({ getParentRoute: () => team, path: "access", component: componentOf(TeamAccessRoute) }),
@@ -163,6 +176,7 @@ function content(): HTMLElement {
 beforeEach(() => {
   membershipLoaded = true;
   orgRole = "admin";
+  organizationsOn = true;
   window.sessionStorage.clear();
   // The switcher holds a team for every test: settings pages must not follow it.
   window.sessionStorage.setItem("valet:workspace", "t1");
@@ -222,6 +236,33 @@ describe("personal workspace pages", () => {
   });
 });
 
+describe("while organizations are off", () => {
+  it("MCP servers opens from Personal workspace, outside the organization guard", async () => {
+    organizationsOn = false;
+    await mount("/settings/mcp-servers");
+    expect(await within(content()).findByRole("listitem", { name: "Docs" })).toBeTruthy();
+    expect(within(content()).queryByText("Organizations aren't enabled")).toBeNull();
+    const rail = screen.getByRole("navigation", { name: "Settings" });
+    const personal = within(rail).getByRole("group", { name: "Personal workspace" });
+    expect(within(personal).getByRole("link", { name: "MCP servers" }).getAttribute("aria-current")).toBe("page");
+  });
+
+  it("MCP servers tells a member to ask an admin, with no list and no rail link", async () => {
+    organizationsOn = false;
+    orgRole = "member";
+    await mount("/settings/mcp-servers");
+    expect(
+      await within(content()).findByText(
+        "Only an organization admin can view MCP servers. To see them, ask an organization admin.",
+      ),
+    ).toBeTruthy();
+    expect(within(content()).queryByRole("listitem", { name: "Docs" })).toBeNull();
+    const rail = screen.getByRole("navigation", { name: "Settings" });
+    const personal = within(rail).getByRole("group", { name: "Personal workspace" });
+    expect(within(personal).queryByRole("link", { name: "MCP servers" })).toBeNull();
+  });
+});
+
 describe("a team's settings tabs", () => {
   it("API keys and proxy renders that team's keys and proxy", async () => {
     await mount("/settings/teams/t2/access");
@@ -251,7 +292,7 @@ describe("Organization tabs", () => {
     await mount("/settings/organization/linear");
     const tabs = await within(content()).findByRole("navigation", { name: "Apps and plugins" });
     expect(within(tabs).getAllByRole("link").map((link) => link.textContent)).toEqual([
-      "Plugins", "GitHub", "Slack", "Linear", "1Password", "Library",
+      "Plugins", "MCP servers", "GitHub", "Slack", "Linear", "1Password", "Library",
     ]);
     expect(within(tabs).getByRole("link", { name: "Linear" }).getAttribute("aria-current")).toBe("page");
     expect(within(tabs).getByRole("link", { name: "Slack" }).getAttribute("aria-current")).toBeNull();
