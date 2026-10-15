@@ -239,6 +239,43 @@ describe("ThreadTree — delete project", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("does not archive a chat another device moved before delete starts", async () => {
+    const original = seed({ unloaded: "acme" });
+    const view = render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
+    await openDelete();
+    view.server.replace("team-runtime", { ...original, projects: [...original.projects, { id: "other", name: "Other", collapsed: false }], assignments: { unloaded: "other" } });
+    await userEvent.click(screen.getByRole("button", { name: "Delete project" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Project: ACME" })).toBeNull());
+    expect(archiveThread).not.toHaveBeenCalled();
+    const saved = JSON.parse(localStorage.getItem(`${key}:cache-v1`) ?? "null");
+    expect(saved.assignments).toEqual({ unloaded: "other" });
+    expect(saved.pinned).toContain("unloaded");
+  });
+
+  it("checks later chats again when another device moves one during archive", async () => {
+    const original = seed({ "thread-1": "acme", unloaded: "acme" });
+    const view = render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
+    archiveThread.mockImplementationOnce(async () => {
+      view.server.replace("team-runtime", { ...original, projects: [...original.projects, { id: "other", name: "Other", collapsed: false }], assignments: { "thread-1": "acme", unloaded: "other" } });
+    });
+    await openDelete();
+    await userEvent.click(screen.getByRole("button", { name: "Delete project" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Project: ACME" })).toBeNull());
+    expect(archiveThread.mock.calls).toEqual([[{ threadId: "thread-1", archived: true }]]);
+    expect(JSON.parse(localStorage.getItem(`${key}:cache-v1`) ?? "null").pinned).toContain("unloaded");
+  });
+
+  it("keeps the folder and chats when its fresh membership read fails", async () => {
+    seed({ unloaded: "acme" });
+    render(<TooltipProvider><ThreadTree sessionId="team-runtime" /></TooltipProvider>);
+    await openDelete();
+    vi.mocked(api.getThreadProjects).mockRejectedValueOnce(new Error("Offline"));
+    await userEvent.click(screen.getByRole("button", { name: "Delete project" }));
+    await screen.findByRole("button", { name: "Retry delete project" });
+    expect(archiveThread).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem(`${key}:cache-v1`) ?? "null").projects).toHaveLength(1);
+  });
+
   it("retains the folder when a new assignment arrives during archive", async () => {
     const original = seed({ unloaded: "acme" });
     let finish = () => {};

@@ -55,6 +55,7 @@ import { isThreadUnread, pendingAgentQuestion, rowPullRequest } from "~/lib/thre
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
 import { projectThreadIds, removeArchivedProject, useThreadProjects } from "~/lib/thread-projects";
+import { downloadTextFile } from "~/lib/download";
 import { useMe } from "~/api/settings";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { ThreadStatusIcon } from "./thread-status-icon";
@@ -429,23 +430,25 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     setDeletingProject(true);
     setDeleteError(undefined);
     const projectOperation = projects.beginOperation();
-    const ids = projectThreadIds(projectOperation.readCurrent(), deleteProject.id);
     const archivedIds = new Set<string>();
-    // Bound concurrency and attempt every chat, even when an earlier archive fails.
-    for (const threadId of ids) {
-      try {
-        await setArchived.mutateAsync({ threadId, archived: true });
-        archivedIds.add(threadId);
-      } catch { /* Keep the folder and offer a retry after all attempts. */ }
-    }
     let removed = false;
-    if (archivedIds.size === ids.length) {
-      const saved = await projectOperation.update(current => {
-        const next = removeArchivedProject(current, deleteProject.id, archivedIds);
-        return next;
-      });
-      removed = saved !== undefined && !saved.projects.some(project => project.id === deleteProject.id);
-    }
+    try {
+      const ids = projectThreadIds(await projectOperation.refresh(), deleteProject.id);
+      let failed = false;
+      for (const threadId of ids) {
+        // Each archive starts from current membership, including unloaded chats.
+        const current = await projectOperation.refresh();
+        if (current.assignments[threadId] !== deleteProject.id) continue;
+        try {
+          await setArchived.mutateAsync({ threadId, archived: true });
+          archivedIds.add(threadId);
+        } catch { failed = true; }
+      }
+      if (!failed) {
+        const saved = await projectOperation.update(current => removeArchivedProject(current, deleteProject.id, archivedIds));
+        removed = saved !== undefined && !saved.projects.some(project => project.id === deleteProject.id);
+      }
+    } catch { /* Keep the folder when membership cannot be checked. */ }
     deletingRef.current = false;
     if (currentSession.current !== sessionId) return;
     setDeletingProject(false);
@@ -633,7 +636,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
           </div>
           {projects.isLoading && <p role="status" className="px-4 py-2 text-xs text-muted">Syncing project folders…</p>}
           {projects.isSaving && <p role="status" className="px-4 py-2 text-xs text-muted">Saving sidebar changes…</p>}
-          {projects.error && <p role="alert" className="px-4 py-2 text-xs text-danger-500">Could not sync project folders. {projects.error} <button type="button" className="underline" onClick={() => void projects.retry()}>Retry sync</button></p>}
+          {projects.error && <p role="alert" className="px-4 py-2 text-xs text-danger-500">Could not sync project folders. {projects.error} {projects.unsyncedLegacy && <>Folders saved on this device remain in browser storage. <button type="button" className="underline" onClick={() => downloadTextFile("valet-project-folders.json", projects.unsyncedLegacy ?? "", "application/json")}>Download saved folders</button>{" "}</>}<button type="button" className="underline" onClick={() => void projects.retry()}>Retry sync</button></p>}
           {originFilter !== "all" && (
             <p className="flex items-center gap-2 px-4 pb-1 text-xs text-muted">
               Showing {THREAD_ORIGIN_FILTERS.find((option) => option.id === originFilter)?.label.toLowerCase()}

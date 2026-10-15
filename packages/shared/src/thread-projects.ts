@@ -8,7 +8,7 @@ export interface ThreadProjects {
 }
 
 export type ThreadProjectsOperation =
-  | { type: "create"; id: string; name: string; collapsed?: boolean }
+  | { type: "create"; id: string; name: string; collapsed?: boolean; generation?: number }
   | { type: "rename"; id: string; name: string }
   | { type: "collapse-project"; id: string; collapsed: boolean }
   | { type: "delete"; id: string; archivedThreadIds: string[] }
@@ -21,6 +21,7 @@ export type ThreadProjectsOperation =
 export interface ThreadProjectsResponse {
   value: ThreadProjects;
   revision: number;
+  generation?: number;
 }
 
 /** Send only the user's changes, so a stale device cannot replace other edits. */
@@ -64,9 +65,15 @@ export interface ThreadProjectsDocument {
   touchedAssignments: string[];
   touchedPins: string[];
   initialized: boolean;
+  importsClosed?: boolean;
+  generation?: number;
 }
 
 export class ThreadProjectsConflict extends Error {}
+
+export class ThreadProjectsImportConflict extends ThreadProjectsConflict {
+  constructor(public readonly code: "import-limit" | "import-closed", message: string) { super(message); }
+}
 
 export function applyThreadProjectsOperations(document: ThreadProjectsDocument, operations: ThreadProjectsOperation[]): ThreadProjectsDocument {
   const next = structuredClone(document);
@@ -76,8 +83,16 @@ export function applyThreadProjectsOperations(document: ThreadProjectsDocument, 
   const pinned = new Set(next.touchedPins);
   for (const op of operations) {
     if (op.type === "import") {
+      if (next.importsClosed) throw new ThreadProjectsImportConflict("import-closed",
+        "Automatic folder import has closed. Download your saved folders and add them manually.");
       for (const project of op.value.projects) {
-        if (!retired.has(project.id) && !value.projects.some(existing => existing.id === project.id)) value.projects.push(project);
+        if (retired.has(project.id) || value.projects.some(existing => existing.id === project.id)) continue;
+        let name = project.name;
+        for (let suffix = 2; value.projects.some(existing => existing.name.toLocaleLowerCase() === name.toLocaleLowerCase()); suffix++) {
+          const ending = ` (${suffix})`;
+          name = `${project.name.slice(0, 100 - ending.length)}${ending}`;
+        }
+        value.projects.push({ ...project, name });
       }
       for (const [threadId, projectId] of Object.entries(op.value.assignments)) {
         if (!assigned.has(threadId) && !value.assignments[threadId] && value.projects.some(project => project.id === projectId)) {
@@ -86,6 +101,10 @@ export function applyThreadProjectsOperations(document: ThreadProjectsDocument, 
       }
       for (const threadId of op.value.pinned) {
         if (!pinned.has(threadId) && !value.pinned.includes(threadId)) value.pinned.push(threadId);
+      }
+      if (value.projects.length > 200 || value.pinned.length > 5000 || Object.keys(value.assignments).length > 5000) {
+        throw new ThreadProjectsImportConflict("import-limit",
+          "Saved folders exceed the sidebar limit. Download your saved folders, free space, and retry importing.");
       }
       if (!next.initialized) {
         value.grouped = op.value.grouped;
@@ -99,6 +118,9 @@ export function applyThreadProjectsOperations(document: ThreadProjectsDocument, 
       case "create": {
         if (retired.has(op.id)) throw new ThreadProjectsConflict("This project was deleted on another device. Create a new project.");
         if (value.projects.some(project => project.id === op.id)) break;
+        if ((op.generation ?? 0) !== (next.generation ?? 0)) {
+          throw new ThreadProjectsConflict("Folder history changed. Refresh the sidebar and create the project again.");
+        }
         if (value.projects.some(project => project.name.toLocaleLowerCase() === op.name.toLocaleLowerCase())) {
           throw new ThreadProjectsConflict("A project with this name already exists. Choose another name.");
         }
@@ -151,8 +173,17 @@ export function applyThreadProjectsOperations(document: ThreadProjectsDocument, 
       case "collapsed": value.collapsed = op.value; break;
     }
   }
+  if (Math.max(retired.size, assigned.size, pinned.size) >= 20000) {
+    // Closing legacy import makes old assignment and pin markers safe to discard.
+    // A new generation also rejects create retries for discarded project tombstones.
+    next.importsClosed = true;
+    next.generation = (next.generation ?? 0) + 1;
+    retired.clear();
+    assigned.clear();
+    pinned.clear();
+  }
   next.retiredProjects = [...retired];
-  next.touchedAssignments = [...assigned];
-  next.touchedPins = [...pinned];
+  next.touchedAssignments = next.importsClosed ? [] : [...assigned];
+  next.touchedPins = next.importsClosed ? [] : [...pinned];
   return next;
 }

@@ -13,7 +13,7 @@ export const threadProjectsSchema: z.ZodType<ThreadProjects> = z.object({
 }).strict();
 
 const operation: z.ZodType<ThreadProjectsOperation> = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("create"), id, name, collapsed: z.boolean().optional() }).strict(),
+  z.object({ type: z.literal("create"), id, name, collapsed: z.boolean().optional(), generation: z.number().int().nonnegative().optional() }).strict(),
   z.object({ type: z.literal("rename"), id, name }).strict(),
   z.object({ type: z.literal("collapse-project"), id, collapsed: z.boolean() }).strict(),
   z.object({ type: z.literal("delete"), id, archivedThreadIds: threadIds }).strict(),
@@ -31,5 +31,7 @@ export const threadProjectsDocumentSchema = z.object({
   touchedAssignments: z.array(id).max(20000),
   touchedPins: z.array(id).max(20000),
   initialized: z.boolean(),
+  importsClosed: z.boolean().default(false),
+  generation: z.number().int().nonnegative().default(0),
 }).strict();
 export type ThreadProjectsDocument = z.infer<typeof threadProjectsDocumentSchema>;
