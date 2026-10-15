@@ -21,6 +21,7 @@ import type {
   SandboxStatus,
   PluginActionContext,
   SignalContent,
+  SessionStore,
 } from "@valet/engine";
 import { VirtualSandbox } from "@valet/engine";
 import { startGithubFixture } from "../test-helpers/github-fixture.js";
@@ -92,6 +93,15 @@ function queuedItem(id: string, threadId: string, prompt: string): QueueItem {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+
+/** Completed watcher fixtures need the same terminal response as a real submission. */
+async function appendTerminalResult(store: SessionStore, sessionId: string, threadId: string, queueItemId: string): Promise<void> {
+  await store.appendEntries(sessionId, threadId, [{
+    id: `terminal-${queueItemId}`, sessionId, threadId, queueItemId, parentId: null,
+    type: "message", role: "assistant", content: "done", stopReason: "end_turn", createdAt: Date.now(),
+  }]);
 }
 
 
@@ -1010,6 +1020,7 @@ describe("ChildWatcher", () => {
     // the ungated stand-in for a completed child run.
     const itemId = "qi-settled-1";
     await engineStore.admitSubmission("child-w", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await appendTerminalResult(engineStore, "child-w", childThread.id, itemId);
     await engineStore.settleUnclaimed("child-w", childThread.id, itemId, { outcome: "completed" });
 
     await db.insert(agentSessions).values({
@@ -2443,6 +2454,7 @@ describe("buildChildSender", () => {
     expect(midRows[0]?.settled).toBe(false);
 
     // The child finishes the steered work: exactly one signal, for the new item.
+    await appendTerminalResult(engineStore, "child-steer", childThread.id, res?.queueItemId ?? "");
     await engineStore.settleUnclaimed("child-steer", childThread.id, res?.queueItemId ?? "", { outcome: "completed" });
     await waitFor(async () => {
       const r = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-steer")).limit(1);
@@ -2584,6 +2596,7 @@ describe("buildChildSender", () => {
     await new ChildWatcher(deps).rearm();
 
     // The successor settles: exactly one signal, for the successor.
+    await appendTerminalResult(engineStore, "child-heal", childThread.id, receipt.queueItemId);
     await engineStore.settleUnclaimed("child-heal", childThread.id, receipt.queueItemId, { outcome: "completed" });
     await waitFor(async () => {
       const r = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-heal")).limit(1);
