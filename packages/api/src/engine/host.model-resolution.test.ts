@@ -24,7 +24,7 @@ import { createLlmProvider, updateLlmProvider } from "../services/llm-providers.
 import { DEFAULT_TIER_MAP, setOrgDefaultTier, setOrgTierMap } from "../services/model-tiers.js";
 import { setOrgReasoningSettings } from "../services/reasoning.js";
 import { createTeam } from "../services/teams.js";
-import { NoCredentialsError } from "@valet/engine";
+import { NoCredentialsError, type CredentialOwner } from "@valet/engine";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
@@ -772,10 +772,18 @@ describe("EngineHost model resolution wiring", () => {
     expect(restored.options.model.provider).toBe(row.id);
   });
 
-  // Workspace runtimes inherit their owner defaults.
   // The org default tier sits after the team default and before the "s"
   // fallback. Children keep `childDefault: "s"`, so it never reaches them.
+  // A session uses the org default tier only when a provider with a key
+  // serves it, so these tests give the org a deployment Anthropic key. A
+  // keyed resolution returns the registry model, whose id is the wire id.
   describe("org default tier", () => {
+    beforeEach(() => {
+      vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
+    });
+
+    afterEach(() => vi.unstubAllEnvs());
+
     it("an unset org default tier keeps the \"s\" fallback", async () => {
       api = await bootTestApi();
       await setOrgDefaultTier(api.providers.db, "local-org", "l");
@@ -786,7 +794,7 @@ describe("EngineHost model resolution wiring", () => {
         { actorUserId: "local-user", orgId: "local-org" },
       );
       expect(session.options.modelSpec).toBe("s");
-      expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+      expect(session.options.model.id).toBe("claude-haiku-4-5");
     });
 
     it("beats the \"s\" fallback when nothing else is set", async () => {
@@ -798,7 +806,7 @@ describe("EngineHost model resolution wiring", () => {
         { actorUserId: "local-user", orgId: "local-org" },
       );
       expect(session.options.modelSpec).toBe("m");
-      expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-6");
+      expect(session.options.model.id).toBe("claude-sonnet-4-6");
     });
 
     it("falls through to \"s\" when a provider change leaves the org default tier with no active target", async () => {
@@ -814,7 +822,35 @@ describe("EngineHost model resolution wiring", () => {
         { actorUserId: "local-user", orgId: "local-org" },
       );
       expect(session.options.modelSpec).toBe("s");
-      expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+      expect(session.options.model.id).toBe("claude-haiku-4-5");
+    });
+
+    it("falls through to \"s\" when the default tier's provider stays enabled but loses its key", async () => {
+      api = await bootTestApi();
+      const { db, engineCredentials, engineHost } = api.providers;
+      const owner: CredentialOwner = { type: "org", id: "local-org" };
+      const row = await createLlmProvider(db, { orgId: "local-org", kind: "openai", name: "OpenAI" });
+      await engineCredentials.save(owner, `llm:${row.id}`, { type: "api_key", apiKey: "org-openai" });
+      await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, l: [`openai/${OPENAI_MODEL}`] });
+      await setOrgDefaultTier(db, "local-org", "l");
+
+      const keyed = await engineHost.sessionFor("org-tier-keyed", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(keyed.options.modelSpec).toBe("l");
+
+      // The provider row stays enabled. Only its org key goes away, so an
+      // active-provider test alone still picks "l" and the build runs keyless.
+      await engineCredentials.delete(owner, `llm:${row.id}`);
+      const keyless = await engineHost.sessionFor("org-tier-keyless", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(keyless.options.modelSpec).toBe("s");
+      expect(keyless.options.model.id).toBe("claude-haiku-4-5");
     });
 
     it("a user default beats the org default tier", async () => {
@@ -843,7 +879,7 @@ describe("EngineHost model resolution wiring", () => {
         workspace: "/tmp",
         ownerTeamId: team.id,
       });
-      expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
+      expect(session.options.model.id).toBe("claude-sonnet-4-5");
     });
 
     it("a team assistant with no team default uses the org default tier", async () => {
@@ -857,7 +893,7 @@ describe("EngineHost model resolution wiring", () => {
         { actorUserId: "local-user", orgId: "local-org" },
       );
       expect(session.options.modelSpec).toBe("l");
-      expect(session.options.model.id).toBe("anthropic/claude-opus-4-7");
+      expect(session.options.model.id).toBe("claude-opus-4-7");
     });
 
     it("a child without an explicit model stays on the \"s\" tier", async () => {
@@ -880,10 +916,11 @@ describe("EngineHost model resolution wiring", () => {
       });
       expect(parent.options.modelSpec).toBe("l");
       expect(child.options.modelSpec).toBe("s");
-      expect(child.options.model.id).toBe("anthropic/claude-haiku-4-5");
+      expect(child.options.model.id).toBe("claude-haiku-4-5");
     });
   });
 
+  // Workspace runtimes inherit their owner defaults.
   describe("workspace owner model defaults", () => {
     it("new workspace runtime uses the personal owner model default", async () => {
       api = await bootTestApi();

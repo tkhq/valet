@@ -1,16 +1,20 @@
 /**
  * `GET /api/org/model-tiers`  — returns the effective tier map (stored or
- *   defaults) and the org default tier.
+ *   defaults), the org default tier, and whether new sessions can use it.
  * `PATCH /api/org/model-tiers` — updates `orgs.model_tiers` and
  *   `orgs.default_tier`. Org-admin gated.
  *
  * Each spec in a tier's list must exist in the org catalog and be approved.
+ * A tier token is not a valid target: a tier that names itself, or two
+ * tiers that name each other, have no model to resolve to.
  * `defaultTier` takes a tier token, or null to clear it. A tier token must
  * reach a provider this org holds a key for (`resolvableTiers`).
  */
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
+import type { CredentialStore } from "@valet/engine";
+import type { AppQueryable } from "../lib/drizzle.js";
 import {
   getOrgDefaultTier,
   getOrgTierMap,
@@ -19,6 +23,7 @@ import {
   setOrgDefaultTier,
   setOrgTierMap,
   TIER_TOKENS,
+  type SizeTier,
   type TierMap,
 } from "../services/model-tiers.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
@@ -53,14 +58,31 @@ function applyTierPatch(current: TierMap, patch: PatchModelTiersRequest): TierMa
   return merged;
 }
 
+/**
+ * The response body for both verbs. `defaultTierResolvable` uses the test
+ * that `EngineHost` applies at session start, so the web labels never claim
+ * a default tier that new sessions skip.
+ */
+async function tiersResponse(
+  db: AppQueryable,
+  credentials: CredentialStore,
+  orgId: string,
+  tierMap: TierMap,
+  defaultTier: SizeTier | null,
+): Promise<GetModelTiersResponse> {
+  const defaultTierResolvable =
+    defaultTier !== null && (await resolvableTiers(db, credentials, orgId, tierMap)).has(defaultTier);
+  return { ...tierMap, defaultTier, defaultTierResolvable };
+}
+
 export const modelTiersRouter = new Hono<AppEnv>();
 
 modelTiersRouter.get("/", async (c) => {
   const user = c.var.user;
-  const { db } = c.var.providers;
+  const { db, engineCredentials } = c.var.providers;
   const tierMap = await getOrgTierMap(db, user.orgId);
   const defaultTier = await getOrgDefaultTier(db, user.orgId);
-  return c.json<GetModelTiersResponse>({ ...tierMap, defaultTier });
+  return c.json<GetModelTiersResponse>(await tiersResponse(db, engineCredentials, user.orgId, tierMap, defaultTier));
 });
 
 modelTiersRouter.patch("/", async (c) => {
@@ -101,6 +123,14 @@ modelTiersRouter.patch("/", async (c) => {
       if (val.length === 0) {
         return c.json({ error: `${tier} must have at least one model spec` }, 400);
       }
+      // The catalog accepts tier tokens as model specs, so this check comes
+      // first. Without it, `{ "m": ["m"] }` saves a tier with no model.
+      const tierTarget = val.find((v) => isSizeTier(v.trim().toLowerCase()));
+      if (tierTarget !== undefined) {
+        return c.json({
+          error: `Tier "${tier}" cannot target the tier token "${tierTarget}". Pick a model from the model list (GET /api/models) for each target.`,
+        }, 400);
+      }
       validated[tier] = val as string[];
     }
   }
@@ -112,19 +142,27 @@ modelTiersRouter.patch("/", async (c) => {
   const validIds = changesTiers ? catalogValidIds(await buildOrgCatalog(db, engineCredentials, user.orgId)) : null;
 
   // A default tier must reach a provider this org holds a key for, in the
-  // tier map this request leaves behind, or new sessions that fall to it
-  // cannot run. This reads credentials, so it runs before the transaction,
-  // like the catalog check.
-  if (isSizeTier(defaultTier)) {
+  // tier map this request leaves behind, or new sessions skip it. The check
+  // covers a new default and an edit to the saved default's own tier. An
+  // edit that empties the default is refused, not allowed with the default
+  // cleared: clearing would move every new thread to "s" as a side effect
+  // of a tier edit, with no sign to the admin. This reads credentials, so it
+  // runs before the transaction, like the catalog check.
+  const savedDefault = defaultTier === undefined ? await getOrgDefaultTier(db, user.orgId) : null;
+  const editedDefault = savedDefault !== null && savedDefault in validated ? savedDefault : null;
+  const checkedDefault = isSizeTier(defaultTier) ? defaultTier : editedDefault;
+  if (checkedDefault !== null) {
     const proposed = applyTierPatch(await getOrgTierMap(db, user.orgId), patch);
     const usable = await resolvableTiers(db, engineCredentials, user.orgId, proposed);
-    if (!usable.has(defaultTier)) {
-      return c.json({
-        error:
-          `No provider this organization holds a key for serves tier "${defaultTier}". ` +
+    if (!usable.has(checkedDefault)) {
+      const error = editedDefault
+        ? `This change leaves tier "${editedDefault}", the organization default tier, with no provider this ` +
+          `organization holds a key for. Put a target whose provider has a key first in the tier, ` +
+          `or choose another default tier before you change it.`
+        : `No provider this organization holds a key for serves tier "${checkedDefault}". ` +
           `Point the tier's first target at a provider with a key in Settings → Organization → Models, ` +
-          `or choose another default tier.`,
-      }, 400);
+          `or choose another default tier.`;
+      return c.json({ error }, 400);
     }
   }
 
@@ -152,5 +190,7 @@ modelTiersRouter.patch("/", async (c) => {
     return { tierMap: merged, defaultTier: await getOrgDefaultTier(tx, user.orgId) };
   });
   if ("error" in result) return c.json({ error: result.error }, 400);
-  return c.json<GetModelTiersResponse>({ ...result.tierMap, defaultTier: result.defaultTier });
+  return c.json<GetModelTiersResponse>(
+    await tiersResponse(db, engineCredentials, user.orgId, result.tierMap, result.defaultTier),
+  );
 });

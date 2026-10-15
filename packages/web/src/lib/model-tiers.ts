@@ -25,9 +25,11 @@ export function isSizeTier(id: string | null | undefined): id is SizeTier {
 }
 
 /** The tier a new thread uses when no personal or team default applies:
- * the org default tier, or Small when the org has none. */
+ * the org default tier, or Small when the org has none. A saved default
+ * that no provider with a key serves also gives Small, because new
+ * sessions skip it (`defaultTierResolvable`). */
 export function fallbackTier(tierMap: GetModelTiersResponse | undefined): SizeTier {
-  return tierMap?.defaultTier ?? "s";
+  return tierMap?.defaultTier && tierMap.defaultTierResolvable ? tierMap.defaultTier : "s";
 }
 
 /** Clear-state label for a default-model control, such as

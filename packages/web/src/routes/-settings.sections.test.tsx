@@ -300,9 +300,16 @@ describe("ThreadDefaultsPage", () => {
 
   it("names the org default tier in the clear-state label", () => {
     orgData = { callerRole: "member", features: { organizations: true } };
-    tiersData = { ...tiersData, defaultTier: "m" };
+    tiersData = { ...tiersData, defaultTier: "m", defaultTierResolvable: true };
     render(<ThreadDefaultsPage />);
     expect(screen.getByLabelText("Default model").getAttribute("placeholder")).toBe("Medium (Organization default)");
+  });
+
+  it("names Small when new sessions skip the saved org default tier", () => {
+    orgData = { callerRole: "member", features: { organizations: true } };
+    tiersData = { ...tiersData, defaultTier: "m", defaultTierResolvable: false };
+    render(<ThreadDefaultsPage />);
+    expect(screen.getByLabelText("Default model").getAttribute("placeholder")).toBe("Small (Organization default)");
   });
 
   it("does not offer current-thread inheritance for new conversations", () => {

@@ -203,15 +203,39 @@ sets as "Default tier for new threads" on the org Models page
 (`PATCH /api/org/model-tiers` with `defaultTier`, null clears it). Without
 it, an orchestrator with no personal or team default ran on `s`, and
 teams set an expensive concrete model as the team default to avoid that.
-When the column is null, the cascade is unchanged. The PATCH refuses a
-tier that no provider with a key serves (`resolvableTiers`, checked
-against the tier map that the same request writes), and the error names
-the fix. A later provider or tier-map change can still leave the saved
-tier with no active target. The cascade then skips it with a warning
-and continues to `s`, as it does for an inactive team default. A child passes
+When the column is null, the cascade is unchanged. The Models page
+select has a "No organization default" option that sends
+`defaultTier: null`.
+
+One test decides whether a provider with a key serves a tier:
+`resolvableTiers`. The PATCH, the cascade, and the GET response all use
+it. The PATCH refuses a `defaultTier` that no provider with a key serves,
+checked against the tier map that the same request writes. It also
+refuses an edit to the saved default's own tier when the edit leaves that
+tier unserved. Clearing the default instead would move every new thread
+to `s` as a side effect of a tier edit, so the PATCH refuses and the
+error names both fixes. A later provider, key, or tier-map change can
+still leave the saved tier unserved, for example when an enabled provider
+loses its org key. The cascade then skips the tier with a warning and
+continues to `s`, as it does for an inactive team default. A child passes
 `childDefault: "s"`, so delegated work stays on `s` whatever the org
-default tier is. The personal and team pickers label their clear state
-with the tier it falls to, for example "Medium (Organization default)".
+default tier is.
+
+`GET /api/org/model-tiers` returns `defaultTierResolvable`, the result of
+the same test. The personal and team pickers label their clear state with
+the tier it falls to, for example "Medium (Organization default)". When
+the saved default is unserved, the label names Small, and the Models page
+shows a warning under the select.
+
+A tier target must be a model, not a tier token. The catalog accepts tier
+tokens as model specs, so before this rule `{ "m": ["m"] }` saved a tier
+whose resolution recursed without end. The PATCH now refuses a tier token
+as a target, and the error names the fix. A map saved before the rule can
+still hold one, so the tier walk follows a tier-token target into its
+tier and keeps a set of the tiers it has entered. A tier that the walk
+enters twice is a cycle: that branch resolves to nothing, and the walk
+continues to the next target. The walk never returns a tier token, so
+`resolveModelSpec` recurses at most once.
 
 `resolveModelSpec` already resolves tier tokens and persists the token as
 the canonical id, so the fallback works exactly like an explicit tier pick:

@@ -7,7 +7,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { createLlmProvider, updateLlmProvider } from "../services/llm-providers.js";
-import { DEFAULT_TIER_MAP, getOrgDefaultTier, getOrgTierMap, setOrgTierMap } from "../services/model-tiers.js";
+import {
+  DEFAULT_TIER_MAP,
+  getOrgDefaultTier,
+  getOrgTierMap,
+  setOrgDefaultTier,
+  setOrgTierMap,
+} from "../services/model-tiers.js";
+import { OPENROUTER_DEFAULT_MODEL_IDS } from "../services/openrouter.js";
 import type { GetModelTiersResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -39,7 +46,22 @@ describe("/api/org/model-tiers defaultTier", () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/org/model-tiers`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ...DEFAULT_TIER_MAP, defaultTier: null });
+    expect(await res.json()).toEqual({ ...DEFAULT_TIER_MAP, defaultTier: null, defaultTierResolvable: false });
+  });
+
+  it("GET reports whether a provider with a key serves the saved default tier", async () => {
+    api = await bootTestApi();
+    // Saved directly: the PATCH refuses a tier with no key, but a key can go
+    // away after the save.
+    await setOrgDefaultTier(api.providers.db, "local-org", "m");
+
+    const keyless = (await (await fetch(`${api.baseUrl}/api/org/model-tiers`)).json()) as GetModelTiersResponse;
+    expect(keyless.defaultTier).toBe("m");
+    expect(keyless.defaultTierResolvable).toBe(false);
+
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    const keyed = (await (await fetch(`${api.baseUrl}/api/org/model-tiers`)).json()) as GetModelTiersResponse;
+    expect(keyed.defaultTierResolvable).toBe(true);
   });
 
   it("an admin sets the default tier without changing the tier map, and null clears it", async () => {
@@ -95,6 +117,51 @@ describe("/api/org/model-tiers defaultTier", () => {
     expect(res.status).toBe(200);
     expect(await getOrgDefaultTier(api.providers.db, "local-org")).toBe("l");
     expect((await getOrgTierMap(api.providers.db, "local-org")).l).toEqual(["anthropic/claude-opus-4-7"]);
+  });
+
+  it.each([
+    [{ m: ["m"], defaultTier: "m" }, 'Tier "m" cannot target the tier token "m".'],
+    [{ l: ["xl"], xl: ["l"] }, 'Tier "l" cannot target the tier token "xl".'],
+  ])("refuses a tier token as a tier target: %j", async (body, lead) => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    api = await bootTestApi();
+
+    const res = await patchTiers(api.baseUrl, body);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: `${lead} Pick a model from the model list (GET /api/models) for each target.`,
+    });
+    expect(await getOrgTierMap(api.providers.db, "local-org")).toEqual(DEFAULT_TIER_MAP);
+    expect(await getOrgDefaultTier(api.providers.db, "local-org")).toBeNull();
+  });
+
+  it("refuses a tier edit that leaves the saved default tier with no provider that has a key", async () => {
+    // A zero-config OpenRouter key puts OpenRouter models in the catalog,
+    // so the catalog check accepts the target. The tier walk does not count
+    // OpenRouter without a provider row, so no provider would serve "m".
+    vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
+    vi.stubEnv("OPENROUTER_API_KEY", "test-openrouter-key");
+    api = await bootTestApi();
+    expect((await patchTiers(api.baseUrl, { defaultTier: "m" })).status).toBe(200);
+
+    const target = `openrouter/${OPENROUTER_DEFAULT_MODEL_IDS[0]}`;
+    const res = await patchTiers(api.baseUrl, { m: [target] });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error:
+        'This change leaves tier "m", the organization default tier, with no provider this ' +
+        "organization holds a key for. Put a target whose provider has a key first in the tier, " +
+        "or choose another default tier before you change it.",
+    });
+    expect((await getOrgTierMap(api.providers.db, "local-org")).m).toEqual(DEFAULT_TIER_MAP.m);
+    expect(await getOrgDefaultTier(api.providers.db, "local-org")).toBe("m");
+
+    // An edit to another tier does not touch the default, so it saves.
+    expect((await patchTiers(api.baseUrl, { l: [target] })).status).toBe(200);
+    // Clearing the default in the same request lets the edit through.
+    const cleared = await patchTiers(api.baseUrl, { m: [target], defaultTier: null });
+    expect(cleared.status).toBe(200);
+    expect(await getOrgDefaultTier(api.providers.db, "local-org")).toBeNull();
   });
 
   it("403s for a non-admin org member", async () => {

@@ -6,8 +6,12 @@ import { Section } from "~/components/settings/section";
 import { AddModelTypeahead } from "~/components/settings/add-model-typeahead";
 import { useModelTiers, useModels, usePatchModelTiers } from "~/api/settings";
 import { apiErrorMessage } from "~/api/policies";
-import { fallbackTier, SIZE_TIERS, TIER_LABELS, tierSubtitle, type SizeTier } from "~/lib/model-tiers";
+import { SIZE_TIERS, TIER_LABELS, tierSubtitle, type SizeTier } from "~/lib/model-tiers";
 import type { PatchModelTiersRequest } from "@valet/api/wire";
+
+/** Select value for "no organization default"; it saves `defaultTier: null`. */
+const NO_DEFAULT_TIER = "none";
+type DefaultTierChoice = SizeTier | typeof NO_DEFAULT_TIER;
 
 /** One-tier `PatchModelTiersRequest` — a computed `{ [tier]: next }` object
  * literal widens to a string index signature, so this switch keeps the
@@ -33,8 +37,8 @@ function tierPatch(tier: SizeTier, next: string[]): PatchModelTiersRequest {
  * engine resolves at run time (`GET`/`PATCH /api/org/model-tiers`, always
  * five tiers). Uses the up/down/remove row pattern and `AddModelTypeahead`
  * per tier; these targets are the org's fallback chain now that org model
- * preferences are gone. A select above the tiers sets the org default tier
- * for new threads that no personal or team default covers.
+ * preferences are gone. A select above the tiers sets or clears the org
+ * default tier for new threads that no personal or team default covers.
  */
 export function ModelTiersSection() {
   const modelsQ = useModels();
@@ -53,18 +57,23 @@ export function ModelTiersSection() {
     });
   }
 
-  function saveDefaultTier(tier: SizeTier) {
-    if (tier === fallbackTier(tiers)) return;
+  const defaultChoice: DefaultTierChoice = tiers?.defaultTier ?? NO_DEFAULT_TIER;
+
+  function saveDefaultTier(choice: DefaultTierChoice) {
+    if (choice === defaultChoice) return;
     setSaveError(null);
-    patchTiers.mutate({ defaultTier: tier }, {
+    patchTiers.mutate({ defaultTier: choice === NO_DEFAULT_TIER ? null : choice }, {
       onError: (err) => setSaveError(apiErrorMessage(err)),
     });
   }
 
-  function tierOptionLabel(tier: SizeTier): string {
-    const model = tierSubtitle(tier, tiers, catalog);
-    return model ? `${TIER_LABELS[tier]} · ${model}` : TIER_LABELS[tier];
+  function tierOptionLabel(choice: DefaultTierChoice): string {
+    if (choice === NO_DEFAULT_TIER) return "No organization default";
+    const model = tierSubtitle(choice, tiers, catalog);
+    return model ? `${TIER_LABELS[choice]} · ${model}` : TIER_LABELS[choice];
   }
+
+  const defaultChoices: DefaultTierChoice[] = [NO_DEFAULT_TIER, ...SIZE_TIERS];
 
   return (
     <Section
@@ -84,13 +93,18 @@ export function ModelTiersSection() {
       {modelsQ.data && tiers && (
         <FieldRow
           label="Default tier for new threads"
-          hint="New threads use this tier when no personal or team default applies. Delegated work stays on Small."
+          hint="New threads use this tier when no personal or team default applies. With no organization default, they use Small. Delegated work stays on Small."
+          error={
+            tiers.defaultTier && !tiers.defaultTierResolvable
+              ? "No provider with a key serves this tier, so new threads use Small. Put a target whose provider has a key first in the tier, or choose another default."
+              : undefined
+          }
         >
           <SelectMenu
-            value={fallbackTier(tiers)}
-            options={SIZE_TIERS.map((tier) => ({ value: tier, label: tierOptionLabel(tier) }))}
+            value={defaultChoice}
+            options={defaultChoices.map((choice) => ({ value: choice, label: tierOptionLabel(choice) }))}
             onChange={saveDefaultTier}
-            ariaLabel={`Default tier for new threads: ${tierOptionLabel(fallbackTier(tiers))}`}
+            ariaLabel={`Default tier for new threads: ${tierOptionLabel(defaultChoice)}`}
           />
         </FieldRow>
       )}

@@ -180,7 +180,8 @@ export async function resolveModelSpec(
   // Tier tokens (xs, s, m, l, xl) resolve through the org's tier map to a
   // concrete model spec, then recurse. canonicalId stays the tier token so
   // the engine persists the tier, not the resolved spec — re-pointing a
-  // tier reaches existing threads (TKAI-285).
+  // tier reaches existing threads (TKAI-285). `resolveTier` never returns a
+  // tier token (its walk cuts tier cycles), so this recursion is one level.
   const normalized = spec.trim().toLowerCase();
   if (db && TIER_SET.has(normalized)) {
     const resolved = await resolveTier(db, credentials, orgId, normalized);

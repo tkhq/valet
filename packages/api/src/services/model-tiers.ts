@@ -100,8 +100,9 @@ export async function setOrgDefaultTier(db: AppQueryable, orgId: string, tier: S
 const ENV_FALLBACK_KINDS: readonly string[] = ["anthropic", "openai", "google"];
 
 /**
- * The walk both tier callers share: the first spec in `specs` whose provider
- * is ACTIVE. "Active" mirrors the active-provider walk in `engine/host.ts`:
+ * The walk both tier callers share: the first spec in `tier`'s list whose
+ * provider is ACTIVE. "Active" mirrors the active-provider walk in
+ * `engine/host.ts`:
  *   - Known kind with no row → active (zero-config env-key path).
  *   - Known kind with a row → active iff `row.enabled`.
  *   - Custom (`openai_compatible`) → active iff `row.enabled` AND org key
@@ -111,14 +112,31 @@ const ENV_FALLBACK_KINDS: readonly string[] = ["anthropic", "openai", "google"];
  * at the first ACTIVE entry whether or not a key exists for it, which is why
  * `resolvableTiers` key-tests that one spec rather than searching the list
  * for any spec that would work.
+ *
+ * A target that is itself a tier token continues the walk in that tier.
+ * `PATCH /api/org/model-tiers` refuses such a target, but a map saved before
+ * that check can hold one. `seen` holds every tier the walk has entered, so
+ * a cycle such as `m` → [`m`] ends that branch instead of recursing forever.
+ * The walk never returns a tier token, so `resolveModelSpec` recurses at
+ * most once.
  */
 async function firstActiveSpec(
   credentials: CredentialStore,
   orgId: string,
   rows: LlmProviderRow[],
-  specs: string[] | undefined,
+  tierMap: TierMap,
+  tier: SizeTier,
+  seen: Set<SizeTier> = new Set(),
 ): Promise<string | undefined> {
-  for (const spec of specs ?? []) {
+  if (seen.has(tier)) return undefined;
+  seen.add(tier);
+  for (const spec of tierMap[tier]) {
+    const token = spec.trim().toLowerCase();
+    if (isSizeTier(token)) {
+      const nested = await firstActiveSpec(credentials, orgId, rows, tierMap, token, seen);
+      if (nested !== undefined) return nested;
+      continue;
+    }
     const { namespace } = parseModelId(spec);
     const row = rows.find((r) => providerNamespace(r) === namespace);
     let active: boolean;
@@ -136,8 +154,9 @@ async function firstActiveSpec(
 
 /**
  * Walk a tier's spec list and return the first spec whose provider is active.
- * Returns `undefined` when no active provider exists for any entry — the
- * host surfaces that case with a corrective, tier-specific error rather
+ * Returns `undefined` when no active provider exists for any entry, or when
+ * the tier's targets only lead back into a tier the walk already entered.
+ * The host surfaces that case with a corrective, tier-specific error rather
  * than a generic "unknown model" message.
  *
  * This deliberately ignores whether a key exists for a known kind. The
@@ -152,11 +171,10 @@ export async function resolveTier(
   orgId: string,
   tier: string,
 ): Promise<string | undefined> {
+  if (!isSizeTier(tier)) return undefined;
   const tierMap = await getOrgTierMap(db, orgId);
-  const specs = tierMap[tier as SizeTier];
-  if (!specs || specs.length === 0) return undefined;
   const rows = await listLlmProviders(db, orgId);
-  return firstActiveSpec(credentials, orgId, rows, specs);
+  return firstActiveSpec(credentials, orgId, rows, tierMap, tier);
 }
 
 /**
@@ -207,7 +225,7 @@ export async function resolvableTiers(
   const usableByNamespace = new Map<string, boolean>();
   const usable = new Map<SizeTier, string>();
   for (const tier of TIER_TOKENS) {
-    const spec = await firstActiveSpec(credentials, orgId, rows, tierMap[tier]);
+    const spec = await firstActiveSpec(credentials, orgId, rows, tierMap, tier);
     if (spec === undefined) continue;
     const { namespace } = parseModelId(spec);
     let ok = usableByNamespace.get(namespace);

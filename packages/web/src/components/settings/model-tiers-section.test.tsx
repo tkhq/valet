@@ -131,22 +131,44 @@ describe("ModelTiersSection", () => {
   });
 
   describe("default tier for new threads", () => {
-    it("shows Small and its model when the org has no default tier", () => {
+    function openDefaultTierMenu() {
+      fireEvent.keyDown(screen.getByRole("button", { name: /^Default tier for new threads/ }), { key: "Enter" });
+    }
+
+    it("shows no organization default when the org has none", () => {
       render(<ModelTiersSection />);
-      expect(screen.getByRole("button", { name: "Default tier for new threads: Small · Sonnet 4.5" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Default tier for new threads: No organization default" })).toBeTruthy();
     });
 
     it("shows the stored default tier", () => {
-      tiersData = { ...tiersData, defaultTier: "xs" };
+      tiersData = { ...tiersData, defaultTier: "xs", defaultTierResolvable: true };
       render(<ModelTiersSection />);
       expect(screen.getByRole("button", { name: "Default tier for new threads: Extra Small · Haiku 4.5" })).toBeTruthy();
+      expect(screen.queryByRole("alert")).toBeNull();
     });
 
     it("picking a tier patches only defaultTier", () => {
       render(<ModelTiersSection />);
-      fireEvent.keyDown(screen.getByRole("button", { name: /^Default tier for new threads/ }), { key: "Enter" });
+      openDefaultTierMenu();
       fireEvent.click(screen.getByText("Extra Small · Haiku 4.5"));
       expect(patchMutate).toHaveBeenCalledWith({ defaultTier: "xs" }, expect.anything());
+    });
+
+    it("picking no organization default clears it with null", () => {
+      tiersData = { ...tiersData, defaultTier: "xs", defaultTierResolvable: true };
+      render(<ModelTiersSection />);
+      openDefaultTierMenu();
+      fireEvent.click(screen.getByText("No organization default"));
+      expect(patchMutate).toHaveBeenCalledWith({ defaultTier: null }, expect.anything());
+    });
+
+    it("warns when new sessions skip the stored default tier", () => {
+      tiersData = { ...tiersData, defaultTier: "xs", defaultTierResolvable: false };
+      render(<ModelTiersSection />);
+      expect(screen.getByRole("button", { name: "Default tier for new threads: Extra Small · Haiku 4.5" })).toBeTruthy();
+      expect(screen.getByRole("alert").textContent).toBe(
+        "No provider with a key serves this tier, so new threads use Small. Put a target whose provider has a key first in the tier, or choose another default.",
+      );
     });
   });
 });

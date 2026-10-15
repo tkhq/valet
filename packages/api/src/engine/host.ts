@@ -104,7 +104,7 @@ import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { clampToMax, getOrgReasoningSettings, type ReasoningLevel } from "../services/reasoning.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
-import { getOrgDefaultTier, resolveTier, TIER_SET, type SizeTier } from "../services/model-tiers.js";
+import { getOrgDefaultTier, resolvableTiers, TIER_SET, type SizeTier } from "../services/model-tiers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   agentSessions,
@@ -3413,19 +3413,21 @@ export class EngineHost {
   }
 
   /**
-   * `orgs.default_tier` when one of its targets has an active provider, else
-   * `undefined`. Like a team default, it applies to people who did not pick
-   * it. The PATCH route refuses a tier that no provider serves, but a later
-   * provider or tier-map change can still empty it. Such a tier falls
-   * through to the next default instead of failing every new session.
+   * `orgs.default_tier` when a provider this org holds a key for serves it,
+   * else `undefined`. Like a team default, it applies to people who did not
+   * pick it. The PATCH route refuses a tier that no provider with a key
+   * serves, but a later provider, key, or tier-map change can still empty
+   * it. Such a tier falls through to the next default instead of failing
+   * every new session. The test is `resolvableTiers`, the same one the save
+   * path applies: an enabled provider that lost its key does not count.
    * Uncached, same as `userDefaultModel`.
    */
   private async orgDefaultTier(orgId: string): Promise<SizeTier | undefined> {
     if (!this.opts.db) return undefined;
     const tier = await getOrgDefaultTier(this.opts.db, orgId);
     if (!tier) return undefined;
-    if (await resolveTier(this.opts.db, this.opts.engineCredentials, orgId, tier)) return tier;
-    console.warn(`[engine-host] org default tier "${tier}" has no active provider; using the next default`);
+    if ((await resolvableTiers(this.opts.db, this.opts.engineCredentials, orgId)).has(tier)) return tier;
+    console.warn(`[engine-host] no provider with a key serves org default tier "${tier}"; using the next default`);
     return undefined;
   }
 
@@ -3446,7 +3448,7 @@ export class EngineHost {
    * `overrideId ?? assistantDefault ?? childDefault ?? userDefault ?? teamDefault ?? orgDefaultTier ?? opts.defaultModelId ?? "s"`
    * — most-specific wins. Org model preferences are gone (superseded by the
    * per-tier ordered target lists). `orgDefaultTier` is the admin-set tier
-   * token in `orgs.default_tier`; when it is unset or no active provider
+   * token in `orgs.default_tier`; when it is unset or no provider with a key
    * serves it (`orgDefaultTier`), the final fallback is the tier token
    * `"s"`. `resolveModelSpec` resolves either token through the org's tier
    * map (`resolveTier` walks that tier's ordered list for the first active
