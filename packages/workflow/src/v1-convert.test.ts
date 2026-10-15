@@ -476,6 +476,25 @@ describe('convertV1Workflows: approvals and limits in a V2 run', () => {
       expect((await runInV2(wf, {}, { count })).status, JSON.stringify(count)).toMatchObject({ none: 'skipped', some: 'completed' });
     }
     expect((await runInV2(wf, {}, { count: 0 })).status).toMatchObject({ none: 'completed', some: 'skipped' });
+    expect(node(wf, 'trigger')).toMatchObject({ dataSchema: { count: { type: 'number' } } });
+  });
+
+  it('leaves a variable that V1 compared to a number and to a string off the run form, so V2 takes both', async () => {
+    const spawn = (id: string) => ({ id, type: 'tool', tool: 'spawn_session', arguments: { task: `Run ${id}.`, workspace: 'app' } });
+    const wf = one([
+      { id: 'zero', type: 'conditional', condition: { variable: 'limit', equals: 0 }, then: [spawn('none')] },
+      { id: 'every', type: 'conditional', condition: { variable: 'limit', equals: 'all' }, then: [spawn('all')] },
+    ]);
+    // A number input refused "all" before the run started.
+    expect(node(wf, 'trigger')).not.toHaveProperty('dataSchema');
+    expect(resolveTriggerInput(triggerDataSchema(wf.definition), { limit: 'all' }).errors).toEqual([]);
+    expect(node(wf, 'zero')).toMatchObject({ conditions: [{ operation: 'exists' }, { operation: 'equals', right: 0 }] });
+    expect(wf.checklist).toEqual([
+      'The if nodes "zero", "every" compare "limit" to values of more than one type (number, string). V1 took a value of any type, so the import does not add "limit" to the run form. To set it in a run you start by hand, add it as a trigger input. A trigger input has one type, so a run then cannot pass a value of another type.',
+    ]);
+    expect((await runInV2(wf, {}, { limit: 'all' })).status).toMatchObject({ none: 'skipped', all: 'completed' });
+    expect((await runInV2(wf, {}, { limit: 0 })).status).toMatchObject({ none: 'completed', all: 'skipped' });
+    expect((await runInV2(wf, {}, { limit: '0' })).status).toMatchObject({ none: 'skipped', all: 'skipped' });
   });
 
   it('goes on at once after an agent message, as V1 did, so its failure does not stop the run', async () => {
@@ -517,6 +536,19 @@ describe('convertV1Workflows: approvals and limits in a V2 run', () => {
     expect(wf.checklist).toContainEqual(
       expect.stringContaining('Approval node "a_gate" is inside step "release". If the run still waited for it 24 hours after the run started, V1 cancelled the run.'),
     );
+  });
+
+  it('says each approval gets its own 24 hours, where V1 cancelled the whole run 24 hours after it started', () => {
+    const wf = one([
+      { id: 'first', type: 'approval', prompt: 'Stage it?' },
+      { id: 'second', type: 'approval', prompt: 'Ship it?' },
+      { id: 'deploy', type: 'tool', tool: 'spawn_session', arguments: { task: 'Deploy to prod.', workspace: 'app' } },
+    ]);
+    expect(wf.checklist).toEqual([
+      'V1 cancelled a run that still waited for an approval 24 hours after the run started. This import made 2 approval nodes ("first", "second"), and V2 gives each one its own 24-hour timeout from the time the run reaches it. A run that passes more than one approval can therefore wait longer than V1 allowed. Decide the timeout of each approval node.',
+    ]);
+    // With one approval, the two timeouts start within the run's first steps.
+    expect(one([{ id: 'only', type: 'approval' }]).checklist).toEqual([]);
   });
 
   const message = (i: number) => ({ id: `s${String(i).padStart(2, '0')}`, type: 'agent_message', content: `Step ${i}.` });
@@ -574,6 +606,35 @@ describe('convertV1Workflows: workflows and triggers', () => {
       'The import creates no schedules, so it did not create V1 schedule "Weekend" (0 9 * * 6-7/7, UTC), which sent the prompt "Post the digest." to the assistant. Add it in Triggers with the same prompt after you finish the checklists of the imported workflows. Set its time zone to UTC.',
       expect.stringContaining('belongs to workflow "Old sync"'),
     ]);
+  });
+
+  it('says the conditions no longer read the request fields a V1 manual trigger copied into variables', async () => {
+    const out = convert({
+      workflows: [
+        {
+          id: 'wf_4',
+          name: 'Deploy',
+          enabled: true,
+          data: {
+            steps: [
+              {
+                id: 'env',
+                type: 'conditional',
+                condition: { variable: 'environment', equals: 'prod' },
+                then: [{ id: 'deploy', type: 'tool', tool: 'spawn_session', arguments: { task: 'Deploy.', workspace: 'app' } }],
+              },
+            ],
+          },
+        },
+      ],
+      triggers: [{ name: 'Prod only', enabled: true, workflowId: 'wf_4', config: { type: 'manual' }, variableMapping: { environment: '$.target' } }],
+    });
+    const wf = out.workflows[0]!;
+    expect(wf.checklist).toEqual([
+      'V1 manual trigger "Prod only" copied request fields into variables (environment from $.target). V2 does not copy them: each condition reads the variable name from the run input, such as trigger.data.environment. Change the callers to send the variable names, or change the conditions to read the request fields.',
+    ]);
+    // V1 deployed for this request. V2 reads trigger.data.environment and skips the deploy.
+    expect((await runInV2(wf, {}, { target: 'prod' })).status).toMatchObject({ deploy: 'skipped' });
   });
 
   it('refuses orchestrator schedules alone, and lists them to add by hand', () => {
