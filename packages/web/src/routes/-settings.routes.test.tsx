@@ -65,6 +65,7 @@ vi.mock("~/api/settings", () => ({
     isLoading: false,
     error: null,
   }),
+  useModelTiers: () => ({ data: undefined, isLoading: true, error: null }),
 }));
 vi.mock("~/api/api-keys", () => ({
   useApiKeys: () => ({ data: [], isLoading: false, error: null }),

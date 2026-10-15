@@ -10,6 +10,7 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type QueryClient,
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
@@ -392,14 +393,20 @@ export function useSetOrgMemberRole() {
 
 // ── LLM providers ────────────────────────────────────────────────────────
 
+/** A provider or key change moves what the catalog lists and whether the
+ * org default tier can run (`defaultTierResolvable`), so every provider
+ * mutation refreshes all three reads. */
+function invalidateProviderQueries(qc: QueryClient): void {
+  qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
+  qc.invalidateQueries({ queryKey: qkSettings.models() });
+  qc.invalidateQueries({ queryKey: qkSettings.modelTiers() });
+}
+
 export function useCreateLlmProvider() {
   const qc = useQueryClient();
   return useMutation<CreateLlmProviderResponse, Error, CreateLlmProviderRequest>({
     mutationFn: (body) => api.createLlmProvider(body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
-      qc.invalidateQueries({ queryKey: qkSettings.models() });
-    },
+    onSuccess: () => invalidateProviderQueries(qc),
   });
 }
 
@@ -407,10 +414,7 @@ export function usePatchLlmProvider() {
   const qc = useQueryClient();
   return useMutation<PatchLlmProviderResponse, Error, { id: string; body: PatchLlmProviderRequest }>({
     mutationFn: ({ id, body }) => api.patchLlmProvider(id, body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
-      qc.invalidateQueries({ queryKey: qkSettings.models() });
-    },
+    onSuccess: () => invalidateProviderQueries(qc),
   });
 }
 
@@ -418,10 +422,7 @@ export function useDeleteLlmProvider() {
   const qc = useQueryClient();
   return useMutation<undefined, Error, string>({
     mutationFn: (id) => api.deleteLlmProvider(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
-      qc.invalidateQueries({ queryKey: qkSettings.models() });
-    },
+    onSuccess: () => invalidateProviderQueries(qc),
   });
 }
 
@@ -429,10 +430,7 @@ export function usePutLlmProviderKey() {
   const qc = useQueryClient();
   return useMutation<PutLlmProviderKeyResponse, Error, { id: string; body: PutLlmProviderKeyRequest }>({
     mutationFn: ({ id, body }) => api.putLlmProviderKey(id, body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
-      qc.invalidateQueries({ queryKey: qkSettings.models() });
-    },
+    onSuccess: () => invalidateProviderQueries(qc),
   });
 }
 
@@ -440,10 +438,7 @@ export function useDeleteLlmProviderKey() {
   const qc = useQueryClient();
   return useMutation<undefined, Error, string>({
     mutationFn: (id) => api.deleteLlmProviderKey(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.llmProviders() });
-      qc.invalidateQueries({ queryKey: qkSettings.models() });
-    },
+    onSuccess: () => invalidateProviderQueries(qc),
   });
 }
 

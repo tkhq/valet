@@ -21,10 +21,10 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, teams, users, type LlmProviderModel } from "../schema/index.js";
 import { createLlmProvider, updateLlmProvider } from "../services/llm-providers.js";
-import { DEFAULT_TIER_MAP, setOrgTierMap } from "../services/model-tiers.js";
+import { DEFAULT_TIER_MAP, setOrgDefaultTier, setOrgTierMap } from "../services/model-tiers.js";
 import { setOrgReasoningSettings } from "../services/reasoning.js";
 import { createTeam } from "../services/teams.js";
-import { NoCredentialsError } from "@valet/engine";
+import { NoCredentialsError, type CredentialOwner } from "@valet/engine";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
@@ -770,6 +770,179 @@ describe("EngineHost model resolution wiring", () => {
     expect(restored.options.modelSpec).toBe(spec);
     expect(restored.options.model.id).toBe("m1"); // wire id, restored verbatim
     expect(restored.options.model.provider).toBe(row.id);
+  });
+
+  // The org default tier sits after the team default and before the "s"
+  // fallback. Children keep `childDefault: "s"`, so it never reaches them.
+  // A session uses the org default tier only when a provider with a key
+  // serves it, so these tests give the org a deployment Anthropic key. A
+  // keyed resolution returns the registry model, whose id is the wire id.
+  describe("org default tier", () => {
+    beforeEach(() => {
+      vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
+    });
+
+    afterEach(() => vi.unstubAllEnvs());
+
+    it("an unset org default tier keeps the \"s\" fallback", async () => {
+      api = await bootTestApi();
+      await setOrgDefaultTier(api.providers.db, "local-org", "l");
+      await setOrgDefaultTier(api.providers.db, "local-org", null);
+
+      const session = await defaultAssistantSessionFor(api.providers,
+        { type: "user", id: "local-user" },
+        { actorUserId: "local-user", orgId: "local-org" },
+      );
+      expect(session.options.modelSpec).toBe("s");
+      expect(session.options.model.id).toBe("claude-haiku-4-5");
+    });
+
+    it("beats the \"s\" fallback when nothing else is set", async () => {
+      api = await bootTestApi();
+      await setOrgDefaultTier(api.providers.db, "local-org", "m");
+
+      const session = await defaultAssistantSessionFor(api.providers,
+        { type: "user", id: "local-user" },
+        { actorUserId: "local-user", orgId: "local-org" },
+      );
+      expect(session.options.modelSpec).toBe("m");
+      expect(session.options.model.id).toBe("claude-sonnet-4-6");
+    });
+
+    it("falls through to \"s\" when a provider change leaves the org default tier with no active target", async () => {
+      api = await bootTestApi();
+      const { db } = api.providers;
+      await setOrgDefaultTier(db, "local-org", "l");
+      const row = await createLlmProvider(db, { orgId: "local-org", kind: "openai", name: "OpenAI" });
+      await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, l: [`openai/${OPENAI_MODEL}`] });
+      await updateLlmProvider(db, "local-org", row.id, { enabled: false });
+
+      const session = await defaultAssistantSessionFor(api.providers,
+        { type: "user", id: "local-user" },
+        { actorUserId: "local-user", orgId: "local-org" },
+      );
+      expect(session.options.modelSpec).toBe("s");
+      expect(session.options.model.id).toBe("claude-haiku-4-5");
+    });
+
+    it("falls through to \"s\" when the default tier's provider stays enabled but loses its key", async () => {
+      api = await bootTestApi();
+      const { db, engineCredentials, engineHost } = api.providers;
+      const owner: CredentialOwner = { type: "org", id: "local-org" };
+      const row = await createLlmProvider(db, { orgId: "local-org", kind: "openai", name: "OpenAI" });
+      await engineCredentials.save(owner, `llm:${row.id}`, { type: "api_key", apiKey: "org-openai" });
+      await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, l: [`openai/${OPENAI_MODEL}`] });
+      await setOrgDefaultTier(db, "local-org", "l");
+
+      const keyed = await engineHost.sessionFor("org-tier-keyed", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(keyed.options.modelSpec).toBe("l");
+
+      // The provider row stays enabled. Only its org key goes away, so an
+      // active-provider test alone still picks "l" and the build runs keyless.
+      await engineCredentials.delete(owner, `llm:${row.id}`);
+      const keyless = await engineHost.sessionFor("org-tier-keyless", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(keyless.options.modelSpec).toBe("s");
+      expect(keyless.options.model.id).toBe("claude-haiku-4-5");
+    });
+
+    it("falls through to \"s\" when a keyed custom provider no longer lists the default tier's model", async () => {
+      api = await bootTestApi();
+      const { db, engineCredentials, engineHost } = api.providers;
+      const row = await createLlmProvider(db, {
+        orgId: "local-org",
+        kind: "openai_compatible",
+        name: "Custom",
+        baseUrl: "https://x/v1",
+        models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
+      });
+      await engineCredentials.save({ type: "org", id: "local-org" }, `llm:${row.id}`, { type: "api_key", apiKey: "org-custom" });
+      await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, l: [`${row.id}/m1`] });
+      await setOrgDefaultTier(db, "local-org", "l");
+      // The provider stays enabled and keyed. Only its model list changes.
+      await updateLlmProvider(db, "local-org", row.id, { models: [{ id: "m2", name: "M2", contextWindow: 8000 }] });
+
+      const session = await engineHost.sessionFor("org-tier-model-gone", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(session.options.modelSpec).toBe("s");
+      expect(session.options.model.id).toBe("claude-haiku-4-5");
+    });
+
+    it("a user default beats the org default tier", async () => {
+      api = await bootTestApi();
+      const { db } = api.providers;
+      await setOrgDefaultTier(db, "local-org", "m");
+      await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
+
+      const session = await defaultAssistantSessionFor(api.providers,
+        { type: "user", id: "local-user" },
+        { actorUserId: "local-user", orgId: "local-org" },
+      );
+      expect(session.options.model.id).toBe("claude-opus-4-5");
+    });
+
+    it("the owning team's default beats the org default tier", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await setOrgDefaultTier(db, "local-org", "l");
+      const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+      await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
+
+      const session = await engineHost.sessionFor("team-owned-org-tier", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+        ownerTeamId: team.id,
+      });
+      expect(session.options.model.id).toBe("claude-sonnet-4-5");
+    });
+
+    it("a team assistant with no team default uses the org default tier", async () => {
+      api = await bootTestApi();
+      const { db } = api.providers;
+      await setOrgDefaultTier(db, "local-org", "l");
+      const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+
+      const session = await defaultAssistantSessionFor(api.providers,
+        { type: "team", id: team.id },
+        { actorUserId: "local-user", orgId: "local-org" },
+      );
+      expect(session.options.modelSpec).toBe("l");
+      expect(session.options.model.id).toBe("claude-opus-4-7");
+    });
+
+    it("a child without an explicit model stays on the \"s\" tier", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await setOrgDefaultTier(db, "local-org", "l");
+
+      const parent = await engineHost.sessionFor("parent-org-tier", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      const child = await engineHost.childSessionFor("child-org-tier", {
+        parentSessionId: "parent-org-tier",
+        parentThreadId: parent.thread("web:default").id,
+        actorUserId: "local-user",
+        orgId: "local-org",
+        owner: { type: "user", id: "local-user" },
+        workspace: "/tmp",
+      });
+      expect(parent.options.modelSpec).toBe("l");
+      expect(child.options.modelSpec).toBe("s");
+      expect(child.options.model.id).toBe("claude-haiku-4-5");
+    });
   });
 
   // Workspace runtimes inherit their owner defaults.

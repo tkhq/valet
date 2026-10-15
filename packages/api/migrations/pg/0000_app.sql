@@ -10,7 +10,8 @@ CREATE TABLE "orgs" (
 	"allow_personal_installations" boolean NOT NULL DEFAULT true,
 	"model_tiers" jsonb,
 	"approved_models" jsonb,
-	"reasoning_settings" jsonb
+	"reasoning_settings" jsonb,
+	"default_tier" text
 );
 --> statement-breakpoint
 CREATE TABLE "user" (

@@ -1689,6 +1689,13 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "reasoning_settings" jsonb',
   },
   {
+    // Org default tier for new sessions. Null = the "s" fallback, so every
+    // existing org keeps its current behavior.
+    describe: "orgs.default_tier column",
+    probe: { kind: "column", table: "orgs", column: "default_tier" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "default_tier" text',
+  },
+  {
     // Personal default reasoning level (model selector overhaul).
     // Null = inherit.
     describe: "user.default_reasoning column",

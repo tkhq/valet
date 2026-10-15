@@ -75,6 +75,9 @@ export const orgs = pgTable("orgs", {
   /** { default?: ThinkingLevel, max?: ThinkingLevel }. Null = no default,
    * no cap. */
   reasoningSettings: jsonb("reasoning_settings"),
+  /** Tier token (xs|s|m|l|xl) for new sessions that no personal or team
+   * default covers. Null = the engine's "s" fallback. */
+  defaultTier: text("default_tier"),
 });
 
 // better-auth's default model name for the user table is "user" (singular);

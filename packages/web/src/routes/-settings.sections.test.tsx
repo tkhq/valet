@@ -14,6 +14,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { GetModelTiersResponse } from "@valet/api/wire";
 
 const patchMeMutate = vi.fn();
 const uploadMyAvatarMutateAsync = vi.fn().mockResolvedValue({ avatarUrl: "/avatars/me.webp" });
@@ -52,6 +53,8 @@ let orgData: { callerRole: "admin" | "member"; features: { organizations: boolea
   features: { organizations: false },
 };
 
+let tiersData: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
+
 let apiKeysData: Array<{
   id: string;
   name: string | null;
@@ -83,7 +86,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useMe: () => ({ data: meData, isLoading: false, error: null }),
     useOrg: () => ({ data: orgData, isLoading: false, error: null }),
     useModels: () => ({ data: modelsData, isLoading: false, error: null }),
-    useModelTiers: () => ({ data: { xs: [], s: [], m: [], l: [], xl: [] }, isLoading: false, error: null }),
+    useModelTiers: () => ({ data: tiersData, isLoading: false, error: null }),
     useOrgReasoning: () => ({ data: {}, isLoading: false, error: null }),
     usePatchMe: () => ({ mutate: patchMeMutate, isPending: false, error: null }),
     useUploadMyAvatar: () => ({ mutateAsync: uploadMyAvatarMutateAsync, isPending: false, error: null }),
@@ -216,6 +219,8 @@ describe("ProfilePage", () => {
 describe("ThreadDefaultsPage", () => {
   beforeEach(() => {
     patchMeMutate.mockClear();
+    orgData = { callerRole: "member", features: { organizations: false } };
+    tiersData = { xs: [], s: [], m: [], l: [], xl: [] };
     meData = {
       id: "u1",
       email: "me@example.com",
@@ -270,7 +275,7 @@ describe("ThreadDefaultsPage", () => {
     fireEvent.focus(input);
 
     // Personal threads do not inherit team defaults.
-    fireEvent.click(within(screen.getByRole("listbox")).getByText("Valet default"));
+    fireEvent.click(within(screen.getByRole("listbox")).getByText("Small (Valet default)"));
     expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: null });
   });
 
@@ -291,6 +296,20 @@ describe("ThreadDefaultsPage", () => {
 
     await user.selectOptions(screen.getByLabelText("Reasoning"), "");
     expect(patchMeMutate).toHaveBeenCalledWith({ defaultReasoning: null });
+  });
+
+  it("names the org default tier in the clear-state label", () => {
+    orgData = { callerRole: "member", features: { organizations: true } };
+    tiersData = { ...tiersData, defaultTier: "m", defaultTierResolvable: true };
+    render(<ThreadDefaultsPage />);
+    expect(screen.getByLabelText("Default model").getAttribute("placeholder")).toBe("Medium (Organization default)");
+  });
+
+  it("names Small when new sessions skip the saved org default tier", () => {
+    orgData = { callerRole: "member", features: { organizations: true } };
+    tiersData = { ...tiersData, defaultTier: "m", defaultTierResolvable: false };
+    render(<ThreadDefaultsPage />);
+    expect(screen.getByLabelText("Default model").getAttribute("placeholder")).toBe("Small (Organization default)");
   });
 
   it("does not offer current-thread inheritance for new conversations", () => {

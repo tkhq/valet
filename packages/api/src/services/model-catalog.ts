@@ -85,7 +85,7 @@ const KNOWN_KIND_LABEL: Record<KnownCatalogKind, string> = {
  * `engine/host.ts`'s `firstActivePreference` can reuse this exact check
  * instead of re-deriving "is this row usable" logic that could drift from
  * the catalog's own `active` definition. */
-export async function hasOrgKey(credentials: CredentialStore, orgId: string, rowId: string): Promise<boolean> {
+export async function hasOrgKey(credentials: Pick<CredentialStore, "get">, orgId: string, rowId: string): Promise<boolean> {
   const owner: CredentialOwner = { type: "org", id: orgId };
   const stored = await credentials.get(owner, `llm:${rowId}`);
   return stored !== null;

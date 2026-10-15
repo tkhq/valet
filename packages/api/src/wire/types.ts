@@ -3656,14 +3656,26 @@ export interface ModelRegistryStatusResponse {
   providers: ModelRegistryProviderStatusWire[];
 }
 
+/** A size tier token. */
+export type WireSizeTier = "xs" | "s" | "m" | "l" | "xl";
+
 /** Model tier map: tier id (xs|s|m|l|xl) to list of model ids in that tier. */
-export type WireTierMap = Record<"xs" | "s" | "m" | "l" | "xl", string[]>;
+export type WireTierMap = Record<WireSizeTier, string[]>;
 
 /** `GET /api/org/model-tiers` — the org's model tier assignments. */
-export type GetModelTiersResponse = WireTierMap;
+export type GetModelTiersResponse = WireTierMap & {
+  /** Tier for new sessions that no personal or team default covers. Null
+   * means unset: those sessions use the "s" tier. */
+  defaultTier?: WireSizeTier | null;
+  /** True when new sessions can run `defaultTier`: its target's provider
+   * is enabled, has a key, and still lists the model. When false or absent,
+   * new sessions skip `defaultTier` and use "s". */
+  defaultTierResolvable?: boolean;
+};
 
-/** `PATCH /api/org/model-tiers` — partial tier updates. */
-export type PatchModelTiersRequest = Partial<WireTierMap>;
+/** `PATCH /api/org/model-tiers` — partial tier updates. `defaultTier: null`
+ * clears the org default tier. */
+export type PatchModelTiersRequest = Partial<WireTierMap> & { defaultTier?: WireSizeTier | null };
 
 /** `GET /api/org/approved-models` — the org's approved model list. */
 export interface GetApprovedModelsResponse {
