@@ -700,6 +700,29 @@ describe("workflows.preview_workflow", () => {
     // Only the values are cut. Every step still reports on itself.
     for (const nodeId of ["trigger", "draft", "copy", "hand-off"]) expect(text).toContain(`nodeId: ${nodeId}`);
   });
+
+  it("keeps a deeply nested sample value inside the encoded tool result budget", async () => {
+    api = await bootTestApi();
+    const { action, ctx } = previewAction(api);
+    const created = await createWorkflow(api.baseUrl, {
+      version: "dag/v1",
+      nodes: [
+        { id: "trigger", type: "trigger" },
+        { id: "copy", type: "set", values: { value: "{{trigger.data.value}}" } },
+      ],
+      edges: [{ from: "trigger", to: "copy" }],
+    });
+    // The encoder indents each level, so 100 levels encode to about ten
+    // times their compact JSON. The JSON alone fits the budget.
+    let value: unknown = "leaf";
+    for (let i = 0; i < 100; i++) value = { child: value };
+
+    const result = await action.execute({ workflow_id: created.id, sample: "none", input: { value } }, ctx);
+    expect(result.success).toBe(true);
+    const text = encodeToolOutput(result.data);
+    expect(text.length).toBeLessThanOrEqual(20_000);
+    expect(text).toContain("call get_node_result");
+  });
 });
 
 describe("preview shape table", () => {

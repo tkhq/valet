@@ -5,11 +5,12 @@
  * create, inspect, and run dag/v1 workflows conversationally. Every result
  * carries the ids (`workflowId`/`runId`) the web chat renderer fetches by.
  */
-import type {
-  ActionPlugin,
-  PluginAction,
-  PluginActionContext,
-  PluginActionResult,
+import {
+  encodeToolOutput,
+  type ActionPlugin,
+  type PluginAction,
+  type PluginActionContext,
+  type PluginActionResult,
 } from "@valet/engine";
 import { TeamAdminRequiredError } from "../services/team-deletion-access.js";
 import { submitDeletionRequest } from "../services/team-deletion-requests.js";
@@ -1580,8 +1581,9 @@ function presentResult(value: unknown, maxChars: number, note?: string): unknown
  * step's output, its observed example, and each downstream field that reads
  * it. So one 200,000-character checkpoint made a 1,000,000-character result.
  * The values share half of `maxChars`, and {@link presentResult} cuts each
- * value that is longer than its share. A reply that still does not fit is
- * cut as a whole. The HTTP route gives the editor the full preview.
+ * value that is longer than its share. A reply whose encoded form still
+ * does not fit is cut as a whole. The HTTP route gives the editor the full
+ * preview.
  */
 function presentPreview(workflowId: string, response: PreviewWorkflowResponse, maxChars: number): unknown {
   const valueCount = response.nodes.reduce(
@@ -1600,8 +1602,18 @@ function presentPreview(workflowId: string, response: PreviewWorkflowResponse, m
       : { ...node.outputShape, example: cut(node.outputShape.example) },
   }));
   const presented = { workflowId, ...response, nodes };
-  if (JSON.stringify(presented).length <= maxChars) return presented;
-  // The cut reply is JSON inside JSON, so each quote in it is escaped again.
-  // Half the room keeps the escaped prefix inside the budget.
-  return presentResult(presented, Math.floor(maxChars / 2), PREVIEW_CUT_NOTE);
+  // Measure what the model reads. The engine encodes the result with
+  // encodeToolOutput, which indents each nested level, so a deep value
+  // encodes to many times its compact JSON.
+  if (encodeToolOutput(presented).length <= maxChars) return presented;
+  // The encoder quotes the JSON prefix and escapes its quotes again, and the
+  // stub adds its keys and note. Drop the overflow from the prefix until the
+  // encoded stub fits.
+  const json = JSON.stringify(presented);
+  for (let prefixChars = Math.floor(maxChars / 2); ; ) {
+    const stub = { truncated: true, jsonPrefix: json.slice(0, prefixChars), note: PREVIEW_CUT_NOTE };
+    const overflow = encodeToolOutput(stub).length - maxChars;
+    if (overflow <= 0 || prefixChars === 0) return stub;
+    prefixChars = Math.max(0, prefixChars - overflow);
+  }
 }
