@@ -142,7 +142,12 @@ function withoutNul(s: string): string {
   return s.includes("\u0000") ? s.replaceAll("\u0000", "�") : s;
 }
 
-/** Returns the last `bytes` bytes of `s` (default `LOG_TAIL_BYTES`), trimmed by whole characters, with NUL replaced. */
+/**
+ * Returns the last `bytes` bytes of `s` (default `LOG_TAIL_BYTES`), trimmed
+ * by whole characters, with NUL replaced. A cut tail starts after its first
+ * newline, so a signal body never opens with a line fragment. A tail with
+ * no earlier newline (one long line) keeps its last bytes.
+ */
 export function tail(s: string, bytes: number = LOG_TAIL_BYTES): string {
   const clean = withoutNul(s);
   if (Buffer.byteLength(clean) <= bytes) return clean;
@@ -150,7 +155,8 @@ export function tail(s: string, bytes: number = LOG_TAIL_BYTES): string {
   while (Buffer.byteLength(result) > bytes) {
     result = result.slice(1);
   }
-  return result;
+  const firstBreak = result.indexOf("\n");
+  return firstBreak >= 0 && firstBreak < result.length - 1 ? result.slice(firstBreak + 1) : result;
 }
 
 /**
