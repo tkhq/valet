@@ -66,6 +66,8 @@ import {
 } from "./trigger-service.js";
 import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
 import { analyzeDefinitionPermissions } from "./permissions.js";
+import { readNodeDiagnostics } from "./node-diagnostics.js";
+import { readRunFollowUp } from "./run-follow-up.js";
 import { readStepTranscript } from "./step-transcript.js";
 import {
   deleteWorkflowWebhook,
@@ -482,7 +484,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Returns { runId, workflowId } — always surface the runId to the user. " +
       "When the run completes, fails, or is cancelled, a workflow.settled signal reports the result in this thread. " +
       "When it waits for approval, a workflow.approval_needed signal says so. " +
-      "End your turn after starting a run and continue from that signal; do not poll.",
+      "Read followUp and next before promising a later reply. When followUp.registered is true, " +
+      "end your turn and continue from that signal; do not poll. Otherwise check get_run.",
     riskLevel: "medium",
     execute: async ({ workflow_id, input }, ctx) => {
       const owner = ownerFromContext(ctx);
@@ -501,7 +504,13 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       }
       return {
         success: true,
-        data: { runId: started.runId, workflowId: workflow_id, status: "pending" },
+        data: {
+          runId: started.runId, workflowId: workflow_id, status: "pending",
+          followUp: { registered: origin !== undefined, status: origin ? "awaiting_settlement" : "no_origin" },
+          next: origin
+            ? "End your turn and continue from workflow.settled. Automatic completion follow-up is registered; do not poll."
+            : "Call get_run to check completion. No automatic chat follow-up is registered.",
+        },
       };
     },
   });
@@ -596,6 +605,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           status: detail.run.status,
           outcome: detail.run.outcome,
           waitingOn: detail.run.waitingOn,
+          followUp: await readRunFollowUp(getDeps(), owner.orgId, detail.run),
+          createdAt: detail.run.createdAt,
+          updatedAt: detail.run.updatedAt,
           // The steps that wait for approval, and the member who must approve
           // a step on their shared account. Anyone who can run the workflow
           // approves a step with no approver.
@@ -614,6 +626,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             // The session a session node drove, and the run a workflow node
             // started — how the agent reaches a failed node's actual output.
             sessionId: cp.sessionId,
+            threadId: cp.threadId,
+            queueItemId: cp.queueItemId,
             childRunId: cp.childRunId,
             ...(cp.repairAttempted ? { repairAttempted: true } : {}),
             ...(cp.schemaError ? { schemaError: cp.schemaError } : {}),
@@ -1046,6 +1060,35 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           })),
         },
       };
+    },
+  });
+
+  const getNodeDiagnostics = action(Type.Object({
+    run_id: Type.String(),
+    node_id: Type.String(),
+    iteration: Type.Optional(Type.Integer({ minimum: 0 })),
+  }))({
+    id: "workflows.get_node_diagnostics",
+    name: "Get node diagnostics",
+    description:
+      "Trace a failed or empty session/orchestrator result through its original and repair submissions. " +
+      "Returns submission status, selected message ID, stored text and text-part lengths, stop reason, " +
+      "provider error, model, usage and cost where recorded. Missing fields are unavailable evidence. " +
+      "No prompts or result bodies are returned. Use get_node_transcript for content and get_node_result for checkpoint output. " +
+      "Pass iteration to select one checkpoint of a foreach node.",
+    riskLevel: "low",
+    execute: async ({ run_id, node_id, iteration }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const deps = getDeps();
+      const detail = await getWorkflowRunDetail(deps, owner, run_id);
+      if (!detail) return { success: false, error: `run not found: ${run_id}` };
+      const matches = (await deps.workflowStore.getCheckpoints(run_id))
+        .filter(cp => cp.nodeId === node_id && (iteration === undefined || cp.iteration === iteration));
+      if (!matches.length) return { success: false, error: `No checkpoint for node ${JSON.stringify(node_id)}. Call get_run to list recorded nodes.` };
+      if (matches.length > 1) return { success: false, error: "Multiple iterations match. Pass iteration to inspect one checkpoint." };
+      return { success: true, data: { runId: run_id, nodeId: node_id,
+        checkpoints: await Promise.all(matches.map(cp => readNodeDiagnostics(deps.engineStore, cp))) } };
     },
   });
 
@@ -1568,6 +1611,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       startRun,
       getRun,
       getNodeResult,
+      getNodeDiagnostics,
       getNodeTranscript,
       previewWorkflowAction,
       listRuns,
