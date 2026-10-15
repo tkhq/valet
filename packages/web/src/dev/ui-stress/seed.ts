@@ -129,6 +129,9 @@ function seedEvents(client: QueryClient): void {
 
 /** The thread sidebar, all 200 threads loaded in four pages. */
 function seedThreads(client: QueryClient): void {
+  client.setQueryData(["thread-projects", stressMe.id, SIDEBAR_SESSION_ID], {
+    value: { projects: [], pinned: [], assignments: {}, grouped: true, collapsed: false }, revision: 1,
+  });
   // Inline key in `hooks/use-workspace-conversation.ts`. Team workspaces
   // resolve to the same session through `resolveUiStressFixture`.
   client.setQueryData<{ sessionId: string }>(["workspace-conversation", "user"], { sessionId: SIDEBAR_SESSION_ID });
