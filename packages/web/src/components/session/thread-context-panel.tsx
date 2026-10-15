@@ -7,6 +7,7 @@ import { api, type OwnerFilter } from "~/api/client";
 import { qkCatchUp } from "~/api/catch-up";
 import { useThreadChannelActivity } from "~/api/channels";
 import { relativeTime } from "~/lib/relative-time";
+import { BackgroundWorkSection } from "./background-work";
 
 /** The pull request's icon, for its state. */
 function PullRequestIcon({ state }: { state: ThreadPullRequest["state"] }) {
@@ -27,8 +28,10 @@ function pullRequestLabel(pr: ThreadPullRequest): string {
  * pull request a child opened bubbles up, in its own group and named by the
  * child, apart from the thread's own. A child's inputs stay on the child:
  * Sources lists only what was shared with this thread, never a child's report.
+ * Background work lists this thread's open wakeups and holds, and shows only
+ * while the thread has some.
  */
-export function ThreadContextPanel({ owner, sessionId, threadId, messages, busy, pullRequests = [], onCreate, onAttach, onReveal }: {
+export function ThreadContextPanel({ owner, sessionId, threadId, messages, busy, pullRequests = [], canCancelWork = false, onCreate, onAttach, onReveal }: {
   owner: OwnerFilter;
   sessionId: string;
   threadId: string;
@@ -36,6 +39,8 @@ export function ThreadContextPanel({ owner, sessionId, threadId, messages, busy,
   busy: boolean;
   /** The thread's pull requests, from its summary. */
   pullRequests?: ThreadPullRequest[];
+  /** The viewer may stop this thread's background work. */
+  canCancelWork?: boolean;
   onCreate: () => void;
   onAttach: () => void;
   onReveal: (messageId: string) => void;
@@ -119,6 +124,7 @@ export function ThreadContextPanel({ owner, sessionId, threadId, messages, busy,
         {activeTools.length === 0 && <p className="text-xs text-muted">No active tool calls</p>}
         {activeTools.map((tool) => <button key={tool.id} onClick={() => onReveal(tool.messageId)} className={rowClass} title={tool.label}><Terminal className="h-4 w-4 shrink-0 text-ink" /><span className="truncate text-ink">{tool.label}</span></button>)}
       </section>
+      <BackgroundWorkSection sessionId={sessionId} threadId={threadId} canCancel={canCancelWork} />
       {latest && channelActivity && (
         // One summary row, whatever the thread's length: the transcript already holds every message.
         <section aria-label="Channel" className="border-t border-line py-3">

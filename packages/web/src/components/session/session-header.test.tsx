@@ -75,8 +75,9 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useRenameSession: () => ({ isPending: false, mutateAsync: renameMutateAsync }),
     useSetSessionProfile: () => ({ isPending: false, mutateAsync: setProfileMutateAsync }),
     useSessionRatings: () => ({ data: { session: sessionRating, entries: {} }, isLoading: false, error: null }),
-    // The background work badge renders nothing with no work.
-    useSessionWakeups: () => ({ data: { wakeups: [], leases: [] } }),
+    // The session has background work. The header must not show it: it
+    // lives in the composer status line.
+    useSessionWakeups: () => ({ data: { wakeups: [{ id: "wk_1", threadId: "t1", kind: "timer", status: "pending", reason: "check CI", fireAt: Date.now() + 3_600_000, createdAt: Date.now() }], leases: [] } }),
     useCancelSessionWakeup: () => ({ isPending: false, mutateAsync: vi.fn() }),
   };
 });
@@ -183,6 +184,14 @@ beforeEach(() => {
   setProfileMutateAsync = vi.fn().mockResolvedValue({ ok: true });
   teamsData = { teams: [] };
   isWorkspaceRuntime = false;
+});
+
+describe("SessionHeader: background work", () => {
+  it("does not show background work in the header", () => {
+    renderHeader(undefined, "t1");
+    expect(screen.queryByRole("button", { name: /background work/i })).toBeNull();
+    expect(screen.queryByText(/next wakeup/)).toBeNull();
+  });
 });
 
 describe("SandboxChip — suspended state", () => {

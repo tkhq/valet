@@ -7,6 +7,7 @@ import {
   type ClipboardEvent,
   type DragEvent,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 import { ArrowUp, Paperclip, Play, Square, X } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
@@ -107,7 +108,11 @@ export function Composer({
   submissionLock,
   onSent,
   guest = false,
+  statusLine,
 }: {
+  /** A quiet one-line strip under the input box, such as the background
+   * work status line. It renders as given and owns its own spacing. */
+  statusLine?: ReactNode;
   /** The sender opens a shared thread as a guest: no file or image intake
    * (uploads land in the owner's working directory) and no slash commands
    * (commands change the owner's thread). */
@@ -1055,6 +1060,7 @@ export function Composer({
           </div>
         </div>
       </div>
+      {statusLine}
     </form>
   );
 }

@@ -634,8 +634,30 @@ valet_leases_over_deadline > 0                                     for 5m
   + (sum(valet_wakeups_kill_failed_total unless valet_wakeups_kill_failed_total offset 1h) or vector(0)) > 0
 ```
 
-UI: a wakeups strip on the session page lists active wakeups and leases
-(kind, reason, elapsed, deadline, cancel). A signal turn that produced no
+UI: background work shows in three places, all read from one
+`GET /api/sessions/:id/wakeups` query per session.
+
+- **Composer status line.** A muted one-line strip under the composer
+  input, in every view with a composer: the session page, the assistant
+  chat, and the child panel. It shows only while the session has
+  background work, for example `next wakeup in 26m · 1 process · 1 hold ·
+  +2 in other threads`. It counts the open thread's work per kind, with a
+  kind icon. It counts work on other threads and never names it. A click
+  or the keyboard opens the list of the work (kind, reason, elapsed,
+  deadline), the open thread's work first. Session admins get a Cancel per
+  row behind a confirm.
+- **Thread card section.** The thread context card has a "Background
+  work" section after "Active tools". It lists each item of this thread
+  with its reason, its state (waiting, running, starting, or held), and
+  its fire time or deadline, with the same Cancel. The section is hidden
+  when the thread has no background work.
+- **Thread list line.** A thread row with an active timer shows one quiet
+  line, `Waiting · next wakeup in 26m`, with the fire time on hover.
+  Processes, watches, and holds get no row line.
+
+The query polls once a minute while one of these reads it. A
+`queue.state` frame and every cancel, pause, replace, or forced action
+invalidate it. A signal turn that produced no
 message and no tool call renders collapsed, the way quiet ticks collapse in
 the Claude Code harness.
 
@@ -753,7 +775,7 @@ A v1 implementation MUST NOT ship these under this spec's label.
    alerts, agents-dev values.
 5. Part E: remove reactive growth, refusal over cap, usage sampling, home
    seed trim with layout version 3.
-6. Web: wakeups strip, volume usage, collapsed quiet turns.
+6. Web: composer status line, volume usage, collapsed quiet turns.
 
 Steps 1 to 4 unblock the user. Step 5 and 6 follow in the same release.
 
@@ -1070,8 +1092,9 @@ with an earlier entry, the entry below wins.
   block. The wire does not ship the envelope tag, so the card keys on the
   signal type prefix and a `wakeupId` or `leaseId` attribute. A
   background `bash` card shows the reason and the deadline. The session
-  header shows `N background · next deadline in …` with a list and a
-  Cancel per row for session admins.
+  header showed `N background · next deadline in …` with a list and a
+  Cancel per row for session admins. See "Review, UI placement" for where
+  this list is now.
 - **C: startup warning thread.** The prompt route passes the target
   thread's key as `warningThreadKey`, so a scratch warning from that
   build lands on that thread. The create route targets the default
@@ -1482,3 +1505,12 @@ with an earlier entry, the entry below wins.
 - **A4: job log cap default.** The dead `resolveJobLogMaxBytes` copy in
   `wakeups-admin.ts` is gone. The seam imports the default from
   `providers/sandbox-backend.ts`.
+- **Review, UI placement.** The product owner asked to remove background
+  work from the session header. The header badge is gone. The composer
+  status line replaces it and keeps the badge's list, its Cancel, and its
+  confirm. The line counts the open thread's work per kind and counts the
+  rest as `+N in other threads`. The UI paragraph of Part G also adds a
+  thread context card section and a thread list timer line. The thread list
+  reads the same session query as the status line, so a row never sends
+  its own request. A `queue.state` frame now also refreshes the query, so
+  work that a turn starts or ends shows without the one-minute poll.
