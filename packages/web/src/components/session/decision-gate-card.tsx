@@ -37,17 +37,23 @@ const WRAPPING_BUTTON = "h-auto min-h-8 max-w-full whitespace-normal py-1.5 text
 const gateColumnClass = "mx-auto mt-3 w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8";
 const ALWAYS_ALLOW_TOOLTIP = "Only an org admin can always-allow this action.";
 
-export function DecisionGateCard(props: { sessionId: string; gate: DecisionGate }) {
+export function DecisionGateCard(props: { sessionId: string; gate: DecisionGate; placement?: "thread" | "notification" }) {
   return <DecisionGateResponse key={`${props.sessionId}:${props.gate.id}`} {...props} />;
 }
 
 function DecisionGateResponse({
   sessionId,
   gate,
+  placement = "thread",
 }: {
   sessionId: string;
   gate: DecisionGate;
+  placement?: "thread" | "notification";
 }) {
+  const inNotification = placement === "notification";
+  const columnClass = inNotification ? "min-w-0 w-full" : gateColumnClass;
+  const surfaceClass = inNotification ? "min-w-0" : cardClass;
+  const inset = inNotification ? "px-4" : "px-5";
   const resolve = useResolveDecision(sessionId);
   const withdraw = useWithdrawDecision(sessionId);
   const meQ = useMe();
@@ -119,9 +125,11 @@ function DecisionGateResponse({
   const waitingOn = gate.approver && gate.approver.userId !== meQ.data?.id ? gate.approver : undefined;
   if (waitingOn) {
     return (
-      <div className={gateColumnClass}>
-        <div className={cn(cardClass, "px-5 py-3")} role="status" aria-live="polite">
-          <Badge variant={kind.variant}>Asked {waitingOn.name ?? "a teammate"} for permission</Badge>
+      <div className={columnClass}>
+        <div className={cn(surfaceClass, inset, "py-3")} role="status" aria-live="polite">
+          {inNotification
+            ? <p className="text-sm font-medium">Asked {waitingOn.name ?? "a teammate"} for permission</p>
+            : <Badge variant={kind.variant}>Asked {waitingOn.name ?? "a teammate"} for permission</Badge>}
           <p className="mt-1.5 text-sm text-muted">
             This needs {waitingOn.name ?? "a teammate"}'s shared account. Valet asked them, and continues once they allow it.
           </p>
@@ -131,9 +139,9 @@ function DecisionGateResponse({
   }
 
   return (
-    <div className={gateColumnClass}>
+    <div className={columnClass}>
       <div
-        className={cardClass}
+        className={surfaceClass}
         role="dialog"
         aria-live="polite"
         aria-busy={busy}
@@ -142,11 +150,13 @@ function DecisionGateResponse({
       >
         {/* The icon sits beside the badge, so the title, body, and controls
             all start at the card's padding edge. */}
-        <header className="flex items-start gap-2.5 px-5 pt-3 pb-2">
+        <header className={cn(inset, "flex items-start gap-2.5 pt-3 pb-2")}>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <Icon aria-hidden className="h-4 w-4 shrink-0 text-muted" />
-              <Badge variant={kind.variant}>{kind.label}</Badge>
+              {inNotification
+                ? <span className="text-xs font-medium text-muted">{kind.label}</span>
+                : <Badge variant={kind.variant}>{kind.label}</Badge>}
             </div>
             <DecisionGateTitle key={`${gate.id}:${gate.title}`} id={`gate-${gate.id}-title`} title={gate.title} />
           </div>
@@ -155,7 +165,7 @@ function DecisionGateResponse({
           </Button>
         </header>
 
-        {error && <p role="alert" className="px-5 py-2 break-words text-sm text-danger-600">{error} Try again.</p>}
+        {error && <p role="alert" className={cn(inset, "py-2 break-words text-sm text-danger-600")}>{error} Try again.</p>}
 
         {gate.body && (
           <div
@@ -163,24 +173,24 @@ function DecisionGateResponse({
             role="region"
             tabIndex={0}
             aria-label="Request details"
-            className="max-h-[min(14rem,25dvh)] overflow-y-auto px-5 pb-3 text-sm leading-relaxed text-muted whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+            className={cn(inset, "max-h-[min(14rem,25dvh)] overflow-y-auto pb-3 text-sm leading-relaxed text-muted whitespace-pre-wrap break-words [overflow-wrap:anywhere]")}
           >
             {gate.body}
           </div>
         )}
 
         {gate.provenance && provenanceLine(gate.provenance) && (
-          <div className="px-5 pb-2 text-xs text-muted" data-testid="gate-provenance">
+          <div className={cn(inset, "pb-2 text-xs text-muted")} data-testid="gate-provenance">
             {provenanceLine(gate.provenance)}
           </div>
         )}
 
-        {busy && <p role="status" className="px-5 pb-2 text-xs text-muted">{reading ? "Reading images…" : withdraw.isPending ? "Dismissing request…" : "Sending response…"}</p>}
+        {busy && <p role="status" className={cn(inset, "pb-2 text-xs text-muted")}>{reading ? "Reading images…" : withdraw.isPending ? "Dismissing request…" : "Sending response…"}</p>}
 
         {gate.type === "question" ? (
           <>
           {gate.actions.length > 0 && (
-            <div className="px-5 pb-2 flex flex-wrap gap-2">
+            <div className={cn(inset, "pb-2 flex flex-wrap gap-2")}>
               {gate.actions.map((a) => (
                 <Button key={a.id} variant="secondary" size="sm" className={WRAPPING_BUTTON} onClick={() => pickAction(a.id)} disabled={busy}>
                   <span className="min-w-0 [overflow-wrap:anywhere]">{a.label}</span>
@@ -188,7 +198,7 @@ function DecisionGateResponse({
               ))}
             </div>
           )}
-          <div className="px-5 pb-3"
+          <div className={cn(inset, "pb-3")}
             onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.stopPropagation(); } }}
             onDrop={(event) => { if (event.dataTransfer.files.length) { event.preventDefault(); event.stopPropagation(); void addImages(Array.from(event.dataTransfer.files)); } }}>
             <ComposerImageStrip images={images} onRemove={(id) => { if (!busy) setImages((current) => current.filter((image) => image.id !== id)); }} />
@@ -231,7 +241,7 @@ function DecisionGateResponse({
           </div>
           </>
         ) : (
-          <div className="px-5 pb-3 flex flex-wrap items-center justify-end gap-2">
+          <div className={cn(inset, "flex flex-wrap items-center justify-end gap-2", inNotification ? "pb-4 pt-1" : "pb-3")}>
             {gate.actions.map((a) => {
               const isAlwaysAllow = a.id === GATE_ACTION_ALWAYS_ALLOW;
               const disabled = busy || (isAlwaysAllow && !isAdmin);

@@ -446,6 +446,12 @@ The notification decision inbox scans at most 100 pending gates per page. An ind
 
 ## Bulk answers in the bell
 
+The notification inbox uses one bordered surface for each thread request.
+The conversation label and Open thread link share a compact header above the request.
+`DecisionGateCard` uses its notification placement inside that surface, without a second border or the thread column's outer padding.
+The request title, details, response field, and actions share one left edge.
+The request type is a plain label. Permission scope and account-owner restrictions remain visible.
+
 Added 2026-10-09. The bell's "Needs action" heading has **Approve all** and **Deny all**. The buttons show only when at least one listed item is eligible. A bulk answer covers only the items listed in the bell now. When the decision inbox has more pages, the buttons read "Approve N listed" and "Deny N listed", and the dialog says that other pages are not included. A bulk answer never loads or answers an item the user has not seen.
 
 Eligible items (`planBulkAnswers` in `packages/web/src/components/layout/bulk-answers.ts`):

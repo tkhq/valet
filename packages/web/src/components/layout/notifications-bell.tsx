@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Bell, X } from "lucide-react";
+import { ArrowUpRight, Bell, X } from "lucide-react";
 import type { NotificationSummary } from "@valet/api/wire";
 import { useMarkAllNotificationsRead, useMarkNotificationRead, useNotifications, useNotificationDecisions } from "~/api/queries";
 import { useWorkflowActionRequired } from "~/api/workflows";
@@ -87,11 +87,15 @@ export function NotificationsBell({ defaultOpen = false }: { defaultOpen?: boole
           <ul className="space-y-3">{workflows.data?.items.map(item => <WorkflowApprovalItem key={item.id} item={item} />)}</ul>
           {decisionCursor && <button className="text-sm underline" onClick={() => setDecisionCursor(undefined)}>First approvals</button>}
           {moreDecisions && <button className="text-sm underline" onClick={() => setDecisionCursor(moreDecisions)}>Next approvals</button>}
-          {decisions.data?.items.map(item => <div key={item.gate.id} className="rounded-lg border border-line pb-3">
-            <div className="px-3 pt-3 text-sm font-medium">{item.title}</div>
-            <DecisionGateCard sessionId={item.sessionId} gate={item.gate} />
-            {item.canOpenThread !== false && <a className="ml-3 mt-2 inline-block text-xs text-muted underline" href={`/threads/${encodeURIComponent(item.gate.threadId)}`}>Open thread</a>}
-          </div>)}
+          {decisions.data?.items.map(item => <article key={item.gate.id} className="min-w-0 rounded-lg border border-line bg-paper">
+            <div className="flex min-w-0 items-center justify-between gap-3 px-4 pt-3">
+              <span className="min-w-0 truncate text-xs text-muted" title={item.title}>{item.title}</span>
+              {item.canOpenThread !== false && <a className="inline-flex shrink-0 items-center gap-1 text-xs text-muted hover:text-ink hover:underline" href={`/threads/${encodeURIComponent(item.gate.threadId)}`}>
+                Open thread <ArrowUpRight aria-hidden className="h-3 w-3" />
+              </a>}
+            </div>
+            <DecisionGateCard sessionId={item.sessionId} gate={item.gate} placement="notification" />
+          </article>)}
         </section>
         <section aria-label="Updates" className="border-t border-line p-4 space-y-3">
           <div className="flex items-center justify-between"><h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Updates</h3>
