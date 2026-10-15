@@ -12,7 +12,10 @@ Valet narrows tools by task. Scopes reduce unrelated choices. Existing authoriza
 - Filter discovery and visible tools. Check execution again, including pinned actions and sandbox calls.
 - A thread focus belongs to one thread. Cached team sessions never store focus in their shared catalog.
 - Workflow runs carry the starting scope through agent steps, tool steps, and nested runs.
+- A `foreach` body is one node. Its declared scope applies to each iteration, including calls before a session exists.
 - Child steering, collected messages, and completion signals retain their originating ceilings.
+- Child gate notifications retain the gate submission's scope. Missing source records permit no tools or actions.
+- Security dispatch and handoff carry the active submission scope through their HTTP route into the child spawner.
 - A workflow report retains the starting member's authority. Private team run evidence still requires that member's access.
 - Thread saves update metadata in each store. A restored focus must match the last saved focus.
 

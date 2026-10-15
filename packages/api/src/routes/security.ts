@@ -54,6 +54,7 @@
  * surface separately.
  */
 import type { Principal } from "@valet/engine";
+import { readToolScope } from "@valet/shared";
 import type { PlanCell } from "@valet/plugin-security";
 import {
   bundledPersonaIds,
@@ -1590,6 +1591,7 @@ securityRouter.post("/:id/security/dispatch", async (c) => {
     const spawned = await childSpawner(
       {
         prompt: req.message,
+        toolScope: readToolScope(body.toolScope),
         title: req.title,
         repo: req.repo,
         // The engagement's pinned commit SHA — every persona reads an
@@ -1815,6 +1817,7 @@ securityRouter.post("/:id/security/handoff", async (c) => {
     const spawned = await childSpawner(
       {
         prompt: brief,
+        toolScope: readToolScope(body.toolScope),
         title,
         repo: result.engagement.repoFullName,
         ...(result.engagement.repoRef !== "" ? { branch: result.engagement.repoRef } : {}),

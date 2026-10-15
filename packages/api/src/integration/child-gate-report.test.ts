@@ -27,16 +27,19 @@ it("signals the parent thread once when its child opens a gate", async () => {
   const child = await p.engineHost.childSessionFor(childId, {
     parentSessionId: parent.id, parentThreadId: parentThread.id,
     actorUserId: "local-user", orgId: "local-org", owner: parent.owner, workspace: "/tmp/child-gate",
+    toolScope: { tools: ["ask_question"], actions: ["workflows.get_run"] },
   });
+  await child.pause();
+  const receipt = await child.prompt("Wait for a question", { metadata: { toolScope: { actions: [] } } });
   await p.db.insert(childWatches).values({
-    childSessionId: childId, queueItemId: "qi-child", parentSessionId: parent.id, parentThreadId: parentThread.id,
+    childSessionId: childId, queueItemId: receipt.queueItemId, parentSessionId: parent.id, parentThreadId: parentThread.id,
     actorUserId: "local-user", orgId: "local-org", settled: false,
     originJson: JSON.stringify({ channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" }), createdAt: Date.now(),
   });
   const unwire = wireChildGateReports(p.eventStream, p.childWatcher);
   try {
     const gate: DecisionGate = {
-      id: "child-gate-1", sessionId: childId, threadId: child.thread().id, queueItemId: "qi-child",
+      id: "child-gate-1", sessionId: childId, threadId: child.thread().id, queueItemId: receipt.queueItemId,
       resumeKey: "rk", ordinal: 0, type: "approval", title: "Push to main?",
       actions: [{ id: "approve", label: "Approve" }], status: "pending", createdAt: Date.now(), updatedAt: Date.now(),
     };
@@ -57,6 +60,7 @@ it("signals the parent thread once when its child opens a gate", async () => {
       expect(items).toHaveLength(1);
       const [item] = items;
       expect(item?.threadId).toBe(parentThread.id);
+      expect(item?.metadata?.toolScope).toEqual({ tools: ["ask_question"], actions: [] });
       expect(item?.content).toMatchObject({
         kind: "signal", signalType: "child.gate_opened",
         attributes: { child_session_id: childId, gate_id: gate.id },

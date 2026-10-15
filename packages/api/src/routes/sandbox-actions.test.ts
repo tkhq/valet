@@ -5,6 +5,9 @@
  */
 import { Type } from "typebox";
 import type { ValetPlugin } from "@valet/engine";
+import { validateWorkflowDefinition, type WorkflowDefinition } from "@valet/workflow";
+import type { ToolScope } from "@valet/shared";
+import { ensureWorkflowSession } from "../workflows/engine-deps.js";
 import { and, eq, like } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
@@ -48,15 +51,15 @@ function plugins(): ValetPlugin[] {
   ];
 }
 
-async function seed(): Promise<string> {
+async function seed(opts: { definition?: WorkflowDefinition; toolScope?: ToolScope } = {}): Promise<string> {
   api = await bootTestApi({ plugins: plugins() });
   const p = api.providers;
   const now = Date.now();
   await p.db.insert(teams).values({ id: TEAM, orgId: "local-org", name: "Script team", createdAt: now });
   await p.db.insert(teamMembers).values({ teamId: TEAM, userId: "local-user", role: "member" });
   await p.db.insert(workflowDefinitions).values({ id: "wf_script", orgId: "local-org", ownerType: "team", ownerId: TEAM, name: "Script", definition: {}, createdAt: now, updatedAt: now });
-  await p.workflowStore.createRun(RUN, { workflowId: "wf_script", definitionVersionId: "v1" },
-    { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: TEAM, actorUserId: "local-user" });
+  await p.workflowStore.createRun(RUN, { workflowId: "wf_script", definitionVersionId: "v1", toolScope: opts.toolScope },
+    opts.definition ?? { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "team", ownerId: TEAM, actorUserId: "local-user" });
   await p.workflowStore.claimRun(RUN, "host", 30_000);
   echoCalls = 0;
   hold = undefined;
@@ -76,6 +79,24 @@ function invoke(token: string, toolId: string, params: Record<string, unknown> =
 }
 
 describe("POST /api/sandbox/actions/:toolId/invoke", () => {
+  it("keeps a foreach body's deny-all scope in the session builder and broker", async () => {
+    const definition: WorkflowDefinition = { version: "dag/v1", nodes: [
+      { id: "trigger", type: "trigger" },
+      { id: "loop", type: "foreach", items: "{{ trigger.data.items }}", body: { id: "fetch", type: "session", mode: "start", prompt: "Inspect", toolScope: { tools: [], actions: [] } } },
+      { id: "stop", type: "stop" },
+    ], edges: [{ from: "trigger", to: "loop" }, { from: "loop", to: "stop" }] };
+    expect(validateWorkflowDefinition(definition).ok).toBe(true);
+    const token = await seed({ definition, toolScope: { tools: ["bash"], actions: ["demo.echo"] } });
+    if (!api) throw new Error("test API missing");
+    const p = api.providers;
+    // The run snapshot must protect the broker even before its engine session exists.
+    const denied = await invoke(token, "demo.echo");
+    expect(denied.status).toBe(403);
+    expect(echoCalls).toBe(0);
+    const session = await ensureWorkflowSession({ host: p.engineHost, store: p.workflowStore, db: p.db, engineStore: p.engineStore, actionPluginByService: p.actionPluginByService, credentials: p.engineCredentials }, SESSION);
+    expect(session.options.toolScope).toEqual({ tools: [], actions: [] });
+  });
+
   it("keeps a canonical action alias within its exact scope", async () => {
     const token = await seed();
     if (!api) throw new Error("test API missing");

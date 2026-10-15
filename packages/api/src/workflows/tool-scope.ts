@@ -8,7 +8,7 @@ export function workflowStepToolScope(params: { toolScope?: ToolScope }, definit
       if (!node || typeof node !== "object") continue;
       if ("id" in node && node.id === nodeId) return readToolScope("toolScope" in node ? node.toolScope : undefined);
       if ("body" in node) {
-        const found = find(node.body);
+        const found = find([node.body]);
         if (found !== undefined) return found;
       }
     }
