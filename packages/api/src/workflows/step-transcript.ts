@@ -1,4 +1,4 @@
-import type { MessagePart, SessionEntry, SessionStore } from "@valet/engine";
+import { MESSAGE_TURN_ERROR_KEY, type MessagePart, type SessionEntry, type SessionStore } from "@valet/engine";
 
 /**
  * One message of a workflow step's conversation, sized for an agent's
@@ -8,6 +8,12 @@ import type { MessagePart, SessionEntry, SessionStore } from "@valet/engine";
  */
 export interface StepTranscriptMessage {
   index: number;
+  messageId?: string;
+  queueItemId?: string;
+  createdAt?: number;
+  model?: string;
+  textLength?: number;
+  providerError?: string;
   role: "user" | "assistant" | "tool" | "system";
   text?: string;
   textTruncated?: true;
@@ -59,6 +65,13 @@ function toMessage(entry: SessionEntry): Omit<StepTranscriptMessage, "index">[] 
   const toolCalls = (entry.parts ?? []).flatMap((part) => part.type === "tool_call" ? [toolCall(part)] : []);
   return [{
     role: entry.role,
+    messageId: entry.id,
+    queueItemId: entry.queueItemId,
+    createdAt: entry.createdAt,
+    model: entry.model,
+    textLength: entry.content.length,
+    ...(typeof entry.metadata?.[MESSAGE_TURN_ERROR_KEY] === "string"
+      ? { providerError: cap(entry.metadata[MESSAGE_TURN_ERROR_KEY], TOOL_CHARS) } : {}),
     ...(text ? clip(text, TEXT_CHARS) : {}),
     ...(entry.stopReason ? { stopReason: entry.stopReason } : {}),
     ...(toolCalls.length > 0 ? { toolCalls } : {}),

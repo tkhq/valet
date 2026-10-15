@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, SkillSource, ValetPlugin } from "@valet/engine";
 import { buildToolIndex } from "./action-id.js";
-import { assemblePlugins, partitionByName, pluginSessionExtras, withCredentialRequirement } from "./assemble.js";
+import { assemblePlugins, partitionByName, pluginSessionExtras, withCredentialRequirement, withServiceDisplayName } from "./assemble.js";
 import { bundledPlugins } from "./registry.gen.js";
 
 function makeAction(id: string): PluginAction {
@@ -280,6 +280,15 @@ describe("partitionByName", () => {
 
     expect(kept.map((c) => c.id)).toEqual(["1"]);
     expect(shadowed.map((c) => c.id)).toEqual(["2"]);
+  });
+});
+
+describe("withServiceDisplayName", () => {
+  // A borrow approval read "Let a teammate use your linear account?".
+  it("names the product, and keeps a name the plugin sets", () => {
+    expect(withServiceDisplayName({ service: "linear", actions: [] }).displayName).toBe("Linear");
+    expect(withServiceDisplayName({ service: "github", actions: [] }).displayName).toBe("GitHub");
+    expect(withServiceDisplayName({ service: "linear", displayName: "Linear (EU)", actions: [] }).displayName).toBe("Linear (EU)");
   });
 });
 
