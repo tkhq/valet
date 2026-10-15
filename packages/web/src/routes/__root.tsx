@@ -71,10 +71,11 @@ function sidebarForPath(pathname: string) {
   return null;
 }
 
-/** The development-only UI stress gallery, with or without a trailing
- * slash. Always false in a production build, where `UiStressShell` is null. */
+/** The development-only UI stress gallery, in any letter case, with or
+ * without a trailing slash. Always false in a production build, where `UiStressShell` is null. */
 function isUiStressPath(pathname: string): boolean {
-  return UiStressShell !== null && pathname.replace(/\/+$/, "") === UI_STRESS_PATH && uiStressEnabled();
+  // The router matches paths without regard to case, so this check does too.
+  return UiStressShell !== null && pathname.replace(/\/+$/, "").toLowerCase() === UI_STRESS_PATH && uiStressEnabled();
 }
 
 /** `/login`, `/signup`, and the shared-artifact reader `/a/$token` —

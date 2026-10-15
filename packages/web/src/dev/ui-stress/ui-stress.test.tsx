@@ -131,6 +131,19 @@ describe("/dev/ui-stress", () => {
     window.sessionStorage.removeItem("valet:workspace");
   }, TEST_TIMEOUT_MS);
 
+  // The router accepts the path in any letter case. Every spelling must get
+  // the fixture shell, or the real shell saves the fixture scope.
+  it("puts the app shell on the fixtures for a mixed-case path", async () => {
+    const fetchSpy = blockFetch();
+    window.sessionStorage.setItem("valet:workspace", "team-real");
+    mount({ path: "/Dev/UI-Stress", appShell: true });
+    await screen.findByRole("heading", { level: 1, name: "UI stress gallery" }, { timeout: RENDER_TIMEOUT_MS });
+    await waitFor(() => expect(uiStressClient.isFetching()).toBe(0), { timeout: RENDER_TIMEOUT_MS });
+    expect(window.sessionStorage.getItem("valet:workspace")).toBe("team-real");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    window.sessionStorage.removeItem("valet:workspace");
+  }, TEST_TIMEOUT_MS);
+
   it("sends no request when Ask Valet opens the assistant", async () => {
     const fetchSpy = blockFetch();
     mount({ appShell: true });
