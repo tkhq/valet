@@ -263,6 +263,22 @@ describeDocker("DockerSandbox", () => {
     }
   });
 
+  it("job-mode: a cancelled detached job keeps its log for process_read, like the kubernetes log file", async () => {
+    const sb = await makeSandbox();
+    try {
+      const { execId } = await sb.execJob("echo before-cancel; sleep 300", { detached: true });
+      for (let i = 0; i < 100 && !(await sb.pollJob(execId, 0, { maxBytes: 4096 })).output; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await sb.cancelJob(execId);
+      const read = await sb.pollJob(execId, 0, { maxBytes: 4096 });
+      expect(read.output).toBe("before-cancel\n");
+      expect(read.status).not.toBe("running");
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
   it("job-mode: a terminal poll of a detached job keeps its state for later reads (fix wave 2, H1)", async () => {
     const sb = await makeSandbox();
     try {

@@ -1032,8 +1032,13 @@ export class DockerSandbox implements Sandbox {
     state.child.kill("SIGKILL");
     await state.closed;
     if (state.detached) {
-      if (state.evictTimer) clearTimeout(state.evictTimer);
-      this.jobs.delete(execId);
+      // Keep the output for process_read until the backstop, like a finished
+      // job. The kubernetes provider keeps the log file the same way. The
+      // killed exec client is not a dead container, so drop any transport
+      // error its close recorded.
+      delete state.transportError;
+      state.terminalPolled = true;
+      this.scheduleJobEviction(execId, state, JOB_EVICTION_BACKSTOP_MS);
     }
   }
 
