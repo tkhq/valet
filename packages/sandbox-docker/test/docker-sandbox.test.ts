@@ -617,6 +617,11 @@ describeDocker("DockerSandbox", () => {
       const tmpdir = await sb.exec("echo $TMPDIR");
       expect(tmpdir.exitCode).toBe(0);
       expect(tmpdir.stdout.trim()).toBe("/scratch/tmp");
+      // TMPDIR must exist even when the image entrypoint does not create it.
+      expect((await stat(join(scratchDir, "tmp"))).mode & 0o7777).toBe(0o1777);
+      const temp = await sb.exec("mktemp");
+      expect(temp.exitCode).toBe(0);
+      expect(temp.stdout.trim()).toMatch(/^\/scratch\/tmp\//);
     } finally {
       await provider.destroy(sbId);
     }
