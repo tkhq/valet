@@ -55,6 +55,10 @@ vi.mock("~/stores/stream", async (importOriginal) => {
   };
 });
 
+// Signal turns reach the transcript only through this refetch hook.
+const queueStateRefetch = vi.hoisted(() => vi.fn());
+vi.mock("~/hooks/use-invalidate-messages-on-queue-state", () => ({ useInvalidateMessagesOnQueueState: queueStateRefetch }));
+
 vi.mock("./session-header", () => ({
   SandboxChip: () => null,
   SessionHeader: ({ session, summaryControl }: { session: { title?: string }; summaryControl?: ReactNode }) => (
@@ -167,5 +171,11 @@ describe("SessionView header chrome", () => {
     renderInRouter("sess-1", true);
     expect(await screen.findByTestId("message-list")).toBeTruthy();
     expect(screen.getByTestId("composer")).toBeTruthy();
+  });
+
+  it("refetches messages on queue changes, so signal turns render live in a session", async () => {
+    renderInRouter("sess-1", false);
+    expect(await screen.findByTestId("message-list")).toBeTruthy();
+    expect(queueStateRefetch).toHaveBeenCalledWith("sess-1", undefined);
   });
 });

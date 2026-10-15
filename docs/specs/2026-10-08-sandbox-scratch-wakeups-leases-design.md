@@ -1329,6 +1329,10 @@ with an earlier entry, the entry below wins.
   `TMPDIR=/scratch/tmp`, but only the image entrypoint created that
   directory, so `mktemp` failed in an image without it. The provider now
   creates `/scratch/tmp` (1777) on the host before `docker run`.
+- **Local test, live signal cards.** Signal entries reach the web client
+  through a REST refetch on `queue.state`, and only the assistant chat ran
+  that refetch. A wakeup signal in a session therefore showed only after a
+  reload. `SessionView` now runs the refetch for every view of a session.
 - **PR review, EXIT after the log drain.** The kubernetes kickoff saves
   the job's status, waits for the capping filter, then writes `.exit`.
   A poll that sees `.exit` reads a complete log.
