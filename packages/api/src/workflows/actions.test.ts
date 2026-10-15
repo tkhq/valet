@@ -991,6 +991,11 @@ describe("DB-backed actions", () => {
     })]);
     expect(data.messages[2]?.text).toContain("did not match the required JSON schema");
 
+    const slice = await action("workflows.get_node_transcript").execute({ run_id: "run-t", node_id: "verify", message_id: "e1", content_field: "text", offset: 4 }, ctx());
+    expect(slice).toMatchObject({ success: true, data: { content: { text: "this research result as the draft: {...}", offset: 4, nextOffset: null } } });
+    const missing = await action("workflows.get_node_transcript").execute({ run_id: "run-t", node_id: "verify", message_id: "another-step" }, ctx());
+    expect(missing).toMatchObject({ success: true, data: { contentError: expect.any(String) } });
+
     const older = await action("workflows.get_node_transcript").execute({ run_id: "run-t", node_id: "verify", before: 2, limit: 1 }, ctx());
     expect(older.success && (older.data as { messages: Array<{ index: number }> }).messages.map((m) => m.index)).toEqual([1]);
 

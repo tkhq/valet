@@ -2614,3 +2614,10 @@ A backend (SQLite, D1, PostgreSQL) is supported when its store passes these suit
 ## Terminal outcome evidence (2026-09-25)
 
 The built-in `bash` tool records a small outcome marker in result `details` for a recognized, successful GitHub CLI write. The marker is not model-visible text. PR creation requires a zero exit code and a returned PR URL. Review submission requires a zero exit code and a submission flag. The command must be direct, with an optional `cd ... &&` prefix; compound scripts are not classified. The usage dashboard reads these persisted markers. Calls made before this change have no marker and are not backfilled from command text.
+
+### Workflow continuation and request evidence (2026-10-15)
+
+Workflow-purpose sessions use unattended completion instructions after compaction; other session purposes
+retain interactive clarification guidance. Persisted response metadata also includes the output-cap field
+observed in the transformed request and an allowlisted HTTP request ID, when the provider hooks expose them.
+Only numeric limits and bounded IDs are retained; request and response bodies are not captured.

@@ -9,6 +9,7 @@ export function modelResponseMetadata(
   message: AssistantMessage,
   streamedTextLength: number,
   requestedMaxOutputTokens: number | undefined,
+  request?: { effectiveMaxOutputTokens: number | null; outputLimitField: string | null; requestId?: string | null },
 ) {
   return {
     stopReason: message.stopReason,
@@ -25,8 +26,9 @@ export function modelResponseMetadata(
     streamedTextLength,
     requestedMaxOutputTokens: requestedMaxOutputTokens ?? null,
     // Adapters can clamp or transform the requested limit. Do not infer the wire value.
-    effectiveMaxOutputTokens: null,
-    requestId: null,
+    effectiveMaxOutputTokens: request?.effectiveMaxOutputTokens ?? null,
+    outputLimitField: request?.outputLimitField ?? null,
+    requestId: request?.requestId?.slice(0, ID_CHARS) ?? null,
     providerTerminalStatus: null,
     incompleteReason: null,
   };
@@ -49,7 +51,18 @@ export function readModelResponseMetadata(entry: MessageEntry) {
       ? ["text", "thinking", "toolCall"].filter(type => blockTypes.includes(type)) : null,
     textLength: number("textLength"), thinkingPresent: boolean("thinkingPresent"), toolCallCount: number("toolCallCount"),
     streamedTextLength: number("streamedTextLength"), requestedMaxOutputTokens: number("requestedMaxOutputTokens"),
-    effectiveMaxOutputTokens: number("effectiveMaxOutputTokens"), requestId: string("requestId"),
+    effectiveMaxOutputTokens: number("effectiveMaxOutputTokens"), outputLimitField: string("outputLimitField"), requestId: string("requestId"),
     providerTerminalStatus: string("providerTerminalStatus"), incompleteReason: string("incompleteReason"),
   };
+}
+
+/** Inspect only numeric output caps after caller payload transformations. Never save the payload. */
+export function modelRequestEvidence(payload: unknown) {
+  const paths = ["max_output_tokens", "max_completion_tokens", "max_tokens", "maxTokens", "config.maxOutputTokens", "generationConfig.maxOutputTokens", "inferenceConfig.maxTokens"];
+  for (const path of paths) {
+    let value: unknown = payload;
+    for (const key of path.split(".")) value = value && typeof value === "object" && key in value ? Reflect.get(value, key) : undefined;
+    if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return { effectiveMaxOutputTokens: value, outputLimitField: path };
+  }
+  return { effectiveMaxOutputTokens: null, outputLimitField: null };
 }

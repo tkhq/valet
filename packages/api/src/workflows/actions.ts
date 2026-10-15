@@ -1136,6 +1136,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       run_id: Type.String(),
       node_id: Type.String(),
       iteration: Type.Optional(Type.Number()),
+      message_id: Type.Optional(Type.String({ description: "Read one message or tool field in full using bounded character slices." })),
+      content_field: Type.Optional(Type.Union([Type.Literal("text"), Type.Literal("tool_args"), Type.Literal("tool_result"), Type.Literal("tool_error")])),
+      call_id: Type.Optional(Type.String()),
+      offset: Type.Optional(Type.Integer({ minimum: 0 })),
       before: Type.Optional(Type.Number()),
       limit: Type.Optional(Type.Number()),
     }),
@@ -1147,9 +1151,11 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "templates filled in, its replies, any format-repair prompt, and each tool call with its " +
       "arguments, result, and error. Use it when a step's result is surprising and " +
       "get_node_result does not explain why. Messages come oldest first. `index` numbers each " +
-      "message; pass `before` to read the page before that index.",
+      "message; pass `before` to read the page before that index. Includes saved compaction summaries and continuation markers. " +
+      "For clipped content, pass message_id, content_field (text, tool_args, tool_result or tool_error), " +
+      "call_id for tool fields, and offset. Read data.content.nextOffset until null.",
     riskLevel: "low",
-    execute: async ({ run_id, node_id, iteration, before, limit }, ctx) => {
+    execute: async ({ run_id, node_id, iteration, before, limit, message_id, content_field, call_id, offset }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const detail = await getWorkflowRunDetail(getDeps(), owner, run_id);
@@ -1180,6 +1186,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const transcript = await readStepTranscript(getDeps().engineStore, checkpoint.sessionId, checkpoint.threadId, {
         ...(before !== undefined ? { before: Math.trunc(before) } : {}),
         limit: pageSize,
+        ...(message_id ? { content: { messageId: message_id, field: content_field ?? "text", callId: call_id, offset: offset ?? 0 } } : {}),
         ...(!ownThread && queueItemIds.length > 0 ? { queueItemIds } : {}),
       });
       if (!transcript) return { success: false, error: `The conversation for node ${JSON.stringify(node_id)} is no longer stored.` };
@@ -1194,6 +1201,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           ...(checkpoint.repairAttempted ? { repairAttempted: true } : {}),
           ...(checkpoint.schemaError ? { schemaError: checkpoint.schemaError } : {}),
           total: transcript.total,
+          entriesMayBeTruncated: transcript.entriesMayBeTruncated,
+          ...(transcript.content ? { content: transcript.content } : {}),
+          ...(transcript.contentError ? { contentError: transcript.contentError } : {}),
           messages: transcript.messages,
         },
       };
