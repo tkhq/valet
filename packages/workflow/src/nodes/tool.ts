@@ -42,6 +42,7 @@ import {
   type TemplateContext,
 } from '../dag/expression.js';
 import type { ToolNode } from '../dag/nodes.js';
+import { isLegacyAccountConsentLoop, matchesGateOccurrence } from '../gate-signals.js';
 import type { NodeCheckpoint, RunSignal } from '../store.js';
 import { iterationSuffix, resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
@@ -154,7 +155,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
 
   if (effects.gate === true) {
     const signals = await store.listSignals(run.runId, { unconsumed: true });
-    heldSignal = signals.find((s) => s.signalType === signalType);
+    heldSignal = signals.find((s) => s.signalType === signalType && matchesGateOccurrence(s, existingCheckpoint?.effects));
     if (heldSignal) {
       const payload = parseGatePayload(heldSignal.payload);
       if (!payload.approved) {
@@ -164,6 +165,9 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
         resolvedBy: payload.resolvedBy,
         ...(payload.note !== undefined ? { note: payload.note } : {}),
       };
+    } else if (existingCheckpoint?.effects?.accountConsentResolved === true && typeof existingCheckpoint.effects.gateId !== 'string'
+      && (await store.listSignals(run.runId)).some(signal => isLegacyAccountConsentLoop(signal, existingCheckpoint.effects))) {
+      return await failUnresolvedGate(args, invocationId, undefined, accountConsentRefusal(node));
     } else if (effects.timeoutAt !== undefined && clock() >= effects.timeoutAt) {
       await callGateResolved(onGateResolved, { run, node, iteration, invocationId, outcome: 'timeout', resolvedBy: 'timeout' });
       return await denyOutcome(args, invocationId, 'timeout', undefined, undefined);
@@ -192,8 +196,7 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
     if (heldSignal && parseGatePayload(heldSignal.payload).accountConsent
       && response.provenance === 'shared_account'
       && sameAccountApprover(existingCheckpoint?.effects?.approver, response.approver)) {
-      return await failUnresolvedGate(args, invocationId, heldSignal,
-        `Account borrowing consent was recorded but this account still requires approval for ${node.service}.${node.action}. Check team membership and account sharing. Then start a new run.`);
+      return await failUnresolvedGate(args, invocationId, heldSignal, accountConsentRefusal(node));
     }
     if (approval !== undefined) {
       // Spec §1: approval was provided but enforcement still requires it —
@@ -256,12 +259,14 @@ async function openGate(
 
   const gp = capJson(renderedParams);
   const gateItem = args.aliases !== undefined ? capJson(args.aliases).value : undefined;
+  const resolvedGateSignalIds = gateSignalReceipts(args.existingCheckpoint, accountSignal);
 
   const gateEffects: Record<string, unknown> = {
     invocationId,
     gate: true,
     gateId,
     gateSequence,
+    ...(resolvedGateSignalIds.length > 0 ? { resolvedGateSignalIds } : {}),
     ...(accountSignal ? { accountConsentResolved: true } : {}),
     gateParams: gp.value,
     ...(gp.truncated ? { gateParamsTruncated: true } : {}),
@@ -372,12 +377,14 @@ async function writeTerminal(
   outcome: TerminalOutcome,
 ): Promise<NodeExecuteResult> {
   const { run, node, attempt, iteration, store, clock } = args;
+  const resolvedGateSignalIds = gateSignalReceipts(args.existingCheckpoint, heldSignal);
   const checkpoint: NodeCheckpoint = {
     runId: run.runId,
     nodeId: node.id,
     iteration,
     ...outcome,
-    effects: { invocationId },
+    effects: { invocationId, ...(resolvedGateSignalIds.length > 0 ? { resolvedGateSignalIds } : {}),
+      ...(args.existingCheckpoint?.effects?.accountConsentResolved === true ? { accountConsentResolved: true } : {}) },
     attempt,
     createdAt: clock(),
   };
@@ -422,6 +429,16 @@ async function callGateResolved(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function accountConsentRefusal(node: ToolNode): string {
+  return `Account borrowing consent was recorded but this account still requires approval for ${node.service}.${node.action}. Check team membership and account sharing. Then start a new run.`;
+}
+
+function gateSignalReceipts(checkpoint: NodeCheckpoint | undefined, signal: RunSignal | undefined): string[] {
+  const previous = checkpoint?.effects?.resolvedGateSignalIds;
+  const ids = Array.isArray(previous) ? previous.filter((id: unknown): id is string => typeof id === 'string') : [];
+  return signal ? [...new Set([...ids, signal.signalId])] : ids;
+}
 
 function sameAccountApprover(previous: unknown, next: { userId: string; shareGeneration?: string } | undefined): boolean {
   if (!next || previous === null || typeof previous !== 'object' || !('userId' in previous) || previous.userId !== next.userId) return false;

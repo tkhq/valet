@@ -8,7 +8,7 @@ import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflo
  */
 import type { ActionPlugin, Principal, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
 import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
-import { normalizeLegacyDefinition, type RunHost, type RunWaitCondition } from "@valet/workflow";
+import { matchesGateOccurrence, normalizeLegacyDefinition, type RunHost, type RunWaitCondition } from "@valet/workflow";
 import { writeBorrowGrant } from "../services/credential-borrow.js";
 import {
   resolveTriggerInput,
@@ -1651,7 +1651,7 @@ export async function listWorkflowActionRequired(
         for (const [key, approver] of await pendingApprovers(deps, candidate)) {
           if (approver.userId !== owner.userId) continue;
           const separator = key.lastIndexOf(":");
-          run = await ownedRun(deps, owner, summary.runId, "act", { nodeId: key.slice(0, separator), iteration: Number(key.slice(separator + 1)) });
+          run = await ownedRun(deps, owner, summary.runId, "act", { nodeId: key.slice(0, separator), iteration: Number(key.slice(separator + 1)), gateId: approver.gateId });
           if (run) break;
         }
       }
@@ -1772,13 +1772,13 @@ function gatesOpen(run: { status: string }): boolean {
   return run.status === "parked" || run.status === "running";
 }
 
-async function pendingApprovers(deps: WorkflowServiceDeps, run: { runId: string; status: string; waitingOn: RunWaitCondition[] }): Promise<Map<string, { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true }>> {
+async function pendingApprovers(deps: WorkflowServiceDeps, run: { runId: string; status: string; waitingOn: RunWaitCondition[] }): Promise<Map<string, { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true; gateId?: string }>> {
   const waits = gatesOpen(run) ? run.waitingOn.filter((w) => w.kind === "signal" && w.signalType.startsWith("approval:")) : [];
   if (waits.length === 0) return new Map();
-  const found = new Map<string, { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true }>();
+  const found = new Map<string, { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true; gateId?: string }>();
   for (const cp of await deps.workflowStore.getCheckpoints(run.runId)) {
     const approver = cp.status === "intent" ? approverFromEffects(cp.effects) : undefined;
-    if (approver) found.set(`${cp.nodeId}:${cp.iteration}`, approver);
+    if (approver) found.set(`${cp.nodeId}:${cp.iteration}`, { ...approver, ...(typeof cp.effects?.gateId === "string" ? { gateId: cp.effects.gateId } : {}) });
   }
   return found;
 }
@@ -1794,7 +1794,7 @@ async function ownedRun(
   owner: WorkflowOwner,
   runId: string,
   scope: OwnerScope = "read",
-  approval?: { nodeId: string; iteration: number },
+  approval?: { nodeId: string; iteration: number; gateId?: string },
 ) {
   const run = await deps.workflowStore.getRun(runId);
   if (!run || !run.owner || !(await isAuthorizedForOwner(deps.db, owner, run.owner))) {
@@ -1815,7 +1815,7 @@ async function ownedRun(
     // Lending an account permits only the named gate decision, never run access.
     if (!approval || !person) return null;
     const approver = (await pendingApprovers(deps, run)).get(`${approval.nodeId}:${approval.iteration}`);
-    if (!approver || approver.userId !== viewer.userId) return null;
+    if (!approver || approver.userId !== viewer.userId || approver.gateId !== approval.gateId) return null;
   }
   return run;
 }
@@ -1993,7 +1993,7 @@ export async function resolveWorkflowApproval(
   },
 ): Promise<ResolveApprovalOutcome> {
   const iter = input.iteration ?? 0;
-  const run = await ownedRun(deps, owner, input.runId, "act", { nodeId: input.nodeId, iteration: iter });
+  const run = await ownedRun(deps, owner, input.runId, "act", { nodeId: input.nodeId, iteration: iter, gateId: input.gateId });
   if (!run) return "not_found";
   const suffix = iter > 0 ? `:${iter}` : "";
   const signalType = `approval:${input.nodeId}${suffix}`;
@@ -2004,9 +2004,6 @@ export async function resolveWorkflowApproval(
   if (!wait || wait.kind !== "signal") return "not_parked";
   if (wait.timeoutAt !== undefined && Date.now() >= wait.timeoutAt) return "timed_out";
 
-  const existing = await deps.workflowStore.listSignals(input.runId, { unconsumed: true });
-  if (existing.some((s) => s.signalType === signalType)) return "already_resolved";
-
   // A step that would use another member's account answers to them, and
   // Allow covers this run. Lasting consent requires a new explicit option.
   const checkpoint = (await deps.workflowStore.getCheckpoints(input.runId)).find(cp => cp.nodeId === input.nodeId && cp.iteration === iter && cp.status === "intent");
@@ -2014,6 +2011,11 @@ export async function resolveWorkflowApproval(
   if (input.gateId !== occurrenceId) return "stale_gate";
   const gateId = occurrenceId ?? signalType;
   const approver = approverFromEffects(checkpoint?.effects);
+  // A lender's exception authorizes only their account gate. A legacy gate
+  // can advance without an occurrence ID, so recheck the action audience.
+  if (!approver && !(await ownedRun(deps, owner, input.runId, "act"))) return "not_found";
+  const existing = await deps.workflowStore.listSignals(input.runId, { unconsumed: true });
+  if (existing.some(s => s.signalType === signalType && matchesGateOccurrence(s, checkpoint?.effects))) return "already_resolved";
   if (approver && (owner.principal?.type === "team" || approver.userId !== owner.userId)) return "not_approver";
   if (input.scope === "team_account") {
     if (!approver?.allowTeamConsent) return "not_approver";
@@ -2158,15 +2160,9 @@ async function projectWorkflowRun(
   // Keep consumed answers too: the drive can consume a sibling's answer
   // before it replaces waitingOn. That gate must not appear pending again.
   const answered = new Set(signals.filter(sig => {
-    const payload = sig.payload;
-    const current = checkpoints.find(cp => cp.status === "intent" && typeof cp.effects?.gateId === "string"
+    const current = checkpoints.find(cp => cp.status === "intent"
       && sig.signalType === `approval:${cp.nodeId}${cp.iteration > 0 ? `:${cp.iteration}` : ""}`);
-    if (current) return payload !== null && typeof payload === "object" && "gateId" in payload && payload.gateId === current.effects?.gateId;
-    if (sig.consumedAt !== undefined && payload && typeof payload === "object" && "scope" in payload && payload.scope === "team_account") {
-      return !checkpoints.some(cp => cp.status === "intent" && cp.effects?.accountConsentResolved === true
-        && sig.signalType === `approval:${cp.nodeId}${cp.iteration > 0 ? `:${cp.iteration}` : ""}`);
-    }
-    return true;
+    return !current || matchesGateOccurrence(sig, current.effects);
   }).map(sig => sig.signalType));
   for (const w of run.waitingOn) {
     if (w.kind !== "signal" || !w.signalType.startsWith("approval:") || answered.has(w.signalType)) continue;

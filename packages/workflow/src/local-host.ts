@@ -58,6 +58,7 @@ import { detachedFromTrace } from '@valet/engine';
 
 import { driveUntilPark, settleAndNotify, type OnRunSettled } from './interpreter.js';
 import type { WorkflowEngineDeps } from './engine-deps.js';
+import { isLegacyAccountConsentLoop, matchesGateOccurrence } from './gate-signals.js';
 import type { NodeExecutorRegistry, OnApprovalGrant, OnApprovalPending, OnGateResolved } from './nodes/index.js';
 import { WorkflowFenceError, type RunParams, type RunParkState, type RunWaitCondition, type WorkflowRunOwnerInput, type WorkflowStore } from './store.js';
 
@@ -515,7 +516,13 @@ export class LocalRunHost implements RunHost {
     const unconsumed = await this.store.listSignals(runId, { unconsumed: true });
     if (unconsumed.length === 0) return false;
     const signalWaits = waitingOn.filter((w): w is Extract<RunWaitCondition, { kind: 'signal' }> => w.kind === 'signal');
-    return unconsumed.some((s) => s.signalType === 'cancel' || signalWaits.some((w) => w.signalType === s.signalType));
+    const checkpoints = await this.store.getCheckpoints(runId);
+    return unconsumed.some((s) => s.signalType === 'cancel' || signalWaits.some(w => {
+      if (w.signalType !== s.signalType) return false;
+      if (!s.signalType.startsWith('approval:')) return true;
+      const checkpoint = checkpoints.find(cp => `approval:${cp.nodeId}${cp.iteration > 0 ? `:${cp.iteration}` : ''}` === s.signalType);
+      return matchesGateOccurrence(s, checkpoint?.effects);
+    }));
   }
 
   private async hasSettledSubmissionWait(waitingOn: RunWaitCondition[]): Promise<boolean> {
@@ -552,18 +559,28 @@ export class LocalRunHost implements RunHost {
     const signals = await this.store.listSignals(runId);
     if (signals.every((s) => s.consumedAt === undefined || !s.consumedBy)) return false;
     const checkpoints = await this.store.getCheckpoints(runId);
-    let voided = false;
+    let shouldWake = false;
     for (const signal of signals) {
       if (signal.consumedAt === undefined || !signal.consumedBy) continue;
       const cp = checkpoints.find(
         (c) => c.nodeId === signal.consumedBy?.nodeId && c.iteration === signal.consumedBy?.iteration,
       );
       const hasMatchingTerminal = cp !== undefined && cp.status !== 'intent' && cp.attempt === signal.consumedBy.attempt;
-      if (!hasMatchingTerminal) {
+      // Account consent can atomically checkpoint the next gate's intent.
+      // Keep every receipt as that node advances through later gates.
+      const receipts = cp?.effects?.resolvedGateSignalIds;
+      const hasGateReceipt = cp !== undefined && cp.attempt >= signal.consumedBy.attempt
+        && Array.isArray(receipts) && receipts.includes(signal.signalId);
+      const payload = signal.payload;
+      const hasLegacyConsentTransition = cp !== undefined && cp.attempt >= signal.consumedBy.attempt
+        && cp.effects?.accountConsentResolved === true && payload !== null && typeof payload === 'object'
+        && 'scope' in payload && payload.scope === 'team_account' && !('gateId' in payload && payload.gateId !== undefined);
+      if (hasLegacyConsentTransition && isLegacyAccountConsentLoop(signal, cp?.effects)) shouldWake = true;
+      if (!hasMatchingTerminal && !hasGateReceipt && !hasLegacyConsentTransition) {
         await this.store.voidConsumption(runId, signal.signalId);
-        voided = true;
+        shouldWake = true;
       }
     }
-    return voided;
+    return shouldWake;
   }
 }
