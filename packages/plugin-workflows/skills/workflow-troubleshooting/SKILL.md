@@ -42,7 +42,7 @@ Do not repeat an unchanged failing call. Follow its corrective action or inspect
 ## Read response diagnostics
 
 - `selected.stopReason` is the stored transcript mapping. `modelResponse.stopReason` is the adapter's normalized stop. `modelResponse.rawStopReason` is the raw stop label exposed by the adapter.
-- An adapted `length`, `error`, or `aborted` stop fails completion, even when partial JSON matches the schema. A mapped transcript `end_turn` does not override it.
+- An awaited submission's adapted `length`, `error`, or `aborted` stop fails completion, even when partial JSON matches the schema. A mapped transcript `end_turn` does not override it.
 - Null effective limits, request IDs, provider terminal status, and incomplete reasons mean unavailable evidence. They do not establish provider behavior. A requested token limit does not establish the effective limit. Report null limits as unknown without inventing a default or an adapter explanation.
 - Compare stored text, text parts, adapted response text, and streamed text lengths. Equal lengths show consistency across those recorded layers. They do not prove capture of the full provider response. Different lengths identify a boundary to inspect, not the source of the loss.
 - Separate observed fields, supported inferences, and unknowns in the answer. For example: "Adapted stop: stop; exposed raw label: end_turn; recorded lengths agree; effective limit and provider terminal status: unknown."

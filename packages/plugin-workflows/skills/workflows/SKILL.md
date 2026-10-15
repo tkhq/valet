@@ -112,7 +112,7 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 
 **Structured LLM output.** Give `llm` (and `session`/`orchestrator`) nodes an `outputSchema` (JSON Schema object). The runtime parses and validates the response, retries once with a repair prompt on mismatch, and puts the parsed object at `result.output`. Use this instead of prompt-engineering JSON or chaining a second extraction LLM node.
 
-An incomplete or failed transport does not get schema repair. For session and orchestrator submissions, adapted `length`, `error`, and `aborted` stops fail completion even when partial JSON validates. A clean-stop empty reply can be intentional silence without a schema. With a schema, it receives the existing one repair opportunity.
+An incomplete or failed transport does not get schema repair. For awaited session and orchestrator submissions, adapted `length`, `error`, and `aborted` stops fail completion even when partial JSON validates. A clean-stop empty reply can be intentional silence without a schema. An awaited submission with a schema receives the existing one repair opportunity for that empty reply.
 
 **Distinguish empty inventory from failed inspection.** A schema-valid empty array does not prove that inspection succeeded. If that distinction matters, require an explicit inspection status and evidence, such as inspected sources and failures. Branch incomplete or failed inspection to review or failure before consuming candidates. Never use `candidates: []` as a fallback for failed inspection. Format repair must reuse successful tool results without repeating actions with side effects.
 
