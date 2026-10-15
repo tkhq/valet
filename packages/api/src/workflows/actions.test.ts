@@ -57,6 +57,7 @@ describe("workflowsActionPlugin", () => {
       "workflows.delete_trigger",
       "workflows.delete_webhook",
       "workflows.delete_workflow",
+      "workflows.get_node_diagnostics",
       "workflows.get_node_result",
       "workflows.get_node_transcript",
       "workflows.get_permissions",
@@ -848,6 +849,61 @@ describe("DB-backed actions", () => {
     ]);
   });
 
+  it("distinguishes an originless start from a registered completion follow-up", async () => {
+    const workflowId = await seedWorkflow();
+    const start = workflowsActionPlugin(() => deps).actions.find(a => a.id === "workflows.start_run");
+    if (!start) throw new Error("start_run missing");
+    expect(await start.execute({ workflow_id: workflowId }, ctx())).toMatchObject({
+      success: true, data: { followUp: { registered: false, status: "no_origin" }, next: expect.stringContaining("get_run") },
+    });
+  });
+
+  it("diagnoses original and repair responses without selecting another submission's text", async () => {
+    const plugin = workflowsActionPlugin(() => deps);
+    const diagnostics = plugin.actions.find(a => a.id === "workflows.get_node_diagnostics");
+    expect(diagnostics, "diagnostics action is discoverable").toBeDefined();
+    if (!diagnostics) return;
+    await deps.workflowStore.createRun("run-diag", { workflowId: "wf-diag", definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] }, "v1", { ownerType: "user", ownerId: "user1" });
+    const claim = await deps.workflowStore.claimRun("run-diag", "host", 30_000);
+    if (!claim) throw new Error("claim failed");
+    const sessionId = "wf:run-diag:research";
+    const threadId = "research-thread";
+    const base = { runId: "run-diag", nodeId: "research", iteration: 0, attempt: claim.attempt, createdAt: 1 };
+    await deps.workflowStore.putIntent({ ...base, status: "intent" });
+    await deps.workflowStore.completeCheckpoint("run-diag", "research", 0, claim.attempt, {
+      ...base, status: "failed", error: "no JSON content found in result text",
+      effects: { sessionId, firstQueueItemId: "original", repairAttempted: true, firstError: "no JSON content",
+        receipt: { sessionId, threadId, queueItemId: "repair" } },
+    });
+    await deps.engineStore.saveSession({ id: sessionId, orgId: "org1", userId: "user1", owner: { type: "user", id: "user1" },
+      workspace: "/tmp", purpose: "workflow", status: "running", createdAt: 1, updatedAt: 1 });
+    await deps.engineStore.saveThread(sessionId, { id: threadId, sessionId, key: "workflow", status: "active", queueMode: "followup", createdAt: 1, updatedAt: 1 });
+    for (const id of ["original", "repair"]) {
+      await deps.engineStore.admitSubmission(sessionId, threadId, { id, threadId, content: "research", status: "queued", attemptCount: 0,
+        maxAttempts: 10, timeoutAt: 999999, createdAt: 1, updatedAt: 1 });
+      await deps.engineStore.settleUnclaimed(sessionId, threadId, id, { outcome: "completed" });
+    }
+    const entry = { sessionId, threadId, parentId: null, type: "message" as const, role: "assistant" as const, createdAt: 1 };
+    await deps.engineStore.appendEntries(sessionId, threadId, [
+      { ...entry, id: "first-blank", queueItemId: "original", content: "", stopReason: "end_turn", model: "openai/gpt-6.1-sol" },
+      { ...entry, id: "repair-blank", queueItemId: "repair", content: "", stopReason: "end_turn" },
+      { ...entry, id: "provider-error", queueItemId: "repair", content: "", stopReason: "error", metadata: { turnError: "upstream failed" } },
+      { ...entry, id: "foreign", queueItemId: "other", content: "SECRET FROM ANOTHER SUBMISSION", stopReason: "end_turn" },
+    ]);
+    const result = await diagnostics.execute({ run_id: "run-diag", node_id: "research" }, ctx());
+    expect(result).toMatchObject({ success: true, data: { checkpoints: [{
+      repairAttempted: true, submissions: [
+        { phase: "original", queueItemId: "original", selectedMessageId: "first-blank", selectedTextLength: 0, textState: "empty" },
+        { phase: "repair", queueItemId: "repair", selectedMessageId: "repair-blank", selectedTextLength: 0, textState: "empty",
+          lastAssistant: { messageId: "provider-error", stopReason: "error", providerError: "upstream failed" } },
+      ],
+    }] } });
+    expect(JSON.stringify(result)).not.toContain("SECRET FROM ANOTHER SUBMISSION");
+    expect(await diagnostics.execute({ run_id: "run-diag", node_id: "research" }, ctx({ userId: "other" })))
+      .toMatchObject({ success: false, error: expect.stringContaining("run not found") });
+  });
+
   it("get_node_transcript reads a step's prompt, tool errors, and format repair, and get_run flags the repair", async () => {
     const plugin = workflowsActionPlugin(() => deps);
     const action = (id: string) => plugin.actions.find((a) => a.id === id)!;
@@ -891,6 +947,9 @@ describe("DB-backed actions", () => {
     expect(transcript.success).toBe(true);
     if (!transcript.success) return;
     const data = transcript.data as { total: number; repairAttempted: boolean; messages: Array<{ index: number; role: string; text?: string; toolCalls?: Array<{ tool: string; status: string; error?: string }> }> };
+    expect(transcript).toMatchObject({ data: { messages: [
+      { messageId: "e1" }, { messageId: "e2", textLength: 0 }, { messageId: "e3" }, { messageId: "e4", textLength: 33 },
+    ] } });
     expect(data.total).toBe(4);
     expect(data.repairAttempted).toBe(true);
     expect(data.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
