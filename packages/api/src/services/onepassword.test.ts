@@ -19,6 +19,11 @@ function memStore(): CredentialStore {
     save: async (o, s, c) => {
       m.set(k(o, s), c);
     },
+    compareAndSwap: async (o, s, expected, next) => {
+      if (m.get(k(o, s)) !== expected) return false;
+      m.set(k(o, s), next);
+      return true;
+    },
     delete: async (o, s) => {
       m.delete(k(o, s));
     },

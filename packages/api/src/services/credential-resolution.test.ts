@@ -718,6 +718,25 @@ describe("resolveTeamCredentialRead", () => {
         .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "dead" }) });
     });
 
+    it("skips expired OAuth without refresh for an approved share, and requires consent otherwise", async () => {
+      const expired: StoredCredential = { type: "oauth2", accessToken: "expired", expiresAt: 1 };
+      const fresh: StoredCredential = { type: "oauth2", accessToken: "bea-fresh", expiresAt: Date.now() + 3_600_000 };
+      const deps = { credentials: await storeWith([[team, expired], [bea, fresh]]), shares: shares(["bea"]) };
+      await expect(readTeamCredential(deps, { orgId, teamId, userId: "al" }, "linear", "none"))
+        .resolves.toEqual({ credential: null, approvalFrom: "bea" });
+      await expect(readTeamCredential(deps, { orgId, teamId, userId: "al", mayBorrow: async () => true }, "linear", "none"))
+        .resolves.toEqual({ credential: expect.objectContaining({ accessToken: "bea-fresh" }) });
+      await expect(readTeamCredential({ credentials: await storeWith([[team, expired]]) }, { orgId, teamId }, "linear", "none"))
+        .resolves.toEqual({ credential: null });
+    });
+
+    it("does not select an expired share, including the acting member's own share", async () => {
+      const expired: StoredCredential = { type: "oauth2", accessToken: "expired", expiresAt: 1 };
+      const deps = { credentials: await storeWith([[al, expired], [bea, expired], [team, { type: "api_key", apiKey: "team-key" }]]), shares: shares(["al", "bea"]) };
+      await expect(readTeamCredential(deps, { orgId, teamId, userId: "al", mayBorrow: async () => true }, "linear", "none"))
+        .resolves.toEqual({ credential: expect.objectContaining({ apiKey: "team-key" }) });
+    });
+
     it("keeps an expired team connection whose refresh failed only temporarily", async () => {
       const expired: StoredCredential = { type: "oauth2", accessToken: "team", refreshToken: "rt", expiresAt: 1, metadata: { refreshFailedAt: 2 } };
       const deps = { credentials: await storeWith([[team, expired], [bea, { type: "api_key", apiKey: "bea-key" }]]), shares: shares(["bea"]) };

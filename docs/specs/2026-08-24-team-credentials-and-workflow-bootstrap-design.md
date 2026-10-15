@@ -342,6 +342,18 @@ The upgrade moves each legacy `metadata.delegatedFrom` team row into `credential
 
 A team with its own connection for a service takes no new share of it (2026-10-14). The share route returns 409. If the team connection works, the error says a team admin must remove it before a member shares their own. If the connection stopped working (`isDeadConnection`), the error says to reconnect it, which any member may do. A team `github` row that no run uses blocks nothing: `isUsableGithubUserRow` refuses it, so the invoker and readiness skip it, and it is never `isDeadConnection`. A team OAuth row past expiry with no refresh token blocks nothing either: the refreshing store skips it, so it is never renewed and never `isDeadConnection`. A dead row still blocks, because members can reconnect it. The team credential list marks both kinds of row `unusable`, so both share pickers allow the share too. Shares made before the team connected stay, and the acting member's own share still resolves first.
 
+Share admission holds the team ownership lock while it rechecks membership, reads the team connection, and inserts the share.
+Team token creation, replacement, OAuth callbacks, 1Password reference writes, and deletion use that same lock.
+If a team connection commits first, the share request sees it and returns 409. If a share commits first, it remains when the team connects.
+Postgres concurrency tests cover creation, replacement, reference writes, and deletion in both commit orders.
+
+Team runtime reads, share admission, and the team credential list use the same expired OAuth predicate.
+An expired OAuth row without a usable refresh token cannot shadow an approved member share. An encrypted empty refresh token counts as missing.
+Runtime reads skip that row even when no alternative exists. Another member's share still requires approval, and a valid acting member's share keeps its precedence.
+A temporary refresh failure retains the existing provider-error behavior. A refused refresh marks a dead connection, which remains the final fallback when no other account answers.
+Those failure-reporting rules differ from an expired row that has no refresh token. Members can reconnect a dead connection in Team Integrations.
+
+
 The acting member's own share resolves first. The team's connection and permitted organization sources follow. For other services, another member's share requires that member's approval. Scheduled workflows can therefore pause for approval after upgrade when their actor differs from the sharer. The account owner must approve the request before the run continues.
 
 GitHub has an exception. Its policy paths do not request permission to borrow another member's account. The sharer's own GitHub actions still resolve their migrated share. Other actors use a direct team connection or the organization GitHub App. If a team previously relied on one member's GitHub delegation, install the organization GitHub App or store a team GitHub connection. The migration alone does not preserve that delegation's access for other actors.
