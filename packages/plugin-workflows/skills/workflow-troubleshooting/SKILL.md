@@ -45,7 +45,15 @@ Do not repeat an unchanged failing call. Follow its corrective action or inspect
 - An awaited submission's adapted `length`, `error`, or `aborted` stop fails completion, even when partial JSON matches the schema. A mapped transcript `end_turn` does not override it.
 - Null effective limits, request IDs, provider terminal status, and incomplete reasons mean unavailable evidence. They do not establish provider behavior. A requested token limit does not establish the effective limit. Report null limits as unknown without inventing a default or an adapter explanation.
 - Compare stored text, text parts, adapted response text, and streamed text lengths. Equal lengths show consistency across those recorded layers. They do not prove capture of the full provider response. Different lengths identify a boundary to inspect, not the source of the loss.
-- Separate observed fields, supported inferences, and unknowns in the answer. For example: "Adapted stop: stop; exposed raw label: end_turn; recorded lengths agree; effective limit and provider terminal status: unknown."
+- Text lengths count JavaScript UTF-16 code units, not bytes.
+
+Use this report format:
+
+1. **Observed:** Name each recorded stop, text length, and requested limit. A null requested limit means "no requested limit recorded."
+2. **Inference:** State whether recorded text layers agree or differ. State the transport and schema outcomes separately.
+3. **Unknown:** Name each unavailable field, including `incompleteReason`. If the raw response is unavailable, include "Full provider-response capture: not verified."
+
+Keep conclusions within those fields. Equal lengths support "recorded lengths agree." The cause of an unavailable field remains unknown.
 
 ## Apply a bounded repair
 
