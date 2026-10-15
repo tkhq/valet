@@ -21,6 +21,11 @@ describe("configMcpPlugins", () => {
     expect(plugins).toEqual([]);
   });
 
+  it("keeps userinfo and query secrets out of the default description", () => {
+    const [plugin] = configMcpPlugins([decl({ url: "https://user:FAKE-PASS@mcp.example.test/mcp?token=FAKE-TOKEN" })], {});
+    expect(plugin.description).toBe("Config-declared MCP server (https://mcp.example.test/mcp)");
+  });
+
   it("builds a prefixed plugin whose action service is the entry name", () => {
     const [plugin] = configMcpPlugins([decl({})], {});
     expect(plugin.name).toBe(`${CONFIG_MCP_PLUGIN_PREFIX}example`);
@@ -80,6 +85,8 @@ describe("configMcpPlugins", () => {
       {},
     );
     expect(plugin.displayName).toBe("Example Cloud");
+    // A borrow approval names the account by the same name.
+    expect(plugin.actions?.[0]?.displayName).toBe("Example Cloud");
     expect(plugin.credentials?.[0]?.connectLabel).toBe("Example Cloud API key");
   });
 

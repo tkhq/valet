@@ -119,7 +119,8 @@ export function readPath(params: unknown, path: string): unknown {
   return cursor;
 }
 
-function parsePath(path: string): Array<string | number> {
+/** The segments of a matcher path: `a.b[0]` is `["a", "b", 0]`. Throws on a malformed index. */
+export function parsePath(path: string): Array<string | number> {
   const out: Array<string | number> = [];
   let i = 0;
   while (i < path.length) {

@@ -11,6 +11,10 @@
  * hold at least one non-empty text element, or Slack rejects the whole
  * message with `invalid_blocks`. Any table outside these limits keeps the
  * existing single `markdown` block.
+ *
+ * Slack draws an emoji shortcode only from a `markdown` block or an `emoji`
+ * element. Rich text shows `:smile:` as typed, so a cell's shortcodes become
+ * `emoji` elements.
  */
 
 import { fromMarkdown } from 'mdast-util-from-markdown';
@@ -39,12 +43,20 @@ interface TextStyle {
   code?: boolean;
 }
 
-interface RichTextElement {
+interface TextElement {
   type: 'text' | 'link';
   text: string;
   url?: string;
   style?: TextStyle;
 }
+
+type RichTextElement = TextElement | { type: 'emoji'; name: string };
+
+/** A shortcode such as `:smile:` or `:murg'd:`. Letters or digits on either
+ * side make it ordinary text, so `10:30:45` keeps its colons. */
+const EMOJI_SHORTCODE = /(?<![\p{L}\p{N}]):([a-z0-9_+'-]+):(?![\p{L}\p{N}])/gu;
+
+const isLineBreak = (element: RichTextElement | undefined): boolean => element?.type === 'text' && element.text === '\n';
 
 /** An inline HTML node that is a line break. Code spans and escaped text
  * never parse as HTML, so they keep a literal `<br>`. */
@@ -82,12 +94,12 @@ function plainText(node: MarkdownNode): string {
 function inlineElements(cell: string): RichTextElement[] {
   const elements: RichTextElement[] = [];
   let afterBreak = false;
-  const emit = (element: RichTextElement): void => {
+  const emit = (element: TextElement): void => {
     if (afterBreak && element.type === 'text') element.text = element.text.replace(/^\s+/, '');
     if (element.text.length === 0) return;
     afterBreak = false;
     const last = elements.at(-1);
-    if (element.type === 'text' && last?.type === 'text' && last.text !== '\n'
+    if (element.type === 'text' && last?.type === 'text' && !isLineBreak(last)
       && JSON.stringify(last.style ?? {}) === JSON.stringify(element.style ?? {})) {
       last.text += element.text;
       return;
@@ -103,13 +115,21 @@ function inlineElements(cell: string): RichTextElement[] {
     elements.push({ type: 'text', text: '\n' });
     afterBreak = true;
   };
-  const styled = (text: string, style: TextStyle): RichTextElement =>
+  const styled = (text: string, style: TextStyle): TextElement =>
     Object.keys(style).length ? { type: 'text', text, style: { ...style } } : { type: 'text', text };
   const visit = (node: MarkdownNode, style: TextStyle): void => {
     switch (node.type) {
-      case 'text':
-        emit(styled(node.value, style));
+      case 'text': {
+        let from = 0;
+        for (const match of node.value.matchAll(EMOJI_SHORTCODE)) {
+          emit(styled(node.value.slice(from, match.index), style));
+          afterBreak = false;
+          elements.push({ type: 'emoji', name: match[1] });
+          from = match.index + match[0].length;
+        }
+        emit(styled(node.value.slice(from), style));
         return;
+      }
       case 'html':
         if (LINE_BREAK_TAG.test(node.value)) lineBreak();
         else emit(styled(node.value, style));
@@ -132,7 +152,7 @@ function inlineElements(cell: string): RichTextElement[] {
       case 'link':
       case 'image': {
         const label = node.type === 'link' ? plainText(node) : node.alt ?? '';
-        const element: RichTextElement = { type: 'link', url: node.url, text: label || node.url };
+        const element: TextElement = { type: 'link', url: node.url, text: label || node.url };
         if (Object.keys(style).length) element.style = { ...style };
         afterBreak = false;
         elements.push(element);
@@ -145,7 +165,7 @@ function inlineElements(cell: string): RichTextElement[] {
   };
   parseCell(cell).children.forEach((child) => visit(child, {}));
   // A trailing break has nothing to separate.
-  while (elements.at(-1)?.text === '\n') elements.pop();
+  while (isLineBreak(elements.at(-1))) elements.pop();
   return elements;
 }
 
@@ -158,7 +178,7 @@ function richTextCell(cell: string): { block: Block; characters: number } | unde
   const content = elements.length ? elements : [{ type: 'text', text: ' ' } satisfies RichTextElement];
   return {
     block: { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: content }] },
-    characters: content.reduce((sum, element) => sum + element.text.length, 0),
+    characters: content.reduce((sum, element) => sum + (element.type === 'emoji' ? element.name.length + 2 : element.text.length), 0),
   };
 }
 

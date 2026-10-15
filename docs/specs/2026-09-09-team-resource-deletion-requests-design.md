@@ -23,7 +23,7 @@ Every row below was read, not inferred. "Member" means a live row in `team_membe
 | Skill, `origin='repo'` | sync only | refused for all | refused for all (`routes/skills.ts:563-567`) | 409 |
 | Content source, workflows or templates | Admin (`services/content-sources.ts:328-340`) | n/a | Admin (`content-sources.ts:562-566`) | 404 |
 | Content source, skills only | Member (`content-sources.ts:376-380`) | n/a | Admin (`content-sources.ts:562-566`) | 404 |
-| Credential | Admin (`routes/credentials.ts:143-149`) | Admin | Admin (`routes/credentials.ts:765-771`) | 404 |
+| Credential | Member since 2026-10-14 (OAuth connect and create-only token); was Admin | Admin | Admin (`routes/credentials.ts:765-771`) | 404 |
 | API key | Admin (`routes/team-api-keys.ts:101`) | n/a | Admin (`routes/team-api-keys.ts:158`) | 404 |
 | Assistant or session | Member | Admin (`services/session-access.ts:106-114`) | Admin | 404 |
 | Memory file | Admin (`routes/memory.ts:132-135`) | Admin | Admin | 404 |

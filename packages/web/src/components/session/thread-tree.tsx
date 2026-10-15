@@ -31,6 +31,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Share2,
   Trash2,
   X,
 } from "lucide-react";
@@ -951,6 +952,7 @@ function ThreadNode({
             >
               <ThreadOriginIcon thread={thread} />
               <span className={cn("flex-1 truncate", unread && "font-medium text-ink")}>{label}</span>
+              {thread.share && <Share2 className="mx-1 h-3.5 w-3.5 shrink-0 text-muted" role="img" aria-label="Shared" />}
               {pullRequest && <ThreadPullRequestIcon pr={pullRequest} count={thread.pullRequests?.length ?? 0} />}
               {question
                 ? <Tooltip content={`Valet asks: ${question}`}><span className="mx-1.5 inline-flex"><StatusDot tone="warning" label="Valet asked you a question" /></span></Tooltip>

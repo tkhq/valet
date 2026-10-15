@@ -253,6 +253,118 @@ describe('LocalRunHost settle reporting', () => {
   });
 });
 
+describe('LocalRunHost approval park reporting', () => {
+  it('reports once per drive that opens a gate, after the park lists every waiting step', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const reports: { attempt: number; waiting: string[] }[] = [];
+    const host = new LocalRunHost({
+      store,
+      engine: makeRunHostFixtureEngine(),
+      clock: clock.now,
+      pollMs: 10,
+      sweepMs: 20,
+      leaseMs: 2_000,
+      heartbeatMs: 300,
+      onApprovalParked: async ({ runId, attempt }) => {
+        const run = await store.getRun(runId);
+        const waiting = (run?.waitingOn ?? []).map((wait) => (wait.kind === 'signal' ? wait.signalType : wait.kind));
+        reports.push({ attempt, waiting: waiting.sort() });
+      },
+    });
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [
+        { id: 't', type: 'trigger' },
+        { id: 'a', type: 'approval', prompt: 'A?', timeout: '1s', onDeny: 'skip' },
+        { id: 'b', type: 'approval', prompt: 'B?' },
+        { id: 'c', type: 'approval', prompt: 'C?' },
+      ],
+      edges: [
+        { from: 't', to: 'a' },
+        { from: 't', to: 'b' },
+        { from: 'a', to: 'c', fromOutput: 'false' },
+      ],
+    };
+
+    host.startHost();
+    try {
+      await host.start('run-gates', runParams(), definition);
+      await waitFor(() => reports.length === 1);
+      expect(reports[0].waiting).toEqual(['approval:a', 'approval:b']);
+
+      // Approving b opens no gate: a still waits, and nothing is reported.
+      await store.insertSignal({ runId: 'run-gates', signalId: 'approval:b:resolution', signalType: 'approval:b',
+        payload: { approved: true, resolvedBy: 'member' }, createdAt: clock.now() });
+      await host.wake('run-gates');
+      await waitFor(async () => (await store.getCheckpoints('run-gates')).some((cp) => cp.nodeId === 'b' && cp.status === 'completed'));
+      await waitFor(async () => (await store.getRun('run-gates'))?.status === 'parked');
+      expect(reports).toHaveLength(1);
+
+      // a times out without a resolution signal and c opens: a new report.
+      clock.advance(5_000);
+      await host.wake('run-gates');
+      await waitFor(() => reports.length === 2);
+      expect(reports[1].waiting).toEqual(['approval:c']);
+      expect(reports[1].attempt).toBeGreaterThan(reports[0].attempt);
+    } finally {
+      await host.stopHost();
+    }
+  });
+});
+
+describe('LocalRunHost approval park reporting after a failed drive', () => {
+  it('reports the gate on the retry when the drive that opened it failed to park', async () => {
+    const clock = makeClock();
+    const store = new InMemoryWorkflowStore(clock.now);
+    const parkRun = store.parkRun.bind(store);
+    let failPark = true;
+    store.parkRun = async (...args) => {
+      if (failPark) {
+        failPark = false;
+        throw new Error('transient park failure');
+      }
+      return parkRun(...args);
+    };
+    let opened = 0;
+    const reports: number[] = [];
+    const host = new LocalRunHost({
+      store,
+      engine: makeRunHostFixtureEngine(),
+      clock: clock.now,
+      pollMs: 10,
+      sweepMs: 20,
+      leaseMs: 50,
+      heartbeatMs: 300,
+      onApprovalPending: () => {
+        opened++;
+      },
+      onApprovalParked: ({ attempt }) => {
+        reports.push(attempt);
+      },
+    });
+    const definition: WorkflowDefinition = {
+      version: 'dag/v1',
+      nodes: [{ id: 't', type: 'trigger' }, { id: 'a', type: 'approval', prompt: 'A?' }],
+      edges: [{ from: 't', to: 'a' }],
+    };
+
+    host.startHost();
+    try {
+      await host.start('run-retry', runParams(), definition);
+      await waitFor(async () => {
+        clock.advance(100);
+        return reports.length > 0;
+      });
+    } finally {
+      await host.stopHost();
+    }
+    expect(opened).toBe(1);
+    expect(reports).toHaveLength(1);
+    expect((await store.getRun('run-retry'))?.waitingOn).toEqual([{ kind: 'signal', nodeId: 'a', signalType: 'approval:a', timeoutAt: undefined }]);
+  });
+});
+
 // ─── LocalRunHost-specific: poisoned-run cap ─────────────────────────────────
 // A run whose drive throws deterministically on every reclaim must settle as
 // `failed` after `maxConsecutiveDriveFailures` strikes instead of retrying

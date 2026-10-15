@@ -112,7 +112,7 @@ export function WorkspaceSwitcher({
               }
               if (pathname === "/integrations") {
                 // A link may name the workspace (`?workspace=user` from
-                // Connected accounts), and the URL outranks the stored key.
+                // a personal settings page), and the URL outranks the stored key.
                 // Name the new one, or the page snaps back to the old.
                 void navigate({ to: "/integrations", search: { workspace: o.key } });
                 return;

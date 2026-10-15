@@ -46,10 +46,10 @@ import { deleteTeamCredential } from "../services/team-resource-deletion.js";
 import { invalidateWorkflowSources } from "../services/content-sync/invalidation.js";
 import { refreshCredentialReadiness } from "../services/credential-readiness.js";
 import { Hono, type Context } from "hono";
-import { insertCredentialIfAbsent, lockTeamCredentialAuthority, replaceCredential } from "../services/credential-insert.js";
+import { insertCredentialIfAbsent, lockTeamCredentialRole, replaceCredential } from "../services/credential-insert.js";
 import { and, eq } from "drizzle-orm";
 import { fromJsonbColumn } from "@valet/store-postgres";
-import { credentialSecret, type CredentialOwner, type StoredCredential } from "@valet/engine";
+import { credentialSecret, type CredentialOwner, type CredentialStore, type StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
@@ -64,8 +64,9 @@ import { mutateTeamOnePassword } from "../services/team-onepassword-token.js";
 import { isDeniedCredentialService } from "../services/credential-resolution.js";
 import { mapOnePasswordError } from "./_onepassword-errors.js";
 import { canAdministerTeam, canViewTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
+import { isDeadConnection } from "../services/credential-resolution.js";
 import { deleteSharesFrom, listShareTeamsFrom, listTeamShares, revokeShare, shareCredential } from "../services/credential-shares.js";
-import { GITHUB_CREDENTIAL_SERVICE, checkGithubUserRow } from "../services/github-tokens.js";
+import { GITHUB_CREDENTIAL_SERVICE, checkGithubUserRow, isUsableGithubUserRow } from "../services/github-tokens.js";
 import { credentials } from "../schema/index.js";
 import { serviceDisplayName } from "../lib/service-display-name.js";
 import type {
@@ -104,6 +105,41 @@ function usableByTeamRead(stored: StoredCredential): boolean {
 }
 
 /**
+ * True when no run uses the team's own row, so it is not a connection
+ * teammates use. It blocks no share, and the team list marks it `unusable`.
+ *
+ * - A `github` row that `isUsableGithubUserRow` refuses. The invoker's team
+ *   branch and readiness skip it. A secretless row reads as absent
+ *   (`TeamCredentialStore`). A 1Password reference cannot be checked
+ *   without resolving it, so it counts as usable. A GitHub read never
+ *   refreshes (`OAuthRefreshingCredentialStore` excludes it).
+ * - An OAuth row past expiry with no refresh token. The refreshing store
+ *   skips it, so it is never renewed and never `isDeadConnection`. A dead
+ *   row does not count: members reconnect it instead of sharing.
+ *
+ * Takes the raw row, so a non-GitHub check reads no secret and refreshes
+ * no token.
+ */
+async function teamRowUnusable(
+  engineCredentials: CredentialStore,
+  teamId: string,
+  row: { service: string; type: string; expiresAt: number | null; refreshTokenEnc: string | null; metadata: unknown },
+  now: number,
+): Promise<boolean> {
+  if (row.service !== GITHUB_CREDENTIAL_SERVICE) {
+    return row.type === "oauth2" && row.refreshTokenEnc === null && row.expiresAt !== null && row.expiresAt <= now
+      && !isDeadConnection(row, now);
+  }
+  const stored = await engineCredentials.get({ type: "team", id: teamId }, GITHUB_CREDENTIAL_SERVICE);
+  if (!stored) return true;
+  if (onePasswordMeta(stored) !== null) return false;
+  return !isUsableGithubUserRow(
+    { accessToken: credentialSecret(stored), refreshToken: stored.refreshToken, expiresAt: stored.expiresAt, metadata: stored.metadata },
+    now,
+  );
+}
+
+/**
  * Team / org / user owner for a credential route. A failed team check
  * returns 404, same as the other team surfaces — existence-hiding.
  */
@@ -111,7 +147,8 @@ async function resolveCredentialOwner(
   c: Context<AppEnv>,
   scope: CredentialScope,
   teamId: string | undefined,
-  access: "read" | "write",
+  /** "create" adds a team connection: every team member may. "write" replaces one: admins only. */
+  access: "read" | "create" | "write",
 ): Promise<CredentialOwner | Response> {
   const user = c.var.user;
   if (scope === "org") {
@@ -130,9 +167,9 @@ async function resolveCredentialOwner(
     // uses: an admin who can already store the team's credentials must be
     // able to see them.
     const allowed =
-      access === "write"
-        ? await canAdministerTeam(db, teamId, user.id)
-        : await canViewTeam(db, teamId, user.id);
+      access === "write" ? await canAdministerTeam(db, teamId, user.id)
+        : access === "create" ? (await canAdministerTeam(db, teamId, user.id)) || (await isTeamMember(db, teamId, user.id))
+          : await canViewTeam(db, teamId, user.id);
     if (!allowed) return c.json({ error: "Team not found." }, 404);
     return { type: "team", id: teamId };
   }
@@ -243,7 +280,7 @@ async function toSummary(
   service: string,
   stored: StoredCredential,
   connectedAt: string,
-  extra?: { delegatedFrom?: string; referenceBroken?: boolean },
+  extra?: { delegatedFrom?: string; referenceBroken?: boolean; unusable?: boolean },
 ): Promise<CredentialSummary | null> {
   if (!isCredentialKind(stored.type)) return null;
   const metadata = stored.metadata;
@@ -256,6 +293,7 @@ async function toSummary(
     login: typeof metadata?.login === "string" ? metadata.login : undefined,
     identityOnly: metadata?.identityOnly === true ? true : undefined,
     refreshFailedAt: typeof metadata?.refreshFailedAt === "number" ? metadata.refreshFailedAt : undefined,
+    dead: isDeadConnection(stored, Date.now()) ? true : undefined,
     onepasswordRef: onePasswordMeta(stored)?.reference,
     onepasswordTokenScope: onePasswordMeta(stored)?.tokenScope,
     ...extra,
@@ -293,6 +331,8 @@ credentialsRouter.get("/", async (c) => {
           metadata: fromJsonbColumn<Record<string, unknown>>(row.metadata),
         },
         new Date(row.createdAt).toISOString(),
+        // The share pickers read this to agree with the delegate route.
+        (await teamRowUnusable(engineCredentials, owner.id, row, Date.now())) ? { unusable: true } : undefined,
       );
       if (summary) listed.push(summary);
     }
@@ -336,7 +376,8 @@ credentialsRouter.put("/:service", async (c) => {
   }
 
   const scope = parseCredentialScope(body.scope);
-  const ownerOrErr = await resolveCredentialOwner(c, scope, body.teamId, "write");
+  // Any team member may add a team connection. Replacing one stays with an admin.
+  const ownerOrErr = await resolveCredentialOwner(c, scope, body.teamId, body.createOnly === true ? "create" : "write");
   if (ownerOrErr instanceof Response) return ownerOrErr;
   const owner = ownerOrErr;
   if (body.createOnly !== undefined && typeof body.createOnly !== "boolean") {
@@ -403,6 +444,13 @@ credentialsRouter.put("/:service", async (c) => {
   // an ambiguous request, not a merge to resolve implicitly.
   if (body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) && "onepassword" in body.metadata) {
     return c.json({ error: "metadata.onepassword is reserved; use the onepassword request field" }, 400);
+  }
+  // `metadata.githubId` links a personal GitHub App installation to the
+  // member who owns that GitHub account (`services/github-app.ts`). Only the
+  // GitHub connect callback writes it, from GitHub's `GET /user`.
+  if (service === GITHUB_CREDENTIAL_SERVICE && body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) &&
+      "githubId" in body.metadata) {
+    return c.json({ error: "metadata.githubId is reserved. Connect GitHub through the GitHub connect flow." }, 400);
   }
   if (body.onepassword) {
     // Structural validation (reserved service name) takes precedence over
@@ -560,9 +608,8 @@ credentialsRouter.put("/:service", async (c) => {
 
   if (owner.type === "team") {
     const outcome = await db.transaction(async (tx) => {
-      if (!(await lockTeamCredentialAuthority(tx, { orgId: user.orgId, userId: user.id, teamId: owner.id }))) {
-        return "access_changed";
-      }
+      const role = await lockTeamCredentialRole(tx, { orgId: user.orgId, userId: user.id, teamId: owner.id });
+      if (!role || (role === "member" && !body.createOnly)) return "access_changed";
       if (body.createOnly) {
         const inserted = await insertCredentialIfAbsent(tx, c.var.providers.encryptionKey, owner, service, credential);
         if (inserted) await invalidateWorkflowSources(tx, { teamId: owner.id });
@@ -576,7 +623,7 @@ credentialsRouter.put("/:service", async (c) => {
       return c.json({ error: "Team access changed. Ask a team admin to restart the connection." }, 404);
     }
     if (outcome === "exists") {
-      return c.json({ error: "This team already has a connection for this service. Ask a team admin to remove it before connecting another account." }, 409);
+      return c.json({ error: "This team already has a connection for this service. Ask a team admin to remove it, then connect again." }, 409);
     }
   } else {
     await engineCredentials.save(owner, service, credential);
@@ -683,14 +730,39 @@ credentialsRouter.post("/:service/delegate", async (c) => {
         {
           error:
             `Your GitHub connection cannot be shared: ${health.reason}. ` +
-            "Connect GitHub in Settings → Connected accounts, then share it with the team.",
+            "Connect GitHub in Integrations → GitHub, then share it with the team.",
         },
         400,
       );
     }
   }
+  // A team with its own connection for this service uses it. A member's
+  // share beside it would add an account the team did not choose, so the
+  // team's connection blocks new shares. A connection that stopped working
+  // is repaired in place, which any member may do. A row no run uses
+  // (`teamRowUnusable`) blocks nothing: runs skip it or get the provider's
+  // refusal, and Team Integrations offers no reconnect for it.
+  const [teamRow] = await db
+    .select({
+      service: credentials.service, type: credentials.type, expiresAt: credentials.expiresAt,
+      refreshTokenEnc: credentials.refreshTokenEnc, metadata: credentials.metadata,
+    })
+    .from(credentials)
+    .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, body.teamId), eq(credentials.service, service)))
+    .limit(1);
+  if (teamRow && !(await teamRowUnusable(engineCredentials, body.teamId, teamRow, Date.now()))) {
+    return c.json(
+      {
+        error: isDeadConnection(teamRow, Date.now())
+          ? `${team.name}'s own ${label} connection stopped working. Reconnect it in the team's Integrations instead of sharing your own.`
+          : `${team.name} already has its own ${label} connection, and teammates use it. ` +
+            `To use your account instead, ask a team admin to remove the team's ${label} connection, then share yours.`,
+      },
+      409,
+    );
+  }
   // Each member keeps their own share, so sharing never displaces another
-  // member's account or the team's own connection.
+  // member's account.
   await db.transaction(async (tx) => {
     await shareCredential(tx, { teamId: body.teamId, service, userId: user.id, createdAt: Date.now() });
     await invalidateWorkflowSources(tx, { teamId: body.teamId });

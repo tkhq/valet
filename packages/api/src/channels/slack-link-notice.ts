@@ -6,7 +6,7 @@ import { identityForExternal } from "./identity-links.js";
 export const SLACK_LINK_NOTICE = "To use this team assistant, you need a Valet account linked to Slack. " +
   "If you do not have a Valet account, sign up in the Valet web app. " +
   "If signup requires an invitation, ask your Valet administrator. " +
-  "Then sign in and open Settings → Connected accounts to link Slack. " +
+  "Then sign in and open Integrations → Slack to link Slack. " +
   "Send your message again after linking.";
 
 const COOLDOWN_MS = 5 * 60_000;

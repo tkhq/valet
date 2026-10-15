@@ -1,7 +1,8 @@
 /**
  * Shared team credentials: a member's own account for a service, shared with
  * a team. Each member keeps their own share, so a team can hold several per
- * service beside its own team connection. A share holds no secret: a read
+ * service. A team with its own connection for a service takes no new share of
+ * it (`routes/credentials.ts`); shares made before the team connected stay. A share holds no secret: a read
  * follows it to the member's live user credential, and a share never
  * outlives its source. Every route that deletes a user row calls
  * `deleteSharesFrom`, so the shares go with it.

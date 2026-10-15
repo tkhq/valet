@@ -157,12 +157,12 @@ function correctiveAction(credential: SkillRepoCredentialDescriptor): string {
     return "Valet read it with the GitHub App installed for this organization. Add the repository to the App installation on GitHub, then sync again.";
   }
   if (credential.kind === "unavailable") {
-    return "Valet has a GitHub credential for this source but cannot read it. This occurs after a change to the server encryption key. Connect GitHub again in Settings → Connected accounts, then sync again.";
+    return "Valet has a GitHub credential for this source but cannot read it. This occurs after a change to the server encryption key. Connect GitHub again in Integrations → GitHub, then sync again.";
   }
   if (credential.kind === "missing_app") {
     return "Valet has no GitHub App installation that can read this repository. Install the GitHub App for this organization, or add the repository to the App installation, then sync again.";
   }
-  return "Valet read it with no GitHub credential. To read a private repository, connect GitHub in Settings → Connected accounts, then sync again. If the repository is public, check the name for a spelling mistake.";
+  return "Valet read it with no GitHub credential. To read a private repository, connect GitHub in Integrations → GitHub, then sync again. If the repository is public, check the name for a spelling mistake.";
 }
 
 /** Thrown when GitHub reports the repository or ref as missing. The message

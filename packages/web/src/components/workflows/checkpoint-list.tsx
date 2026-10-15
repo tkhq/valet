@@ -3,6 +3,9 @@ import { StepLogs } from "./step-logs";
 import { Link } from "@tanstack/react-router";
 import { RUN_STATUS_GLYPH, type NodeRunStatus } from "./editor/flow-node";
 import { formatRunOutput } from "./run-detail-helpers";
+import type { WorkflowModelChange, WorkflowStepCost } from "@valet/api/wire";
+import { Badge } from "~/components/primitives";
+import { formatTokens, formatUsdPrecise } from "~/lib/format-usage";
 
 export interface CheckpointLike {
   nodeId: string;
@@ -58,8 +61,14 @@ export function CheckpointList({
   promotedNodeId,
   nodeStatuses,
   nodeOrder = [],
+  stepCosts = [],
+  modelChanges = [],
 }: {
   checkpoints: CheckpointLike[];
+  /** Model spend per step; a step with no model calls has none. */
+  stepCosts?: WorkflowStepCost[];
+  /** Steps whose models changed since the previous run with the same steps. */
+  modelChanges?: WorkflowModelChange[];
   /** Keep output collapsed when the result panel already shows it. */
   promotedNodeId?: string;
   nodeStatuses?: Record<string, NodeRunStatus>;
@@ -69,15 +78,20 @@ export function CheckpointList({
     return <p className="text-sm text-muted">No steps have started yet.</p>;
   }
   const order = new Map(nodeOrder.map((id, index) => [id, index]));
+  const costs = new Map(stepCosts.map((cost) => [`${cost.nodeId}:${cost.iteration}`, cost]));
+  const changes = new Map(modelChanges.map((change) => [change.nodeId, change]));
   return (
     <ol className="overflow-hidden rounded-lg border border-line divide-y divide-line">
       {[...checkpoints].sort((a, b) =>
         (order.get(a.nodeId) ?? nodeOrder.length) - (order.get(b.nodeId) ?? nodeOrder.length) ||
         a.nodeId.localeCompare(b.nodeId) || a.iteration - b.iteration,
-      ).map((cp, index) => (
+      ).map((cp, index, sorted) => (
         <CheckpointRow
           key={`${cp.nodeId}:${cp.iteration}`}
           checkpoint={cp}
+          cost={costs.get(`${cp.nodeId}:${cp.iteration}`)}
+          // A change covers every iteration of a step, so only its first row says so.
+          modelChange={sorted[index - 1]?.nodeId === cp.nodeId ? undefined : changes.get(cp.nodeId)}
           number={(order.get(cp.nodeId) ?? index) + 1}
           promoted={cp.nodeId === promotedNodeId}
           waiting={cp.status === "intent" && nodeStatuses?.[cp.nodeId] === "waiting"}
@@ -87,8 +101,10 @@ export function CheckpointList({
   );
 }
 
-function CheckpointRow({ checkpoint, number, promoted, waiting }: {
+function CheckpointRow({ checkpoint, cost, modelChange, number, promoted, waiting }: {
   checkpoint: CheckpointLike;
+  cost?: WorkflowStepCost;
+  modelChange?: WorkflowModelChange;
   number: number;
   promoted: boolean;
   waiting: boolean;
@@ -102,13 +118,25 @@ function CheckpointRow({ checkpoint, number, promoted, waiting }: {
   return (
     <li className="min-w-0 bg-paper">
       <details className="group" open={open}>
-        <summary className="flex min-h-11 cursor-pointer list-none items-center gap-3 px-4 py-3 hover:bg-neutral-100 dark:hover:bg-neutral-800 [&::-webkit-details-marker]:hidden">
+        <summary className="flex min-h-11 cursor-pointer list-none items-baseline gap-3 px-4 py-3 hover:bg-neutral-100 dark:hover:bg-neutral-800 [&::-webkit-details-marker]:hidden">
           <span className="text-muted transition-transform group-open:rotate-90" aria-hidden>›</span>
           <span className="w-5 shrink-0 text-xs text-muted tabular-nums" aria-hidden>{number}</span>
           <span className={`shrink-0 text-sm ${TEXT_COLOR[status]}`} aria-hidden>{RUN_STATUS_GLYPH[status]}</span>
-          <span className="min-w-0 flex-1 break-words text-sm font-medium text-ink">{checkpoint.nodeId}</span>
-          {checkpoint.iteration > 0 && <span className="shrink-0 text-xs text-muted">Iteration {checkpoint.iteration + 1}</span>}
-          <span className={`shrink-0 text-xs ${TEXT_COLOR[status]}`}>{denied ? "Denied" : LABEL[status]}</span>
+          <span className="min-w-0 flex-1">
+            <span className="block break-words text-sm font-medium text-ink">{checkpoint.nodeId}</span>
+            {cost && cost.models.length > 0 && <span className="block break-words text-xs text-muted">{cost.models.join(", ")}</span>}
+            {modelChange && (
+              <Badge variant="warning" className="mt-1 whitespace-normal break-words">
+                {`Model changed since the last run: ${modelChange.previous.join(", ")} → ${modelChange.current.join(", ")}. The workflow was not edited.`}
+              </Badge>
+            )}
+          </span>
+          {checkpoint.iteration > 0 && <span className="shrink-0 text-xs text-muted"><span className="sm:hidden" aria-hidden>#{checkpoint.iteration + 1}</span><span className="max-sm:sr-only">Iteration {checkpoint.iteration + 1}</span></span>}
+          {cost && <StepCost cost={cost} />}
+          {/* On a phone the ✓ alone says Completed, so that label gives the
+              name its room. A denied step also shows ✓, so it and every
+              other state keep their label. */}
+          <span className={`text-xs ${status === "succeeded" && !denied ? "sr-only sm:not-sr-only sm:shrink-0" : "shrink-0"} ${TEXT_COLOR[status]}`}>{denied ? "Denied" : LABEL[status]}</span>
         </summary>
         <div className="min-w-0 space-y-3 border-t border-line px-4 py-3 sm:pl-16">
           {(checkpoint.threadId || checkpoint.sessionId || checkpoint.childRunId) && (
@@ -146,5 +174,18 @@ function CheckpointRow({ checkpoint, number, promoted, waiting }: {
       </details>
       {checkpoint.error != null && <p className="break-words px-4 pb-3 text-xs text-danger-500 sm:pl-16">{checkpoint.error}</p>}
     </li>
+  );
+}
+
+/** What the step's model calls cost. Unpriced calls make it a lower bound. */
+function StepCost({ cost }: { cost: WorkflowStepCost }) {
+  const unpriced = cost.unpricedTurns > 0;
+  const detail = `${formatTokens(cost.totalTokens)} tokens over ${cost.turns} ${cost.turns === 1 ? "call" : "calls"}`
+    + (unpriced ? ` · ${cost.unpricedTurns} unpriced` : "");
+  return (
+    <span className="shrink-0 text-xs tabular-nums text-muted" title={detail}>
+      {formatUsdPrecise(cost.costUsd)}{unpriced ? "+" : ""}
+      <span className="sr-only"> model spend, {detail}</span>
+    </span>
   );
 }

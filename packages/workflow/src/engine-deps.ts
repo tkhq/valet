@@ -40,6 +40,10 @@ export interface WorkflowAwaitResultOptions {
 export interface WorkflowLlmCompleteRequest {
   /** Identifies the run whose org model catalog resolves the model spec. */
   runId: string;
+  /** The step and foreach iteration the call bills to. The host records the
+   * call's usage under the step, so Usage can show what each step cost. */
+  nodeId: string;
+  iteration: number;
   model: string;
   system?: string;
   prompt: string;

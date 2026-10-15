@@ -55,6 +55,7 @@ import {
   rawToThreadRow,
   rawToWakeupRow,
   rowToEntry,
+  USAGE_ENTRY_TYPE,
   rowToGate,
   rowToLease,
   rowToWakeup,
@@ -685,8 +686,8 @@ export class PgSessionStore implements SessionStore {
       const rawThread = threadResult.rows[0];
       if (!rawThread) return null;
       const entryResult = await tx.query(
-        "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 ORDER BY created_at ASC, seq ASC",
-        [sessionId, threadId],
+        "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 AND entry_type <> $3 ORDER BY created_at ASC, seq ASC",
+        [sessionId, threadId, USAGE_ENTRY_TYPE],
       );
       return {
         thread: rowToThread(rawToThreadRow(rawThread)),
@@ -721,8 +722,8 @@ export class PgSessionStore implements SessionStore {
         const scoped = opts?.queueItemId !== undefined;
         const limit = opts?.limit && opts.limit > 0 ? opts.limit : undefined;
         const newestFirst = scoped || limit !== undefined;
-        const conditions = ["session_id = $1", "thread_id = $2"];
-        const params: unknown[] = [sessionId, threadId];
+        const conditions = ["session_id = $1", "thread_id = $2", "entry_type <> $3"];
+        const params: unknown[] = [sessionId, threadId, USAGE_ENTRY_TYPE];
         if (scoped) {
           params.push(opts.queueItemId);
           conditions.push(`queue_item_id = $${params.length}`);
@@ -1127,6 +1128,12 @@ export class PgSessionStore implements SessionStore {
     return raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
   }
 
+  async getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null> {
+    const result = await this.db.query("SELECT * FROM engine_queue_items WHERE session_id = $1 AND dispatch_id = $2", [sessionId, dispatchId]);
+    const raw = result.rows[0];
+    return raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
+  }
+
   async latestActivityAt(sessionId: string): Promise<number | null> {
     // MAX(updated_at) is NULL when the session has no queue items — toNumOrNull
     // maps that to null. updated_at is a bigint ms column, so it must funnel
@@ -1469,15 +1476,6 @@ export class PgSessionStore implements SessionStore {
       [...transitionParams(id, from, to, patch, updatedAt), releaseCause],
     );
     return r.rows[0] ? rowToWakeup(rawToWakeupRow(r.rows[0])) : null;
-  }
-
-  async getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null> {
-    const result = await this.db.query("SELECT * FROM engine_queue_items WHERE session_id = $1 AND dispatch_id = $2", [
-      sessionId,
-      dispatchId,
-    ]);
-    const raw = result.rows[0];
-    return raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
   }
 
   async getWakeup(id: string): Promise<Wakeup | null> {

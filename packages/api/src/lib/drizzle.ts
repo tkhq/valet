@@ -26,6 +26,7 @@ import { prepareMemberActivity, MEMBER_ACTIVITY_PUBLISH_SQL } from "./usage-memb
 import { prepareAuxUsageRollups, AUX_USAGE_PUBLISH_SQL } from "./usage-aux-rollups.js";
 import { prepareUsageDaily, prepareUsageHourly, usageHourlyPublishSql } from "./usage-hourly-migration.js";
 import { prepareUsageAnalytics, usageAnalyticsPublishSql, projectedCostViewSql } from "./usage-analytics-migration.js";
+import { prepareUsageStepAttribution, USAGE_STEP_ATTRIBUTION_PUBLISH_SQL, WORKFLOW_RUN_ORG_BACKFILL, WORKFLOW_RUN_ORG_SQL } from "./usage-step-attribution.js";
 import * as schema from "../schema/index.js";
 
 /** Application Drizzle handle. The engine's session store has its own
@@ -579,6 +580,31 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     probe: { kind: "column", table: "session_threads", column: "last_user_activity_at" },
     sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "last_user_activity_at" bigint',
   },
+  { describe: "child completion reply deliveries", probe: { kind: "table", table: "child_reply_deliveries" }, sql: `CREATE TABLE IF NOT EXISTS "child_reply_deliveries" (
+  "id" text PRIMARY KEY NOT NULL,
+  "org_id" text NOT NULL,
+  "session_id" text NOT NULL,
+  "thread_id" text NOT NULL,
+  "queue_item_id" text,
+  "next_attempt_at" bigint NOT NULL,
+  "completed_at" bigint,
+  "attempts" integer DEFAULT 0 NOT NULL,
+  "last_error" text,
+  "failed_at" bigint,
+  "created_at" bigint,
+  "child_session_id" text,
+  "child_queue_item_id" text
+);` },
+  { describe: "child completion reply due index", probe: { kind: "index", index: "child_reply_deliveries_due" }, sql: `CREATE INDEX IF NOT EXISTS "child_reply_deliveries_due" ON "child_reply_deliveries" ("org_id", "completed_at", "next_attempt_at");` },
+  { describe: "child completion reply terminal failures", probe: { kind: "column", table: "child_reply_deliveries", column: "failed_at" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "failed_at" bigint' },
+  { describe: "child completion reply creation time", probe: { kind: "column", table: "child_reply_deliveries", column: "created_at" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "created_at" bigint' },
+  { describe: "child completion reply child session", probe: { kind: "column", table: "child_reply_deliveries", column: "child_session_id" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "child_session_id" text' },
+  { describe: "child completion reply child submission", probe: { kind: "column", table: "child_reply_deliveries", column: "child_queue_item_id" }, sql: 'ALTER TABLE "child_reply_deliveries" ADD COLUMN IF NOT EXISTS "child_queue_item_id" text' },
+  {
+    describe: "session_threads.share_mode column",
+    probe: { kind: "column", table: "session_threads", column: "share_mode" },
+    sql: 'ALTER TABLE "session_threads" ADD COLUMN IF NOT EXISTS "share_mode" text',
+  },
   {
     describe: "session_repos.resolved_ref column",
     probe: { kind: "column", table: "session_repos", column: "resolved_ref" },
@@ -785,6 +811,14 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "child_watches.origin_json column",
     probe: { kind: "column", table: "child_watches", column: "origin_json" },
     sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "origin_json" text',
+  },
+  {
+    // Reply-route state of a child watch. Null on older rows, which read
+    // as "manual": their takeover or cross-thread history is unknown, so
+    // they never post automatically. New watches store an explicit route.
+    describe: "child_watches.reply_route column",
+    probe: { kind: "column", table: "child_watches", column: "reply_route" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "reply_route" text',
   },
   {
     // The last delivered message ts on a followed thread, read by the
@@ -1655,6 +1689,13 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "reasoning_settings" jsonb',
   },
   {
+    // Org default tier for new sessions. Null = the "s" fallback, so every
+    // existing org keeps its current behavior.
+    describe: "orgs.default_tier column",
+    probe: { kind: "column", table: "orgs", column: "default_tier" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "default_tier" text',
+  },
+  {
     // Personal default reasoning level (model selector overhaul).
     // Null = inherit.
     describe: "user.default_reasoning column",
@@ -1831,6 +1872,19 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
       `WHERE "owner_type" = 'team' AND "credential_owner_mode" IS NULL RETURNING "id"`,
   },
   {
+    // Before the usage repairs: the action fact rule reads it.
+    describe: "action_invocations.queue_item_id column",
+    probe: { kind: "column", table: "action_invocations", column: "queue_item_id" },
+    sql: 'ALTER TABLE "action_invocations" ADD COLUMN IF NOT EXISTS "queue_item_id" text',
+  },
+  {
+    // Before the usage repairs: their views and the billing rule read it.
+    describe: "workflow_runs.org_id column",
+    probe: { kind: "column", table: "workflow_runs", column: "org_id" },
+    sql: WORKFLOW_RUN_ORG_SQL,
+    backfill: WORKFLOW_RUN_ORG_BACKFILL,
+  },
+  {
     describe: "usage_entry_facts projection and indexes",
     probe: { kind: "column", table: "usage_entries", column: "entry_id" },
     prepare: prepareUsageAnalytics,
@@ -1885,6 +1939,9 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   {describe:"usage_daily_org_window",probe:{kind:"index",index:"usage_daily_org_window"},sql:"CREATE INDEX IF NOT EXISTS usage_daily_org_window ON usage_daily(org_id,created_at)"},
   {describe:"usage_daily_empty",probe:{kind:"index",index:"usage_daily_empty"},sql:"CREATE INDEX IF NOT EXISTS usage_daily_empty ON usage_daily(created_at) WHERE turns=0 AND tool_calls=0 AND pull_requests=0 AND reviews=0"},
   {describe:"usage_daily_outcomes",probe:{kind:"index",index:"usage_daily_outcomes"},sql:"CREATE INDEX IF NOT EXISTS usage_daily_outcomes ON usage_daily(created_at,session_id) WHERE pull_requests>0 OR reviews>0"},
+  // After every rollup and its views: the backfill moves facts, and their
+  // triggers move the hours and days.
+  { describe: "usage workflow step attribution", probe: { kind: "column", table: "usage_step_attribution_ready", column: "version" }, prepare: prepareUsageStepAttribution, sql: USAGE_STEP_ATTRIBUTION_PUBLISH_SQL },
 
 ];
 

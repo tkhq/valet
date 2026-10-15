@@ -1,7 +1,8 @@
 /**
  * A signed-in user's own GitHub connection through the organization's App.
  * A successful callback saves a repository-capable user `github` credential:
- * `{ accessToken, refreshToken?, expiresAt?, login }`.
+ * `{ accessToken, refreshToken?, expiresAt?, login, githubId? }`. `githubId`
+ * is GitHub's numeric account id from `GET /user`.
  *
  * The callback runs behind host authentication, because the browser that
  * started the flow returns with its session. The host also checks that the
@@ -9,33 +10,25 @@
  * another user's browser.
  */
 import type { PluginHttpRequest } from "@valet/engine";
-import type { GithubConnectionCapability, GithubEndpoints, GithubPostAuthDestination } from "./capabilities.js";
-import { isRecord, json, noContent, queryParam, readJson, redirect } from "./respond.js";
+import type { GithubConnectionCapability, GithubEndpoints } from "./capabilities.js";
+import { isRecord, json, noContent, queryParam, redirect } from "./respond.js";
 
 const NO_APP = "no GitHub App is configured for this organization; ask an admin to set it up first";
 
-/** Only the Integrations reconnect may change the destination. A fixed value
- * keeps OAuth state from carrying an external redirect. */
-function postAuthDestination(value: unknown): GithubPostAuthDestination | undefined {
-  return value === "integrations" ? value : undefined;
-}
-
 export async function connectStart(
-  request: PluginHttpRequest,
   connection: GithubConnectionCapability,
   endpoints: GithubEndpoints,
 ): Promise<Response> {
   const clientId = await connection.oauthClientId();
   if (clientId === null) return json({ error: NO_APP }, 409);
 
-  const body = readJson(request);
-  const destination = isRecord(body) ? postAuthDestination(body.postAuthDestination) : undefined;
-  const state = connection.signConnectState(destination);
+  const state = connection.signConnectState();
   const url = `${endpoints.githubUrl}/login/oauth/authorize?client_id=${encodeURIComponent(clientId)}&state=${encodeURIComponent(state)}`;
   return json({ url });
 }
 
-/** The App's state for any member: no App ID, slug, logins, or secrets. */
+/** The App's state for any member: no App ID, slug, secrets, or logins
+ * other than the caller's own. */
 export async function connectOrgStatus(connection: GithubConnectionCapability): Promise<Response> {
   return json(await connection.orgStatus());
 }
@@ -131,21 +124,18 @@ export async function connectCallback(
   }
   const login = isRecord(userPayload) && typeof userPayload.login === "string" ? userPayload.login : null;
   if (!login) return json({ error: "malformed response from GitHub" }, 502);
+  const githubId = isRecord(userPayload) && typeof userPayload.id === "number" ? String(userPayload.id) : undefined;
 
   await grant.saveConnection({
     accessToken: token.accessToken,
     refreshToken: token.refreshToken,
     expiresAt: token.expiresInMs !== undefined ? Date.now() + token.expiresInMs : undefined,
     login,
+    ...(githubId ? { githubId } : {}),
   });
 
-  // The Integrations page reads `?connected=<service>`. The Settings
-  // connected-accounts page reads `?github=connected`.
-  const { destination, query } =
-    grant.postAuthDestination === "integrations"
-      ? { destination: "/integrations", query: "connected=github" }
-      : { destination: "/settings/connected-accounts", query: "github=connected" };
-  return redirect(`${grant.returnTo}${destination}?${query}`);
+  // Integrations holds every connection and reads `?connected=<service>`.
+  return redirect(`${grant.returnTo}/integrations?connected=github`);
 }
 
 export async function connectDisconnect(connection: GithubConnectionCapability): Promise<Response> {

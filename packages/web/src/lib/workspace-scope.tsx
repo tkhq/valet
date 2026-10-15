@@ -77,17 +77,24 @@ export function resolveWorkspaceKey(args: {
   return args.available.includes(args.stored) ? args.stored : PERSONAL;
 }
 
-export function WorkspaceScopeProvider({ children }: { children: ReactNode }) {
+export function WorkspaceScopeProvider({ children, persist = true }: {
+  children: ReactNode;
+  /** False keeps the selection in memory only. The UI stress gallery sets it:
+   * its fixture teams lack the tab's real team, and writing its fallback
+   * would replace the workspace the tab had selected. */
+  persist?: boolean;
+}) {
   const [stored, setStored] = useState<string>(() => loadStored());
 
   const setKey = useCallback((next: string) => {
     setStored(next);
+    if (!persist) return;
     try {
       window.sessionStorage.setItem(STORAGE_KEY, next);
     } catch {
       // Non-persistent environments still get the in-session behaviour.
     }
-  }, []);
+  }, [persist]);
 
   // `strict: false` because this provider sits above the route tree and must
   // read the same search param from any route, including those that declare

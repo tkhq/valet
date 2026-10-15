@@ -37,6 +37,8 @@ import {
   buildOverheardDigest,
   deriveQueueState,
   formatSenderLine,
+  attributedAuthor,
+  type AuthorAttribution,
   isOverheardDigestMeta,
   isSignalContent,
   MAX_PENDING_PER_THREAD,
@@ -80,6 +82,7 @@ import {
 import { context as otelContext, trace as otelTrace, type Span } from "@opentelemetry/api";
 import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
+import { modelCallUsage } from "./model-call-usage.js";
 import {
   applyPrune,
   ELIDED_TOOL_OUTPUT,
@@ -141,10 +144,13 @@ import type {
   ToolResult,
   WriteFence,
 } from "./types.js";
-import { THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { MESSAGE_TURN_ERROR_KEY, THREAD_USER_TIMEZONE_KEY } from "./types.js";
 
 /** Bound on `awaitResult`'s merged-constituent delegation chain (Task 6). */
 const MAX_MERGE_DELEGATION_DEPTH = 5;
+
+/** Bound on the provider error text a failed turn keeps on its assistant entry. */
+const TURN_ERROR_MAX_CHARS = 1_000;
 
 /**
  * Credential-less claim attempts before settling `failed` (2 releases + 1
@@ -2151,14 +2157,15 @@ export class Thread {
   }
 
   /**
-   * Whether user messages carry a `[from: …]` sender line in the LLM
-   * transcript. On when the session is shared (team/org-owned) — several
-   * people prompt the same thread there, and the model cannot differentiate
-   * them from the text alone. Personal sessions have one author; the line
-   * would be noise.
+   * Which user messages carry a `[from: …]` sender line in the LLM
+   * transcript. Every authored message on a team or org session: several
+   * people prompt the same thread there, and the model cannot tell them
+   * apart from the text alone. On a personal session, only a message from
+   * someone other than the owner, such as a reply in a shared thread. The
+   * owner's own line would be noise.
    */
-  private get attributeAuthors(): boolean {
-    return this.session.owner.type !== "user";
+  private get attributeAuthors(): AuthorAttribution {
+    return this.session.owner.type !== "user" || { ownerId: this.session.owner.id };
   }
 
   setMode(mode: QueueMode): void {
@@ -3947,7 +3954,7 @@ export class Thread {
     // this entry on reload — same gate (shared owner, non-signal), same
     // render function — or the hot and cold transcripts diverge.
     const sender =
-      this.attributeAuthors && !isSignalContent(item.content) ? item.author : undefined;
+      isSignalContent(item.content) ? undefined : attributedAuthor(this.attributeAuthors, item.author);
     try {
       // A role can replace the queue-item model. Publish the replacement
       // after the overlay applies and before the main agent run.
@@ -5193,7 +5200,7 @@ export class Thread {
   }
 
   private buildTools(): AgentTool[] {
-    const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseExternalSender);
+    const all: ToolDef[] = [this.nativeImages.tool(), ...this.session.builtinTools, ...(this.session.options.tools ?? [])].map(refuseOutsideAuthors);
     return all.map((def) =>
       toAgentTool(def, ({ signal, toolCallId, toolName, toolArgs }) =>
         this.buildToolContext({ signal, toolCallId, toolName, toolArgs }),
@@ -5477,6 +5484,12 @@ export class Thread {
               : event.message.stopReason === "stop" || event.message.stopReason === "length"
               ? "end_turn"
               : undefined; // toolUse (mid-turn) carries no stopReason
+          // The live `error` event is gone after a reload. Keep the provider's
+          // reason on the entry, so the transcript can show why the turn failed.
+          const turnError =
+            event.message.stopReason === "error" && event.message.errorMessage
+              ? attrTruncate(event.message.errorMessage, TURN_ERROR_MAX_CHARS)
+              : undefined;
           const entry: MessageEntry = {
             id: this.currentAssistantMessageId,
             sessionId: this.session.id,
@@ -5489,6 +5502,7 @@ export class Thread {
             model: event.message.model,
             queueItemId: this.runningItem?.id,
             stopReason,
+            ...(turnError ? { metadata: { [MESSAGE_TURN_ERROR_KEY]: turnError } } : {}),
             createdAt: Date.now(),
           };
           if (this.checkpointEntry?.id === entry.id) {
@@ -5609,16 +5623,12 @@ export class Thread {
         let turnModel: string | undefined;
         if (event.message.role === "assistant") {
           const u = event.message.usage;
-          this.lastAssistantUsage = {
-            input: u.input,
-            output: u.output,
-            cacheRead: u.cacheRead,
-            cacheWrite: u.cacheWrite,
-            total: u.totalTokens || u.input + u.output + u.cacheRead + u.cacheWrite,
-          };
-          // All-zero usage (dev fakes, providers that don't report) is
-          // "no usage reported" — omit, mirroring the cost-is-null rule.
-          if (this.lastAssistantUsage.total > 0) turnUsage = { ...this.lastAssistantUsage };
+          // The shared rule (`modelCallUsage`): all-zero usage is "no usage
+          // reported", and an unpriced call has no cost, never "$0".
+          const call = modelCallUsage(u);
+          this.lastAssistantUsage = call.reported;
+          turnUsage = call.usage;
+          turnCost = call.cost;
           turnModel = event.message.model;
           // Cache-break telemetry (TKAI-320): compare against the previous
           // turn's snapshot and count breaks by cause. Alert-only — nothing
@@ -5644,19 +5654,6 @@ export class Thread {
               }
             }
             this.prevCacheSnapshot = snapshot;
-          }
-          // Cost is null, not zero: unpriced models (custom providers, dev
-          // fakes) omit the field entirely — a missing value reads
-          // "unpriced", never "$0".
-          const c = u.cost;
-          if (c && c.total > 0) {
-            turnCost = {
-              input: c.input,
-              output: c.output,
-              cacheRead: c.cacheRead,
-              cacheWrite: c.cacheWrite,
-              total: c.total,
-            };
           }
           if (this.currentAssistantEntry && turnUsage) {
             const entry = this.currentAssistantEntry;
@@ -6401,7 +6398,7 @@ export function entriesToAgentMessages(
      * team/org sessions, where prompts come from different people). Signal
      * entries are exempt — their envelope already names the sender.
      */
-    attributeAuthors?: boolean;
+    attributeAuthors?: AuthorAttribution;
     /**
      * This thread's key. When set and a compaction is active, the
      * <previous-context> wrapper tells the model the covered entries are
@@ -6468,7 +6465,7 @@ export function entriesToAgentMessages(
           : e.signal
           ? renderSignalEnvelope(e.signal, e.content)
           : renderReplyContext(e.content, e.metadata);
-      const sender = opts?.attributeAuthors && !e.signal ? e.author : undefined;
+      const sender = e.signal ? undefined : attributedAuthor(opts?.attributeAuthors, e.author);
       const contentBlocks = userContentBlocks(text, e.attachments, sender);
       out.push({
         role: "user",
@@ -6574,12 +6571,28 @@ export function toolOutcome(result: unknown): { outcome?: ToolResult["outcome"] 
  * artifact, and child tools act as the workspace, so they refuse that turn. */
 const EXTERNAL_SENDER_READS = new Set(["list_tools", "list_threads", "thread_read"]);
 
-function refuseExternalSender(def: ToolDef): ToolDef {
-  if (def.policyChecked || EXTERNAL_SENDER_READS.has(def.name)) return def;
+/** A member other than the owner wrote this turn in a personal session: a
+ * reply in a shared thread. Policy-checked plugin actions run with the
+ * owner's accounts and ask the owner. The tools a sender with no Valet
+ * account may not run, and the owner's other threads and memory
+ * (`ToolDef.ownerOnly`), stay the owner's. */
+function guestTurn(ctx: ToolContext): boolean {
+  return ctx.owner?.type === "user" && ctx.userId !== ctx.owner.id;
+}
+
+function refuseOutsideAuthors(def: ToolDef): ToolDef {
+  const actsAsWorkspace = !def.policyChecked && !EXTERNAL_SENDER_READS.has(def.name);
+  if (!actsAsWorkspace && !def.ownerOnly) return def;
   return {
     ...def,
-    execute: (args, ctx) => ctx.externalSender
-      ? Promise.resolve({ text: `[not_available] ${def.name} acts as the workspace, and this message came from someone with no Valet account. Answer in words, or ask a teammate with a Valet account to do it.` })
-      : def.execute(args, ctx),
+    execute: (args, ctx) => {
+      if (actsAsWorkspace && ctx.externalSender) {
+        return Promise.resolve({ text: `[not_available] ${def.name} acts as the workspace, and this message came from someone with no Valet account. Answer in words, or ask a teammate with a Valet account to do it.` });
+      }
+      if (guestTurn(ctx)) {
+        return Promise.resolve({ text: `[not_available] ${def.name} acts as the owner's workspace, and this message came from a member replying in a shared thread. Answer from this thread, or ask the owner to do it.` });
+      }
+      return def.execute(args, ctx);
+    },
   };
 }

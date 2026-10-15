@@ -1,10 +1,13 @@
 import { useState, type ReactNode } from "react";
 import type { CredentialSummary, OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 import { useCredentials, useDisconnectCredential, useRevokeDelegation } from "~/api/integrations";
+import { useSubmitTeamDeletionRequest } from "~/api/team-deletion-requests";
 import { Badge, Button, ConfirmDialog, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 import { CardHeading } from "./integration-card";
 import { displayName } from "./display-name";
+import { credentialRowHealth, healthBadge, healthNote, isTeamOwnConnection, needsReauth, type ServiceHealth } from "./service-health";
+import { TeamConnectionDialog } from "./team-connection-setup";
 
 /**
  * The verb for a removal control. A share is a member's own account, so
@@ -19,11 +22,37 @@ function removalLabels(
   row: CredentialSummary,
   teamName: string,
   nameFor: (userId: string) => string,
+  canMutate: boolean,
 ): { action: string; pending: string; target: string } {
   const service = displayName(row.service);
-  return row.delegatedFrom
-    ? { action: "Stop sharing", pending: "Stopping…", target: `${nameFor(row.delegatedFrom)}'s ${service} with ${teamName}` }
-    : { action: "Disconnect", pending: "Disconnecting…", target: `${service} from ${teamName}` };
+  if (row.delegatedFrom) {
+    return { action: "Stop sharing", pending: "Stopping…", target: `${nameFor(row.delegatedFrom)}'s ${service} with ${teamName}` };
+  }
+  return canMutate
+    ? { action: "Disconnect", pending: "Disconnecting…", target: `${service} from ${teamName}` }
+    // A member asks a team admin (team resource deletion requests).
+    : { action: "Request removal", pending: "Sending…", target: `of ${service} from ${teamName}` };
+}
+
+/**
+ * The repair for a row that cannot act. Any member may reconnect a dead team
+ * connection (`CredentialSummary.dead`). For a team connection in another broken
+ * state, an admin removes it and connects again. A shared account belongs to
+ * its member, so only that member can repair it.
+ */
+function repairNote(
+  row: CredentialSummary,
+  health: ServiceHealth,
+  canMutate: boolean,
+  nameFor: (userId: string) => string,
+): string {
+  const service = displayName(row.service);
+  const problem = health === "identity-only" ? "This connection gives sign-in only." : "The last token refresh failed.";
+  if (row.delegatedFrom) return `${problem} ${nameFor(row.delegatedFrom)} must reconnect ${service} in their own Integrations.`;
+  if (row.dead === true) return healthNote(health) ?? problem;
+  return canMutate
+    ? `${problem} Disconnect it, then connect ${service} again under Available.`
+    : `${problem} Ask a team admin to connect ${service} again.`;
 }
 
 /** The rows grouped by integration, in the order the API lists them. */
@@ -57,19 +86,27 @@ export function TeamCredentials({
   const credsQ = useCredentials("team", { teamId: team.id });
   const disconnect = useDisconnectCredential();
   const revoke = useRevokeDelegation();
+  const requestRemoval = useSubmitTeamDeletionRequest(team.id);
   // One row at a time, so the list renders ONE dialog.
   const [removing, setRemoving] = useState<CredentialSummary | null>(null);
+  const [reconnecting, setReconnecting] = useState<string | null>(null);
   const nameFor = (userId: string) => orgMembers.find((m) => m.userId === userId)?.name ?? userId;
   const rows = credsQ.error ? [] : credsQ.data?.credentials ?? [];
-  const dialogLabels = removing ? removalLabels(removing, team.name, nameFor) : null;
-  const pending = disconnect.isPending || revoke.isPending;
-  const failure = removing?.delegatedFrom ? revoke.error : disconnect.error;
+  const dialogLabels = removing ? removalLabels(removing, team.name, nameFor, canMutate) : null;
+  const pending = disconnect.isPending || revoke.isPending || requestRemoval.isPending;
+  const failure = removing?.delegatedFrom ? revoke.error : canMutate ? disconnect.error : requestRemoval.error;
 
   function removalNote(row: CredentialSummary): string {
     const service = displayName(row.service);
+    if (!canMutate) {
+      return `A team admin approves or declines the request. Team actions keep using ${service} until then.`;
+    }
     if (row.delegatedFrom) {
-      return `Team actions stop using ${nameFor(row.delegatedFrom)}'s ${service} account. They keep their own ` +
-        `${service} connection and can share it with the team again from Integrations.`;
+      const kept = `Team actions stop using ${nameFor(row.delegatedFrom)}'s ${service} account. They keep their own ${service} connection.`;
+      // The delegate route refuses a new share beside the team's own connection.
+      return rows.some((other) => other.service === row.service && isTeamOwnConnection(other))
+        ? `${kept} While ${team.name} has its own ${service} connection, they cannot share theirs again.`
+        : `${kept} They can share it with the team again from Integrations.`;
     }
     if (row.service === "slack" || row.service === "github") {
       return `This deletes the ${service} credential stored on ${team.name}. Team Integrations cannot recreate this connection. ` +
@@ -106,19 +143,35 @@ export function TeamCredentials({
               {/* pl-12 starts these lines under the title, past the 36px icon and its gap. */}
               <ul className="mt-2 space-y-3 text-xs sm:pl-12">
                 {group.rows.map((row) => {
-                  const removal = removalLabels(row, team.name, nameFor);
+                  const removal = removalLabels(row, team.name, nameFor, canMutate);
+                  // A member may ask to remove the team's own connection, not another member's share.
+                  const canRemove = canMutate || !row.delegatedFrom;
+                  const health = credentialRowHealth(row);
+                  const badge = needsReauth(health) ? healthBadge(health) : null;
+                  const canReconnect = !row.delegatedFrom && row.type === "oauth2" && row.dead === true;
                   return (
                     <li key={row.delegatedFrom ?? "team"} className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-                      <div className="min-w-0">
-                        <p className="flex items-center gap-2 text-ink">
+                      <div className="min-w-0 max-w-full">
+                        <p className="flex min-w-0 items-center gap-2 text-ink">
                           <span className="truncate">{row.delegatedFrom ? `Shared by ${nameFor(row.delegatedFrom)}` : "Team connection"}</span>
                           {row.referenceBroken && <Badge variant="danger">Broken</Badge>}
+                          {!row.referenceBroken && badge && <Badge variant={badge.variant}>{badge.label}</Badge>}
                         </p>
                         {row.referenceBroken && (
                           <p className="text-danger-500">Their account is gone or they left the team. They can share it again.</p>
                         )}
+                        {!row.referenceBroken && badge && (
+                          <p className="text-danger-500">{repairNote(row, health, canMutate, nameFor)}</p>
+                        )}
                       </div>
-                      {canMutate && (
+                      <div className="flex shrink-0 gap-2">
+                      {canReconnect && (
+                        <Button size="sm" variant="primary" aria-label={`Reconnect ${displayName(row.service)} for ${team.name}`}
+                          onClick={() => setReconnecting(row.service)}>
+                          Reconnect
+                        </Button>
+                      )}
+                      {canRemove && (
                         <Button
                           size="sm"
                           variant="secondary"
@@ -130,12 +183,14 @@ export function TeamCredentials({
                             // opens: React Query holds `error` until the next mutate.
                             disconnect.reset();
                             revoke.reset();
+                            requestRemoval.reset();
                             setRemoving(row);
                           }}
                         >
                           {removal.action}
                         </Button>
                       )}
+                      </div>
                     </li>
                   );
                 })}
@@ -145,7 +200,16 @@ export function TeamCredentials({
         ))}
       </ul>
 
-      {canMutate && !credsQ.error && removing && dialogLabels && (
+      {reconnecting && (
+        <TeamConnectionDialog
+          key={reconnecting}
+          teamId={team.id}
+          service={{ service: reconnecting, type: "oauth2", connect: "oauth" }}
+          reconnect
+          onClose={() => setReconnecting(null)}
+        />
+      )}
+      {!credsQ.error && removing && dialogLabels && (canMutate || !removing.delegatedFrom) && (
         <ConfirmDialog
           open
           onOpenChange={(next) => {
@@ -159,7 +223,9 @@ export function TeamCredentials({
           error={failure != null ? errorText(failure) : undefined}
           onConfirm={() => {
             const done = { onSuccess: () => setRemoving(null) };
-            if (removing.delegatedFrom) {
+            if (!canMutate) {
+              requestRemoval.mutate({ resourceType: "credential", resourceId: removing.service }, done);
+            } else if (removing.delegatedFrom) {
               revoke.mutate({ service: removing.service, teamId: team.id, userId: removing.delegatedFrom }, done);
             } else {
               disconnect.mutate({ service: removing.service, scope: "team", teamId: team.id }, done);

@@ -61,6 +61,22 @@ import type { WorkflowEngineDeps } from './engine-deps.js';
 import type { NodeExecutorRegistry, OnApprovalGrant, OnApprovalPending, OnGateResolved } from './nodes/index.js';
 import { WorkflowFenceError, type RunParams, type RunParkState, type RunWaitCondition, type WorkflowRunOwnerInput, type WorkflowStore } from './store.js';
 
+/** A run that a drive parked after opening at least one approval gate. */
+export interface ApprovalParkedInfo {
+  runId: string;
+  /** The drive's attempt. Each claim increments it, so it names one drive. */
+  attempt: number;
+}
+
+/**
+ * Fired once per drive that opened an approval gate and then parked the run.
+ * `onApprovalPending` fires inside the wave, before sibling nodes finish and
+ * before the park records every waiting step. A consumer that reports the
+ * waiting steps as a set uses this hook: when it fires, `waitingOn` holds all
+ * of them. Best-effort: the host logs a throw and keeps the drive.
+ */
+export type OnApprovalParked = (info: ApprovalParkedInfo) => Promise<void> | void;
+
 /** The spec's `RunHost` port, widened per the "Port deviation" note above, plus lifecycle. */
 export interface RunHost {
   /** Begin executing a run. Idempotent by runId: re-starting an existing run is a no-op. */
@@ -90,6 +106,8 @@ export interface LocalRunHostDeps {
   onApprovalPending?: OnApprovalPending;
   onApprovalGrant?: OnApprovalGrant;
   onGateResolved?: OnGateResolved;
+  /** See `OnApprovalParked`. */
+  onApprovalParked?: OnApprovalParked;
   /**
    * Settle report (batch-fanout design decision 4). Handed to every drive
    * this host runs, so a run that settles under any path — natural,
@@ -136,6 +154,7 @@ export class LocalRunHost implements RunHost {
   private readonly onApprovalPending?: OnApprovalPending;
   private readonly onApprovalGrant?: OnApprovalGrant;
   private readonly onGateResolved?: OnGateResolved;
+  private readonly onApprovalParked?: OnApprovalParked;
   private readonly onRunSettled?: OnRunSettled;
   private readonly concurrency: number;
   private readonly pollMs: number;
@@ -164,6 +183,14 @@ export class LocalRunHost implements RunHost {
    * restarts re-earns its strikes in minutes.
    */
   private readonly driveFailures = new Map<string, number>();
+  /**
+   * Runs with a gate that opened since their last park report. Held on the
+   * host, not the drive: a drive that opens a gate and then fails retries on
+   * this host, and the retry does not open the gate again. A process that
+   * dies loses the entry, so the report is at most once, like the settle
+   * report.
+   */
+  private readonly gatesToReport = new Set<string>();
   /** How many parked runs a single sweep pass enumerates via `store.listParked`. */
   private readonly sweepBatchLimit = 1_000;
 
@@ -181,6 +208,7 @@ export class LocalRunHost implements RunHost {
     this.onApprovalPending = deps.onApprovalPending;
     this.onApprovalGrant = deps.onApprovalGrant;
     this.onGateResolved = deps.onGateResolved;
+    this.onApprovalParked = deps.onApprovalParked;
     this.onRunSettled = deps.onRunSettled;
     this.concurrency = deps.concurrency ?? 4;
     this.pollMs = deps.pollMs ?? 1_000;
@@ -318,13 +346,18 @@ export class LocalRunHost implements RunHost {
       void this.store.heartbeat(runId, this.ownerId, this.leaseMs);
     }, this.heartbeatMs);
 
+    const onApprovalPending: OnApprovalPending = async (info) => {
+      this.gatesToReport.add(runId);
+      await this.onApprovalPending?.(info);
+    };
+
     try {
       const park = await driveUntilPark(runId, claim.attempt, {
         store: this.store,
         engine: this.engine,
         clock: this.clock,
         executors: this.executors,
-        onApprovalPending: this.onApprovalPending,
+        onApprovalPending,
         onApprovalGrant: this.onApprovalGrant,
         onGateResolved: this.onGateResolved,
         onRunSettled: this.onRunSettled,
@@ -336,6 +369,8 @@ export class LocalRunHost implements RunHost {
             : undefined,
       });
       await this.afterPark(runId, park);
+      if (park.status === 'parked' && this.gatesToReport.delete(runId)) await this.reportApprovalPark(runId, claim.attempt);
+      if (park.status === 'settled') this.gatesToReport.delete(runId);
       this.driveFailures.delete(runId);
     } catch (err) {
       // A `WorkflowFenceError` means a superseded attempt, not a sick run —
@@ -373,6 +408,7 @@ export class LocalRunHost implements RunHost {
       try {
         await settleAndNotify(this.store, this.onRunSettled, runId, 'failed');
         this.driveFailures.delete(runId);
+        this.gatesToReport.delete(runId);
       } catch (settleErr) {
         // Keep the strike count: if the settle write itself failed, the
         // next reclaim lands here again and retries the settle.
@@ -400,6 +436,14 @@ export class LocalRunHost implements RunHost {
       if (wait.kind === 'submission') {
         this.spawnSubmissionWaiter(runId, wait);
       }
+    }
+  }
+
+  private async reportApprovalPark(runId: string, attempt: number): Promise<void> {
+    try {
+      await this.onApprovalParked?.({ runId, attempt });
+    } catch (err) {
+      console.error(`workflow approval park report failed for ${runId}:`, err);
     }
   }
 

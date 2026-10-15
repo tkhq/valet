@@ -208,7 +208,10 @@ removes every piece this doc described for it:
 The new-session model chain (`EngineHost.resolveModelForBuild`) is:
 
 `existing?.model ?? overrideId ?? assistantDefault ?? childDefault ??
-userDefault ?? teamDefault ?? opts.defaultModelId ?? "s"`
+userDefault ?? teamDefault ?? orgDefaultTier ?? opts.defaultModelId ?? "s"`
+
+`orgDefaultTier` is the org's optional default tier token; see the
+model selector overhaul design, section 5.
 
 The final fallback is the tier token `"s"`, not a hardcoded model id.
 `resolveModelSpec` resolves it through the org's tier map exactly like an

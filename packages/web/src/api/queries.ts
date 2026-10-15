@@ -39,6 +39,7 @@ import type {
   PatchIdentityLinkRequest,
   PatchSessionResponse,
   PatchThreadResponse,
+  ThreadShareMode,
   PauseSessionResponse,
   ReplaceSandboxResponse,
   ListSessionWakeupsResponse,
@@ -503,6 +504,21 @@ export function useRenameThread(sessionId: string) {
     onSuccess: () => {
       qc.invalidateQueries(threadListFilters(sessionId));
       qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
+    },
+  });
+}
+
+/** PATCH /threads/:id with a `share` — the owner shares a personal thread
+ * with the organization, or stops sharing it. */
+export function useShareThread(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PatchThreadResponse, Error, { threadId: string; share: ThreadShareMode | "off" }>({
+    mutationFn: ({ threadId, share }) => api.patchThread(threadId, { share }),
+    onSuccess: (saved) => {
+      qc.setQueriesData<ListThreadsResponse | InfiniteData<ListThreadsResponse>>(
+        threadListFilters(sessionId),
+        (current) => mapThreadData(current, thread => thread.id === saved.id ? { ...thread, share: saved.share } : thread),
+      );
     },
   });
 }

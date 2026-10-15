@@ -87,6 +87,10 @@ Implemented on branch `feat/single-binary-cli` (PR against `dev-v2`). Plan: `doc
 
 The integration suite resolves the tsx loader through the workspace dependency graph. It starts the loader with the current Node executable. A missing package-local binary no longer prevents server startup. Spawn errors fail immediately and remove the test data directory.
 
+### Output before exit
+
+The dispatcher (`cli.ts`) exits only through `exitAfterOutput` in `cli/output.ts`. That function waits for the last write that the output helpers queued on stdout and stderr, then calls `process.exit`. Node and Bun write to a pipe asynchronously, and an exit that does not wait drops the queued data. A `--json` result piped to `jq` then stops at 65,536 bytes, the pipe buffer size. Command modules therefore write through the `output.ts` helpers. The readline prompts of `chat`, `login`, and `reset` are the exception, because they are interactive. If the reader closes the pipe early (`valet … | head`), the CLI ignores the EPIPE error and keeps the exit code of the command. `src/cli/pipe-output.test.ts` runs the real CLI with a pipe on stdout.
+
 
 ## CLI release memory budget
 

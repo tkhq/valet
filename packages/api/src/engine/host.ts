@@ -2,7 +2,7 @@ import { assistantMemoryNamespace } from "../services/memory-scope.js";
 import { assistantExecutions } from "../schema/index.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
-import { workflowEditorThreadContext } from "../workflows/editor-thread-context.js";
+import { workflowThreadContext } from "../workflows/editor-thread-context.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
@@ -110,7 +110,7 @@ import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { clampToMax, getOrgReasoningSettings, type ReasoningLevel } from "../services/reasoning.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
-import { TIER_SET } from "../services/model-tiers.js";
+import { getOrgDefaultTier, resolvableTiers, TIER_SET, type SizeTier } from "../services/model-tiers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   agentSessions,
@@ -2821,6 +2821,10 @@ export class EngineHost {
     // The OWNER, not the assistant: memory, journal and skills belong to the
     // principal. The runtime keeps its own working directory.
     const principal: Principal = { type: assistant.ownerType, id: assistant.ownerId };
+    // A personal runtime acts for its owner, whoever woke it: a reply in a
+    // shared thread can be the first request. An author-less turn (a signal
+    // or a schedule) then runs as the owner, not as that guest.
+    const runtimeUserId = principal.type === "user" ? principal.id : meta.actorUserId;
 
     const [execution] = await db.select().from(assistantExecutions)
       .where(and(eq(assistantExecutions.sessionId, sessionId), eq(assistantExecutions.assistantId, assistantId))).limit(1);
@@ -2833,7 +2837,7 @@ export class EngineHost {
       : join(homedir(), ".valet", "assistants", assistantId);
     await mkdir(workspace, { recursive: true });
 
-    const scope: MemoryScope = { owner: principal, actorUserId: meta.actorUserId, ...(principal.type === "team" ? { namespace: await assistantMemoryNamespace(db, sessionId, principal.id, meta.orgId) } : {}) };
+    const scope: MemoryScope = { owner: principal, actorUserId: runtimeUserId, ...(principal.type === "team" ? { namespace: await assistantMemoryNamespace(db, sessionId, principal.id, meta.orgId) } : {}) };
     await ensureTodayJournal(db, scope);
     const snapshotContent = await assembleMemorySnapshot(db, scope);
     const personaPrefix = await this.resolvePersonaPrefix(db, meta.orgId, scope, assistant.id);
@@ -2901,13 +2905,13 @@ export class EngineHost {
     // first web visit) means headless, the same value the column defaults
     // to. See `PATCH /api/sessions/:id`.
     const profile = await this.storedProfile(sessionId);
-    const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, profile);
+    const sandboxMint = await this.mintSandboxEnv(sessionId, runtimeUserId, meta.orgId, profile);
     // Same row read as the profile: a team assistant from before team-owner
     // resolution keeps reading credentials as the member prompting it.
     const credentialOwnerMode = await this.storedCredentialOwnerMode(sessionId);
     const credentialResolver = this.buildCredentialResolver(
       sessionId,
-      meta.actorUserId,
+      runtimeUserId,
       meta.orgId,
       resolvesAsActingMember({ ownerType: principal.type, credentialOwnerMode }),
     );
@@ -2932,7 +2936,7 @@ export class EngineHost {
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId);
     const resolveOutboundSender = this.outboundSenderResolver(meta.orgId, principal, assistant.id);
     const sessionOptions = {
-      userId: meta.actorUserId,
+      userId: runtimeUserId,
       orgId: meta.orgId,
       workspace,
       purpose: "orchestrator" as const,
@@ -2970,7 +2974,7 @@ export class EngineHost {
         readOnlyReason: "This legacy team conversation is read-only. Start a new conversation to use an isolated working directory.",
       } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
-      threadSystemContext: workflowEditorThreadContext,
+      threadSystemContext: workflowThreadContext,
       // A team or org orchestrator is shared, so no one timezone applies.
       ...(await this.userTimezoneOptions(principal.type === "user" ? principal.id : undefined)),
       tools: [...buildMemoryTools(), ...extras.tools],
@@ -3559,7 +3563,7 @@ export class EngineHost {
    * `teams.default_model` for the team that owns the session being built,
    * filtered through the same active-provider walk `firstActivePreference`
    * applies elsewhere — a team default whose provider was later disabled
-   * falls through to the cascade's next tier (`opts.defaultModelId ?? "s"`)
+   * falls through to the cascade's next tier (the org default tier, then `"s"`)
    * instead of failing every member's session build (members did not pick
    * it and cannot clear it). `undefined` when unset, inactive, or the host
    * has no `db`. Consulted only for team-owned sessions (TKAI-255) — a
@@ -3580,6 +3584,26 @@ export class EngineHost {
   }
 
   /**
+   * `orgs.default_tier` when session creation can resolve it, else
+   * `undefined`. Like a team default, it applies to people who did not pick
+   * it. The PATCH route refuses a tier that new sessions cannot run, but a
+   * later provider, key, or tier-map change can still break it. Such a tier
+   * falls through to the next default instead of failing every new
+   * session. The test is `resolvableTiers`, the same one the save path
+   * applies: it asks the resolver, so an enabled provider that lost its key
+   * or no longer lists the model does not count. Uncached, same as
+   * `userDefaultModel`.
+   */
+  private async orgDefaultTier(orgId: string): Promise<SizeTier | undefined> {
+    if (!this.opts.db) return undefined;
+    const tier = await getOrgDefaultTier(this.opts.db, orgId);
+    if (!tier) return undefined;
+    if ((await resolvableTiers(this.opts.db, this.opts.engineCredentials, orgId)).has(tier)) return tier;
+    console.warn(`[engine-host] new sessions cannot run org default tier "${tier}"; using the next default`);
+    return undefined;
+  }
+
+  /**
    * Resolve the `Model` to build/restore a session with. Spec-pinned
    * restore-no-clobber constraint: `Session.rehydrate`
    * (`packages/engine/src/session.ts`) always takes `options.model` as
@@ -3593,13 +3617,17 @@ export class EngineHost {
    * `overrideId` and the user default — that persisted value already
    * reflects whatever `setModel` (or the original create-time model) set.
    * Only on create does the preference cascade apply (TKAI-255):
-   * `overrideId ?? assistantDefault ?? childDefault ?? userDefault ?? teamDefault ?? opts.defaultModelId ?? "s"`
+   * `overrideId ?? assistantDefault ?? childDefault ?? userDefault ?? teamDefault ?? orgDefaultTier ?? opts.defaultModelId ?? "s"`
    * — most-specific wins. Org model preferences are gone (superseded by the
-   * per-tier ordered target lists): the final fallback is the tier token
-   * `"s"`, which `resolveModelSpec` resolves through the org's tier map
-   * (`resolveTier` walks that tier's ordered list for the first active
-   * provider), so an org remap of `s` reaches every session that bottoms
-   * out at this fallback. The tiers are opt-in via `prefs`:
+   * per-tier ordered target lists). `orgDefaultTier` is the admin-set tier
+   * token in `orgs.default_tier`; when it is unset or no provider with a key
+   * serves it (`orgDefaultTier`), the final fallback is the tier token
+   * `"s"`. `resolveModelSpec` resolves either token through the org's tier
+   * map (`resolveTier` walks that tier's ordered list for the first active
+   * provider), so an org remap of a tier reaches every
+   * session that bottoms out at it. A child sets `childDefault: "s"`, so
+   * the org default tier never reaches delegated work. The tiers are
+   * opt-in via `prefs`:
    *
    * - `userId` names the person whose personal default may apply. Callers
    *   building a SHARED principal-owned session (team/org assistant, a
@@ -3639,6 +3667,7 @@ export class EngineHost {
       prefs.childDefault ??
       (prefs.userId ? await this.userDefaultModel(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultModel(orgId, prefs.ownerTeamId) : undefined) ??
+      (await this.orgDefaultTier(orgId)) ??
       this.opts.defaultModelId ??
       "s";
     return this.resolveModelObject(orgId, id);

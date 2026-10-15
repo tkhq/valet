@@ -21,7 +21,7 @@ import { PresenceSettings } from "~/components/presence-settings";
  * an invalid definition is otherwise a completely normal in-progress
  * editing state and is never silently discarded.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { validateWorkflowDefinition, type WorkflowDefinition } from "@valet/workflow";
 import { ArrowLeft, MoreHorizontal } from "lucide-react";
 import { ApiError } from "~/api/client";
@@ -72,7 +72,15 @@ import { cn } from "~/lib/cn";
 import { CompactPalette, Palette } from "./palette";
 import { errorNodeIdsFrom, ValidationBanner } from "./validation-banner";
 
+/** What the page can ask the editor to do. */
+export interface EditorHandle {
+  /** Put the assistant conversation on screen: close a step form, and on a
+   * narrow screen switch to the Assistant view. */
+  showAssistant(): void;
+}
+
 export interface EditorProps {
+  ref?: Ref<EditorHandle>;
   /**
    * The definition as the server currently holds it. It seeds the local
    * draft at mount and backs Cancel, and the editor also ADOPTS it when it
@@ -114,6 +122,9 @@ export interface EditorProps {
   /** Per-node policy predictions for the canvas cards, keyed by node id.
    * The page owns the query (it is per stored workflow, not per draft). */
   gateByNodeId?: ReadonlyMap<string, "require_approval" | "deny">;
+  /** The models each step called in the workflow's last run, keyed by node
+   * id. The page owns the query, like `gateByNodeId`. */
+  lastRunModels?: ReadonlyMap<string, string[]>;
   /** A mirrored workflow is edited in its file. Disable definition changes
    * and hide Save and the JSON hatch. */
   readOnly?: boolean;
@@ -133,7 +144,9 @@ function EditorDraft({
   onCancelExternal,
   onDirtyChange,
   gateByNodeId,
+  lastRunModels,
   readOnly = false,
+  ref,
 }: EditorProps) {
   const [definition, setDefinition] = useState<WorkflowDefinition>(initialDefinition);
   const [dirty, setDirty] = useState(false);
@@ -353,6 +366,8 @@ function EditorDraft({
     setCompactView("assistant");
   }
 
+  useImperativeHandle(ref, () => ({ showAssistant }));
+
   const saveDisabled = !effectiveDirty || !validation.ok || validatePresence(definition.presence ?? {}) !== null || saving === true;
 
   // The form for whatever is selected, or null when nothing is. JSON mode
@@ -363,6 +378,7 @@ function EditorDraft({
       readOnly={readOnly}
       key={selectedNode.id}
       node={selectedNode}
+      lastRunModels={lastRunModels?.get(selectedNode.id)}
       onChange={(patch) => handleNodeChange(selectedNode.id, patch)}
       onRemove={() => handleRemoveNode(selectedNode.id)}
       onDuplicate={() => handleDuplicateNode(selectedNode.id)}

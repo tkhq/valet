@@ -5,8 +5,8 @@
  * `plugins.test.ts` — flip `VALET_LOCAL_AUTH` off for one request).
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { eq } from "drizzle-orm";
-import type { ValetPlugin } from "@valet/engine";
+import { and, eq } from "drizzle-orm";
+import type { StoredCredential, ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { contentSources, credentials, orgMembers, orgs, users } from "../schema/index.js";
 import { listTeamShares } from "../services/credential-shares.js";
@@ -1011,6 +1011,24 @@ describe("GET /api/credentials — onepasswordRef summary", () => {
   });
 });
 
+describe("PUT /api/credentials/github — metadata.githubId guard", () => {
+  // The id links a personal GitHub App installation to its owner. Only the
+  // GitHub connect callback may write it, from GitHub's own `GET /user`.
+  it("rejects a pasted githubId, no row saved", async () => {
+    api = await bootTestApi();
+    const put = await fetch(`${api.baseUrl}/api/credentials/github`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "oauth2", accessToken: "ghp_pasted", metadata: { login: "octouser", githubId: "4242" } }),
+    });
+    expect(put.status).toBe(400);
+    expect(await put.json()).toEqual({
+      error: "metadata.githubId is reserved. Connect GitHub through the GitHub connect flow.",
+    });
+    expect(await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "github")).toBeNull();
+  });
+});
+
 describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard", () => {
   it("plain PUT with metadata.onepassword (no body.onepassword) 400s, no row saved", async () => {
     api = await bootTestApi();
@@ -1116,7 +1134,6 @@ describe("team credential scope (TKAI-205)", () => {
       method: "PUT", headers,
       body: JSON.stringify({ scope: "team", teamId: team.id, type: "api_key", apiKey: token, createOnly: true }),
     });
-    expect((await write("member", MEMBER_HEADERS)).status).toBe(404);
     const responses = await Promise.all([write("one"), write("two")]);
     expect(responses.map((r) => r.status).sort()).toEqual([200, 409]);
     const winner = responses[0].status === 200 ? "one" : "two";
@@ -1127,6 +1144,17 @@ describe("team credential scope (TKAI-205)", () => {
       .toMatchObject({ apiKey: winner });
     const list = await fetch(`${baseUrl}/api/credentials?scope=team&teamId=${team.id}`);
     expect(await list.text()).not.toContain(winner === "one" ? '"apiKey":"one"' : '"apiKey":"two"');
+  });
+
+  it("lets a team member add a team token but not replace one", async () => {
+    const team = await teamWithMember();
+    const put = (apiKey: string, createOnly: boolean) => fetch(`${api!.baseUrl}/api/credentials/demo`, {
+      method: "PUT", headers: MEMBER_HEADERS,
+      body: JSON.stringify({ scope: "team", teamId: team.id, type: "api_key", apiKey, createOnly }),
+    });
+    expect((await put("member-key", true)).status).toBe(200);
+    expect((await put("member-replacement", false)).status).toBe(404);
+    expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "demo")).toMatchObject({ apiKey: "member-key" });
   });
 
   it("omits complete access and refresh token sentinels from direct team responses", async () => {
@@ -1322,7 +1350,7 @@ describe("team credential scope (TKAI-205)", () => {
     });
   });
 
-  it("keeps each member's share beside the others and the team's own connection", async () => {
+  it("keeps each member's share beside the others", async () => {
     const team = await teamWithMember();
     const connect = (headers: Record<string, string>, apiKey: string) => fetch(`${api!.baseUrl}/api/credentials/linear`, {
       method: "PUT", headers, body: JSON.stringify({ type: "api_key", apiKey }),
@@ -1361,6 +1389,82 @@ describe("team credential scope (TKAI-205)", () => {
     expect((await fetch(`${api!.baseUrl}/api/credentials/linear/delegations/${team.id}?userId=local-user`, { method: "DELETE", headers: MEMBER_HEADERS })).status).toBe(403);
     expect((await fetch(`${api!.baseUrl}/api/credentials/linear/delegations/${team.id}?userId=test-member`, { method: "DELETE", headers: HEADERS })).status).toBe(200);
     expect((await list()).map((row) => row.delegatedFrom)).toEqual(["local-user"]);
+  });
+
+  it("refuses a share of a service the team has its own connection for, and names the fix", async () => {
+    const team = await teamWithMember();
+    const shareFrom = () => fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST", headers: MEMBER_HEADERS, body: JSON.stringify({ teamId: team.id }),
+    });
+    await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT", headers: MEMBER_HEADERS, body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
+    });
+    await api!.providers.db.insert(credentials).values({
+      ownerType: "team", ownerId: team.id, service: "linear", type: "api_key", createdAt: 1, updatedAt: 1,
+    });
+    const refused = await shareFrom();
+    expect(refused.status).toBe(409);
+    expect(((await refused.json()) as { error: string }).error).toContain("ask a team admin to remove the team's Linear connection");
+    // A team connection that stopped working is repaired, not shared around.
+    await api!.providers.db.update(credentials).set({ type: "oauth2", expiresAt: 1, metadata: { refreshRefused: true } })
+      .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, team.id), eq(credentials.service, "linear")));
+    const dead = await shareFrom();
+    expect(dead.status).toBe(409);
+    expect(((await dead.json()) as { error: string }).error).toContain("Reconnect it in the team's Integrations");
+    // With no team connection, the member shares.
+    await api!.providers.db.delete(credentials)
+      .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, team.id), eq(credentials.service, "linear")));
+    expect((await shareFrom()).status).toBe(201);
+  });
+
+  // Runs skip a team github row that `isUsableGithubUserRow` refuses, and
+  // GitHub rows are never `isDeadConnection`. That row must not block a
+  // member's healthy share, and the list must mark it for the pickers.
+  it("shares beside a team GitHub row no run uses, and blocks beside a usable one", async () => {
+    const team = await teamWithMember();
+    const { engineCredentials } = api!.providers;
+    const teamGithub = (credential: StoredCredential) => engineCredentials.save({ type: "team", id: team.id }, "github", credential);
+    const shareFrom = () => fetch(`${api!.baseUrl}/api/credentials/github/delegate`, {
+      method: "POST", headers: MEMBER_HEADERS, body: JSON.stringify({ teamId: team.id }),
+    });
+    await engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2", accessToken: "repo-tok", metadata: { login: "octocat" },
+    });
+    await teamGithub({ type: "oauth2", accessToken: "identity-tok", metadata: { identityOnly: true } });
+    const listed = (await (
+      await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: MEMBER_HEADERS })
+    ).json()) as ListCredentialsResponse;
+    expect(listed.credentials).toEqual([expect.objectContaining({ service: "github", unusable: true })]);
+    expect((await shareFrom()).status).toBe(201);
+
+    expect((await fetch(`${api!.baseUrl}/api/credentials/github/delegations/${team.id}`, { method: "DELETE", headers: MEMBER_HEADERS })).status).toBe(200);
+    await teamGithub({ type: "oauth2", accessToken: "team-repo-tok", metadata: { login: "team-bot" } });
+    const blocked = await shareFrom();
+    expect(blocked.status).toBe(409);
+    expect(((await blocked.json()) as { error: string }).error).toContain("already has its own GitHub connection");
+  });
+
+  // The refreshing store skips an OAuth row with no refresh token, so an
+  // expired one is never renewed or marked dead. No run can use it, so it
+  // must not block a member's share, and the list must mark it for the pickers.
+  it("shares beside an expired team OAuth row that cannot refresh", async () => {
+    const team = await teamWithMember();
+    await api!.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", {
+      type: "oauth2", accessToken: "expired-tok", expiresAt: Date.now() - 60_000,
+    });
+    const connect = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT", headers: MEMBER_HEADERS, body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
+    });
+    expect(connect.status).toBe(200);
+    const listed = (await (
+      await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: MEMBER_HEADERS })
+    ).json()) as ListCredentialsResponse;
+    expect(listed.credentials).toEqual([expect.objectContaining({ service: "linear", unusable: true })]);
+    expect(listed.credentials[0]?.dead).toBeUndefined();
+    const share = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST", headers: MEMBER_HEADERS, body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(share.status).toBe(201);
   });
 
   // A team row is read with org-scoped 1Password tokens only, so a
@@ -1540,7 +1644,7 @@ describe("team credential scope (TKAI-205)", () => {
     });
     expect(share.status).toBe(400);
     const { error } = (await share.json()) as { error: string };
-    expect(error).toContain("Connect GitHub in Settings → Connected accounts");
+    expect(error).toContain("Connect GitHub in Integrations → GitHub");
     expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "github")).toBeNull();
 
     await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
@@ -1581,9 +1685,11 @@ describe("team credential scope (TKAI-205)", () => {
     }
 
     // Exercise the existing provider-validation await; this adds no Slack setup flow.
+    // A demoted admin stays a team member, who may still add a connection,
+    // so a demotion refuses only a replacement.
     it.each(["remove", "demote", "org-demote", "org-remove", "delete-team"].flatMap((change) =>
       [true, false].map((createOnly) => ({ change, createOnly })),
-    ))(
+    ).filter(({ change, createOnly }) => !(createOnly && (change === "demote" || change === "org-demote"))))(
       "refuses direct writing with createOnly=$createOnly when $change occurs during validation", async ({ change, createOnly }) => {
         const team = await teamWithMember([slackDeclaration]);
         if (!api) throw new Error("API not booted");
@@ -1752,7 +1858,7 @@ describe("team credential scope (TKAI-205)", () => {
     expect(((await unshareable.json()) as { error: string }).error).toContain("Ask a team admin to connect GitHub for the team instead.");
   });
 
-  it("shares beside the team's own connection without touching it", async () => {
+  it("refuses a share beside the team's own connection, and leaves that connection alone", async () => {
     const team = await teamWithMember();
     const putDirect = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
       method: "PUT",
@@ -1770,7 +1876,7 @@ describe("team credential scope (TKAI-205)", () => {
       headers: MEMBER_HEADERS,
       body: JSON.stringify({ teamId: team.id }),
     });
-    expect(share.status).toBe(201);
+    expect(share.status).toBe(409);
     const direct = await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear");
     expect(direct).toMatchObject({ type: "api_key", apiKey: "team-lin" });
     expect(direct?.metadata).toBeUndefined();

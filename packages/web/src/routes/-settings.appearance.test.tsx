@@ -5,9 +5,8 @@
  * `~/lib/preferences` module — the round trip through localStorage IS the
  * contract under test, so mocking it would assert nothing.
  *
- * `@tanstack/react-router` is mocked the same way
- * `-settings.connected-accounts.test.tsx` mocks it: `createFileRoute` runs
- * at module scope, and these tests render `AppearancePage` directly with no
+ * `@tanstack/react-router` is mocked: `createFileRoute` runs at module
+ * scope, and these tests render `AppearancePage` directly with no
  * router around it.
  *
  * Theme and palette are covered elsewhere. Nothing here asserts on them.

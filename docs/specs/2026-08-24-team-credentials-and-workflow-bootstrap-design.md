@@ -340,6 +340,8 @@ Mobile graph QA (2026-09-11): the editor permits zooming out to 10% so Fit View 
 
 The upgrade moves each legacy `metadata.delegatedFrom` team row into `credential_shares`. It preserves the member's source credential and removes the secretless team reference. Direct team connections remain unchanged. Each member can share an account for the same service.
 
+A team with its own connection for a service takes no new share of it (2026-10-14). The share route returns 409. If the team connection works, the error says a team admin must remove it before a member shares their own. If the connection stopped working (`isDeadConnection`), the error says to reconnect it, which any member may do. A team `github` row that no run uses blocks nothing: `isUsableGithubUserRow` refuses it, so the invoker and readiness skip it, and it is never `isDeadConnection`. A team OAuth row past expiry with no refresh token blocks nothing either: the refreshing store skips it, so it is never renewed and never `isDeadConnection`. A dead row still blocks, because members can reconnect it. The team credential list marks both kinds of row `unusable`, so both share pickers allow the share too. Shares made before the team connected stay, and the acting member's own share still resolves first.
+
 The acting member's own share resolves first. The team's connection and permitted organization sources follow. For other services, another member's share requires that member's approval. Scheduled workflows can therefore pause for approval after upgrade when their actor differs from the sharer. The account owner must approve the request before the run continues.
 
 GitHub has an exception. Its policy paths do not request permission to borrow another member's account. The sharer's own GitHub actions still resolve their migrated share. Other actors use a direct team connection or the organization GitHub App. If a team previously relied on one member's GitHub delegation, install the organization GitHub App or store a team GitHub connection. The migration alone does not preserve that delegation's access for other actors.
@@ -360,3 +362,9 @@ The caller must be that team's synthetic actor. The stored run actor must be abs
 Approval eligibility and subsequent credential borrowing use the same durable ownership check.
 Only the account owner can approve. Existing team membership, share generation, and workflow grant scope checks still apply.
 Tool nodes retain their run-only approval scope. Workflow download, origin, and private-thread visibility rules remain unchanged.
+
+The approval card names the product, such as "Let a teammate use your Linear account?". The API sets `ActionPlugin.displayName` from `serviceDisplayName` (`withServiceDisplayName`), and the engine falls back to the service id. Discovery appears as "List Linear tools". The card shows no policy-source line for a shared account, because the title already names whose account it is (2026-10-15).
+
+A failed discovery keeps its cause. `resolveDynamic` (`packages/engine/src/plugin-catalog.ts`) reports `<service> tool discovery failed:` followed by the same text `call_tool` gives for that outcome.
+A connector error keeps the upstream message. A missing account names the Integrations page. A shared-account denial says that the caller cannot ask the account owner for approval, and does not call it an org policy.
+Before 2026-10-08, every failure read `Tool discovery requires permitted account access: <outcome kind>`. That text dropped the connector message, and it hid whether a policy or the connector was at fault.

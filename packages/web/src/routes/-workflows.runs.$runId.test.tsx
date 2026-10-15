@@ -266,6 +266,36 @@ describe("RunDetailBody", () => {
     expect(screen.getAllByText("Scoped agent logs were not recorded for this step.")).toHaveLength(1);
   });
 
+  it("totals the steps' model spend and marks it a lower bound when any call was unpriced", () => {
+    const data = baseRun({ status: "settled", outcome: "completed" });
+    data.checkpoints = [
+      { nodeId: "draft", iteration: 0, status: "completed", createdAt: Date.now() },
+      { nodeId: "review", iteration: 0, status: "completed", createdAt: Date.now() },
+    ];
+    const step = { iteration: 0, turns: 1, totalTokens: 10, models: [] };
+    data.stepCosts = [
+      { ...step, nodeId: "draft", costUsd: 0.01, unpricedTurns: 0 },
+      { ...step, nodeId: "review", costUsd: 0.002, unpricedTurns: 1 },
+    ];
+    const { unmount } = render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.getByText("$0.0120+ model spend")).toBeTruthy();
+    unmount();
+    data.stepCosts = [{ ...step, nodeId: "draft", costUsd: 0.01, unpricedTurns: 0 }];
+    render(<RunDetailBody runId="wfrun_1" data={data} onCancel={vi.fn()} cancelPending={false} onRetry={vi.fn()} retryPending={false} />);
+    expect(screen.getByText("$0.0100 model spend")).toBeTruthy();
+  });
+
+  it("says at the top when a step's model changed without an edit", () => {
+    const data = baseRun({ status: "settled", outcome: "completed" });
+    const props = { runId: "wfrun_1", onCancel: vi.fn(), cancelPending: false, onRetry: vi.fn(), retryPending: false };
+    const { unmount } = render(<RunDetailBody {...props} data={data} />);
+    expect(screen.queryByText(/The model changed/)).toBeNull();
+    unmount();
+    data.modelChanges = [{ nodeId: "draft", previous: ["sol-5.6"], current: ["sol-6.1"] }];
+    render(<RunDetailBody {...props} data={data} />);
+    expect(screen.getByRole("status").textContent).toBe("The model changed for 1 step since the last run. The workflow was not edited.");
+  });
+
   it("renders checkpoints with status and a result preview", () => {
     const data = baseRun({ status: "settled", outcome: "completed" });
     data.checkpoints = [

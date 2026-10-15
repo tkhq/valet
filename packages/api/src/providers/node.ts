@@ -66,7 +66,7 @@ import { bundledPlugins } from "../plugins/registry.gen.js";
 import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
-import { buildRunOriginReport, buildRunSettledAttention, buildRunThreadArchive, workflowApprovalHref } from "../workflows/run-attention.js";
+import { buildRunApprovalReport, buildRunOriginReport, buildRunSettledAttention, buildRunThreadArchive, workflowApprovalHref } from "../workflows/run-attention.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
@@ -794,6 +794,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engine: workflowEngineDeps,
     executors: createDefaultNodeExecutors(),
     onApprovalPending,
+    // The thread that started the run hears about it too, once the run
+    // parks, so Valet can say which steps wait instead of staying silent
+    // until the run settles.
+    onApprovalParked: buildRunApprovalReport({ db, engineHost, store: workflowStore }),
     onApprovalGrant,
     onGateResolved,
     // Settle attention (batch-fanout design decision 4): a failed top-level
@@ -936,6 +940,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     eventDispatcher,
     contentSync,
     plugins,
+    configMcpServers: opts.instanceConfig?.mcpServers ?? [],
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),
     prebuildService,

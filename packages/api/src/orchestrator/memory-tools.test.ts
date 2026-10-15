@@ -102,6 +102,13 @@ describe("buildMemoryTools", () => {
     ]);
   });
 
+  it("keeps memory to the owner's own turns", () => {
+    // A reply in a shared personal thread runs in the owner's session; the
+    // engine refuses an ownerOnly tool on that turn (`ToolDef.ownerOnly`).
+    const memory = buildMemoryTools().filter((t) => t.name.startsWith("mem_"));
+    expect(memory.filter((t) => t.ownerOnly !== true).map((t) => t.name)).toEqual([]);
+  });
+
   it("describes explicit copy sources, destinations, and collision rules", () => {
     expect(memCopyToTeamTool.description).toContain("original copy request does not authorize replacement");
     expect(memCopyToTeamTool.parameters).toMatchObject({

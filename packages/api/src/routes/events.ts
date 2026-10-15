@@ -14,11 +14,12 @@ import { getLinearIngressStatus, linearEventArmBlock } from "../services/linear-
  * `event_keys`/`filters` jsonb shapes this file writes.
  */
 import type { FilterOption, FilterOptionResolver, StoredCredential, ValetPlugin } from "@valet/engine";
-import { and, desc, eq, or, type SQL } from "drizzle-orm";
+import { and, desc, eq, ne, or, sql, type SQL } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { randomUUID } from "node:crypto";
 import type { AppEnv } from "../env.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
+import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
 import { allCatalogEntries, catalogForService } from "../events/ingest.js";
 import type { SubscriptionFilter } from "../events/match.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
@@ -31,6 +32,7 @@ import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError } from "../services/onepassword.js";
 import { isTeamMember, withAuthorizedTeamOwnership } from "../services/teams.js";
 import type {
+  EventDeliveryWire,
   EventLogResponse,
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
@@ -48,9 +50,10 @@ import type {
   PatchEventSubscriptionResponse,
   RedeliverEventResponse,
 } from "../wire/types.js";
-import { armableDefinitionRow } from "../workflows/service.js";
+import { workflowRequestContext } from "../workflows/request-context.js";
+import { armableDefinitionRow, canReadWorkflowRun } from "../workflows/service.js";
 import { isOrgAdminUser } from "./_org-admin.js";
-import { channelsVisibleTo } from "./_thread-access.js";
+import { channelsVisibleTo, threadEntry, threadsVisibleTo } from "./_thread-access.js";
 import { slackEventChannel } from "../services/thread-access.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { EVENT_LOG_WINDOW_MS, lastEventLogActivity, listEventLog } from "../services/event-log.js";
@@ -136,9 +139,44 @@ type NarrowedSubscriptionRow = Omit<
 };
 
 /**
+ * Why a replacement cannot turn on, and how the reviewer recovers. The
+ * message never says to turn the replaced version back on: that version's
+ * history (a successor, a later version that replaced the successor, a
+ * rollback) decides whether doing so leaves two versions replying, and the
+ * rows do not keep that history reliably. It sends the reviewer to the
+ * version that replies now.
+ */
+function staleReplacement(replaced: { name: string } | undefined): string {
+  if (replaced === undefined) {
+    return "This proposal replaces a subscription that was removed. Delete this proposal, then ask the assistant for a new one.";
+  }
+  return `This proposal replaces "${replaced.name}", which is off, so enabling it could leave two versions replying. ` +
+    "Delete this proposal. To change the subscription that replies now, ask the assistant for a new proposal that replaces it.";
+}
+
+/** Another enable turned the replaced version off first; rolls this enable back. */
+class StaleReplacementError extends Error {}
+
+/** After an enable turned `replacedId` off: the link is cleared and its ID
+ * recorded as `replaced`, so the link acts once and a retry can see it did. */
+function spendReplacement(target: EventSubscriptionTargetWire, replacedId: string | undefined): EventSubscriptionTargetWire {
+  if (replacedId === undefined || target.kind !== "orchestrator") return target;
+  const { replaces: _link, ...rest } = target;
+  return { ...rest, replaced: replacedId };
+}
+
+/** The target without a replacement link or its record (`events.propose_subscription`'s `replaces`). */
+function withoutReplaces(target: EventSubscriptionTargetWire): EventSubscriptionTargetWire {
+  if (target.kind !== "orchestrator" || (target.replaces === undefined && target.replaced === undefined)) return target;
+  const { replaces: _link, replaced: _record, ...rest } = target;
+  return rest;
+}
+
+/**
  * The collision report for one candidate write (TKAI-294): the candidate
- * compared against every ENABLED subscription in the org, minus the row
- * being edited. Disabled rows do not fire, so they cannot collide; enabling
+ * compared against every ENABLED subscription in the org, minus the rows the
+ * write leaves off: the row being edited, and the row an enabled replacement
+ * disables. Disabled rows do not fire, so they cannot collide; enabling
  * one later re-runs this check (see the PATCH route).
  */
 async function collisionsForWrite(
@@ -146,14 +184,14 @@ async function collisionsForWrite(
   plugins: ValetPlugin[],
   orgId: string,
   candidate: { ownerType?: string; eventKeys: string[]; filters: SubscriptionFilter[]; target: EventSubscriptionTargetWire },
-  excludeId?: string,
+  excludeIds: readonly string[] = [],
 ): Promise<CollisionReport<NarrowedSubscriptionRow>> {
   const rows = await db
     .select()
     .from(eventSubscriptions)
     .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
   const existing: NarrowedSubscriptionRow[] = rows
-    .filter((r) => r.id !== excludeId)
+    .filter((r) => !excludeIds.includes(r.id))
     .map((r) => ({
       ...r,
       eventKeys: r.eventKeys as string[],
@@ -364,6 +402,57 @@ async function eventVisibleTo(c: Context<AppEnv>, row: { service: string; refs: 
   return channel === undefined || channelsVisibleTo(c)(`slack:${channel}`);
 }
 
+/**
+ * The assistant thread each delivery was admitted to, by delivery id. The
+ * dispatcher admits a delivery under `eventDeliveryDispatchId`, and the engine
+ * keeps that id on the queue item, so one query finds every thread. A thread
+ * stays only when this request may open it at `/threads/:threadId`
+ * (`routes/threads.ts`), by the same two checks: `threadEntry` (a viewer of
+ * the session, or a member the thread's share admits), then `threadsVisibleTo`
+ * on the thread's key.
+ */
+async function deliveryThreads(
+  c: Context<AppEnv>,
+  deliveryIds: string[],
+): Promise<Map<string, { sessionId: string; threadId: string }>> {
+  const found = new Map<string, { sessionId: string; threadId: string }>();
+  if (deliveryIds.length === 0) return found;
+  const { db } = c.var.providers;
+  const byDispatchId = new Map(deliveryIds.map((id) => [eventDeliveryDispatchId(id), id]));
+  const result = await db.execute(sql`
+    SELECT q.dispatch_id, q.session_id, q.thread_id, t.key, s.org_id, s.status, s.user_id, s.owner_type, s.owner_id
+    FROM engine_queue_items q
+    JOIN agent_sessions s ON s.id = q.session_id
+    JOIN engine_threads t ON t.session_id = q.session_id AND t.id = q.thread_id
+    WHERE q.dispatch_id IN (${sql.join([...byDispatchId.keys()].map((id) => sql`${id}`), sql`, `)})
+      AND s.org_id = ${c.var.user.orgId} AND s.status <> 'deleted'
+    ORDER BY q.created_at`) as {
+    rows: Array<{
+      dispatch_id: string; session_id: string; thread_id: string; key: string;
+      org_id: string; status: string; user_id: string; owner_type: string; owner_id: string;
+    }>;
+  };
+  // An event has few deliveries, so each thread is checked on its own.
+  for (const row of result.rows) {
+    const deliveryId = byDispatchId.get(row.dispatch_id);
+    if (deliveryId === undefined || found.has(deliveryId)) continue;
+    const session = { id: row.session_id, orgId: row.org_id, status: row.status, userId: row.user_id, ownerType: row.owner_type, ownerId: row.owner_id };
+    if (!await threadEntry(c, session, row.thread_id) || !await threadsVisibleTo(c, session)(row.key)) continue;
+    found.set(deliveryId, { sessionId: row.session_id, threadId: row.thread_id });
+  }
+  return found;
+}
+
+/** The workflow run each delivery started, by delivery id, when this request
+ * may open it: the check the run page applies (`canReadWorkflowRun`). A
+ * delivery that started no run has no run to read. */
+async function deliveryRuns(c: Context<AppEnv>, deliveryIds: string[]): Promise<Map<string, string>> {
+  const { deps, owner } = workflowRequestContext(c);
+  const runs = deliveryIds.map((id) => [id, eventDeliveryRunId(id)] as const);
+  const readable = await Promise.all(runs.map(([, runId]) => canReadWorkflowRun(deps, owner, runId)));
+  return new Map(runs.filter((_, index) => readable[index]));
+}
+
 eventsRouter.get("/events/:id", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
@@ -391,11 +480,24 @@ eventsRouter.get("/events/:id", async (c) => {
       lastError: eventDeliveries.lastError,
       deliveredAt: eventDeliveries.deliveredAt,
       nextAttemptAt: eventDeliveries.nextAttemptAt,
+      target: eventSubscriptions.target,
     })
     .from(eventDeliveries)
     .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
     .where(and(eq(eventDeliveries.eventId, id), eq(eventSubscriptions.orgId, user.orgId)))
     .orderBy(desc(eventDeliveries.createdAt));
+  // `target` is validated jsonb, the same narrowing as `rowToSubscription`.
+  const idsFor = (kind: EventSubscriptionTargetWire["kind"]) =>
+    deliveryRows.filter((d) => (d.target as EventSubscriptionTargetWire).kind === kind).map((d) => d.id);
+  const [threads, runs] = await Promise.all([
+    deliveryThreads(c, idsFor("orchestrator")),
+    deliveryRuns(c, idsFor("workflow")),
+  ]);
+  const destination = (id: string): Pick<EventDeliveryWire, "thread" | "runId"> => {
+    const thread = threads.get(id);
+    const runId = runs.get(id);
+    return { ...(thread ? { thread } : {}), ...(runId ? { runId } : {}) };
+  };
 
   const resp: GetEventResponse = {
     event: { ...rowToEventSummary(row), payload: row.payload },
@@ -413,6 +515,7 @@ eventsRouter.get("/events/:id", async (c) => {
       // attempt is really coming, or the UI promises a retry that the
       // dispatcher will never make.
       nextAttemptAt: d.status === "pending" || d.status === "failed" ? d.nextAttemptAt : null,
+      ...destination(d.id),
     })),
   };
   return c.json(resp);
@@ -602,7 +705,9 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     name: body.name,
     eventKeys: body.eventKeys,
     filters,
-    target: body.target,
+    // Only an assistant's proposal carries `replaces`, and only its enable
+    // spends it. A direct create stores no link.
+    target: withoutReplaces(body.target),
     audience,
     enabled,
     createdBy: user.id,
@@ -812,6 +917,25 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   const willBeEnabled = body.enabled ?? row.enabled;
   const matchChanged = body.filters !== undefined || body.eventKeys !== undefined;
   const arming = body.enabled === true && !row.enabled;
+  // Enabling a replacement proposal disables the subscription it replaces
+  // (see the update below), so that row is not a collision peer. Same owner
+  // only: a target written by hand must not reach another workspace's rule.
+  const replaces = arming && patchedTarget.kind === "orchestrator" ? patchedTarget.replaces : undefined;
+  // An assistant subscription only: a workflow trigger is not a version.
+  const replaced = replaces === undefined ? undefined : (await db
+    .select({ id: eventSubscriptions.id, name: eventSubscriptions.name, enabled: eventSubscriptions.enabled })
+    .from(eventSubscriptions)
+    .where(and(
+      eq(eventSubscriptions.id, replaces), ne(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId),
+      eq(eventSubscriptions.ownerType, row.ownerType), eq(eventSubscriptions.ownerId, row.ownerId),
+      sql`${eventSubscriptions.target}->>'kind' = 'orchestrator'`,
+    ))
+    .limit(1))[0];
+  // A replacement turns off a version that still replies. If that version is
+  // already off or gone (another replacement of it was enabled, or a person
+  // removed it), enabling this one could leave two versions on.
+  if (replaces !== undefined && !replaced?.enabled) return c.json({ error: staleReplacement(replaced) }, 409);
+  const replacedId = replaced?.id;
   let collisions: EventSubscriptionCollisionsWire | undefined;
   if (willBeEnabled && (matchChanged || arming)) {
     const ingressBlocked = await linearEventArmBlock(db,c.var.providers.engineCredentials,user.orgId,merged.eventKeys as string[]);
@@ -829,7 +953,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
         // would answer for the rule as it was.
         target: patchedTarget,
       },
-      id,
+      replacedId !== undefined ? [id, replacedId] : [id],
     );
     if (report.blocking.length > 0 && body.allowCollision !== true) {
       const resp: EventSubscriptionCollisionErrorWire = {
@@ -849,19 +973,42 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     }
   }
 
-  const updated = await db
-    .update(eventSubscriptions)
-    .set({
-      name: merged.name,
-      eventKeys: merged.eventKeys,
-      filters,
-      target: patchedTarget,
-      audience,
-      enabled: willBeEnabled,
-      updatedAt: Math.max(Date.now(), row.updatedAt + 1),
-    })
-    .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.updatedAt, row.updatedAt)))
-    .returning();
+  // The link is spent once the replaced version is off. Clearing it keeps a
+  // later off-and-on of this version from disabling the old one again.
+  const enabledTarget = spendReplacement(patchedTarget, replacedId);
+  let updated: (typeof eventSubscriptions.$inferSelect)[];
+  try {
+    updated = await db.transaction(async (tx) => {
+      const rows = await tx
+        .update(eventSubscriptions)
+        .set({
+          name: merged.name,
+          eventKeys: merged.eventKeys,
+          filters,
+          target: enabledTarget,
+          audience,
+          enabled: willBeEnabled,
+          updatedAt: Math.max(Date.now(), row.updatedAt + 1),
+        })
+        .where(and(eq(eventSubscriptions.id, id), eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.updatedAt, row.updatedAt)))
+        .returning();
+      // One transaction, so the replacement and the version it replaces are
+      // never both enabled. The version must still be on: of two replacements
+      // of one version enabled at once, the second rolls back.
+      if (rows[0] && replacedId !== undefined) {
+        const off = await tx
+          .update(eventSubscriptions)
+          .set({ enabled: false, updatedAt: sql`greatest(${eventSubscriptions.updatedAt} + 1, ${Date.now()})` })
+          .where(and(eq(eventSubscriptions.id, replacedId), eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.enabled, true)))
+          .returning({ id: eventSubscriptions.id });
+        if (off.length === 0) throw new StaleReplacementError();
+      }
+      return rows;
+    });
+  } catch (err) {
+    if (err instanceof StaleReplacementError) return c.json({ error: staleReplacement(replaced) }, 409);
+    throw err;
+  }
 
   if (!updated[0]) return c.json({ error: "This subscription changed while you were editing it. Refresh and try again." }, 409);
 

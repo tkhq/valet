@@ -7,12 +7,13 @@
  * routes through here (its refresh lives in services/github-tokens.ts) —
  * findOAuthDeclaration excludes it. Refresh failure stamps
  * metadata.refreshFailedAt (the health field the credential summary
- * already whitelists) and returns the stored credential: the caller gets
- * the provider's own 401 and the UI shows the unhealthy badge.
+ * already whitelists) and returns the stamped credential: the caller gets
+ * the provider's own 401, the UI shows the unhealthy badge, and a team read
+ * can pass over the row on the same read (`isDeadConnection`).
  */
 import { eq } from "drizzle-orm";
 import type { CredentialOwner, CredentialStore, StoredCredential, ValetPlugin } from "@valet/engine";
-import { refreshTokenPkce, type TokenResponse } from "@valet/sdk";
+import { OAuthTokenError, refreshTokenPkce, type TokenResponse } from "@valet/sdk";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { mcpOauthClients } from "../schema/index.js";
 import { findOAuthDeclaration, refreshAuthorizationCodeToken } from "../services/integration-oauth.js";
@@ -84,15 +85,18 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
       }
     } catch (err) {
       console.error(`credential refresh failed for ${service}:`, err);
+      // Only the provider refusing the grant (400 or 401) makes the row dead
+      // (`isDeadConnection`). A 5xx, a 429, or a network error stamps the
+      // failure and leaves the next read to retry.
+      const refused = err instanceof OAuthTokenError && (err.status === 400 || err.status === 401);
       const stamped: StoredCredential = {
         ...stored,
-        metadata: { ...stored.metadata, refreshFailedAt: now },
+        metadata: { ...stored.metadata, refreshFailedAt: now, ...(refused ? { refreshRefused: true } : {}) },
       };
-      await this.inner.save(owner, service, stamped);
-      return stored;
+      return this.saveIfUnchanged(owner, service, stored, stamped);
     }
 
-    const { refreshFailedAt: _cleared, ...restMetadata } = stored.metadata ?? {};
+    const { refreshFailedAt: _cleared, refreshRefused: _refused, ...restMetadata } = stored.metadata ?? {};
     const fresh: StoredCredential = {
       ...stored,
       accessToken: tokens.access_token,
@@ -100,8 +104,24 @@ export class OAuthRefreshingCredentialStore implements CredentialStore {
       expiresAt: typeof tokens.expires_in === "number" ? now + tokens.expires_in * 1000 : undefined,
       metadata: Object.keys(restMetadata).length > 0 ? restMetadata : undefined,
     };
-    await this.inner.save(owner, service, fresh);
-    return fresh;
+    return this.saveIfUnchanged(owner, service, stored, fresh);
+  }
+
+  /**
+   * Saves the refresh result only if the row still holds the tokens it
+   * refreshed. A reconnect can replace the row while the token request is in
+   * flight, and saving then would put the old grant back over the new one.
+   * Returns the row the caller should use. The store has no compare-and-swap,
+   * so a write can still land between this read and the save; the window is
+   * one round trip, not the provider's response time.
+   */
+  private async saveIfUnchanged(
+    owner: CredentialOwner, service: string, expected: StoredCredential, next: StoredCredential,
+  ): Promise<StoredCredential | null> {
+    const current = await this.inner.get(owner, service);
+    if (!current || current.accessToken !== expected.accessToken || current.refreshToken !== expected.refreshToken) return current;
+    await this.inner.save(owner, service, next);
+    return next;
   }
 
   save(owner: CredentialOwner, service: string, credential: StoredCredential): Promise<void> {

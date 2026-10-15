@@ -239,6 +239,15 @@ export async function exchangeCodePkce(params: {
   return (await res.json()) as TokenResponse;
 }
 
+/** A token endpoint answered with an HTTP error. `status` tells a refusal
+ * (400 or 401: the grant is no longer valid) from a temporary failure. */
+export class OAuthTokenError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'OAuthTokenError';
+  }
+}
+
 /** Refresh a token for a public client. */
 export async function refreshTokenPkce(params: {
   tokenEndpoint: string;
@@ -256,7 +265,7 @@ export async function refreshTokenPkce(params: {
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`MCP PKCE token refresh failed: ${res.status} ${body.slice(0, 200)}`);
+    throw new OAuthTokenError(`MCP PKCE token refresh failed: ${res.status} ${body.slice(0, 200)}`, res.status);
   }
   return (await res.json()) as TokenResponse;
 }

@@ -93,6 +93,11 @@ describe("DecisionGateCard — policy provenance", () => {
     expect(screen.getByTestId("gate-provenance").textContent).toBe("Gated by your personal policy override.");
   });
 
+  it("names no internal id for a source it does not know", () => {
+    renderCard(gate({ provenance: { baseMode: "require_approval", source: "future_source" } }));
+    expect(screen.getByTestId("gate-provenance").textContent).toBe("Gated by policy.");
+  });
+
   it("renders nothing extra when provenance is absent", () => {
     renderCard();
     expect(screen.queryByTestId("gate-provenance")).toBeNull();
@@ -157,6 +162,15 @@ describe("DecisionGateCard — another member's shared account", () => {
     expect(screen.queryByRole("button", { name: "Allow" })).toBeNull();
   });
 
+  // The raw source id showed as "Gated by policy (shared_account)." under a
+  // title that already says whose account it is.
+  it("shows no raw policy source on the account owner's card", () => {
+    meData = { id: "bea", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current", timezone: null, timezoneReportDone: false };
+    renderCard({ ...borrow, provenance: { baseMode: "allow", source: "shared_account" } });
+    expect(screen.queryByTestId("gate-provenance")).toBeNull();
+    expect(document.body.textContent).not.toContain("shared_account");
+  });
+
   it("gives that member the buttons", () => {
     meData = { id: "bea", email: "a@b.com", name: "A", avatarUrl: null, role: "member", orgId: "org_1", orgRole: "member", defaultModel: null, defaultReasoning: null, newThreadBehavior: "keep_current", timezone: null, timezoneReportDone: false };
     renderCard(borrow);
@@ -164,6 +178,22 @@ describe("DecisionGateCard — another member's shared account", () => {
   });
 });
 
+
+describe("question answer layout", () => {
+  // The paperclip sat beside the field and pushed it out of line with the
+  // title and the options. The field now spans the card, with Attach and
+  // Submit on one row below it.
+  it("puts Attach and Submit on one row below a full-width answer field", () => {
+    renderCard(gate({ type: "question", actions: [{ id: "yes", label: "Yes" }] }));
+    const field = screen.getByRole("textbox", { name: "Your answer" });
+    const attach = screen.getByRole("button", { name: "Attach images" });
+    const submit = screen.getByRole("button", { name: "Submit" });
+    expect(field.className).toContain("w-full");
+    expect(attach.parentElement).toBe(submit.parentElement);
+    expect(field.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(attach.parentElement?.contains(field)).toBe(false);
+  });
+});
 
 describe("question keyboard confirmation", () => {
   it.each(["metaKey", "ctrlKey"])("submits a typed answer with %s + Enter", async (modifier) => {

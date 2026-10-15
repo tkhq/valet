@@ -426,6 +426,7 @@ export function threadReference(value: string): string {
 export const threadReadTool = defineTool({
   name: "thread_read",
   concurrencySafe: true,
+  ownerOnly: true,
   description:
     "Read recent messages from another thread in this session. Useful for cross-thread context (e.g. an orchestrator pulling notes from a worker thread, or a thread checking what a sibling has done). " +
     "Accepts a thread key, a thread id, or a Valet thread link a person pasted (`/threads/<id>`, or a chat link with `?thread=<id>`).",
@@ -633,7 +634,11 @@ export const childSendTool = defineTool({
         message: args.message,
         ...(args.queue !== undefined ? { queue: args.queue } : {}),
       },
-      { parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId },
+      {
+        parentSessionId: ctx.sessionId, parentThreadId: ctx.threadId, actorUserId: ctx.userId,
+        // The host keeps automatic channel replies only for a channel turn.
+        ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
+      },
     );
     if (result === null) {
       return {
@@ -704,6 +709,7 @@ export const childStatusTool = defineTool({
 export const listThreadsTool = defineTool({
   name: "list_threads",
   concurrencySafe: true,
+  ownerOnly: true,
   description:
     "List sibling threads in this session, including paused ones. Use this " +
     "to discover thread keys before calling `thread_read`. Returns key, " +
@@ -768,7 +774,9 @@ export const askApprovalTool = defineTool({
   description:
     "Ask the user for an explicit approval before proceeding with an action. " +
     "Blocks until the user approves or denies (or the gate expires). Use for " +
-    "irreversible or sensitive steps the user should sign off on.",
+    "irreversible or sensitive steps the user should sign off on. " +
+    "Do not use it before an integration action: call_tool asks for approval itself " +
+    "when policy requires it, and that request offers to allow the action from then on.",
   parameters: Type.Object({
     title: Type.String({ description: "Short question, e.g. 'Delete the staging database?'" }),
     body: Type.Optional(Type.String({ description: "Details the user needs to decide." })),
@@ -836,7 +844,8 @@ export const askQuestionTool = defineTool({
         return {
           text:
             `question expired: "${args.question}". Nobody answered before the deadline. ` +
-            "Do not ask again in this turn. Continue without the answer if you can, and say what you assumed.",
+            "Do not ask again in this turn. Do not send, change, or delete anything that depends on the answer; " +
+            "say what was missing. Continue with the rest of the work, and say what you assumed.",
         };
       }
       throw err;

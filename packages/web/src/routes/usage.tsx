@@ -20,6 +20,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
+import { Users } from "lucide-react";
 import { useUsageBreakdown, useUsageItems, useUsageOutcomes, useUsageToolEfficiency } from "~/api/usage";
 import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
 import { useOrg } from "~/api/settings";
@@ -30,6 +31,7 @@ import type { UsageExportGranularity, UsageUseCase, UsageDrillItem, UsagePeriodS
 import { api } from "~/api/client";
 import { FilterChips, pageClass } from "~/components/primitives";
 import { cn } from "~/lib/cn";
+import { formatUsdPrecise } from "~/lib/format-usage";
 
 export const Route = createFileRoute("/usage")({
   component: UsagePage,
@@ -58,10 +60,6 @@ function usageErrorText(error: unknown): string {
 
 function fmt(n: number) {
   return n.toLocaleString();
-}
-
-function fmtUsd(n: number) {
-  return `$${n.toFixed(4)}`;
 }
 
 function fmtPct(n: number) {
@@ -153,7 +151,15 @@ function ItemList({
         // A workspace runtime has no session page; its threads open from chat.
         const isRuntimeId = /^(orchestrator|assistant):/.test(item.sessionId ?? "");
         const canLink = item.sessionId !== null && !isRuntimeId;
-        const labelEl = canLink ? (
+        const labelEl = item.workflowId !== undefined && !item.isChild ? (
+          <Link
+            to="/workflows/$workflowId"
+            params={{ workflowId: item.workflowId }}
+            className="block min-h-11 max-w-full break-words py-3 text-moss hover:underline underline-offset-2 sm:min-h-0 sm:py-0"
+          >
+            {item.label}
+          </Link>
+        ) : canLink ? (
           <Link
             to="/sessions/$sessionId"
             params={{ sessionId: item.sessionId! }}
@@ -173,13 +179,22 @@ function ItemList({
             }`}
           >
             <div className="basis-full min-w-0 sm:basis-auto sm:flex-1">{labelEl}</div>
+            {item.runs !== undefined && item.runs > 0 && (
+              <span className="tabular-nums text-muted shrink-0">
+                {item.isChild
+                  ? `${formatUsdPrecise(item.costUsd / item.runs)} avg over ${item.runs} ${item.runs === 1 ? "run" : "runs"}`
+                  : `${item.runs} ${item.runs === 1 ? "run" : "runs"}`}
+              </span>
+            )}
             <span className="tabular-nums text-muted shrink-0">
-              {fmtUsd(item.costUsd)}
+              {formatUsdPrecise(item.costUsd)}
             </span>
-            <span className="tabular-nums text-muted shrink-0 sm:w-20 sm:text-right">
+            {/* A workflow row leads with cost per run; on a phone that and the
+                total are the whole row. */}
+            <span className={`tabular-nums text-muted shrink-0 sm:w-20 sm:text-right ${item.runs !== undefined ? "max-sm:hidden" : ""}`}>
               {fmt(item.totalTokens)} tok
             </span>
-            <span className="tabular-nums text-muted shrink-0 sm:w-14 sm:text-right">
+            <span className={`tabular-nums text-muted shrink-0 sm:w-14 sm:text-right ${item.runs !== undefined ? "max-sm:hidden" : ""}`}>
               {item.turns} turns
             </span>
           </div>
@@ -231,7 +246,7 @@ function UseCaseRow({
           ›
         </span>
         <span className="min-w-0 basis-4/5 grow break-words text-ink font-medium sm:basis-auto">{USE_CASE_LABELS[useCase]}</span>
-        <span className="tabular-nums text-muted sm:w-24 sm:text-right">{fmtUsd(costUsd)}</span>
+        <span className="tabular-nums text-muted sm:w-24 sm:text-right">{formatUsdPrecise(costUsd)}</span>
         <span className="tabular-nums text-muted sm:w-24 sm:text-right">
           {fmt(totalTokens)} tok
         </span>
@@ -425,30 +440,33 @@ export function UsagePage() {
               }`}
             />
           </label>
-          <label className="text-sm text-muted">
-            <span className="sr-only">Custom start date</span>
-            <input
-              type="date"
-              aria-label="Custom start date"
-              max={todayUtc}
-              value={customStart}
-              onChange={(event) => setCustomStart(event.target.value)}
-              className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
-            />
-          </label>
-          <span className="text-sm text-muted">to</span>
-          <label className="text-sm text-muted">
-            <span className="sr-only">Custom end date</span>
-            <input
-              type="date"
-              aria-label="Custom end date"
-              min={customStart}
-              max={todayUtc}
-              value={customEnd}
-              onChange={(event) => setCustomEnd(event.target.value)}
-              className="min-h-11 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
-            />
-          </label>
+          {/* One row that shrinks its inputs, so the range never splits. */}
+          <div className="flex min-w-0 items-center gap-2 max-sm:w-full">
+            <label className="min-w-0 flex-1 text-sm text-muted sm:flex-none">
+              <span className="sr-only">Custom start date</span>
+              <input
+                type="date"
+                aria-label="Custom start date"
+                max={todayUtc}
+                value={customStart}
+                onChange={(event) => setCustomStart(event.target.value)}
+                className="min-h-11 w-full min-w-0 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+              />
+            </label>
+            <span className="text-sm text-muted">to</span>
+            <label className="min-w-0 flex-1 text-sm text-muted sm:flex-none">
+              <span className="sr-only">Custom end date</span>
+              <input
+                type="date"
+                aria-label="Custom end date"
+                min={customStart}
+                max={todayUtc}
+                value={customEnd}
+                onChange={(event) => setCustomEnd(event.target.value)}
+                className="min-h-11 w-full min-w-0 rounded border border-line bg-paper px-2 text-ink sm:min-h-0"
+              />
+            </label>
+          </div>
           <button
             type="button"
             disabled={!customStart || !customEnd || customStart > customEnd}
@@ -520,7 +538,7 @@ export function UsagePage() {
             <div hidden={view !== "overview"} className="space-y-8">
             <div className="grid grid-cols-1 min-[360px]:grid-cols-2 lg:grid-cols-5 gap-3">
               <StatCard label="Active agents" value={fmt(breakdown.activeAgents)} sub="Unique agents with token usage in this period." />
-              <StatCard label="Total cost" value={fmtUsd(breakdown.totalCostUsd)} />
+              <StatCard label="Total cost" value={formatUsdPrecise(breakdown.totalCostUsd)} />
               <StatCard label="Total tokens" value={fmt(breakdown.totalTokens)} />
               <StatCard
                 label="Input / Output"
@@ -625,8 +643,8 @@ export function UsagePage() {
                             slack_dm_sent: "Slack DMs sent",
                           }[row.kind]}</th>
                           <td className="px-3 py-2 text-right tabular-nums">{fmt(row.count)}</td>
-                          <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(row.estimatedCostUsd)}</td>
-                          <td className="px-3 py-2 text-right tabular-nums">{row.estimatedCostPerOutcomeUsd === null ? "—" : fmtUsd(row.estimatedCostPerOutcomeUsd)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{formatUsdPrecise(row.estimatedCostUsd)}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{row.estimatedCostPerOutcomeUsd === null ? "—" : formatUsdPrecise(row.estimatedCostPerOutcomeUsd)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -825,7 +843,17 @@ export function UsagePage() {
                           className="border-b border-line last:border-0 hover:bg-ink-wash"
                         >
                           <td className="px-3 py-2 text-ink truncate max-w-[14rem]" title={row.name}>
-                            {row.name || <span className="text-muted italic">unknown</span>}
+                            {/* A team's own work (schedules, event rules, API
+                                keys): the switcher's team icon tells it
+                                apart from a person. */}
+                            {row.isTeam ? (
+                              <span className="inline-flex min-w-0 max-w-full items-center gap-1">
+                                <Users role="img" aria-label="Team" className="h-3.5 w-3.5 shrink-0 text-muted" />
+                                <span className="truncate">{row.name}</span>
+                              </span>
+                            ) : (
+                              row.name || <span className="text-muted italic">unknown</span>
+                            )}
                           </td>
                           {dailyAgentWindow && (
                             <td className="px-3 py-2 text-right tabular-nums text-muted">

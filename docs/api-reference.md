@@ -31,7 +31,7 @@ App webhooks (HMAC-verified).
 | `/api/sessions/:id/wakeups` | GET | Open wakeups and active leases → `{ wakeups, leases }` (no command or exec id) |
 | `/api/sessions/:id/wakeups/:wakeupId/cancel` | POST | Cancel one wakeup (`wk_`) or hold (`ls_`) as a person. The agent gets the terminal signal with `cause=cancelled`. Session admins only |
 | `/api/sessions/:id/sandbox-jwt` | POST | Mint a short-lived gateway JWT |
-| `/api/sessions/:id/ws` | WebSocket | Live event stream (`?fromOffset=` to resume) |
+| `/api/sessions/:id/ws` | WebSocket | Live event stream (`?fromOffset=` to resume; `?threadId=` for a shared thread's guest) |
 | `/api/sessions/:id/gateway/*` | ALL | Authenticated proxy to the sandbox gateway (terminal, VS Code) |
 
 ### Background-work rule
@@ -84,12 +84,14 @@ background work. While such work is open, these actions return 409 with a
 |----------|--------|-------------|
 | `/api/sessions/:id/messages` | GET / POST | Thread history (`?threadId=`) / send a prompt → `{ messageId, threadId }` |
 | `/api/sessions/:id/threads` | GET / POST | List / create threads |
-| `/api/sessions/:id/threads/:threadId` | PATCH | Rename, set queue mode, archive. An archive of a thread with background work follows the background-work rule |
+| `/api/sessions/:id/threads/:threadId` | PATCH | Rename, set queue mode, archive, set the model, or share a personal thread (`share`: `off`, `view`, `reply`). An archive of a thread with background work follows the background-work rule |
 | `/api/threads/:threadId` | PATCH | The same operation by thread id; the web app uses it. Archive follows the background-work rule with the same 409 and `force` contract |
 | `/api/sessions/:id/threads/:threadId/abort` | POST | Abort the running turn |
 | `/api/sessions/:id/decisions` | GET | List decision gates |
 | `/api/sessions/:id/decisions/:gateId/resolve` | POST | Resolve a gate |
 | `/api/sessions/:id/decisions/:gateId/withdraw` | POST | Withdraw a gate |
+
+The `/api/threads/:threadId` routes run the same operations by thread address. They are the only routes a shared thread's guest can use ([thread sharing](specs/2026-10-13-thread-sharing-design.md)).
 
 The WebSocket `init` frame is metadata-only. History always loads over REST.
 Wire event types are listed in
@@ -123,6 +125,7 @@ Wire event types are listed in
 | `/api/me/github` | — | GitHub App user-OAuth connect. Alias of `/api/plugins/github/http/connection` |
 | `/api/plugins/:name/http/*` | varies | Authenticated routes that a plugin declares |
 | `/api/me/identity-links` | GET / DELETE | Chat identity links (e.g. Telegram) + link codes |
+| `/api/me/tool-permissions` | GET | Effective mode, source, and settable modes per catalog action |
 | `/api/repos` | GET | Repos available for session binding |
 
 ## User & org

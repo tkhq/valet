@@ -77,12 +77,13 @@ import { llmProvidersRouter } from "./routes/llm-providers.js";
 import { reposRouter } from "./routes/repos.js";
 import { sourcesRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
+import { sandboxActionsRouter } from "./routes/sandbox-actions.js";
 import { fileUploadRouter } from "./routes/sandbox-file-upload.js";
 import { browserRouter } from "./routes/browser.js";
 import { profilePicturesPublicRouter, profilePicturesRouter } from "./routes/profile-pictures.js";
 import { teamPoliciesRouter } from "./routes/team-policies.js";
 import { policiesRouter, actionLogRouter } from "./routes/policies.js";
-import { mePolicyOverridesRouter, meGrantsRouter } from "./routes/me-policies.js";
+import { mePolicyOverridesRouter, meGrantsRouter, meToolPermissionsRouter } from "./routes/me-policies.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
 import { registerProxyGateway } from "./routes/proxy-gateway.js";
@@ -401,9 +402,11 @@ export function createApp(
   // rather than before it.
   app.route("/api/me/policy-overrides", mePolicyOverridesRouter);
   app.route("/api/me/grants", meGrantsRouter);
+  app.route("/api/me/tool-permissions", meToolPermissionsRouter);
   app.route("/api/org/sources", sourcesRouter);
   app.route("/api/repos", reposRouter);
   app.route("/api/sandbox", sandboxGitCredentialRouter);
+  app.route("/api/sandbox", sandboxActionsRouter);
   // Mounted at /api (not /api/events) because the router carries both the
   // /events* and /event-subscriptions* path families. Placed after every
   // more-specific /api/* router above so nothing gets shadowed.

@@ -3,6 +3,7 @@ import type { SandboxPrincipal } from "./auth/sandbox-tokens.js";
 import type { Providers } from "./providers/types.js";
 import type { AuthVia, RequestPrincipal } from "./lib/request-principal.js";
 import type { ValetAuth } from "./auth/index.js";
+import type { ThreadShareMode } from "./wire/types.js";
 
 /**
  * Hono request context shape for every route in this package.
@@ -17,6 +18,10 @@ import type { ValetAuth } from "./auth/index.js";
  *   admin for audit.
  * - `auth` is the better-auth instance when real auth is configured.
  * - `sandbox` is set on the `x-valet-sandbox` rung only.
+ * - `threadShareGuest` is set by the thread-addressed routes
+ *   (`routes/threads.ts`) after they admit a caller through a thread's share.
+ *   The session loader in `routes/messages.ts` admits that one session for
+ *   the rest of the request.
  */
 export interface AppVariables {
   providers: Providers;
@@ -27,6 +32,7 @@ export interface AppVariables {
   mcpClientId?: string;
   auth?: ValetAuth;
   sandbox?: SandboxPrincipal;
+  threadShareGuest?: { sessionId: string; threadId: string; mode: ThreadShareMode };
 }
 
 export type AppEnv = { Variables: AppVariables };

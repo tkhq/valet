@@ -66,7 +66,7 @@ describe('checkPrivateChannelAccess', () => {
     expect(result).toEqual({
       allowed: false,
       isPrivate: true,
-      error: 'Owner has not linked their Slack identity. Link Slack in Settings → Connected accounts.',
+      error: 'Owner has not linked their Slack identity. Link Slack in Integrations → Slack.',
     });
     expect(slackGetMock).toHaveBeenCalledTimes(1);
   });

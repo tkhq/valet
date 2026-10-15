@@ -75,6 +75,9 @@ export const orgs = pgTable("orgs", {
   /** { default?: ThinkingLevel, max?: ThinkingLevel }. Null = no default,
    * no cap. */
   reasoningSettings: jsonb("reasoning_settings"),
+  /** Tier token (xs|s|m|l|xl) for new sessions that no personal or team
+   * default covers. Null = the engine's "s" fallback. */
+  defaultTier: text("default_tier"),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
@@ -440,6 +443,9 @@ export const sessionThreads = pgTable(
     // Display-state only: an archived thread leaves the default sidebar
     // list. The engine thread and its history are untouched.
     archivedAt: bigint("archived_at", { mode: "number" }),
+    // Who else in the org may open this personal thread by its link:
+    // null (only the owner), "view", or "reply" (`services/thread-share.ts`).
+    shareMode: text("share_mode", { enum: ["view", "reply"] }),
   },
   (t) => [index("session_threads_session").on(t.sessionId)],
 );
@@ -616,6 +622,12 @@ export const childWatches = pgTable(
     // child.settled signal so the settlement turn can reach the channel
     // that asked. Null for spawns from non-channel turns.
     originJson: text("origin_json"),
+    // Reply-route state, kept apart from the origin above, which never
+    // changes and also decides transcript sharing. "origin": the origin's
+    // own reply policy, written only at spawn. "manual": explicit replies
+    // only. "none": a person took over the child. Null: a row from before
+    // this column, read as "manual" (`ChildReplyRoute`).
+    replyRoute: text("reply_route"),
     // Display-state only: a dismissed watch leaves the thread tree. The
     // child session row and its history stay reachable from Sessions.
     dismissedAt: bigint("dismissed_at", { mode: "number" }),
@@ -1329,6 +1341,10 @@ export const workflowRuns = pgTable(
     // sandboxes (workflows/sandbox-reclaim.ts). NULL until the run settles
     // AND every session sandbox is gone — the sweep retries NULL rows.
     sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
+    // The workflow's org when the run started, written by the
+    // `workflow_runs_org` insert trigger. Usage reads it, so a run's spend
+    // keeps its org after the workflow is deleted.
+    orgId: text("org_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -1604,6 +1620,9 @@ export const actionInvocations = pgTable(
     /** Who made an external call (`pol:ext:` rows): `mcp:<OAuth client id>`,
      * `cli`, `apiKey`, or `session`. Null on other rows. */
     caller: text("caller"),
+    /** The queue item whose turn made a model-directed call. Usage bills the
+     * action with that turn (`valet_action_fact`). Null on other rows. */
+    queueItemId: text("queue_item_id"),
   },
   (t) => [
     index("action_invocations_session").on(t.sessionId),
@@ -2920,3 +2939,22 @@ export const generatedFiles = pgTable("generated_files", {
   ready: boolean("ready").notNull().default(false),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 }, t => [uniqueIndex("generated_files_scope_digest").on(t.orgId, t.sessionId, t.threadId, t.digest)]);
+
+export const childReplyDeliveries = pgTable("child_reply_deliveries", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  sessionId: text("session_id").notNull(),
+  threadId: text("thread_id").notNull(),
+  queueItemId: text("queue_item_id"),
+  nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
+  completedAt: bigint("completed_at", { mode: "number" }),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+  /** Set when retries stop. `last_error` and an `event_drop_log` row say why. */
+  failedAt: bigint("failed_at", { mode: "number" }),
+  /** When the intent was written. Reports how long a reply has waited. */
+  createdAt: bigint("created_at", { mode: "number" }),
+  /** The child submission this reply reports. Its child watch decides whether admission can still happen. */
+  childSessionId: text("child_session_id"),
+  childQueueItemId: text("child_queue_item_id"),
+}, (t) => [index("child_reply_deliveries_due").on(t.orgId, t.completedAt, t.nextAttemptAt)]);

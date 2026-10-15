@@ -49,7 +49,6 @@ import {
   type GithubDeliveryEffects,
   type GithubEndpoints,
   type GithubOrgStatus,
-  type GithubPostAuthDestination,
   type GithubSetupCapability,
   type GithubWebhookCapability,
 } from "@valet/plugin-github/http";
@@ -64,13 +63,15 @@ import { githubAppInstallUrl, resolveGithubApiUrl, resolveGithubUrl } from "../s
 import {
   buildAppConfig,
   discoverInstallations,
+  installationServesOrg,
   loadAppConfig,
   loadAppConfigWithSource,
-  relinkInstallations,
+  reconcileUserInstallations,
   resolveGithubAppEnvConfig,
   saveAppConfig,
   syncAppWebhookUrl,
   verifyAppCredential,
+  type GithubAppConfig,
   type GithubAppDeps,
 } from "../services/github-app.js";
 import { invalidateWorkflowSources } from "../services/content-sync/invalidation.js";
@@ -137,7 +138,7 @@ export const githubHttpBindings: Readonly<Record<string, PluginHttpBinding>> = {
   },
   connect: {
     method: "POST", path: "/connection/connect", auth: "user",
-    bind: (context) => connectStart(context.request, connection(context), endpoints()),
+    bind: (context) => connectStart(connection(context), endpoints()),
   },
   "org-status": {
     method: "GET", path: "/connection/org-status", auth: "user",
@@ -314,14 +315,13 @@ interface ConnectState {
   userId: string;
   orgId: string;
   returnTo: string;
-  postAuthDestination?: GithubPostAuthDestination;
 }
 
 function verifyConnectState(state: string, key: Buffer): ConnectState | null {
   const now = Date.now();
   return verifyState<ConnectState>("github-connect", state, key, (payload) => {
     if (!isRecord(payload)) return null;
-    const { userId, orgId, nonce, exp, returnTo, postAuthDestination } = payload;
+    const { userId, orgId, nonce, exp, returnTo } = payload;
     if (typeof userId !== "string" || typeof orgId !== "string") return null;
     if (typeof nonce !== "string" || typeof exp !== "number") return null;
     if (exp < now) return null;
@@ -329,7 +329,6 @@ function verifyConnectState(state: string, key: Buffer): ConnectState | null {
       userId,
       orgId,
       returnTo: typeof returnTo === "string" ? returnTo : "",
-      ...(postAuthDestination === "integrations" ? { postAuthDestination } : {}),
     };
   });
 }
@@ -340,7 +339,7 @@ function connectionCapability(
   const { userId, orgId } = caller;
   return {
     oauthClientId: async () => (await loadAppConfig(appDeps(providers), orgId))?.oauthClientId ?? null,
-    signConnectState: (postAuthDestination) => {
+    signConnectState: () => {
       const returnTo = returnOrigin(request);
       return signState(
         "github-connect",
@@ -350,7 +349,6 @@ function connectionCapability(
           nonce: randomBytes(16).toString("hex"),
           exp: Date.now() + STATE_TTL_MS,
           ...(returnTo ? { returnTo } : {}),
-          ...(postAuthDestination ? { postAuthDestination } : {}),
         },
         stateKey(providers),
       );
@@ -359,7 +357,12 @@ function connectionCapability(
       const { db } = providers;
       const config = await loadAppConfig(appDeps(providers), orgId);
       const rows = await db
-        .select({ suspended: githubInstallations.suspended })
+        .select({
+          accountLogin: githubInstallations.accountLogin,
+          repositorySelection: githubInstallations.repositorySelection,
+          suspended: githubInstallations.suspended,
+          linkedUserId: githubInstallations.linkedUserId,
+        })
         .from(githubInstallations)
         .where(eq(githubInstallations.orgId, orgId));
       const [org] = await db
@@ -367,13 +370,21 @@ function connectionCapability(
         .from(orgs)
         .where(eq(orgs.id, orgId))
         .limit(1);
+      // As in the legacy stack, the install link shows once the member has
+      // connected GitHub, so the installation can link to them.
+      const own = await providers.engineCredentials.get({ type: "user", id: userId }, GITHUB_CREDENTIAL_SERVICE);
+      const connected = typeof own?.metadata?.githubId === "string";
+      const personalInstallations = rows
+        .filter((row) => row.linkedUserId === userId)
+        .map(({ accountLogin, repositorySelection, suspended }) => ({ accountLogin, repositorySelection, suspended }));
       const status: GetGithubOrgStatusResponse = {
         configured: config !== null,
         installationCount: rows.length,
         suspendedCount: rows.filter((row) => row.suspended).length,
-        ...(config !== null && org?.allowPersonalInstallations === true
+        ...(config !== null && org?.allowPersonalInstallations === true && connected
           ? { personalInstallUrl: githubAppInstallUrl(process.env, config.appSlug) }
           : {}),
+        ...(personalInstallations.length > 0 ? { personalInstallations } : {}),
       };
       const projected: GithubOrgStatus = status;
       return projected;
@@ -386,7 +397,6 @@ function connectionCapability(
         status: "open",
         grant: {
           returnTo: verified.returnTo,
-          ...(verified.postAuthDestination ? { postAuthDestination: verified.postAuthDestination } : {}),
           oauthClient: async () => {
             const config = await loadAppConfig(appDeps(providers), verified.orgId);
             return config ? { clientId: config.oauthClientId, clientSecret: config.oauthClientSecret } : null;
@@ -399,14 +409,20 @@ function connectionCapability(
               accessToken: connection.accessToken,
               refreshToken: connection.refreshToken,
               expiresAt: connection.expiresAt,
-              metadata: { login: connection.login },
+              // `githubId` comes from GitHub's `GET /user`, never from the
+              // caller. It links the member's personal installations.
+              metadata: { login: connection.login, ...(connection.githubId ? { githubId: connection.githubId } : {}) },
             });
             await refreshCredentialReadiness(providers, { type: "user", id: userId }, GITHUB_CREDENTIAL_SERVICE);
             // Best-effort: the next discovery run catches up.
-            try {
-              await relinkInstallations(appDeps(providers), verified.orgId);
-            } catch (err) {
-              console.error("github connect callback: post-save relink failed:", err);
+            if (connection.githubId) {
+              try {
+                await reconcileUserInstallations(appDeps(providers), verified.orgId, {
+                  userId, githubId: connection.githubId, accessToken: connection.accessToken,
+                });
+              } catch (err) {
+                console.error("github connect callback: personal installation reconcile failed:", err);
+              }
             }
           },
         },
@@ -468,14 +484,19 @@ function webhookCapability(providers: Providers): GithubWebhookCapability {
         webhookSecret: config.webhookSecret,
         bind: async ({ installationId }) => {
           const orgId = ownerOrgId ?? (await resolveEnvFallbackOrgId(db, installationId));
-          return orgId ? deliveryEffects(providers, orgId) : null;
+          return orgId ? deliveryEffects(providers, orgId, config, installationId) : null;
         },
       };
     },
   };
 }
 
-function deliveryEffects(providers: Providers, orgId: string): GithubDeliveryEffects {
+function deliveryEffects(
+  providers: Providers,
+  orgId: string,
+  config: GithubAppConfig,
+  installationId: number | null,
+): GithubDeliveryEffects {
   const { db } = providers;
   /** Changes one installation row under the organization row lock. */
   const changeInstallation = async (installationId: number, suspended: boolean | null): Promise<void> => {
@@ -507,6 +528,9 @@ function deliveryEffects(providers: Providers, orgId: string): GithubDeliveryEff
     discoverInstallations: async () => {
       await discoverInstallations(appDeps(providers), orgId);
     },
+    installationServesOrg: async () =>
+      installationId !== null
+      && installationServesOrg({ db, apiUrl: resolveGithubApiUrl(process.env) }, config, orgId, installationId),
     emit: async (event) => {
       await ingestEvent(
         { db, plugins: providers.plugins, onIngest: providers.eventDispatcher.nudge },

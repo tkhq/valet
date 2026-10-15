@@ -106,7 +106,12 @@ export function Composer({
   beforeSend,
   submissionLock,
   onSent,
+  guest = false,
 }: {
+  /** The sender opens a shared thread as a guest: no file or image intake
+   * (uploads land in the owner's working directory) and no slash commands
+   * (commands change the owner's thread). */
+  guest?: boolean;
   submissionLock?: { current: boolean };
   beforeSend?: (text: string) => Promise<{ text: string; threadId: string }>;
   onSent?: () => void;
@@ -140,6 +145,22 @@ export function Composer({
   const [preparing, setPreparing] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [selected, setSelected] = useState(false);
+  // True from a pointer press outside the composer that took focus from it
+  // until that press's click has fired. See `onBlurCapture`.
+  const [holdOpen, setHoldOpen] = useState(false);
+  const pointerPressed = useRef(false);
+  useEffect(() => {
+    const press = () => { pointerPressed.current = true; };
+    const release = () => { pointerPressed.current = false; };
+    window.addEventListener("pointerdown", press, true);
+    window.addEventListener("pointerup", release, true);
+    window.addEventListener("pointercancel", release, true);
+    return () => {
+      window.removeEventListener("pointerdown", press, true);
+      window.removeEventListener("pointerup", release, true);
+      window.removeEventListener("pointercancel", release, true);
+    };
+  }, []);
   useAutosizeTextarea(inputRef, text);
   useEffect(() => {
     if (replyTarget) inputRef.current?.focus();
@@ -186,7 +207,7 @@ export function Composer({
   // sends text unchanged.
   const commandQuery = /^\/(\S*)$/.exec(text)?.[1] ?? null;
   const argMatch = /^\/(\S+) (\S*)$/.exec(text);
-  const { data: commandsData } = useCommands(sessionId);
+  const { data: commandsData } = useCommands(sessionId, !guest);
   const allCommands = commandsData?.commands ?? [];
   // Per-browser last-used ranking for the command popup. Loaded once per
   // mount; `submit` records each sent slash command and refreshes it.
@@ -351,7 +372,7 @@ export function Composer({
 
   /** True while the composer refuses new files. */
   const intakeBlocked =
-    (!IMAGE_ATTACHMENTS_ENABLED && !FILE_UPLOADS_ENABLED) || send.isPending || !threadId;
+    guest || (!IMAGE_ATTACHMENTS_ENABLED && !FILE_UPLOADS_ENABLED) || send.isPending || !threadId;
 
   /**
    * Take files from a paste, a drop, or the picker. Refused files leave a
@@ -774,6 +795,7 @@ export function Composer({
 
   const expanded =
     selected ||
+    holdOpen ||
     text.length > 0 ||
     images.length > 0 ||
     files.length > 0 ||
@@ -802,6 +824,20 @@ export function Composer({
         // Submission temporarily disables the input before restoring its focus.
         if (!event.currentTarget.contains(event.relatedTarget) && !send.isPending) {
           setSelected(false);
+          // A press outside blurs the composer on pointerdown. Collapsing then
+          // moves everything that rests on it, such as a decision card, so the
+          // release lands off the target and its click never fires. Stay open
+          // until the press ends; the click fires in the same task as pointerup.
+          if (pointerPressed.current) {
+            setHoldOpen(true);
+            const release = () => {
+              window.removeEventListener("pointerup", release, true);
+              window.removeEventListener("pointercancel", release, true);
+              setTimeout(() => setHoldOpen(false), 0);
+            };
+            window.addEventListener("pointerup", release, true);
+            window.addEventListener("pointercancel", release, true);
+          }
         }
       }}
       onSubmit={(e) => {
@@ -850,6 +886,15 @@ export function Composer({
         </div>
       )}
       <div
+        onMouseDown={(event) => {
+          // A press on the box's padding or hint text moved focus to the page
+          // and collapsed the box, so the next keystrokes went nowhere. Keep
+          // focus in the message field unless the press is on a control.
+          const target = event.target instanceof Element ? event.target : null;
+          if (event.button !== 0 || target?.closest("button, a, input, textarea, select, label, [role=button], [contenteditable]")) return;
+          event.preventDefault();
+          inputRef.current?.focus({ preventScroll: true });
+        }}
         className={cn(
           "flex min-h-0 flex-col rounded-2xl border border-line bg-paper shadow-sm transition-[border-color,box-shadow] duration-150 focus-within:border-moss focus-within:ring-4 focus-within:ring-moss-wash motion-reduce:transition-none",
           expanded ? "p-2" : "p-1",
@@ -928,7 +973,7 @@ export function Composer({
             disabled={preparing || send.isPending || !threadId}
           />
           <div className={cn("flex shrink-0 items-center gap-2", expanded && "px-1 pb-1 pt-1")}>
-            {(IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
+            {!guest && (IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
               <>
                 <input
                   ref={fileInputRef}

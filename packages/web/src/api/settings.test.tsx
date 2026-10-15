@@ -10,15 +10,31 @@ import type {
 
 const createTeam = vi.fn();
 const patchMe = vi.fn();
+const providerCall = vi.fn(async () => undefined);
 
 vi.mock("./client", () => ({
   api: {
     createTeam: (body: CreateTeamRequest) => createTeam(body),
     patchMe: (body: unknown) => patchMe(body),
+    createLlmProvider: () => providerCall(),
+    patchLlmProvider: () => providerCall(),
+    deleteLlmProvider: () => providerCall(),
+    putLlmProviderKey: () => providerCall(),
+    deleteLlmProviderKey: () => providerCall(),
   },
 }));
 
-import { qkSettings, teamCreateQueryKeys, useCreateTeam, usePatchMe } from "./settings";
+import {
+  qkSettings,
+  teamCreateQueryKeys,
+  useCreateLlmProvider,
+  useCreateTeam,
+  useDeleteLlmProvider,
+  useDeleteLlmProviderKey,
+  usePatchLlmProvider,
+  usePatchMe,
+  usePutLlmProviderKey,
+} from "./settings";
 
 const created: CreateTeamResponse = {
   team: {
@@ -55,6 +71,31 @@ describe("workspace creation", () => {
     await result.current.mutateAsync({ name: "Platform" });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: qkSettings.teams() });
     expect(client.getQueryData(["assistants"])).toBeUndefined();
+  });
+});
+
+describe("LLM provider mutations", () => {
+  // The model tiers response says whether the org default tier can run, and
+  // that answer depends on the providers and their keys.
+  it("each provider and key change refreshes the model tiers", async () => {
+    const client = makeClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const wrapper = wrapperFor(client);
+    const mutations: Record<string, () => Promise<unknown>> = {
+      create: () => renderHook(() => useCreateLlmProvider(), { wrapper }).result.current
+        .mutateAsync({ kind: "openai", name: "OpenAI" }),
+      patch: () => renderHook(() => usePatchLlmProvider(), { wrapper }).result.current
+        .mutateAsync({ id: "p1", body: { enabled: false } }),
+      delete: () => renderHook(() => useDeleteLlmProvider(), { wrapper }).result.current.mutateAsync("p1"),
+      putKey: () => renderHook(() => usePutLlmProviderKey(), { wrapper }).result.current
+        .mutateAsync({ id: "p1", body: { apiKey: "sk-test" } }),
+      deleteKey: () => renderHook(() => useDeleteLlmProviderKey(), { wrapper }).result.current.mutateAsync("p1"),
+    };
+    for (const [name, run] of Object.entries(mutations)) {
+      invalidate.mockClear();
+      await run();
+      expect(invalidate, name).toHaveBeenCalledWith({ queryKey: qkSettings.modelTiers() });
+    }
   });
 });
 

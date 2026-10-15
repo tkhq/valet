@@ -89,13 +89,26 @@ function demoPlugin() {
     }],
     credentials: [{ service: "locked", type: "api_key", configKeys: ["apiKey"], connectLabel: "Locked" }],
   };
+  // A service whose action ids carry their own prefix, the way
+  // google_workspace ships `drive.search_files`. No service is named "docs".
+  const suite: ValetPlugin = {
+    name: "suite",
+    version: "0.0.1",
+    actions: [{ service: "suite", actions: [{
+      id: "docs.open", name: "Open", description: "Opens a suite document.", riskLevel: "low", parameters: Type.Object({}),
+      execute: async () => {
+        calls["docs.open"] = (calls["docs.open"] ?? 0) + 1;
+        return { success: true, data: { from: "suite" } };
+      },
+    }] }],
+  };
   const plugin: ValetPlugin = {
     name: "demo",
     version: "0.0.1",
     actions: [{ service: "demo", actions: [action("demo.ping", "Ping"), action("demo.pong", "Pong"), action("demo.blocked", "Blocked"), action("demo.risky", "Risky"), ...extra] }],
     credentials: [{ service: "demo", type: "api_key", configKeys: ["apiKey"], connectLabel: "Demo" }],
   };
-  return { plugin, dynamic, locked, dyn, calls, releaseSlow: () => releaseSlow(), slowStarted: slowStartedP };
+  return { plugin, dynamic, locked, suite, dyn, calls, releaseSlow: () => releaseSlow(), slowStarted: slowStartedP };
 }
 
 async function seedUser(testApi: TestApi, id: string): Promise<string> {
@@ -130,7 +143,7 @@ async function tool(baseUrl: string, token: string, name: string, args: Record<s
 
 async function setup() {
   const demo = demoPlugin();
-  const testApi = await bootTestApi({ auth: true, plugins: [demo.plugin, demo.dynamic, demo.locked] });
+  const testApi = await bootTestApi({ auth: true, plugins: [demo.plugin, demo.dynamic, demo.locked, demo.suite] });
   clearDiscoveryCache();
   api = testApi;
   const alice = await seedUser(testApi, "alice");
@@ -181,6 +194,22 @@ describe("MCP tool broker", () => {
     const unknown = await tool(testApi.baseUrl, alice, "describe_tool", { tool_id: "demo.nope" });
     expect(unknown.isError).toBe(true);
     expect(unknown.text).toContain("Use search_tools");
+  });
+
+  // google_workspace lists `drive.search_files`, but describe and call
+  // matched tool ids against service names only and rejected it as unknown.
+  it("describes and calls a tool whose id does not start with its service", async () => {
+    const { testApi, demo, alice } = await setup();
+    const found = await tool(testApi.baseUrl, alice, "search_tools", { query: "docs.open" });
+    expect(found.data.tools).toEqual([expect.objectContaining({ tool_id: "docs.open", service: "suite" })]);
+    const described = await tool(testApi.baseUrl, alice, "describe_tool", { tool_id: "docs.open" });
+    expect(described.data).toMatchObject({ tool_id: "docs.open", service: "suite", policy: "allow" });
+    const called = await tool(testApi.baseUrl, alice, "call_tool", { tool_id: "docs.open", params: {} });
+    expect(called.data).toEqual({ tool_id: "docs.open", status: "completed", result: { from: "suite" } });
+    expect(demo.calls["docs.open"]).toBe(1);
+    // The service-prefixed form still resolves.
+    const qualified = await tool(testApi.baseUrl, alice, "describe_tool", { tool_id: "suite.docs.open" });
+    expect(qualified.data).toMatchObject({ tool_id: "docs.open", service: "suite" });
   });
 
   it("runs an allowed tool with the caller's own credential and never returns the secret", async () => {

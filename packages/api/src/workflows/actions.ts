@@ -5,20 +5,23 @@
  * create, inspect, and run dag/v1 workflows conversationally. Every result
  * carries the ids (`workflowId`/`runId`) the web chat renderer fetches by.
  */
-import type {
-  ActionPlugin,
-  PluginAction,
-  PluginActionContext,
-  PluginActionResult,
+import {
+  encodeToolOutput,
+  type ActionPlugin,
+  type PluginAction,
+  type PluginActionContext,
+  type PluginActionResult,
 } from "@valet/engine";
 import { TeamAdminRequiredError } from "../services/team-deletion-access.js";
 import { submitDeletionRequest } from "../services/team-deletion-requests.js";
 import { proposalResult } from "../events/proposals.js";
 import { ValetError } from "@valet/shared";
-import { WorkflowCursorError, type WorkflowDefinition, type WorkflowEdge } from "@valet/workflow";
+import { WorkflowCursorError, type WorkflowDefinition, type WorkflowEdge, type WorkflowRun } from "@valet/workflow";
 import type { Static, TSchema } from "typebox";
 import { Type } from "typebox";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
+import { previewWorkflow } from "../routes/workflow-preview.js";
+import type { PreviewWorkflowResponse, WorkflowPendingGate } from "../wire/types.js";
 import {
   appendRemovedEdgeHint,
   applyWorkflowModelPatch,
@@ -33,10 +36,12 @@ import {
 } from "./schedule-service.js";
 import {
   addAggregateNode,
+  canReadWorkflowRun,
   cancelWorkflowRun,
   copyWorkflowDefinition,
   createWorkflowDefinition,
   deleteWorkflowDefinition,
+  findNodeInDefinition,
   getWorkflowDefinition,
   getWorkflowRunDetail,
   isRunStatus,
@@ -60,6 +65,10 @@ import {
   updateWorkflowTrigger,
 } from "./trigger-service.js";
 import { buildOrgValidateEnvironment, buildValidateEnvironment } from "./validation-env.js";
+import { analyzeDefinitionPermissions } from "./permissions.js";
+import { readNodeDiagnostics } from "./node-diagnostics.js";
+import { readRunFollowUp } from "./run-follow-up.js";
+import { readStepTranscript } from "./step-transcript.js";
 import {
   deleteWorkflowWebhook,
   getWorkflowWebhook,
@@ -243,6 +252,86 @@ function armDepsFrom(deps: WorkflowServiceDeps): TeamServiceReadinessDeps {
   return { db: deps.db, credentials: deps.credentials, plugins: deps.plugins ?? [], onePassword: deps.onePassword };
 }
 
+/** Steps whose actions the permission preview cannot see: an agent decides
+ * them, or a sub-workflow runs them. A foreach reports its body's type. */
+function uncheckedSteps(definition: unknown): Array<{ nodeId: string; type: string }> {
+  const nodes = typeof definition === "object" && definition !== null && "nodes" in definition && Array.isArray(definition.nodes)
+    ? definition.nodes : [];
+  const unchecked: Array<{ nodeId: string; type: string }> = [];
+  for (const node of nodes) {
+    if (typeof node !== "object" || node === null || !("id" in node) || typeof node.id !== "string") continue;
+    const body = "body" in node && typeof node.body === "object" && node.body !== null ? node.body : undefined;
+    const typed = body ?? node;
+    const type = "type" in typed && typeof typed.type === "string" ? typed.type : "";
+    if (["session", "llm", "orchestrator", "workflow"].includes(type)) unchecked.push({ nodeId: node.id, type });
+  }
+  return unchecked;
+}
+
+/** What resolve_approval tells the assistant after a person answers the card,
+ * when this conversation started the run, so the run's signals arrive here. */
+export const RESOLVED_GATE_NEXT =
+  "The run continues. A workflow.settled signal reports its result in this thread, " +
+  "and a workflow.approval_needed signal says when it waits again. " +
+  "Tell the person the gate is resolved, then end your turn. Do not call get_run to wait for the result.";
+
+/** True when the run's signals reach this conversation. They go only to the
+ * thread that started the run (`signalOrigin` in run-attention.ts), and a
+ * sub-run reports nowhere. */
+export function runReportsToThread(
+  params: Pick<WorkflowRun["params"], "origin" | "parentRunId">,
+  sessionId: string | undefined,
+  threadId: string | undefined,
+): boolean {
+  const origin = params.origin;
+  return params.parentRunId === undefined && origin !== undefined
+    && origin.assistantSessionId === sessionId && origin.threadId === threadId;
+}
+
+/** The same, when another conversation started the run (or none did). The
+ * run's signals go only to the conversation that started it, so this one
+ * must read the result itself. */
+export const RESOLVED_GATE_NEXT_ELSEWHERE =
+  "The run continues, but its signals go to the conversation that started it, not this one. " +
+  "To tell the person the result here, call get_run when they ask or after a short wait.";
+
+/** The approval signal a gate waits on: `approval:{nodeId}`, with
+ * `:{iteration}` only after the first item (`resolveWorkflowApproval`). */
+function approvalSignalType(nodeId: string, iteration: number | undefined): string {
+  const iter = iteration ?? 0;
+  return `approval:${nodeId}${iter > 0 ? `:${iter}` : ""}`;
+}
+
+/**
+ * The gates that waited before this approval and still wait after it. The
+ * run wakes as soon as the approval is recorded, so the read after it can
+ * race the drive: it can still list the approved gate, or list a gate the
+ * drive just opened. The approved gate is not waiting, and a newly opened
+ * gate gets its own workflow.approval_needed signal, so both are left out.
+ */
+export function gatesStillWaiting<G extends { nodeId: string; iteration?: number }>(
+  waitingBefore: readonly { kind: string; signalType?: string }[],
+  resolved: { nodeId: string; iteration?: number },
+  pendingAfter: readonly G[],
+): G[] {
+  const before = new Set(waitingBefore.flatMap((w) => (w.kind === "signal" && w.signalType ? [w.signalType] : [])));
+  before.delete(approvalSignalType(resolved.nodeId, resolved.iteration));
+  return pendingAfter.filter((gate) => before.has(approvalSignalType(gate.nodeId, gate.iteration)));
+}
+
+/** The same, when other approvals were already waiting on the run. A
+ * workflow.approval_needed signal reports only a gate a drive opens, so no
+ * signal names these steps: the assistant must name them now. */
+export function resolvedGateStillWaiting(gates: { nodeId: string; iteration?: number; approver?: { name?: string } }[]): string {
+  const steps = gates.map((gate) => {
+    const step = gate.iteration === undefined ? gate.nodeId : `${gate.nodeId} (item ${gate.iteration})`;
+    return gate.approver?.name ? `${step}, which ${gate.approver.name} must approve` : step;
+  });
+  return `The run still waits for approval at ${steps.join("; ")}. ` +
+    "These steps were already waiting, so no new signal reports them. " +
+    "Tell the person which steps still wait and who must approve each. Do not say the run continues.";
+}
+
 export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): ActionPlugin {
   const copyToTeam = action(Type.Object({
     workflow_id: Type.String({ description: "Explicit personal workflow ID to copy." }),
@@ -312,6 +401,32 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           updatedAt: wf.updatedAt,
         },
       };
+    },
+  });
+
+  // The assistant's copy of `GET /api/workflows/:id/permissions`: the same
+  // analysis and the same owner check, so it never reports a gate the
+  // workflow page does not show.
+  const getPermissions = action(Type.Object({ workflow_id: Type.String() }))({
+    id: "workflows.get_permissions",
+    name: "Get workflow step permissions",
+    description:
+      "Show what policy decides for each tool step of a workflow, as the workflow page's Permissions section shows it. " +
+      "Per step: mode `allow` means no policy gates the step, `require_approval` waits for a person, `deny` is blocked " +
+      "by policy, and `unknown` is checked when the run reaches it. `provenance` names the rule that set the mode. " +
+      "`sharedAccount: true` means a run may use a member's shared account and then asks that member, whatever the mode; a team 1Password item for the service avoids it. " +
+      "`runtimeParams: true` means a policy rule keys on a parameter the step fills in at run time, so a run can decide differently. " +
+      "`unchecked` lists agent and sub-workflow steps; their actions are checked when they run. " +
+      "Read this before you tell a user that a step needs approval, and check a run's `waitingOn` to confirm.",
+    riskLevel: "low",
+    execute: async ({ workflow_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const deps = getDeps();
+      const summary = await getWorkflowDefinition(deps, owner, workflow_id);
+      if (!summary) return { success: false, error: `workflow not found: ${workflow_id}` };
+      const nodes = await analyzeDefinitionPermissions(deps, owner, summary);
+      return { success: true, data: { workflowId: workflow_id, nodes, unchecked: uncheckedSteps(summary.definition) } };
     },
   });
 
@@ -392,7 +507,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Start a run of a workflow. Optional `input` becomes the trigger payload data. " +
       "Returns { runId, workflowId } — always surface the runId to the user. " +
       "When the run completes, fails, or is cancelled, a workflow.settled signal reports the result in this thread. " +
-      "End your turn after starting a run and continue from that signal; do not poll.",
+      "When it waits for approval, a workflow.approval_needed signal says so. " +
+      "Read followUp and next before promising a later reply. When followUp.registered is true, " +
+      "end your turn and continue from that signal; do not poll. Otherwise check get_run.",
     riskLevel: "medium",
     execute: async ({ workflow_id, input }, ctx) => {
       const owner = ownerFromContext(ctx);
@@ -411,7 +528,13 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       }
       return {
         success: true,
-        data: { runId: started.runId, workflowId: workflow_id, status: "pending" },
+        data: {
+          runId: started.runId, workflowId: workflow_id, status: "pending",
+          followUp: { registered: origin !== undefined, status: origin ? "awaiting_settlement" : "no_origin" },
+          next: origin
+            ? "End your turn and continue from workflow.settled. Automatic completion follow-up is registered; do not poll."
+            : "Call get_run to check completion. No automatic chat follow-up is registered.",
+        },
       };
     },
   });
@@ -490,7 +613,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     name: "Get workflow run",
     description:
       "Fetch a run's status, outcome, per-node checkpoints, and what it is waiting on " +
-      "(timers, signals, approvals). Use to check progress or find pending approval gates.",
+      "(timers, signals, approvals). pendingGates lists each step that waits for approval and, " +
+      "for a step on a teammate's shared account, the teammate who must approve it.",
     riskLevel: "low",
     execute: async ({ run_id }, ctx) => {
       const owner = ownerFromContext(ctx);
@@ -505,6 +629,19 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           status: detail.run.status,
           outcome: detail.run.outcome,
           waitingOn: detail.run.waitingOn,
+          followUp: await readRunFollowUp(getDeps(), owner.orgId, detail.run),
+          createdAt: detail.run.createdAt,
+          updatedAt: detail.run.updatedAt,
+          // The steps that wait for approval, and the member who must approve
+          // a step on their shared account. Anyone who can run the workflow
+          // approves a step with no approver.
+          pendingGates: detail.pendingGates.map((gate) => ({
+            nodeId: gate.nodeId,
+            ...(gate.iteration !== undefined ? { iteration: gate.iteration } : {}),
+            kind: gate.kind,
+            ...(gate.service ? { service: gate.service, action: gate.action } : {}),
+            ...(gate.approver ? { approver: { userId: gate.approver.userId, name: gate.approver.name } } : {}),
+          })),
           checkpoints: detail.checkpoints.map((cp) => ({
             nodeId: cp.nodeId,
             iteration: cp.iteration,
@@ -513,7 +650,11 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             // The session a session node drove, and the run a workflow node
             // started — how the agent reaches a failed node's actual output.
             sessionId: cp.sessionId,
+            threadId: cp.threadId,
+            queueItemId: cp.queueItemId,
             childRunId: cp.childRunId,
+            ...(cp.repairAttempted ? { repairAttempted: true } : {}),
+            ...(cp.schemaError ? { schemaError: cp.schemaError } : {}),
           })),
         },
       };
@@ -601,12 +742,15 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     id: "workflows.resolve_approval",
     name: "Resolve workflow approval",
     description:
-      "Approve or deny a run's pending approval-node gate. Approval gates exist for HUMANS — " +
-      "only call this when the user has explicitly told you their decision in this " +
-      "conversation; never resolve a gate on your own judgment. (This action itself " +
-      "requires the user's confirmation.) Policy gates on tool nodes must be resolved " +
-      "from the run page, not via this action.",
-    riskLevel: "high",
+      "Approve or deny a run's pending gate: an approval node, or a tool node that policy holds. " +
+      "Call it when the user asks you to resolve a gate; never resolve one on your own judgment. " +
+      "Valet shows the user a card for the gate, and the gate resolves as the person who confirms it. " +
+      "The run then continues. If this conversation started the run, a workflow.settled signal reports its result here, " +
+      "and a workflow.approval_needed signal says when it waits again: end your turn after the call and continue from that signal; do not poll. " +
+      "The result's `next` field says which case applies.",
+    // The call itself always asks a person (below), so the catalog's own
+    // approval card would only ask twice. A policy cannot skip that question.
+    riskLevel: "medium",
     execute: async ({ run_id, node_id, approved, note, iteration }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
@@ -615,23 +759,66 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (typeof sessionId === "string" && sessionId.startsWith("wf:invoke:")) {
         return { success: false, error: "A workflow cannot resolve approval gates. A human must resolve this gate from the run page." };
       }
-      const result = await resolveWorkflowApproval(getDeps(), owner, {
+      const deps = getDeps();
+      // Name the step only for a run the caller may read.
+      const run = (await canReadWorkflowRun(deps, owner, run_id)) ? await deps.workflowStore.getRun(run_id) : null;
+      if (!run) return { success: false, error: `run not found: ${run_id}` };
+      const node = findNodeInDefinition(run.definition, node_id);
+      const step = node?.type === "tool" && typeof node.service === "string" && typeof node.action === "string"
+        ? (node.action.includes(".") ? node.action : `${node.service}.${node.action}`)
+        : `step ${node_id}`;
+      // A gate exists for a person. The agent relays the request, and the
+      // person who answers this card resolves the gate under their own access,
+      // as the run page would.
+      const decision = await ctx.requestDecision({
+        type: "approval",
+        title: `${approved ? "Approve" : "Deny"} ${step} on this workflow run?`,
+        body: [`Run ${run_id}, step ${node_id}${iteration ? `, iteration ${iteration}` : ""}.`, note].filter(Boolean).join("\n\n"),
+        actions: [
+          { id: "approve", label: approved ? "Approve step" : "Deny step", style: approved ? "primary" : "danger" },
+          { id: "cancel", label: "Cancel" },
+        ],
+        resumeKey: `workflow-gate:${run_id}:${node_id}:${iteration ?? 0}:${approved ? "approve" : "deny"}`,
+      });
+      if (decision.actionId !== "approve") {
+        return { success: false, error: `Nobody confirmed the card, so ${node_id} on run ${run_id} still waits for a decision.` };
+      }
+      const person: WorkflowOwner = { userId: decision.resolvedBy, orgId: owner.orgId, principal: { type: "user", id: decision.resolvedBy } };
+      // Read just before the approval: what already waits, for `next`.
+      const waitingBefore = (await deps.workflowStore.getRun(run_id))?.waitingOn ?? [];
+      const result = await resolveWorkflowApproval(deps, person, {
         runId: run_id,
         nodeId: node_id,
         approved,
         note,
         iteration,
-        via: "agent",
+        via: "thread",
       });
       if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
       if (result === "not_parked") return { success: false, error: `run ${run_id} is not parked on approval gate ${node_id}` };
       if (result === "already_resolved") return { success: false, error: `approval gate ${node_id} on run ${run_id} has already been resolved` };
       if (result === "timed_out") return { success: false, error: `approval gate ${node_id} on run ${run_id} has timed out` };
-      if (result === "human_only") return { success: false, error: "A human must resolve this policy gate from the run page." };
       if (result === "not_approver") return { success: false, error: "This step would use another member's shared account. Only that member can answer it." };
       if (result === "forbidden_always") return { success: false, error: "scope=always requires an org admin" };
       if (result === "org_mismatch") return { success: false, error: "not a member of this workflow's org" };
-      return { success: true, data: { runId: run_id, nodeId: node_id, approved } };
+      // The result is what the assistant reads right after the card. Saying
+      // here that the signal reports the run stops a get_run poll that
+      // reports the run twice: once from the poll, once from the signal.
+      let stillWaiting: WorkflowPendingGate[] | undefined;
+      try {
+        const detail = await getWorkflowRunDetail(deps, owner, run_id);
+        if (detail) stillWaiting = gatesStillWaiting(waitingBefore, { nodeId: node_id, iteration }, detail.pendingGates);
+      } catch (err) {
+        // The approval is already recorded. A failed read only loses the
+        // still-waiting list; it must not turn a success into a failure.
+        console.warn(`resolve_approval: could not read run ${run_id} after the approval:`, err);
+      }
+      const next = stillWaiting === undefined
+        ? "The gate is resolved, but the run's waiting state could not be read. Call get_run to check for remaining approvals."
+        : stillWaiting.length > 0
+        ? resolvedGateStillWaiting(stillWaiting)
+        : runReportsToThread(run.params, ctx.sessionId, ctx.threadId) ? RESOLVED_GATE_NEXT : RESOLVED_GATE_NEXT_ELSEWHERE;
+      return { success: true, data: { runId: run_id, nodeId: node_id, approved, next } };
     },
   });
 
@@ -904,10 +1091,146 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             iteration: cp.iteration,
             status: cp.status,
             error: cp.error,
-            result: presentResult(cp.result, 20_000),
+            result: presentResult(cp.result, TOOL_RESULT_CHARS),
           })),
         },
       };
+    },
+  });
+
+  const getNodeDiagnostics = action(Type.Object({
+    run_id: Type.String(),
+    node_id: Type.String(),
+    iteration: Type.Optional(Type.Integer({ minimum: 0 })),
+  }))({
+    id: "workflows.get_node_diagnostics",
+    name: "Get node diagnostics",
+    description:
+      "Trace a failed or empty session/orchestrator result through its original and repair submissions. " +
+      "Returns submission status, selected message ID, stored text and text-part lengths, stop reason, " +
+      "provider error, model, usage and cost where recorded. Missing fields are unavailable evidence. " +
+      "No prompts or result bodies are returned. Use get_node_transcript for content and get_node_result for checkpoint output. " +
+      "Pass iteration to select one checkpoint of a foreach node.",
+    riskLevel: "low",
+    execute: async ({ run_id, node_id, iteration }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const deps = getDeps();
+      const detail = await getWorkflowRunDetail(deps, owner, run_id);
+      if (!detail) return { success: false, error: `run not found: ${run_id}` };
+      const matches = (await deps.workflowStore.getCheckpoints(run_id))
+        .filter(cp => cp.nodeId === node_id && (iteration === undefined || cp.iteration === iteration));
+      if (!matches.length) return { success: false, error: `No checkpoint for node ${JSON.stringify(node_id)}. Call get_run to list recorded nodes.` };
+      if (matches.length > 1) return { success: false, error: "Multiple iterations match. Pass iteration to inspect one checkpoint." };
+      return { success: true, data: { runId: run_id, nodeId: node_id,
+        checkpoints: await Promise.all(matches.map(cp => readNodeDiagnostics(deps.engineStore, cp))) } };
+    },
+  });
+
+  const getNodeTranscript = action(
+    Type.Object({
+      run_id: Type.String(),
+      node_id: Type.String(),
+      iteration: Type.Optional(Type.Number()),
+      before: Type.Optional(Type.Number()),
+      limit: Type.Optional(Type.Number()),
+    }),
+  )({
+    id: "workflows.get_node_transcript",
+    name: "Get node transcript",
+    description:
+      "Read the conversation a session or orchestrator step held: the prompt it received with " +
+      "templates filled in, its replies, any format-repair prompt, and each tool call with its " +
+      "arguments, result, and error. Use it when a step's result is surprising and " +
+      "get_node_result does not explain why. Messages come oldest first. `index` numbers each " +
+      "message; pass `before` to read the page before that index.",
+    riskLevel: "low",
+    execute: async ({ run_id, node_id, iteration, before, limit }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const detail = await getWorkflowRunDetail(getDeps(), owner, run_id);
+      if (!detail) return { success: false, error: `run not found: ${run_id}` };
+      const matches = detail.checkpoints.filter(
+        (cp) => cp.nodeId === node_id && (iteration === undefined || cp.iteration === iteration),
+      );
+      if (matches.length === 0) return { success: false, error: `run ${run_id} has no checkpoint for node ${JSON.stringify(node_id)}` };
+      if (matches.length > 1) {
+        const iterations = matches.map((cp) => cp.iteration).sort((a, b) => a - b).join(", ");
+        return { success: false, error: `Node ${JSON.stringify(node_id)} ran iterations ${iterations}. Pass iteration to choose one.` };
+      }
+      const checkpoint = matches[0]!;
+      if (!checkpoint.sessionId) {
+        return { success: false, error: `Node ${JSON.stringify(node_id)} ran no conversation. Only session and orchestrator steps keep a transcript; use get_node_result for this node.` };
+      }
+      const pageSize = Math.min(Math.max(Math.trunc(limit ?? TRANSCRIPT_PAGE), 1), TRANSCRIPT_PAGE_MAX);
+      // A session step owns its thread, repair turn included. An orchestrator
+      // step shares a thread with other steps and with chat, so it reads only
+      // its own submission.
+      // After a format repair the checkpoint's receipt names the repair, and
+      // the stored effects keep the first submission, so both turns load.
+      const ownThread = checkpoint.sessionId.startsWith("wf:");
+      const stored = (await getDeps().workflowStore.getCheckpoints(run_id))
+        .find((cp) => cp.nodeId === node_id && cp.iteration === checkpoint.iteration);
+      const firstQueueItemId = typeof stored?.effects?.firstQueueItemId === "string" ? stored.effects.firstQueueItemId : undefined;
+      const queueItemIds = [firstQueueItemId, checkpoint.queueItemId].filter((id): id is string => id !== undefined);
+      const transcript = await readStepTranscript(getDeps().engineStore, checkpoint.sessionId, checkpoint.threadId, {
+        ...(before !== undefined ? { before: Math.trunc(before) } : {}),
+        limit: pageSize,
+        ...(!ownThread && queueItemIds.length > 0 ? { queueItemIds } : {}),
+      });
+      if (!transcript) return { success: false, error: `The conversation for node ${JSON.stringify(node_id)} is no longer stored.` };
+      return {
+        success: true,
+        data: {
+          runId: run_id,
+          nodeId: node_id,
+          iteration: checkpoint.iteration,
+          sessionId: checkpoint.sessionId,
+          threadId: transcript.threadId,
+          ...(checkpoint.repairAttempted ? { repairAttempted: true } : {}),
+          ...(checkpoint.schemaError ? { schemaError: checkpoint.schemaError } : {}),
+          total: transcript.total,
+          messages: transcript.messages,
+        },
+      };
+    },
+  });
+
+  const previewWorkflowAction = action(
+    Type.Object({
+      workflow_id: Type.String(),
+      input: Type.Optional(Type.Record(Type.String(), Type.Unknown(), {
+        description: "Sample trigger fields. They override the last run's trigger data.",
+      })),
+      sample: Type.Optional(Type.Union([Type.Literal("last_run"), Type.Literal("none")], {
+        description: "last_run (default) reads node results from the newest run. none uses only `input`.",
+      })),
+      node_id: Type.Optional(Type.String({ description: "Return only this step. Omit for every step." })),
+    }),
+  )({
+    id: "workflows.preview_workflow",
+    name: "Preview workflow",
+    description:
+      "Dry-run the saved workflow with no side effects. Only trigger, set, if and stop steps run " +
+      "(fidelity 'executed'). Every other step is described from its shape and never called " +
+      "(fidelity 'described'). Each step lists its resolved template fields, the `unresolved` " +
+      "paths that render to nothing, its output paths and warnings. Use it before a real run " +
+      "to catch template and structure errors. A long value comes back as " +
+      "{ truncated: true, jsonPrefix, note }; pass node_id to give one step more room.",
+    riskLevel: "low",
+    execute: async ({ workflow_id, input, sample, node_id }, ctx) => {
+      const owner = ownerFromContext(ctx);
+      if (!owner) return NO_OWNER;
+      const outcome = await previewWorkflow(getDeps(), owner, workflow_id, { input, sample, nodeId: node_id });
+      if (outcome.ok) return { success: true, data: presentPreview(workflow_id, outcome.response, TOOL_RESULT_CHARS) };
+      switch (outcome.reason) {
+        case "not_found":
+          return { success: false, error: `workflow not found: ${workflow_id}` };
+        case "invalid_definition":
+          return { success: false, error: formatLintErrors(outcome.errors) };
+        case "unknown_node":
+          return { success: false, error: outcome.message };
+      }
     },
   });
 
@@ -1259,7 +1582,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
     // for triggering a run — equivalent in blast radius to granting a new
     // credential, which the plugin catalog's default policy (medium ==
     // auto-allow) would otherwise let the agent do with no human in the
-    // loop, the same reasoning that keeps resolve_approval at "high".
+    // loop.
     riskLevel: "high",
     execute: async ({ workflow_id }, ctx) => {
       const owner = ownerFromContext(ctx);
@@ -1313,6 +1636,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       copyToTeam,
       listWorkflows,
       getWorkflow,
+      getPermissions,
       saveWorkflow,
       patchWorkflow,
       updateModel,
@@ -1322,6 +1646,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       startRun,
       getRun,
       getNodeResult,
+      getNodeDiagnostics,
+      getNodeTranscript,
+      previewWorkflowAction,
       listRuns,
       cancelRun,
       resolveApproval,
@@ -1343,22 +1670,80 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
   };
 }
 
+/** Messages per `get_node_transcript` page, and the most a caller may ask for. */
+const TRANSCRIPT_PAGE = 20;
+const TRANSCRIPT_PAGE_MAX = 50;
+
+/** The most one `get_node_result` checkpoint holds, and the most one whole
+ * `preview_workflow` reply holds. */
+const TOOL_RESULT_CHARS = 20_000;
+
+/** The least room one preview value keeps, however many values share the budget. */
+const PREVIEW_VALUE_MIN_CHARS = 200;
+
+const PREVIEW_CUT_NOTE =
+  "Cut to fit the tool result. Pass node_id to preview one step with more room, " +
+  "or call get_node_result for the full result of a step in the sample run.";
+
 /**
  * Return a checkpoint result verbatim when its JSON fits `maxChars`, so the
  * agent sees the same structured value templates read via
  * `nodes.<id>.result`. An oversized result becomes a `{ truncated: true,
  * jsonPrefix }` stub so a giant payload can't blow up the LLM context.
+ * `note`, when given, goes on the stub and tells the agent where to read more.
  * (An earlier always-stringified wrapper here read as the checkpoint's own
  * shape and convinced agents the data was unreachable.)
  */
-function presentResult(value: unknown, maxChars: number): unknown {
+function presentResult(value: unknown, maxChars: number, note?: string): unknown {
   let json: string;
   try {
     json = JSON.stringify(value) ?? "null";
   } catch (err) {
     json = `<unserializable: ${err instanceof Error ? err.message : String(err)}>`;
-    return { truncated: true, jsonPrefix: json };
+    return { truncated: true, jsonPrefix: json, ...(note ? { note } : {}) };
   }
   if (json.length <= maxChars) return value;
-  return { truncated: true, jsonPrefix: json.slice(0, maxChars) };
+  return { truncated: true, jsonPrefix: json.slice(0, maxChars), ...(note ? { note } : {}) };
+}
+
+/**
+ * Fit a preview into one tool result. A preview repeats sample values: a
+ * step's output, its observed example, and each downstream field that reads
+ * it. So one 200,000-character checkpoint made a 1,000,000-character result.
+ * The values share half of `maxChars`, and {@link presentResult} cuts each
+ * value that is longer than its share. A reply whose encoded form still
+ * does not fit is cut as a whole. The HTTP route gives the editor the full
+ * preview.
+ */
+function presentPreview(workflowId: string, response: PreviewWorkflowResponse, maxChars: number): unknown {
+  const valueCount = response.nodes.reduce(
+    (count, node) =>
+      count + node.fields.length + (node.output === undefined ? 0 : 1) + (node.outputShape.example === undefined ? 0 : 1),
+    0,
+  );
+  const valueChars = Math.max(PREVIEW_VALUE_MIN_CHARS, Math.floor(maxChars / 2 / Math.max(valueCount, 1)));
+  const cut = (value: unknown): unknown => presentResult(value, valueChars, PREVIEW_CUT_NOTE);
+  const nodes = response.nodes.map((node) => ({
+    ...node,
+    fields: node.fields.map((field) => ({ ...field, resolved: cut(field.resolved) })),
+    ...(node.output === undefined ? {} : { output: cut(node.output) }),
+    outputShape: node.outputShape.example === undefined
+      ? node.outputShape
+      : { ...node.outputShape, example: cut(node.outputShape.example) },
+  }));
+  const presented = { workflowId, ...response, nodes };
+  // Measure what the model reads. The engine encodes the result with
+  // encodeToolOutput, which indents each nested level, so a deep value
+  // encodes to many times its compact JSON.
+  if (encodeToolOutput(presented).length <= maxChars) return presented;
+  // The encoder quotes the JSON prefix and escapes its quotes again, and the
+  // stub adds its keys and note. Drop the overflow from the prefix until the
+  // encoded stub fits.
+  const json = JSON.stringify(presented);
+  for (let prefixChars = Math.floor(maxChars / 2); ; ) {
+    const stub = { truncated: true, jsonPrefix: json.slice(0, prefixChars), note: PREVIEW_CUT_NOTE };
+    const overflow = encodeToolOutput(stub).length - maxChars;
+    if (overflow <= 0 || prefixChars === 0) return stub;
+    prefixChars = Math.max(0, prefixChars - overflow);
+  }
 }

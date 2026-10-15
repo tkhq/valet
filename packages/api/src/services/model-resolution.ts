@@ -40,10 +40,13 @@
  *     detects this at turn start and releases the claim back to `queued` for a
  *     bounded number of attempts; setModel-style validation accepts the spec
  *     via the attached model.
- *   - throw (plain Error) — the spec names a real provider that can't
- *     currently run it (disabled provider, deleted/unknown custom provider,
- *     model not active on a custom provider). These fail the turn the way
- *     model-resolution errors do today, with a clear message.
+ *   - throw `ModelUnavailableError` — the spec names a real provider that
+ *     can't currently run it (disabled provider, deleted/unknown custom
+ *     provider, model not active on a custom provider). These fail the turn
+ *     the way model-resolution errors do today, with a clear message.
+ *
+ * `canRunSpec` asks the same question without the throw: does this resolver
+ * return a model and a key for the spec today?
  */
 import { getEnvApiKey, type Api, type Model } from "@earendil-works/pi-ai/compat";
 import { registryModelById } from "./model-registry.js";
@@ -72,7 +75,15 @@ function noKeyMessage(canonicalId: string): string {
   return `no usable API key for model "${canonicalId}" — configure an org LLM key or set the provider's API key env var`;
 }
 
-async function orgKey(credentials: CredentialStore, orgId: string, rowId: string): Promise<string | undefined> {
+/** The provider behind a spec exists but cannot run it today: the provider
+ * is disabled or deleted, or a custom provider no longer lists the model. */
+class ModelUnavailableError extends Error {}
+
+/** The credential read this resolver makes. A caller that cannot read the
+ * credential store at check time passes a copy (`orgKeySnapshot`). */
+export type CredentialReader = Pick<CredentialStore, "get">;
+
+async function orgKey(credentials: CredentialReader, orgId: string, rowId: string): Promise<string | undefined> {
   const owner: CredentialOwner = { type: "org", id: orgId };
   const stored = await credentials.get(owner, `llm:${rowId}`);
   // Normalize empty/whitespace-only stored keys to "missing" so both the
@@ -180,7 +191,8 @@ export async function resolveModelSpec(
   // Tier tokens (xs, s, m, l, xl) resolve through the org's tier map to a
   // concrete model spec, then recurse. canonicalId stays the tier token so
   // the engine persists the tier, not the resolved spec — re-pointing a
-  // tier reaches existing threads (TKAI-285).
+  // tier reaches existing threads (TKAI-285). `resolveTier` never returns a
+  // tier token (its walk cuts tier cycles), so this recursion is one level.
   const normalized = spec.trim().toLowerCase();
   if (db && TIER_SET.has(normalized)) {
     const resolved = await resolveTier(db, credentials, orgId, normalized);
@@ -189,16 +201,45 @@ export async function resolveModelSpec(
     if (result) return { ...result, canonicalId: normalized };
     return null;
   }
+  return resolveConcreteSpec(db ? await listLlmProviders(db, orgId) : [], credentials, orgId, spec);
+}
 
+/**
+ * True when `resolveModelSpec` returns a model and a key for the concrete
+ * (non-tier) `spec` today. `resolvableTiers` asks this, so a tier that the
+ * save checks and the session cascade accept is a tier that session
+ * creation can resolve: the model still exists on its provider, and the
+ * key is not blank. Other errors, such as a failed credential read, throw.
+ */
+export async function canRunSpec(
+  rows: LlmProviderRow[],
+  credentials: CredentialReader,
+  orgId: string,
+  spec: string,
+): Promise<boolean> {
+  try {
+    return (await resolveConcreteSpec(rows, credentials, orgId, spec)) !== null;
+  } catch (err) {
+    if (err instanceof NoCredentialsError || err instanceof ModelUnavailableError) return false;
+    throw err;
+  }
+}
+
+/** `resolveModelSpec` for a concrete spec, over provider rows already read. */
+async function resolveConcreteSpec(
+  rows: LlmProviderRow[],
+  credentials: CredentialReader,
+  orgId: string,
+  spec: string,
+): Promise<ResolvedModel | null> {
   const { namespace, modelId } = parseModelId(spec);
   // Echo the caller's canonical form (bare stays bare, namespaced stays
   // namespaced) so the persisted id is idempotent under re-resolution.
   const canonicalId = spec.includes("/") ? `${namespace}/${modelId}` : modelId;
-  const rows = db ? await listLlmProviders(db, orgId) : [];
   const row = rows.find((r) => providerNamespace(r) === namespace);
 
   if (row) {
-    if (!row.enabled) throw new Error(`provider ${row.name} is disabled`);
+    if (!row.enabled) throw new ModelUnavailableError(`provider ${row.name} is disabled`);
     if (isKnownProviderKind(row.kind)) {
       // Guaranteed by isKnownProviderKind; narrow for the registry lookup.
       const kind = row.kind as KnownKind;
@@ -222,7 +263,7 @@ export async function resolveModelSpec(
     }
     // Custom (openai_compatible): org key only, no env fallback.
     const model = synthesizeCustomModel(row, modelId);
-    if (!model) throw new Error(`model ${modelId} is not active on provider ${row.name}`);
+    if (!model) throw new ModelUnavailableError(`model ${modelId} is not active on provider ${row.name}`);
     const apiKey = await orgKey(credentials, orgId, row.id);
     if (!apiKey) throw new NoCredentialsError(`provider ${row.name} has no API key`, { ...model, id: canonicalId });
     return { model, apiKey, canonicalId };
@@ -248,5 +289,5 @@ export async function resolveModelSpec(
 
   // A non-known namespace with no matching row is a deleted/unknown custom
   // provider — fail with a clear message rather than silently mis-resolving.
-  throw new Error(`unknown or deleted provider: ${namespace}`);
+  throw new ModelUnavailableError(`unknown or deleted provider: ${namespace}`);
 }

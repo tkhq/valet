@@ -5,7 +5,7 @@
  * admin. The API enforces the same gate (`canMutateTeam`); this suite pins
  * that the UI stops offering controls that would 404.
  */
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 import type { ReactNode } from "react";
@@ -37,6 +37,10 @@ function RouterLinkStub({
 
 // The request panel has its own real-query integration tests. Keep this suite
 // focused on team settings and authority controls.
+// Team credential rows let a member request removal through this hook.
+vi.mock("~/api/team-deletion-requests", () => ({
+  useSubmitTeamDeletionRequest: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, error: null }),
+}));
 vi.mock("./team-deletion-requests", () => ({
   TeamDeletionRequests: ({ teamId, canManage }: { teamId: string; canManage: boolean }) =>
     <section aria-label="Deletion requests" data-team-id={teamId} data-can-manage={canManage} />,
@@ -229,6 +233,38 @@ describe("TeamsPanel — identity-provider provenance", () => {
   });
 });
 
+describe("TeamsPanel — rename", () => {
+  beforeEach(() => {
+    patchTeamMutate.mockClear();
+  });
+
+  afterEach(() => {
+    origin = "local";
+  });
+
+  it("team admin saves a trimmed new name", () => {
+    callerRole = "admin";
+    orgRole = "member";
+    openTeam();
+    fireEvent.change(screen.getByRole("textbox", { name: "Team name" }), { target: { value: "  Infra  " } });
+    // The Name section is first, so its Save is the first one.
+    fireEvent.click(screen.getAllByRole("button", { name: "Save" })[0]);
+    expect(patchTeamMutate).toHaveBeenCalledWith({ id: "team_1", body: { name: "Infra" } });
+  });
+
+  it("offers no rename to a plain member or for a declared team", () => {
+    callerRole = "member";
+    orgRole = "member";
+    openTeam();
+    expect(screen.queryByRole("textbox", { name: "Team name" })).toBeNull();
+    cleanup();
+    callerRole = "admin";
+    origin = "config";
+    openTeam();
+    expect(screen.queryByRole("textbox", { name: "Team name" })).toBeNull();
+  });
+});
+
 describe("TeamsPanel — team default model (TKAI-255)", () => {
   beforeEach(() => {
     patchTeamMutate.mockClear();
@@ -271,11 +307,13 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     expect(screen.queryByText("custom_1/llama-3")).toBeNull();
   });
 
-  it("plain member with no team override reads 'Organization default' for both model and reasoning", () => {
+  it("plain member with no team override reads the org fallback for model and reasoning", () => {
     callerRole = "member";
     orgRole = "member";
     openTeam();
-    expect(screen.getAllByText("Organization default")).toHaveLength(2);
+    // The model label names the tier unset falls to: Small with no org default tier.
+    expect(screen.getByText("Small (Organization default)")).toBeTruthy();
+    expect(screen.getByText("Organization default")).toBeTruthy();
   });
 
   it("team admin picks a reasoning level → PATCH with the level", () => {

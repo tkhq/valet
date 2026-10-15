@@ -108,6 +108,9 @@ export type ApprovalMode = "allow" | "require_approval" | "deny";
 export interface ActionPlugin {
   /** Service id (e.g. "github"). Used as the credential service name and as a routing key. */
   service: string;
+  /** The product name people read in approval cards (e.g. "GitHub").
+   * Defaults to `service`. */
+  displayName?: string;
   description?: string;
   actions: PluginAction[];
   /** Override credential service name (defaults to `service`). */
@@ -342,7 +345,9 @@ export type InvokeActionResult =
   | { kind: "ok"; result: PluginActionResult }
   | { kind: "unknown"; toolId: string }
   | { kind: "invalid-args"; error: string }
-  | { kind: "denied-policy"; scope?: "team" }
+  /** `shared_account`: the action needs a teammate's shared account, and
+   * the policy resolver refused to ask that teammate for this caller. */
+  | { kind: "denied-policy"; scope?: "team" | "shared_account" }
   /** The action needs approval and the turn came from a channel sender with
    * no Valet account (`ToolContext.externalSender`). No gate opens, so a
    * newcomer can never send a teammate an approval request. */
@@ -710,10 +715,14 @@ export async function invokeAction(
   let decision: PolicyDecision;
   try {
     decision = await resolver.resolve(input);
-  } catch {
+  } catch (err) {
+    // Log and keep the cause: without it, every team action fails with no
+    // trace of why the policy check threw.
+    const cause = innermostMessage(err);
+    console.error(`[policy] resolve failed for ${policyActionId} in ${ctx.sessionId}:`, err);
     // A failed read cannot establish whether the team has an absolute deny.
     if (ctx.owner?.type === "team") {
-      return { kind: "error", message: "Could not check this team's action policies. Retry the action when policy checks are available." };
+      return { kind: "error", message: `Could not check this team's action policies (${cause.slice(0, 300)}). Retry the action when policy checks are available.` };
     }
     // Fail closed but keep a human in the loop — degrade to an approval
     // gate rather than hard-deny on a transient resolver/store error.
@@ -730,7 +739,9 @@ export async function invokeAction(
       resolvedMode: "deny",
       provenance: decision.provenance,
     });
-    return decision.provenance.source === "team_policy" ? { kind: "denied-policy", scope: "team" } : { kind: "denied-policy" };
+    if (decision.provenance.source === "team_policy") return { kind: "denied-policy", scope: "team" };
+    if (decision.provenance.source === "shared_account") return { kind: "denied-policy", scope: "shared_account" };
+    return { kind: "denied-policy" };
   }
 
   // Populated only when a gate actually opens below (require_approval), so
@@ -777,8 +788,9 @@ export async function invokeAction(
     }
     // Another member's account: only they answer, so the gate asks them.
     const borrowScope = ctx.sessionId.startsWith("wf:") ? "workflow run" : "thread";
+    const label = entry.plugin.displayName ?? entry.service;
     const borrowed = decision.approver
-      ? { title: `Let a teammate use your ${entry.service} account?`, body: `${summary}\n\nValet would run ${entry.action.name} through your ${entry.service} account. Allowing this also permits later ${entry.service} actions in this ${borrowScope}, including actions requested by other teammates. Only you can answer.` }
+      ? { title: `Let a teammate use your ${label} account?`, body: `${summary}\n\nValet would use your ${label} account for "${entry.action.name}". If you allow it, later ${label} actions in this ${borrowScope} can use it too, including ones other teammates ask for. Only you can answer.` }
       : {};
     const gateOutcome = await requestApprovalDecision(ctx, {
       ...baseReq,
@@ -980,6 +992,15 @@ async function checkServiceAvailability(
   }
 }
 
+/** The innermost error's message. A database error wraps the driver's
+ * failure in `cause` behind the query text, and the driver's message is the
+ * one that names the problem. The full error goes to the server log. */
+function innermostMessage(err: unknown): string {
+  let current = err;
+  while (current instanceof Error && current.cause !== undefined) current = current.cause;
+  return current instanceof Error ? current.message : String(current);
+}
+
 function availabilityOutcome(check: ServiceAvailabilityCheck): InvokeActionResult | undefined {
   if (check.unavailable) return serviceUnavailableOutcome(check.unavailable);
   return check.error ? { kind: "error", message: check.error } : undefined;
@@ -1025,8 +1046,9 @@ async function resolveDynamic(
     // Discovery can transmit a member's credential before any remote action
     // schema is known. Reuse the ordinary policy/gate/audit pipeline first.
     let discovered: PluginAction[] | undefined;
+    const label = plugin.displayName ?? plugin.service;
     const action: PluginAction = {
-      id: `${plugin.service}.${DISCOVERY_ACTION_NAME}`, name: `Discover ${plugin.service} tools`,
+      id: `${plugin.service}.${DISCOVERY_ACTION_NAME}`, name: `List ${label} tools`,
       description: "Read the tools available through this account.", riskLevel: "low",
       parameters: Type.Object({}),
       execute: async () => {
@@ -1037,11 +1059,20 @@ async function resolveDynamic(
     const entry: CatalogEntry = { service: plugin.service, plugin, action };
     const outcome = await invokeAction(
       { ...catalog, entries: [entry], byId: new Map([[action.id, entry]]), dynamicPlugins: [] },
-      action.id, {}, ctx, `Read available ${plugin.service} tools using this account.`,
+      action.id, {}, ctx, `Read the list of ${label} tools this account can use.`,
     );
     if (outcome.kind !== "ok" || !outcome.result.success || !discovered) {
-      const reason = outcome.kind === "ok" ? outcome.result.error ?? "discovery failed" : outcome.kind;
-      throw new Error(`Tool discovery requires permitted account access: ${reason}`);
+      // Keep the cause. A connector error, a missing account, and a policy
+      // denial need different fixes, and the caller sees only this text.
+      // A pending gate is not a refusal: an unattended run waits for the
+      // account owner, so it must not read as "did not approve".
+      const label = `${plugin.service} tool discovery`;
+      const detail = outcome.kind === "pending-approval"
+        ? "pending-approval: waiting for the account owner to approve this account's use. Retry after they answer."
+        : outcome.kind === "ok" && outcome.result.success
+          ? "the connector returned no tool list"
+          : renderInvokeOutcome(outcome, label).text;
+      throw new Error(`${label} failed: ${detail}`);
     }
     actions = discovered;
   } else {
@@ -1380,6 +1411,11 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
         text: `error resolving ${outcome.service} tools: ${resolveFailurePrefix(outcome.message)}${outcome.message}`,
       };
     case "denied-policy":
+      if (outcome.scope === "shared_account") {
+        return {
+          text: `denied: ${toolId} would use a teammate's shared account, and this caller cannot ask the account owner for approval. Do not retry it. Tell the user to ask a team member to run it, or to ask a team admin to connect a team account on the team's Integrations page.`,
+        };
+      }
       return { text: `denied: ${toolId} is blocked by ${outcome.scope === "team" ? "team" : "org"} policy` };
     case "denied-external-sender":
       return {

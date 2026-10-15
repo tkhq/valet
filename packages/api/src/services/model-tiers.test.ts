@@ -197,6 +197,38 @@ describe("model-tiers", () => {
     });
   });
 
+  describe("tier tokens as tier targets", () => {
+    // PATCH refuses these targets now, but a map saved before that check
+    // can still hold one, so resolution must end on its own.
+    it("a cyclic tier map resolves to nothing instead of recursing", async () => {
+      vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
+      await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, m: ["m"], l: ["xl"], xl: ["l"] });
+
+      expect(await resolveTier(db, credentials, orgId, "m")).toBeUndefined();
+      expect(await resolveModelSpec(db, credentials, orgId, "m")).toBeNull();
+      expect(await resolveModelSpec(db, credentials, orgId, "l")).toBeNull();
+      expect([...(await resolvableTiers(db, credentials, orgId)).keys()].sort()).toEqual(["s", "xs"]);
+    });
+
+    it("a cycle skips to the next target in the tier", async () => {
+      vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
+      await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, m: ["m", "anthropic/claude-sonnet-4-6"] });
+
+      expect(await resolveTier(db, credentials, orgId, "m")).toBe("anthropic/claude-sonnet-4-6");
+      expect((await resolvableTiers(db, credentials, orgId)).get("m")).toBe("anthropic/claude-sonnet-4-6");
+    });
+
+    it("a target that names another tier resolves through that tier", async () => {
+      vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
+      await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, xs: ["s"] });
+
+      expect(await resolveTier(db, credentials, orgId, "xs")).toBe("anthropic/claude-haiku-4-5");
+      const resolved = await resolveModelSpec(db, credentials, orgId, "xs");
+      expect(resolved?.canonicalId).toBe("xs");
+      expect(resolved?.model.id).toBe("claude-haiku-4-5");
+    });
+  });
+
   describe("resolvableTiers", () => {
     it("names the spec each tier would use when the default targets have a key", async () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");

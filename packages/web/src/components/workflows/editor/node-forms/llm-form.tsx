@@ -3,12 +3,19 @@ import { JsonTextarea, LabeledTextarea, NumberField } from "../fields";
 import { Label } from "~/components/primitives";
 import { ModelCombobox } from "~/components/settings/model-combobox";
 import { ErrorPolicyField, type ErrorPolicyProps } from "./error-policy-field";
+import { LastRunModel } from "./last-run-model";
 
 export function LlmForm({
   node,
   onChange,
   allowOnError = true,
-}: { node: LlmNode; onChange: (patch: Record<string, unknown>) => void } & ErrorPolicyProps) {
+  lastRunModels,
+}: {
+  node: LlmNode;
+  onChange: (patch: Record<string, unknown>) => void;
+  /** The models this step called in the workflow's last run. */
+  lastRunModels?: string[];
+} & ErrorPolicyProps) {
   return (
     <div className="flex flex-col gap-3">
       <div className="grid gap-1">
@@ -20,6 +27,7 @@ export function LlmForm({
           emptyLabel="Choose a model"
           ariaLabel="Model"
         />
+        <LastRunModel models={lastRunModels} />
       </div>
       <LabeledTextarea label="System" value={node.system ?? ""} onChange={(value) => onChange({ system: value || undefined })} />
       <LabeledTextarea label="Prompt" value={node.prompt} onChange={(value) => onChange({ prompt: value })} />

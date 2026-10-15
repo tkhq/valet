@@ -110,6 +110,7 @@ import type {
   ListWorkflowActionRequiredResponse,
   ListOrgPoliciesResponse,
   ListPolicyOverridesResponse,
+  ListToolPermissionsResponse,
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
   GetModelTiersResponse,
@@ -153,6 +154,7 @@ import type {
   OrgDirectoryResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
+  OrgMcpServersResponse,
   OrgResponse,
   PatchLlmProviderRequest,
   PatchLlmProviderResponse,
@@ -182,10 +184,10 @@ import type {
   SessionKind,
   PatchThreadRequest,
   PatchThreadResponse,
+  ThreadAddress,
   PostGithubAppCredentialRequest,
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
-  PostGithubConnectRequest,
   PostGithubConnectResponse,
   OpenrouterRegistryResponse,
   PreviewOrgPolicyRequest,
@@ -637,7 +639,7 @@ export const api = {
   listWorkspaceOutcomes: (owner: OwnerFilter, cursor?: string) =>
     request<WorkspaceOutcomesResponse>("GET", `/workspaces/${encodeURIComponent(owner.ownerType === "team" ? owner.ownerId : "user")}/outcomes?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   getThreadAddress: (id: string) =>
-    request<{ id: string; sessionId: string }>("GET", `/threads/${encodeURIComponent(id)}`),
+    request<ThreadAddress>("GET", `/threads/${encodeURIComponent(id)}`),
   getSession: (id: string) =>
     request<GetSessionResponse>("GET", `/sessions/${encodeURIComponent(id)}`),
   /** GET /sessions/:id/security — the session's engagement + cells
@@ -849,6 +851,9 @@ export const api = {
   // org plugin entitlements (plugin-entitlements design). `getOrgPlugins` is
   // member-readable; `patchOrgPlugin` is org-admin-only (403 otherwise).
   getOrgPlugins: () => request<OrgPluginsResponse>("GET", "/org/plugins"),
+  // Config-declared MCP servers (instance config `mcpServers`). Org-admin-only
+  // (403 otherwise) and read-only: the operator edits the config file.
+  getOrgMcpServers: () => request<OrgMcpServersResponse>("GET", "/org/mcp-servers"),
   patchOrgPlugin: (name: string, body: PatchOrgPluginRequest) =>
     request<PatchOrgPluginResponse>("PATCH", `/org/plugins/${encodeURIComponent(name)}`, body),
   getMemoryDoc: (path: string, owner?: OwnerFilter) =>
@@ -961,6 +966,8 @@ export const api = {
       "GET",
       `/sessions/${encodeURIComponent(sessionId)}/decisions`,
     ),
+  listThreadDecisions: (threadId: string) =>
+    request<ListDecisionsResponse>("GET", `/threads/${encodeURIComponent(threadId)}/decisions`),
   resolveDecision: (
     sessionId: string,
     gateId: string,
@@ -1457,7 +1464,7 @@ export const api = {
     ),
 
   // per-user GitHub App-OAuth connection (GitHub/repo integration plan, Task 6)
-  connectGithub: (body?: PostGithubConnectRequest) => request<PostGithubConnectResponse>("POST", "/me/github/connect", body),
+  connectGithub: () => request<PostGithubConnectResponse>("POST", "/me/github/connect"),
   disconnectGithub: () => request<undefined>("DELETE", "/me/github"),
   // The org App's state, readable by a member — `getGithubApp` above is the
   // admin-only detail read, so connect surfaces use this instead.
@@ -1537,6 +1544,7 @@ export const api = {
 
   // per-user policy overrides + runtime grants (action-policies plan, Task 4/5)
   listMyPolicyOverrides: () => request<ListPolicyOverridesResponse>("GET", "/me/policy-overrides"),
+  listMyToolPermissions: () => request<ListToolPermissionsResponse>("GET", "/me/tool-permissions"),
   putMyPolicyOverride: (body: PutPolicyOverrideRequest) =>
     request<PutPolicyOverrideResponse>("PUT", "/me/policy-overrides", body),
   deleteMyPolicyOverride: (body: DeletePolicyOverrideRequest) =>

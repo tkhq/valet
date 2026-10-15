@@ -975,6 +975,29 @@ export interface ThreadSummary {
   /** The channel this thread talks in: its Slack channel, or the newest pull
    * request it opened. Absent for a thread with no channel. */
   channel?: ThreadChannel;
+  /** Set when the owner shares this personal thread with the organization. */
+  share?: ThreadShareMode;
+}
+
+/**
+ * How other members of the organization may open a shared personal thread by
+ * its link: "view" lets them watch it, "reply" also lets them send prompts.
+ * The thread still runs as its owner (docs/specs/2026-10-13-thread-sharing-design.md).
+ */
+export type ThreadShareMode = "view" | "reply";
+
+/** `GET /api/threads/:threadId` — where a thread lives and how the caller reaches it. */
+export interface ThreadAddress {
+  id: string;
+  sessionId: string;
+  title: string | null;
+  createdAt: number;
+  archivedAt: number | null;
+  /** The thread's share, when it has one. */
+  share?: ThreadShareMode;
+  /** Present when the caller opens the thread through its share, not as its
+   * owner or a member of its workspace. */
+  guest?: { mode: ThreadShareMode; ownerName: string };
 }
 
 /** A channel as a thread names it. */
@@ -1112,6 +1135,9 @@ export interface PatchThreadRequest {
    * `BackgroundWorkConflict`.
    */
   force?: boolean;
+  /** Share a personal thread with the organization, or "off" to stop. Only
+   * the owner can change it. */
+  share?: ThreadShareMode | "off";
 }
 
 export type PatchThreadResponse = ThreadSummary & {
@@ -1303,6 +1329,12 @@ export interface Message {
   completed?: boolean;
   /** Terminal assistant state, preserved for live and reloaded interruption handling. */
   stopReason?: "end_turn" | "error" | "abort";
+  /**
+   * Provider error text of a failed turn (`stopReason: "error"`). The engine
+   * truncates it to 1000 characters. Set only on REST-fetched assistant
+   * messages, from the entry's `metadata.turnError`.
+   */
+  errorMessage?: string;
   /** Assistant message that this user message addresses. */
   replyTo?: MessageReplyReference;
   /**
@@ -1897,6 +1929,8 @@ export interface CreateTeamResponse {
 /** `PATCH /api/teams/:id` — team settings. `defaultModel: null` clears the
  * override back to the cascade's next tier. */
 export interface PatchTeamRequest {
+  /** New team name. Refused for a team declared in the config file. */
+  name?: string;
   slackHomeChannelId?: string | null;
   defaultModel?: string | null;
   /** Team's default reasoning/thinking level, or null to clear. */
@@ -2183,6 +2217,11 @@ export interface WorkflowRunCheckpoint {
   threadId?: string;
   /** Latest dispatched attempt; used to isolate inline logs from other turns. */
   queueItemId?: string;
+  /** The step's first reply did not match its output schema, so the step
+   * sent one format-repair prompt. The result is the repaired reply. */
+  repairAttempted?: boolean;
+  /** Why the first reply failed the schema, kept after the repair. */
+  schemaError?: string;
 }
 
 /** One pending approval gate on a parked workflow run. */
@@ -2226,9 +2265,42 @@ export interface WorkflowRunConversation {
   nodeId?: string;
 }
 
+/**
+ * What one step of a run cost: every model call it made, summed over its
+ * attempts. A `workflow` step includes the runs it started. `unpricedTurns`
+ * counts calls the provider reported no price for; while it is above zero,
+ * `costUsd` is a lower bound.
+ */
+export interface WorkflowStepCost {
+  nodeId: string;
+  iteration: number;
+  costUsd: number;
+  turns: number;
+  unpricedTurns: number;
+  totalTokens: number;
+  models: string[];
+}
+
+/**
+ * A step that called none of the same models as in the previous run with
+ * the same steps. Nobody edited the steps between the two runs, so the
+ * platform changed the model: a size tier remap or a new default.
+ */
+export interface WorkflowModelChange {
+  nodeId: string;
+  previous: string[];
+  current: string[];
+}
+
 export interface WorkflowRunDetail {
   /** Run-owned histories, excluding the human conversation that started the run. */
   conversations?: WorkflowRunConversation[];
+  /** Model spend per step, from the usage projection. Steps with no model
+   * calls are absent. */
+  stepCosts?: WorkflowStepCost[];
+  /** Steps whose models changed since the previous run with the same steps.
+   * Empty for a first run and for a run after an edit. */
+  modelChanges?: WorkflowModelChange[];
   run: WorkflowRunSummary & {
     waitingOn: unknown[];
     definition: unknown;
@@ -2301,6 +2373,17 @@ export interface WorkflowNodePermissionWire {
   /** `PolicyProvenanceSource` of the prediction (org_policy, override,
    * plugin_default, risk_default, ...). Absent when `mode` is `unknown`. */
   provenance?: string;
+  /** True when a policy or override for this action matches on a parameter
+   * that the step fills in from a template at run time. `mode` reads the
+   * template literally, as a workflow grant does, so the run can resolve
+   * differently once it renders the value. */
+  runtimeParams?: true;
+  /** True for a team workflow whose team has no live connection of its own
+   * for the step's service while a current member shares one (never
+   * GitHub). A run may then ask that member to approve, per run. It does
+   * not when the person who starts it shares their own account, or when a
+   * team 1Password item covers the service; the preview reads no vault. */
+  sharedAccount?: true;
 }
 
 export interface GetWorkflowPermissionsResponse {
@@ -3283,6 +3366,15 @@ export interface CredentialSummary {
   /** `metadata.refreshFailedAt`, when a previous token-refresh attempt
    * failed and left the credential needing a reconnect. Epoch ms. */
   refreshFailedAt?: number;
+  /** True when the provider refused the refresh token and the access token is
+   * past expiry (`isDeadConnection`). Any team member may reconnect a dead
+   * team connection. */
+  dead?: boolean;
+  /** Team-scope rows only. True when no run uses the team's own row: a
+   * `github` row that `isUsableGithubUserRow` refuses, or an OAuth row past
+   * expiry with no refresh token that is not `dead`. It does not block a
+   * member's share (`POST /:service/delegate`). */
+  unusable?: boolean;
   /** `metadata.onepassword.reference`, when this credential resolves via a
    * 1Password reference instead of an inline secret (1Password credential
    * provider plan, Task 3). Display-only — never secret material. */
@@ -3680,14 +3772,26 @@ export interface ModelRegistryStatusResponse {
   providers: ModelRegistryProviderStatusWire[];
 }
 
+/** A size tier token. */
+export type WireSizeTier = "xs" | "s" | "m" | "l" | "xl";
+
 /** Model tier map: tier id (xs|s|m|l|xl) to list of model ids in that tier. */
-export type WireTierMap = Record<"xs" | "s" | "m" | "l" | "xl", string[]>;
+export type WireTierMap = Record<WireSizeTier, string[]>;
 
 /** `GET /api/org/model-tiers` — the org's model tier assignments. */
-export type GetModelTiersResponse = WireTierMap;
+export type GetModelTiersResponse = WireTierMap & {
+  /** Tier for new sessions that no personal or team default covers. Null
+   * means unset: those sessions use the "s" tier. */
+  defaultTier?: WireSizeTier | null;
+  /** True when new sessions can run `defaultTier`: its target's provider
+   * is enabled, has a key, and still lists the model. When false or absent,
+   * new sessions skip `defaultTier` and use "s". */
+  defaultTierResolvable?: boolean;
+};
 
-/** `PATCH /api/org/model-tiers` — partial tier updates. */
-export type PatchModelTiersRequest = Partial<WireTierMap>;
+/** `PATCH /api/org/model-tiers` — partial tier updates. `defaultTier: null`
+ * clears the org default tier. */
+export type PatchModelTiersRequest = Partial<WireTierMap> & { defaultTier?: WireSizeTier | null };
 
 /** `GET /api/org/approved-models` — the org's approved model list. */
 export interface GetApprovedModelsResponse {
@@ -3750,6 +3854,9 @@ export interface UsageWindow {
 export interface UsageMemberSummary extends UsageWindow {
   userId: string;
   name: string;
+  /** True when the row is a team's own work (its schedules, event
+   * subscriptions, and API keys), not a person. */
+  isTeam?: boolean;
 }
 
 /** A Valet activity kind, derived from the session id in `cost_entries`
@@ -3822,8 +3929,15 @@ export interface UsageBreakdownResponse {
   byModel: (UsageBucket & { model: string | null })[];
   /** Org scope always; team scope when the caller administers the team. */
   byUser?: (UsageBucket & {
+    /** The actor id: a user id, `"shared"` for no actor, or a workspace
+     * principal (`team:{teamId}`, `org:{orgId}`) for unattended work. */
     userId: string;
+    /** Display label. Never a raw id: a deleted or hidden team reads
+     * "Another team", and a deleted user reads "Former member". */
     name: string;
+    /** True when the actor is a team (its schedules, event subscriptions,
+     * and API keys), not a person. */
+    isTeam?: boolean;
     /** Team admins only. Distinct session-days divided by dailyAgentWindow.days. */
     avgDailyActiveAgents?: number;
   })[];
@@ -3876,6 +3990,11 @@ export interface UsageDrillItem {
   costUsd: number;
   totalTokens: number;
   turns: number;
+  /** Workflow rows and their step rows: the workflow, for its page link. */
+  workflowId?: string;
+  /** Workflow rows and their step rows: the runs that spent in the window.
+   * A step's average cost per run is `costUsd / runs`. */
+  runs?: number;
 }
 
 export interface UsageDrillResponse {
@@ -3991,6 +4110,37 @@ export interface OrgPluginWire {
 /** `GET /api/org/plugins` — any member reads; non-admins get it read-only. */
 export interface OrgPluginsResponse {
   plugins: OrgPluginWire[];
+}
+
+/**
+ * One MCP server declared in the instance config (`valet.yaml` `mcpServers`).
+ * Read-only: the operator edits the config file, not this surface. The wire
+ * leaves out `tokenEnv` and `authQueryParam`, which say where a token lives.
+ *  - `displayName` — the configured name, or the title-cased `name` the
+ *    connect UI also shows.
+ *  - `url` — scheme, host, and path of the configured URL. The API drops
+ *    userinfo, query, and fragment, where an operator can put a token.
+ *  - `riskLevel` — the configured risk, or the `medium` default.
+ *  - `enabled` — false when the entry sets `enabled: false`; the API did not
+ *    load it.
+ *  - `connected` — the caller's own credential for an `oauth` or `api_key`
+ *    entry. `null` for `none` and `bearer`, which have no per-user credential.
+ */
+export interface OrgMcpServerWire {
+  name: string;
+  displayName: string;
+  url: string;
+  auth: "none" | "oauth" | "api_key" | "bearer";
+  scopes: string[];
+  description: string | null;
+  riskLevel: "low" | "medium" | "high" | "critical";
+  enabled: boolean;
+  connected: boolean | null;
+}
+
+/** `GET /api/org/mcp-servers` — org admin only (403 otherwise). Config order. */
+export interface OrgMcpServersResponse {
+  servers: OrgMcpServerWire[];
 }
 
 /** `PATCH /api/org/plugins/:name` body — org admin only. `teamIds` is required
@@ -4400,12 +4550,6 @@ export interface PostGithubAppCredentialRequest {
 // from the org-level App setup above. `GET /callback` has no wire response
 // type of its own (always a 302 redirect, or a 400/409/502 error body).
 
-export interface PostGithubConnectRequest {
-  /** The callback destination for an Integrations reconnect. The API accepts
-   * only `"integrations"`; other values use the existing destination. */
-  postAuthDestination?: "integrations";
-}
-
 export interface PostGithubConnectResponse {
   /** `{github}/login/oauth/authorize?...` — where the browser should
    * navigate to start the App-OAuth authorize flow. */
@@ -4419,7 +4563,7 @@ export interface PostGithubConnectResponse {
  * but it is org-admin-only — so a member had no way to learn that the App
  * they depend on is missing or uninstalled. This is the projection a
  * connect surface needs and nothing more: no app id, no slug, no
- * installation logins, no secrets.
+ * installation logins other than the caller's own, no secrets.
  */
 export interface GetGithubOrgStatusResponse {
   /** The org has a GitHub App — its own credential row, or the
@@ -4435,8 +4579,11 @@ export interface GetGithubOrgStatusResponse {
    * `installationCount` means the App reaches nothing. */
   suspendedCount: number;
   /** Full GitHub installation URL. Present only when this org allows
-   * personal installations. */
+   * personal installations and the caller connected GitHub. */
   personalInstallUrl?: string;
+  /** The caller's own personal installations: the rows linked to the
+   * caller. Absent when there are none. */
+  personalInstallations?: Array<{ accountLogin: string; repositorySelection: string | null; suspended: boolean }>;
 }
 
 // ── REST: repo listing (GitHub/repo integration plan, Task 7)
@@ -4681,6 +4828,19 @@ export type EventSubscriptionTargetWire =
        * write that names anything else is refused.
        */
       userPromptTemplate?: string;
+      /**
+       * The ID of a subscription with the same owner that this rule updates.
+       * `events.propose_subscription` sets it. When a person enables this
+       * rule, the server disables that subscription in the same transaction,
+       * so one version replies.
+       */
+      replaces?: string;
+      /**
+       * The ID that `replaces` named, recorded when an enable turned that
+       * subscription off and cleared the link. It changes nothing; a retried
+       * proposal reads it to tell a spent link from one that never existed.
+       */
+      replaced?: string;
     };
 
 /**
@@ -4875,6 +5035,12 @@ export interface EventDeliveryWire {
   /** The subscription's display name, so a delivery row can say what it
    * was trying to reach without a second request. */
   subscriptionName?: string;
+  /** The assistant thread that received this delivery. Absent when the
+   * delivery reached no thread, or when the viewer may not open it. */
+  thread?: { sessionId: string; threadId: string };
+  /** The workflow run this delivery started. Absent when no run started, or
+   * when the viewer may not open it. */
+  runId?: string;
 }
 
 /** `POST /api/events/:id/redeliver` — queue a fresh delivery for an event
@@ -5183,6 +5349,40 @@ export interface DeletePolicyOverrideRequest {
 
 export interface DeletePolicyOverrideResponse {
   ok: true;
+}
+
+/** Where a tool's effective mode comes from. `default` is the engine's
+ *  risk default and `plugin` the plugin's own default. `org` and `team` are
+ *  admin rules, `personal` is one of the caller's overrides, and `grant` is
+ *  a live approval. */
+export type ToolPermissionSource = "default" | "plugin" | "org" | "team" | "personal" | "grant";
+
+/** One catalog action as the caller's assistant would meet it now. */
+export interface ToolPermissionWire {
+  /** The action plugin's service, as `/api/plugins` `actionServices[].service`. */
+  service: string;
+  /** The fully-qualified action id, as `PluginActionSummary.id`. */
+  actionId: string;
+  name: string;
+  description: string;
+  riskLevel: RiskLevelWire;
+  /** The effective mode, from the same resolver a session call uses (no
+   *  params, no session grants). */
+  mode: ApprovalModeWire;
+  source: ToolPermissionSource;
+  /** The caller has an override on this exact action, so
+   *  `DELETE /api/me/policy-overrides` with `{ actionId }` resets it. */
+  overridden: boolean;
+  /** The modes `PUT /api/me/policy-overrides` would accept and apply for this
+   *  action. A missing mode is fixed by `lockedBy`. Empty in a team
+   *  workspace, where personal overrides do not apply. */
+  settable: ApprovalModeWire[];
+  lockedBy?: "org" | "team";
+}
+
+/** GET /api/me/tool-permissions[?service=][&teamId=] */
+export interface ListToolPermissionsResponse {
+  tools: ToolPermissionWire[];
 }
 
 export interface RuntimeGrantWire {

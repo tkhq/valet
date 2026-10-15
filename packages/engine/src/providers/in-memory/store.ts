@@ -674,9 +674,9 @@ export class InMemorySessionStore implements SessionStore {
   }
 
   async getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null> {
-    const r = this.rows.get(sessionId);
-    const itemId = r?.dispatchIndex.get(dispatchId);
-    const item = itemId === undefined ? undefined : r?.queueItems.get(itemId);
+    const row = this.rows.get(sessionId);
+    const id = row?.dispatchIndex.get(dispatchId);
+    const item = id ? row?.queueItems.get(id) : undefined;
     return item ? { ...item } : null;
   }
 

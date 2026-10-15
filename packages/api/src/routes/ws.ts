@@ -29,8 +29,9 @@ import { loadSessionMeta } from "../engine/session-meta.js";
 import { deriveRunFields } from "../sessions/run-state.js";
 import { canViewSession } from "../services/session-access.js";
 import { requestViewer, threadVisibility } from "../services/thread-access.js";
+import { shareWriteCount, threadShareGrant } from "../services/thread-share.js";
 import type { AssistantOwner, ClientFrame, SessionStatus, WireEvent } from "../wire/types.js";
-import type { DeliveredBusEvent } from "@valet/engine";
+import type { DeliveredBusEvent, QueueItem } from "@valet/engine";
 
 const PING_INTERVAL_MS = 30_000;
 /** Page size for durable replay reads on resume. */
@@ -73,6 +74,9 @@ export function createWsConnectionLifecycle() {
 /** How long one connection trusts a thread access answer before asking again,
  * so a person removed from a private channel stops receiving it. */
 const THREAD_ACCESS_RECHECK_MS = 5 * 60_000;
+/** How long a shared thread's guest stream trusts a share before reading it
+ * again. A share change in this process is seen at once. */
+const SHARE_RECHECK_MS = 5_000;
 
 export function registerWsRoutes(
   app: Hono<AppEnv>,
@@ -100,8 +104,12 @@ export function registerWsRoutes(
       // only to the people who may see them. Frames pass through one chain so
       // a thread awaiting its access check cannot reorder the stream.
       let threadShown: ((threadId: string) => Promise<boolean>) | undefined;
+      // A shared thread's guest (`services/thread-share.ts`) connects with
+      // `?threadId=` and receives that thread's frames and keepalives only.
+      const sharedThreadId = c.req.query("threadId") || undefined;
+      let guestOnly = false;
       let chain: Promise<void> = Promise.resolve();
-      const deliver = (ws: { send: (data: string) => void }, draftEvent: WireEventDraft) => {
+      const deliver = (ws: { send: (data: string) => void; close: (code?: number, reason?: string) => void }, draftEvent: WireEventDraft) => {
         const threadId = "threadId" in draftEvent && typeof draftEvent.threadId === "string" ? draftEvent.threadId : undefined;
         const shown = threadShown;
         if (!shown) {
@@ -109,7 +117,14 @@ export function registerWsRoutes(
           return;
         }
         chain = chain.then(async () => {
-          if (threadId && !(await shown(threadId).catch(() => false))) return;
+          if (guestOnly && !threadId && draftEvent.type !== "ping") return;
+          // A guest's keepalive also checks the share, so an idle stream ends too.
+          const checkThread = guestOnly && draftEvent.type === "ping" ? sharedThreadId : threadId;
+          if (checkThread && !(await shown(checkThread).catch(() => false))) {
+            // A revoked share ends the guest's stream.
+            if (guestOnly && checkThread === sharedThreadId && !lifecycle.closed) ws.close(4040, "session not found");
+            return;
+          }
           if (!lifecycle.closed) send(ws, draftEvent);
         });
       };
@@ -148,9 +163,27 @@ export function registerWsRoutes(
               // A child started from a private thread is that thread's audience's.
               && (row.ownerType !== "team" || await threadVisibility(providers, row, requestViewer(row.orgId, caller, c.var.user.id))(null));
             if (lifecycle.closed) return;
-            if (!canView) {
+            const share = !canView && sharedThreadId ? await threadShareGrant(providers.db, row, sharedThreadId, caller) : null;
+            if (lifecycle.closed) return;
+            if (!canView && !share) {
               ws.close(4040, "session not found");
               return;
+            }
+            if (share && sharedThreadId) {
+              guestOnly = true;
+              // Read the share again when it may have changed: after a share
+              // write in this process, or after the recheck interval.
+              let checked = { at: Date.now(), writes: shareWriteCount(), shown: true };
+              threadShown = async (threadId) => {
+                if (threadId !== sharedThreadId) return false;
+                if (checked.writes !== shareWriteCount() || Date.now() - checked.at >= SHARE_RECHECK_MS) {
+                  const writes = shareWriteCount();
+                  const [current] = await providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+                  const mode = current ? await threadShareGrant(providers.db, current, sharedThreadId, caller) : null;
+                  checked = { at: Date.now(), writes, shown: mode !== null };
+                }
+                return checked.shown;
+              };
             }
 
             // Materialize the engine session so the bus is set up + the
@@ -172,7 +205,7 @@ export function registerWsRoutes(
             await engineSession.ensureDefaultThread();
             if (lifecycle.closed) return;
 
-            if (row.ownerType === "team") {
+            if (row.ownerType === "team" && !guestOnly) {
               const visible = threadVisibility(providers, row, requestViewer(row.orgId, caller, c.var.user.id));
               const checked = new Map<string, { shown: Promise<boolean>; at: number }>();
               threadShown = async (threadId) => {
@@ -196,19 +229,20 @@ export function registerWsRoutes(
             if (lifecycle.closed) return;
             const run = deriveRunFields(
               { status: row.status as SessionStatus, updatedAt: row.updatedAt },
-              unsettled,
+              guestOnly ? unsettled.filter((item: QueueItem) => item.threadId === sharedThreadId) : unsettled,
             );
 
+            // A guest does not get the session's workspace label or title.
             send(ws, {
               type: "init",
               session: {
                 id: row.id,
-                workspace: row.workspace,
+                workspace: guestOnly ? "" : row.workspace,
                 status: row.status as SessionStatus,
                 kind: row.kind === "security" ? "security" : "code",
                 runState: run.runState,
                 owner: { type: row.ownerType as AssistantOwner["type"], id: row.ownerId },
-                title: row.title ?? undefined,
+                title: guestOnly ? undefined : row.title ?? undefined,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
                 lastActivityAt: run.lastActivityAt,

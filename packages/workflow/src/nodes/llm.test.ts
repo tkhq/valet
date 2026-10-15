@@ -212,6 +212,8 @@ describe('executeLlm: schema invalid, then valid after one repair', () => {
     expect(calls).toHaveLength(2);
 
     const repairReq = calls[1]?.req;
+    // Both the first call and the repair call bill to the step.
+    expect(calls.map(({ req }) => [req.nodeId, req.iteration])).toEqual([['l', 0], ['l', 0]]);
     expect(repairReq?.prompt).toContain(JSON.stringify(outputSchema));
     // First failure is a JSON-parse error (not a schema-mismatch error) —
     // still asserted verbatim in the repair prompt.
@@ -665,6 +667,8 @@ describe('executeLlm: iteration > 0', () => {
 
     expect(result.status).toBe('completed');
     expect(calls[0]?.req.prompt).toBe('process widget-7 at index 1');
+    // The host bills the call to this step and iteration.
+    expect(calls[0]?.req).toMatchObject({ runId: 'run-10', nodeId: 'l', iteration: 1 });
 
     const checkpoints = await store.getCheckpoints('run-10');
     const cp = checkpoints.find((c) => c.nodeId === 'l' && c.iteration === 1);

@@ -303,7 +303,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       queueCallTool(faux, "widgets.nuke", {}, "nuke it");
       await postPrompt(baseUrl, sessionA, "call nuke");
       const defaultGate = await waitForGate(baseUrl, sessionA);
-      expect(defaultGate.actions.map((a) => a.id).sort()).toEqual(["always_allow", "approve", "approve_session", "deny"]);
+      expect(defaultGate.actions.map((a) => a.id).sort()).toEqual(["always_allow", "always_allow_owner", "approve", "approve_session", "deny"]);
       // The live gate carries WHY it opened (spec Deviations T6 #5, fixed):
       // risk default for an unconfigured critical action.
       expect(defaultGate.provenance).toMatchObject({ baseMode: "require_approval", source: "risk_default" });
@@ -454,23 +454,35 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       expect(fixture.calls("widgets.ping")).toBe(2);
       expect(pingOverrideRow).toMatchObject({ resolvedMode: "require_approval", baseMode: "allow", matchedOverrideId: override.id });
 
-      // The SAME override does not apply to a different user — proven via
+      // The SAME override does not apply to a different user's own session,
+      // and it does apply to another member's turn in this user's session (a
+      // reply in a shared thread runs under the owner's settings). Proven via
       // the admin-only resolver preview route (dry-run, no writes).
-      const previewRes = await fetch(`${baseUrl}/api/org/policies/preview`, {
+      const createSessionCRes = await fetch(`${baseUrl}/api/sessions`, {
         method: "POST",
-        headers: HEADERS,
-        body: JSON.stringify({
-          service: "widgets",
-          actionId: "widgets.ping",
-          riskLevel: "low",
-          appliesIn: "session",
-          sessionId: sessionB,
-          userId: "test-member",
-        }),
+        headers: MEMBER_HEADERS,
+        body: JSON.stringify({ workspace: join(workspaceRoot, "sC") }),
       });
-      expect(previewRes.status).toBe(200);
-      const preview = (await previewRes.json()) as PreviewOrgPolicyResponse;
-      expect(preview.mode).toBe("allow");
+      expect(createSessionCRes.status).toBe(201);
+      const sessionC = ((await createSessionCRes.json()) as CreateSessionResponse).id;
+      const previewPing = async (sessionId: string) => {
+        const res = await fetch(`${baseUrl}/api/org/policies/preview`, {
+          method: "POST",
+          headers: HEADERS,
+          body: JSON.stringify({
+            service: "widgets",
+            actionId: "widgets.ping",
+            riskLevel: "low",
+            appliesIn: "session",
+            sessionId,
+            userId: "test-member",
+          }),
+        });
+        expect(res.status).toBe(200);
+        return ((await res.json()) as PreviewOrgPolicyResponse).mode;
+      };
+      expect(await previewPing(sessionC)).toBe("allow");
+      expect(await previewPing(sessionB)).toBe("require_approval");
 
       // Non-admin members cannot see the admin-only surfaces this test used.
       const memberActionLogRes = await fetch(`${baseUrl}/api/org/action-log`, { headers: MEMBER_HEADERS });

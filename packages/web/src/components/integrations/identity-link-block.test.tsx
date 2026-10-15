@@ -19,6 +19,7 @@ const unlinkReset = vi.fn(() => {
 });
 
 const deliverMutateAsync = vi.fn();
+const setNotifyMutate = vi.fn();
 const verifyMutate = vi.fn();
 let verifyError: Error | null = null;
 
@@ -28,6 +29,7 @@ vi.mock("~/api/queries", () => ({
   useDeliverIdentityLink: () => ({ mutateAsync: deliverMutateAsync, isPending: false, error: null }),
   useVerifyIdentityLink: () => ({ mutate: verifyMutate, isPending: false, error: verifyError }),
   useLinkMembers: () => ({ data: undefined, isLoading: false, isError: false, error: null }),
+  useSetLinkNotify: () => ({ mutate: setNotifyMutate, isPending: false, error: null }),
   useUnlinkIdentity: () => ({
     mutate: unlinkMutate,
     isPending: unlinkPending,
@@ -126,10 +128,8 @@ describe("IdentityLinkBlock sign-in with OAuth", () => {
     provider: "slack", linked: false, channelReady: true, codeDelivery: true, memberSearch: true, oauthService: "slack-user",
   };
 
-  it("offers Sign in with Slack only when the page opts in", () => {
-    const { rerender } = render(<IdentityLinkBlock link={UNLINKED} title="Slack" />);
-    expect(screen.queryByRole("button", { name: "Sign in with Slack" })).toBeNull();
-    rerender(<IdentityLinkBlock link={UNLINKED} title="Slack" offerOAuth />);
+  it("offers Sign in with Slack when the deployment can run the OAuth connect", () => {
+    render(<IdentityLinkBlock link={UNLINKED} title="Slack" />);
     expect(screen.getByRole("button", { name: "Sign in with Slack" })).toBeTruthy();
     // The button grants more than a link; the card says so.
     expect(screen.getByText(/search, read, and post in Slack as you/)).toBeTruthy();
@@ -137,13 +137,14 @@ describe("IdentityLinkBlock sign-in with OAuth", () => {
 
   it("starts the OAuth connect for the declared service", () => {
     Object.defineProperty(window, "location", { value: { ...window.location, href: "" }, writable: true });
-    render(<IdentityLinkBlock link={UNLINKED} title="Slack" offerOAuth />);
+    render(<IdentityLinkBlock link={UNLINKED} title="Slack" />);
     fireEvent.click(screen.getByRole("button", { name: "Sign in with Slack" }));
-    expect(window.location.href).toBe("/api/credentials/slack-user/connect?landing=connected-accounts");
+    // No landing: every connect returns to Integrations.
+    expect(window.location.href).toBe("/api/credentials/slack-user/connect");
   });
 
   it("hides the button when the deployment has no OAuth client", () => {
-    render(<IdentityLinkBlock link={{ ...UNLINKED, oauthService: undefined }} title="Slack" offerOAuth />);
+    render(<IdentityLinkBlock link={{ ...UNLINKED, oauthService: undefined }} title="Slack" />);
     expect(screen.queryByRole("button", { name: "Sign in with Slack" })).toBeNull();
   });
 });
@@ -180,5 +181,17 @@ describe("IdentityLinkBlock DM me", () => {
     render(<IdentityLinkBlock link={UNLINKED} title="Slack" />);
     fireEvent.click(screen.getByRole("button", { name: "DM me on Slack" }));
     expect(await screen.findByText(/invalid or expired/)).toBeTruthy();
+  });
+});
+
+describe("IdentityLinkBlock attention ping", () => {
+  beforeEach(() => setNotifyMutate.mockReset());
+
+  it("shows the linked account's setting and turns it off", () => {
+    render(<IdentityLinkBlock link={LINKED} title="Slack" />);
+    const toggle = screen.getByRole("switch", { name: "Notify on Slack when your assistant needs you" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(toggle);
+    expect(setNotifyMutate).toHaveBeenCalledWith({ notifyAttention: false });
   });
 });

@@ -467,22 +467,36 @@ describe("github-app service", () => {
       expect(allRows[0].installationId).toBe(111);
     });
 
-    it("sets linkedUserId when a connected user's github login case-insensitively matches the account login", async () => {
+    it("links a personal installation to the member whose verified GitHub id matches the account id", async () => {
       await saveAppConfig({ credentials }, orgId, baseConfig);
-      await db.insert(users).values({ id: "user1", name: "User One", email: "u1@example.com" });
+      await db.insert(users).values([
+        { id: "user1", name: "User One", email: "u1@example.com" },
+        { id: "user2", name: "User Two", email: "u2@example.com" },
+      ]);
+      // The connect callback saved user1's id; the login is stale after a rename.
       await credentials.save(
         { type: "user", id: "user1" },
         "github",
-        { type: "oauth2", accessToken: "user-token", metadata: { login: "Acme" } },
+        { type: "oauth2", accessToken: "user-token", metadata: { login: "old-name", githubId: "77" } },
+      );
+      // user2 pasted a token that names the installation's login, with no verified id.
+      await credentials.save(
+        { type: "user", id: "user2" },
+        "github",
+        { type: "oauth2", accessToken: "pasted", metadata: { login: "someuser" } },
       );
       fixture = startGithubFixture({
         listInstallations: () => ({
-          body: [{ id: 111, account: { login: "acme", type: "Organization" }, repository_selection: "all", suspended_at: null }],
+          body: [
+            { id: 111, account: { login: "acme", id: 78, type: "Organization" }, repository_selection: "all", suspended_at: null },
+            { id: 222, account: { login: "someuser", id: 77, type: "User" }, repository_selection: "all", suspended_at: null },
+          ],
         }),
       });
 
       const rows = await discoverInstallations(deps(), orgId);
-      expect(rows[0].linkedUserId).toBe("user1");
+      const linked = Object.fromEntries(rows.map((row) => [row.installationId, row.linkedUserId]));
+      expect(linked).toEqual({ 111: null, 222: "user1" });
     });
   });
 

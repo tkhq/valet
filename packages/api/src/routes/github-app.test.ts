@@ -87,6 +87,7 @@ async function setupConfiguredOrg(
   overrides: Parameters<typeof startGithubFixture>[0] = {},
 ): Promise<{ webhookSecret: string; fixture: GithubFixture }> {
   const f = useFixture({
+    getApp: () => ({ body: { id: 42, slug: "valet-acme", owner: { login: "acme", id: 1, type: "Organization" } } }),
     listInstallations: () => ({ body: [] }),
     convertManifest: () => ({
       body: {
@@ -184,7 +185,7 @@ describe("POST /api/org/github-app/manifest", () => {
     // redirect_url) — without it the App can't do user connects at all.
     expect(body.manifest.callback_urls).toHaveLength(1);
     expect(body.manifest.callback_urls[0]).toContain("/api/me/github/callback");
-    expect(body.manifest.public).toBe(false);
+    expect(body.manifest.public).toBe(true);
     expect(body.manifest.default_permissions).toEqual({
       contents: "write",
       metadata: "read",
@@ -809,6 +810,30 @@ describe("POST /webhooks/github-app", () => {
     expect(body.installations.some((i) => i.accountLogin === "newco")).toBe(true);
   });
 
+  // The legacy rule: a personal installation links to the member whose
+  // GitHub account id, saved by the connect callback, equals `account.id`.
+  // A login proves nothing, because a member can paste any login.
+  it("links a personal installation to its owner by GitHub account id on installation.created", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const personal = { id: 556, account: { login: "octouser", id: 4242, type: "User" }, repository_selection: "all", suspended_at: null };
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl, { listInstallations: () => ({ body: [personal] }) });
+    // The owner connected before renaming the account on GitHub.
+    await api.providers.engineCredentials.save({ type: "user", id: "test-member" }, "github", {
+      type: "oauth2", accessToken: "member-token", metadata: { login: "old-name", githubId: "4242" },
+    });
+    // Another member pasted a token that names the same login.
+    await api.providers.engineCredentials.save({ type: "user", id: "local-user" }, "github", {
+      type: "oauth2", accessToken: "pasted-token", metadata: { login: "octouser" },
+    });
+
+    const payload = { action: "created", installation: personal };
+    const res = await postWebhook(api.baseUrl, "installation", payload, signWebhookBody(JSON.stringify(payload), webhookSecret));
+    expect(res.status).toBe(204);
+
+    const [row] = await api.providers.db.select().from(githubInstallations).where(eq(githubInstallations.installationId, 556));
+    expect(row?.linkedUserId).toBe("test-member");
+  });
+
   // A push marks every matching enabled source due, whoever owns it, and
   // syncs none of them inline. Marking a personal source due used to be
   // skipped on the reasoning that it often has no App installation; true, and
@@ -885,6 +910,7 @@ describe("POST /webhooks/github-app", () => {
 
   const PR_OPENED_PAYLOAD = {
     action: "opened",
+    installation: { id: 999 },
     pull_request: { number: 7, title: "Add thing" },
     repository: { full_name: "acme/widgets" },
     sender: { id: 1234, login: "octocat" },
@@ -893,6 +919,7 @@ describe("POST /webhooks/github-app", () => {
   it("forwards a pull_request webhook into the event pipeline: events row + matched pending delivery", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedInstallationRow();
 
     const now = Date.now();
     await api.providers.db.insert(eventSubscriptions).values({
@@ -935,9 +962,38 @@ describe("POST /webhooks/github-app", () => {
     expect(["pending", "delivered"]).toContain(deliveryRows[0].status);
   });
 
+  // Anybody can install the public App, and the App's webhook secret signs
+  // every installation's deliveries. Only the App owner's installation and a
+  // member's linked personal installation reach the organization's subscriptions.
+  it("forwards events only from the org installation and members' linked personal installations", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    const now = Date.now();
+    await api.providers.db.insert(eventSubscriptions).values({
+      id: "sub_gh", orgId: "local-org", ownerType: "org", ownerId: "local-org", name: "Every PR",
+      eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "orchestrator" }, enabled: true,
+      createdBy: "local-user", createdAt: now, updatedAt: now,
+    });
+    await seedInstallationRow();
+    await seedInstallationRow({ id: "ghi_member", installationId: 1001, accountLogin: "member", accountType: "User", linkedUserId: "local-user" });
+    await seedInstallationRow({ id: "ghi_outsider", installationId: 1002, accountLogin: "outsider", accountType: "User" });
+    await seedInstallationRow({ id: "ghi_outsider_org", installationId: 1003, accountLogin: "outsider-org" });
+
+    const deliver = (id: number) => postForwardedWebhook(
+      api!.baseUrl, "pull_request", { ...PR_OPENED_PAYLOAD, installation: { id } }, webhookSecret, `gh-inst-${id}`,
+    );
+    for (const id of [1002, 1003, 1004]) expect((await deliver(id)).status).toBe(204);
+    expect(await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"))).toEqual([]);
+
+    for (const id of [999, 1001]) expect((await deliver(id)).status).toBe(204);
+    const forwarded = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
+    expect(forwarded.map((row) => row.dedupeKey).sort()).toEqual(["gh-inst-1001", "gh-inst-999"]);
+  });
+
   it("drops forwarded events with no matching subscription (nothing stored)", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedInstallationRow();
 
     const res = await postForwardedWebhook(api.baseUrl, "pull_request", PR_OPENED_PAYLOAD, webhookSecret, "gh-del-2");
     // The route still acks (204): the event verified, it just matched no
@@ -952,6 +1008,7 @@ describe("POST /webhooks/github-app", () => {
   it("dedupes a redelivered webhook (same x-github-delivery -> one events row, one delivery)", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    await seedInstallationRow();
 
     const now = Date.now();
     await api.providers.db.insert(eventSubscriptions).values({

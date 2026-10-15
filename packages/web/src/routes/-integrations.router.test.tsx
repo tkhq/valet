@@ -15,7 +15,13 @@ import {
   createRouter,
 } from "@tanstack/react-router";
 import userEvent from "@testing-library/user-event";
-import type { CredentialSummary, ListPluginsResponse, PluginServiceSummary, TeamSummary } from "@valet/api/wire";
+import type {
+  CredentialSummary,
+  ListPluginsResponse,
+  PluginServiceSummary,
+  TeamSummary,
+  ToolPermissionWire,
+} from "@valet/api/wire";
 
 vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog: [] } }) }));
 vi.mock("~/components/integrations/integration-limit-notice", () => ({ IntegrationLimitNotice: () => null }));
@@ -36,6 +42,10 @@ vi.mock("~/api/repos", () => ({
 }));
 let credentials: CredentialSummary[] = [];
 let plugins: ListPluginsResponse = { plugins: [] };
+// Team credential rows let a member request removal through this hook.
+vi.mock("~/api/team-deletion-requests", () => ({
+  useSubmitTeamDeletionRequest: () => ({ mutate: vi.fn(), reset: vi.fn(), isPending: false, error: null }),
+}));
 vi.mock("~/api/integrations", () => ({
   usePlugins: () => ({ data: plugins, isLoading: false, error: null }),
   useCredentials: () => ({ data: { credentials }, isLoading: false, error: null }),
@@ -62,6 +72,16 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useUnlinkIdentity: () => ({ mutate: vi.fn(), isPending: false, reset: vi.fn() }),
   };
 });
+
+// The rows' summaries and the panel's tool controls read these.
+let toolPermissions: ToolPermissionWire[] = [];
+let setToolModesError: Error | null = null;
+const setToolModes = vi.fn();
+vi.mock("~/api/policies", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/api/policies")>()),
+  useMyToolPermissions: () => ({ data: { tools: toolPermissions }, isLoading: false, error: null }),
+  useSetMyToolModes: () => ({ mutate: setToolModes, error: setToolModesError }),
+}));
 
 import { WorkspaceScopeProvider, useWorkspaceScope } from "~/lib/workspace-scope";
 import { WorkspaceSwitcher, workspaceOptions } from "~/components/layout/workspace-switcher";
@@ -186,7 +206,7 @@ describe("integration rows", () => {
     plugins = { plugins: [plugin("drive", [service("drive", { connected: true, connect: "unconfigured", connectBlockedBy: "org" })])] };
     mount();
     const row = await rowIn("Connected", /Drive/);
-    expect(within(row).getByText("Not configured")).toBeTruthy();
+    expect(within(row).getByText("Needs setup")).toBeTruthy();
     fireEvent.click(row);
     expect(within(await screen.findByRole("dialog")).getByText(/Not configured for this organization/)).toBeTruthy();
   });
@@ -197,10 +217,21 @@ describe("integration rows", () => {
     expect(within(await rowIn("Connected", /Notion/)).getByText("Refresh failed")).toBeTruthy();
   });
 
-  it("show no badge for a healthy connection", async () => {
+  it("say Connected for a healthy connection, and name its account", async () => {
+    plugins = { plugins: [plugin("notion", [service("notion", { connected: true, health: { login: "me@example.com" } })])] };
     mount();
     const row = await rowIn("Connected", /Notion/);
-    expect(row.textContent).not.toMatch(/Connected|Not configured|Refresh failed|Expired/);
+    expect(within(row).getByText("Connected")).toBeTruthy();
+    expect(within(row).getAllByText(/me@example\.com/).length).toBeGreaterThan(0);
+    expect(row.textContent).not.toMatch(/Needs setup|Refresh failed|Expired|Reconnect/);
+  });
+
+  it("offer Reconnect on an expired connection", async () => {
+    plugins = { plugins: [plugin("notion", [service("notion", { connected: true, health: { expiresAt: 1 } })])] };
+    mount();
+    const row = await rowIn("Connected", /Notion/);
+    expect(within(row).getByText("Expired")).toBeTruthy();
+    expect(within(row).getByText("Reconnect")).toBeTruthy();
   });
 
   it("name what an unconnected row offers", async () => {
@@ -213,8 +244,10 @@ describe("integration rows", () => {
     };
     mount();
     // The organization provides Slack, so it is connected for the caller.
-    expect(within(await rowIn("Connected", /Slack/)).getByText("Organization")).toBeTruthy();
-    expect(within(await rowIn("Available", /Gmail/)).getByText("Set up")).toBeTruthy();
+    const slack = await rowIn("Connected", /Slack/);
+    expect(within(slack).getByText("Connected")).toBeTruthy();
+    expect(within(slack).getAllByText(/Your organization/).length).toBeGreaterThan(0);
+    expect(within(await rowIn("Available", /Gmail/)).getByText("Needs setup")).toBeTruthy();
     expect(within(await rowIn("Available", /Typefully/)).getByText("Connect")).toBeTruthy();
   });
 

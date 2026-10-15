@@ -112,6 +112,21 @@ export function injectIncludeUsage(kind: ProviderKind, subpath: string, body: st
   return JSON.stringify({ ...parsed, stream_options: { ...existing, include_usage: true } });
 }
 
+/**
+ * The upstream subpath for a gateway request path. Every Anthropic API path
+ * starts with `/v1`. Claude Code's base URL is `/proxy/anthropic` and its
+ * client adds `/v1`. Clients built on the AI SDK (OpenCode) append
+ * `/messages` to the base URL directly, so a user who copies the Claude Code
+ * base URL sends `/proxy/anthropic/messages`. Adding the missing `/v1` lets
+ * both base URLs work. OpenAI paths are left alone: an org's custom OpenAI
+ * upstream (Azure) can use other path shapes.
+ */
+export function proxySubpath(kind: ProviderKind, pathname: string): string {
+  const subpath = pathname.replace(new RegExp(`^/proxy/${kind}`), "") || "/";
+  if (kind === "anthropic" && subpath !== "/" && !/^\/v1(\/|$)/.test(subpath)) return `/v1${subpath}`;
+  return subpath;
+}
+
 /** Deps injected at registration time and captured in the handler closure. */
 export interface ProxyGatewayDeps {
   verifyApiKey: PrincipalDeps["verifyApiKey"];
@@ -190,7 +205,7 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
     }
 
     const url = new URL(c.req.url);
-    const subpath = url.pathname.replace(new RegExp(`^/proxy/${kind}`), "") || "/";
+    const subpath = proxySubpath(kind, url.pathname);
     // Reject path-traversal attempts (spec finding: reject .. segments).
     if (subpath.split("/").some((s) => s === "..")) {
       return wireError(kind, 400, "Invalid path.");

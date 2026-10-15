@@ -236,6 +236,35 @@ describe("Composer — compact layout", () => {
     expect(input.closest("form")?.dataset.expanded).toBe("false");
   });
 
+  // A press on a card above the composer blurs it on pointerdown. Collapsing
+  // then moved the card, so the release missed the button and the first
+  // click on "Approve step" did nothing.
+  it("stays expanded through a press outside, then collapses after its click", async () => {
+    renderComposer();
+    const input = screen.getByRole("textbox", { name: "Message" });
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    act(() => input.focus());
+    fireEvent.pointerDown(outside);
+    act(() => input.blur());
+    expect(input.closest("form")?.dataset.expanded).toBe("true");
+    fireEvent.pointerUp(outside);
+    await waitFor(() => expect(input.closest("form")?.dataset.expanded).toBe("false"));
+    outside.remove();
+  });
+
+  // A press on the hint text under the field moved focus to the page, so
+  // the next keystrokes went nowhere.
+  it("keeps focus in the message field when the box's hint text is pressed", () => {
+    renderComposer();
+    const input = screen.getByRole("textbox", { name: "Message" });
+    act(() => input.focus());
+    const hint = screen.getByText(/Shift\+Enter for a new line/);
+    expect(fireEvent.mouseDown(hint, { button: 0 })).toBe(false);
+    expect(document.activeElement).toBe(input);
+    expect(input.closest("form")?.dataset.expanded).toBe("true");
+  });
+
   it("keeps a draft expanded after blur, then collapses when the draft is cleared", () => {
     renderComposer();
     const input = screen.getByRole("textbox", { name: "Message" });

@@ -36,16 +36,18 @@ import { deleteTeamResources } from "../services/team-resource-deletion.js";
  * A delete is different: the next boot recreates the team empty, which reads
  * as data loss, so the route refuses it and names the file instead.
  *
- * There is no rename route today. Whoever adds one must refuse BOTH `idp`
- * and `config`: the reconciler identifies a declared team by name, so a
- * rename orphans the row and the next boot creates a second team beside it.
+ * A rename (`PATCH` with `name`) is refused for a `config` team: the
+ * reconciler identifies a declared team by name, so a rename orphans the
+ * row and the next boot creates a second team beside it. An `idp` team can
+ * be renamed: the team sync matches a mirror by its group path, not its name.
  */
 import { Hono, type Context } from "hono";
-import { and, eq, inArray, ne } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { channelsVisibleTo } from "./_thread-access.js";
+import { loadInstanceConfig } from "../config/instance-config.js";
 import { requirePrincipal } from "../middleware/auth.js";
 import {
   assistants,
@@ -332,7 +334,16 @@ teamsRouter.post("/", async (c) => {
 
 // ── Update ────────────────────────────────────────────────────────────────
 
-const PATCH_TEAM_FIELDS = new Set(["defaultModel", "defaultReasoning", "slackHomeChannelId"]);
+/** Lowercased team names the instance config file refers to. */
+function configTeamNames(): Set<string> {
+  const cfg = loadInstanceConfig(process.env);
+  return new Set([
+    ...(cfg?.teams ?? []).map((t) => t.name),
+    ...(cfg?.skillSources ?? []).flatMap((s) => (s.team ? [s.team] : [])),
+  ].map((n) => n.toLowerCase()));
+}
+
+const PATCH_TEAM_FIELDS = new Set(["name", "defaultModel", "defaultReasoning", "slackHomeChannelId"]);
 
 /**
  * Team settings (TKAI-255). Strict whitelist, same shape as `PATCH /api/me`:
@@ -366,7 +377,7 @@ teamsRouter.patch("/:id", async (c) => {
   const unknownFields = Object.keys(raw).filter((k) => !PATCH_TEAM_FIELDS.has(k));
   if (unknownFields.length > 0) {
     return c.json(
-      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only defaultModel, defaultReasoning, or slackHomeChannelId.` },
+      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only name, defaultModel, defaultReasoning, or slackHomeChannelId.` },
       400,
     );
   }
@@ -374,7 +385,23 @@ teamsRouter.patch("/:id", async (c) => {
   // `team` from `loadTeamInOrg` above is fresh within this request; the
   // write branch swaps it for the UPDATE's own returned row, so no re-read.
   let fresh: TeamRow = team;
-  const update: { defaultModel?: string | null; defaultReasoning?: string | null; slackHomeChannelId?: string | null } = {};
+  const update: { name?: string; defaultModel?: string | null; defaultReasoning?: string | null; slackHomeChannelId?: string | null } = {};
+  if ("name" in raw) {
+    const name = typeof raw.name === "string" ? raw.name.trim() : "";
+    if (!name) return c.json({ error: "Send a team name that is not empty." }, 400);
+    // The next boot resolves `teams[].name` and `skillSources[].team` by
+    // name and refuses near-name collisions, so a rename must keep both intact.
+    const configNames = configTeamNames();
+    if (name !== team.name && (team.origin === "config" || configNames.has(team.name.toLowerCase()))) {
+      return c.json({ error: "The instance config file names this team. Rename it there, then restart.", code: "team_name_managed" }, 409);
+    }
+    const [taken] = await db.select({ id: teams.id }).from(teams)
+      .where(and(eq(teams.orgId, user.orgId), sql`lower(${teams.name}) = lower(${name})`, ne(teams.id, id))).limit(1);
+    if (taken || (name !== team.name && configNames.has(name.toLowerCase()))) {
+      return c.json({ error: `Another team already uses the name ${name}. Choose another name.`, code: "team_name_conflict" }, 409);
+    }
+    update.name = name;
+  }
   if ("slackHomeChannelId" in raw) {
     const channel = raw.slackHomeChannelId;
     if (channel !== null && (typeof channel !== "string" || !/^[CG][A-Z0-9]{2,}$/.test(channel))) {
@@ -432,7 +459,10 @@ teamsRouter.patch("/:id", async (c) => {
     try {
       updated = await db.update(teams).set(update).where(eq(teams.id, id)).returning();
     } catch (err) {
-      // Another team saved this home channel after the check above.
+      // Another team saved this name or home channel after the checks above.
+      if (update.name !== undefined && isPgUniqueViolation(err)) {
+        return c.json({ error: "Another team saved this name or home channel first. Reload, then try again.", code: "team_name_conflict" }, 409);
+      }
       if (update.slackHomeChannelId && isPgUniqueViolation(err)) {
         return c.json({ error: "Another team already uses this channel as its home channel. Choose another channel." }, 409);
       }

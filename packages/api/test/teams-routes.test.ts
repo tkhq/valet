@@ -795,7 +795,7 @@ describe("teams routes", () => {
       });
     });
 
-    it("still refuses a rename while allowing Valet-local defaults", async () => {
+    it("allows a rename and Valet-local defaults", async () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
       try {
         api = await bootTestApi();
@@ -805,7 +805,8 @@ describe("teams routes", () => {
           headers: HEADERS,
           body: JSON.stringify({ name: "renamed" }),
         });
-        expect(rename.status).toBe(400);
+        // The team sync matches a mirror by group path, not by name.
+        expect(rename.status).toBe(200);
 
         const defaults = await fetch(`${api.baseUrl}/api/teams/${teamId}`, {
           method: "PATCH",

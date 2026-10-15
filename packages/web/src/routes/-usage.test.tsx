@@ -244,15 +244,30 @@ const mockSessionItems: UsageDrillResponse = {
 const mockWorkflowItems: UsageDrillResponse = {
   items: [
     {
-      id: "wf_run_1",
-      label: "Deploy pipeline run #12",
+      id: "wf_1",
+      label: "Deploy pipeline",
       useCase: "workflow",
       isChild: false,
       parentId: null,
       sessionId: null,
+      workflowId: "wf_1",
+      runs: 4,
       costUsd: 0.01,
       totalTokens: 1_000,
       turns: 2,
+    },
+    {
+      id: "wf_1/summarize",
+      label: "summarize",
+      useCase: "workflow",
+      isChild: true,
+      parentId: "wf_1",
+      sessionId: null,
+      workflowId: "wf_1",
+      runs: 4,
+      costUsd: 0.008,
+      totalTokens: 800,
+      turns: 4,
     },
   ],
 };
@@ -679,6 +694,34 @@ describe("UsagePage — By-member table (org scope)", () => {
     expect(screen.getByText("Bob Jones")).toBeTruthy();
   });
 
+  it("labels a team's own work by the team's name with a team marker, never by its id", () => {
+    const person = mockBreakdownOrgScope.byUser?.[0];
+    if (!person) throw new Error("Missing member fixture");
+    breakdownResult = {
+      data: {
+        ...mockBreakdownOrgScope,
+        byUser: [
+          person,
+          { ...person, userId: "team:team-x", name: "Platform", isTeam: true },
+          // A deleted team, or one the viewer is not on.
+          { ...person, userId: "team:team-gone", name: "Another team", isTeam: true },
+        ],
+      },
+      isLoading: false,
+      error: null,
+    };
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
+    for (const name of ["Platform", "Another team"]) {
+      const row = screen.getByRole("row", { name: new RegExp(name) });
+      expect(within(row).getByRole("img", { name: "Team" })).toBeTruthy();
+    }
+    const personRow = screen.getByRole("row", { name: new RegExp(person.name) });
+    expect(within(personRow).queryByRole("img", { name: "Team" })).toBeNull();
+    // Not as text, and not in a tooltip either.
+    expect(document.body.innerHTML).not.toContain("team:team-");
+  });
+
   it("does not show By-member table in me scope", () => {
     render(<UsagePage />);
     fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
@@ -772,7 +815,7 @@ describe("UsagePage — by-use-case table", () => {
     expect(parentLink).toBeTruthy();
   });
 
-  it("expanding Workflows row shows workflow items (not linked)", async () => {
+  it("expanding Workflows shows each workflow, linked, with its steps' cost per run", async () => {
     render(<UsagePage />);
     fireEvent.click(screen.getByRole("button", { name: "breakdown" }));
     const wfRow = screen.getByRole("button", {
@@ -780,13 +823,13 @@ describe("UsagePage — by-use-case table", () => {
     });
     fireEvent.click(wfRow);
     await waitFor(() => {
-      expect(screen.getByText("Deploy pipeline run #12")).toBeTruthy();
+      expect(screen.getByText("Deploy pipeline")).toBeTruthy();
     });
-    // Workflow items have no sessionId — must not be links
-    const wfLinks = Array.from(document.querySelectorAll("a")).filter((a) =>
-      a.textContent?.includes("Deploy pipeline run #12"),
-    );
-    expect(wfLinks.length).toBe(0);
+    expect(screen.getByText("Deploy pipeline").closest("a")?.getAttribute("href")).toBe("/workflows/$workflowId");
+    expect(screen.getByText("4 runs")).toBeTruthy();
+    expect(screen.getByText("summarize").closest("a")).toBeNull();
+    // The average is over the runs the step ran in, and the label says so.
+    expect(screen.getByText("$0.0020 avg over 4 runs")).toBeTruthy();
   });
 
   it("expanding Proxy row shows proxy items (not linked)", async () => {

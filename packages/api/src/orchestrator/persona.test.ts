@@ -203,4 +203,12 @@ describe("orchestratorPersona", () => {
       expect(persona).toContain("never ask anyone to paste one");
     }
   });
+
+  it("asks when blocked and names the assumption when it goes ahead on a guess", () => {
+    for (const owner of OWNERS) {
+      const persona = flat(orchestratorPersona(owner));
+      expect(persona).toContain("call ask_question instead of ending your turn");
+      expect(persona).toContain("say what you assumed in one line");
+    }
+  });
 });

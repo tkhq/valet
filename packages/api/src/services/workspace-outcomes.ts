@@ -32,7 +32,8 @@ export async function listWorkspaceOutcomes(
   db: AppDb, orgId: string, owner: Principal, limit: number, cursor?: OutcomeCursor,
   shared?: (threadKey: SQL) => SQL,
 ): Promise<WorkspaceOutcomesResponse> {
-  const owned = sql`(s.id IS NULL OR s.status<>'deleted') AND COALESCE(s.org_id,d.org_id) = ${orgId}
+  // A run carries its org, so its outcomes outlive the workflow's deletion.
+  const owned = sql`(s.id IS NULL OR s.status<>'deleted') AND COALESCE(s.org_id,r.org_id) = ${orgId}
     AND COALESCE(s.owner_type,r.owner_type) = ${owner.type}
     AND COALESCE(NULLIF(s.owner_id,''), CASE WHEN s.owner_type='user' THEN s.user_id END,r.owner_id) = ${owner.id}`;
   const conditions = [
@@ -67,15 +68,16 @@ export async function listWorkspaceOutcomes(
     -- A Slack send's channel record names its thread and the message's link. The
     -- row is titled by that thread, never by the message: every workspace member
     -- sees this feed, and the message may sit in a private channel.
-    LEFT JOIN channel_messages cm ON f.outcome_kind='slack_message_sent' AND cm.session_id=f.session_id
+    -- The audit's session is where the action ran; the fact's session is its
+    -- billing key, which is a Thread step's id for an action in its turn.
+    LEFT JOIN channel_messages cm ON f.outcome_kind='slack_message_sent' AND cm.session_id=a.session_id
       AND cm.direction='out' AND cm.provider_message_id=a.result->'data'->>'ts'
       -- A Slack message is its channel and its ts; two channels can share a ts.
       AND cm.channel_key='slack:' || (a.result->'data'->>'channel')
     LEFT JOIN session_threads st ON st.session_id=cm.session_id AND st.id=cm.thread_id
-    LEFT JOIN agent_sessions s ON s.id=f.session_id
+    LEFT JOIN agent_sessions s ON s.id=a.session_id
     LEFT JOIN workflow_runs r ON r.id=COALESCE(f.workflow_execution_id,
       CASE WHEN f.session_id LIKE 'wf:%' THEN split_part(f.session_id,':',2) END)
-    LEFT JOIN workflow_definitions d ON d.id=r.workflow_id
     WHERE f.org_id=${orgId}
       AND f.outcome_kind IN ('pull_request_created','review_submitted','slack_message_sent','slack_dm_sent') AND ${owned} AND ${sharedRun}
     UNION ALL
@@ -86,10 +88,11 @@ export async function listWorkspaceOutcomes(
       CASE WHEN s.id IS NOT NULL THEN e.thread_id ELSE r.params->'origin'->>'threadId' END,r.id,NULL::text,
       p.part->'result'->'details'->'outcome'->>'url'
     FROM usage_entry_facts f
-    LEFT JOIN agent_sessions s ON s.id=f.session_id
+    JOIN engine_entries e ON e.id=f.entry_id
+    -- The session that ran the turn, not the billing key: a Thread step's
+    -- turn bills to its step but ran in a workspace session and thread.
+    LEFT JOIN agent_sessions s ON s.id=e.session_id
     LEFT JOIN workflow_runs r ON r.id=f.workflow_run_id
-    LEFT JOIN workflow_definitions d ON d.id=r.workflow_id
-    JOIN engine_entries e ON e.id=f.entry_id AND e.session_id=f.session_id
     CROSS JOIN LATERAL jsonb_array_elements(replace(e.parts,chr(92)||'u0000',chr(92)||'uFFFD')::jsonb)
       WITH ORDINALITY AS p(part,ordinality)
     WHERE (f.pull_requests>0 OR f.reviews>0) AND ${owned} AND ${sharedRun}

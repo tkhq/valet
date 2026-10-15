@@ -259,6 +259,19 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
 - `GET /api/events` — org event feed (filter by service/key/time);
   `GET /api/events/:id` includes its deliveries (debugging "why didn't my
   trigger fire").
+- Each delivery on `GET /api/events/:id` names where it went, when the
+  caller may open it: `thread` (`sessionId`, `threadId`) for an assistant
+  delivery, `runId` for a workflow delivery. The dispatcher admits an
+  assistant delivery under the dispatch id `event:{deliveryId}`, and the
+  engine keeps that id on the queue item. One query over
+  `engine_queue_items` finds the thread of every delivery of the event. A
+  thread must pass the `/threads/:threadId` rule, through the same two
+  checks the thread routes call: `threadEntry` (`routes/_thread-access.ts`)
+  admits a viewer of the session or a member the thread's share admits, and
+  `threadsVisibleTo` then checks the thread's key. A run must pass the
+  run page rule (`canReadWorkflowRun`) for the derived id
+  `wfrun_evt_{deliveryId}`. A delivery that reached nothing, or that the
+  caller may not open, has neither field.
 - `GET /api/events/catalog` — merged catalog from loaded plugins; drives the
   subscription-builder UI.
 - `POST/GET/PATCH/DELETE /api/event-subscriptions` — CRUD; validates event
@@ -274,6 +287,35 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   workflow targets on different workflows never collide (intentional
   fan-out); a workflow↔orchestrator pair warns but never blocks. Disabled
   rows are skipped — they cannot fire — and enabling one re-runs the gate.
+- Replacement proposals: `events.propose_subscription` takes an optional
+  `replaces`, the ID of an enabled assistant subscription
+  (`target.kind: "orchestrator"`) with the same owner, and stores it as
+  `target.replaces`. The action refuses an unknown ID, an ID from another
+  workspace, a workflow trigger, and a disabled subscription. When a person
+  enables the proposal, the PATCH route disables the replaced subscription in
+  the same transaction and leaves it out of the collision gate, so one version
+  replies. The PATCH lookup applies the same owner and kind checks. The
+  disable requires the replaced subscription to still be on. If it is off,
+  the enable is refused with 409. The message tells the person to delete the
+  proposal and, to change the subscription that replies now, ask for a new
+  proposal that replaces it. It never advises turning the old version back
+  on: a successor, a later version that replaced the successor, or a
+  rollback can each make that leave two versions replying, and the rows do
+  not keep that history reliably. If the old version was removed, the
+  message tells the person to delete the proposal and ask for a new one. Deliveries already
+  queued for the replaced version when it turns off are skipped at dispatch,
+  as for any disabled subscription, and the replacement gets no delivery for
+  an event ingested before it was on. A swap can therefore miss an event
+  that arrives during it. The review dialog
+  says when the replaced version is already off instead of promising to turn
+  it off. The enable clears `target.replaces` and records the ID as
+  `target.replaced`, so turning the new version off and on later leaves the
+  old one alone. A repeated proposal key returns the stored proposal before it
+  checks `replaces`; a retry matches the spent form only when `replaced`
+  names the same ID, so adding `replaces` to a proposal stored without one is
+  a key conflict. The review dialog names the
+  replaced subscription. An agent still cannot enable or change a live
+  subscription.
 - Workflow editor: an "event" trigger node type whose save/update syncs an
   `event_subscriptions` row.
 
@@ -293,6 +335,11 @@ first UI over this system. Two tabs:
   workflow. The UI says "assistant"; the wire keeps `orchestrator`. Rows
   badge team owners with the team's name and a colleague's personal
   subscription with "Personal"; an unbadged row is the caller's own.
+
+An event also has its own page (`routes/events.$eventId.tsx`). Its delivery
+list (`components/events/delivery-list.tsx`) shows "Open thread" or "Open
+run" on a delivery that carries a `thread` or a `runId`. A reader can then
+open the transcript or the run that the event caused.
 
 Each mutable row's menu opens an edit dialog
 (`components/events/edit-subscription-dialog.tsx`): name, event keys, and
@@ -528,4 +575,4 @@ Deployment environment variables (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`) ar
 
 Known gaps: when a workspace removes the app, Linear sends a signed `OAuthApp` `revoked` event. The ingress acknowledges it and drop-logs it as `unsupported_event` with a reconnect instruction, but does not mark the connection broken. Valet does not revoke tokens with Linear on disconnect.
 
-The Events Log defaults to subscription delivery history. Disabling a subscription stops new matching and preserves existing history. Show diagnostics includes organization-wide ingestion problems and exposes raw receipts to administrators. The diagnostics filter is part of both the query cache key and page cursor scope.
+The Events Log defaults to subscription delivery history. Disabling a subscription stops new matching and preserves existing history. Show diagnostics includes organization-wide ingestion problems and exposes raw receipts to administrators. A filter miss (`filter_excluded`) is the exception to organization-wide: it shows only in a workspace whose enabled subscriptions, or the organization's, name its event key, exactly or through a `prefix.*` pattern. A workspace that never subscribed to the event does not see another workspace's filter miss as its own. The diagnostics filter is part of both the query cache key and page cursor scope.

@@ -65,12 +65,15 @@ describe("ask_question tool", () => {
     expect(result.text).toBe('answer to "Which repo?": web');
   });
 
-  it("tells the model to go on without asking again when the question expires", async () => {
+  it("holds work that depends on an expired question, and goes on with the rest", async () => {
     const result = await askQuestionTool.execute(
       { question: "Ship it?" },
       makeCtx(async () => { throw new DecisionGateExpiredError("g1"); }),
     );
     expect(result.text).toContain("Do not ask again in this turn");
+    // An unanswered question never licenses the action it was about.
+    expect(result.text).toContain("Do not send, change, or delete anything that depends on the answer; say what was missing.");
+    expect(result.text).not.toContain("Continue without the answer");
   });
 });
 

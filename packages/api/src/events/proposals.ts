@@ -7,10 +7,13 @@ export function proposalId(kind: string, orgId: string, ownerType: string, owner
   return `proposal-${createHash("sha256").update(JSON.stringify([kind, orgId, ownerType, ownerId, key, ...(target ? [target] : [])])).digest("hex")}`;
 }
 
-export function proposalResult(kind: "subscription" | "schedule", id: string, enabled: boolean, config: unknown) {
+/** `replaces` names the enabled subscription that enabling this proposal
+ * disables, so the agent can tell the reviewer which version goes away. */
+export function proposalResult(kind: "subscription" | "schedule", id: string, enabled: boolean, config: unknown, replaces?: { id: string; name: string }) {
   return {
     proposal: {
       kind, id, enabled, config,
+      ...(replaces ? { replaces } : {}),
       reviewUrl: kind === "subscription"
         ? `/events?tab=subscriptions&review=${encodeURIComponent(id)}`
         : `/workflows?tab=scheduled&review=${encodeURIComponent(id)}`,

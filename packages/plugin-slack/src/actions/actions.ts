@@ -20,13 +20,13 @@ import {
   type PluginActionResult,
 } from "@valet/engine";
 import { authorizeSlackFile } from "./file-access.js";
-import { slackFetch, slackGet } from "./api.js";
+import { slackFetch, slackGet, slackGetOnce } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
 import { cachedChannelName, rememberChannelName, resolveChannelName } from "./channel-names.js";
 import { buildContentBlocks, hasTableBlock, needsContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 import { SlackApi, SlackApiError } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
-import { markdownToSlackMrkdwn } from "../transport/format.js";
+import { markdownToSlackMrkdwn, stripCode } from "../transport/format.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -291,6 +291,99 @@ async function resolveAndEnrichMessages(token: string, messages: Record<string, 
   });
 }
 
+/** The most distinct mentioned users one post checks. Mentions past this
+ *  number go out unchecked. */
+const MAX_CHECKED_MENTIONS = 20;
+
+/** The longest time one users.info lookup in the mention check can take. A
+ *  slower lookup counts as failed, and the post goes out unchecked. */
+const MENTION_LOOKUP_TIMEOUT_MS = 3_000;
+
+/** Block Kit fields that Slack never shows as message text: IDs, URLs, image
+ *  alt text, and the `value` that a button or a select option sends back. */
+const UNRENDERED_KEYS = new Set(['action_id', 'block_id', 'callback_id', 'alt_text', 'url', 'image_url', 'value']);
+
+/** Block Kit object types whose text Slack shows literally: `plain_text`
+ *  objects, and rich-text `text` and `link` elements. A rich-text mention is
+ *  a separate `user` element. */
+const LITERAL_TEXT_TYPES = new Set(['plain_text', 'text', 'link']);
+
+/**
+ * The user IDs that message content mentions, in first-seen order. Each
+ * source is message text or parsed Block Kit JSON. The walk scans every
+ * string for `<@U…>` mentions outside code and adds the user_id of every
+ * rich-text `user` element. It skips objects of a LITERAL_TEXT_TYPES type
+ * and fields in UNRENDERED_KEYS: a `<@U…>` there mentions no one.
+ */
+function mentionedUserIds(sources: unknown[]): Set<string> {
+  const ids = new Set<string>();
+  // A queue, not recursion: blocks are caller-supplied JSON of any depth.
+  const queue = [...sources];
+  for (let i = 0; i < queue.length; i++) {
+    const value = queue[i];
+    if (typeof value === 'string') {
+      for (const m of stripCode(value).matchAll(SLACK_USER_MENTION_RE)) ids.add(m[1]);
+    } else if (Array.isArray(value)) {
+      for (const item of value) queue.push(item);
+    } else if (typeof value === 'object' && value !== null) {
+      if ('type' in value && typeof value.type === 'string' && LITERAL_TEXT_TYPES.has(value.type)) continue;
+      if ('type' in value && value.type === 'user' && 'user_id' in value && typeof value.user_id === 'string') {
+        ids.add(value.user_id);
+      }
+      for (const [key, item] of Object.entries(value)) {
+        if (!UNRENDERED_KEYS.has(key)) queue.push(item);
+      }
+    }
+  }
+  return ids;
+}
+
+/**
+ * The error for outgoing message content that mentions a user ID Slack does
+ * not know, or undefined when the content can go out. Slack accepts such a
+ * post and shows a broken mention, so a mistyped ID otherwise fails with no
+ * signal.
+ *
+ * Every action that posts or edits message content calls this once, right
+ * before it writes, on the content it sends: the converted text, the blocks
+ * after any block-budget slice, and the fallback blocks it can send instead.
+ * The conversion can add a mention: a Markdown link `[label](@U…)` becomes
+ * `<@U…|label>`. Each source is message text or parsed Block Kit JSON.
+ * `linkedUserId` is the owner's linked Slack user ID, which the attribution
+ * block mentions. Valet adds that mention and Slack identity linking supplied
+ * the ID, so the check skips it.
+ */
+async function unknownMentionError(
+  token: string,
+  sources: unknown[],
+  linkedUserId?: string,
+): Promise<PluginActionResult | undefined> {
+  const ids = mentionedUserIds(sources);
+  if (linkedUserId) ids.delete(linkedUserId);
+  const results = await Promise.all([...ids].slice(0, MAX_CHECKED_MENTIONS).map(async (id) => {
+    // Only Slack's definite user_not_found refuses the post. The check exists
+    // to catch a mistyped ID. A lookup that fails for another reason (rate
+    // limit, timeout, missing users:read scope, network) must not stop every
+    // post. The lookup makes one attempt: a retry would wait out Slack's
+    // Retry-After and hold the post back.
+    try {
+      const res = await slackGetOnce('users.info', token, { user: id }, MENTION_LOOKUP_TIMEOUT_MS);
+      if (!res.ok) return undefined;
+      const data = (await res.json()) as { ok: boolean; error?: string };
+      return !data.ok && data.error === 'user_not_found' ? id : undefined;
+    } catch {
+      return undefined;
+    }
+  }));
+  const unknown = results.filter((id) => id !== undefined);
+  if (unknown.length === 0) return undefined;
+  return {
+    success: false,
+    error: `Slack has no user with ID${unknown.length > 1 ? 's' : ''} ${unknown.join(', ')}, so Valet did not send the message. ` +
+      'Look up the user again with slack.list_users or slack.lookup_user_by_email. Then retry with the correct ID.',
+  };
+}
+
 // ─── Response Helpers ─────────────────────────────────────────────────────────
 
 function slimUser(u: Record<string, unknown>): Record<string, unknown> {
@@ -388,6 +481,8 @@ async function openAndSendDM(
     fallbackBlocks = markdownFallbackBlocks(body.blocks as Record<string, unknown>[], text, formattedText, SLACK_MAX_BLOCKS);
   }
 
+  const mentionError = await unknownMentionError(token, [body.text, body.blocks, fallbackBlocks]);
+  if (mentionError) return mentionError;
   const { res, data } = await postActionMessage(token, body, ctx, sender, fallbackBlocks);
   if (!res.ok) return slackError(res);
   if (!data.ok) return slackError(res, data);
@@ -414,7 +509,7 @@ const dmOwner = action(Type.Object({
       return { success: false, error: "This run has no personal Slack recipient. Use slack.dm_user with the intended recipient’s Slack user ID." };
     }
     const ownerSlackId = ownerSlackUserId(cred);
-    if (!ownerSlackId) return { success: false, error: 'Owner has not linked their Slack identity. Ask them to link Slack in Settings → Connected accounts.' };
+    if (!ownerSlackId) return { success: false, error: 'Owner has not linked their Slack identity. Ask them to link Slack in Integrations → Slack.' };
     return openAndSendDM(token, ownerSlackId, p.text, ctx, p);
   },
 });
@@ -585,7 +680,7 @@ const listChannels = action(Type.Object({
     const accessNote = sharedOwner
       ? wantAll ? 'scope="all" lists public channels only. Use scope="joined" for private channels where the bot is a member.' : 'Private channels are included where the connected bot is a member. Team and organization runs use bot membership, not a person’s private access. Direct messages remain restricted.'
       : !ownerSlackId
-        ? 'Private channels are excluded because the personal owner has no linked Slack identity. Link Slack in Settings → Connected accounts. Then use scope="joined".'
+        ? 'Private channels are excluded because the personal owner has no linked Slack identity. Link Slack in Integrations → Slack. Then use scope="joined".'
         : wantAll
           ? 'scope="all" lists public channels only. Use scope="joined" to find private channels where both the bot and personal owner are members.'
           : 'Private channels are included only when the linked personal owner is a member. An absent channel is not proof that the bot needs an invitation.';
@@ -1082,7 +1177,7 @@ const sendMessage = action(Type.Object({
   }))({
   id: 'slack.send_message',
   name: 'Send Message',
-  description: 'Post a message to an arbitrary Slack channel or thread the bot has joined. This requires approval on every call, because it can post outside the current conversation — for example into a customer channel. To answer or follow up in the thread this turn came from, use reply_to_origin instead: it needs no approval and cannot reach a wrong channel. Returns ts (message timestamp) and channel — save ts to thread a follow-up under this message via thread_ts, or to edit or delete this message later with update_message / delete_message.',
+  description: 'Post a message to an arbitrary Slack channel or thread the bot has joined. It can post outside the current conversation, for example into a customer channel, so Valet asks for approval when your organization\'s policy requires it. Do not call ask_approval before this action. To answer or follow up in the thread this turn came from, use reply_to_origin instead: it cannot reach a wrong channel. Returns ts (message timestamp) and channel — save ts to thread a follow-up under this message via thread_ts, or to edit or delete this message later with update_message / delete_message.',
   riskLevel: 'high',
   execute: async (args, ctx) => {
     const p = args;
@@ -1165,6 +1260,8 @@ const sendMessage = action(Type.Object({
       body.blocks = userBlocks;
     }
 
+    const mentionError = await unknownMentionError(token, [body.text, body.blocks, fallbackBlocks], ownerSlackId);
+    if (mentionError) return mentionError;
     const { res, data } = await postActionMessage(token, body, ctx, p, fallbackBlocks);
     if (!res.ok || !data.ok) {
       return { success: false, error: `Slack API error: ${data.error || res.statusText}` };
@@ -1215,12 +1312,15 @@ const replyToOrigin = action(Type.Object({
   execute: async (args, ctx) => {
     const o = await resolveSlackOrigin(ctx);
     if ('error' in o) return { success: false, error: o.error };
-    const { res, data } = await postActionMessage(o.token, {
+    const body = {
       channel: o.channelId,
       thread_ts: o.threadTs,
       text: markdownToSlackMrkdwn(args.text, { preserveSlackNativeSpans: true }),
       mrkdwn: true,
-    }, ctx, args);
+    };
+    const mentionError = await unknownMentionError(o.token, [body.text]);
+    if (mentionError) return mentionError;
+    const { res, data } = await postActionMessage(o.token, body, ctx, args);
     if (!res.ok) return slackError(res);
     if (!data.ok) return slackError(res, data);
     return { success: true, data: { channel: o.channelId, ts: data.ts } };
@@ -1251,6 +1351,13 @@ const replyFileToOrigin = action(Type.Object({
     if (!stat.isFile) {
       return { success: false, error: 'The upload path is not a file. Choose a file in the sandbox and retry.' };
     }
+    // completeUploadExternal posts this same conversion of the caption. The
+    // check runs before the upload, so a refused caption leaves no file behind.
+    const caption = args.caption === undefined
+      ? undefined
+      : markdownToSlackMrkdwn(args.caption, { preserveSlackNativeSpans: true });
+    const mentionError = await unknownMentionError(o.token, [caption]);
+    if (mentionError) return mentionError;
     const data = await ctx.sandbox.readBinary(args.path);
     const name = args.name ?? args.path.split('/').filter(Boolean).at(-1) ?? 'file';
     const api = new SlackApi(o.token);
@@ -1332,6 +1439,8 @@ const updateMessage = action(Type.Object({
       body.blocks = [];
     }
 
+    const mentionError = await unknownMentionError(token, [body.text, body.blocks, fallbackBlocks]);
+    if (mentionError) return mentionError;
     type UpdateData = { ok: boolean; error?: string; ts?: string; channel?: string; text?: string };
     let res = await slackFetch('chat.update', token, body);
     if (!res.ok) return slackError(res);

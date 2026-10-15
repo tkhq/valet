@@ -9,6 +9,7 @@ import {
   useCreateTeam,
   useDeleteTeam,
   useMe,
+  useModelTiers,
   useModels,
   usePatchTeam,
   useRemoveTeamMember,
@@ -43,7 +44,7 @@ import { ReasoningSelect } from "~/components/settings/reasoning-select";
 import { SubSection } from "~/components/settings/section";
 import { errorText } from "~/lib/error-text";
 import { formatDate } from "~/lib/format-when";
-import { isSizeTier, TIER_LABELS } from "~/lib/model-tiers";
+import { fallbackLabel, isSizeTier, TIER_LABELS } from "~/lib/model-tiers";
 import { curatedForCatalogId } from "~/lib/models";
 import { reasoningLabelFor } from "~/lib/reasoning";
 import { matchesNeedle } from "~/lib/text-match";
@@ -302,6 +303,7 @@ function TeamRow({
 
       {open && (
         <div className={page ? "mt-6 space-y-10" : "ml-6 mt-3 space-y-8 border-l border-line pl-4"}>
+          {canMutate && !declared && <TeamName key={team.id} team={team} />}
           <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} onSelfRemoved={leavePage} />
           <TeamDefaults team={team} canMutate={canMutate} />
           <TeamSlack key={team.id} team={team} canMutate={canMutate} />
@@ -364,12 +366,15 @@ function TeamDefaults({
   // catalog name, then raw id) so members and admins read the same words
   // for one value.
   const modelsQ = useModels();
+  const tiersQ = useModelTiers();
+  // Unset falls to the org default tier, so the label names that tier.
+  const modelFallbackLabel = fallbackLabel("Organization default", tiersQ.data);
   const entry = modelsQ.data?.models.find((m) => m.id === team.defaultModel);
   const readOnlyModelLabel = team.defaultModel
     ? isSizeTier(team.defaultModel)
       ? TIER_LABELS[team.defaultModel]
       : (curatedForCatalogId(team.defaultModel)?.label ?? entry?.name ?? team.defaultModel)
-    : "Organization default";
+    : modelFallbackLabel;
   const readOnlyReasoningLabel = team.defaultReasoning
     ? reasoningLabelFor(team.defaultReasoning)
     : "Organization default";
@@ -386,7 +391,7 @@ function TeamDefaults({
               value={team.defaultModel}
               onSelect={(id) => patchTeam.mutate({ id: team.id, body: { defaultModel: id } })}
               onClear={() => patchTeam.mutate({ id: team.id, body: { defaultModel: null } })}
-              emptyLabel="Organization default"
+              emptyLabel={modelFallbackLabel}
             />
           ) : (
             <p className="truncate text-sm text-ink sm:pt-2" title={team.defaultModel ?? undefined}>
@@ -685,6 +690,30 @@ function AddMemberPicker({
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+/** Rename. Hidden for a team declared in the config file, which the API
+ * refuses: the config reconciler matches a declared team by name. */
+function TeamName({ team }: { team: TeamSummary }) {
+  const [name, setName] = useState(team.name);
+  const patch = usePatchTeam();
+  useEffect(() => setName(team.name), [team.name]);
+  const next = name.trim();
+  return (
+    <SubSection title="Name">
+      <FieldRow label="Team name" error={patch.error ? errorText(patch.error) : undefined}>
+        <div className="flex gap-2">
+          <Input aria-label="Team name" value={name} onChange={(event) => setName(event.target.value)} />
+          <Button
+            disabled={patch.isPending || next === "" || next === team.name}
+            onClick={() => patch.mutate({ id: team.id, body: { name: next } })}
+          >
+            Save
+          </Button>
+        </div>
+      </FieldRow>
+    </SubSection>
   );
 }
 

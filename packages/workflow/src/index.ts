@@ -113,6 +113,7 @@ export {
   executeSet,
   executeStop,
   executeTrigger,
+  workflowStepSessionId,
 } from './nodes/index.js';
 export type {
   NodeExecuteResult,
@@ -128,4 +129,4 @@ export { driveUntilPark } from './interpreter.js';
 export type { InterpreterDeps, OnRunSettled, RunSettledInfo } from './interpreter.js';
 
 export { LocalRunHost } from './local-host.js';
-export type { LocalRunHostDeps, RunHost } from './local-host.js';
+export type { ApprovalParkedInfo, LocalRunHostDeps, OnApprovalParked, RunHost } from './local-host.js';

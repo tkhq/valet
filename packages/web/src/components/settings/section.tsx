@@ -17,18 +17,24 @@ export const ActiveTabLabel = createContext<string | undefined>(undefined);
 export function Section({
   title,
   description,
+  actions,
   children,
 }: {
   title: ReactNode;
   description?: string;
+  /** Controls for the whole section, beside the heading and not in a row. */
+  actions?: ReactNode;
   children: ReactNode;
 }) {
   const tab = useContext(ActiveTabLabel);
   return (
     <section className="space-y-3">
-      <div className="space-y-1">
-        <h2 className={tab !== undefined && title === tab ? "sr-only" : "text-lg font-medium text-ink"}>{title}</h2>
-        {description && <p className="text-sm text-muted">{description}</p>}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 flex-1 space-y-1">
+          <h2 className={tab !== undefined && title === tab ? "sr-only" : "text-lg font-medium text-ink"}>{title}</h2>
+          {description && <p className="text-sm text-muted">{description}</p>}
+        </div>
+        {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
       </div>
       {/* The group pads its own top and bottom, so a child with no padding
           of its own (a note, a form) does not touch the rounded edge. A row

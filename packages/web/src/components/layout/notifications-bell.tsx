@@ -27,8 +27,10 @@ export function groupUpdates(updates: readonly NotificationSummary[]): Array<{ l
   return [...groups.values()].sort((a, b) => b.latest.createdAt - a.latest.createdAt);
 }
 
-export function NotificationsBell() {
-  const [open, setOpen] = useState(false);
+/** `defaultOpen` opens the panel on mount without a refetch. The UI stress
+ * gallery (`/dev/ui-stress`) uses it to show the panel open. */
+export function NotificationsBell({ defaultOpen = false }: { defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
   const notifications = useNotifications();
   const workflows = useWorkflowActionRequired();
   const [decisionCursor, setDecisionCursor] = useState<string>();

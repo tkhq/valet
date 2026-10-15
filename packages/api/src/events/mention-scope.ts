@@ -183,7 +183,7 @@ export async function enforceMentionScope(
       ok: false,
       error:
         "A mention subscription fires only for its creator's own @-mentions, so the creator must link " +
-        "their Slack account in Settings → Connected accounts first.",
+        "their Slack account in Integrations → Slack first.",
     };
   }
 

@@ -19,32 +19,39 @@ export async function canReadCachedBriefingSources(db: AppDb, orgId: string, own
     LEFT JOIN agent_sessions s ON s.id=v.session_id AND s.org_id=${orgId} AND s.owner_type=${owner.type}
       AND COALESCE(NULLIF(s.owner_id,''),CASE WHEN s.owner_type='user' THEN s.user_id END)=${owner.id} AND s.status<>'deleted'
     LEFT JOIN session_threads t ON t.id=v.thread_id AND t.session_id=s.id
-    LEFT JOIN workflow_runs r ON r.id=v.run_id AND r.owner_type=${owner.type} AND r.owner_id=${owner.id}
-    LEFT JOIN workflow_definitions d ON d.id=r.workflow_id AND d.org_id=${orgId}
+    -- A run carries its org, so a deleted workflow's run sources stay readable.
+    LEFT JOIN workflow_runs r ON r.id=v.run_id AND r.owner_type=${owner.type} AND r.owner_id=${owner.id} AND r.org_id=${orgId}
     LEFT JOIN artifacts a ON a.id=v.artifact_id AND a.token=v.token AND a.org_id=${orgId}
       AND a.owner_type=${owner.type} AND a.owner_id=${owner.id} AND a.revoked_at IS NULL
     LEFT JOIN action_invocations i ON i.invocation_id=v.action_id AND i.org_id=${orgId}
     LEFT JOIN engine_entries e ON e.id=v.entry_id
+    LEFT JOIN usage_entry_facts ef ON ef.entry_id=e.id
     WHERE (v.session_id IS NULL OR s.id IS NOT NULL)
       -- A team briefing is shown to every member, so each source must still
       -- be shared with the whole team: a channel that turned private, or a
       -- source with no thread to judge, fails the cached briefing.
       ${owner.type === "team" ? sql`AND (v.session_id IS NULL OR (v.thread_id IS NOT NULL
         AND ${sharedBriefingOrigin(orgId, owner.id, sql`v.session_id`, sql`v.thread_id`)}))
-        AND (v.run_id IS NULL OR ${sharedBriefingRun(orgId, owner.id, sql`r.params`)})
+        AND (v.run_id IS NULL OR (r.id IS NULL AND v.kind <> 'workflow' AND s.id IS NOT NULL)
+          OR ${sharedBriefingRun(orgId, owner.id, sql`r.params`)})
         AND (a.id IS NULL OR a.source_session_id IS NULL OR
           ${sharedBriefingOrigin(orgId, owner.id, sql`a.source_session_id`, sql`a.source_thread_id`)})` : sql``}
-      AND (v.run_id IS NULL OR d.id IS NOT NULL)
-      AND (v.thread_id IS NULL OR t.id IS NOT NULL OR (v.session_id IS NULL AND d.id IS NOT NULL))
+      -- A source's own session is its provenance; its run id only adds a
+      -- link. A team run's Thread step that reports in a member's personal
+      -- session stays readable to that member through the session.
+      AND (v.run_id IS NULL OR r.id IS NOT NULL OR (v.kind <> 'workflow' AND s.id IS NOT NULL))
+      AND (v.thread_id IS NULL OR t.id IS NOT NULL OR (v.session_id IS NULL AND r.id IS NOT NULL))
       AND CASE v.kind
         WHEN 'thread' THEN t.id IS NOT NULL
-        WHEN 'workflow' THEN d.id IS NOT NULL
+        WHEN 'workflow' THEN r.id IS NOT NULL
         WHEN 'artifact' THEN a.id IS NOT NULL
         ELSE (i.invocation_id IS NOT NULL AND (
           (s.id IS NOT NULL AND i.session_id=s.id) OR
-          (d.id IS NOT NULL AND COALESCE(i.workflow_execution_id,CASE WHEN i.session_id LIKE 'wf:%' THEN split_part(i.session_id,':',2) END)=r.id)))
+          (r.id IS NOT NULL AND COALESCE(i.workflow_execution_id,CASE WHEN i.session_id LIKE 'wf:%' THEN split_part(i.session_id,':',2) END)=r.id)))
+          -- A terminal write counts for its own session, or for the run its
+          -- usage bills to: a session step's, or a Thread step's turn.
           OR (e.id IS NOT NULL AND ((s.id IS NOT NULL AND e.session_id=s.id)
-            OR (d.id IS NOT NULL AND e.session_id LIKE 'wf:%' AND split_part(e.session_id,':',2)=r.id)))
+            OR (r.id IS NOT NULL AND ef.workflow_run_id=r.id)))
       END`) as { rows: { valid: number }[] };
   return result.rows[0]?.valid === sources.length;
 }

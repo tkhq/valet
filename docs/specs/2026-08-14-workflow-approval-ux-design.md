@@ -148,6 +148,28 @@ iteration suffix (`{runId}:{nodeId}{iterationSuffix}`) — the current
 The existing attention `href` (`/workflows/runs/{runId}`) is the deep link;
 channel deliverers get it for free and remain the mobile story for v1.
 
+The host also tells the thread that started the run (2026-10-14,
+`buildRunApprovalReport` in `run-attention.ts`). It submits a
+`workflow.approval_needed` signal to the origin thread, so the assistant says
+which steps wait and offers to approve them, instead of staying silent until
+the run settles. The run host fires the report through `onApprovalParked`,
+after a drive that opened a gate parks the run. `onApprovalPending` fires
+inside the wave, before slow sibling nodes finish and before the park records
+every waiting step, so it is too early. The dispatch id is
+`workflow-approval:{runId}:{attempt}`. Each drive has its own attempt, so the
+steps one drive parks wake the thread once. A later drive that opens a gate
+wakes it again, whether the earlier gate was approved, denied, or timed out.
+A drive that only resolves gates opens none and sends nothing. The host keeps
+a run that opened a gate until a park reports it, so if the drive fails
+before it parks, the retry on that host reports. A process that dies loses
+the report: delivery is at most once, like the settle report. The signal
+queues as `followup` on every thread. A personal thread steers by default,
+and a steer admission would drop the person's queued messages, abort the
+running turn, and withdraw open decision cards. The body tells the assistant
+to call `get_run`, whose `pendingGates` names each waiting step and the
+teammate who must approve a step on a shared account. A run with no origin
+thread (scheduled or event) and a sub-run send no signal.
+
 ### 3. Approval scopes
 
 The gate card offers three approve scopes and deny:
@@ -205,18 +227,45 @@ Hardening (applies to approval-node resolutions too — shared route):
    resolutions can no longer mint grants — the executor's `onApprovalGrant`
    path stays but the route never feeds it. Blanket coverage now comes from
    a policy gate's `run` scope or an org policy.
-4. **Humans only.** The agent-callable `workflows.resolve_approval` action
-   refuses to resolve policy gates (`approval:{nodeId}` waits on `tool`
-   nodes) and refuses to run at all from a workflow tool-node invocation
-   context (the synthetic `wf:invoke:` session id) — a workflow must not
-   approve its own or another run's gates. Its error names the corrective
-   action ("A human must resolve this gate from the run page."). Policy-gate
-   resolution is HTTP-principal-only by construction, not by prompt.
+4. **Humans only.** A person resolves every gate. The agent-callable
+   `workflows.resolve_approval` action relays a request: on each call it
+   opens a decision card in the thread (`ctx.requestDecision`), and the gate
+   resolves as the person who confirms that card (`resolvedBy`), with the same
+   access checks as the run page and `resolvedVia: 'thread'`. No policy can
+   skip the card, so the action is `medium` and the catalog adds no second
+   card. A direct `via: 'agent'` resolution of a policy gate still returns
+   `human_only`. The action refuses to run from a workflow tool-node
+   invocation context (the synthetic `wf:invoke:` session id), so a workflow
+   cannot approve its own or another run's gates. Updated 2026-10-14: before,
+   the action refused policy gates, and an agent could only send the user to
+   the run page. Updated 2026-10-15: the result's `next` field says what
+   follows. When the approving conversation started the run
+   (`runReportsToThread`), the run's `workflow.settled` and
+   `workflow.approval_needed` signals arrive there, so the assistant ends its
+   turn, the same rule as after `start_run`. An assistant that polled
+   `get_run` after an approval reported a fast run twice: once from the poll
+   and once from the settle signal. When another conversation started the
+   run, or none did, the signals do not arrive, so `next` tells the
+   assistant to read `get_run` instead. When other gates were already
+   waiting, `next` names them (`resolvedGateStillWaiting`): a drive that
+   only resolves gates opens none, so no `workflow.approval_needed` signal
+   would report them. The run wakes as soon as the approval is recorded, so
+   `gatesStillWaiting` counts only gates that waited just before the
+   approval and still wait after it; a gate the drive opens gets its own
+   signal. The pending-gate projection keeps consumed answers, because the
+   drive can consume an answer before it replaces the run's waiting list.
+   If the status read fails after resolution, approval still succeeds.
+   The assistant must call `get_run` to check for remaining approvals.
+   An unknown waiting state must not tell it to wait for a signal.
+   Known gap: a team run started before its thread moved
+   to an execution session stores the root session as its origin, while its
+   reports go to the execution thread, so `next` there says to read
+   `get_run`.
 5. **Timeout.** After `timeoutAt` has passed, resolution returns 409
    `Gate timed out`.
 
 The signal payload records `resolvedBy`, `note`, `scope`, and
-`resolvedVia: 'web'` for the audit trail.
+`resolvedVia` (`'web'` or `'thread'`) for the audit trail.
 
 ### 5. Run-page UI
 

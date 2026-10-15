@@ -123,6 +123,19 @@ function channelText(payload: unknown): string | undefined {
   return undefined;
 }
 
+/** The dispatch id an assistant delivery is admitted under. The engine keeps
+ * it on the queue item, so the item, and the thread it ran in, can be found
+ * from the delivery. */
+export function eventDeliveryDispatchId(deliveryId: string): string {
+  return `event:${deliveryId}`;
+}
+
+/** The workflow run a delivery starts. Derived from the delivery, not
+ * minted, so a retried delivery resolves to the same run (`startWorkflow`). */
+export function eventDeliveryRunId(deliveryId: string): string {
+  return `wfrun_evt_${deliveryId}`;
+}
+
 /** The `target` jsonb column's shape — written only by the subscriptions CRUD validator. */
 interface SubscriptionTarget {
   kind: "workflow" | "orchestrator" | "signal";
@@ -384,7 +397,7 @@ export class EventDispatcher {
             origin: origin ?? undefined,
           },
           ...(target.presence ? { presence: target.presence } : {}),
-          dispatchId: `event:${delivery.id}`,
+          dispatchId: eventDeliveryDispatchId(delivery.id),
           ...(prComment && commentThread ? { target: { sessionId: commentThread.sessionId, threadId: commentThread.threadId } } : {}),
           ...(prThreadKey ? { threadKey: prThreadKey } : !origin && slackChannel ? { threadKey: slackEventsThreadKey(slackChannel) } : {}),
           ...(inbound ? { inbound } : {}),
@@ -497,7 +510,7 @@ export class EventDispatcher {
     // race with a DB blip and the claim lease lapsed) resolves to the same
     // run instead of starting a duplicate. If that run already exists, the
     // prior attempt got as far as starting it — nothing left to do.
-    const runId = `wfrun_evt_${deliveryId}`;
+    const runId = eventDeliveryRunId(deliveryId);
     const existing = await this.deps.db
       .select({ id: workflowRuns.id })
       .from(workflowRuns)

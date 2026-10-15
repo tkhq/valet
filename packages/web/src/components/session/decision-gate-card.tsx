@@ -30,6 +30,10 @@ import { ComposerImageStrip } from "./composer-image-strip";
 // it's a server-internal constant (`policies/service.ts`'s
 // `GATE_ACTION_ALWAYS_ALLOW`), not part of the wire contract.
 const GATE_ACTION_ALWAYS_ALLOW = "always_allow";
+
+/** Gate buttons carry labels that can name a long service or a whole
+ * question option. They wrap within the card instead of overflowing it. */
+const WRAPPING_BUTTON = "h-auto min-h-8 max-w-full whitespace-normal py-1.5 text-left";
 const gateColumnClass = "mx-auto mt-3 w-full min-w-0 max-w-[52rem] shrink-0 px-5 sm:px-8";
 const ALWAYS_ALLOW_TOOLTIP = "Only an org admin can always-allow this action.";
 
@@ -136,10 +140,14 @@ function DecisionGateResponse({
         aria-describedby={gate.body ? `gate-${gate.id}-body` : undefined}
         aria-labelledby={`gate-${gate.id}-title`}
       >
+        {/* The icon sits beside the badge, so the title, body, and controls
+            all start at the card's padding edge. */}
         <header className="flex items-start gap-2.5 px-5 pt-3 pb-2">
-          <Icon aria-hidden className="mt-1 h-4 w-4 shrink-0 text-muted" />
           <div className="min-w-0 flex-1">
-            <Badge variant={kind.variant}>{kind.label}</Badge>
+            <div className="flex items-center gap-2">
+              <Icon aria-hidden className="h-4 w-4 shrink-0 text-muted" />
+              <Badge variant={kind.variant}>{kind.label}</Badge>
+            </div>
             <DecisionGateTitle key={`${gate.id}:${gate.title}`} id={`gate-${gate.id}-title`} title={gate.title} />
           </div>
           <Button variant="ghost" size="icon" onClick={cancel} disabled={busy} aria-label="Cancel and dismiss" className="-mr-1">
@@ -161,7 +169,7 @@ function DecisionGateResponse({
           </div>
         )}
 
-        {gate.provenance && (
+        {gate.provenance && provenanceLine(gate.provenance) && (
           <div className="px-5 pb-2 text-xs text-muted" data-testid="gate-provenance">
             {provenanceLine(gate.provenance)}
           </div>
@@ -174,7 +182,9 @@ function DecisionGateResponse({
           {gate.actions.length > 0 && (
             <div className="px-5 pb-2 flex flex-wrap gap-2">
               {gate.actions.map((a) => (
-                <Button key={a.id} variant="secondary" size="sm" onClick={() => pickAction(a.id)} disabled={busy}>{a.label}</Button>
+                <Button key={a.id} variant="secondary" size="sm" className={WRAPPING_BUTTON} onClick={() => pickAction(a.id)} disabled={busy}>
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{a.label}</span>
+                </Button>
               ))}
             </div>
           )}
@@ -184,8 +194,9 @@ function DecisionGateResponse({
             <ComposerImageStrip images={images} onRemove={(id) => { if (!busy) setImages((current) => current.filter((image) => image.id !== id)); }} />
             <input ref={picker} type="file" accept={IMAGE_ACCEPT_ATTRIBUTE} multiple className="sr-only" aria-label="Attach images to answer" disabled={busy}
               onChange={(event) => { void addImages(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
-            <div className="flex items-end gap-2">
-            <Button variant="ghost" size="icon" aria-label="Attach images" disabled={busy} onClick={() => picker.current?.click()}><Paperclip className="h-4 w-4" /></Button>
+            {/* The answer field spans the card, so it lines up with the title and
+                the options above it. Attach and Submit sit on the row below, as in
+                the message box. */}
             <Textarea
               value={value}
               onChange={(e) => setValue(e.target.value)}
@@ -199,19 +210,23 @@ function DecisionGateResponse({
               aria-label="Your answer"
               placeholder={gate.actions.length > 0 ? "Or type a different answer…" : "Your answer…"}
               rows={2}
-              className="flex-1"
+              className="w-full"
               disabled={busy}
             />
-            <Button
-              size="sm"
-              aria-label="Submit"
-              onClick={submitValue}
-              title={`Submit answer (${formatChord({ code: "Enter", key: "Enter" })})`}
-              aria-keyshortcuts="Meta+Enter Control+Enter"
-              disabled={busy || (value.trim().length === 0 && images.length === 0)}
-            >
-              {busy ? <Spinner size={14} /> : "Submit"}
-            </Button>
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <Button variant="ghost" size="icon" aria-label="Attach images" disabled={busy} onClick={() => picker.current?.click()} className="-ml-2">
+                <Paperclip className="h-4 w-4" />
+              </Button>
+              <Button
+                size="sm"
+                aria-label="Submit"
+                onClick={submitValue}
+                title={`Submit answer (${formatChord({ code: "Enter", key: "Enter" })})`}
+                aria-keyshortcuts="Meta+Enter Control+Enter"
+                disabled={busy || (value.trim().length === 0 && images.length === 0)}
+              >
+                {busy ? <Spinner size={14} /> : "Submit"}
+              </Button>
             </div>
           </div>
           </>
@@ -224,6 +239,7 @@ function DecisionGateResponse({
                 <Button
                   key={a.id}
                   size="sm"
+                  className={WRAPPING_BUTTON}
                   onClick={() => pickAction(a.id)}
                   disabled={disabled}
                   variant={
@@ -239,7 +255,7 @@ function DecisionGateResponse({
                   {resolve.isPending && resolve.variables?.gateId === gate.id && resolve.variables.body.actionId === a.id ? (
                     <Spinner size={14} />
                   ) : null}
-                  <span>{a.label}</span>
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{a.label}</span>
                 </Button>
               );
               // `isAdmin` reads `false` while `useMe()` is still loading —
@@ -325,7 +341,7 @@ function DecisionGateTitle({ id, title }: { id: string; title: string }) {
 /** One line naming the precedence rung that gated this call. Policy/override
  * rungs link nowhere from here (the Action Log carries the row links); this
  * is the live "why" the spec's decision 4 promised. */
-function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string {
+function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string | null {
   // Cases mirror the engine's `PolicyProvenanceSource` values exactly.
   switch (p.source) {
     case "team_policy":
@@ -342,8 +358,13 @@ function provenanceLine(p: NonNullable<DecisionGate["provenance"]>): string {
       return "Gated by the action's risk level.";
     case "resolver_error":
       return "Policy check failed — approval requested as a safe fallback.";
+    // The title already says the call would use this person's shared
+    // account, and the body says only they can answer.
+    case "shared_account":
+      return null;
     default:
-      return `Gated by policy (${p.source}).`;
+      // An unknown source is an internal id, not something to show people.
+      return "Gated by policy.";
   }
 }
 

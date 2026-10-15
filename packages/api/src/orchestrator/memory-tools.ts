@@ -151,6 +151,7 @@ async function relayWriteResult(res: Response, verb: string): Promise<ToolResult
 
 export const memWriteTool = defineTool({
   name: "mem_write",
+  ownerOnly: true,
   description:
     "Create or update a memory file in your own memory, or in a team's shared memory when you pass `teamId`. Create requires `content`; call again with `content` omitted to update metadata only (type/description/tags/etc.) without touching the body. Search with mem_search before writing to update an existing file about the same thing instead of creating a duplicate.",
   parameters: Type.Object({
@@ -237,6 +238,7 @@ export const memWriteTool = defineTool({
 
 export const memPatchTool = defineTool({
   name: "mem_patch",
+  ownerOnly: true,
   description:
     "Exact-string replace a memory file's body, in your own memory or in a team's shared memory when you pass `teamId`: finds `oldString` and replaces it with `newString`. Fails if `oldString` doesn't match exactly once. Pass `oldString: ''` against a non-existent path to create it with `newString` as the body (useful for appending to today's journal).",
   parameters: Type.Object({
@@ -286,6 +288,7 @@ function asReadResultBody(body: unknown): ReadResultBody | null {
 
 export const memReadTool = defineTool({
   name: "mem_read",
+  ownerOnly: true,
   description:
     "Read a memory file (returns its rendered document) or a directory (returns a virtual index of its files and subdirectories). Pass a path ending in '/' or '' for the root to read a directory.",
   parameters: Type.Object({
@@ -337,6 +340,7 @@ function asSearchResultBody(body: unknown): SearchResultBody | null {
 
 export const memSearchTool = defineTool({
   name: "mem_search",
+  ownerOnly: true,
   description:
     "Full-text search over memory (path, title, description, tags, content) within your own scope and any teams you belong to. Search before mem_write when the memory might already exist, especially for anything with a `resource`.",
   parameters: Type.Object({
@@ -408,6 +412,7 @@ const memoryCopyReplacementSchema = Type.Optional(Type.Object({
 
 export const memCopyToTeamTool = defineTool({
   name: "mem_copy_to_team",
+  ownerOnly: true,
   description: "Push an existing personal memory or knowledge file into a team by copying its exact content and metadata. Requires team membership plus team-admin or target-organization-admin authority. Use mem_copy_from_team to pull team knowledge into personal memory. Preserves the source and links. Default to the same source path unless the user chooses a different destination. On collision, ASK the user to replace, rename, or cancel; never invent a suffix or alternate name. The original copy request does not authorize replacement. Send replacement only after the user explicitly confirms replacing the reported destination revision. A stale revision requires a new user decision.",
   parameters: Type.Object({
     from: Type.String({ description: "Existing personal memory path to copy." }),
@@ -432,6 +437,7 @@ export const memCopyToTeamTool = defineTool({
 
 export const memCopyFromTeamTool = defineTool({
   name: "mem_copy_from_team",
+  ownerOnly: true,
   description: "Pull an explicitly selected team memory or knowledge file into personal memory with exact content and metadata. Requires current team membership. Use mem_copy_to_team to push personal memory to a team. Preserves the source and links. Default to the same source path unless the user chooses a different destination. On collision, ASK the user to replace, rename, or cancel; never invent a suffix or alternate name. The original copy request does not authorize replacement. Send replacement only after the user explicitly confirms replacing the reported destination revision. A stale revision requires a new user decision.",
   parameters: Type.Object({
     from: Type.String({ description: "Existing path within the source team, without the team:{id}/ prefix." }),
@@ -456,6 +462,7 @@ export const memCopyFromTeamTool = defineTool({
 
 export const memMoveTool = defineTool({
   name: "mem_move",
+  ownerOnly: true,
   description:
     "Rename or move a memory file. Rewrites markdown links in other memory files that pointed at the old path, and reports which files were updated. Metadata carries over unchanged — a cross-directory move keeps the old `type`, so follow it with a metadata-only mem_write to reclassify when the new location implies a different type.",
   parameters: Type.Object({
@@ -533,6 +540,7 @@ function formatEdges(label: string, edges: LinkEdgeRow[]): string {
 
 export const memLinksTool = defineTool({
   name: "mem_links",
+  ownerOnly: true,
   description:
     "List one memory file's link edges: inbound (files whose markdown links point at it) and outbound (files its links point at, phantom targets included). Check inbound before mem_move or mem_rm, and use it to orient on a topic's cluster.",
   parameters: Type.Object({
@@ -571,6 +579,7 @@ function asShareResultBody(body: unknown): ShareResultBody | null {
 
 export const memShareTool = defineTool({
   name: "mem_share",
+  ownerOnly: true,
   description:
     "Share a memory file as a link, or revoke an existing share. The link serves a snapshot of the file at share time — call mem_share again after editing the file to publish the update (the URL stays the same). Links require a logged-in member of the user's org; only a human can widen one further from the web UI. Share only when the user asks for a link or clearly wants to hand the document to someone — never proactively.",
   parameters: Type.Object({
@@ -783,6 +792,7 @@ export const artifactPublishTool = defineTool({
 
 export const memRmTool = defineTool({
   name: "mem_rm",
+  ownerOnly: true,
   description: "Delete a memory file. This is permanent — prefer mem_write to update a file instead of deleting and recreating it.",
   parameters: Type.Object({ path: Type.String() }),
   execute: async (args, ctx) => {

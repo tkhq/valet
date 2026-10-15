@@ -62,8 +62,8 @@ const redeliverMutate = vi.fn();
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
-  Link: ({ children, to, ...rest }: { children: React.ReactNode; to?: string }) => (
-    <a href={to} {...rest}>
+  Link: ({ children, to, params, ...rest }: { children: React.ReactNode; to?: string; params?: Record<string, string> }) => (
+    <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to ?? "")} {...rest}>
       {children}
     </a>
   ),
@@ -95,6 +95,26 @@ describe("EventDetailBody", () => {
     expect(screen.getByText("PR alerts")).toBeTruthy();
     expect(screen.getByText(/Retries in 8 minutes/)).toBeTruthy();
     expect(screen.getByText("Error: workflow wf_1 not found in org acme")).toBeTruthy();
+  });
+
+  it("links each delivery to the thread or the run it reached", () => {
+    const reached = { subscriptionId: "sub_1", status: "delivered" as const, attempts: 1, lastError: null, deliveredAt: 1_723_200_000_000 };
+    render(
+      <EventDetailBody
+        data={{
+          ...detailData,
+          deliveries: [
+            ...detailData.deliveries,
+            { ...reached, id: "d2", subscriptionName: "Triage", thread: { sessionId: "sess_1", threadId: "th_1" } },
+            { ...reached, id: "d3", subscriptionName: "Release flow", runId: "wfrun_evt_d3" },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByRole("link", { name: "Open thread" }).getAttribute("href")).toBe("/threads/th_1");
+    expect(screen.getByRole("link", { name: "Open run" }).getAttribute("href")).toBe("/workflows/runs/wfrun_evt_d3");
+    // The failing delivery reached nothing, so it links nowhere.
+    expect(screen.getAllByRole("link", { name: /^Open / })).toHaveLength(2);
   });
 
   it("confirms before redelivering, naming the subscriptions and the runs", async () => {

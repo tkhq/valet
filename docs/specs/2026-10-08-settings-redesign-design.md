@@ -41,7 +41,7 @@ on these pages, not the switcher's.
 
 | Group | Items | Scope |
 |---|---|---|
-| Account | Profile, Preferences, Notifications, Connected accounts | you |
+| Account | Profile, Preferences, Notifications | you |
 | Personal workspace | API keys and proxy, Agent access, Policies | your personal workspace |
 | Your teams | one item per team you belong to | that team |
 | Organization | General, Models and usage, Apps and plugins, Security and audit | the organization (admins) |
@@ -62,12 +62,18 @@ on these pages, not the switcher's.
   each item's page shows a tab bar over the routes it groups:
   - General: General, Members, Teams
   - Models and usage: Models, Proxy
-  - Apps and plugins: Plugins, GitHub, Slack, Linear, 1Password, Library
+  - Apps and plugins: Plugins, MCP servers, GitHub, Slack, Linear,
+    1Password, Library
   - Security and audit: Policies, Sandbox settings, Action log
 
   A plain member still sees only Teams and 1Password, as two rail items, and
   no tab bar.
-- While organizations are off, Personal workspace also lists Models.
+- While organizations are off, Personal workspace also lists Models
+  (`/settings/models`). For an org admin it also lists MCP servers
+  (`/settings/mcp-servers`), because `GET /api/org/mcp-servers` refuses a
+  plain member. Each opens the same page as its Organization tab, outside
+  the organization route guard. A plain member who opens
+  `/settings/mcp-servers` sees a notice to ask an organization admin.
 - Below `sm`, the rail becomes one menu with the same groups.
 
 ### 3. Visual language
@@ -83,12 +89,22 @@ Settings matches the thread UI:
 
 ### 4. One place per thing
 
-- Connected accounts keeps identity linking (Slack, Telegram), GitHub, and the
-  personal 1Password token. Its second credential list is removed. Integrations
-  owns service connections, and Connected accounts links to it with
-  `?workspace=user`, so the link opens your personal Integrations whatever the
-  switcher holds. On Integrations the switcher navigates with the workspace it
-  chose, so the parameter cannot hold the page on Personal.
+- Integrations is the one home for connections (2026-10-13). Account →
+  Connected accounts is removed, and its parts moved to Integrations: the
+  Slack and Telegram identity links go to their detail panels, GitHub was
+  already there, and your 1Password token becomes a row. A link from a personal
+  page opens Integrations with `?workspace=user`, so it shows your personal
+  Integrations whatever the switcher holds. On Integrations the switcher
+  navigates with the workspace it chose, so the parameter cannot hold the page
+  on Personal.
+- `/settings/connected-accounts` stays as a redirect to
+  `/integrations?workspace=user` for old links, emails, and OAuth returns. It
+  keeps `?connected=`, `?error=`, and `?detail=`, and maps an older GitHub
+  return's `?github=connected` to `?connected=github`. Every OAuth connect now
+  lands on `/integrations`. The credential connect ignores the old `landing`
+  parameter, and the GitHub App connect takes no destination.
+- User-facing copy names the place to act as "Integrations → <service>", for
+  example "Link Slack in Integrations → Slack".
 - The unconfigured-channel copy names Settings → Organization, where the bot
   token lives.
 
@@ -97,30 +113,54 @@ Settings matches the thread UI:
 Integrations becomes a list, like Claude's Connectors page. It follows the
 switcher.
 
-- Three groups. **Connected** holds a plugin with a service that the caller
+- Two groups. **Connected** holds a plugin with a service that the caller
   connected or the organization provides. **Available** holds a plugin the
-  caller can still connect. **Built in** holds a plugin that needs no
-  account, so built-in tools do not crowd the Connected group.
-- A row is one line: the mark, the name, and the description (hidden below
-  `sm`). On the right it shows a badge only when the connection needs
-  attention (Expired, Refresh failed, Sign-in only, or Not configured for a
-  leftover credential on an unconfigured service). An unconnected row shows
-  what it offers instead: Connect, Set up (an org admin can configure it), or
-  Organization (the organization provides it). A healthy connection shows no
-  badge. The name truncates before the badge does.
+  caller can still connect. A built-in plugin needs no account, so the page
+  does not list it (2026-10-13); its panel still opens from a `?service=`
+  link, such as a skill's integration row.
+- A row is one line: the mark, the name, a text status pill, the account it
+  uses, and a permission summary such as "12 tools · 3 ask · 1 off" (2026-10-13).
+  The pill reads Connected, a health state (Expired, Refresh failed, Sign-in
+  only), or Needs setup for a service nobody configured. A broken connection
+  also offers Reconnect, and an unconnected row offers Connect and shows its
+  description in place of the account. The organization's own connection
+  names "Your organization" as its account. Below `sm` the account and
+  summary move to a line under the row. The name truncates before the pill
+  does.
 - A row is a link to `?service=<plugin>`, which opens the plugin's details
   in a modal panel: who owns the connection (Your account, or Managed by your
   organization), its reach, the account, pairing, repair notes, the controls,
-  and the tools. A link can open the panel. Closing a panel that a row click
+  and the tools.
+- The panel groups the tools by risk: Read (low), Write (medium), and High
+  risk (high and critical). Each tool shows its name, one line of
+  description, and an Allow / Ask first / Off control that holds the
+  effective value from `GET /api/me/tool-permissions`. An untouched tool is
+  tagged Default, an org or team rule names its owner, and your own choice is
+  tagged Custom with a Reset. A mode that an org or team rule forbids is
+  disabled, and the tool says "Set by your organization" (or team). Each group
+  has a Set all, and the panel has "Reset all to defaults". No control allows
+  every tool at once. A change writes through `PUT` or `DELETE
+  /api/me/policy-overrides` (Allow is `allow`, Ask first is
+  `require_approval`, Off is `deny`). The control changes at once, rolls back
+  if the write fails, and shows the API's error text. The team view keeps a
+  plain tool list. A link can open the panel. Closing a panel that a row click
   opened goes back to the list entry, so open and close cycles add no history.
   Closing a panel that a link opened replaces its entry. Either way the list
   keeps `?q=`, and Back does not reopen the panel. An unknown `?service=`
   opens nothing. Disconnect on a credential that stores a 1Password reference
   says that the 1Password item is not deleted.
+- A Slack or Telegram panel holds your identity link: the pairing flows,
+  "Sign in with Slack" when the deployment can run the slack-user OAuth
+  connect, and, once linked, the account, Notify on attention, and Unlink.
+- Your own 1Password service account token is a row in Connected once set,
+  and in Available until then, with its controls in line. The organization
+  token stays on Organization · 1Password. Listing a member's own GitHub App
+  installations needs a member-readable field that no endpoint has yet, so
+  the GitHub panel keeps the personal install link only.
 - A saved credential that no listed service covers, for example one left by
   a removed plugin, gets a row with Revoke under **Other saved credentials**.
-  The removed Connected accounts list was the only Revoke control for such a
-  credential, so Integrations keeps one.
+  The removed Connected accounts credential list was the only Revoke control
+  for such a credential, so Integrations keeps one.
 - The team view lists the team's connections under Connected and the
   services the team can still connect under Available, with the team's
   1Password row in the group that matches its state. It uses the same parts
@@ -136,17 +176,29 @@ a prompt badge for a stored prompt, the description (hidden below `sm`), and
 the id an agent passes (hidden below `md`). The whole row opens the skill.
 The filters, search, the Catalog and Sources tabs, and New skill stay.
 
+A plugin skill's page lists the integrations it uses as Integrations rows
+(2026-10-13), each a link to `/integrations?service=<plugin>`. Skill metadata
+declares no tools, so the list is the reverse of a panel's Related skills: the
+plugin that ships the skill, and any plugin that lists it, when Integrations
+has a panel for it (`hasPanel`). The rows carry your tool summary. Team
+Integrations has no panels, so a team workspace gets one link to the page. A
+stored or repository skill declares no integrations and keeps its note. A
+skill has no permissions of its own.
+
 ## Testing
 
 - `settings-rail.test.tsx`: the four groups, teams by name through the typed
   team route, the admin and member Organization items, Models while
-  organizations are off, the phone menu, and a rail that does not change with
-  the switcher.
+  organizations are off, MCP servers for an admin but not a member while
+  organizations are off, the phone menu, and a rail that does not change
+  with the switcher.
 - `-settings.routes.test.tsx` (real router, real layout and scope provider):
   the redirects from `/settings/appearance`, `/settings/threads`, and
   `/settings/proxy`; Preferences with both parts; personal Policies pinned while
   the switcher holds a team; a team's API keys and proxy and Policies tabs;
-  and the Organization tabs for an admin but not a member.
+  the Organization tabs for an admin but not a member; and, while
+  organizations are off, MCP servers outside the organization route guard
+  for an admin and the ask-an-admin notice for a member.
 - `-settings.team.test.tsx`: the team page pins its team, marks its tab,
   refuses a team the caller is not on, and drops a draft when another of the
   caller's teams opens; `/settings/team` redirects; the personal API keys and
@@ -154,8 +206,16 @@ The filters, search, the Catalog and Sources tabs, and New skill stay.
 - `workspace-scope-pinned.test.tsx`: a pinned scope and the tab title.
 - `-integrations.test.tsx` and `-integrations.router.test.tsx`: the three
   groups, the row states and offers, the panel as a URL (Back, `?q=`, an
-  unknown service), `?workspace=user`, and Other saved credentials.
+  unknown service), `?workspace=user`, Other saved credentials, the Slack
+  pairing with Notify on attention and Sign in with Slack, and the 1Password
+  row.
+- `-settings.connected-accounts.test.tsx`: the redirect replaces its entry
+  and keeps the connect result.
+- `-integrations.test.tsx` also covers the row summary and the panel's tool
+  controls: the risk groups, Default against Custom, Reset, Set all, Reset
+  all, the locked state, and the API error. `api/policies.test.tsx` covers
+  the optimistic write and its rollback.
   `-integrations-workspace.test.tsx` covers the team view.
 - `-skills.index.test.tsx` and `-skills.stored.test.tsx`: one list and the
-  scope badges.
+  scope badges. `skill-usage.test.tsx`: the integration rows and their links.
 - `make e2e` passes before a deploy.

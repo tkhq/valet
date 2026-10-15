@@ -457,6 +457,13 @@ export interface MessageCost {
   total: number;
 }
 
+/**
+ * Key in an assistant `MessageEntry.metadata` that holds the provider error
+ * text of a turn that ended with `stopReason: "error"`. The engine truncates
+ * the text before it writes the entry.
+ */
+export const MESSAGE_TURN_ERROR_KEY = "turnError";
+
 export interface MessageEntry extends BaseEntry {
   type: "message";
   role: "user" | "assistant" | "tool" | "system";
@@ -653,6 +660,11 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
    * run such a tool, because the policy refuses what needs approval; other
    * tools act as the workspace and refuse that turn (`Thread.buildTools`). */
   policyChecked?: boolean;
+  /** The tool reads or changes what the owner of a personal workspace keeps
+   * beyond this thread: other threads or memory. A turn that another member
+   * wrote there, such as a reply in a shared thread, refuses it
+   * (`Thread.buildTools`). */
+  ownerOnly?: boolean;
   riskLevel?: RiskLevel;
   requiresApproval?: boolean | ((args: Static<TParams>, ctx: ToolContext) => Promise<boolean> | boolean);
   /** When true, this tool's outputs are exempt from pruning during compaction. */
@@ -2055,7 +2067,7 @@ export interface SessionStore {
   /** Settled queue items whose updatedAt is strictly before `cutoff`. Used by the event-retention prune. */
   listSettledSubmissionsBefore(sessionId: string, cutoff: number): Promise<QueueItem[]>;
   getQueueItem(sessionId: string, itemId: string): Promise<QueueItem | null>;
-  /** The session's queue item admitted with this exact `dispatchId`, or null. */
+  /** Resolve idempotent admission after a caller loses the returned receipt. */
   getQueueItemByDispatchId(sessionId: string, dispatchId: string): Promise<QueueItem | null>;
   /**
    * Max last-touched timestamp across the session's queue items, or null when
@@ -3010,7 +3022,8 @@ export type ChildStatusReader = (
  */
 export type ChildSender = (
   req: { childSessionId: string; message: string; queue?: boolean },
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string },
+  /** `origin`: the sending turn's channel origin, absent for a web or other non-channel turn. */
+  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; origin?: ChannelOrigin },
 ) => Promise<{ queueItemId: string } | null>;
 
 /**

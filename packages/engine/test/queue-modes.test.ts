@@ -373,6 +373,27 @@ describe("queue mode: steer (abort + new)", () => {
     faux.unregister();
   });
 
+  it("promoteQueuedItem names its source item, which keeps its dispatch id", async () => {
+    const faux = registerFauxProvider({ provider: "promote-provenance", tokensPerSecond: 30 });
+    const longText = Array.from({ length: 30 }, (_, i) => `word${i}`).join(" ");
+    faux.setResponses([fauxAssistantMessage(longText), fauxAssistantMessage("step-done")]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const active = await session.prompt("original");
+    await waitFor(() => events.some((e) => e.event.type === "text_delta"));
+    // A workflow Thread step's prompt, queued behind the running turn. Usage
+    // bills its turn to the step through this dispatch id.
+    const step = await session.thread().submitPrompt("step", { queueMode: "followup", dispatchId: "workflow:run-1:think" });
+    const promoted = await session.thread().promoteQueuedItem(step.queueItemId);
+    await waitFor(async () => (await store.getQueueItem(session.id, promoted.queueItemId))?.status === "settled", 10_000);
+    // The dispatch id stays on the source: it is unique per session, so the
+    // promoted item cannot repeat it, and it names the source instead.
+    expect((await store.getQueueItem(session.id, step.queueItemId))?.dispatchId).toBe("workflow:run-1:think");
+    expect((await store.getQueueItem(session.id, promoted.queueItemId))?.metadata).toMatchObject({ promotedFromItemId: step.queueItemId });
+    await waitFor(async () => (await store.getQueueItem(session.id, active.queueItemId))?.status === "settled", 10_000);
+    faux.unregister();
+  });
+
   it("promoteQueuedItem refuses a claimed followup and does not admit another user entry", async () => {
     const faux = registerFauxProvider({ provider: "promote-claimed", tokensPerSecond: 50 });
     faux.setResponses([

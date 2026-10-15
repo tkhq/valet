@@ -36,6 +36,7 @@ export function MessageList({
   viewerId,
   header,
   onReply,
+  ratings = true,
 }: {
   messages: StreamMessage[];
   threadId?: string;
@@ -63,6 +64,11 @@ export function MessageList({
   /** Full-page chat controls share the transcript sticky layer. */
   header?: ReactNode;
   onReply?: (target: MessageReplyReference) => void;
+  /**
+   * Shows the per-reply rating buttons. A shared-thread guest passes false:
+   * ratings are session-addressed, so they belong to the session's viewers.
+   */
+  ratings?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -183,6 +189,7 @@ export function MessageList({
                   suppressEmptyPlaceholder={agentBusy && i === items.length - 1}
                   viewerId={viewerId}
                   onReply={onReply}
+                  ratings={ratings}
                 />
               );
             })}

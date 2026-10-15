@@ -237,3 +237,25 @@ The card shows the result's summary, when supplied, and its item or field count.
 Message copying preserves the original reply. The code display mounts only when expanded.
 User messages, streaming replies, failed replies, diagnostic objects, malformed JSON, and prose remain visible.
 This is presentation only. It does not change schema validation, approval decisions, stored history, or workflow data.
+
+
+### Workflow diagnostics and completion follow-up (2026-10-15)
+
+`workflows.get_node_diagnostics` reads submissions named by an authorized checkpoint.
+It reports the original and repair queue IDs, submission states, and selected assistant message ID.
+For normal outcomes, selection follows `awaitResult`: the last assistant entry with `stopReason: end_turn` supplies stored `content`.
+Superseded submissions show the last partial assistant entry. Merged submissions identify their target without selecting local output.
+The tool shows content and text-part lengths separately, plus model, usage, cost, and persisted provider errors.
+It returns no prompt or result bodies. Each submission read loads at most 2,000 entries.
+A foreach step requires an explicit iteration when multiple checkpoints match.
+Missing receipts, messages, or provider errors remain unavailable evidence. Historical records are not backfilled.
+Transcripts also expose message and queue IDs, stored text length, model, and persisted provider errors.
+
+`start_run` reports whether it registered an origin for automatic completion follow-up.
+An originless start instructs the agent to check `get_run` instead of promising a later reply.
+`get_run.followUp` reports the stored completion signal's queue state and outcome.
+The reader follows existing isolated team execution mappings without creating a runtime.
+A settled run with no signal admission reports `not_recorded`; it does not claim delivery succeeded.
+A queued signal proves admission only. A settled signal proves the follow-up turn ended, not that Slack received a message.
+The completion signal instructs the agent to inspect results and report the requested checks to the user.
+Approval and completion continue to use the existing event-driven follow-up path.

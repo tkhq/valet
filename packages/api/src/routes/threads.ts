@@ -1,10 +1,11 @@
 import { and, eq, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
-import { agentSessions, sessionThreads, workflowRuns, workflowDefinitions } from "../schema/index.js";
-import { canViewSession } from "../services/session-access.js";
+import { agentSessions, sessionThreads, users, workflowRuns, workflowDefinitions } from "../schema/index.js";
+import { shareAllows, type ThreadShareNeed } from "../services/thread-share.js";
+import type { ThreadAddress } from "../wire/types.js";
 import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
-import { spawnedFromVisibleThread, threadsVisibleTo } from "./_thread-access.js";
+import { threadEntry, threadsVisibleTo } from "./_thread-access.js";
 import { ensureDefaultAssistantSession, findDefaultAssistant } from "../assistants/service.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import {
@@ -38,7 +39,14 @@ threadsRouter.post("/read", c => inWorkspace(c, readThreads));
 
 type ThreadOperation = (c: Context<AppEnv>, sessionId: string, threadId: string) => Promise<Response>;
 
-async function inThread(c: Context<AppEnv>, operation: ThreadOperation, purpose: "content" | "metadata" | "decision" = "content") {
+/**
+ * Resolves a thread address and authorizes the caller. `guest` names what a
+ * person admitted only by the thread's share may do here
+ * (`services/thread-share.ts`). An operation without it is the owner's alone.
+ */
+async function inThread(
+  c: Context<AppEnv>, operation: ThreadOperation, purpose: "content" | "metadata" | "decision" = "content", guest?: ThreadShareNeed,
+) {
   const threadId = c.req.param("threadId");
   const { db, engineStore } = c.var.providers;
   const [appSession] = await db.select().from(agentSessions)
@@ -46,11 +54,23 @@ async function inThread(c: Context<AppEnv>, operation: ThreadOperation, purpose:
       select 1 from engine_threads where engine_threads.session_id = ${agentSessions.id} and engine_threads.id = ${threadId}
     )`)).limit(1);
   let sessionId = appSession?.id;
-  if (appSession) {
+  const entry = appSession ? await threadEntry(c, appSession, threadId) : null;
+  if (appSession && entry?.as === "guest") {
+    const share = entry.mode;
+    if (!guest || !shareAllows(share, guest)) {
+      const error = purpose === "decision"
+        ? "Only the thread owner can answer approvals in a shared thread. Ask the owner to answer it."
+        : share === "view" && guest === "reply"
+          ? "This thread is shared to view only. Ask the owner to allow replies."
+          : "Only the thread owner can change this thread.";
+      return c.json({ error }, 403);
+    }
+    c.set("threadShareGuest", { sessionId: appSession.id, threadId, mode: share });
+  } else if (appSession) {
     if (purpose === "decision") {
       const authorized = await loadDecisionSession(c, appSession.id, threadId);
       if ("error" in authorized) return authorized.error;
-    } else if (!await canViewSession(db, appSession, c.var.principal) || !await spawnedFromVisibleThread(c, appSession)) {
+    } else if (!entry) {
       return c.json({ error: "Thread not found." }, 404);
     }
   } else {
@@ -81,19 +101,32 @@ async function inThread(c: Context<AppEnv>, operation: ThreadOperation, purpose:
   return operation(c, sessionId, threadId);
 }
 
+/** The thread's owner, as a guest of a shared thread sees them. */
+async function ownerName(c: Context<AppEnv>, sessionId: string): Promise<string> {
+  const [row] = await c.var.providers.db.select({ name: users.name, email: users.email }).from(agentSessions)
+    .innerJoin(users, eq(users.id, agentSessions.userId)).where(eq(agentSessions.id, sessionId)).limit(1);
+  return row?.name || row?.email || "the owner";
+}
+
 threadsRouter.get("/:threadId", c => inThread(c, async (c, sessionId, threadId) => {
   const thread = await c.var.providers.engineStore.getThread(sessionId, threadId);
   if (!thread) return c.json({ error: "Thread not found." }, 404);
   const [meta] = await c.var.providers.db.select().from(sessionThreads)
     .where(and(eq(sessionThreads.id, threadId), eq(sessionThreads.sessionId, sessionId))).limit(1);
-  return c.json({ id: threadId, sessionId, title: meta?.title ?? null, createdAt: thread.createdAt, archivedAt: meta?.archivedAt ?? null });
-}, "metadata"));
+  const guest = c.var.threadShareGuest;
+  const body: ThreadAddress = {
+    id: threadId, sessionId, title: meta?.title ?? null, createdAt: thread.createdAt, archivedAt: meta?.archivedAt ?? null,
+    ...(meta?.shareMode ? { share: meta.shareMode } : {}),
+    ...(guest ? { guest: { mode: guest.mode, ownerName: await ownerName(c, sessionId) } } : {}),
+  };
+  return c.json(body);
+}, "metadata", "read"));
 threadsRouter.patch("/:threadId", c => inThread(c, patchThread));
-threadsRouter.get("/:threadId/messages", c => inThread(c, listMessages));
-threadsRouter.post("/:threadId/messages", c => inThread(c, sendPrompt));
-threadsRouter.get("/:threadId/channel-activity", c => inThread(c, getThreadChannelActivity));
-threadsRouter.post("/:threadId/abort", c => inThread(c, abortThread));
-threadsRouter.post("/:threadId/resume", c => inThread(c, resumeThread));
-threadsRouter.get("/:threadId/decisions", c => inThread(c, listDecisions, "decision"));
+threadsRouter.get("/:threadId/messages", c => inThread(c, listMessages, "content", "read"));
+threadsRouter.post("/:threadId/messages", c => inThread(c, sendPrompt, "content", "reply"));
+threadsRouter.get("/:threadId/channel-activity", c => inThread(c, getThreadChannelActivity, "content", "read"));
+threadsRouter.post("/:threadId/abort", c => inThread(c, abortThread, "content", "reply"));
+threadsRouter.post("/:threadId/resume", c => inThread(c, resumeThread, "content", "reply"));
+threadsRouter.get("/:threadId/decisions", c => inThread(c, listDecisions, "decision", "read"));
 threadsRouter.post("/:threadId/decisions/:gateId/resolve", c => inThread(c, resolveDecision, "decision"));
 threadsRouter.post("/:threadId/decisions/:gateId/withdraw", c => inThread(c, withdrawDecision, "decision"));

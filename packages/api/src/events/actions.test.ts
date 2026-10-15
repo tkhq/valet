@@ -114,6 +114,65 @@ describe("eventsActionPlugin", () => {
     expect(await db.select().from(eventSubscriptions)).toHaveLength(2);
   });
 
+  it("links a proposal to the enabled subscription it replaces and names it for the reviewer", async () => {
+    const now = Date.now();
+    await db.insert(eventSubscriptions).values({ id: "live", orgId: ORG, ownerType: "user", ownerId: "member", name: "Replies v1", eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "orchestrator", orchestrator: "user" }, createdBy: "member", createdAt: now, updatedAt: now });
+    const tool = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
+    const input = { proposal_key: "replies-v2", name: "Replies v2", event_keys: ["github.pull_request.opened"], system_prompt: "Reply briefly.", replaces: "live" };
+    const proposed = await tool.execute(input, context("member"));
+    expect(proposed).toMatchObject({ success: true, data: { proposal: { enabled: false, replaces: { id: "live", name: "Replies v1" }, config: { target: { replaces: "live" } } } } });
+    // A retry after a person enabled the proposal (which disabled the live
+    // version) still answers with the stored proposal.
+    const stored = (await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.name, "Replies v2")))[0]!;
+    const proposalId = stored.id;
+    // The PATCH route's enable: switch on, clear the spent link, record it.
+    const { replaces: _spent, ...unlinkedTarget } = stored.target as { replaces?: string };
+    await db.update(eventSubscriptions).set({ enabled: true, target: { ...unlinkedTarget, replaced: "live" } }).where(eq(eventSubscriptions.id, proposalId));
+    await db.update(eventSubscriptions).set({ enabled: false }).where(eq(eventSubscriptions.id, "live"));
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { id: proposalId, enabled: true } } });
+    // Still the stored record after the new version is turned off, and after
+    // the version it replaced is deleted.
+    await db.update(eventSubscriptions).set({ enabled: false }).where(eq(eventSubscriptions.id, proposalId));
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { id: proposalId, enabled: false } } });
+    await db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, "live"));
+    expect(await tool.execute(input, context("member"))).toMatchObject({ success: true, data: { proposal: { id: proposalId } } });
+    // Adding replaces to a proposal stored without a link is a different
+    // proposal, not a spent one: the key conflicts.
+    const { replaces: _none, ...firstPlain } = input;
+    expect(await tool.execute({ ...firstPlain, proposal_key: "plain-first" }, context("member"))).toMatchObject({ success: true });
+    expect(await tool.execute({ ...firstPlain, proposal_key: "plain-first", replaces: "live" }, context("member")))
+      .toMatchObject({ success: false, error: expect.stringContaining("Use a new proposal_key") });
+    // Without replaces, a proposal stores no link, as before.
+    const { replaces: _replaces, ...unlinked } = input;
+    const plain = await tool.execute({ ...unlinked, proposal_key: "plain" }, context("member"));
+    expect(plain).toMatchObject({ success: true, data: { proposal: { enabled: false } } });
+    expect(plain.data).not.toHaveProperty("proposal.replaces");
+    expect(plain.data).not.toHaveProperty("proposal.config.target.replaces");
+  });
+
+  it("refuses a replaces ID that is unknown, in another workspace, or not enabled", async () => {
+    const now = Date.now();
+    const rule = { eventKeys: ["github.pull_request.opened"], filters: [], target: { kind: "orchestrator" }, createdAt: now, updatedAt: now };
+    await db.insert(orgs).values({ id: "foreign", name: "Foreign", createdAt: now });
+    await db.insert(teams).values({ id: "replace-team", orgId: ORG, name: "Team", createdAt: now });
+    await db.insert(teamMembers).values({ teamId: "replace-team", userId: "member", role: "member" });
+    await db.insert(eventSubscriptions).values([
+      { ...rule, id: "colleague", orgId: ORG, ownerType: "user", ownerId: "admin", name: "Colleague", createdBy: "admin" },
+      { ...rule, id: "team-rule", orgId: ORG, ownerType: "team", ownerId: "replace-team", name: "Team rule", createdBy: "member" },
+      { ...rule, id: "other-org", orgId: "foreign", ownerType: "user", ownerId: "member", name: "Other org", createdBy: "member" },
+      { ...rule, id: "parked", orgId: ORG, ownerType: "user", ownerId: "member", name: "Parked", enabled: false, createdBy: "member" },
+      { ...rule, id: "trigger", orgId: ORG, ownerType: "user", ownerId: "member", name: "Trigger", target: { kind: "workflow", workflowId: "wf" }, createdBy: "member" },
+    ]);
+    const tool = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
+    const input = { proposal_key: "refused", name: "Next", event_keys: ["github.pull_request.opened"] };
+    // A workflow trigger is not an assistant version, even the caller's own.
+    for (const replaces of ["missing", "colleague", "team-rule", "other-org", "trigger"]) {
+      expect(await tool.execute({ ...input, replaces }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("No assistant subscription with this replaces ID exists in this workspace") });
+    }
+    expect(await tool.execute({ ...input, replaces: "parked" }, context("member"))).toMatchObject({ success: false, error: expect.stringContaining("\"Parked\" is not enabled") });
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(5);
+  });
+
   it("persists explicit personal thread preferences and rejects them for team proposals", async () => {
     const tool = eventsActionPlugin(db, [githubPlugin]).actions.find(a => a.id === "events.propose_subscription")!;
     const base = { proposal_key: "thread", name: "Thread", event_keys: ["github.pull_request.opened"] };

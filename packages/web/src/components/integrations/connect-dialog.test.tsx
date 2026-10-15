@@ -153,13 +153,11 @@ describe("the decision, stated before the connection", () => {
     expect(screen.getByText("https://www.googleapis.com/auth/gmail.readonly")).toBeTruthy();
   });
 
-  it("offers one full-width Continue and a link to remove the token later", () => {
+  it("offers one full-width Continue and says how to remove the token later", () => {
     show(gmail());
     expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
     expect(screen.getByText(/Valet encrypts this token before it saves it/)).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Connected accounts" }).getAttribute("href")).toBe(
-      "/settings/connected-accounts",
-    );
+    expect(screen.getByText(/select Disconnect on this integration/)).toBeTruthy();
   });
 });
 
@@ -284,18 +282,11 @@ describe("the choice reaches the connect call", () => {
     expect(githubMutateAsync).toHaveBeenCalledTimes(1);
   });
 
-  it("asks the GitHub callback to return to Integrations for a reconnect", () => {
+  // The callback always lands on Integrations, so a connect names no destination.
+  it("starts a GitHub connect and a reconnect the same way", () => {
     show(gmail({ service: "github", connect: "manual", connected: true }), "GitHub");
-
     fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
-    expect(githubMutateAsync).toHaveBeenCalledWith({ postAuthDestination: "integrations" });
-  });
-
-  it("keeps a new GitHub connection on its existing callback destination", () => {
-    show(gmail({ service: "github", connect: "manual" }), "GitHub");
-
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-    expect(githubMutateAsync).toHaveBeenCalledWith(undefined);
+    expect(githubMutateAsync).toHaveBeenCalledWith();
   });
 
   it("carries the manual path to the token form and saves under the right service", async () => {
