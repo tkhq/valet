@@ -13,12 +13,15 @@ import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js"
 import { filtersMatch, type SubscriptionFilter, subscriptionMatchesEvent, subscriptionNamesKey } from "./match.js";
 import { authorizedSlackDiagnosticSubscription, isTeamAssistantRule, subscriptionMatchOutcome } from "./team-slack-gate.js";
 import { writeDropLog } from "../orchestrator/signals.js";
+import { appMentionCoveredBy, matchEventWaiters, recordWaiterMatchFailure, waiterMatchStage, type WaiterMatchDeps } from "./waiters.js";
 
 export interface IngestDeps {
   db: AppDb;
   plugins: ValetPlugin[];
   /** In-process dispatcher nudge; wired in main.ts. */
   onIngest?: () => void;
+  /** Event waiter matching (spec 2026-10-15: event wakeups, Part E). Absent: no waiter matching. */
+  waiters?: WaiterMatchDeps;
 }
 
 export function catalogForService(plugins: ValetPlugin[], service: string): EventCatalogEntry[] {
@@ -240,6 +243,23 @@ export async function ingestEvent(
       outcome: matched.length > 0 ? "matched" : authorizationDenied ? "authorization_denied" : decisions.some(d => d.outcome === "filter_excluded") ? "filtered" : "no_subscription",
       detail: `${subs.length} enabled subscriptions checked; ${decisions.filter(d => d.outcome !== "disabled").length} name this key; ${matched.length} matched; ${decisions.filter(d => d.outcome === "disabled").length} naming this key are disabled. Decisions show up to 50 matching-key subscriptions.`,
     }, { subscriptions: decisions });
+    // Event waiters match before the early return for an unmatched event,
+    // inside their own error boundary: a failure here never changes the
+    // subscription outcome or fails ingestion (INV-E2).
+    if (deps.waiters) {
+      const waiters = deps.waiters;
+      try {
+        const count = await matchEventWaiters({
+          ...waiters,
+          // The mention rule reuses the subscriptions this ingest already read.
+          appMentionCovered: async (_orgId, mention) => appMentionCoveredBy(subs, mention, deps.plugins),
+        }, orgId, service, event);
+        await appendReceiptStage(deps.db, receiptId, waiterMatchStage(count));
+      } catch (error) {
+        recordWaiterMatchFailure(waiters);
+        console.error(`[ingest] receipt ${receiptId ?? "unavailable"} event waiter matching failed`, error);
+      }
+    }
     const namedSubscriptions = subs.filter((sub) => subscriptionNamesKey(sub, event.key));
     const namedSubscription = namedSubscriptions.length > 0;
     // A sender denial is an authorization diagnostic, not a filter miss. Never

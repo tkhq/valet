@@ -120,6 +120,8 @@ export {
   recordLeaseOrphanReleased,
   recordWakeupBadRow,
   recordEventWaiterBufferFull,
+  recordEventWaiterMatch,
+  recordEventMatchFailed,
   recordWakeupSweepFailed,
   recordWakeupSweepOk,
   recordJobLogsPruned,
