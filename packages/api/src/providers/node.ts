@@ -766,6 +766,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const deliverToOrchestrator = buildOrchestratorTarget({
     db,
     engineHost,
+    engineCredentials,
+    onePassword,
     fetchThreadContext: channelThreadContextFetcher(channelHost),
   });
   const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost, deliverToOrchestrator });

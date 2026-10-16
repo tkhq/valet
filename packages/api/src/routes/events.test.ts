@@ -17,6 +17,8 @@ import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatche
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   eventDeliveries,
+  sessionThreads,
+  agentSessions,
   events,
   eventSubscriptions,
   orgMembers,
@@ -27,6 +29,7 @@ import {
   workflowDefinitions,
 } from "../schema/index.js";
 import * as teamsService from "../services/teams.js";
+import { ensureAssistantExecution } from "../assistants/service.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { deleteTeam } from "../services/teams.js";
 import type {
@@ -2396,5 +2399,180 @@ describe("replacement proposals", () => {
 
     expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(500);
     expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: false });
+  });
+});
+
+
+describe("subscription page reads and destinations", () => {
+  it("reads a same-org colleague subscription but hides foreign and missing rows", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "page-colleague", "local-org");
+    await seedSubscriptionRow(a, "page-foreign", "other-org");
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/page-colleague`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ subscription: { id: "page-colleague", ownerId: "someone" } });
+    for (const id of ["page-foreign", "page-missing"]) {
+      expect((await fetch(`${a.baseUrl}/api/event-subscriptions/${id}`)).status).toBe(404);
+    }
+  });
+  it("creates, patches, preserves and clears a new conversation destination", async () => {
+    const a = await boot();
+    const created = await postSubscription(a.baseUrl, { ...VALID_BODY, target: { kind: "orchestrator", thread: { mode: "new" } } });
+    expect(created.status).toBe(201);
+    const row = await created.json() as EventSubscriptionWire;
+    expect(row.target).toMatchObject({ thread: { mode: "new" } });
+    const rename = await patchSubscription(a.baseUrl, row.id, { name: "Renamed" });
+    expect(await rename.json()).toMatchObject({ target: { thread: { mode: "new" } } });
+    const cleared = await patchSubscription(a.baseUrl, row.id, { thread: null });
+    expect(await cleared.json()).toMatchObject({ target: { kind: "orchestrator" } });
+    const read = await (await fetch(`${a.baseUrl}/api/event-subscriptions/${row.id}`)).json() as { subscription: EventSubscriptionWire };
+    expect("thread" in read.subscription.target).toBe(false);
+    const patched = await patchSubscription(a.baseUrl, row.id, { thread: { mode: "new" } });
+    expect(await patched.json()).toMatchObject({ target: { thread: { mode: "new" } } });
+    expect((await patchSubscription(a.baseUrl, row.id, { thread: { mode: "existing", sessionId: "missing", threadId: "missing" } })).status).toBe(400);
+  });
+});
+
+
+describe("subscription existing conversations", () => {
+  it("accepts a personal thread and rejects a foreign org, owner, or archived thread", async () => {
+    const a = await boot();
+    const owner = { type: "user", id: "local-user" } as const;
+    const session = await defaultAssistantSessionFor(a.providers, owner, { actorUserId: "local-user", orgId: "local-org" });
+    const thread = await session.createThread("web:destination");
+    const target = { kind: "orchestrator", thread: { mode: "existing", sessionId: session.id, threadId: thread.id } };
+    const created = await postSubscription(a.baseUrl, { ...VALID_BODY, target, enabled: false });
+    expect(created.status).toBe(201);
+    expect(await created.json()).toMatchObject({ target });
+    const listed = await fetch(`${a.baseUrl}/api/event-subscription-threads?ownerType=user&ownerId=local-user`);
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toMatchObject({ threads: expect.arrayContaining([expect.objectContaining({ id: thread.id, sessionId: session.id })]) });
+    await a.providers.db.insert(sessionThreads).values({ id: thread.id, sessionId: session.id, createdAt: 1, archivedAt: 1 }).onConflictDoUpdate({ target: sessionThreads.id, set: { archivedAt: 1 } });
+    expect((await postSubscription(a.baseUrl, { ...VALID_BODY, target, enabled: false })).status).toBe(400);
+    const hidden = await fetch(`${a.baseUrl}/api/event-subscription-threads?ownerType=user&ownerId=local-user`);
+    const hiddenBody = await hidden.json() as { threads: Array<{ id: string }> };
+    expect(hiddenBody.threads.some(item => item.id === thread.id)).toBe(false);
+    await a.providers.db.update(sessionThreads).set({ archivedAt: null }).where(eq(sessionThreads.id, thread.id));
+    for (const changed of [{ orgId: "other-org" }, { ownerId: "someone" }, { status: "archived" as const }, { status: "deleted" as const }]) {
+      await a.providers.db.update(agentSessions).set(changed).where(eq(agentSessions.id, session.id));
+      expect((await postSubscription(a.baseUrl, { ...VALID_BODY, target, enabled: false })).status).toBe(400);
+      await a.providers.db.update(agentSessions).set({ orgId: "local-org", ownerId: "local-user", status: "active" }).where(eq(agentSessions.id, session.id));
+    }
+  });
+  it("admits full-team conversations and hides private helpers and revoked membership", async () => {
+    const a = await boot();
+    const db = a.providers.db;
+    await db.insert(teams).values({ id: "destination-team", orgId: "local-org", name: "Team", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: "destination-team", userId: "local-user", role: "member" });
+    const owner = { type: "team", id: "destination-team" } as const;
+    const root = await defaultAssistantSessionFor(a.providers, owner, { actorUserId: "local-user", orgId: "local-org" });
+    const { session } = await ensureAssistantExecution(a.providers, owner, { actorUserId: "local-user", orgId: "local-org" }, "web:team-destination");
+    const shared = await session.createThread("web:team-destination");
+    const privateThread = await root.createThread("app-assistant:local-user");
+    const privateRuntime = await ensureAssistantExecution(a.providers, owner, { actorUserId: "local-user", orgId: "local-org" }, "app-assistant:local-user");
+    const privateExecutionThread = await privateRuntime.session.createThread("web:private-execution");
+    expect((await postSubscription(a.baseUrl, { ...VALID_BODY, enabled: false, target: { kind: "orchestrator", orchestrator: "team", teamId: owner.id,
+      thread: { mode: "existing", sessionId: privateRuntime.sessionId, threadId: privateExecutionThread.id } } })).status).toBe(400);
+    const target = (threadId: string) => ({ kind: "orchestrator", orchestrator: "team", teamId: owner.id, thread: { mode: "existing", sessionId: session.id, threadId } });
+    expect((await postSubscription(a.baseUrl, { ...VALID_BODY, target: target(shared.id), enabled: false })).status).toBe(201);
+    expect((await postSubscription(a.baseUrl, { ...VALID_BODY, target: target(privateThread.id), enabled: false })).status).toBe(400);
+    const listUrl = `${a.baseUrl}/api/event-subscription-threads?ownerType=team&ownerId=${owner.id}`;
+    const listed = await fetch(listUrl);
+    expect(listed.status).toBe(200);
+    const { threads } = await listed.json() as { threads: Array<{ id: string }> };
+    expect(threads.some(t => t.id === shared.id)).toBe(true);
+    expect(threads.some(t => t.id === privateThread.id)).toBe(false);
+    expect(threads.some(t => t.id === privateExecutionThread.id)).toBe(false);
+    await db.delete(teamMembers).where(eq(teamMembers.teamId, owner.id));
+    expect((await fetch(listUrl)).status).toBe(404);
+    expect((await postSubscription(a.baseUrl, { ...VALID_BODY, target: target(shared.id), enabled: false })).status).toBeGreaterThanOrEqual(400);
+  });
+});
+
+
+describe("subscription conversation picker pagination", () => {
+  it("bounds, searches, and pages eligible persisted conversations", async () => {
+    const a = await boot();
+    const session = await defaultAssistantSessionFor(a.providers, { type: "user", id: "local-user" }, { actorUserId: "local-user", orgId: "local-org" });
+    const expected = [];
+    for (let i = 0; i < 3; i++) {
+      const thread = await session.createThread(`web:page-${i}`);
+      expected.push(thread.id);
+      await a.providers.db.insert(sessionThreads).values({ id: thread.id, sessionId: session.id, title: `Picker ${i}`, createdAt: 1 });
+    }
+    const url = `${a.baseUrl}/api/event-subscription-threads?ownerType=user&ownerId=local-user&limit=2&q=picker`;
+    const first = await (await fetch(url)).json() as { threads: Array<{ id: string }>; nextCursor: string };
+    expect(first.threads).toHaveLength(2);
+    expect(first.nextCursor).toBeTruthy();
+    const second = await (await fetch(`${url}&cursor=${encodeURIComponent(first.nextCursor)}`)).json() as { threads: Array<{ id: string }>; nextCursor?: string };
+    expect(second.threads).toHaveLength(1);
+    expect(second.nextCursor).toBeUndefined();
+    expect([...first.threads, ...second.threads].map(t => t.id).sort()).toEqual(expected.sort());
+    expect((await fetch(`${url}&cursor=broken`)).status).toBe(400);
+    expect((await fetch(`${url.replace("limit=2", "limit=0")}`)).status).toBe(400);
+    expect((await fetch(`${a.baseUrl}/api/event-subscription-threads?ownerType=user&ownerId=someone`)).status).toBe(404);
+  });
+});
+
+
+describe("disabling subscriptions with unavailable destinations", () => {
+  it("can disable an archived destination without silently clearing its saved choice", async () => {
+    const a = await boot();
+    const session = await defaultAssistantSessionFor(a.providers, { type: "user", id: "local-user" }, { actorUserId: "local-user", orgId: "local-org" });
+    const thread = await session.createThread("web:disable-destination");
+    const target = { kind: "orchestrator", thread: { mode: "existing", sessionId: session.id, threadId: thread.id } };
+    const created = await postSubscription(a.baseUrl, { ...VALID_BODY, target });
+    expect(created.status).toBe(201);
+    const row = await created.json() as EventSubscriptionWire;
+    await a.providers.db.insert(sessionThreads).values({ id: thread.id, sessionId: session.id, createdAt: 1, archivedAt: 1 });
+    const disabled = await patchSubscription(a.baseUrl, row.id, { enabled: false });
+    expect(disabled.status).toBe(200);
+    expect(await disabled.json()).toMatchObject({ enabled: false, target });
+    expect((await patchSubscription(a.baseUrl, row.id, { enabled: true })).status).toBe(400);
+    expect((await patchSubscription(a.baseUrl, row.id, { enabled: false, thread: { mode: "existing", sessionId: "missing", threadId: "missing" } })).status).toBe(400);
+  });
+});
+
+
+describe("subscription destination activity", () => {
+  it("refuses engine-archived threads and workflow-owned run histories", async () => {
+    const a = await boot();
+    const session = await defaultAssistantSessionFor(a.providers, { type: "user", id: "local-user" }, { actorUserId: "local-user", orgId: "local-org" });
+    const archived = await session.createThread("web:engine-archived");
+    const workflow = await session.createThread("signal:workflow:run-1");
+    await a.providers.db.execute(sql`UPDATE engine_threads SET status = 'archived' WHERE id = ${archived.id} AND session_id = ${session.id}`);
+    for (const thread of [archived, workflow]) {
+      expect((await postSubscription(a.baseUrl, { ...VALID_BODY, enabled: false,
+        target: { kind: "orchestrator", thread: { mode: "existing", sessionId: session.id, threadId: thread.id } } })).status).toBe(400);
+    }
+    const body = await (await fetch(`${a.baseUrl}/api/event-subscription-threads?ownerType=user&ownerId=local-user`)).json() as { threads: Array<{ id: string }> };
+    expect(body.threads.some(t => t.id === archived.id || t.id === workflow.id)).toBe(false);
+  });
+});
+
+
+describe("subscription destination execution anchors", () => {
+  it("offers execution histories instead of empty root anchors and retains old anchor history", async () => {
+    const a = await boot();
+    const db = a.providers.db;
+    await db.insert(teams).values({ id: "anchor-team", orgId: "local-org", name: "Anchors", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: "anchor-team", userId: "local-user", role: "member" });
+    const owner = { type: "team", id: "anchor-team" } as const;
+    const root = await defaultAssistantSessionFor(a.providers, owner, { actorUserId: "local-user", orgId: "local-org" });
+    const execution = await ensureAssistantExecution(a.providers, owner, { actorUserId: "local-user", orgId: "local-org" }, "web:anchor");
+    const thread = await execution.session.createThread("web:anchor");
+    const anchor = await root.threadByKey("web:anchor");
+    if (!anchor) throw new Error("Expected the governing thread.");
+    const target = { kind: "orchestrator", orchestrator: "team", teamId: owner.id,
+      thread: { mode: "existing", sessionId: root.id, threadId: anchor.id } };
+    expect((await postSubscription(a.baseUrl, { ...VALID_BODY, enabled: false, target })).status).toBe(400);
+    const list = await (await fetch(`${a.baseUrl}/api/event-subscription-threads?ownerType=team&ownerId=${owner.id}`)).json() as { threads: Array<{ id: string }> };
+    expect(list.threads.some(t => t.id === thread.id)).toBe(true);
+    expect(list.threads.some(t => t.id === anchor.id)).toBe(false);
+    await db.execute(sql`INSERT INTO engine_entries (id, session_id, thread_id, entry_type, role, content, created_at)
+      VALUES ('retained-anchor-message', ${root.id}, ${anchor.id}, 'message', 'user', 'Retained conversation', 1)`);
+    expect((await postSubscription(a.baseUrl, { ...VALID_BODY, enabled: false, target })).status).toBe(400);
+    await db.execute(sql`INSERT INTO legacy_assistant_runtimes (session_id, org_id) VALUES (${root.id}, 'local-org')`);
+    expect((await postSubscription(a.baseUrl, { ...VALID_BODY, enabled: false, target })).status).toBe(201);
   });
 });

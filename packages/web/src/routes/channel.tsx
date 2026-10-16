@@ -1,12 +1,11 @@
 import { useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { Ear } from "lucide-react";
-import type { ChannelDetailResponse, ChannelListener, ChannelMessage, EventSubscriptionWire } from "@valet/api/wire";
+import type { ChannelDetailResponse, ChannelListener, ChannelMessage } from "@valet/api/wire";
 import { useWorkspaceChannel } from "~/api/channels";
 import { useEventSubscriptions, usePatchEventSubscription } from "~/api/events";
 import { Badge, Button, EmptyRow, ErrorRow, LoadingRow, WorkRow, WorkSection, textLinkClass, cardClass, pageClass } from "~/components/primitives";
 import { ChannelIcon, ProviderLink } from "~/components/channels/channel-parts";
-import { EditSubscriptionDialog } from "~/components/events/edit-subscription-dialog";
 import { AutomationWizard } from "~/components/events/automation-wizard";
 import { TeamSlackSetupModal } from "~/components/events/team-slack-setup";
 import { useListOwner } from "~/lib/use-list-owner";
@@ -105,7 +104,6 @@ function Listening({ listeners }: { listeners: ChannelListener[] }) {
   const owner = useListOwner();
   const subscriptions = useEventSubscriptions(owner);
   const patch = usePatchEventSubscription();
-  const [editing, setEditing] = useState<EventSubscriptionWire>();
   const [setup, setSetup] = useState(false);
   const team = owner?.ownerType === "team" ? owner.ownerId : undefined;
   const own = listeners.find((listener) => listener.editable);
@@ -120,7 +118,7 @@ function Listening({ listeners }: { listeners: ChannelListener[] }) {
           : "A mention here does not reach this workspace."}
         actions={<>
           {own && rule && <>
-            <Button size="sm" variant="ghost" onClick={() => setEditing(rule)}>Edit</Button>
+            <Button size="sm" variant="ghost" asChild><Link to="/events/subscriptions/$subscriptionId" params={{ subscriptionId: rule.id }}>Edit</Link></Button>
             <Button size="sm" variant="ghost" disabled={patch.isPending} onClick={() => patch.mutate({ id: rule.id, body: { enabled: false } })}>Pause</Button>
           </>}
           {(!own || team) && (
@@ -131,10 +129,6 @@ function Listening({ listeners }: { listeners: ChannelListener[] }) {
         </>}
       />
       {others.length > 0 && <p className="border-t border-line px-4 py-2 text-xs text-muted">Also listening: {others.join(", ")}.</p>}
-      {editing && (
-        <EditSubscriptionDialog open onOpenChange={(open) => { if (!open) setEditing(undefined); }} sub={editing}
-          targetLabel="Replies in the thread as this workspace's Valet" />
-      )}
       {setup && team && <TeamSlackSetupModal teamId={team} onOpenChange={setSetup} />}
       {setup && !team && <AutomationWizard open onOpenChange={setSetup} />}
     </section>

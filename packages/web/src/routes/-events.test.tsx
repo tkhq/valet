@@ -13,8 +13,9 @@
  */
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { EventSubscriptionWire, TeamSummary } from "@valet/api/wire";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EditSubscriptionForm } from "~/components/events/edit-subscription-form";
 import { TooltipProvider } from "~/components/primitives";
 
 vi.mock("~/components/layout/workspace-assistant", () => ({ useWorkspaceAssistant: () => ({ open: vi.fn() }) }));
@@ -126,6 +127,7 @@ vi.mock("~/components/events/event-log", () => ({
   },
 }));
 
+vi.mock("~/components/events/subscription-thread-destination", () => ({ SubscriptionThreadDestination: () => <div>Run in</div> }));
 vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
   useEventSubscriptions: () => ({ data: subscriptionsData, isPending: false, error: null }),
@@ -333,7 +335,7 @@ describe("EventsPage — Subscriptions", () => {
           name: "Merged PRs",
           eventKeys: ["github.pr.merged"],
           filters: [],
-          target: { kind: "orchestrator", orchestrator: "user", deliveryPolicy: "always", pauseOnOverlap: true },
+          target: { kind: "orchestrator", orchestrator: "user", deliveryPolicy: "always", pauseOnOverlap: true, thread: { mode: "new" } },
         },
         expect.anything(),
       ),
@@ -394,7 +396,7 @@ describe("EventsPage — Subscriptions", () => {
           name: "Team PRs",
           eventKeys: ["github.pr.merged"],
           filters: [],
-          target: { kind: "orchestrator", orchestrator: "team", teamId: "t_eng" },
+          target: { kind: "orchestrator", orchestrator: "team", teamId: "t_eng", thread: { mode: "new" } },
         },
         expect.anything(),
       ),
@@ -505,6 +507,12 @@ describe("EventsPage — Subscriptions", () => {
   async function openEditDialog() {
     fireEvent.keyDown(screen.getByRole("button", { name: "PR alerts actions" }), { key: "Enter" });
     fireEvent.click(await screen.findByText("Edit subscription"));
+    expect(navigateCalls.at(-1)).toMatchObject({ to: "/events/subscriptions/$subscriptionId", params: { subscriptionId: "sub_1" } });
+    function TestEditor() {
+      const [open, setOpen] = useState(true);
+      return open ? <EditSubscriptionForm sub={subscriptionsData.subscriptions[0]} targetLabel="Run workflow: Deploy pipeline" onOpenChange={setOpen} /> : null;
+    }
+    render(<TestEditor />);
   }
 
   it("edit: the form is prefilled and a rename patches only the name", async () => {
@@ -550,7 +558,7 @@ describe("EventsPage — Subscriptions", () => {
     await openEditDialog();
     // The dialog names the stored target (the row shows it too, hence "all").
     expect(screen.getAllByText(/Run workflow: Deploy pipeline/).length).toBeGreaterThan(1);
-    expect(screen.getByText(/This dialog cannot change the target/)).toBeTruthy();
+    expect(screen.getByText(/To change the workspace or workflow/)).toBeTruthy();
     expect(screen.queryByRole("radio", { name: /Run a workflow/ })).toBeNull();
   });
 

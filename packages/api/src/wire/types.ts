@@ -4685,6 +4685,10 @@ export interface FilterOptionsResponse {
 // validator rejects it — see routes/events.ts TARGET_KINDS.
 export type EventDeliveryPolicy = "always" | "ignoreIfMyTeamSubscribed" | "ignoreIfAnyTeamSubscribed";
 
+export type EventSubscriptionThreadWire =
+  | { mode: "new" }
+  | { mode: "existing"; sessionId: string; threadId: string };
+
 export type EventSubscriptionTargetWire =
   | { kind: "workflow"; workflowId: string; presence?: Presence }
   /** `teamId` is required when `orchestrator` is `"team"`, and refused
@@ -4692,6 +4696,8 @@ export type EventSubscriptionTargetWire =
    * `"user"` would name a team the delivery never reaches. */
   | {
       kind: "orchestrator";
+      /** Absent preserves channel and pull-request routing. */
+      thread?: EventSubscriptionThreadWire;
       presence?: Presence;
       orchestrator?: "user" | "team" | "org";
       teamId?: string;
@@ -4859,7 +4865,13 @@ export interface ListEventSubscriptionsResponse {
   subscriptions: EventSubscriptionWire[];
 }
 
+export interface GetEventSubscriptionResponse {
+  subscription: EventSubscriptionWire;
+}
+
 export interface PatchEventSubscriptionRequest {
+  /** Null restores channel and pull-request routing. Omission preserves the destination. */
+  thread?: EventSubscriptionThreadWire | null;
   /** Replace channel identity. Null clears the override; omission preserves it. */
   presence?: Presence | null;
   deliveryPolicy?: EventDeliveryPolicy;
@@ -4868,15 +4880,6 @@ export interface PatchEventSubscriptionRequest {
   eventKeys?: string[];
   filters?: EventSubscriptionFilterWire[];
   enabled?: boolean;
-  /**
-   * Re-point an orchestrator rule at a different assistant of the SAME owner.
-   * `null` clears the choice, so the owner's default answers again. Absent
-   * leaves it alone.
-   *
-   * The only part of `target` a patch may touch. Changing the owner is not a
-   * field edit — it decides the row's mutation ACL and its collision peers —
-   * so a rule that should belong elsewhere is rewritten, not patched.
-   */
   /**
    * Rewrite this orchestrator rule's prompt templates. `null` clears the
    * field, so the rule delivers the default body again. Absent leaves it

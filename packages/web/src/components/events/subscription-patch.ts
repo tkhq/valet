@@ -7,6 +7,7 @@ import type { DeliveryPreferencesValue } from "./delivery-preferences";
  * render — the same split the trigger dialog's edit branch encodes inline.
  */
 import type {
+  EventSubscriptionThreadWire,
   EventSubscriptionFilterWire,
   EventSubscriptionWire,
   PatchEventSubscriptionRequest,
@@ -40,6 +41,7 @@ function sameKeySet(a: string[], b: string[]): boolean {
 export function buildSubscriptionPatch(
   sub: EventSubscriptionWire,
   form: {
+    thread?: EventSubscriptionThreadWire | null;
     name: string;
     eventKeys: string[];
     filters: EventSubscriptionFilterWire[];
@@ -82,6 +84,14 @@ export function buildSubscriptionPatch(
     const next = form.deliveryPreferences;
     if (next.deliveryPolicy !== (sub.target.deliveryPolicy ?? "always")) body.deliveryPolicy = next.deliveryPolicy;
     if (next.deliveryPolicy !== "always" && next.pauseOnOverlap !== (sub.target.pauseOnOverlap ?? false)) body.pauseOnOverlap = next.pauseOnOverlap;
+  }
+
+  if (form.thread !== undefined && sub.target.kind === "orchestrator") {
+    const stored = sub.target.thread;
+    const next = form.thread;
+    const changed = next?.mode !== stored?.mode || (next?.mode === "existing" && stored?.mode === "existing"
+      && (next.sessionId !== stored.sessionId || next.threadId !== stored.threadId));
+    if (changed) body.thread = next;
   }
 
   if (form.presence !== undefined) {
