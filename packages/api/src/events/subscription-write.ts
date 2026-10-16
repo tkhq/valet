@@ -12,7 +12,7 @@ import { validatePresence } from "@valet/shared";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { allCatalogEntries, subscribableEntries } from "./ingest.js";
-import { eventKeyMatches, validateRegexPattern, type SubscriptionFilter } from "./match.js";
+import { eventKeyMatches, SUBJECT_FILTER_FIELD, validateRegexPattern, type SubscriptionFilter } from "./match.js";
 import { enforceMentionScope, readMentionAudience } from "./mention-scope.js";
 import { validatePromptTemplate } from "./prompt-template.js";
 import { isTeamAssistantRule, type MentionAudience } from "./team-slack-gate.js";
@@ -105,7 +105,14 @@ export function validateSubscription(
         if (regexError) return regexError;
       }
     }
-    if (!selectedEntries.some((e) => e.filters.some((cf) => cf.field === f.field))) {
+    // `subject` is implicit on every key (spec 2026-10-15: event wakeups,
+    // Part G) — it is not one of a plugin's declared fields, so it skips the
+    // declared-field check below. The spec defines only eq and prefix for it.
+    if (f.field === SUBJECT_FILTER_FIELD) {
+      if (f.op !== "eq" && f.op !== "prefix") {
+        return `subject filter accepts only op eq or prefix, not ${f.op}`;
+      }
+    } else if (!selectedEntries.some((e) => e.filters.some((cf) => cf.field === f.field))) {
       return `filter field ${f.field} is not declared by any event selected by eventKeys`;
     }
   }

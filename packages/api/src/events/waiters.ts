@@ -181,7 +181,7 @@ export function appMentionCoveredBy(
   const key = "slack.app_mention";
   const catalog = plugins.flatMap((p) => p.triggers ?? []).filter((t) => t.service === "slack").flatMap((t) => t.catalog);
   return subs.some((sub) => sub.enabled
-    && subscriptionMatchesEvent(sub, key, event.payload, catalog, isTeamAssistantMention(sub, key)));
+    && subscriptionMatchesEvent(sub, key, event.payload, catalog, isTeamAssistantMention(sub, key), event.subjects));
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
