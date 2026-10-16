@@ -34,23 +34,23 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<void
   }
 }
 
-// Long enough that the live transcript's char-based estimate exceeds the
-// tiny fixtures' usable budget (contextWindow 50 → usable 45 tokens ≈ 180
-// chars). The proactive trigger measures the transcript estimate, not
-// provider-reported usage (TKAI-305).
+// The initial request fits. Response growth crosses the context budget.
 const OVER_BUDGET_PROMPT = "third prompt " + "x".repeat(400);
+const boundaryResponse = (text: string) => fauxAssistantMessage([
+  { type: "text", text },
+  { type: "thinking", thinking: "x".repeat(40_000) },
+]);
 
 describe("compaction: proactive (token threshold)", () => {
   it("after a turn that pushes the context estimate past usable, runs compaction and inserts a CompactionEntry", async () => {
-    // Tiny model dimensions: usable = contextWindow - min(reserveCap, maxTokens) = 50 - 5 = 45.
-    // OVER_BUDGET_PROMPT alone pushes the live transcript estimate past 45 tokens.
+    // The initial request fits; reported response usage crosses the 19,995-token budget.
     const faux2 = registerFauxProvider({
       provider: "compact-proactive",
       models: [
         {
           id: "tiny",
           name: "tiny",
-          contextWindow: 50,
+          contextWindow: 20_000,
           maxTokens: 5,
         },
       ],
@@ -58,7 +58,7 @@ describe("compaction: proactive (token threshold)", () => {
     // Two responses: the third user turn's assistant response, then the
     // summarizer completion (one-shot completeSimple from compactThread).
     faux2.setResponses([
-      fauxAssistantMessage("third response"),
+      boundaryResponse("third response"),
       fauxAssistantMessage(
         "## Goal\n- test\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- prior turns\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
       ),
@@ -94,7 +94,7 @@ describe("compaction: proactive (token threshold)", () => {
         parentId: "e-1",
         type: "message",
         role: "assistant",
-        content: "first response",
+        content: "first response " + "x".repeat(50_000),
         createdAt: 2,
       },
       {
@@ -118,9 +118,9 @@ describe("compaction: proactive (token threshold)", () => {
         createdAt: 4,
       },
     ]);
+    thread.rehydrateTranscript(await store2.getEntries(session2.id, thread.id));
 
-    // Trigger the third turn — its response reports high usage, kicking
-    // off compaction.
+    // The third response grows context past the budget and triggers compaction.
     const receipt = await session2.prompt(OVER_BUDGET_PROMPT);
     await waitFor(
       () =>
@@ -158,11 +158,11 @@ describe("compaction: proactive (token threshold)", () => {
     const seenKeys: Array<string | undefined> = [];
     const faux = registerFauxProvider({
       provider: "compact-byo-key",
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+      models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }],
     });
     const record = (_ctx: unknown, opts: { apiKey?: string } | undefined) => {
       seenKeys.push(opts?.apiKey);
-      return fauxAssistantMessage("third response");
+      return boundaryResponse("third response");
     };
     const recordSummary = (_ctx: unknown, opts: { apiKey?: string } | undefined) => {
       seenKeys.push(opts?.apiKey);
@@ -190,10 +190,11 @@ describe("compaction: proactive (token threshold)", () => {
     const thread = session.thread();
     await store.appendEntries(session.id, thread.id, [
       { id: "e-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "first prompt", createdAt: 1 },
-      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "message", role: "assistant", content: "first response", createdAt: 2 },
+      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "message", role: "assistant", content: "first response " + "x".repeat(50_000), createdAt: 2 },
       { id: "e-3", sessionId: session.id, threadId: thread.id, parentId: "e-2", type: "message", role: "user", content: "second prompt", createdAt: 3 },
       { id: "e-4", sessionId: session.id, threadId: thread.id, parentId: "e-3", type: "message", role: "assistant", content: "second response", createdAt: 4 },
     ]);
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
 
     const receipt = await session.prompt(OVER_BUDGET_PROMPT);
     await waitFor(() =>
@@ -279,11 +280,11 @@ describe("compaction: auto-continue", () => {
   it.each([undefined, "interactive", "orchestrator", "child", "workflow"] as const)("continues purpose %s inside the original submission after compaction", async (purpose) => {
     const faux = registerFauxProvider({
       provider: `compact-autocontinue-${purpose ?? "default"}`,
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+      models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }],
     });
     faux.setResponses([
       // Third user prompt → assistant response (triggers proactive compaction).
-      fauxAssistantMessage("third response"),
+      boundaryResponse("third response"),
       // Summarizer one-shot.
       fauxAssistantMessage(
         "## Goal\n- t\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- (none)\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
@@ -328,10 +329,11 @@ describe("compaction: auto-continue", () => {
         parentId: "u-1",
         type: "message",
         role: "assistant",
-        content: "first response",
+        content: "first response " + "x".repeat(50_000),
         createdAt: 2,
       },
     ]);
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
 
     const receipt = await session.prompt(OVER_BUDGET_PROMPT, {
       channel: { channelType: "slack", channelId: "slack:T1:D1" },
@@ -409,10 +411,10 @@ describe("compaction: auto-continue", () => {
   it("fails a child visibly when its same-submission continuation cannot start", async () => {
     const faux = registerFauxProvider({
       provider: "compact-child-continuation-failure",
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+      models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }],
     });
     faux.setResponses([
-      fauxAssistantMessage("implementation reached the boundary"),
+      boundaryResponse("implementation reached the boundary"),
       fauxAssistantMessage(
         "## Goal\n- finish child work\n\n## Continuation Checkpoint\n- Branch: fix/child\n- Next Action: continue implementation",
       ),
@@ -446,10 +448,11 @@ describe("compaction: auto-continue", () => {
         parentId: "u-before",
         type: "message",
         role: "assistant",
-        content: "working",
+        content: "working " + "x".repeat(50_000),
         createdAt: 2,
       },
     ]);
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
     const append = store.appendEntries.bind(store);
     store.appendEntries = async (sessionId, threadId, entries, fence) => {
       if (
@@ -485,10 +488,10 @@ describe("compaction: auto-continue", () => {
   it("does not run continuation after its fenced prompt append goes stale", async () => {
     const faux = registerFauxProvider({
       provider: "compact-stale-continuation",
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+      models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }],
     });
     faux.setResponses([
-      fauxAssistantMessage("implementation reached the boundary"),
+      boundaryResponse("implementation reached the boundary"),
       fauxAssistantMessage(SUMMARY_RESPONSE),
       fauxAssistantMessage("must not run"),
     ]);
@@ -504,8 +507,9 @@ describe("compaction: auto-continue", () => {
     const thread = session.thread();
     await store.appendEntries(session.id, thread.id, [
       { id: "u-before-stale", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "start", createdAt: 1 },
-      { id: "a-before-stale", sessionId: session.id, threadId: thread.id, parentId: "u-before-stale", type: "message", role: "assistant", content: "working", createdAt: 2 },
+      { id: "a-before-stale", sessionId: session.id, threadId: thread.id, parentId: "u-before-stale", type: "message", role: "assistant", content: "working " + "x".repeat(50_000), createdAt: 2 },
     ]);
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
     const append = store.appendEntries.bind(store);
     store.appendEntries = async (sessionId, threadId, entries, fence) => {
       if (entries.some((entry) => entry.metadata?.compaction_continue === true)) {
@@ -535,7 +539,7 @@ describe("compaction: auto-continue", () => {
   it.each(["original", "summarizer"] as const)("does not call the continuation provider after a workflow abort during the %s call", async (phase) => {
     const faux = registerFauxProvider({
       provider: `compact-workflow-abort-${phase}`,
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+      models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }],
     });
     let started = false;
     let finishSummary: (() => void) | undefined;
@@ -545,7 +549,7 @@ describe("compaction: auto-continue", () => {
       options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
     });
     faux.setResponses([
-      ...(phase === "summarizer" ? [fauxAssistantMessage("unfinished inspection")] : []),
+      ...(phase === "summarizer" ? [boundaryResponse("unfinished inspection")] : []),
       pending,
       fauxAssistantMessage("must not continue"),
     ]);
@@ -558,8 +562,9 @@ describe("compaction: auto-continue", () => {
     try {
       await store.appendEntries(session.id, thread.id, [
         { id: "u-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "first prompt", createdAt: 1 },
-        { id: "a-1", sessionId: session.id, threadId: thread.id, parentId: "u-1", type: "message", role: "assistant", content: "first response", createdAt: 2 },
+        { id: "a-1", sessionId: session.id, threadId: thread.id, parentId: "u-1", type: "message", role: "assistant", content: "first response " + "x".repeat(50_000), createdAt: 2 },
       ]);
+      thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
       const receipt = await session.prompt(OVER_BUDGET_PROMPT);
       await waitFor(() => started);
       await thread.abortSubmission(receipt.queueItemId);
@@ -578,10 +583,10 @@ describe("compaction: auto-continue", () => {
   it.each(["interactive", "workflow"] as const)("autoContinue: false suppresses the %s synthetic follow-up", async (purpose) => {
     const faux = registerFauxProvider({
       provider: `compact-autocontinue-off-${purpose}`,
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+      models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }],
     });
     faux.setResponses([
-      fauxAssistantMessage("third response"),
+      boundaryResponse("third response"),
       fauxAssistantMessage(
         "## Goal\n- t\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- (none)\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
       ),
@@ -615,10 +620,11 @@ describe("compaction: auto-continue", () => {
         parentId: "u-1",
         type: "message",
         role: "assistant",
-        content: "first response",
+        content: "first response " + "x".repeat(50_000),
         createdAt: 2,
       },
     ]);
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
 
     const receipt = await session.prompt(OVER_BUDGET_PROMPT);
     await waitFor(
@@ -645,10 +651,10 @@ describe("compaction: pruning persists via updateEntry", () => {
   it("pruned tool_call results are marked elided in the DAG, not just the live transcript", async () => {
     const faux = registerFauxProvider({
       provider: "compact-prune-persist",
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+      models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }],
     });
     faux.setResponses([
-      fauxAssistantMessage("trigger response"),
+      boundaryResponse("trigger response"),
       fauxAssistantMessage(
         "## Goal\n- t\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- (none)\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
       ),
@@ -672,8 +678,8 @@ describe("compaction: pruning persists via updateEntry", () => {
     const thread = session.thread();
 
     // Pre-populate the DAG with two prior turns whose assistant messages
-    // contain large bash tool outputs (~3000 chars each ≈ 750 token estimate).
-    const bigOutput = "x".repeat(3_000);
+    // contain large bash tool outputs (~30,000 chars each, about 7,500 tokens).
+    const bigOutput = "x".repeat(30_000);
     await store.appendEntries(session.id, thread.id, [
       {
         id: "u-1",
@@ -736,6 +742,7 @@ describe("compaction: pruning persists via updateEntry", () => {
         createdAt: 4,
       },
     ]);
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
 
     const receipt = await session.prompt(OVER_BUDGET_PROMPT);
     await waitFor(
@@ -942,48 +949,45 @@ describe("compaction: summarizer failure handling (TKAI-306)", () => {
     faux.unregister();
   });
 
-  it("a proactive pass with nothing to reclaim counts toward the breaker as compaction_noop", async () => {
+  it("reports a proactive noop when response growth leaves no head to compact", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-response-noop",
+      models: [{ id: "model", name: "model", contextWindow: 20_000, maxTokens: 5 }],
+    });
+    faux.setResponses([fauxAssistantMessage([
+      { type: "text", text: "response at the boundary" },
+      { type: "thinking", thinking: "x".repeat(80_000) },
+    ])]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {},
+      model: faux.getModel("model")!, compaction: { autoContinue: false },
+    });
+    const receipt = await session.prompt("hello");
+    expect((await session.thread().awaitResult(receipt.queueItemId)).outcome).toBe("completed");
+    expect(events.filter((event) => event.event.type === "error" && event.event.code === "compaction_noop")).toHaveLength(1);
+    expect(events.filter((event) => event.event.type === "compaction_start")).toHaveLength(0);
+    expect(faux.state.callCount).toBe(1);
+    faux.unregister();
+  });
+
+  it("rejects an unreclaimable first request without calling the provider", async () => {
     const faux = registerFauxProvider({
       provider: "compact-noop-breaker",
       models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
     });
-    // No summarizer responses queued: the pass must never reach summarize.
-    faux.setResponses([
-      fauxAssistantMessage("r1"),
-      fauxAssistantMessage("r2"),
-      fauxAssistantMessage("r3"),
-      fauxAssistantMessage("r4"),
-    ]);
+    faux.setResponses([fauxAssistantMessage("must not run")]);
     const { engine, events } = makeEngine();
-    // A single over-budget turn with NO prior turns: the whole transcript
-    // fits the tail budget (min floor 2k), so cutIndex is 0 → noop.
     const session = await engine.createSession({
-      userId: "u",
-      orgId: "o",
-      workspace: "/",
-      sandbox: {},
-      model: faux.getModel("tiny")!,
-      compaction: { autoContinue: false },
+      userId: "u", orgId: "o", workspace: "/", sandbox: {},
+      model: faux.getModel("tiny")!, compaction: { autoContinue: false },
     });
-    for (let turn = 1; turn <= 4; turn++) {
-      const receipt = await session.prompt(OVER_BUDGET_PROMPT);
-      await waitFor(
-        () =>
-          events.filter(
-            (e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId,
-          ).length >= turn,
-      );
-    }
-    expect(events.filter((e) => e.event.type === "compaction_start")).toHaveLength(0);
-    const noops = events.filter(
-      (e) => e.event.type === "error" && e.event.code === "compaction_noop",
-    );
-    expect(noops).toHaveLength(3); // breaker opens after 3; turn 4 skips
-    expect(
-      events.filter(
-        (e) => e.event.type === "error" && e.event.code === "compaction_circuit_open",
-      ),
-    ).toHaveLength(1);
+    const receipt = await session.prompt("hello");
+    const result = await session.thread().awaitResult(receipt.queueItemId);
+    expect(result.outcome).toBe("failed");
+    expect(result.error).toContain("Run /compact");
+    expect(events.filter((event) => event.event.type === "compaction_start")).toHaveLength(0);
+    expect(faux.getPendingResponseCount()).toBe(1);
     faux.unregister();
   });
 
@@ -1010,11 +1014,11 @@ describe("compaction: summarizer failure handling (TKAI-306)", () => {
     const inputSizes: number[] = [];
     const faux = registerFauxProvider({
       provider: "compact-summ-overflow",
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+      models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }],
     });
     faux.setResponses([
       // The triggering turn's assistant response.
-      fauxAssistantMessage("trigger response"),
+      boundaryResponse("trigger response"),
       // Summarizer attempt 1: context overflow (Anthropic's error shape).
       (ctx: { messages: unknown[] }) => {
         inputSizes.push(ctx.messages.length);
@@ -1041,10 +1045,11 @@ describe("compaction: summarizer failure handling (TKAI-306)", () => {
     const thread = session.thread();
     await store.appendEntries(session.id, thread.id, [
       { id: "e-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "first prompt", createdAt: 1 },
-      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "message", role: "assistant", content: "first response", createdAt: 2 },
+      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "message", role: "assistant", content: "first response " + "x".repeat(50_000), createdAt: 2 },
       { id: "e-3", sessionId: session.id, threadId: thread.id, parentId: "e-2", type: "message", role: "user", content: "second prompt", createdAt: 3 },
       { id: "e-4", sessionId: session.id, threadId: thread.id, parentId: "e-3", type: "message", role: "assistant", content: "second response", createdAt: 4 },
     ]);
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
 
     const receipt = await session.prompt(OVER_BUDGET_PROMPT);
     await waitFor(
@@ -1069,15 +1074,14 @@ describe("compaction: summarizer failure handling (TKAI-306)", () => {
   it("proactive compaction opens the circuit breaker after 3 consecutive failures; a manual success closes it", async () => {
     const faux = registerFauxProvider({
       provider: "compact-breaker",
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+      models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }],
     });
     const summarizerError = () =>
       fauxAssistantMessage("", { stopReason: "error", errorMessage: "summarizer down" });
     faux.setResponses([
-      fauxAssistantMessage("r1"), summarizerError, // turn 1: compaction failure 1
-      fauxAssistantMessage("r2"), summarizerError, // turn 2: failure 2
-      fauxAssistantMessage("r3"), summarizerError, // turn 3: failure 3 → breaker opens
-      fauxAssistantMessage("r4"),                  // turn 4: NO summarizer call queued
+      boundaryResponse("r1"), summarizerError, // turn 1: compaction failure 1
+      summarizerError, // turn 2: failure 2
+      summarizerError, // turn 3: failure 3 → breaker opens
     ]);
     const { engine, store, events } = makeEngine();
     const session = await engine.createSession({
@@ -1091,8 +1095,9 @@ describe("compaction: summarizer failure handling (TKAI-306)", () => {
     const thread = session.thread();
     await store.appendEntries(session.id, thread.id, [
       { id: "e-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "first prompt", createdAt: 1 },
-      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "message", role: "assistant", content: "first response", createdAt: 2 },
+      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "message", role: "assistant", content: "first response " + "x".repeat(50_000), createdAt: 2 },
     ]);
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
 
     for (let turn = 1; turn <= 4; turn++) {
       const receipt = await session.prompt(OVER_BUDGET_PROMPT);
@@ -1112,7 +1117,7 @@ describe("compaction: summarizer failure handling (TKAI-306)", () => {
       (e) => e.event.type === "error" && e.event.code === "compaction_circuit_open",
     );
     expect(circuitEvents).toHaveLength(1);
-    // If the fourth turn had tried to compact, this response would be consumed.
+    // Oversized turns stop before another conversational provider request.
     expect(faux.getPendingResponseCount()).toBe(0);
 
     // A successful manual /compact closes the breaker …
@@ -1121,8 +1126,8 @@ describe("compaction: summarizer failure handling (TKAI-306)", () => {
     // … and after the manual pass's one-turn cool-down
     // (skipNextProactiveCheck), over-budget turns compact proactively again.
     faux.appendResponses([
-      fauxAssistantMessage("r5"), // cool-down turn: no compaction attempt
-      fauxAssistantMessage("r6"),
+      fauxAssistantMessage("r5 " + "x".repeat(40_000)), // cool-down turn: no compaction attempt
+      boundaryResponse("r6"),
       fauxAssistantMessage(SUMMARY_RESPONSE),
     ]);
     for (let turn = 5; turn <= 6; turn++) {
@@ -1847,24 +1852,24 @@ describe("compaction: summarizer input covers the head", () => {
   // corrective action, not so the callers can act differently.
   const unreadableHead = (sessionId: string, threadId: string) => [
     { id: "e-1", sessionId, threadId, parentId: null, type: "message" as const, role: "user" as const, content: "", createdAt: 1 },
-    { id: "e-2", sessionId, threadId, parentId: "e-1", type: "message" as const, role: "assistant" as const, content: "", parts: [{ type: "thinking" as const, text: "x".repeat(200) }], createdAt: 2 },
+    { id: "e-2", sessionId, threadId, parentId: "e-1", type: "message" as const, role: "assistant" as const, content: "", parts: [{ type: "thinking" as const, text: "x".repeat(50_000) }], createdAt: 2 },
   ];
 
   it("feeds the proactive circuit breaker when the head cannot be covered", async () => {
     const faux = registerFauxProvider({
       provider: "compact-coverage-breaker",
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+      models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }],
     });
     const summarizerError = () =>
       fauxAssistantMessage("", { stopReason: "error", errorMessage: "summarizer down" });
     faux.setResponses([
       // Turn 1: the head holds no summarizer text, so compaction reports
       // coverage_gap and never calls the summarizer. Breaker count 1.
-      fauxAssistantMessage("r1"),
+      boundaryResponse("r1"),
       // Turns 2 and 3: turn 1 left readable entries in the head, so the
       // summarizer runs and fails. Breaker counts 2 and 3.
-      fauxAssistantMessage("r2"), summarizerError,
-      fauxAssistantMessage("r3"), summarizerError,
+      summarizerError,
+      summarizerError,
     ]);
     const { engine, store, events } = makeEngine();
     const session = await engine.createSession({
@@ -1877,6 +1882,7 @@ describe("compaction: summarizer input covers the head", () => {
     });
     const thread = session.thread();
     await store.appendEntries(session.id, thread.id, unreadableHead(session.id, thread.id));
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
 
     for (let turn = 1; turn <= 3; turn++) {
       const receipt = await session.prompt(OVER_BUDGET_PROMPT);
@@ -1893,7 +1899,8 @@ describe("compaction: summarizer input covers the head", () => {
       .map((e) => (e.event as { code: string }).code);
     // One gap, two summarizer failures, and the breaker opens on the third.
     expect(codes.filter((c) => c === "compaction_coverage_gap")).toHaveLength(1);
-    expect(codes.filter((c) => c === "compaction_failed")).toHaveLength(2);
+    expect(events.filter((event) => event.event.type === "error"
+      && event.event.error.startsWith("Could not prepare context"))).toHaveLength(2);
     expect(codes.filter((c) => c === "compaction_circuit_open")).toHaveLength(1);
     // The gap pass emits its own error. It must not also emit the generic
     // proactive-failure error for the same pass.
@@ -1905,7 +1912,7 @@ describe("compaction: summarizer input covers the head", () => {
   it("stops the reactive overflow retry when the head cannot be covered", async () => {
     const faux = registerFauxProvider({
       provider: "compact-coverage-reactive",
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+      models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }],
     });
     faux.setResponses([
       // The turn overflows, which is what starts reactive compaction.
@@ -1927,6 +1934,7 @@ describe("compaction: summarizer input covers the head", () => {
     });
     const thread = session.thread();
     await store.appendEntries(session.id, thread.id, unreadableHead(session.id, thread.id));
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
 
     const receipt = await session.prompt("marker-reactive prompt");
     await waitFor(() =>
@@ -1953,7 +1961,7 @@ describe("compaction: summarizer input covers the head", () => {
   it("counts one blocked reactive pass once toward the breaker", async () => {
     const faux = registerFauxProvider({
       provider: "compact-coverage-reactive-breaker",
-      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+      models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }],
     });
     const summarizerError = () =>
       fauxAssistantMessage("", { stopReason: "error", errorMessage: "summarizer down" });
@@ -1965,9 +1973,9 @@ describe("compaction: summarizer input covers the head", () => {
         errorMessage: "prompt is too long: 100 tokens > 50 maximum",
       }),
       // Turns 2 and 3: turn 1 left a readable prompt in the head, so the
-      // proactive pass reaches the summarizer and it fails. Counts 2 and 3.
-      fauxAssistantMessage("r2"), summarizerError,
-      fauxAssistantMessage("r3"), summarizerError,
+      // request preparation reaches the summarizer and fails. Counts 2 and 3.
+      summarizerError,
+      summarizerError,
     ]);
     const { engine, store, events } = makeEngine();
     const session = await engine.createSession({
@@ -1980,6 +1988,7 @@ describe("compaction: summarizer input covers the head", () => {
     });
     const thread = session.thread();
     await store.appendEntries(session.id, thread.id, unreadableHead(session.id, thread.id));
+    thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
 
     for (let turn = 1; turn <= 3; turn++) {
       const receipt = await session.prompt(OVER_BUDGET_PROMPT);
@@ -1998,7 +2007,8 @@ describe("compaction: summarizer input covers the head", () => {
     // because the thread must stop retrying a compaction that cannot help;
     // it counts ONCE, because one failure is one failure.
     expect(codes.filter((c) => c === "compaction_coverage_gap")).toHaveLength(1);
-    expect(codes.filter((c) => c === "compaction_failed")).toHaveLength(2);
+    expect(events.filter((event) => event.event.type === "error"
+      && event.event.error.startsWith("Could not prepare context"))).toHaveLength(2);
     expect(codes.filter((c) => c === "compaction_circuit_open")).toHaveLength(1);
     expect(faux.getPendingResponseCount()).toBe(0);
     faux.unregister();
