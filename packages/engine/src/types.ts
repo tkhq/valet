@@ -2273,13 +2273,23 @@ export interface SessionStore {
   findEventWaiters(subjects: readonly string[]): Promise<Wakeup[]>;
   /**
    * Appends `digest` to the event wakeup's `eventBuffer` and sets
-   * `updatedAt`, in one statement. It appends only while the row is
-   * `running` and only when no buffered digest has the same `dedupeKey`
-   * (INV-E4). The store cuts `digest.text` to
-   * `EVENT_DIGEST_TEXT_MAX_BYTES` on a UTF-8 boundary (INV-E7). Returns
-   * whether it appended.
+   * `updatedAt`, in one statement. It appends only to a `running` event
+   * wakeup, only when neither `eventBuffer` nor `eventSeen` holds the
+   * digest's `dedupeKey` (INV-E4), and only while the buffer holds fewer
+   * than `EVENT_BUFFER_MAX_DIGESTS` digests. A refusal at the cap counts in
+   * `valet.event_waiter.buffer_full`. The store strips NUL from the
+   * digest's strings and cuts `text` to `EVENT_DIGEST_TEXT_MAX_BYTES` on a
+   * UTF-8 boundary (INV-E7). Returns whether it appended.
    */
   appendEventMatch(id: string, digest: EventMatchDigest, updatedAt: number): Promise<boolean>;
+  /**
+   * Removes the digests with `dedupeKeys` from the event wakeup's
+   * `eventBuffer`, appends those keys to `eventSeen` (newest
+   * `EVENT_SEEN_MAX_KEYS` kept), and sets `updatedAt`, in one statement.
+   * A digest appended after the caller read the row stays buffered.
+   * False for an unknown id or a row that is not an event wakeup.
+   */
+  removeEventMatches(id: string, dedupeKeys: readonly string[], updatedAt: number): Promise<boolean>;
   /** Wakeup counts per (kind, status) over `statuses`. Groups with no rows are absent. */
   countWakeupsByKindAndStatus(statuses: readonly WakeupStatus[]): Promise<WakeupCount[]>;
   /** CAS: succeeds only when the row's current status is in `from`. Null when the CAS loses. */

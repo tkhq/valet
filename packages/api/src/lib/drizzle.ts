@@ -1808,6 +1808,11 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "event_buffer" text',
   },
   {
+    describe: "engine_wakeups.event_seen column",
+    probe: { kind: "column", table: "engine_wakeups", column: "event_seen" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "event_seen" text',
+  },
+  {
     describe: "engine_wakeups_session index (spec 2026-10-08)",
     probe: { kind: "index", index: "engine_wakeups_session" },
     sql: 'CREATE INDEX IF NOT EXISTS "engine_wakeups_session" ON "engine_wakeups" ("session_id","status")',

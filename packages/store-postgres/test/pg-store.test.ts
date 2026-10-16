@@ -141,6 +141,27 @@ describe("PgSessionStore (PGlite)", () => {
     }
   });
 
+  it("appendEventMatch tells a refusal at the buffer cap from a duplicate", async () => {
+    const store = await factory();
+    const digest = (dedupeKey: string) => ({ key: "k", subjects: ["s"], summary: "x", occurredAt: "t", dedupeKey });
+    await store.createWakeup({
+      id: "wk_full", sessionId: "s", threadId: "t", kind: "event", status: "running", reason: "r",
+      subjects: ["s"], eventMatch: { clauses: [{ key: "k" }], once: false, self: [] },
+      eventBuffer: Array.from({ length: 200 }, (_, i) => digest(`f-${i}`)), eventSeen: ["seen-1"],
+      logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1,
+    });
+    const query = vi.spyOn(db, "query");
+    try {
+      expect(await store.appendEventMatch("wk_full", digest("new"), 2)).toBe(false);
+      expect(await store.appendEventMatch("wk_full", digest("f-3"), 3)).toBe(false);
+      expect(await store.appendEventMatch("wk_full", digest("seen-1"), 4)).toBe(false);
+      const rows = await Promise.all(query.mock.results.map(async (r) => (await r.value).rows[0]));
+      expect(rows.map((row) => row.full)).toEqual([true, false, false]);
+    } finally {
+      query.mockRestore();
+    }
+  });
+
   it("creates the event subjects index as a partial GIN index", async () => {
     await factory();
     const r = await db.query(

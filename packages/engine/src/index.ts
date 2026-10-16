@@ -117,6 +117,7 @@ export {
   recordChildSettleOverDeadline,
   recordLeaseOrphanReleased,
   recordWakeupBadRow,
+  recordEventWaiterBufferFull,
   recordWakeupSweepFailed,
   recordWakeupSweepOk,
   recordJobLogsPruned,

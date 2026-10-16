@@ -28,8 +28,9 @@ import type {
   WakeupStatus,
   WriteFence,
 } from "../../types.js";
-import { recordWakeupEnded } from "../../metrics.js";
+import { recordEventWaiterBufferFull, recordWakeupEnded } from "../../metrics.js";
 import { boundEventDigest } from "../../wakeups/digest.js";
+import { EVENT_BUFFER_MAX_DIGESTS, EVENT_SEEN_MAX_KEYS } from "../../wakeups/types.js";
 
 const DEFAULT_LEASE_MS = 30_000;
 
@@ -397,10 +398,26 @@ export class InMemorySessionStore implements SessionStore {
     // The check and the write happen with no await between them, like the
     // Postgres single statement.
     const w = this.wakeups.get(id);
-    if (!w || w.status !== "running") return false;
+    if (!w || w.kind !== "event" || w.status !== "running") return false;
+    const bounded = boundEventDigest(digest);
     const buffer = w.eventBuffer ?? [];
-    if (buffer.some((d) => d.dedupeKey === digest.dedupeKey)) return false;
-    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer: [...buffer, boundEventDigest(digest)], updatedAt }));
+    if (buffer.some((d) => d.dedupeKey === bounded.dedupeKey)) return false;
+    if ((w.eventSeen ?? []).includes(bounded.dedupeKey)) return false;
+    if (buffer.length >= EVENT_BUFFER_MAX_DIGESTS) {
+      recordEventWaiterBufferFull();
+      return false;
+    }
+    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer: [...buffer, bounded], updatedAt }));
+    return true;
+  }
+
+  async removeEventMatches(id: string, dedupeKeys: readonly string[], updatedAt: number): Promise<boolean> {
+    const w = this.wakeups.get(id);
+    if (!w || w.kind !== "event") return false;
+    const removed = new Set(dedupeKeys);
+    const eventSeen = [...(w.eventSeen ?? []).filter((k) => !removed.has(k)), ...removed].slice(-EVENT_SEEN_MAX_KEYS);
+    const eventBuffer = (w.eventBuffer ?? []).filter((d) => !removed.has(d.dedupeKey));
+    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer, eventSeen, updatedAt }));
     return true;
   }
 

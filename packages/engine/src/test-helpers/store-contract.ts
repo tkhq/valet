@@ -813,6 +813,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
             self: ["github:9001"],
           },
           eventBuffer: [digest({ status: "failure", previousStatus: "queued", url: "https://x", actor: "ada", text: "t", derive: "github.pull_request.checks_completed" })],
+          eventSeen: ["d-0"],
         });
         await store.createWakeup(full);
         expect(await store.getWakeup("wk_ev")).toEqual(full);
@@ -852,6 +853,72 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         await store.createWakeup(eventWaiter({ id: "wk_late", deadlineAt: 5 }));
         const { rows } = await store.listDueWakeups(100, 50);
         expect(rows.map((r) => r.id).sort()).toEqual(["wk_buf", "wk_late"]);
+      });
+
+      it("removeEventMatches keeps a digest appended after the caller's read", async () => {
+        await store.createWakeup(eventWaiter());
+        await store.appendEventMatch("wk_ev", digest(), 20);
+        const read = await store.getWakeup("wk_ev");
+        const delivered = (read?.eventBuffer ?? []).map((d) => d.dedupeKey);
+        expect(delivered).toEqual(["d-1"]);
+        // An ingest lands between the watcher's read and its write.
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "d-2" }), 21)).toBe(true);
+        expect(await store.removeEventMatches("wk_ev", delivered, 22)).toBe(true);
+        const after = await store.getWakeup("wk_ev");
+        expect(after?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["d-2"]);
+        expect(after?.eventSeen).toEqual(["d-1"]);
+        expect(after?.updatedAt).toBe(22);
+      });
+
+      it("appendEventMatch refuses a dedupeKey that was already delivered", async () => {
+        await store.createWakeup(eventWaiter());
+        expect(await store.appendEventMatch("wk_ev", digest(), 20)).toBe(true);
+        await store.removeEventMatches("wk_ev", ["d-1"], 21);
+        expect(await store.appendEventMatch("wk_ev", digest(), 22)).toBe(false);
+        expect((await store.getWakeup("wk_ev"))?.eventBuffer).toEqual([]);
+      });
+
+      it("removeEventMatches keeps the newest 256 seen keys", async () => {
+        await store.createWakeup(eventWaiter());
+        const keys = Array.from({ length: 257 }, (_, i) => `k-${i}`);
+        await store.removeEventMatches("wk_ev", keys.slice(0, 100), 20);
+        await store.removeEventMatches("wk_ev", keys.slice(100), 21);
+        const seen = (await store.getWakeup("wk_ev"))?.eventSeen ?? [];
+        expect(seen).toHaveLength(256);
+        expect(seen[0]).toBe("k-1");
+        expect(seen[255]).toBe("k-256");
+        // The oldest key fell off the seen list, so it appends again.
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "k-0" }), 22)).toBe(true);
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "k-1" }), 23)).toBe(false);
+      });
+
+      it("removeEventMatches returns false for an unknown id or a row that is not an event waiter", async () => {
+        await store.createWakeup(wakeup({ id: "wk_w", kind: "watch" }));
+        expect(await store.removeEventMatches("missing", ["d-1"], 20)).toBe(false);
+        expect(await store.removeEventMatches("wk_w", ["d-1"], 20)).toBe(false);
+      });
+
+      it("appendEventMatch strips NUL from the digest's strings", async () => {
+        await store.createWakeup(eventWaiter());
+        expect(await store.appendEventMatch("wk_ev", digest({ text: "a\u0000b", summary: "s\u0000um" }), 20)).toBe(true);
+        const stored = (await store.getWakeup("wk_ev"))?.eventBuffer?.[0];
+        expect(stored?.text).toBe("ab");
+        expect(stored?.summary).toBe("sum");
+      });
+
+      it("appendEventMatch refuses a running row that is not an event waiter", async () => {
+        await store.createWakeup(wakeup({ id: "wk_w", kind: "watch" }));
+        expect(await store.appendEventMatch("wk_w", digest(), 20)).toBe(false);
+        expect((await store.getWakeup("wk_w"))?.eventBuffer).toBeUndefined();
+      });
+
+      it("appendEventMatch refuses a digest past the 200-digest buffer cap", async () => {
+        const full = Array.from({ length: 200 }, (_, i) => digest({ dedupeKey: `f-${i}` }));
+        await store.createWakeup(eventWaiter({ eventBuffer: full }));
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "f-200" }), 20)).toBe(false);
+        expect((await store.getWakeup("wk_ev"))?.eventBuffer).toHaveLength(200);
+        await store.removeEventMatches("wk_ev", ["f-0"], 21);
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "f-200" }), 22)).toBe(true);
       });
 
       it("transitionWakeup clears eventBuffer when the patch sets []", async () => {

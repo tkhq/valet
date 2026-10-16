@@ -318,39 +318,51 @@ deadline ends that wait.
 
 *Depends on: Parts A and B.*
 
-An event waiter is a `wakeups` row with `kind = "event"`. Three nullable
+An event waiter is a `wakeups` row with `kind = "event"`. Four nullable
 columns hold its state:
 
 ```sql
 "match_json"   text,    -- { clauses, once, self, minIntervalMs }
 "subjects"     text[],  -- the subjects it waits on
-"event_buffer" text     -- JSON array of match digests awaiting delivery
+"event_buffer" text,    -- JSON array of match digests awaiting delivery
+"event_seen"   text     -- JSON array of delivered dedupe keys, oldest first
 CREATE INDEX "engine_wakeups_event_subjects" ON "engine_wakeups"
   USING gin ("subjects") WHERE "kind" = 'event' AND "status" = 'running';
 ```
 
-- The columns and index MUST ship with matching `SCHEMA_REPAIRS` entries.
+- The four columns and the index MUST ship with matching `SCHEMA_REPAIRS`
+  entries.
   `ENGINE_SCHEMA_VERSION` MUST NOT change.
 - `WakeupKind` gains `event`. `WakeupCause` uses the existing `fired`,
   `deadline`, `cancelled`, and `rate`.
 - A clause is `{ key, status?, from_status?, actor?, bots?, include_self? }`.
 - An event waiter MUST NOT create a lease.
 
-`SessionStore` gains two methods, both covered by the conformance suite:
+`SessionStore` gains three methods, all covered by the conformance suite.
+Each write method is one statement.
 
 - `findEventWaiters(subjects: string[]): Promise<Wakeup[]>` returns running
   event waiters whose subjects overlap the argument.
 - `appendEventMatch(id, digest, updatedAt): Promise<boolean>` appends a
-  digest and sets `updatedAt` only while the row is `running` and only when
-  no buffered digest has the same `dedupeKey`. It returns whether it
-  appended.
+  digest and sets `updatedAt`. It appends only to a `running` row with
+  `kind = "event"`. It refuses a `dedupeKey` that `event_buffer` or
+  `event_seen` holds. It refuses when the buffer holds 200 digests, and it
+  counts that refusal in `valet_event_waiter_buffer_full_total`. It
+  returns whether it appended.
+- `removeEventMatches(id, dedupeKeys, updatedAt): Promise<boolean>` removes
+  only the digests with those keys from `event_buffer`. A digest that
+  arrived after the caller read the row stays. It appends the keys to
+  `event_seen` and keeps the newest 256, so the oldest key drops first. It
+  returns false for an unknown id or a row that is not an event waiter.
 - `listDueWakeups` also returns a running event waiter whose buffer is not
   empty or whose `deadlineAt` has passed.
 
 A match digest holds `key`, `status`, `previousStatus`, `subjects`,
 `summary`, `url`, `actor` login, `occurredAt`, `dedupeKey`, `text`, and an
 optional `derive` key. `text` is the message or comment body, cut to 4096
-bytes.
+bytes on a UTF-8 code point boundary. Before it stores a digest, the store
+removes every NUL character from the digest's strings, because Postgres
+rejects NUL in `text` and `jsonb`.
 
 ## Part D: The tool
 
@@ -475,7 +487,7 @@ The WakeWatcher processes running event waiters with a non-empty
    submit one `event.matched` signal with the first digest. List any other
    buffered digests under `Also matched`.
 3. Stream mode: submit one `event.matched` signal with every buffered digest,
-   then clear the buffer. The first signal goes out at once. Later signals
+   then remove the sent digests with `removeEventMatches`. The first signal goes out at once. Later signals
    follow the waiter's `minIntervalMs` when set, else `watchMinIntervalMs`,
    and `watchMaxEventsPerHour`, through the same
    rate code as `watch`. When the hourly cap trips, the row ends with cause
@@ -571,6 +583,7 @@ agent asked to "always" watch something proposes one.
 | `valet_event_waiter_matches_total` | counter | `service` |
 | `valet_event_waiter_derive_total` | counter | `key`, `result` (`event`, `null`, `error`) |
 | `valet_wakeups_event_match_failed_total` | counter | |
+| `valet_event_waiter_buffer_full_total` | counter | |
 
 Alert rule: any increase of `valet_wakeups_event_match_failed_total` in an
 hour, with the first-series pattern of the wakeups spec.
@@ -587,16 +600,16 @@ hour, with the first-series pattern of the wakeups spec.
 - **INV-E3 An event waiter holds no lease.** Mechanism: the event create
   path has no `createLease` call; vector A1 asserts `leases` is empty.
 - **INV-E4 A matched event reaches a thread at most once per waiter.**
-  Mechanism: `appendEventMatch` skips a buffered `dedupeKey`; dispatch ids
-  are per event count. Vector: a provider redelivery yields one signal.
+  Mechanism: `appendEventMatch` refuses a `dedupeKey` present in
+  `event_buffer` or `event_seen`; dispatch ids are per event count. Vector: a provider redelivery yields one signal.
 - **INV-E5 Every ending except an agent cancel sends exactly one terminal
   signal.** Mechanism: the existing single-statement `transitionWakeup` CAS.
 - **INV-E6 Matching cost is independent of the number of waiters.**
   Mechanism: the store has no method that lists all running event waiters;
   a test greps the store interface for one.
-- **INV-E7 A digest's text is at most 4096 bytes, and delivery clears the
-  buffer.** Mechanism: `appendEventMatch` cuts the text; the delivery CAS
-  writes an empty buffer.
+- **INV-E7 A digest's text is at most 4096 bytes, and delivery removes the
+  digests it sent.** Mechanism: `appendEventMatch` cuts the text; delivery
+  removes delivered digests by `dedupeKey` with `removeEventMatches`.
 - **INV-E8 Events caused by self never wake an agent unless a clause sets
   `include_self`.** Mechanism: the matcher compares actor ids to `self`;
   vectors C5 and E1.

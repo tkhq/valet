@@ -753,6 +753,8 @@ export interface WakeupRow {
   subjects: string[] | null;
   /** `event`: a JSON array of `EventMatchDigest`. */
   event_buffer: string | null;
+  /** `event`: a JSON array of delivered dedupe keys, oldest first. */
+  event_seen: string | null;
 }
 
 /**
@@ -808,6 +810,7 @@ export function rawToWakeupRow(raw: Record<string, unknown>): WakeupRow {
     match_json: asStringOrNull(raw.match_json, "match_json"),
     subjects: asStringArrayOrNull(raw.subjects, "subjects"),
     event_buffer: asStringOrNull(raw.event_buffer, "event_buffer"),
+    event_seen: asStringOrNull(raw.event_seen, "event_seen"),
   };
 }
 
@@ -906,6 +909,13 @@ function toEventMatchDigest(v: unknown, field: string): EventMatchDigest {
   return out;
 }
 
+/** Narrows a stored `event_seen`. Throws on unreadable JSON or a wrong shape. */
+export function parseEventSeenJson(raw: string): string[] {
+  const parsed: unknown = JSON.parse(raw);
+  if (!isStringArray(parsed)) throw new Error("engine_wakeups.event_seen is not a string array");
+  return parsed;
+}
+
 /** Narrows a stored `event_buffer`. Throws on unreadable JSON or a wrong shape. */
 export function parseEventBufferJson(raw: string): EventMatchDigest[] {
   const parsed: unknown = JSON.parse(raw);
@@ -961,6 +971,7 @@ export function rowToWakeup(row: WakeupRow): Wakeup {
     ...(row.subjects !== null ? { subjects: row.subjects } : {}),
     ...(row.match_json !== null ? { eventMatch: parseEventMatchJson(row.match_json) } : {}),
     ...(row.event_buffer !== null ? { eventBuffer: parseEventBufferJson(row.event_buffer) } : {}),
+    ...(row.event_seen !== null ? { eventSeen: parseEventSeenJson(row.event_seen) } : {}),
   };
 }
 
