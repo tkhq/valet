@@ -62,9 +62,9 @@ export interface AssistantDeliveryArgs {
   author?: PromptAuthor;
 }
 
-/** Resolve `sessionId` to its assistant row, for `orgId`/`owner`, when it is
- * live and not archived. Shared by `deliverToAssistantThread`'s explicit-
- * target check and `isDeliverableTarget` below. */
+/** The assistant row of `sessionId` for `orgId` and `owner`, when it is live
+ * and not archived. `deliverToAssistantThread`'s explicit-target check and
+ * `isDeliverableTarget` below share it. */
 async function resolveLiveAssistant(
   db: AppDb,
   orgId: string,
@@ -79,11 +79,10 @@ async function resolveLiveAssistant(
   return assistant;
 }
 
-/** True when `target`'s thread is live: the session is not deleted, the
- * thread is not archived, and — for an execution session — its assistant and
- * governing thread are not archived either. Shared by
- * `deliverToAssistantThread`'s pre-submit check and `isDeliverableTarget`
- * below. */
+/** True when `target`'s thread is live. The session is not deleted and the
+ * thread is not archived. For an execution session, its assistant and
+ * governing thread are not archived either. `deliverToAssistantThread`'s
+ * pre-submit check and `isDeliverableTarget` below share it. */
 async function isTargetThreadLive(
   db: AppDb,
   orgId: string,
@@ -106,11 +105,11 @@ async function isTargetThreadLive(
 }
 
 /**
- * True when `target` would resolve for `deliverToAssistantThread`: the
- * session names a live, non-archived assistant (or execution) of `owner` in
+ * True when `target` would resolve for `deliverToAssistantThread`. The
+ * session names a live, non-archived assistant or execution of `owner` in
  * `orgId`, and its thread is not archived. Incident mention routing
- * (`watching-waiter.ts`) reuses this gate so a watching waiter that would
- * dead-letter here is filtered out before it is chosen as a target.
+ * (`watching-waiter.ts`) reuses this gate. It never chooses a watching
+ * waiter that would dead-letter here.
  */
 export async function isDeliverableTarget(
   deps: { db: AppDb },

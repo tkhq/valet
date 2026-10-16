@@ -1001,7 +1001,22 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     expect(m3[2]?.content).toContain(underMention);
     expect(await queuedWith(u, underMention)).toEqual([expect.objectContaining(tInc)]);
 
-    // M5: the agent cancels the watching waiter. A later mention opens its own
+    // M5: a mention from U002, who links to no Valet user. The team mention
+    // gate refuses U002, so the mention rule does not skip the message event,
+    // and t-inc receives it once through the event waiter (Part C).
+    const unlinkedTs = `${++slackTs}.000100`;
+    const unlinkedText = `<@${BOT_USER}> is the replica healthy?`;
+    await postSlack(u, { ...slackMessage("C900", "U002", unlinkedText), ts: unlinkedTs });
+    await postSlack(u, { type: "app_mention", channel: "C900", user: "U002", text: unlinkedText, ts: unlinkedTs, team: SLACK_TEAM, event_ts: unlinkedTs });
+    await p.eventDispatcher.pollOnce();
+    u.clock.now += 60_000;
+    await u.watcher.sweep(u.clock.now);
+    const m5 = await awaitSignals(u, "event.matched", 4, tInc.sessionId, tInc.threadId);
+    expect(m5[3]?.content).toContain("is the replica healthy?");
+    expect(await queuedWith(u, "is the replica healthy?")).toEqual([expect.objectContaining(tInc)]);
+    expect(await queuedSignals(u, "slack.app_mention")).toHaveLength(1);
+
+    // M6: the agent cancels the watching waiter. A later mention opens its own
     // thread, keyed by its Slack post, and the dispatcher binds a follow.
     u.agent.on(/incident closed, stop watching/, [{ name: "wakeup_cancel", args: { id: waiterId } }]);
     await postSlack(u, slackMessage("C900", "U002", "incident closed, stop watching"));
