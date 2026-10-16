@@ -44,7 +44,8 @@ export interface WakeupDecision {
   /** The watcher kills the process group after a successful CAS (spec B5, fix wave 2). */
   kill?: boolean;
   /** The row cannot be acted on as stored. The watcher counts it in `valet.wakeups.bad_rows`. */
-  badRow?: true;  /**
+  badRow?: true;
+  /**
    * Event waiter, stream mode: the dedupe keys this decision delivers. After
    * a successful CAS and before delivery, the watcher removes them with
    * `removeEventMatches`, so a digest that arrived meanwhile stays buffered
@@ -289,18 +290,18 @@ function timerFiredSignal(now: number, row: Wakeup, prompt: string): SignalDraft
  * tick old. A late timer makes each tick land a little after the last, so
  * a window of exactly one hour started over one poll before the 121st and
  * the limit never tripped (fix wave 4, data M1). `over` is true when the
- * count exceeds the limit.
+ * count exceeds the limit. An event waiter counts each `event.matched`
+ * signal once, however many digests it lists.
  */
 function nextWindow(
   now: number,
   row: Wakeup,
   max: number,
   tickMs: number,
-  count = 1,
 ): { windowStartAt: number; windowCount: number; over: boolean } {
   const fresh = row.windowStartAt === undefined || now - row.windowStartAt > WATCH_RATE_WINDOW_MS + tickMs;
   const windowStartAt = fresh || row.windowStartAt === undefined ? now : row.windowStartAt;
-  const windowCount = (fresh ? 0 : (row.windowCount ?? 0)) + count;
+  const windowCount = (fresh ? 0 : (row.windowCount ?? 0)) + 1;
   return { windowStartAt, windowCount, over: windowCount > max };
 }
 
@@ -610,12 +611,21 @@ export function eventMatchedSignal(row: Wakeup, digests: EventMatchDigest[], n: 
   };
 }
 
-/** The `event.ended` signal with the F1 text for `deadline` or `rate`. */
+/**
+ * The `event.ended` signal (spec F1). For `deadline`, `count` is the number
+ * of `event.matched` signals the waiter delivered over its life: with none,
+ * the body is the F1 text; otherwise it names the count. For `rate`,
+ * `count` is the signal count in the rate window.
+ */
 export function eventEndedSignal(row: Wakeup, cause: "deadline" | "rate", hours: number, count: number): SignalDraft {
-  const body =
-    cause === "deadline"
-      ? `No matching event arrived within ${hours} hours. Check the subject's state before you wait again.`
-      : `Ended after ${count} events in an hour. Narrow the clauses, then wait again.`;
+  let body: string;
+  if (cause === "rate") {
+    body = `Ended after ${count} events in an hour. Narrow the clauses, then wait again.`;
+  } else if (count === 0) {
+    body = `No matching event arrived within ${hours} hours. Check the subject's state before you wait again.`;
+  } else {
+    body = `The wait reached its ${hours}-hour deadline after ${count} matched ${count === 1 ? "event" : "events"}. Arm a new wait to keep watching.`;
+  }
   return {
     signalType: "event.ended",
     body,
@@ -632,11 +642,12 @@ export function eventEndedSignal(row: Wakeup, cause: "deadline" | "rate", hours:
  * - Once mode: the first deliverable digest ends the row as `done/fired`.
  * - Stream mode: every deliverable digest goes out in one signal. The first
  *   signal goes out at once; later ones wait for `eventMatch.minIntervalMs`,
- *   else `watchMinIntervalMs`. Delivered digests count toward
- *   `watchMaxEventsPerHour` through the watch rate window; past it the row
- *   ends as `done/rate`.
- * - Past `deadlineAt`, the row ends as `expired/deadline`. Stream mode sends
- *   the matches it still holds first.
+ *   else `watchMinIntervalMs`. Each signal counts once toward
+ *   `watchMaxEventsPerHour` through the watch rate window, however many
+ *   digests it lists; past it the row ends as `done/rate`.
+ * - Past `deadlineAt`, the row ends as `expired/deadline`. Stream mode first
+ *   flushes the matches it still holds in one last signal, which skips the
+ *   min interval and counts once in the window.
  */
 export function decideEventWaiter(now: number, row: Wakeup, opts: DecideOptions): WakeupDecision | null {
   if (row.kind !== "event" || row.status !== "running") return null;
@@ -659,13 +670,14 @@ export function decideEventWaiter(now: number, row: Wakeup, opts: DecideOptions)
     const hours = row.deadlineAt === undefined ? 0 : Math.round((row.deadlineAt - row.createdAt) / HOUR_MS);
     const signals: SignalDraft[] = [];
     const patch: WakeupPatch = { cause: "deadline", endedAt: now, eventBuffer: [] };
+    let delivered = row.eventCount;
     if (ready.length > 0) {
-      const eventCount = row.eventCount + 1;
-      signals.push(eventMatchedSignal(row, ready, eventCount, false));
-      patch.eventCount = eventCount;
-      patch.lastEmitAt = now;
+      delivered += 1;
+      const window = nextWindow(now, row, opts.watchMaxEventsPerHour, opts.tickMs ?? DEFAULT_TICK_MS);
+      signals.push(eventMatchedSignal(row, ready, delivered, false));
+      Object.assign(patch, { eventCount: delivered, lastEmitAt: now, windowStartAt: window.windowStartAt, windowCount: window.windowCount });
     }
-    signals.push(eventEndedSignal(row, "deadline", hours, 0));
+    signals.push(eventEndedSignal(row, "deadline", hours, delivered));
     return { to: "expired", cause: "deadline", patch, signals };
   }
 
@@ -674,7 +686,7 @@ export function decideEventWaiter(now: number, row: Wakeup, opts: DecideOptions)
   const minInterval = match.minIntervalMs ?? opts.watchMinIntervalMs ?? DEFAULT_WATCH_MIN_INTERVAL_MS;
   if (row.lastEmitAt !== undefined && now - row.lastEmitAt < minInterval) return null;
 
-  const window = nextWindow(now, row, opts.watchMaxEventsPerHour, opts.tickMs ?? DEFAULT_TICK_MS, ready.length);
+  const window = nextWindow(now, row, opts.watchMaxEventsPerHour, opts.tickMs ?? DEFAULT_TICK_MS);
   if (window.over) {
     return {
       to: "done",

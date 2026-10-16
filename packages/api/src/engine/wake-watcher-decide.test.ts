@@ -444,7 +444,22 @@ describe("decideEventWaiter (event wakeups spec, Part F)", () => {
     expect(d?.signals[0]?.body.split("\n\n")).toHaveLength(50);
     expect(d?.signals[0]?.attributes.matchCount).toBe("50");
     expect(d?.deliveredKeys).toHaveLength(50);
-    expect(d?.patch.windowCount).toBe(50);
+    // The cap counts signals, not digests: a burst is one signal.
+    expect(d?.patch.windowCount).toBe(1);
+  });
+
+  it("stream mode, burst of 500 digests under a cap of 120: one signal, and the row stays running", () => {
+    const buffer = Array.from({ length: 500 }, (_, i) => digest(i + 1));
+    const d = decideEventWaiter(NOW, waiter({ eventBuffer: buffer }, { once: false }), OPTS);
+    expect(d?.to).toBe("running");
+    expect(d?.signals).toHaveLength(1);
+    expect(d?.patch).toMatchObject({ eventCount: 1, windowCount: 1 });
+  });
+
+  it("stream mode: the 120th signal in the window goes out, the 121st ends the row with cause rate", () => {
+    const row = (windowCount: number) => waiter({ lastEmitAt: NOW - 200_000, eventCount: windowCount, windowStartAt: NOW - HOUR / 2, windowCount }, { once: false });
+    expect(decideEventWaiter(NOW, row(119), OPTS)).toMatchObject({ to: "running", patch: { windowCount: 120 } });
+    expect(decideEventWaiter(NOW, row(120), OPTS)).toMatchObject({ to: "done", cause: "rate" });
   });
 
   it("stream mode past watchMaxEventsPerHour in the window ends with cause rate", () => {
@@ -487,12 +502,34 @@ describe("decideEventWaiter (event wakeups spec, Part F)", () => {
     });
   });
 
-  it("stream mode past the deadline sends the buffered matches, then the ending", () => {
-    const d = decideEventWaiter(NOW, waiter({ deadlineAt: NOW - 1, createdAt: NOW - 6 * HOUR, lastEmitAt: NOW - 1_000, eventCount: 2 }, { once: false }), OPTS);
+  it("stream mode past the deadline flushes the held matches inside the min interval, then ends with the match count", () => {
+    const row = waiter(
+      { deadlineAt: NOW - 1, createdAt: NOW - 6 * HOUR, lastEmitAt: NOW - 1_000, eventCount: 2, windowStartAt: NOW - HOUR / 2, windowCount: 2 },
+      { once: false },
+    );
+    const d = decideEventWaiter(NOW, row, OPTS);
     expect(d?.to).toBe("expired");
+    expect(d?.cause).toBe("deadline");
     expect(d?.signals.map((s) => [s.signalType, s.dispatchId])).toEqual([
       ["event.matched", "wakeup:wk_ev:event:3"],
       ["event.ended", "wakeup:wk_ev:terminal"],
+    ]);
+    expect(d?.signals[1]?.body).toBe("The wait reached its 6-hour deadline after 3 matched events. Arm a new wait to keep watching.");
+    expect(d?.signals[1]?.attributes).toEqual({ wakeupId: "wk_ev", kind: "event", subject: "github:acme/lean-proofs#42", cause: "deadline" });
+    // The flush counts as one signal in the rate window.
+    expect(d?.patch).toMatchObject({ eventCount: 3, lastEmitAt: NOW, windowStartAt: NOW - HOUR / 2, windowCount: 3, eventBuffer: [] });
+  });
+
+  it("stream mode past the deadline with matches delivered earlier and none held names the count", () => {
+    const d = decideEventWaiter(NOW, waiter({ eventBuffer: [], deadlineAt: NOW - 1, createdAt: NOW - 6 * HOUR, eventCount: 1 }, { once: false }), OPTS);
+    expect(d?.signals).toHaveLength(1);
+    expect(d?.signals[0]?.body).toBe("The wait reached its 6-hour deadline after 1 matched event. Arm a new wait to keep watching.");
+  });
+
+  it("stream mode past the deadline with no match ever delivered uses the F1 deadline text", () => {
+    const d = decideEventWaiter(NOW, waiter({ eventBuffer: [], deadlineAt: NOW - 1, createdAt: NOW - 6 * HOUR }, { once: false }), OPTS);
+    expect(d?.signals.map((s) => s.body)).toEqual([
+      "No matching event arrived within 6 hours. Check the subject's state before you wait again.",
     ]);
   });
 

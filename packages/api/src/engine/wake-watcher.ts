@@ -344,9 +344,11 @@ export class WakeWatcher {
    * runs no job, so it has no probe, lease, or kill.
    */
   private async processEventRow(now: number, row: Wakeup, progress: { pastCas: boolean }): Promise<void> {
-    const current = await this.deriveStep(row);
+    const { row: current, derived } = await this.deriveStep(row);
     if (!current) return;
-    const decision = decideEventWaiter(now, current, this.decideOptions);
+    // A derive can take up to its 20 s deadline, so the decision after one
+    // reads the clock again instead of the pass start.
+    const decision = decideEventWaiter(derived ? this.clock() : now, current, this.decideOptions);
     if (!decision) return;
     if (decision.badRow) {
       this.metrics.badRow("engine_wakeups");
@@ -370,15 +372,16 @@ export class WakeWatcher {
    * same derive key. A derive reads the subject's current state, so the
    * latest source answers for the older ones too.
    *
-   * Returns the row to decide on, or null when it is gone.
+   * Returns the row to decide on, or null when it is gone, and whether a
+   * derive call ran.
    */
-  private async deriveStep(row: Wakeup): Promise<Wakeup | null> {
+  private async deriveStep(row: Wakeup): Promise<{ row: Wakeup | null; derived: boolean }> {
     const buffer = row.eventBuffer ?? [];
     const latest = [...buffer].reverse().find((d) => d.derive !== undefined);
-    if (!latest) return row;
+    if (!latest) return { row, derived: false };
     if (!this.deps.deriveEvent) {
       console.error(`WakeWatcher: event wakeup ${row.id} holds a ${latest.derive} digest, but this watcher has no derive step; it stays buffered.`);
-      return row;
+      return { row, derived: false };
     }
     let outcome: Awaited<ReturnType<EventWaiterDerive>>;
     try {
@@ -388,13 +391,13 @@ export class WakeWatcher {
     }
     if (outcome.result === "error") {
       console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; it retries next tick:`, outcome.error);
-      return row;
+      return { row, derived: true };
     }
     const sources = buffer.filter((d) => d.derive === latest.derive).map((d) => d.dedupeKey);
     const at = this.clock();
     await this.deps.engineStore.removeEventMatches(row.id, sources, at);
     if (outcome.result === "event") await this.deps.engineStore.appendEventMatch(row.id, outcome.digest, at);
-    return this.deps.engineStore.getWakeup(row.id);
+    return { row: await this.deps.engineStore.getWakeup(row.id), derived: true };
   }
 
   /**
@@ -439,10 +442,15 @@ export class WakeWatcher {
     // An event waiter in stream mode removes what it delivers, by key and
     // before the delivery: a digest that ingest appended after the read
     // stays, and a crash here loses a signal rather than sending it twice
-    // (INV-E4, INV-E7). A failed removal throws before any delivery, so
-    // the digests go out next tick under the next event count.
+    // (INV-E4, INV-E7). A failed removal rolls the emit back and throws
+    // before any delivery, so the next tick sends the same digests once.
     if (decision.deliveredKeys && decision.deliveredKeys.length > 0) {
-      await this.deps.engineStore.removeEventMatches(row.id, decision.deliveredKeys, at);
+      try {
+        await this.deps.engineStore.removeEventMatches(row.id, decision.deliveredKeys, at);
+      } catch (err) {
+        await this.rollBackEventEmit(row, at);
+        throw err;
+      }
     }
 
     for (const signal of decision.signals) {
@@ -476,6 +484,33 @@ export class WakeWatcher {
       this.metrics.wakeupEnded(updated.kind, decision.cause);
     }
     return updated;
+  }
+
+  /**
+   * Undoes a stream emit's CAS after its removal failed, so the next tick
+   * sends the same digests as the same event number and counts them once
+   * in the rate window. A store patch cannot unset a field, so a first
+   * emit's `lastEmitAt` goes back to 0, which the min-interval check reads
+   * as long past. If the rollback also fails, the next tick can count one
+   * extra signal; the log line is the record.
+   */
+  private async rollBackEventEmit(row: Wakeup, at: number): Promise<void> {
+    try {
+      await this.deps.engineStore.transitionWakeup(
+        row.id,
+        ["running"],
+        "running",
+        {
+          eventCount: row.eventCount,
+          lastEmitAt: row.lastEmitAt ?? 0,
+          windowCount: row.windowCount ?? 0,
+          ...(row.windowStartAt !== undefined ? { windowStartAt: row.windowStartAt } : {}),
+        },
+        at,
+      );
+    } catch (err) {
+      console.error(`WakeWatcher: rollback of event wakeup ${row.id}'s emit failed; its next signal can count twice in the rate window:`, err);
+    }
   }
 
   /** The sandbox to kill a row's job in, or null when none can be reached. */
@@ -560,16 +595,7 @@ export class WakeWatcher {
       // did not have: keep the output and the channel origin out of it,
       // as a human cancel does (fix wave 4, security N3).
       const { origin: _origin, ...plain } = content;
-      await session.prompt(
-        {
-          ...plain,
-          body:
-            `This ${draft.attributes.kind ?? "work"} ("${draft.attributes.reason ?? draft.attributes.wakeupId ?? ""}") ` +
-            `ended with ${draft.signalType}, but the thread it ran in is gone. Its output stays out of this thread. ` +
-            `Use process_read with its id if the log still exists.`,
-        },
-        base,
-      );
+      await session.prompt({ ...plain, body: removedThreadBody(draft) }, base);
       return;
     }
     await session.prompt(content, { threadId, ...base });
@@ -757,6 +783,24 @@ export class WakeWatcher {
       }
     }
   }
+}
+
+/**
+ * The main-thread body for a signal whose thread is gone. It names the work
+ * and the next step, and it never carries the work's output.
+ */
+function removedThreadBody(draft: SignalDraft): string {
+  const id = draft.attributes.wakeupId ?? "";
+  if (draft.attributes.kind === "event") {
+    return draft.signalType === "event.matched"
+      ? `A background wait (${id}) in a removed thread matched an event. Its details stay out of this thread. Arm a new wait in an open thread if you still need one.`
+      : `A background wait (${id}) in a removed thread ended. Arm a new wait in an open thread if you still need one.`;
+  }
+  return (
+    `This ${draft.attributes.kind ?? "work"} ("${draft.attributes.reason ?? id}") ` +
+    `ended with ${draft.signalType}, but the thread it ran in is gone. Its output stays out of this thread. ` +
+    `Use process_read with its id if the log still exists.`
+  );
 }
 
 /** The `lease.expired` signal (spec B6: `leaseId`, `reason`, `ownerKind`, `expiredAt`). */

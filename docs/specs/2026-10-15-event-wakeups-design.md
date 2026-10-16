@@ -494,10 +494,14 @@ The WakeWatcher processes running event waiters with a non-empty
    them. The first signal goes out at once. Later signals
    follow the waiter's `minIntervalMs` when set, else `watchMinIntervalMs`,
    and `watchMaxEventsPerHour`, through the same
-   rate code as `watch`. Each delivered digest counts once toward the cap.
-   When the hourly cap trips, the row ends with cause `rate`. Past
-   `deadlineAt`, stream mode submits the digests it still holds, then the
-   `deadline` ending.
+   rate code as `watch`. Each `event.matched` signal counts once toward the
+   cap, however many digests it lists. When the hourly cap trips, the row
+   ends with cause `rate`. If the removal fails after the CAS, the
+   WakeWatcher rolls the CAS back and sends nothing, so the next tick sends
+   the digests once and counts them once.
+5. Past `deadlineAt`, stream mode sends the digests it still holds in one
+   last `event.matched` signal. That signal skips the min interval and
+   counts once in the rate window. Then the row ends with cause `deadline`.
 4. The dispatch id is `wakeup:<id>:event:<eventCount>`. The terminal
    dispatch id is `wakeup:<id>:terminal`.
 
@@ -511,17 +515,24 @@ https://github.com/acme/lean-proofs/runs/123
 
 A digest with `text` adds the text after the URL.
 
-Attributes: `wakeupId`, `kind: event`, `subject`, `matchCount`.
+`event.matched` attributes: `wakeupId`, `kind: event`, `subject`,
+`matchCount`. `event.ended` attributes: `wakeupId`, `kind: event`,
+`subject`, `cause`.
+
+If the waiter's thread is gone, the signal goes to the session's main
+thread without the digests. The body names the waiter id and tells the
+agent to arm a new wait in an open thread.
 
 ### F1. Endings
 
 | Cause | Signal | Body |
 |---|---|---|
 | `fired` (once mode) | `event.matched` | the digest |
-| `deadline` | `event.ended` | `No matching event arrived within <n> hours. Check the subject's state before you wait again.` |
+| `deadline`, no match delivered | `event.ended` | `No matching event arrived within <n> hours. Check the subject's state before you wait again.` |
+| `deadline`, `<m>` matches delivered (stream mode, including the last flush) | `event.ended` | `The wait reached its <n>-hour deadline after <m> matched events. Arm a new wait to keep watching.` (`event` when `<m>` is 1) |
 | `cancelled` by a person | `event.ended` | the human-cancel text of the wakeups spec |
 | `cancelled` by the agent | none | |
-| `rate` | `event.ended` | `Ended after <n> events in an hour. Narrow the clauses, then wait again.` |
+| `rate` | `event.ended` | `Ended after <n> events in an hour. Narrow the clauses, then wait again.` `<n>` is the signal count in the rate window. |
 
 ### F2. Background-work rule
 
@@ -632,7 +643,7 @@ hour, with the first-series pattern of the wakeups spec.
 - Ingest tests: a match with no subscription, a throwing matcher (INV-E2),
   and visibility drops.
 - WakeWatcher tests: once and stream modes, the rate cap, every ending in
-  F1, and a crash between submit and buffer clear.
+  F1, and a removal that fails after the CAS (one signal, counted once in the rate window, on the next tick).
 - Arm-check tests for R1 to R8.
 - Background-work tests for each F2 rule.
 - Web tests for each Part H element, including live rendering.
@@ -684,5 +695,6 @@ webhook MUST include `Issue` and `Comment`. Add the Part J alert rule.
   with `derived: true`.
 - Part F step 3 removes the digests before it submits the signal, not
   after. A crash between the two steps then loses one signal instead of
-  sending it twice, which keeps INV-E4. A failed removal stops the tick
-  before the submit, so the digests go out on the next tick.
+  sending it twice, which keeps INV-E4. A failed removal rolls the CAS back
+  and stops the tick before the submit, so the digests go out once on the
+  next tick.
