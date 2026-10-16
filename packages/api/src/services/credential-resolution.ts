@@ -33,6 +33,7 @@
  */
 import { credentialSecret, type CredentialStore, type StoredCredential, type ValetPlugin } from "@valet/engine";
 import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
+import { recordAppCredentialFallback, type AppFallbackReason } from "../observability/credential-metrics.js";
 import { findCredentialDeclaration } from "./integration-availability.js";
 import { LINEAR_CLIENT_CREDENTIALS_GRANT } from "./linear-app.js";
 import {
@@ -380,6 +381,56 @@ export async function resolveAppCredentialRead(
   // enough, and no person's vault is in reach.
   const fromOrg = await readOrgRow(deps, { orgId: ctx.orgId, userId: "", scopes: ["org"] }, rowService, "resolve", isAppCredentialRow);
   return fromOrg === ABSENT ? null : fromOrg;
+}
+
+/**
+ * The row-backed app credential service behind a native `service`
+ * (`linear` → `linear:app`), or `undefined`. Only these services have an app
+ * step that a resolver adds after the personal and delegated reads; the
+ * GitHub installation is minted on its own path, and the Slack bot row is
+ * the service's only identity.
+ */
+export function rowBackedAppServiceFor(plugins: readonly ValetPlugin[] | undefined, service: string): string | undefined {
+  const appService = nativeAppCredentialServiceFor(plugins, service);
+  return appService && isAppCredentialRowService(appService) ? appService : undefined;
+}
+
+/**
+ * Records a read of a native `service` that ended at its app token
+ * (`valet_credentials_app_fallback_total`). Call it after the personal or
+ * delegated read returned `null`: it counts only when the app token
+ * answers, so a read with no app connection is not a fallback.
+ */
+export async function noteAppCredentialFallback(
+  deps: CredentialReadDeps,
+  ctx: { orgId: string },
+  service: string,
+  reason: AppFallbackReason,
+  plugins: readonly ValetPlugin[] | undefined,
+): Promise<void> {
+  const appService = rowBackedAppServiceFor(plugins, service);
+  if (!appService) return;
+  if ((await resolveAppCredentialRead(deps, ctx, appService, plugins)) !== null) recordAppCredentialFallback(service, reason);
+}
+
+/**
+ * An org-owned read of a native `service` whose app credential is
+ * row-backed: the app token, counted as `org_owner`. `undefined` when the
+ * service has no such app step or the app token does not answer, so the
+ * caller goes on to its plain org read.
+ */
+export async function resolveOrgNativeAppRead(
+  deps: CredentialReadDeps,
+  ctx: { orgId: string },
+  service: string,
+  plugins: readonly ValetPlugin[] | undefined,
+): Promise<StoredCredential | undefined> {
+  const appService = rowBackedAppServiceFor(plugins, service);
+  if (!appService) return undefined;
+  const app = await resolveAppCredentialRead(deps, ctx, appService, plugins);
+  if (!app) return undefined;
+  recordAppCredentialFallback(service, "org_owner");
+  return app;
 }
 
 /** Who a team read acts for, and which members it may borrow an account
