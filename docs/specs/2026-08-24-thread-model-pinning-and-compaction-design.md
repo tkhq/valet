@@ -29,8 +29,9 @@ Two related gaps in the v2 model/compaction stack:
 
 ### October 5: protect live model changes before requests
 
-The provider request hook checks context after a model change.
+The provider request hook checks context before every conversational provider request.
 This includes thread pins, submission models, role models, and in-turn switches.
+It also checks unchanged models after tool results grow the context within one agent loop.
 The check includes pending prompts, tool results, current instructions, and tool definitions.
 It uses the larger of prior usage and a fresh payload estimate.
 Prior usage alone cannot measure instructions added by a new role.
@@ -52,6 +53,8 @@ It must not create a tunnel just to edit a hosted deck.
 
 Regression coverage uses mock providers for all four model-selection paths,
 oversized role instructions with prior usage, prompt deduplication, failed-switch recovery, and repeated cancellation.
+Same-model tool-loop coverage verifies compaction before the next request, retained tool evidence, and one tool execution.
+If compaction is disabled, an oversized request fails before the provider call.
 
 ### 1. `Session.thread()` stamps the pin at creation
 

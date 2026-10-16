@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as catalog from "../src/model-catalog.js";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
 import {
   Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider,
   loadRoleFromMarkdown, type BusEvent,
@@ -17,7 +17,56 @@ async function settled(events: BusEvent[], queueItemId: string): Promise<void> {
   }
 }
 
-describe("smaller model context protection", () => {
+describe("provider request context protection", () => {
+  it.each([true, false])("checks same-model tool-result growth with compaction enabled=%s", async (enabled) => {
+    const faux = registerFauxProvider({ provider: `context-tool-growth-${enabled}`,
+      models: [{ id: "model", name: "model", contextWindow: 200_000, maxTokens: 5 }] });
+    const summarizer = registerFauxProvider({ provider: `context-tool-summary-${enabled}` });
+    cleanups.push(() => faux.unregister(), () => summarizer.unregister());
+    const events: BusEvent[] = [];
+    const store = new InMemorySessionStore();
+    const stream = new InMemoryEventStream();
+    stream.subscribe({}, (event) => events.push(event));
+    const engine = new Engine({ providers: { store, stream, sandboxProvider: new VirtualSandboxProvider() } });
+    let effects = 0;
+    const evidence = "current tool evidence " + "y".repeat(320_000);
+    const session = await engine.createSession({ userId: "u", orgId: "o", workspace: "/", sandbox: {},
+      model: faux.getModel("model")!,
+      compaction: { enabled, tailTurns: 1, autoContinue: false, summarizerModel: summarizer.getModel() },
+      tools: [{ name: "collect_evidence", description: "Collect evidence once", parameters: Type.Object({}), protectedFromPruning: true,
+        execute: async () => { effects++; return { text: evidence }; } }],
+    });
+    faux.setResponses([fauxAssistantMessage("old inspection " + "x".repeat(500_000))]);
+    await settled(events, (await session.prompt("inspect earlier work")).queueItemId);
+    expect((await store.getEntries(session.id, session.thread().id)).some((entry) => entry.type === "compaction")).toBe(false);
+    summarizer.setResponses([fauxAssistantMessage("## Progress\n- Earlier inspection complete")]);
+    let nextRequest = "";
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("collect_evidence", {}, { id: "evidence-call" })], { stopReason: "toolUse" }),
+      (context) => { nextRequest = JSON.stringify(context); return fauxAssistantMessage("report complete"); },
+    ]);
+    const receipt = await session.prompt("unique report request");
+    await settled(events, receipt.queueItemId);
+    expect(effects).toBe(1);
+    const entries = await store.getEntries(session.id, session.thread().id);
+    expect(entries.filter((entry) => entry.type === "message" && entry.role === "user" && entry.content === "unique report request")).toHaveLength(1);
+    if (enabled) {
+      expect(nextRequest.length).toBeLessThan(800_000);
+      expect(nextRequest).toContain("previous-context");
+      expect(nextRequest.split("unique report request")).toHaveLength(2);
+      expect(nextRequest).toContain('"id":"evidence-call"');
+      expect(nextRequest).toContain('"toolCallId":"evidence-call"');
+      expect(nextRequest.includes(evidence)).toBe(true);
+      expect(entries.some((entry) => entry.type === "compaction")).toBe(true);
+      expect((await store.getQueueItem(session.id, receipt.queueItemId))?.outcome?.outcome).toBe("completed");
+    } else {
+      expect(nextRequest.length).toBe(0);
+      expect(entries.some((entry) => entry.type === "compaction")).toBe(false);
+      expect((await store.getQueueItem(session.id, receipt.queueItemId))?.outcome?.outcome).toBe("failed");
+      expect(events.some((event) => event.event.type === "error" && event.event.error.includes("Run /compact"))).toBe(true);
+    }
+  });
+
   it.each(["pin", "submission", "role", "tool"] as const)(
     "compacts before the first smaller-model request after a %s switch",
     async (selection) => {
