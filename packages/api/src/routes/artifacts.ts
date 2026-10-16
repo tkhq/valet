@@ -33,7 +33,7 @@ import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-curso
 import { resolveOrgId } from "../lib/org.js";
 import { agentSessions, users } from "../schema/index.js";
 import { requireActingUser, requirePrincipal, requireUser, resolveOptionalIdentity, type AuthUser, type RequestIdentity } from "../middleware/auth.js";
-import { isAgentCaller, userPrincipal } from "../lib/request-principal.js";
+import { isAgentCaller, userPrincipal, type AuthVia } from "../lib/request-principal.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { isOrgAdmin } from "../services/org.js";
@@ -195,10 +195,10 @@ const TEAM_KEY_ARTIFACT_MESSAGE =
 async function resolveArtifactCaller(
   c: Context<AppEnv>,
   auth: ValetAuth | null,
-): Promise<{ user: AuthUser | undefined; teamKey: boolean }> {
+): Promise<{ user: AuthUser | undefined; teamKey: boolean; authVia?: AuthVia }> {
   const identity: RequestIdentity | undefined = await resolveOptionalIdentity(c, { auth, db: c.var.providers.db });
   if (identity?.principal.type === "team") return { user: undefined, teamKey: true };
-  return { user: identity?.user, teamKey: false };
+  return { user: identity?.user, teamKey: false, authVia: identity?.authVia };
 }
 
 /** Retained runtimes preserve publications that predate source-thread metadata. */
@@ -212,7 +212,7 @@ async function hasUnknownTeamSource(db: AppDb, artifact: ArtifactRow): Promise<b
 async function loadCommentContext(
   c: Context<AppEnv>,
   auth: ValetAuth | null,
-): Promise<{ artifact: ArtifactRow; user: AuthUser } | { error: Response }> {
+): Promise<{ artifact: ArtifactRow; user: AuthUser; authVia?: AuthVia } | { error: Response }> {
   const { db } = c.var.providers;
   const [artifact, caller] = await Promise.all([
     getArtifactByToken(db, c.req.param("token")),
@@ -236,7 +236,7 @@ async function loadCommentContext(
       ),
     };
   }
-  return { artifact, user };
+  return { artifact, user, authVia: caller.authVia };
 }
 
 /** Whether `user`'s `sendToSession` would deliver: the artifact records a
@@ -435,7 +435,7 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
           const anchor = row.vdid ? `element ${row.vdid}` : "page";
           const text = `[artifact comment] on "${artifact.title}" (${anchor}): ${row.body}`;
           const resp = await submitSessionPrompt(providers, send.row, text, {
-            author: promptAuthorFromUser(user),
+            author: promptAuthorFromUser(user, userPrincipal(user.id), loaded.authVia),
             threadId: artifact.sourceThreadId ?? undefined,
           });
           if (resp) {

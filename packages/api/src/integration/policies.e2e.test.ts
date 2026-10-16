@@ -539,7 +539,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       const denyRes = await fetch(`${baseUrl}/api/workflows/runs/${runNoGrant}/approvals/call`, {
         method: "POST",
         headers: HEADERS,
-        body: JSON.stringify({ approved: false }),
+        body: JSON.stringify({ approved: false, gateId: parkedNoGrant.pendingGates.find(gate => gate.nodeId === "call")?.gateId }),
       });
       expect(denyRes.status).toBe(200);
       expect(((await denyRes.json()) as ResolveWorkflowApprovalResponse).ok).toBe(true);
@@ -611,7 +611,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       expect(((await approveNodeRes.json()) as ResolveWorkflowApprovalResponse).ok).toBe(true);
 
       // Poll for the run to park again on the tool gate (policy gate for `call`).
-      await poll(
+      const parkedGrant = await poll(
         async () => {
           const r = await fetch(`${baseUrl}/api/workflows/runs/${runGrant}`);
           expect(r.status).toBe(200);
@@ -629,7 +629,7 @@ describe("api e2e: action policies + audit exit-criteria loop (fixture-backed, n
       const approveGateRes = await fetch(`${baseUrl}/api/workflows/runs/${runGrant}/approvals/call`, {
         method: "POST",
         headers: HEADERS,
-        body: JSON.stringify({ approved: true, scope: "run" }),
+        body: JSON.stringify({ approved: true, scope: "run", gateId: parkedGrant.pendingGates.find(gate => gate.nodeId === "call")?.gateId }),
       });
       expect(approveGateRes.status).toBe(200);
       expect(((await approveGateRes.json()) as ResolveWorkflowApprovalResponse).ok).toBe(true);

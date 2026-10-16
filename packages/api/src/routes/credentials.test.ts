@@ -1391,6 +1391,60 @@ describe("team credential scope (TKAI-205)", () => {
     expect((await list()).map((row) => row.delegatedFrom)).toEqual(["local-user"]);
   });
 
+  it("treats an encrypted empty refresh token like a missing token for admission and the team list", async () => {
+    const team = await teamWithMember();
+    await api!.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", {
+      type: "oauth2", accessToken: "expired", refreshToken: "", expiresAt: 1,
+    });
+    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "linear", { type: "api_key", apiKey: "personal" });
+    const listed = await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: MEMBER_HEADERS });
+    expect(((await listed.json()) as ListCredentialsResponse).credentials).toEqual([expect.objectContaining({ service: "linear", unusable: true })]);
+    const response = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST", headers: MEMBER_HEADERS, body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(response.status).toBe(201);
+  });
+
+  it("rechecks authority after resolving a team 1Password reference", async () => {
+    const team = await teamWithMember();
+    const onePassword = new FakeOnePasswordService();
+    api!.providers.onePassword = onePassword;
+    await api!.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "api_key", apiKey: "keep-team" });
+    vi.spyOn(onePassword, "resolveReference").mockImplementation(async () => {
+      await api!.providers.db.delete(orgMembers).where(and(eq(orgMembers.orgId, "local-org"), eq(orgMembers.userId, "local-user")));
+      return "vault-secret";
+    });
+    const response = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT", headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", scope: "team", teamId: team.id,
+        onepassword: { reference: "op://Shared/Linear/token", tokenScope: "org" } }),
+    });
+    expect(response.status).toBe(404);
+    expect(await api!.providers.engineCredentials.get({ type: "team", id: team.id }, "linear"))
+      .toMatchObject({ apiKey: "keep-team" });
+  });
+
+  it("rechecks the team connection inside the share transaction", async () => {
+    const team = await teamWithMember();
+    await api!.providers.engineCredentials.save({ type: "user", id: "test-member" }, "linear", { type: "api_key", apiKey: "personal" });
+    const db = api!.providers.db;
+    const transaction = db.transaction.bind(db);
+    const boundary = vi.spyOn(db, "transaction").mockImplementationOnce(async (fn, config) => {
+      // A connection commits after admission started but before its transaction.
+      await api!.providers.engineCredentials.save({ type: "team", id: team.id }, "linear", { type: "api_key", apiKey: "team-connected" });
+      return transaction(fn, config);
+    });
+    try {
+      const response = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+        method: "POST", headers: MEMBER_HEADERS, body: JSON.stringify({ teamId: team.id }),
+      });
+      expect(response.status).toBe(409);
+      expect(await listTeamShares(db, team.id)).toEqual([]);
+    } finally {
+      boundary.mockRestore();
+    }
+  });
+
   it("refuses a share of a service the team has its own connection for, and names the fix", async () => {
     const team = await teamWithMember();
     const shareFrom = () => fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {

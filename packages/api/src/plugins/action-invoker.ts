@@ -318,6 +318,10 @@ export async function recordAttemptAudit(
     params: req.params,
     createdAt: (opts.clock ?? Date.now)(),
   });
+  if (!parked) await updateInvocationOutcome(opts.db, key, ctx.orgId, {
+    status: result.ok ? "completed" : "error",
+    ...(!result.ok && "error" in result ? { error: result.error } : {}),
+  });
 }
 
 /**
@@ -713,6 +717,7 @@ async function enforceWorkflowPolicy(
   }
 
   if (decision.mode === "deny") {
+    const error = `${req.service}.${req.action} is blocked by ${decision.provenance.source === "team_policy" ? "team" : "org"} policy`;
     await persist({
       invocationId: key,
       service: req.service,
@@ -731,7 +736,8 @@ async function enforceWorkflowPolicy(
       params,
       createdAt: now,
     });
-    return { ok: false, error: `${req.service}.${req.action} is blocked by ${decision.provenance.source === "team_policy" ? "team" : "org"} policy` };
+    await updateInvocationOutcome(opts.db, key, ctx.orgId, { status: "denied", error });
+    return { ok: false, error };
   }
 
   // decision.mode === "require_approval"
@@ -968,7 +974,7 @@ export async function sharedAccountApprover(
   ctx: ActionInvocationContext,
   teamId: string,
   service: string,
-): Promise<{ userId: string; name?: string; shareGeneration: string } | undefined> {
+): Promise<{ userId: string; name?: string; shareGeneration: string; allowTeamConsent: true } | undefined> {
   // An external call has no run to attach a member's approval to, so it
   // never borrows. It still reports whose approval the account needs, so the
   // caller hears to delegate with start_thread instead of "no credential".
@@ -997,7 +1003,7 @@ export async function sharedAccountApprover(
   const [member] = await opts.db.select({ name: users.name }).from(users).where(eq(users.id, approvalFrom)).limit(1);
   const generation = await shareGeneration(opts.db, teamId, service, approvalFrom);
   if (!generation) return undefined;
-  return { shareGeneration: generation, userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
+  return { allowTeamConsent: true, shareGeneration: generation, userId: approvalFrom, ...(member?.name ? { name: member.name } : {}) };
 }
 
 /**
@@ -1177,6 +1183,8 @@ function buildActionContext(
   const presence = mergePresence(readPresence(ctx.presence));
   return {
     toolScope: ctx.toolScope,
+    // Headless actions have no mutable focus. Their delegated scope is the ceiling.
+    toolScopeCeiling: ctx.toolScope,
     userId: ctx.userId,
     orgId: ctx.orgId,
     sessionId,

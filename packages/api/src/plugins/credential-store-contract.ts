@@ -53,6 +53,24 @@ export function describeCredentialStoreContract(makeStore: () => Promise<Credent
       expect(listed.filter((c) => c.service === "github")).toHaveLength(1);
     });
 
+    it("conditionally replaces the matching snapshot, but never a changed or deleted row", async () => {
+      const store = await makeStore();
+      await store.save(userOwner, "linear", { type: "oauth2", accessToken: "old", refreshToken: "rt" });
+      const expected = await store.get(userOwner, "linear");
+      if (!expected) throw new Error("Missing seeded credential");
+      const next: StoredCredential = { ...expected, accessToken: "refreshed" };
+      expect(await store.compareAndSwap(userOwner, "linear", expected, next)).toBe(true);
+      expect((await store.get(userOwner, "linear"))?.accessToken).toBe("refreshed");
+      expect(await store.compareAndSwap(userOwner, "linear", expected, next)).toBe(false);
+      const current = await store.get(userOwner, "linear");
+      if (!current) throw new Error("Missing refreshed credential");
+      await store.save(userOwner, "linear", { ...current, metadata: { login: "reconnected" } });
+      expect(await store.compareAndSwap(userOwner, "linear", current, next)).toBe(false);
+      await store.delete(userOwner, "linear");
+      expect(await store.compareAndSwap(userOwner, "linear", current, next)).toBe(false);
+      expect(await store.get(userOwner, "linear")).toBeNull();
+    });
+
     it("delete removes the row; list returns entries scoped to the requesting owner only", async () => {
       const store = await makeStore();
 

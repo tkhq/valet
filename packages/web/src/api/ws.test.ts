@@ -58,6 +58,71 @@ function renderSocketHook(sessionId: string) {
 }
 
 describe("useSessionWebSocket", () => {
+  it("refreshes settings after a successful settings action, while unrelated and failed tools leave them alone", () => {
+    const { queryClient } = renderSocketHook("s1");
+    const key = ["settings", "me"];
+    queryClient.setQueryData(key, { name: "Before" });
+    const socket = FakeWebSocket.instances[0];
+    const frame = (value: object) => act(() => socket?.onmessage?.({ data: JSON.stringify({ seq: 1, ts: 1, threadId: "t", ...value }) }));
+    frame({ type: "tool_start", toolName: "call_tool", callId: "read", args: { tool_id: "settings.get_settings" } });
+    frame({ type: "tool_end", toolName: "call_tool", callId: "read", result: "current", isError: false });
+    expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);
+    frame({ type: "tool_start", toolName: "call_tool", callId: "failed", args: { tool_id: "settings.update_account" } });
+    frame({ type: "tool_end", toolName: "call_tool", callId: "failed", result: "Denied", isError: true });
+    expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);
+    frame({ type: "tool_start", toolName: "call_tool", callId: "saved", args: { tool_id: "settings.update_account" } });
+    frame({ type: "tool_end", toolName: "call_tool", callId: "saved", result: "Saved", isError: false });
+    expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+  });
+
+  it.each(["settings__update_account", "settings__update_team", "settings__update_organization"])(
+    "refreshes settings after successful pinned %s, while read, unrelated, and failed tools leave them alone",
+    (toolName) => {
+      const { queryClient } = renderSocketHook("s1");
+      const key = ["settings", "me"];
+      queryClient.setQueryData(key, { name: "Before" });
+      const socket = FakeWebSocket.instances[0];
+      const frame = (value: object) => act(() => socket?.onmessage?.({ data: JSON.stringify({ seq: 1, ts: 1, threadId: "t", ...value }) }));
+      frame({ type: "tool_start", toolName: "settings__get_settings", callId: "read", args: {} });
+      frame({ type: "tool_end", toolName: "settings__get_settings", callId: "read", result: "current", isError: false });
+      expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);
+      frame({ type: "tool_start", toolName: "teams__rename_team", callId: "unrelated", args: {} });
+      frame({ type: "tool_end", toolName: "teams__rename_team", callId: "unrelated", result: "Saved", isError: false });
+      expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);
+      frame({ type: "tool_start", toolName, callId: "failed", args: {} });
+      frame({ type: "tool_end", toolName, callId: "failed", result: "Denied", isError: true });
+      expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);
+      frame({ type: "tool_start", toolName, callId: "saved", args: {} });
+      frame({ type: "tool_end", toolName, callId: "saved", result: "Saved", isError: false });
+      expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+    },
+  );
+
+  it.each([
+    { toolName: "call_tool", toolId: "settings.update_account", isError: false, refresh: true },
+    { toolName: "settings__update_account", toolId: undefined, isError: false, refresh: true },
+    { toolName: "call_tool", toolId: "settings.update_account", isError: true, refresh: false },
+    { toolName: "settings__update_account", toolId: undefined, isError: true, refresh: false },
+    { toolName: "call_tool", toolId: "settings.get_settings", isError: false, refresh: false },
+    { toolName: "settings__get_settings", toolId: undefined, isError: false, refresh: false },
+    { toolName: "call_tool", toolId: "teams.rename_team", isError: false, refresh: false },
+    { toolName: "teams__rename_team", toolId: undefined, isError: false, refresh: false },
+  ])("refreshes only successful settings writes after close/reopen: $toolName $toolId error=$isError", ({ toolName, toolId, isError, refresh }) => {
+    const { queryClient, unmount } = renderSocketHook("s1");
+    const key = ["settings", "me"];
+    queryClient.setQueryData(key, { name: "Before" });
+    const frame = (socket: FakeWebSocket | undefined, value: object) => act(() => socket?.onmessage?.({ data: JSON.stringify({ seq: 1, ts: 1, threadId: "t", ...value }) }));
+    frame(FakeWebSocket.instances[0], { type: "message_start", messageId: "assistant", role: "assistant", offset: "0000000000000001" });
+    frame(FakeWebSocket.instances[0], { type: "tool_start", toolName, callId: "saved", args: { tool_id: toolId }, offset: "0000000000000002" });
+    unmount();
+    const wrapper = ({ children }: PropsWithChildren) => createElement(QueryClientProvider, { client: queryClient }, children);
+    const reopened = renderHook(() => useSessionWebSocket("s1"), { wrapper });
+    expect(FakeWebSocket.instances[1]?.url).toContain("fromOffset=0000000000000002");
+    frame(FakeWebSocket.instances[1], { type: "tool_end", toolName, callId: "saved", result: "Finished", isError, offset: "0000000000000003" });
+    expect(queryClient.getQueryState(key)?.isInvalidated).toBe(refresh);
+    reopened.unmount();
+  });
+
   it("marks the slice open on connect and closed on unmount", () => {
     const { unmount } = renderSocketHook("s1");
     const socket = FakeWebSocket.instances[0];

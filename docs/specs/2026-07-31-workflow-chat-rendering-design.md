@@ -269,3 +269,24 @@ A settled run with no signal admission reports `not_recorded`; it does not claim
 A queued signal proves admission only. A settled signal proves the follow-up turn ended, not that Slack received a message.
 The completion signal instructs the agent to inspect results and report the requested checks to the user.
 Approval and completion continue to use the existing event-driven follow-up path.
+
+### Completion evidence and unattended recovery (2026-10-15)
+
+`get_node_transcript` exposes saved compaction summaries, their token counts and covered-entry count,
+synthetic continuation markers, usage, and allowlisted response metadata. It still clips normal pages.
+To read retained content in full, pass `message_id`, `content_field` (`text`, `tool_args`, `tool_result`,
+`tool_error`), `call_id` for tool fields, and `offset`. `data.content` contains at most 6,000 characters,
+`totalLength`, and `nextOffset` (null at the end). Tool-call previews include call IDs and truncation flags.
+Content slices use the same authorized checkpoint thread and submission filters as transcript pages.
+The 2,000-entry store cap is reported; the tool does not promise to recover deleted history.
+
+Response evidence records numeric output caps from the provider request payload after caller transformations,
+and an allowlisted response request ID. No payloads, credentials, arbitrary headers, or private reasoning are saved.
+Absent hooks or fields remain unavailable. Provider terminal status and incomplete details still remain unavailable
+when the adapter does not expose them. A sent output cap is distinct from actual consumed tokens.
+
+After compaction, sessions whose purpose is `workflow` receive unattended-task guidance: finish remaining
+authorized work, treat a progress recap as incomplete, and report genuine blockers truthfully. Interactive
+sessions keep their existing continuation. The single schema-repair submission tells an agent to complete
+unfinished actionable work using read tools before its final JSON response. It preserves prior results,
+approvals, and side-effect protections. There is no added retry loop and no guarantee a model will recover.

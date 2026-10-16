@@ -516,7 +516,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       if (!owner) return NO_OWNER;
       const deps = getDeps();
       const origin = await workflowActionOrigin(deps, owner, ctx.sessionId, ctx.threadId, ctx.owner);
-      const started = await startWorkflowRun(deps, owner, workflow_id, input, origin, "manual", ctx.toolScope);
+      const started = await startWorkflowRun(deps, owner, workflow_id, input, origin, "manual", ctx.toolScope, ctx.toolScopeCeiling ?? {});
       if (!started) return { success: false, error: `workflow not found: ${workflow_id}` };
       if ("invalidInput" in started) {
         return {
@@ -764,6 +764,8 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const run = (await canReadWorkflowRun(deps, owner, run_id)) ? await deps.workflowStore.getRun(run_id) : null;
       if (!run) return { success: false, error: `run not found: ${run_id}` };
       const node = findNodeInDefinition(run.definition, node_id);
+      const checkpoint = (await deps.workflowStore.getCheckpoints(run_id)).find(cp => cp.nodeId === node_id && cp.iteration === (iteration ?? 0) && cp.status === "intent");
+      const gateId = typeof checkpoint?.effects?.gateId === "string" ? checkpoint.effects.gateId : undefined;
       const step = node?.type === "tool" && typeof node.service === "string" && typeof node.action === "string"
         ? (node.action.includes(".") ? node.action : `${node.service}.${node.action}`)
         : `step ${node_id}`;
@@ -778,7 +780,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           { id: "approve", label: approved ? "Approve step" : "Deny step", style: approved ? "primary" : "danger" },
           { id: "cancel", label: "Cancel" },
         ],
-        resumeKey: `workflow-gate:${run_id}:${node_id}:${iteration ?? 0}:${approved ? "approve" : "deny"}`,
+        resumeKey: `workflow-gate:${run_id}:${node_id}:${iteration ?? 0}:${approved ? "approve" : "deny"}${gateId ? `:${gateId}` : ""}`,
       });
       if (decision.actionId !== "approve") {
         return { success: false, error: `Nobody confirmed the card, so ${node_id} on run ${run_id} still waits for a decision.` };
@@ -789,6 +791,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const result = await resolveWorkflowApproval(deps, person, {
         runId: run_id,
         nodeId: node_id,
+        gateId,
         approved,
         note,
         iteration,
@@ -796,6 +799,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       });
       if (result === "not_found") return { success: false, error: `run not found: ${run_id}` };
       if (result === "not_parked") return { success: false, error: `run ${run_id} is not parked on approval gate ${node_id}` };
+      if (result === "stale_gate") return { success: false, error: "This approval gate changed. Read the run and review its current approval." };
       if (result === "already_resolved") return { success: false, error: `approval gate ${node_id} on run ${run_id} has already been resolved` };
       if (result === "timed_out") return { success: false, error: `approval gate ${node_id} on run ${run_id} has timed out` };
       if (result === "not_approver") return { success: false, error: "This step would use another member's shared account. Only that member can answer it." };
@@ -1132,6 +1136,10 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       run_id: Type.String(),
       node_id: Type.String(),
       iteration: Type.Optional(Type.Number()),
+      message_id: Type.Optional(Type.String({ description: "Read one message or tool field in full using bounded character slices." })),
+      content_field: Type.Optional(Type.Union([Type.Literal("text"), Type.Literal("tool_args"), Type.Literal("tool_result"), Type.Literal("tool_error")])),
+      call_id: Type.Optional(Type.String()),
+      offset: Type.Optional(Type.Integer({ minimum: 0 })),
       before: Type.Optional(Type.Number()),
       limit: Type.Optional(Type.Number()),
     }),
@@ -1143,9 +1151,11 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "templates filled in, its replies, any format-repair prompt, and each tool call with its " +
       "arguments, result, and error. Use it when a step's result is surprising and " +
       "get_node_result does not explain why. Messages come oldest first. `index` numbers each " +
-      "message; pass `before` to read the page before that index.",
+      "message; pass `before` to read the page before that index. Includes saved compaction summaries and continuation markers. " +
+      "For clipped content, pass message_id, content_field (text, tool_args, tool_result or tool_error), " +
+      "call_id for tool fields, and offset. Read data.content.nextOffset until null.",
     riskLevel: "low",
-    execute: async ({ run_id, node_id, iteration, before, limit }, ctx) => {
+    execute: async ({ run_id, node_id, iteration, before, limit, message_id, content_field, call_id, offset }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const detail = await getWorkflowRunDetail(getDeps(), owner, run_id);
@@ -1176,6 +1186,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       const transcript = await readStepTranscript(getDeps().engineStore, checkpoint.sessionId, checkpoint.threadId, {
         ...(before !== undefined ? { before: Math.trunc(before) } : {}),
         limit: pageSize,
+        ...(message_id ? { content: { messageId: message_id, field: content_field ?? "text", callId: call_id, offset: offset ?? 0 } } : {}),
         ...(!ownThread && queueItemIds.length > 0 ? { queueItemIds } : {}),
       });
       if (!transcript) return { success: false, error: `The conversation for node ${JSON.stringify(node_id)} is no longer stored.` };
@@ -1190,6 +1201,9 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           ...(checkpoint.repairAttempted ? { repairAttempted: true } : {}),
           ...(checkpoint.schemaError ? { schemaError: checkpoint.schemaError } : {}),
           total: transcript.total,
+          entriesMayBeTruncated: transcript.entriesMayBeTruncated,
+          ...(transcript.content ? { content: transcript.content } : {}),
+          ...(transcript.contentError ? { contentError: transcript.contentError } : {}),
           messages: transcript.messages,
         },
       };

@@ -36,6 +36,11 @@ function tokenOnlyStore(token: string): CredentialStore {
     save: async (o, s, c) => {
       m.set(key(o, s), c);
     },
+    compareAndSwap: async (o, s, expected, next) => {
+      if (m.get(key(o, s)) !== expected) return false;
+      m.set(key(o, s), next);
+      return true;
+    },
     delete: async (o, s) => {
       m.delete(key(o, s));
     },

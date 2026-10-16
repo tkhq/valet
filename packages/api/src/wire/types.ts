@@ -1297,6 +1297,8 @@ export interface AbortThreadRequest {
 }
 
 export interface SendPromptRequest {
+  /** Optional browser location for this Ask Valet message only. Never an authorization grant. */
+  appPageHint?: import("@valet/shared").AppPageHint;
   /**
    * Prompt text. Required unless `promoteItemId` is set — a promote
    * reuses the queued item's content and does not admit a new user entry.
@@ -1378,7 +1380,7 @@ export interface DecisionGate {
   provenance?: DecisionGateProvenance;
   /** The one member who may answer: the gate asks to use their shared
    * account. Anyone else sees the gate as waiting on them. */
-  approver?: { userId: string; name?: string };
+  approver?: { userId: string; name?: string; allowTeamConsent?: true };
   /** Present only on a tool approval gate whose "approve" allows exactly
    * this one call and writes no grant. A bulk answer covers only these.
    * Absent on `ask_approval`, `sec_start`, and shared-account gates. */
@@ -2110,8 +2112,10 @@ export interface WorkflowRunCheckpoint {
 
 /** One pending approval gate on a parked workflow run. */
 export interface WorkflowPendingGate {
+  /** The persisted occurrence shown by this card. Absent on older gates. */
+  gateId?: string;
   /** The one member who may answer: the step would use their shared account. */
-  approver?: { userId: string; name?: string };
+  approver?: { userId: string; name?: string; allowTeamConsent?: true };
   /** Context supplied by the approval node in the run snapshot. */
   summary?: string;
   details?: unknown;
@@ -2124,6 +2128,8 @@ export interface WorkflowPendingGate {
   prompt?: string;
   /** Policy gates: the service that owns the action. */
   service?: string;
+  /** Configured product label for the account approval copy. */
+  serviceDisplayName?: string;
   /** Policy gates: the action identifier. */
   action?: string;
   riskLevel?: string;
@@ -2206,12 +2212,15 @@ export type GetWorkflowRunResponse = WorkflowRunDetail;
 
 export interface ResolveWorkflowApprovalRequest {
   approved: boolean;
+  /** Required when the pending gate supplies an occurrence ID. */
+  gateId?: string;
   note?: string;
   /** Approve scope (policy gates): 'once' (default) authorizes only this
    * invocation; 'run' writes a run-scoped grant for the gated action;
-   * 'workflow' writes a durable workflow-only grant; 'always' is a legacy alias. Ignored on
+   * 'workflow' writes a durable workflow-only grant; 'always' is a legacy alias.
+   * 'team_account' records explicit borrowing consent on a new named account gate. Ignored on
    * approval-node gates and on denials. */
-  scope?: "once" | "run" | "always" | "workflow";
+  scope?: "once" | "run" | "always" | "workflow" | "team_account";
   /** Foreach-iteration disambiguation; omit or 0 for top-level nodes. */
   iteration?: number;
 }
@@ -3270,6 +3279,8 @@ export interface CredentialSummary {
   onepasswordTokenScope?: "org" | "personal" | "team";
   /** Team-scope only. The member whose live user row this reference follows. */
   delegatedFrom?: string;
+  /** Team share only. Account borrowing consent lasts until this share ends. */
+  borrowConsentAt?: number;
   /** Team-scope only. True when the delegator left the team or disconnected. */
   referenceBroken?: boolean;
 }
@@ -5800,7 +5811,7 @@ export interface ActionInvokeRequest {
 export type ActionInvokeResponse =
   | { tool_id: string; status: "completed"; result: unknown }
   | { tool_id: string; status: "failed"; error: string }
-  | { tool_id: string; status: "approval_required"; risk_level?: string; approver?: { userId: string; name?: string }; next_step: string }
+  | { tool_id: string; status: "approval_required"; risk_level?: string; approver?: { userId: string; name?: string; allowTeamConsent?: true }; next_step: string }
   /** A call with the same idempotency key, tool, and params is still running. */
   | { tool_id: string; status: "in_progress"; next_step: string };
 

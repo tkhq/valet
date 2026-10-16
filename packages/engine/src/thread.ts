@@ -1,3 +1,4 @@
+import { renderAppPageHint } from "./app-page-hint.js";
 import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, readToolScope, toolInScope, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -84,7 +85,7 @@ import {
 import { context as otelContext, trace as otelTrace, type Span } from "@opentelemetry/api";
 import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
-import { MODEL_RESPONSE_METADATA_KEY, modelResponseMetadata } from "./model-response.js";
+import { MODEL_RESPONSE_METADATA_KEY, modelResponseMetadata, modelRequestEvidence } from "./model-response.js";
 import { modelCallUsage } from "./model-call-usage.js";
 import {
   applyPrune,
@@ -181,17 +182,11 @@ const MAX_CREDENTIAL_ATTEMPTS = 3;
  */
 const CREDENTIAL_RELEASE_BACKOFF_MS = 4_000;
 
+const WORKFLOW_AUTO_CONTINUE_PROMPT =
+  "You are continuing an unattended workflow task after context compaction. Finish the remaining authorized work using the saved task and available tools. A progress recap is not completion. Return the required final result only after completing the work. If genuinely blocked by missing access, necessary input, or a tool failure you cannot resolve, report that blocker truthfully. Do not invent results, bypass approvals, or repeat completed side effects.";
+
 const AUTO_CONTINUE_PROMPT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
-
-const WORKFLOW_AUTO_CONTINUE_PROMPT = [
-  "Continue the remaining authorized, actionable work for this unattended workflow.",
-  "A progress recap is not task completion.",
-  "Honor the original scope, allowed tools, safety and approval boundaries, constraints, and required output contract.",
-  "Stop only after completing the requested work and output, or reporting a genuine blocking failure truthfully.",
-  "Do not ask routine optional questions.",
-  "Do not fabricate output, bypass approvals, or expand scope.",
-].join("\n");
 
 /** Turn-local guidance for manual-delivery Slack messages. `reply: "manual"`
  * prevents automatic posting but does not decide whether content is addressed.
@@ -589,6 +584,7 @@ export class Thread {
   /** Last conversational request model; a switch must recheck the live context. */
   private lastRequestModel: PiModel;
   private requestedMaxOutputTokens?: number;
+  private requestEvidence: ReturnType<typeof modelRequestEvidence> & { requestId?: string | null } = modelRequestEvidence(undefined);
   private streamedTextLength = 0;
   /** Set only after a role model resolves and is applied. Never persisted. */
   private roleModelSpec?: string;
@@ -1470,8 +1466,9 @@ export class Thread {
     this.runningItem = {
       id: suspended.queueItemId,
       metadata: priorActive?.metadata,
+      author: priorActive?.author,
       threadId: this.id,
-      content: "",
+      content: priorActive?.content ?? "",
       status: "running",
       attemptCount: 0,
       maxAttempts: 10,
@@ -1514,6 +1511,12 @@ export class Thread {
     // tool DID run to completion on replay (its result was pushed above), it
     // just didn't flow through the agent loop's tool_execution_end.
     await this.persistReplayedToolResult(suspended.toolCallId, toolResult);
+    await this.fencedEmit({
+      type: "tool_end", threadId: this.id, tool: suspended.toolName, callId: suspended.toolCallId,
+      result: renderToolResult(toolResult), isError: false,
+      ...(toolResultImages(toolResult).length > 0 ? { resultData: toolResult } : {}),
+      ...toolOutcome(toolResult),
+    }, { queueItemId: suspended.queueItemId });
     await this.session.providers.store.clearSuspendedTurn(this.session.id, this.id, this.fence);
     this.blockedGateId = undefined;
     // Drive the continuation, recording any failure for settlement — a
@@ -4442,13 +4445,11 @@ export class Thread {
   }
 
   private async continueAfterCompaction(): Promise<void> {
+    const prompt = this.session.options.purpose === "workflow" ? WORKFLOW_AUTO_CONTINUE_PROMPT : AUTO_CONTINUE_PROMPT;
     const item = this.runningItem;
     if (!item) {
       throw new Error("Compaction continuation has no active submission.");
     }
-    const prompt = this.session.options.purpose === "workflow"
-      ? WORKFLOW_AUTO_CONTINUE_PROMPT
-      : AUTO_CONTINUE_PROMPT;
     const entry: MessageEntry = {
       id: uid("e"),
       sessionId: this.session.id,
@@ -5103,6 +5104,7 @@ export class Thread {
       streamFn: async (model, context, options) => {
         this.lastRequestModel = model;
         this.requestedMaxOutputTokens = options?.maxTokens;
+        this.requestEvidence = modelRequestEvidence(undefined);
         await this.persistSkillContextAttributions();
         const runtimeModelContext = this.modelSystemPrompt(undefined, model);
         const initialSystemIndex = context.messages.findIndex((message) => message.role === "system");
@@ -5129,6 +5131,16 @@ export class Thread {
         };
         return this.nativeImages.stream(model, transcript, {
           ...options,
+          onPayload: async (payload, requestModel) => {
+            const transformed = (await options?.onPayload?.(payload, requestModel)) ?? payload;
+            this.requestEvidence = modelRequestEvidence(transformed);
+            return transformed;
+          },
+          onResponse: async (response, requestModel) => {
+            const requestId = Object.entries(response.headers).find(([key]) => ["x-request-id", "request-id", "x-amzn-requestid"].includes(key.toLowerCase()))?.[1];
+            this.requestEvidence.requestId = requestId?.slice(0, 200) ?? null;
+            await options?.onResponse?.(response, requestModel);
+          },
           maxRetries: options?.maxRetries ?? TURN_STREAM_MAX_RETRIES,
           maxRetryDelayMs: options?.maxRetryDelayMs ?? TURN_STREAM_MAX_RETRY_DELAY_MS,
           timeoutMs: options?.timeoutMs ?? TURN_STREAM_TIMEOUT_MS,
@@ -5293,7 +5305,7 @@ export class Thread {
       // Only while the hosted tool was actually offered: a replayed approval after a restart must reach the plugin action.
       nativeImageGeneration: this.nativeImages.offered,
       userId: actorId,
-      ...(this.runningItem?.author && !this.runningItem.author.externalSender &&
+      ...(this.runningItem?.author?.interactive === true && !this.runningItem.author.externalSender &&
         runningContent !== undefined && !isSignalContent(runningContent) &&
         session.options.purpose !== "workflow" && session.options.purpose !== "child"
         ? { interactiveActor: { id: this.runningItem.author.id } } : {}),
@@ -5566,7 +5578,7 @@ export class Thread {
             queueItemId: this.runningItem?.id,
             stopReason,
             metadata: {
-              [MODEL_RESPONSE_METADATA_KEY]: modelResponseMetadata(event.message, this.streamedTextLength, this.requestedMaxOutputTokens),
+              [MODEL_RESPONSE_METADATA_KEY]: modelResponseMetadata(event.message, this.streamedTextLength, this.requestedMaxOutputTokens, this.requestEvidence),
               ...(turnError ? { [MESSAGE_TURN_ERROR_KEY]: turnError } : {}),
             },
             createdAt: Date.now(),
@@ -6445,6 +6457,7 @@ export function renderReplyContext(
   text: string,
   metadata: Record<string, unknown> | undefined,
 ): string {
+  text = renderAppPageHint(text, metadata?.appPageHint);
   const ref = replyMetadata(metadata);
   if (!ref) return text;
   return [

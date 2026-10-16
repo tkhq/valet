@@ -97,6 +97,14 @@ function openMenu(acknowledge = true) {
 }
 
 describe("ShareWithTeam", () => {
+  it("shows lasting account consent and its revocation control", () => {
+    teams = [TEAM];
+    teamCreds = [{ ...SHARED_BY_ME[0]!, borrowConsentAt: 42 }];
+    openMenu();
+    expect(screen.getByText(/Account use stays allowed/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop sharing Linear with Engineering" })).toBeTruthy();
+  });
+
   it("requires explicit personal-account authorization before sharing", () => {
     teams = [TEAM];
     openMenu(false);

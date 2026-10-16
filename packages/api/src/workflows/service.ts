@@ -7,8 +7,8 @@ import { canGrantWorkflowPermissions, prepareWorkflowPermissions, persistWorkflo
  * that to 404) so an owned row and a missing row stay indistinguishable.
  */
 import type { ActionPlugin, Principal, CredentialStore, SessionStore, ValetPlugin } from "@valet/engine";
-import { NotFoundError, RepoOwnedWorkflowError, ValidationError } from "@valet/shared";
-import { normalizeLegacyDefinition, type RunHost, type RunWaitCondition } from "@valet/workflow";
+import { NotFoundError, RepoOwnedWorkflowError, ValidationError, readToolScope } from "@valet/shared";
+import { matchesGateOccurrence, normalizeLegacyDefinition, type RunHost, type RunWaitCondition } from "@valet/workflow";
 import { writeBorrowGrant } from "../services/credential-borrow.js";
 import {
   resolveTriggerInput,
@@ -112,6 +112,8 @@ export interface WorkflowOwner {
    * approves the new steps (`updateWorkflowDefinition`).
    */
   agentEditor?: boolean;
+  /** Server-derived browser or linked human callback authority for account consent. */
+  humanAccountConsent?: boolean;
   /** The authenticated request, assistant-session, or workflow-run owner. */
   principal?: RequestPrincipal;
   /** Live team-assistant actions recheck the acting member. Team API keys
@@ -1407,6 +1409,7 @@ export async function startWorkflowRun(
   origin?: WorkflowRunOrigin,
   triggerType: "manual" | "event" = "manual",
   toolScope?: import("@valet/shared").ToolScope,
+  originToolScope?: import("@valet/shared").ToolScope,
 ): Promise<{ runId: string } | { invalidInput: TriggerInputError[] } | null> {
   const row = await ownedDefinitionRow(deps.db, owner, workflowId);
   if (!row) return null;
@@ -1433,6 +1436,7 @@ export async function startWorkflowRun(
   };
   const params: RunParams = {
     ...(toolScope ? { toolScope } : {}),
+    ...(validOrigin && originToolScope !== undefined ? { originToolScope } : {}),
     workflowId,
     definitionVersionId: versionId,
     input: trigger,
@@ -1649,7 +1653,7 @@ export async function listWorkflowActionRequired(
         for (const [key, approver] of await pendingApprovers(deps, candidate)) {
           if (approver.userId !== owner.userId) continue;
           const separator = key.lastIndexOf(":");
-          run = await ownedRun(deps, owner, summary.runId, "act", { nodeId: key.slice(0, separator), iteration: Number(key.slice(separator + 1)) });
+          run = await ownedRun(deps, owner, summary.runId, "act", { nodeId: key.slice(0, separator), iteration: Number(key.slice(separator + 1)), gateId: approver.gateId });
           if (run) break;
         }
       }
@@ -1660,7 +1664,7 @@ export async function listWorkflowActionRequired(
         if (!canReadRun && gate.approver?.userId !== owner.userId) continue;
         const iteration = gate.iteration ?? 0;
         items.push({
-          id: `${summary.runId}:${gate.nodeId}:${iteration}`,
+          id: `${summary.runId}:${gate.gateId ?? `${gate.nodeId}:${iteration}`}`,
           runId: summary.runId,
           workflowId: run.params.workflowId,
           workflowName: names.get(run.params.workflowId) ?? run.params.workflowId,
@@ -1749,11 +1753,11 @@ function receiptField(effects: NodeCheckpoint["effects"], field: "threadId" | "q
  */
 /** The member a tool gate waits on, when the step would use their shared
  * account (`plugins/action-invoker.ts#sharedAccountApprover`). */
-function approverFromEffects(effects: unknown): { userId: string; name?: string; shareGeneration?: string } | undefined {
+function approverFromEffects(effects: unknown): { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true } | undefined {
   if (!effects || typeof effects !== "object" || !("approver" in effects)) return undefined;
   const raw = effects.approver;
   if (!raw || typeof raw !== "object" || !("userId" in raw) || typeof raw.userId !== "string") return undefined;
-  return { userId: raw.userId, ...("shareGeneration" in raw && typeof raw.shareGeneration === "string" ? { shareGeneration: raw.shareGeneration } : {}), ...("name" in raw && typeof raw.name === "string" ? { name: raw.name } : {}) };
+  return { userId: raw.userId, allowTeamConsent: "allowTeamConsent" in raw && raw.allowTeamConsent === true ? true : undefined, ...("shareGeneration" in raw && typeof raw.shareGeneration === "string" ? { shareGeneration: raw.shareGeneration } : {}), ...("name" in raw && typeof raw.name === "string" ? { name: raw.name } : {}) };
 }
 
 /** The members this parked run waits on to lend their accounts. */
@@ -1770,13 +1774,13 @@ function gatesOpen(run: { status: string }): boolean {
   return run.status === "parked" || run.status === "running";
 }
 
-async function pendingApprovers(deps: WorkflowServiceDeps, run: { runId: string; status: string; waitingOn: RunWaitCondition[] }): Promise<Map<string, { userId: string; name?: string; shareGeneration?: string }>> {
+async function pendingApprovers(deps: WorkflowServiceDeps, run: { runId: string; status: string; waitingOn: RunWaitCondition[] }): Promise<Map<string, { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true; gateId?: string }>> {
   const waits = gatesOpen(run) ? run.waitingOn.filter((w) => w.kind === "signal" && w.signalType.startsWith("approval:")) : [];
   if (waits.length === 0) return new Map();
-  const found = new Map<string, { userId: string; name?: string; shareGeneration?: string }>();
+  const found = new Map<string, { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true; gateId?: string }>();
   for (const cp of await deps.workflowStore.getCheckpoints(run.runId)) {
     const approver = cp.status === "intent" ? approverFromEffects(cp.effects) : undefined;
-    if (approver) found.set(`${cp.nodeId}:${cp.iteration}`, approver);
+    if (approver) found.set(`${cp.nodeId}:${cp.iteration}`, { ...approver, ...(typeof cp.effects?.gateId === "string" ? { gateId: cp.effects.gateId } : {}) });
   }
   return found;
 }
@@ -1792,7 +1796,7 @@ async function ownedRun(
   owner: WorkflowOwner,
   runId: string,
   scope: OwnerScope = "read",
-  approval?: { nodeId: string; iteration: number },
+  approval?: { nodeId: string; iteration: number; gateId?: string },
 ) {
   const run = await deps.workflowStore.getRun(runId);
   if (!run || !run.owner || !(await isAuthorizedForOwner(deps.db, owner, run.owner))) {
@@ -1813,13 +1817,14 @@ async function ownedRun(
     // Lending an account permits only the named gate decision, never run access.
     if (!approval || !person) return null;
     const approver = (await pendingApprovers(deps, run)).get(`${approval.nodeId}:${approval.iteration}`);
-    if (!approver || approver.userId !== viewer.userId) return null;
+    if (!approver || approver.userId !== viewer.userId || approver.gateId !== approval.gateId) return null;
   }
   return run;
 }
 
 export type ResolveApprovalOutcome =
   | "ok" | "not_found" | "not_parked" | "already_resolved" | "timed_out"
+  | "stale_gate"
   | "forbidden_always" | "forbidden_workflow" | "stale_workflow" | "org_mismatch" | "human_only"
   /** The gate asks to use another member's shared account; only they answer. */
   | "not_approver";
@@ -1949,6 +1954,8 @@ export async function retryWorkflowRun(
     // Event provenance also carries the private-channel audience.
     typeof run.params.input === "object" && run.params.input !== null
       && "type" in run.params.input && run.params.input.type === "event" ? "event" : "manual",
+    readToolScope(run.params.toolScope),
+    readToolScope(run.params.originToolScope),
   );
   if (!started) return "workflow_deleted";
   return started;
@@ -1980,16 +1987,17 @@ export async function resolveWorkflowApproval(
   input: {
     runId: string;
     nodeId: string;
+    gateId?: string;
     approved: boolean;
     note?: string;
-    scope?: "once" | "run" | "always" | "workflow";
+    scope?: "once" | "run" | "always" | "workflow" | "team_account";
     iteration?: number;
     /** "thread": a person answered the agent's card in a conversation. */
     via: "web" | "agent" | "thread";
   },
 ): Promise<ResolveApprovalOutcome> {
   const iter = input.iteration ?? 0;
-  const run = await ownedRun(deps, owner, input.runId, "act", { nodeId: input.nodeId, iteration: iter });
+  const run = await ownedRun(deps, owner, input.runId, "act", { nodeId: input.nodeId, iteration: iter, gateId: input.gateId });
   if (!run) return "not_found";
   const suffix = iter > 0 ? `:${iter}` : "";
   const signalType = `approval:${input.nodeId}${suffix}`;
@@ -2000,14 +2008,25 @@ export async function resolveWorkflowApproval(
   if (!wait || wait.kind !== "signal") return "not_parked";
   if (wait.timeoutAt !== undefined && Date.now() >= wait.timeoutAt) return "timed_out";
 
-  const existing = await deps.workflowStore.listSignals(input.runId, { unconsumed: true });
-  if (existing.some((s) => s.signalType === signalType)) return "already_resolved";
-
   // A step that would use another member's account answers to them, and
-  // their approval covers this run only.
-  const approver = (await pendingApprovers(deps, run)).get(`${input.nodeId}:${iter}`);
+  // Allow covers this run. Lasting consent requires a new explicit option.
+  const checkpoint = (await deps.workflowStore.getCheckpoints(input.runId)).find(cp => cp.nodeId === input.nodeId && cp.iteration === iter && cp.status === "intent");
+  const occurrenceId = typeof checkpoint?.effects?.gateId === "string" ? checkpoint.effects.gateId : undefined;
+  if (input.gateId !== occurrenceId) return "stale_gate";
+  const gateId = occurrenceId ?? signalType;
+  const approver = approverFromEffects(checkpoint?.effects);
+  // A lender's exception authorizes only their account gate. A legacy gate
+  // can advance without an occurrence ID, so recheck the action audience.
+  if (!approver && !(await ownedRun(deps, owner, input.runId, "act"))) return "not_found";
+  const existing = await deps.workflowStore.listSignals(input.runId, { unconsumed: true });
+  if (existing.some(s => s.signalType === signalType && matchesGateOccurrence(s, checkpoint?.effects))) return "already_resolved";
   if (approver && (owner.principal?.type === "team" || approver.userId !== owner.userId)) return "not_approver";
-  if (approver && input.scope !== undefined && input.scope !== "once") input = { ...input, scope: undefined };
+  if (input.scope === "team_account") {
+    if (!approver?.allowTeamConsent) return "not_approver";
+    if (!owner.humanAccountConsent || input.via !== "web" || owner.agentEditor) return "human_only";
+    if (!input.approved) input = { ...input, scope: undefined };
+  }
+  if (approver && input.scope !== undefined && input.scope !== "once" && input.scope !== "team_account") input = { ...input, scope: undefined };
 
   const orgId = await definitionOrgId(deps.db, run.params.workflowId);
   if (orgId === null || !(await isOrgMember(deps.db, orgId, owner.userId))) return "org_mismatch";
@@ -2041,7 +2060,7 @@ export async function resolveWorkflowApproval(
     resolvedBy: owner.userId,
     scope: input.scope,
   };
-  const signalId = `approval:${input.nodeId}${suffix}:resolution`;
+  const signalId = `${gateId}${approver?.allowTeamConsent ? `:account:${approver.shareGeneration ?? "legacy"}` : ""}:resolution`;
   const signal = {
     runId: input.runId,
     signalId,
@@ -2052,6 +2071,7 @@ export async function resolveWorkflowApproval(
       note: input.note,
       scope: input.scope,
       resolvedVia: input.via,
+      ...(checkpoint?.effects?.gateId ? { gateId } : {}),
     },
     createdAt: Date.now(),
   };
@@ -2085,7 +2105,7 @@ export async function resolveWorkflowApproval(
         const service = deps.actionPluginByService?.get(node.service)?.actionPlugin.credentialService ?? node.service;
         if (!approver.shareGeneration) throw new Error("This approval is stale. Request account approval again.");
         if (run.owner?.ownerType !== "team") throw new Error("The team is unavailable. Request account approval again.");
-        await writeBorrowGrant(tx, orgId, { teamId: run.owner.ownerId, shareGeneration: approver.shareGeneration, sessionId: `wf:${input.runId}`, service, memberId: approver.userId });
+        await writeBorrowGrant(tx, orgId, { teamId: run.owner.ownerId, shareGeneration: approver.shareGeneration, consentScope: input.scope === "team_account" ? "team" : undefined, sessionId: `wf:${input.runId}`, service, memberId: approver.userId });
       }
       if (input.approved && isPolicyGate && input.scope === "run") {
         const service = typeof node.service === "string" ? node.service : "";
@@ -2094,7 +2114,7 @@ export async function resolveWorkflowApproval(
         await writeExecutionGrant(tx, input.runId, { orgId, service, actionId, grantedBy: owner.userId, now: Date.now() });
       }
       if (isPolicyGate) {
-        await tx.update(actionInvocations).set({ status: input.approved ? "approved" : "denied", resolvedBy: owner.userId })
+        await tx.update(actionInvocations).set({ status: input.approved ? input.scope === "team_account" ? "pending" : "approved" : "denied", resolvedBy: input.scope === "team_account" ? null : owner.userId })
           .where(and(eq(actionInvocations.orgId, orgId), eq(actionInvocations.invocationId, `pol:wf:workflow:${input.runId}:${input.nodeId}${suffix}`)));
       }
       await tx.update(workflowRuns).set({ wakeRequested: true }).where(eq(workflowRuns.id, input.runId));
@@ -2143,7 +2163,11 @@ async function projectWorkflowRun(
   const pendingGates: WorkflowPendingGate[] = [];
   // Keep consumed answers too: the drive can consume a sibling's answer
   // before it replaces waitingOn. That gate must not appear pending again.
-  const answered = new Set(signals.map((sig) => sig.signalType));
+  const answered = new Set(signals.filter(sig => {
+    const current = checkpoints.find(cp => cp.status === "intent"
+      && sig.signalType === `approval:${cp.nodeId}${cp.iteration > 0 ? `:${cp.iteration}` : ""}`);
+    return !current || matchesGateOccurrence(sig, current.effects);
+  }).map(sig => sig.signalType));
   for (const w of run.waitingOn) {
     if (w.kind !== "signal" || !w.signalType.startsWith("approval:") || answered.has(w.signalType)) continue;
 
@@ -2178,7 +2202,11 @@ async function projectWorkflowRun(
         waitingSince: intentCp?.createdAt ?? run.updatedAt,
       };
       if (iteration !== undefined) gate.iteration = iteration;
-      if (typeof node.service === "string") gate.service = node.service;
+      if (typeof effects?.gateId === "string") gate.gateId = effects.gateId;
+      if (typeof node.service === "string") {
+        gate.service = node.service;
+        gate.serviceDisplayName = deps.actionPluginByService?.get(node.service)?.actionPlugin.displayName;
+      }
       if (typeof node.action === "string") gate.action = node.action;
       if (node.onDeny === "fail" || node.onDeny === "skip") gate.onDeny = node.onDeny;
       if (typeof w.timeoutAt === "number") gate.timeoutAt = w.timeoutAt;

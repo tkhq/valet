@@ -655,6 +655,15 @@ describe("api integration: artifact pages", () => {
       const added = (await add.json()) as AddArtifactCommentResponse;
       expect(added.sent).toBe(true);
       expect(added.comment.sentToSession).toBe(sessionId);
+      const items = [
+        ...await api.providers.engineStore.listUnsettledSubmissions(sessionId),
+        ...await api.providers.engineStore.listSettledSubmissionsBefore(sessionId, Date.now() + 1),
+      ];
+      const queued = items.find(item => {
+        const text = typeof item.content === "string" ? item.content : "text" in item.content ? item.content.text : undefined;
+        return text?.includes("Add a per-region breakdown");
+      });
+      expect(queued?.author).toMatchObject({ id: "local-user", interactive: true });
 
       // `sent: true` + `sentToSession` IS the delivery contract: the route
       // returns them only after `submitSessionPrompt` hands back a queue

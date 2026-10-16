@@ -112,6 +112,9 @@ function TeamShareRow({
       <div className="min-w-0">
         <p className="truncate text-sm text-ink">{team.name}</p>
         {context && <p className="text-xs text-muted">{context}</p>}
+        {myRow?.borrowConsentAt != null && !myRow.referenceBroken && (
+          <p className="text-xs text-muted">Account use stays allowed for this team. Stop sharing revokes it. Action approvals still apply.</p>
+        )}
         {myRow?.referenceBroken && (
           <p className="text-xs text-danger-500">Broken. Reconnect {title}, then share again.</p>
         )}

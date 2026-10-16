@@ -67,6 +67,8 @@ export interface PluginAction<TParams extends TSchema = TSchema> {
   name: string;
   description: string;
   riskLevel: RiskLevel;
+  /** Each call requires the verified prompt author's one-shot consent, regardless of policy allows or grants. */
+  approvalScope?: "actor";
   parameters: TParams;
   execute: (
     args: Static<TParams>,
@@ -452,6 +454,7 @@ function approvalGateRequest(
   args: Record<string, unknown> | undefined,
   summary: string,
   resumeKey: string,
+  ctx: ToolContext,
 ): DecisionGateRequest {
   return {
     type: "approval",
@@ -470,8 +473,15 @@ function approvalGateRequest(
       // Approvals are not sticky (`findStickyTerminalGate`): a later call
       // opens a new gate. The policy path clears this for a borrow gate.
       oneShot: true,
+      ...(entry.action.approvalScope === "actor" && ctx.interactiveActor
+        ? { approver: { userId: ctx.interactiveActor.id } } : {}),
     },
   };
+}
+
+function approvalActorMatches(entry: CatalogEntry, ctx: ToolContext, resolution: DecisionResolution): boolean {
+  return entry.action.approvalScope !== "actor" ||
+    (ctx.interactiveActor !== undefined && resolution.resolvedBy === ctx.interactiveActor.id);
 }
 
 /**
@@ -507,6 +517,7 @@ export async function resolveUngatedAction(
   if (ctx.externalSender || !actionInScope(ctx.toolScope, actionId)) return undefined;
   const entry = catalog.byId.get(actionId);
   if (!entry) return undefined;
+  if (entry.action.approvalScope === "actor") return undefined;
   const availability = await checkServiceAvailability(catalog, entry.service, entry.plugin.requiresCredential === true);
   if (availability.unavailable || availability.error) return undefined;
   const grant = { service: entry.service, actionId: qualifiedId(entry), riskLevel: entry.action.riskLevel, params };
@@ -633,6 +644,11 @@ export async function invokeAction(
     if (outcome) return outcome;
   }
 
+  const actorApproval = entry.action.approvalScope === "actor";
+  if (actorApproval && (ctx.externalSender || !ctx.interactiveActor || ctx.interactiveActor.id !== ctx.userId)) {
+    return { kind: "error", message: "This action requires a verified interactive author. Ask for it in a signed-in browser session." };
+  }
+
   const resolver = ctx.policyResolver;
   // Deterministic per-(tool_id, args) key — identical to the resumeKey handed
   // to ctx.requestDecision when a gate opens for this call. Recorded on every
@@ -651,10 +667,10 @@ export async function invokeAction(
     const approvalMode = approvalModeFor(entry);
     if (approvalMode === "deny") return { kind: "denied-policy" };
     if (approvalMode === "require_approval" && ctx.externalSender) return { kind: "denied-external-sender" };
-    if (approvalMode === "require_approval") {
+    if (approvalMode === "require_approval" || actorApproval) {
       const gateOutcome = await requestApprovalDecision(
         ctx,
-        approvalGateRequest(entry, actionId, args, summary, resumeKey),
+        approvalGateRequest(entry, actionId, args, summary, resumeKey, ctx),
       );
       if (gateOutcome.kind === "expired") return { kind: "expired-approval" };
       const resolution = gateOutcome.resolution;
@@ -662,6 +678,7 @@ export async function invokeAction(
       // yet been decided — distinct from an outright deny.
       if (resolution.actionId === "pending") return { kind: "pending-approval" };
       if (resolution.actionId !== "approve") return { kind: "denied-approval" };
+      if (!approvalActorMatches(entry, ctx, resolution)) return { kind: "denied-approval" };
       const availability = await checkServiceAvailability(
         catalog,
         entry.service,
@@ -746,6 +763,10 @@ export async function invokeAction(
     return { kind: "denied-policy" };
   }
 
+  // Policy allows and stored grants cannot replace the current author's consent.
+  // Actor gates accept one-shot answers only and cannot create lasting grants.
+  if (actorApproval) decision = { ...decision, mode: "require_approval", extraGateActions: undefined };
+
   // Populated only when a gate actually opens below (require_approval), so
   // the terminal audit record can carry it — absent for allow/deny.
   let gateOrdinal: number | undefined;
@@ -780,8 +801,10 @@ export async function invokeAction(
     // Pass `approves` through to the gate — DecisionAction persists it on
     // the row so denial stickiness classifies host rejection actions the
     // same way isApprovedResolution does.
-    const extras: DecisionAction[] = decision.approver ? [] : decision.extraGateActions ?? [];
-    const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey);
+    const extras: DecisionAction[] = decision.approver
+      ? decision.approver.allowTeamConsent ? (decision.extraGateActions ?? []).filter(a => a.id === "always_allow_account") : []
+      : decision.extraGateActions ?? [];
+    const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey, ctx);
     if (decision.approver?.shareGeneration) {
       const share = `:share:${decision.approver.shareGeneration}`;
       baseReq.dedupeKey = `${qualifiedId(entry)}${share}`;
@@ -792,7 +815,7 @@ export async function invokeAction(
     const borrowScope = ctx.sessionId.startsWith("wf:") ? "workflow run" : "thread";
     const label = entry.plugin.displayName ?? entry.service;
     const borrowed = decision.approver
-      ? { title: `Let a teammate use your ${label} account?`, body: `${summary}\n\nValet would use your ${label} account for "${entry.action.name}". If you allow it, later ${label} actions in this ${borrowScope} can use it too, including ones other teammates ask for. Only you can answer.` }
+      ? { title: `Let a teammate use your ${label} account?`, body: `${summary}\n\nValet would use your ${label} account for "${entry.action.name}". If you allow it, later ${label} actions in this ${borrowScope} can use it too, including ones other teammates ask for. Only you can answer.${decision.approver.allowTeamConsent ? " Always allow for this team covers future threads and runs until you choose Stop sharing in Integrations. Action approvals still apply." : ""}` }
       : {};
     const gateOutcome = await requestApprovalDecision(ctx, {
       ...baseReq,
@@ -828,8 +851,10 @@ export async function invokeAction(
     gateOrdinal = resolution.gateOrdinal;
     // onResolution is awaited BEFORE the outcome is interpreted; a throw
     // fails the approval closed (treated as not-approved).
+    const approverMatches = approvalActorMatches(entry, ctx, resolution);
+    const oneShotResolution = !actorApproval || resolution.actionId === "approve" || resolution.actionId === "deny";
     let onResolutionThrew = false;
-    if (resolver.onResolution) {
+    if (resolver.onResolution && approverMatches && oneShotResolution) {
       try {
         await resolver.onResolution(input, decision, resolution);
       } catch {
@@ -837,7 +862,7 @@ export async function invokeAction(
       }
     }
     const approved =
-      !onResolutionThrew && isApprovedResolution(resolution, decision.extraGateActions);
+      approverMatches && oneShotResolution && !onResolutionThrew && isApprovedResolution(resolution, decision.extraGateActions);
     if (!approved) {
       emitInvocation(resolver, {
         ...baseRecord,
@@ -849,6 +874,10 @@ export async function invokeAction(
       return onResolutionThrew
         ? { kind: "denied-approval", reason: "approval-processing-failed" }
         : { kind: "denied-approval" };
+    }
+    if (decision.approver && resolution.actionId === "always_allow_account") {
+      // Account consent never grants the action's separate policy permission.
+      return invokeAction(catalog, actionId, args, ctx, summary);
     }
     const availability = await checkServiceAvailability(
       catalog,

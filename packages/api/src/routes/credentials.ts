@@ -64,10 +64,11 @@ import { mutateTeamOnePassword } from "../services/team-onepassword-token.js";
 import { isDeniedCredentialService } from "../services/credential-resolution.js";
 import { mapOnePasswordError } from "./_onepassword-errors.js";
 import { canAdministerTeam, canViewTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
-import { isDeadConnection } from "../services/credential-resolution.js";
+import { isDeadConnection, isUnusableOAuthCredential } from "../services/credential-resolution.js";
 import { deleteSharesFrom, listShareTeamsFrom, listTeamShares, revokeShare, shareCredential } from "../services/credential-shares.js";
 import { GITHUB_CREDENTIAL_SERVICE, checkGithubUserRow, isUsableGithubUserRow } from "../services/github-tokens.js";
 import { credentials } from "../schema/index.js";
+import { deriveSecretKey, decryptSecret } from "../lib/secret-crypto.js";
 import { serviceDisplayName } from "../lib/service-display-name.js";
 import type {
   CredentialSummary,
@@ -117,26 +118,28 @@ function usableByTeamRead(stored: StoredCredential): boolean {
  *   skips it, so it is never renewed and never `isDeadConnection`. A dead
  *   row does not count: members reconnect it instead of sharing.
  *
- * Takes the raw row, so a non-GitHub check reads no secret and refreshes
- * no token.
+ * Takes the raw row and refreshes no token. An encrypted empty refresh
+ * token has the same meaning as a missing refresh token.
  */
-async function teamRowUnusable(
-  engineCredentials: CredentialStore,
-  teamId: string,
-  row: { service: string; type: string; expiresAt: number | null; refreshTokenEnc: string | null; metadata: unknown },
+function teamRowUnusable(
+  encryptionKey: string,
+  row: typeof credentials.$inferSelect,
   now: number,
-): Promise<boolean> {
+): boolean {
   if (row.service !== GITHUB_CREDENTIAL_SERVICE) {
-    return row.type === "oauth2" && row.refreshTokenEnc === null && row.expiresAt !== null && row.expiresAt <= now
-      && !isDeadConnection(row, now);
+    const refreshToken = row.refreshTokenEnc ? decryptSecret(row.refreshTokenEnc, deriveSecretKey(encryptionKey)) : undefined;
+    return isUnusableOAuthCredential({ ...row, refreshTokenEnc: undefined, refreshToken }, now);
   }
-  const stored = await engineCredentials.get({ type: "team", id: teamId }, GITHUB_CREDENTIAL_SERVICE);
-  if (!stored) return true;
-  if (onePasswordMeta(stored) !== null) return false;
-  return !isUsableGithubUserRow(
-    { accessToken: credentialSecret(stored), refreshToken: stored.refreshToken, expiresAt: stored.expiresAt, metadata: stored.metadata },
-    now,
-  );
+  const metadata = fromJsonbColumn<Record<string, unknown>>(row.metadata);
+  if (onePasswordMeta({ type: row.type, metadata }) !== null) return false;
+  const key = deriveSecretKey(encryptionKey);
+  const secret = row.accessTokenEnc ?? row.apiKeyEnc;
+  return !isUsableGithubUserRow({
+    accessToken: secret ? decryptSecret(secret, key) : undefined,
+    refreshToken: row.refreshTokenEnc ? decryptSecret(row.refreshTokenEnc, key) : undefined,
+    expiresAt: row.expiresAt ?? undefined,
+    metadata,
+  }, now);
 }
 
 /**
@@ -185,6 +188,38 @@ async function resyncTeamWorkflows(c: Context<AppEnv>, teamIds: Iterable<string>
   for (const teamId of new Set(teamIds)) {
     await c.var.providers.contentSync.resyncTeamWorkflowSources(teamId);
   }
+}
+
+async function persistCredential(
+  c: Context<AppEnv>, owner: CredentialOwner, service: string,
+  credential: StoredCredential, createOnly: boolean,
+): Promise<Response | undefined> {
+  const { db, engineCredentials, encryptionKey } = c.var.providers;
+  const user = c.var.user;
+  if (owner.type === "team") {
+    const outcome = await db.transaction(async (tx) => {
+      const role = await lockTeamCredentialRole(tx, { orgId: user.orgId, userId: user.id, teamId: owner.id });
+      if (!role || (role === "member" && !createOnly)) return "access_changed";
+      if (createOnly) {
+        const inserted = await insertCredentialIfAbsent(tx, encryptionKey, owner, service, credential);
+        if (inserted) await invalidateWorkflowSources(tx, { teamId: owner.id });
+        return inserted ? "created" : "exists";
+      }
+      await replaceCredential(tx, encryptionKey, owner, service, credential);
+      await invalidateWorkflowSources(tx, { teamId: owner.id });
+      return "created";
+    });
+    if (outcome === "access_changed") {
+      return c.json({ error: "Team access changed. Ask a team admin to restart the connection." }, 404);
+    }
+    if (outcome === "exists") {
+      return c.json({ error: "This team already has a connection for this service. Ask a team admin to remove it, then connect again." }, 409);
+    }
+  } else {
+    await engineCredentials.save(owner, service, credential);
+  }
+
+  return undefined;
 }
 
 function isCredentialKind(type: StoredCredential["type"]): type is PutCredentialRequest["type"] {
@@ -280,7 +315,7 @@ async function toSummary(
   service: string,
   stored: StoredCredential,
   connectedAt: string,
-  extra?: { delegatedFrom?: string; referenceBroken?: boolean; unusable?: boolean },
+  extra?: { delegatedFrom?: string; referenceBroken?: boolean; unusable?: boolean; borrowConsentAt?: number },
 ): Promise<CredentialSummary | null> {
   if (!isCredentialKind(stored.type)) return null;
   const metadata = stored.metadata;
@@ -332,7 +367,7 @@ credentialsRouter.get("/", async (c) => {
         },
         new Date(row.createdAt).toISOString(),
         // The share pickers read this to agree with the delegate route.
-        (await teamRowUnusable(engineCredentials, owner.id, row, Date.now())) ? { unusable: true } : undefined,
+        teamRowUnusable(c.var.providers.encryptionKey, row, Date.now()) ? { unusable: true } : undefined,
       );
       if (summary) listed.push(summary);
     }
@@ -344,7 +379,7 @@ credentialsRouter.get("/", async (c) => {
       // resolve. A personal-scope reference has one the team read cannot use.
       const referenceBroken = !source || (!rowHasSecret(source) && !usableByTeamRead(source));
       const summary = await toSummary(share.service, source ?? { type: "api_key" }, new Date(share.createdAt).toISOString(),
-        { delegatedFrom: share.userId, referenceBroken });
+        { delegatedFrom: share.userId, referenceBroken, ...(share.borrowConsentAt != null && !referenceBroken ? { borrowConsentAt: share.borrowConsentAt } : {}) });
       if (summary) listed.push(summary);
     }
     return c.json({ credentials: listed } satisfies ListCredentialsResponse);
@@ -563,7 +598,8 @@ credentialsRouter.put("/:service", async (c) => {
       const rejected = await verifySlackCredential(c, scope, credential, resolved);
       if (rejected) return rejected;
     }
-    await engineCredentials.save(owner, service, credential);
+    const saveError = await persistCredential(c, owner, service, credential, false);
+    if (saveError) return saveError;
     await refreshCredentialReadiness(c.var.providers, owner, service);
     const resp: PutCredentialResponse = { ok: true };
     return c.json(resp);
@@ -606,28 +642,8 @@ credentialsRouter.put("/:service", async (c) => {
     if (rejected) return rejected;
   }
 
-  if (owner.type === "team") {
-    const outcome = await db.transaction(async (tx) => {
-      const role = await lockTeamCredentialRole(tx, { orgId: user.orgId, userId: user.id, teamId: owner.id });
-      if (!role || (role === "member" && !body.createOnly)) return "access_changed";
-      if (body.createOnly) {
-        const inserted = await insertCredentialIfAbsent(tx, c.var.providers.encryptionKey, owner, service, credential);
-        if (inserted) await invalidateWorkflowSources(tx, { teamId: owner.id });
-        return inserted ? "created" : "exists";
-      }
-      await replaceCredential(tx, c.var.providers.encryptionKey, owner, service, credential);
-      await invalidateWorkflowSources(tx, { teamId: owner.id });
-      return "created";
-    });
-    if (outcome === "access_changed") {
-      return c.json({ error: "Team access changed. Ask a team admin to restart the connection." }, 404);
-    }
-    if (outcome === "exists") {
-      return c.json({ error: "This team already has a connection for this service. Ask a team admin to remove it, then connect again." }, 409);
-    }
-  } else {
-    await engineCredentials.save(owner, service, credential);
-  }
+  const saveError = await persistCredential(c, owner, service, credential, body.createOnly === true);
+  if (saveError) return saveError;
 
   await refreshCredentialReadiness(c.var.providers, owner, service);
 
@@ -742,31 +758,29 @@ credentialsRouter.post("/:service/delegate", async (c) => {
   // is repaired in place, which any member may do. A row no run uses
   // (`teamRowUnusable`) blocks nothing: runs skip it or get the provider's
   // refusal, and Team Integrations offers no reconnect for it.
-  const [teamRow] = await db
-    .select({
-      service: credentials.service, type: credentials.type, expiresAt: credentials.expiresAt,
-      refreshTokenEnc: credentials.refreshTokenEnc, metadata: credentials.metadata,
-    })
-    .from(credentials)
-    .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, body.teamId), eq(credentials.service, service)))
-    .limit(1);
-  if (teamRow && !(await teamRowUnusable(engineCredentials, body.teamId, teamRow, Date.now()))) {
-    return c.json(
-      {
-        error: isDeadConnection(teamRow, Date.now())
-          ? `${team.name}'s own ${label} connection stopped working. Reconnect it in the team's Integrations instead of sharing your own.`
-          : `${team.name} already has its own ${label} connection, and teammates use it. ` +
-            `To use your account instead, ask a team admin to remove the team's ${label} connection, then share yours.`,
-      },
-      409,
-    );
-  }
-  // Each member keeps their own share, so sharing never displaces another
-  // member's account.
-  await db.transaction(async (tx) => {
+  const outcome = await db.transaction(async (tx) => {
+    const role = await lockTeamCredentialRole(tx, { orgId: user.orgId, userId: user.id, teamId: body.teamId });
+    // Sharing requires actual team membership, including for an org admin.
+    if (!role || !(await isTeamMember(tx, body.teamId, user.id))) return { kind: "access_changed" as const };
+    const [teamRow] = await tx.select().from(credentials).where(and(
+      eq(credentials.ownerType, "team"), eq(credentials.ownerId, body.teamId), eq(credentials.service, service),
+    )).limit(1);
+    if (teamRow && !teamRowUnusable(c.var.providers.encryptionKey, teamRow, Date.now())) {
+      return { kind: "blocked" as const, dead: isDeadConnection(teamRow, Date.now()) };
+    }
     await shareCredential(tx, { teamId: body.teamId, service, userId: user.id, createdAt: Date.now() });
     await invalidateWorkflowSources(tx, { teamId: body.teamId });
+    return { kind: "shared" as const };
   });
+  if (outcome.kind === "access_changed") return c.json({ error: "Team access changed. Ask a team admin to restore your membership, then share again." }, 404);
+  if (outcome.kind === "blocked") {
+    return c.json({
+      error: outcome.dead
+        ? `${team.name}'s own ${label} connection stopped working. Reconnect it in the team's Integrations instead of sharing your own.`
+        : `${team.name} already has its own ${label} connection, and teammates use it. ` +
+          `To use your account instead, ask a team admin to remove the team's ${label} connection, then share yours.`,
+    }, 409);
+  }
   await resyncTeamWorkflows(c, [body.teamId]);
   const resp: DelegateCredentialResponse = { ok: true };
   return c.json(resp, 201);

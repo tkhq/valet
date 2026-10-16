@@ -299,7 +299,10 @@ export async function readTeamCredential(
   const fromShare = async (memberId: string) => {
     const row = await deps.credentials.get({ type: "user", id: memberId }, service);
     const credential = await resolveRow(deps, row, { ...readCtx, userId: memberId }, "resolve");
-    if (!credential) brokenShare = true;
+    if (!credential || isUnusableOAuthCredential(credential, Date.now())) {
+      brokenShare = true;
+      return null;
+    }
     return credential;
   };
 
@@ -313,7 +316,7 @@ export async function readTeamCredential(
   // and members' shares, still asking a share's member first. It stays the
   // last answer, so with nothing else the caller gets the provider's refusal.
   const deadTeam = fromTeam && isDeadConnection(fromTeam, Date.now()) ? fromTeam : null;
-  if (fromTeam && !deadTeam) return { credential: fromTeam };
+  if (fromTeam && !deadTeam && !isUnusableOAuthCredential(fromTeam, Date.now())) return { credential: fromTeam };
   if (orgFallback !== "none") {
     if (orgFallback === "org-provided") {
       const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
@@ -340,6 +343,16 @@ export async function readTeamCredential(
   // A share whose member left their account unusable: name the fix.
   if (brokenShare) throw new CredentialReferenceBrokenError(service);
   return { credential: null };
+}
+
+/** An expired OAuth token without a refresh token cannot answer a run.
+ * Supports stored credentials and raw rows without reading their secrets. */
+export function isUnusableOAuthCredential(
+  row: { type: string; expiresAt?: number | null; refreshToken?: string; refreshTokenEnc?: string | null; metadata?: unknown },
+  now: number,
+): boolean {
+  return row.type === "oauth2" && typeof row.expiresAt === "number" && row.expiresAt <= now
+    && !row.refreshToken && !row.refreshTokenEnc && !isDeadConnection(row, now);
 }
 
 /**

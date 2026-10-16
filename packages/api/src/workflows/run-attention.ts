@@ -24,7 +24,7 @@ import { readToolScope } from "@valet/shared";
 import { runEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
 import { eq } from "drizzle-orm";
 import type { SessionStore } from "@valet/engine";
-import type { NodeCheckpoint, OnApprovalParked, OnRunSettled, WorkflowRun, WorkflowStore } from "@valet/workflow";
+import type { NodeCheckpoint, OnApprovalParked, OnApprovalPending, OnRunSettled, WorkflowRun, WorkflowStore } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
 import { ensureAssistantRuntime, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
@@ -35,6 +35,36 @@ import { workflowRunThreadKey } from "./engine-deps.js";
 
 export function workflowApprovalHref(runId: string, nodeId: string): string {
   return `/workflows/runs/${encodeURIComponent(runId)}?gate=${encodeURIComponent(nodeId)}`;
+}
+
+/** Routes an account gate to its lender and other gates to the run's audience. */
+export function buildRunApprovalAttention(deps: {
+  db: AppDb;
+  store: Pick<WorkflowStore, "getRun">;
+  channels?: AttentionChannelDeliverer[];
+  access?: AttentionDeps["access"];
+}): OnApprovalPending {
+  return async info => {
+    try {
+      const run = await deps.store.getRun(info.runId);
+      const owner = principalFromOwner(run?.owner);
+      if (!owner) return;
+      const channel = run && !run.params.origin ? runEventChannel(run.params) : undefined;
+      await routeAttention({ db: deps.db, channels: deps.channels, access: deps.access }, {
+        kind: "approval",
+        owner: info.approver ? { type: "user", id: info.approver.userId } : owner,
+        ...(run?.params.origin && !info.approver ? { sessionId: run.params.origin.assistantSessionId, threadId: run.params.origin.threadId } : {}),
+        ...(channel ? { audienceKey: slackEventsThreadKey(channel) } : {}),
+        title: info.summary ?? info.prompt ?? `Approval needed: ${info.service ?? "?"}.${info.action ?? "?"}`,
+        body: info.kind === "policy_gate" ? `Workflow run ${info.runId} is paused on ${info.nodeId}.` : info.summary ? info.prompt : undefined,
+        href: workflowApprovalHref(info.runId, info.nodeId),
+        dedupeKey: `${info.runId}:${info.gateId ?? `${info.nodeId}${info.iteration !== undefined && info.iteration > 0 ? `:${info.iteration}` : ""}`}`,
+      });
+    } catch (err) {
+      // A failed notification must not prevent the run from parking.
+      console.error(`workflow approval notification failed for ${info.runId}:${info.nodeId}`, err);
+    }
+  };
 }
 
 export interface RunSettledAttentionDeps {
@@ -201,11 +231,14 @@ async function signalOrigin(
   const { thread, priorQueueItemId } = await resolveWorkflowReportTarget(deps,
     { type: assistant.ownerType, id: assistant.ownerId }, meta, source.session, sourceThread, dispatchId);
   if (priorQueueItemId) return;
+  // Execution inherits focus; reports inherit only the origin's authorization ceiling.
+  // Older runs did not record that ceiling, so retain their execution restriction.
+  const toolScope = run.params.originToolScope ?? run.params.toolScope;
   await thread.submitPrompt({ kind: "signal", ...(await signal()) }, { dispatchId, queueMode: "followup",
     // Continue with the starting member's authority, including private run evidence.
     // Signal turns remain non-interactive in the engine and retain normal access checks.
     author: { id: actorUserId, name: "Valet" },
-    ...(run.params.toolScope !== undefined ? { metadata: { toolScope: readToolScope(run.params.toolScope) } } : {}),
+    ...(toolScope !== undefined ? { metadata: { toolScope: readToolScope(toolScope) } } : {}),
   });
 }
 

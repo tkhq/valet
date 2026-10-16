@@ -64,6 +64,33 @@ it("reports a settled run to the thread that started it, once", async () => {
   expect((await api.providers.engineStore.listUnsettledSubmissions(sessionId)).filter((item) => item.threadId === thread.id)).toHaveLength(1);
 });
 
+it.each([
+  { name: "legacy execution restriction", originToolScope: undefined, expected: { actions: ["workflows.get_run"] } },
+  { name: "captured unrestricted origin", originToolScope: {}, expected: {} },
+  { name: "captured deny-all origin", originToolScope: { tools: [], actions: [] }, expected: { tools: [], actions: [] } },
+])("retains the $name in approval and completion reports", async ({ originToolScope, expected }) => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const { session, sessionId } = await ensureDefaultAssistantSession(p, { type: "user", id: "local-user" },
+    { actorUserId: "local-user", orgId: "local-org" });
+  const thread = await session.createThread("web:report-ceiling");
+  await thread.pause();
+  const run: WorkflowRun = {
+    runId: "run-ceiling", status: "settled", outcome: "failed", waitingOn: [], updatedAt: 2, attempt: 1, wakeRequested: false, createdAt: 1,
+    definition: { version: "dag/v1" }, definitionVersionId: "v1", actorUserId: "local-user",
+    params: { workflowId: "wf-1", definitionVersionId: "v1", toolScope: { actions: ["workflows.get_run"] },
+      ...(originToolScope !== undefined ? { originToolScope } : {}), origin: { assistantSessionId: sessionId, threadId: thread.id } },
+  };
+  const deps = { db: p.db, engineHost: p.engineHost,
+    store: { getRun: async () => run, getCheckpoints: async () => [] } };
+  await buildRunApprovalReport(deps)({ runId: run.runId, attempt: 1 });
+  await buildRunApprovalReport(deps)({ runId: run.runId, attempt: 2 });
+  await buildRunOriginReport(deps)({ runId: run.runId, workflowId: "wf-1", outcome: "failed", settledAt: 2 });
+  const queued = (await p.engineStore.listUnsettledSubmissions(sessionId)).filter(item => item.threadId === thread.id);
+  expect(queued).toHaveLength(3);
+  expect(queued.map(item => item.metadata?.toolScope)).toEqual([expected, expected, expected]);
+});
+
 it.each(["app-assistant:local-user", "slack:C_PRIVATE:1.2"])("reports a legacy team origin settlement inside its isolated %s audience", async (key) => {
   api = await bootTestApi();
   const p = api.providers;

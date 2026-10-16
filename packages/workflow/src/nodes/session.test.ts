@@ -384,14 +384,14 @@ describe('executeSession: schema validation failure triggers exactly one repair'
     expect(repairText).toContain('Reuse prior successful tool results');
     expect(repairText).toContain('Do not repeat actions with side effects');
     expect(repairText).toContain('Do not invent empty arrays');
-    expect(repairText).toContain('Incomplete work is not a blocking failure');
-    expect(repairText).toContain('existing allowed tools');
-    expect(repairText).toContain('continue it before returning the complete output');
-    expect(repairText).toContain('original scope, permissions, constraints, and approval boundaries');
-    expect(repairText).toContain('Do not repeat completed actions or automatically replay side effects');
-    expect(repairText).toContain('genuinely failed or is blocked');
-    expect(repairText).toContain('report that failure truthfully');
-    expect(repairText).toContain('JSON-only applies to the final answer, not intervening authorized tool calls');
+    expect(repairText).toContain('If work remains incomplete but actionable');
+    expect(repairText).toContain('using available read tools');
+    expect(repairText).toContain('before returning the result');
+    expect(repairText).toContain('remaining authorized work');
+    expect(repairText).toContain('Reuse completed work and do not repeat side effects');
+    expect(repairText).toContain('If a genuine blocker prevents completion');
+    expect(repairText).toContain('report it truthfully');
+    expect(repairText).toContain('JSON-only applies to your final reply, not to intervening tool use');
     const primary = calls.find((call) => call.kind === 'prompt' && call.dispatchId === 'workflow:run-7:s');
     expect(String(primary?.text)).toContain(JSON.stringify(outputSchema));
     expect(String(primary?.text)).toContain('End it with one fenced ```json block');
@@ -685,8 +685,8 @@ describe('executeSession: actionable repair through the real engine', () => {
       (context) => {
         const last = context.messages.at(-1);
         const prompt = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content);
-        expect(prompt).toContain('continue it before returning the complete output');
-        expect(prompt).toContain('JSON-only applies to the final answer, not intervening authorized tool calls');
+        expect(prompt).toContain('before returning the result');
+        expect(prompt).toContain('JSON-only applies to your final reply, not to intervening tool use');
         expect(JSON.stringify(context.messages)).toContain('alpha: inspected');
         return fauxAssistantMessage([fauxToolCall('inspect_repo', { repo: 'beta' }, { id: 'beta' })], { stopReason: 'toolUse' });
       },

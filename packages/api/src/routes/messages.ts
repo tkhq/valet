@@ -1,3 +1,4 @@
+import { readAppPageHint, type AppPageHint } from "@valet/shared";
 /**
  * Messages + threads routes — the agent loop entry points.
  *
@@ -26,7 +27,7 @@ import {
   ValidationError,
 } from "@valet/engine";
 import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@valet/engine";
-import { isAgentCaller, type RequestPrincipal } from "../lib/request-principal.js";
+import { isAgentCaller, type AuthVia, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
 import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
@@ -208,9 +209,10 @@ export function promptAuthorFromUser(user: {
   id: string;
   email: string;
   name?: string;
-}, principal?: RequestPrincipal): PromptAuthor {
+}, principal?: RequestPrincipal, authVia?: AuthVia): PromptAuthor {
   if (principal?.type === "team") return { id: `team:${principal.id}`, name: "Team API key" };
-  return { id: user.id, email: user.email, ...(user.name ? { name: user.name } : {}) };
+  return { id: user.id, email: user.email, ...(user.name ? { name: user.name } : {}),
+    ...(authVia === "session" || authVia === "stub" ? { interactive: true } : {}) };
 }
 
 /**
@@ -998,6 +1000,7 @@ export async function submitSessionPrompt(
   text: string,
   opts?: {
     threadId?: string;
+    appPageHint?: AppPageHint;
     attachments?: SendPromptRequest["attachments"];
     fileRefs?: SendPromptRequest["fileRefs"];
     queueMode?: "followup" | "steer";
@@ -1135,7 +1138,10 @@ export async function submitSessionPrompt(
     outcome?.kind === "expand" && outcome.skill
       ? { skill: outcome.skill.source.name, skillArgs: outcome.skill.args }
       : undefined;
+  const appPageHint = author && !author.externalSender && thread.key === `app-assistant:${author.id}`
+    ? readAppPageHint(opts?.appPageHint) : undefined;
   const continuationMetadata = {
+    ...(appPageHint ? { appPageHint } : {}),
     ...(opts?.toolScope ? { [TOOL_SCOPE_KEY]: opts.toolScope } : {}),
     ...(opts?.inheritToolScope ? { [INHERIT_TOOL_SCOPE_KEY]: true } : {}),
   };
@@ -1291,11 +1297,12 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
     // their messages apart.
     const resp = await submitSessionPrompt(c.var.providers, row, body.text ?? "", {
       threadId: body.threadId,
+      appPageHint: readAppPageHint(body.appPageHint),
       attachments: body.attachments,
       fileRefs: body.fileRefs,
       ...(body.queueMode ? { queueMode: body.queueMode } : {}),
       ...(promoteItemId ? { promoteItemId } : {}),
-      author: promptAuthorFromUser(c.var.user, c.var.principal),
+      author: promptAuthorFromUser(c.var.user, c.var.principal, c.var.authVia),
       ...(replyTo ? { replyTo } : {}),
     });
     if (!resp) return c.json({ error: "thread not found" }, 404);
@@ -1587,6 +1594,13 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
   }
   if (!answersGate(gate, c.var.principal)) {
     return c.json({ error: `Only ${gateApprover(gate)?.name ?? "the account's owner"} can allow use of their account.` }, 403);
+  }
+
+  if (body.actionId === "always_allow_account" && (
+    c.var.principal.type !== "user" || !["session", "stub"].includes(c.var.authVia)
+    || !gateApprover(gate) || !gate.actions.some(action => action.id === "always_allow_account")
+  )) {
+    return c.json({ error: "Open this account approval in Valet as the account owner to allow it for the team." }, 403);
   }
 
   if (gate.context?.browser) {

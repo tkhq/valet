@@ -18,6 +18,8 @@ export interface PromptAuthor {
    * the turn runs as; `name` is the sender. Tools the sender may not use on
    * their own refuse such a turn (`ToolContext.externalSender`). */
   externalSender?: boolean;
+  /** The host verified a direct human submission, rather than a token or channel sender. */
+  interactive?: boolean;
 }
 
 export interface ChannelTarget {
@@ -921,6 +923,9 @@ export function credentialSecret(credential: StoredCredential | null | undefined
 export interface CredentialStore {
   get(owner: CredentialOwner, service: string): Promise<StoredCredential | null>;
   save(owner: CredentialOwner, service: string, credential: StoredCredential): Promise<void>;
+  /** Atomically replace an existing row only when its value still equals expected.
+   * Missing or changed rows return false. This operation must never insert. */
+  compareAndSwap(owner: CredentialOwner, service: string, expected: StoredCredential, next: StoredCredential): Promise<boolean>;
   delete(owner: CredentialOwner, service: string): Promise<void>;
   list(owner: CredentialOwner): Promise<{ service: string; scopes?: string[]; connectedAt: string }[]>;
 }
@@ -1131,11 +1136,11 @@ export interface PolicyDecision {
   extraGateActions?: (DecisionAction & { approves: boolean })[];
   /**
    * The one person who may answer this gate: the member whose shared account
-   * the action would use. The gate offers approve and deny only, and carries
+   * the action would use. New gates can offer explicit team account consent. The gate carries
    * the approver in its `context.approver` so the host routes and authorizes
    * it to them alone.
    */
-  approver?: { userId: string; name?: string; shareGeneration?: string };
+  approver?: { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true };
 }
 
 /**

@@ -42,6 +42,7 @@ import {
   type TemplateContext,
 } from '../dag/expression.js';
 import type { ToolNode } from '../dag/nodes.js';
+import { isLegacyAccountConsentLoop, matchesGateOccurrence } from '../gate-signals.js';
 import type { NodeCheckpoint, RunSignal } from '../store.js';
 import { iterationSuffix, resolveTemplateContext, type NodeExecuteResult, type NodeExecutorArgs } from './index.js';
 
@@ -91,6 +92,7 @@ function capJson(value: unknown): CapResult {
 // ─── Gate payload parsing ─────────────────────────────────────────────────────
 
 interface GatePayload {
+  accountConsent: boolean;
   approved: boolean;
   resolvedBy: string;
   note?: string;
@@ -108,6 +110,7 @@ function parseGatePayload(payload: unknown): GatePayload {
     throw new Error('gate resolution signal payload missing string "resolvedBy"');
   }
   return {
+    accountConsent: p.scope === 'team_account',
     approved: p.approved,
     resolvedBy: p.resolvedBy,
     note: typeof p.note === 'string' ? p.note : undefined,
@@ -152,16 +155,19 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
 
   if (effects.gate === true) {
     const signals = await store.listSignals(run.runId, { unconsumed: true });
-    heldSignal = signals.find((s) => s.signalType === signalType);
+    heldSignal = signals.find((s) => s.signalType === signalType && matchesGateOccurrence(s, existingCheckpoint?.effects));
     if (heldSignal) {
       const payload = parseGatePayload(heldSignal.payload);
       if (!payload.approved) {
         return await denyOutcome(args, invocationId, payload.resolvedBy, payload.note, heldSignal);
       }
-      approval = {
+      if (!payload.accountConsent) approval = {
         resolvedBy: payload.resolvedBy,
         ...(payload.note !== undefined ? { note: payload.note } : {}),
       };
+    } else if (existingCheckpoint?.effects?.accountConsentResolved === true && typeof existingCheckpoint.effects.gateId !== 'string'
+      && (await store.listSignals(run.runId)).some(signal => signal.signalType === signalType && isLegacyAccountConsentLoop(signal, existingCheckpoint.effects))) {
+      return await failUnresolvedGate(args, invocationId, undefined, accountConsentRefusal(node));
     } else if (effects.timeoutAt !== undefined && clock() >= effects.timeoutAt) {
       await callGateResolved(onGateResolved, { run, node, iteration, invocationId, outcome: 'timeout', resolvedBy: 'timeout' });
       return await denyOutcome(args, invocationId, 'timeout', undefined, undefined);
@@ -187,16 +193,19 @@ export async function executeTool(args: NodeExecutorArgs<ToolNode>): Promise<Nod
 
   // ─── Gate raised ─────────────────────────────────────────────────────────
   if (!response.ok && 'requiresApproval' in response && response.requiresApproval) {
+    if (heldSignal && parseGatePayload(heldSignal.payload).accountConsent
+      && response.provenance === 'shared_account'
+      && sameAccountApprover(existingCheckpoint?.effects?.approver, response.approver)) {
+      return await failUnresolvedGate(args, invocationId, heldSignal, accountConsentRefusal(node));
+    }
     if (approval !== undefined) {
       // Spec §1: approval was provided but enforcement still requires it —
       // the grant write may have failed. Fail loudly; never livelock.
       // The signal must still be consumed so it can't re-deliver.
-      return await writeTerminal(args, invocationId, heldSignal, {
-        status: 'failed',
-        error: `approval was recorded but policy enforcement still requires approval for ${node.service}.${node.action} — the grant write may have failed; resolve the gate again or check org policies`,
-      });
+      return await failUnresolvedGate(args, invocationId, heldSignal,
+        `approval was recorded but policy enforcement still requires approval for ${node.service}.${node.action} — the grant write may have failed; resolve the gate again or check org policies`);
     }
-    return await openGate(args, invocationId, renderedParams, response.riskLevel, response.provenance, response.approver);
+    return await openGate(args, invocationId, renderedParams, response.riskLevel, response.provenance, response.approver, heldSignal);
   }
 
   if (!response.ok) {
@@ -218,11 +227,15 @@ async function openGate(
   renderedParams: Record<string, unknown>,
   riskLevel: string | undefined,
   provenance: string | undefined,
-  approver: { userId: string; name?: string; shareGeneration?: string } | undefined,
+  approver: { userId: string; name?: string; shareGeneration?: string; allowTeamConsent?: true } | undefined,
+  accountSignal?: RunSignal,
 ): Promise<NodeExecuteResult> {
   const { run, node, attempt, iteration, store, clock, onApprovalPending } = args;
   const suffix = iterationSuffix(iteration);
   const signalType = `approval:${node.id}${suffix}`;
+  const previousSequence = args.existingCheckpoint?.effects?.gateSequence;
+  const gateSequence = typeof previousSequence === 'number' ? previousSequence + 1 : 1;
+  const gateId = `${signalType}:gate:${gateSequence}`;
 
   let timeoutAt: number | undefined;
   if (node.approvalTimeout !== undefined) {
@@ -246,10 +259,15 @@ async function openGate(
 
   const gp = capJson(renderedParams);
   const gateItem = args.aliases !== undefined ? capJson(args.aliases).value : undefined;
+  const resolvedGateSignalIds = gateSignalReceipts(args.existingCheckpoint, accountSignal);
 
   const gateEffects: Record<string, unknown> = {
     invocationId,
     gate: true,
+    gateId,
+    gateSequence,
+    ...(resolvedGateSignalIds.length > 0 ? { resolvedGateSignalIds } : {}),
+    ...(accountSignal ? { accountConsentResolved: true } : {}),
     gateParams: gp.value,
     ...(gp.truncated ? { gateParamsTruncated: true } : {}),
     ...(gateItem !== undefined ? { gateItem } : {}),
@@ -261,23 +279,20 @@ async function openGate(
 
   // putIntent replaces an existing intent row (memory-store.ts:196) — this
   // is the documented way to grow effects on a re-entered intent.
-  await store.putIntent({
-    runId: run.runId,
-    nodeId: node.id,
-    iteration,
-    status: 'intent',
-    attempt,
-    createdAt: clock(),
-    effects: gateEffects,
-  });
+  const checkpoint: NodeCheckpoint = { runId: run.runId, nodeId: node.id, iteration,
+    status: 'intent', attempt, createdAt: clock(), effects: gateEffects };
+  if (accountSignal) {
+    await store.consumeSignalAndCheckpoint(accountSignal.signalId, { nodeId: node.id, iteration, attempt }, checkpoint);
+  } else {
+    await store.putIntent(checkpoint);
+  }
 
-  // Fire onApprovalPending only on first gate open (effects.gate !== true
-  // before this call — the check is done in the caller before entering
-  // openGate, which is only called when effects.gate is falsy).
+  // Replays keep this checkpoint. Only a fresh gate occurrence notifies.
   await onApprovalPending?.({
     runId: run.runId,
     nodeId: node.id,
     kind: 'policy_gate',
+    gateId,
     service: node.service,
     action: node.action,
     params: gp.value,
@@ -342,6 +357,15 @@ async function denyOutcome(
 
 // ─── Terminal checkpoint write ────────────────────────────────────────────────
 
+async function failUnresolvedGate(args: NodeExecutorArgs<ToolNode>, invocationId: string, signal: RunSignal | undefined, error: string): Promise<NodeExecuteResult> {
+  const payload = signal ? parseGatePayload(signal.payload) : undefined;
+  await callGateResolved(args.onGateResolved, {
+    run: args.run, node: args.node, iteration: args.iteration, invocationId, outcome: 'error', error,
+    ...(payload && !payload.accountConsent ? { resolvedBy: payload.resolvedBy } : {}),
+  });
+  return writeTerminal(args, invocationId, signal, { status: 'failed', error });
+}
+
 type TerminalOutcome =
   | { status: 'completed'; result: unknown }
   | { status: 'failed'; error: string };
@@ -353,12 +377,14 @@ async function writeTerminal(
   outcome: TerminalOutcome,
 ): Promise<NodeExecuteResult> {
   const { run, node, attempt, iteration, store, clock } = args;
+  const resolvedGateSignalIds = gateSignalReceipts(args.existingCheckpoint, heldSignal);
   const checkpoint: NodeCheckpoint = {
     runId: run.runId,
     nodeId: node.id,
     iteration,
     ...outcome,
-    effects: { invocationId },
+    effects: { invocationId, ...(resolvedGateSignalIds.length > 0 ? { resolvedGateSignalIds } : {}),
+      ...(args.existingCheckpoint?.effects?.accountConsentResolved === true ? { accountConsentResolved: true } : {}) },
     attempt,
     createdAt: clock(),
   };
@@ -381,8 +407,9 @@ async function callGateResolved(
     node: ToolNode;
     iteration: number;
     invocationId: string;
-    outcome: 'denied' | 'timeout';
-    resolvedBy: string;
+    outcome: 'denied' | 'timeout' | 'error';
+    resolvedBy?: string;
+    error?: string;
   },
 ): Promise<void> {
   if (onGateResolved === undefined) return;
@@ -394,6 +421,7 @@ async function callGateResolved(
       invocationId: info.invocationId,
       outcome: info.outcome,
       resolvedBy: info.resolvedBy,
+      ...(info.error !== undefined ? { error: info.error } : {}),
     });
   } catch {
     // Best-effort — a throw must not abort the node.
@@ -401,6 +429,22 @@ async function callGateResolved(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function accountConsentRefusal(node: ToolNode): string {
+  return `Account borrowing consent was recorded but this account still requires approval for ${node.service}.${node.action}. Check team membership and account sharing. Then start a new run.`;
+}
+
+function gateSignalReceipts(checkpoint: NodeCheckpoint | undefined, signal: RunSignal | undefined): string[] {
+  const previous = checkpoint?.effects?.resolvedGateSignalIds;
+  const ids = Array.isArray(previous) ? previous.filter((id: unknown): id is string => typeof id === 'string') : [];
+  return signal ? [...new Set([...ids, signal.signalId])] : ids;
+}
+
+function sameAccountApprover(previous: unknown, next: { userId: string; shareGeneration?: string } | undefined): boolean {
+  if (!next || previous === null || typeof previous !== 'object' || !('userId' in previous) || previous.userId !== next.userId) return false;
+  const generation = 'shareGeneration' in previous ? previous.shareGeneration : undefined;
+  return generation === next?.shareGeneration;
+}
 
 function mintInvocationId(runId: string, nodeId: string, iteration: number): string {
   return `workflow:${runId}:${nodeId}${iterationSuffix(iteration)}`;

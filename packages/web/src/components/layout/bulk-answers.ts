@@ -31,7 +31,7 @@ const CONCURRENCY = 4;
 type DecisionItem = ListNotificationDecisionsResponse["items"][number];
 
 export interface DecisionTarget { kind: "decision"; key: string; title: string; context?: string; sessionId: string; gateId: string }
-export interface WorkflowTarget { kind: "workflow"; key: string; title: string; context?: string; runId: string; nodeId: string; iteration?: number; policy: boolean }
+export interface WorkflowTarget { kind: "workflow"; key: string; title: string; context?: string; runId: string; nodeId: string; iteration?: number; gateId?: string; policy: boolean }
 export type BulkTarget = DecisionTarget | WorkflowTarget;
 
 export type SkipReason = "needs_answer" | "needs_credential" | "waiting_on_other" | "shares_your_account" | "not_one_shot" | "policy_check_failed" | "high_risk" | "not_pending";
@@ -42,16 +42,15 @@ export const SKIP_REASON_TEXT: Record<SkipReason, string> = {
   needs_answer: "Needs a typed answer.",
   needs_credential: "Needs a credential.",
   waiting_on_other: "Waits on another member.",
-  shares_your_account: "Lends your shared account. Answer it on its own.",
+  shares_your_account: "Needs your individual approval. Answer it on its own.",
   not_one_shot: "Its approval can cover more than this one call. Answer it on its own.",
   policy_check_failed: "Policy check failed. Answer it on its own.",
   high_risk: "High-risk action. Answer it on its own.",
   not_pending: "Is no longer pending.",
 };
 
-/** A gate that names an approver lends that member's shared account, and its
- * approval also covers later calls in the thread or run. That is not a
- * one-time answer, so a bulk answer skips it whoever the approver is. */
+/** Named approvals can lend an account or require the original author's
+ * consent. Both need individual review, so a bulk answer skips them. */
 function approverReason(approver: { userId: string } | undefined, meId: string | undefined): SkipReason | undefined {
   if (!approver) return undefined;
   return approver.userId === meId ? "shares_your_account" : "waiting_on_other";
@@ -101,7 +100,7 @@ export function planBulkAnswers(
     const title = workflowTitle(item);
     const reason = approverReason(item.gate.approver, meId) ?? policyWarning(item.gate);
     if (reason) { skipped.push({ key, title, reason }); continue; }
-    targets.push({ kind: "workflow", key, title, runId: item.runId, nodeId: item.gate.nodeId, iteration: item.gate.iteration, policy: item.gate.kind === "policy_gate" });
+    targets.push({ kind: "workflow", key, title, runId: item.runId, nodeId: item.gate.nodeId, iteration: item.gate.iteration, ...(item.gate.gateId ? { gateId: item.gate.gateId } : {}), policy: item.gate.kind === "policy_gate" });
   }
   for (const item of decisions) {
     const key = `decision:${item.gate.id}`;
@@ -119,8 +118,9 @@ export function decisionRequest(decision: BulkDecision): ResolveDecisionRequest 
 /** Approval nodes take no scope. A policy gate approval is "once" only: it
  * never writes a run or workflow grant. A denial needs no scope. */
 export function workflowRequest(target: WorkflowTarget, decision: BulkDecision): ResolveWorkflowApprovalRequest {
-  if (decision === "deny") return { approved: false, iteration: target.iteration };
-  return target.policy ? { approved: true, scope: "once", iteration: target.iteration } : { approved: true, iteration: target.iteration };
+  const identity = { iteration: target.iteration, ...(target.gateId ? { gateId: target.gateId } : {}) };
+  if (decision === "deny") return { approved: false, ...identity };
+  return target.policy ? { approved: true, scope: "once", ...identity } : { approved: true, ...identity };
 }
 
 export interface BulkOutcome {

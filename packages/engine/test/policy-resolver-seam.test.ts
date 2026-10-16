@@ -406,6 +406,30 @@ describe("policyResolver seam: another member's shared account", () => {
     expect((gateReq?.context as Record<string, unknown>)?.oneShot).toBeUndefined();
   });
 
+  it("offers lasting account consent explicitly and still asks for action approval", async () => {
+    const gates: DecisionGateRequest[] = [];
+    let consent = false;
+    const { resolver } = makeResolver({
+      resolve: async () => consent
+        ? { mode: "require_approval", provenance: { baseMode: "require_approval", source: "org_policy" } }
+        : { mode: "require_approval", provenance: { baseMode: "require_approval", source: "shared_account" }, approver: { userId: "bea", shareGeneration: "generation", allowTeamConsent: true },
+          extraGateActions: [{ id: "always_allow_account", label: "Always allow for this team", approves: true }] },
+      onResolution: async (_input, _decision, resolution) => { if (resolution.actionId === "always_allow_account") consent = true; },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    const result = await callTool.execute({ tool_id: "github.get_issue", params: { n: 1 }, summary: "s" }, makeCtx({
+      policyResolver: resolver, requestDecision: async req => {
+        gates.push(req);
+        return { actionId: gates.length === 1 ? "always_allow_account" : "deny", resolvedBy: "bea", resolvedAt: 1 };
+      },
+    }));
+    expect(gates[0]?.actions?.map(a => a.id)).toEqual(["approve", "deny", "always_allow_account"]);
+    expect(gates[0]?.body).toContain("Stop sharing");
+    expect(gates).toHaveLength(2);
+    expect(gates[1]?.context).not.toHaveProperty("approver");
+    expect(result).toMatchObject({ text: expect.stringContaining("denied: user did not approve") });
+  });
+
   // The card names the product a person knows, not the service id.
   it("names the plugin's display name in the borrow card", async () => {
     let gateReq: DecisionGateRequest | undefined;

@@ -467,7 +467,7 @@ describeDocker("DockerImageBuilder (live docker)", () => {
       status = await builder.status(buildId);
     }
 
-    expect(status.state).toBe("pushed");
+    expect(status.state, JSON.stringify(status)).toBe("pushed");
 
     const inspect = spawnSync("docker", ["image", "inspect", imageRef], { stdio: "pipe" });
     expect(inspect.status).toBe(0);

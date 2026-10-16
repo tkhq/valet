@@ -294,7 +294,7 @@ describe("compaction: auto-continue", () => {
         expect(last?.role).toBe("user");
         const text = typeof last?.content === "string" ? last.content : JSON.stringify(last?.content);
         expect(text).toContain(purpose === "workflow"
-          ? "remaining authorized, actionable work for this unattended workflow"
+          ? "Finish the remaining authorized work"
           : "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.");
         return fauxAssistantMessage(purpose === "interactive" ? "Which optional task should I do next?" : "continued from where I left off");
       },
@@ -306,8 +306,8 @@ describe("compaction: auto-continue", () => {
       workspace: "/",
       sandbox: {},
       model: faux.getModel("tiny")!,
-      purpose,
       compaction: { tailTurns: 1 },
+      purpose,
     });
     const thread = session.thread();
     await store.appendEntries(session.id, thread.id, [
@@ -356,12 +356,11 @@ describe("compaction: auto-continue", () => {
     expect(autoContinue).toBeDefined();
     if (autoContinue?.type === "message") {
       if (purpose === "workflow") {
-        expect(autoContinue.content).toContain("remaining authorized, actionable work for this unattended workflow");
-        expect(autoContinue.content).toContain("A progress recap is not task completion");
-        expect(autoContinue.content).toContain("required output contract");
-        expect(autoContinue.content).toContain("genuine blocking failure truthfully");
-        expect(autoContinue.content).toContain("Do not ask routine optional questions");
-        expect(autoContinue.content).toContain("Do not fabricate output, bypass approvals, or expand scope");
+        expect(autoContinue.content).toContain("Finish the remaining authorized work");
+        expect(autoContinue.content).toContain("A progress recap is not completion");
+        expect(autoContinue.content).toContain("Return the required final result");
+        expect(autoContinue.content).toContain("report that blocker truthfully");
+        expect(autoContinue.content).toContain("Do not invent results, bypass approvals, or repeat completed side effects");
       } else {
         expect(autoContinue.content).toBe(
           "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
