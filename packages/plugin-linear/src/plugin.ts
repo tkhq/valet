@@ -25,6 +25,7 @@ const plugin: ValetPlugin = {
       defaultRiskLevel: 'medium',
       appCredentialService: LINEAR_APP_CREDENTIAL_SERVICE,
       displayName: LINEAR_DISPLAY_NAME,
+      appConnectHint: 'Settings, Organization, Linear',
     }),
   ],
   triggers: linearTriggerDefs,

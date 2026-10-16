@@ -34,7 +34,20 @@ export interface McpActionPluginOptions {
    * back to `serviceName` when absent.
    */
   displayName?: string;
+  /**
+   * Where an admin reconnects the app identity, as a settings path in words
+   * (for example "Settings, Organization, Linear"). The app-token rejection
+   * message names it. When absent, the message names no page.
+   */
+  appConnectHint?: string;
   description?: string;
+}
+
+/** The names an auth-rejection message uses. */
+interface RejectionText {
+  /** `displayName`, or `serviceName` when absent. */
+  label: string;
+  appConnectHint?: string;
 }
 
 /** Which credential answered the lookup — drives the auth-rejection message. */
@@ -72,7 +85,7 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
   const noAuth = opts.noAuth ?? false;
   const staticToken = opts.staticToken;
   const appCredentialService = opts.appCredentialService;
-  const displayName = opts.displayName;
+  const messages: RejectionText = { label: opts.displayName ?? serviceName, appConnectHint: opts.appConnectHint };
 
   return {
     service: serviceName,
@@ -86,11 +99,11 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
       try {
         tools = await client.listTools(token);
       } catch (err) {
-        const rejection = authRejectionMessage(err, source, serviceName, displayName);
+        const rejection = authRejectionMessage(err, source, messages);
         throw rejection ? new Error(rejection) : err;
       }
       return tools.map((tool) =>
-        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, displayName),
+        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages),
       );
     },
   };
@@ -143,16 +156,15 @@ async function resolveToken(
 function authRejectionMessage(
   err: unknown,
   source: CredentialSource | undefined,
-  serviceName: string,
-  displayName?: string,
+  { label, appConnectHint }: RejectionText,
 ): string | undefined {
   if (!source) return undefined;
   if (!(err instanceof McpHttpError) || (err.status !== 401 && err.status !== 403)) return undefined;
-  const label = displayName ?? serviceName;
   if (source === 'app') {
-    return `${serviceName} rejected the Valet app's access. Ask an admin to reconnect the ${label} app in Settings, Integrations, or connect your own ${label} account.`;
+    const where = appConnectHint ? ` in ${appConnectHint}` : '';
+    return `${label} rejected the Valet app's access. Ask an admin to reconnect the ${label} app${where}, or connect your own ${label} account on the Integrations page.`;
   }
-  return `${serviceName} rejected your connected account. Reconnect ${label} in Settings, Integrations.`;
+  return `${label} rejected your connected account. Reconnect ${label} on the Integrations page.`;
 }
 
 function mapToolToAction(
@@ -161,9 +173,9 @@ function mapToolToAction(
   serviceName: string,
   defaultRiskLevel: RiskLevel,
   noAuth: boolean,
-  staticToken?: string,
-  appCredentialService?: string,
-  displayName?: string,
+  staticToken: string | undefined,
+  appCredentialService: string | undefined,
+  messages: RejectionText,
 ): PluginAction {
   // `tool.inputSchema` is a JSON-Schema-shaped object from the MCP server.
   // TypeBox's `TSchema` is declared as an empty interface
@@ -184,7 +196,7 @@ function mapToolToAction(
         const result = await client.callTool(token, tool.name, args);
         return mapToolResult(result);
       } catch (err) {
-        const rejection = authRejectionMessage(err, source, serviceName, displayName);
+        const rejection = authRejectionMessage(err, source, messages);
         if (rejection) return { success: false, error: rejection };
         return { success: false, error: err instanceof Error ? err.message : String(err) };
       }
