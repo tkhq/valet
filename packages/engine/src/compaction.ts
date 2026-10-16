@@ -1,3 +1,4 @@
+import { failedToolResultText } from "./tool-result-text.js";
 import { completeSimple, isContextOverflow } from "@earendil-works/pi-ai/compat";
 import type { Message, Model } from "@earendil-works/pi-ai/compat";
 import { attributedAuthor, formatSenderLine, type AuthorAttribution } from "./submission.js";
@@ -992,7 +993,7 @@ export function entriesToSummaryMessages(
           // the live context) — feed it to the summarizer so a pruned output
           // still contributes facts to the summary. Rows pruned before the
           // text was preserved fall back to the elision marker.
-          const raw = storedToolResultText(p);
+          const raw = p.status === "error" ? failedToolResultText(p) : storedToolResultText(p);
           let resultStr = "";
           if (raw !== undefined) {
             resultStr = capTool(raw);

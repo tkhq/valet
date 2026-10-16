@@ -569,3 +569,23 @@ It rebuilds repair context before appending the repair message, so the repair it
 A new repair can recover an original entry admitted before task markers existed, in both running and restarted sessions.
 Already-queued repairs without a source reference are not rewritten.
 The existing per-request context check budgets the retained task before calling the provider.
+
+
+### Tool evidence during reconstruction
+
+Live tool-result persistence and transcript reconstruction use one text reader.
+Failed calls retain their stored result text, including operation receipts and recovery instructions.
+If a call also has an explicit interruption error, both texts remain available without duplicating identical text.
+The summarizer receives the same failure evidence, including errors without a stored result.
+Successful elided results keep their existing live-context elision policy. Stored results remain available to the summarizer.
+A schema repair rebuilds its prefix only when the active checkpoint covers its original source entry.
+An uncompacted running session keeps its live prefix. A restarted session reconstructs failed-tool evidence from storage.
+
+This design keeps essential instructions outside summary prose while preserving the context needed to continue.
+Anthropic documents retaining selected instruction messages after compaction: https://platform.claude.com/docs/en/build-with-claude/compaction-threshold.
+OpenAI documents treating the returned compacted window as the canonical next context: https://developers.openai.com/api/docs/guides/compaction.
+These references support the retention principle; the engine keeps its provider-independent compaction implementation.
+
+Regression coverage combines the workflow interpreter, PostgreSQL-compatible storage, original task retention, compaction, restart, and one bounded repair.
+Session nodes and team orchestrator nodes retain operation receipts. They reuse completed operations and deliver only validated output.
+A blocked repair fails the workflow without posting a fabricated report.

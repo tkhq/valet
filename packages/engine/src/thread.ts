@@ -1,3 +1,4 @@
+import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
 import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, readToolScope, toolInScope, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
@@ -1510,7 +1511,7 @@ export class Thread {
     await this.persistReplayedToolResult(suspended.toolCallId, toolResult);
     await this.fencedEmit({
       type: "tool_end", threadId: this.id, tool: suspended.toolName, callId: suspended.toolCallId,
-      result: renderToolResult(toolResult), isError: false,
+      result: toolResultText(toolResult), isError: false,
       ...(toolResultImages(toolResult).length > 0 ? { resultData: toolResult } : {}),
       ...toolOutcome(toolResult),
     }, { queueItemId: suspended.queueItemId });
@@ -1623,7 +1624,7 @@ export class Thread {
         part.status = "completed";
         const structured =
           result && typeof result === "object" ? (result as Record<string, unknown>) : {};
-        part.result = { ...structured, text: renderToolResult(result) };
+        part.result = { ...structured, text: toolResultText(result) };
         await this.fencedWrite(() =>
           store.updateEntry(this.session.id, this.id, e, this.fence),
         );
@@ -3943,7 +3944,11 @@ export class Thread {
     const taskSource = item.metadata?.taskSourceQueueItemId;
     if (item.metadata?.preserveTask === true && typeof taskSource === "string") {
       const snapshot = await this.transcriptSnapshot();
-      if (!snapshot.entries.some(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === item.id)) {
+      const activeEntries = walkTranscriptDag(snapshot.entries, this.activeLeafEntryId);
+      const source = activeEntries.find(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === taskSource);
+      const checkpoint = findMostRecentCompaction(activeEntries);
+      if (source && checkpoint?.coveredEntryIds.includes(source.id)
+        && !activeEntries.some(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === item.id)) {
         this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.agent.state.model, {
           attributeAuthors: this.attributeAuthors,
           threadKey: this.key,
@@ -5652,7 +5657,7 @@ export class Thread {
         break;
       case "tool_execution_end": {
         const part = this.currentToolCalls.get(event.toolCallId);
-        const resultText = renderToolResult(event.result);
+        const resultText = toolResultText(event.result);
         if (part && part.type === "tool_call") {
           part.status = event.isError ? "error" : "completed";
           // Persist the *flattened* text alongside the raw structured
@@ -6251,16 +6256,6 @@ function textOf(message: AgentMessage): string {
   return parts.map((p) => p.text).join("");
 }
 
-function renderToolResult(result: unknown): string {
-  if (!result || typeof result !== "object") return String(result ?? "");
-  const r = result as { content?: Array<{ type: string; text?: string }> };
-  if (!r.content) return JSON.stringify(result);
-  return r.content
-    .filter((c) => c.type === "text")
-    .map((c) => c.text ?? "")
-    .join("");
-}
-
 interface RoleOverlay {
   restore: boolean;
   model?: PiModel;
@@ -6293,22 +6288,6 @@ export function resolveModelId(spec: string): PiModel | undefined {
 
 // Back-compat alias used by applyRoleForTurn in this file.
 const resolveRoleModel = resolveModelId;
-
-/** Extract readable text from a persisted tool_call `result` (any shape). */
-function toolResultText(result: unknown): string {
-  if (result && typeof result === "object") {
-    const r = result as { text?: unknown; content?: Array<{ type: string; text?: string }> };
-    if (typeof r.text === "string") return r.text;
-    if (Array.isArray(r.content)) {
-      return r.content
-        .filter((c) => c.type === "text")
-        .map((c) => c.text ?? "")
-        .join("");
-    }
-    return JSON.stringify(result);
-  }
-  return String(result ?? "");
-}
 
 /** Retain selected tool evidence on reload without reviving malformed content. */
 function toolResultImages(result: unknown): ImageContent[] {
@@ -6647,7 +6626,7 @@ export function entriesToAgentMessages(
               // Elided parts keep their stored result for the summarizer and
               // the UI; the LIVE context is where the elision applies.
               text: isError
-                ? p.error ?? "tool call failed"
+                ? failedToolResultText(p)
                 : p.elided
                   ? ELIDED_TOOL_OUTPUT
                   : toolResultText(p.result),

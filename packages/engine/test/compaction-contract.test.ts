@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type MessageEntry, type SessionEntry } from "../src/index.js";
-import { summarize } from "../src/compaction.js";
+import { entriesToSummaryMessages, summarize } from "../src/compaction.js";
 import { entriesToAgentMessages } from "../src/thread.js";
 import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 
@@ -205,4 +205,70 @@ it.each([
   expect(requests[0].split("PERSISTED_RULE")).toHaveLength(2);
   expect(requests[0]).toContain("Correct the final JSON schema");
   expect(faux.state.callCount).toBe(3);
+});
+
+
+describe("failed-tool evidence across context reconstruction", () => {
+  const diagnostic = "ACTIONABLE_FAILURE: receipt is /workspace/receipt-719.json; do not retry the external operation";
+  it.each([
+    { restart: false, compact: false }, { restart: true, compact: false },
+    { restart: false, compact: true }, { restart: true, compact: true },
+  ])("keeps failure evidence and executes the operation once (restart=$restart, compact=$compact)", async ({ restart, compact }) => {
+    const faux = registerFauxProvider({ provider: `failure-evidence-${restart}-${compact}`,
+      models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }] });
+    cleanups.push(() => faux.unregister());
+    let operations = 0;
+    let repairContext = "";
+    const summary = COMPLETE_SUMMARY.replace("## Errors & Fixes\n- (none)", `## Errors & Fixes\n- ${diagnostic}`);
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("receipt_probe", {}, { id: "receipt-call" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("The task is blocked; no JSON."),
+      ...(compact ? [fauxAssistantMessage(summary)] : []),
+      context => { repairContext = JSON.stringify(context.messages); return fauxAssistantMessage('{"report":"blocked"}'); },
+    ]);
+    const providers = { store: new InMemorySessionStore(), stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() };
+    const options = { userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: modelFor(faux, "tiny"),
+      compaction: { tailTurns: 1, autoContinue: false },
+      tools: [{ name: "receipt_probe", description: "Read the operation receipt", parameters: Type.Object({}), execute: async () => {
+        operations++; throw new Error(diagnostic);
+      } }],
+    };
+    const engine = new Engine({ providers });
+    const session = await engine.createSession(options);
+    const primary = await session.prompt("QUALIFICATION_RULE: exclude internal repos. Report receipt and blocker.", { metadata: { preserveTask: true } });
+    expect((await session.thread().awaitResult(primary.queueItemId)).outcome).toBe("completed");
+    if (compact) {
+      const thread = session.thread();
+      const prior = await providers.store.getEntries(session.id, thread.id);
+      const last = prior.at(-1);
+      if (!last) throw new Error("Missing prior transcript");
+      await providers.store.appendEntries(session.id, thread.id, [
+        { id: "evidence", parentId: last.id, sessionId: session.id, threadId: thread.id, type: "message", role: "assistant", content: "collected evidence ".repeat(5_000), createdAt: Date.now() },
+        { id: "progress", parentId: "evidence", sessionId: session.id, threadId: thread.id, type: "message", role: "user", content: "Finish the report", createdAt: Date.now() + 1 },
+      ]);
+      thread.rehydrateTranscript(await providers.store.getEntries(session.id, thread.id));
+      expect(await thread.compactThread({ mode: "manual" })).toBe("compacted");
+    }
+    const active = restart ? await new Engine({ providers }).restoreSession({ sessionId: session.id, options }) : session;
+    const repair = await active.prompt("Correct the final JSON", { metadata: { preserveTask: true, taskSourceQueueItemId: primary.queueItemId } });
+    expect((await active.thread().awaitResult(repair.queueItemId)).outcome).toBe("completed");
+    expect(repairContext).toContain(diagnostic);
+    expect(repairContext.split("QUALIFICATION_RULE")).toHaveLength(2);
+    expect(repairContext.split("Correct the final JSON")).toHaveLength(2);
+    expect(operations).toBe(1);
+  });
+
+  it.each([
+    { result: { text: diagnostic }, error: undefined },
+    { result: { content: [{ type: "text", text: diagnostic }] }, error: undefined },
+    { result: diagnostic, error: undefined },
+    { result: { text: diagnostic }, error: "The tool failed after recording the receipt." },
+    { result: undefined, error: diagnostic },
+  ])("keeps persisted failure details in both summary input and provider context: %j", part => {
+    const entry: MessageEntry = { ...user("failure", ""), role: "assistant", parts: [
+      { type: "tool_call", callId: "failed", toolName: "read", args: {}, status: "error", ...part },
+    ] };
+    expect(render([entry])).toContain(diagnostic);
+    expect(JSON.stringify(entriesToSummaryMessages([entry], { toolOutputMaxChars: 2_000 }))).toContain(diagnostic);
+  });
 });
