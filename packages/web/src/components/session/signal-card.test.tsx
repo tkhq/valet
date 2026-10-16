@@ -17,6 +17,7 @@ import {
   formatDurationSeconds,
   isLongBody,
   isWakeupSignal,
+  parseEventMatchedBody,
   truncateBody,
   wakeupOutcome,
 } from "./signal-card";
@@ -219,6 +220,8 @@ describe("SignalCard: wakeup signals (fix wave 2, H5)", () => {
   it("classifies signals and outcomes", () => {
     expect(isWakeupSignal({ signalType: "timer.fired", attributes: { wakeupId: "wk_1" } })).toBe(true);
     expect(isWakeupSignal({ signalType: "lease.expired", attributes: { leaseId: "ls_1" } })).toBe(true);
+    expect(isWakeupSignal({ signalType: "event.matched", attributes: { wakeupId: "wk_1" } })).toBe(true);
+    expect(isWakeupSignal({ signalType: "event.ended", attributes: { wakeupId: "wk_1" } })).toBe(true);
     expect(isWakeupSignal({ signalType: "process.exited" })).toBe(false);
     expect(isWakeupSignal({ signalType: "github.push", attributes: { wakeupId: "wk_1" } })).toBe(false);
     expect(wakeupOutcome({})).toBeNull();
@@ -295,5 +298,113 @@ describe("wakeup signal origin and watch event grouping (fix wave 3, UX)", () =>
     expect(screen.queryByText("event 1")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Show all 3 events" }));
     expect(screen.getByText("event 1")).toBeTruthy();
+  });
+
+  it("does not let an event.matched signal join a watch.event group", () => {
+    const items = groupWatchEvents([
+      signalMessage("e1", "watch.event", { wakeupId: "wk_w", reason: "tail build" }, "line 1"),
+      signalMessage("e2", "watch.event", { wakeupId: "wk_w", reason: "tail build" }, "line 2"),
+      signalMessage("m1", "event.matched", { wakeupId: "wk_e", kind: "event", subject: "github:acme/x#1" }, "github.check_run.completed · success · by ada\nchecks passed\nhttps://example.com/1"),
+      signalMessage("e3", "watch.event", { wakeupId: "wk_w", reason: "tail build" }, "line 3"),
+    ]);
+    expect(items.map((i) => (i.kind === "watch" ? `watch:${i.events.length}` : i.message.id))).toEqual([
+      "watch:2",
+      "m1",
+      "e3",
+    ]);
+  });
+});
+
+describe("parseEventMatchedBody (spec Part F, digestBlock)", () => {
+  it("parses a single digest into its key, status, actor, summary, and url", () => {
+    const body = "github.check_run.completed · failure · by ada\nacme/lean-proofs: check_run completed (test)\nhttps://github.com/acme/lean-proofs/runs/123";
+    const { blocks, alsoMatched } = parseEventMatchedBody(body);
+    expect(blocks).toEqual([
+      {
+        key: "github.check_run.completed",
+        status: "failure",
+        actor: "ada",
+        summary: "acme/lean-proofs: check_run completed (test)",
+        url: "https://github.com/acme/lean-proofs/runs/123",
+      },
+    ]);
+    expect(alsoMatched).toEqual([]);
+  });
+
+  it("keeps a digest's trailing text after the url", () => {
+    const body = "github.check_run.completed · failure · by ada\nchecks failed\nhttps://example.com/1\nSee the log for details.";
+    const { blocks } = parseEventMatchedBody(body);
+    expect(blocks[0]?.text).toBe("See the log for details.");
+  });
+
+  it("parses a stream signal's three digest blocks, each separated by a blank line", () => {
+    const body = [
+      "github.check_run.completed · success · by ada\nfirst check\nhttps://example.com/1",
+      "github.check_run.completed · success · by ben\nsecond check\nhttps://example.com/2",
+      "github.check_run.completed · failure · by cy\nthird check\nhttps://example.com/3",
+    ].join("\n\n");
+    const { blocks } = parseEventMatchedBody(body);
+    expect(blocks).toHaveLength(3);
+    expect(blocks.map((b) => b.summary)).toEqual(["first check", "second check", "third check"]);
+  });
+
+  it("parses once mode's extra digests under 'Also matched' as plain lines", () => {
+    const body = [
+      "github.check_run.completed · failure · by ada\nfirst check\nhttps://example.com/1",
+      "Also matched:\ngithub.check_run.completed · success · by ben · second check\ngithub.check_run.completed · success · by cy · third check",
+    ].join("\n\n");
+    const { blocks, alsoMatched } = parseEventMatchedBody(body);
+    expect(blocks).toHaveLength(1);
+    expect(alsoMatched).toEqual([
+      "github.check_run.completed · success · by ben · second check",
+      "github.check_run.completed · success · by cy · third check",
+    ]);
+  });
+});
+
+describe("SignalCard: event.matched and event.ended (spec Part H)", () => {
+  function eventMessage(signalType: string, attributes: Record<string, string>, content: string): Message {
+    return baseMessage({ content, parts: [{ kind: "text", text: content }], signal: { signalType, attributes } });
+  }
+
+  it("renders an event.matched signal's key, status chip, actor, summary, and link", () => {
+    const content = "github.check_run.completed · failure · by ada\nacme/lean-proofs: check_run completed (test)\nhttps://github.com/acme/lean-proofs/runs/123";
+    render(
+      <SignalCard
+        message={eventMessage("event.matched", { wakeupId: "wk_1", kind: "event", subject: "github:acme/lean-proofs#42", matchCount: "1" }, content)}
+      />,
+    );
+    expect(screen.getByText("github.check_run.completed")).toBeTruthy();
+    expect(screen.getByText("failure")).toBeTruthy();
+    expect(screen.getByText("by ada")).toBeTruthy();
+    expect(screen.getByText("acme/lean-proofs: check_run completed (test)")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "https://github.com/acme/lean-proofs/runs/123" }).getAttribute("href")).toBe(
+      "https://github.com/acme/lean-proofs/runs/123",
+    );
+  });
+
+  it("renders every block of a stream signal with three digests", () => {
+    const content = [
+      "github.check_run.completed · success · by ada\nfirst check\nhttps://example.com/1",
+      "github.check_run.completed · success · by ben\nsecond check\nhttps://example.com/2",
+      "github.check_run.completed · failure · by cy\nthird check\nhttps://example.com/3",
+    ].join("\n\n");
+    render(
+      <SignalCard message={eventMessage("event.matched", { wakeupId: "wk_1", kind: "event", subject: "github:acme/x#1", matchCount: "3" }, content)} />,
+    );
+    expect(screen.getByText("first check")).toBeTruthy();
+    expect(screen.getByText("second check")).toBeTruthy();
+    expect(screen.getByText("third check")).toBeTruthy();
+    expect(screen.getAllByRole("link")).toHaveLength(3);
+  });
+
+  it("renders an event.ended signal's outcome for a deadline cause", () => {
+    render(
+      <SignalCard
+        message={eventMessage("event.ended", { wakeupId: "wk_1", kind: "event", subject: "github:acme/x#1", cause: "deadline" }, "No matching event arrived within 24 hours. Check the subject's state before you wait again.")}
+      />,
+    );
+    expect(screen.getByText("deadline reached").className).toContain("danger");
+    expect(screen.getByText("github:acme/x#1")).toBeTruthy();
   });
 });

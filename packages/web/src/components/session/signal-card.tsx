@@ -137,13 +137,14 @@ function WorkflowRequestCard({ message, signal }: { message: Message; signal: Me
   );
 }
 
-const WAKEUP_PREFIXES = ["process.", "watch.", "timer.", "lease."];
+const WAKEUP_PREFIXES = ["process.", "watch.", "timer.", "lease.", "event."];
 
 /**
- * Pure: whether a signal reports background work (spec 2026-10-08, B6):
- * `process.*`, `watch.*`, `timer.*`, or `lease.*` with a wakeup or lease
- * id. The wire does not ship the envelope tag, so the id attribute marks
- * the signal as the WakeWatcher's or a human cancel's.
+ * Pure: whether a signal reports background work (spec 2026-10-08, B6;
+ * 2026-10-15, Part H): `process.*`, `watch.*`, `timer.*`, `lease.*`, or
+ * `event.*` with a wakeup or lease id. The wire does not ship the envelope
+ * tag, so the id attribute marks the signal as the WakeWatcher's or a
+ * human cancel's.
  */
 export function isWakeupSignal(signal: MessageSignal): boolean {
   const attrs = signal.attributes ?? {};
@@ -216,7 +217,106 @@ export function originLabel(signal: MessageSignal): string | null {
   return `from ${CHANNEL_LABEL[type] ?? type}`;
 }
 
-/** Background work: the reason as the title, the outcome, and the log as plain text. */
+/** One digest block of an `event.matched` signal body: a key, an optional status and actor, a summary, and an optional URL and text. */
+export interface EventDigestBlock {
+  key: string;
+  status?: string;
+  actor?: string;
+  summary: string;
+  url?: string;
+  text?: string;
+}
+
+/**
+ * Pure: parses an `event.matched` signal body into its digest blocks
+ * (spec Part F, `eventMatchedSignal`/`digestBlock`). Each block's header
+ * is `<key> · <status> · by <actor>`, then a summary line, an optional
+ * URL, then optional text. Once mode's extra digests come back after an
+ * `Also matched:` line, one per digest, and are not full blocks.
+ */
+export function parseEventMatchedBody(body: string): { blocks: EventDigestBlock[]; alsoMatched: string[] } {
+  const blocks: EventDigestBlock[] = [];
+  let alsoMatched: string[] = [];
+  for (const segment of body.split("\n\n")) {
+    const lines = segment.split("\n");
+    if (lines[0] === "Also matched:") {
+      alsoMatched = lines.slice(1).filter((line) => line !== "");
+      continue;
+    }
+    const headerParts = (lines[0] ?? "").split(" · ");
+    const key = headerParts[0] ?? "";
+    let status: string | undefined;
+    let actor: string | undefined;
+    for (const part of headerParts.slice(1)) {
+      if (part.startsWith("by ")) actor = part.slice(3);
+      else status = part;
+    }
+    const summary = lines[1] ?? "";
+    const rest = lines.slice(2);
+    const url = rest[0]?.startsWith("http") ? rest[0] : undefined;
+    const text = (url !== undefined ? rest.slice(1) : rest).join("\n");
+    blocks.push({
+      key,
+      ...(status !== undefined ? { status } : {}),
+      ...(actor !== undefined ? { actor } : {}),
+      summary,
+      ...(url !== undefined ? { url } : {}),
+      ...(text !== "" ? { text } : {}),
+    });
+  }
+  return { blocks, alsoMatched };
+}
+
+/**
+ * An `event.matched` signal (spec Part H): each digest block shows its
+ * key, a status chip, the actor, the summary, and a link. A stream
+ * signal lists every digest it carries; a once-mode signal lists the
+ * extra digests it caught under "Also matched".
+ */
+function EventMatchedCard({ message, signal }: { message: Message; signal: MessageSignal }) {
+  const attrs = signal.attributes ?? {};
+  const origin = originLabel(signal);
+  const { blocks, alsoMatched } = parseEventMatchedBody(message.content);
+  return (
+    <CardShell>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="min-w-0 truncate text-sm font-medium text-ink">{attrs.subject || "Event matched"}</span>
+        <Badge variant="neutral">event.matched</Badge>
+        {origin && <span className="text-xs text-muted">{origin}</span>}
+      </div>
+      <ul className="mt-1.5 space-y-2">
+        {blocks.map((block, index) => (
+          <li key={index} className="text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="min-w-0 truncate font-medium text-ink">{block.key}</span>
+              {block.status && <Badge variant="neutral">{block.status}</Badge>}
+              {block.actor && <span className="text-xs text-muted">by {block.actor}</span>}
+            </div>
+            <p className="text-muted">{block.summary}</p>
+            {block.url && (
+              <a href={block.url} target="_blank" rel="noreferrer" className="break-all text-xs text-moss hover:underline">
+                {block.url}
+              </a>
+            )}
+            {block.text && <p className="text-xs text-muted whitespace-pre-wrap">{block.text}</p>}
+          </li>
+        ))}
+      </ul>
+      {alsoMatched.length > 0 && (
+        <div className="mt-1.5 text-xs text-muted">
+          <p>Also matched:</p>
+          {alsoMatched.map((line, index) => <p key={index}>{line}</p>)}
+        </div>
+      )}
+    </CardShell>
+  );
+}
+
+/**
+ * Background work: the reason as the title, the outcome, and the log as
+ * plain text. An event waiter carries no `reason`, so the title falls
+ * back to its `subject` (spec Part F/H), e.g. `event.ended`.
+ */
 function WakeupCard({ message, signal }: { message: Message; signal: MessageSignal }) {
   const attrs = signal.attributes ?? {};
   const outcome = wakeupOutcome(attrs);
@@ -226,7 +326,7 @@ function WakeupCard({ message, signal }: { message: Message; signal: MessageSign
   return (
     <CardShell>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="min-w-0 truncate text-sm font-medium text-ink">{attrs.reason || signal.signalType}</span>
+        <span className="min-w-0 truncate text-sm font-medium text-ink">{attrs.reason || attrs.subject || signal.signalType}</span>
         <Badge variant="neutral">{signal.signalType}</Badge>
         {outcome && <Badge variant={outcome.tone}>{outcome.label}</Badge>}
         {cancelledBy && <span className="text-xs text-muted">{cancelledBy}</span>}
@@ -352,6 +452,9 @@ function EnvelopeCard({ message, signal }: { message: Message; signal: MessageSi
   // thread that started it (`workflow.settled`, `run-attention.ts`).
   if (signal.signalType === "workflow.request" || signal.signalType === "workflow.settled") {
     return <WorkflowRequestCard key={message.id} message={message} signal={signal} />;
+  }
+  if (signal.signalType === "event.matched") {
+    return <EventMatchedCard message={message} signal={signal} />;
   }
   if (isWakeupSignal(signal)) {
     return <WakeupCard message={message} signal={signal} />;
