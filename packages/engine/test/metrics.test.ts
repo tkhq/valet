@@ -55,6 +55,8 @@ import {
   recordLeaseOrphanReleased,
   recordWakeupBadRow,
   recordEventWaiterBufferFull,
+  recordEventWaiterMatch,
+  recordEventMatchFailed,
   recordDockerJobOutputDropped,
   recordJobLogsPruned,
   recordWakeupSweepFailed,
@@ -266,6 +268,14 @@ describe("fix wave 2 wakeup and lease metrics", () => {
   it("counts an event match refused at the buffer cap", () => {
     recordEventWaiterBufferFull();
     expect(metricState.points).toContainEqual({ name: "valet.event_waiter.buffer_full", value: 1, attributes: undefined });
+  });
+
+  it("counts event waiter matches by service and failed matching passes", () => {
+    recordEventWaiterMatch("slack");
+    recordEventMatchFailed();
+    expect(metricState.points).toContainEqual({ name: "valet.event_waiter.matches", value: 1, attributes: { service: "slack" } });
+    expect(metricState.points).toContainEqual({ name: "valet.wakeups.event_match_failed", value: 1, attributes: undefined });
+    expect(metricState.descriptions.get("valet.wakeups.event_match_failed")).toContain("valet_wakeups_event_match_failed_total");
   });
 
   it("reports the last successful sweep time and counts failed sweeps (M5)", () => {

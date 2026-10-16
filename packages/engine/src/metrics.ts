@@ -89,6 +89,8 @@ interface Instruments {
   leasesOrphanReleased: Counter;
   wakeupBadRows: Counter;
   eventWaiterBufferFull: Counter;
+  eventWaiterMatches: Counter;
+  eventMatchFailed: Counter;
   wakeupSweepOkAt: ObservableGauge;
   wakeupSweepFailed: Counter;
   jobLogsPruned: Counter;
@@ -195,6 +197,14 @@ function inst(): Instruments {
     eventWaiterBufferFull: meter.createCounter("valet.event_waiter.buffer_full", {
       description:
         "Event matches a store refused because the event waiter already buffered EVENT_BUFFER_MAX_DIGESTS digests. Prometheus exports it as valet_event_waiter_buffer_full_total. A count means delivery is stalled for that waiter: find out why the WakeWatcher does not drain it.",
+    }),
+    eventWaiterMatches: meter.createCounter("valet.event_waiter.matches", {
+      description:
+        "Event matches that ingest appended to an event waiter's buffer, by service. Prometheus exports it as valet_event_waiter_matches_total. A redelivered event the waiter already holds is not counted.",
+    }),
+    eventMatchFailed: meter.createCounter("valet.wakeups.event_match_failed", {
+      description:
+        "Event waiter matching passes, or single waiter candidates, that failed with an error during ingest. Prometheus exports it as valet_wakeups_event_match_failed_total. The subscription outcome does not change, but a waiter can miss the event: alert on any increase.",
     }),
     wakeupSweepOkAt: meter.createObservableGauge("valet.wakeups.sweep_ok_at", {
       unit: "s",
@@ -426,6 +436,16 @@ export function recordWakeupBadRow(table: "engine_wakeups" | "engine_leases", co
 /** A store refused an event match because the waiter's buffer was full. */
 export function recordEventWaiterBufferFull(): void {
   inst().eventWaiterBufferFull.add(1);
+}
+
+/** Ingest appended one event match to an event waiter for `service`. */
+export function recordEventWaiterMatch(service: string): void {
+  inst().eventWaiterMatches.add(1, { service });
+}
+
+/** Event waiter matching failed during ingest. */
+export function recordEventMatchFailed(): void {
+  inst().eventMatchFailed.add(1);
 }
 
 /** The WakeWatcher finished a pass at `unixSeconds`. */
