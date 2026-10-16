@@ -583,9 +583,11 @@ agent to arm a new wait in an open thread.
 
 An event waiter follows the rule for timers:
 
-- Pause and sandbox replace leave it running.
-- Owner move, profile change, and thread archive stop it through the 409
-  and `force` contract, with the human-cancel signal.
+- Pause, sandbox replace, and a profile change leave it running: all three
+  gate on `leasedOnly`, and an event waiter holds no lease (INV-E3), same
+  as a timer.
+- Owner move and thread archive stop it through the 409 and `force`
+  contract, with the human-cancel signal: neither filters by lease.
 - In a child session, an event waiter whose deadline falls within the child
   timer bound keeps the child unsettled.
 - Event waiters on hidden threads are counted and never named.

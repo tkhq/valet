@@ -87,7 +87,10 @@ export interface BackgroundWorkFilter {
    * filter with no thread selects it.
    */
   threadId?: string;
-  /** Only work that holds a lease: process, watch, and hold. Timers keep their schedule. */
+  /**
+   * Only work that holds a lease: process, watch, and hold. Timers and
+   * event waiters hold no lease (INV-E3) and keep running.
+   */
   leasedOnly?: boolean;
   /** Only these ids. A route passes the work the caller can see. */
   ids?: ReadonlySet<string>;
@@ -101,7 +104,7 @@ export function selectWork(work: BackgroundWork, filter: BackgroundWorkFilter): 
   const inThread = (threadId: string | undefined) => filter.threadId === undefined || threadId === filter.threadId;
   const picked = (id: string) => filter.ids === undefined || filter.ids.has(id);
   const wakeups: BlockingWork[] = work.wakeups
-    .filter((w) => inThread(w.threadId) && !(filter.leasedOnly && w.kind === "timer") && picked(w.id))
+    .filter((w) => inThread(w.threadId) && !(filter.leasedOnly && (w.kind === "timer" || w.kind === "event")) && picked(w.id))
     .map((w) => ({
       id: w.id,
       kind: w.kind,
@@ -274,6 +277,18 @@ function wakeupCancelledSignal(row: Wakeup, opts: HumanCancelOptions, nowMs: num
       kind: "signal",
       signalType: "timer.cancelled",
       body: `A person cancelled this scheduled wakeup at ${at}, before it fired. ${opts.note ?? "Do not run its prompt unless someone asks."}`,
+      attributes,
+      tagName: "wakeup",
+    };
+  }
+  if (row.kind === "event") {
+    // Spec 2026-10-15, F1: a human cancel sends `event.ended` with
+    // `cause=cancelled`, not `event.exited` (event waiters have no exit).
+    attributes.subject = row.subjects?.[0] ?? "";
+    return {
+      kind: "signal",
+      signalType: "event.ended",
+      body: `A person stopped this event at ${at}. ${opts.note ?? DEFAULT_CANCEL_NOTE}`,
       attributes,
       tagName: "wakeup",
     };
