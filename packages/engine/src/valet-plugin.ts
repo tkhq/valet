@@ -685,6 +685,13 @@ export interface ValetPlugin {
   eventSubjects?: EventSubjects;
   /** Derived event keys this plugin computes from other events and provider state (spec Part B). */
   derivedEvents?: DerivedEventDef[];
+  /**
+   * Names the natural subject of one normalized event: the narrowest subject
+   * a human would call "what this event is about" (spec Part D). Returns
+   * null when the event names no subject this plugin recognizes. A plugin
+   * without this hook offers no `subject` delivery mode (spec Part A step 4).
+   */
+  naturalSubject?(event: NormalizedEvent): { subject: string; label: string } | null;
   /** Provider-state status mapping for `from_status` resolution (spec Part E). */
   statusResolver?: StatusResolver;
 }
@@ -1080,6 +1087,10 @@ export function validateValetPlugin(
       issues.push({ path: `${path}.derive`, message: "required function" });
     }
   });
+
+  if (v.naturalSubject !== undefined && typeof v.naturalSubject !== "function") {
+    issues.push({ path: "naturalSubject", message: "must be a function when present" });
+  }
 
   if (v.statusResolver !== undefined) {
     const resolver = asRecord(v.statusResolver, "statusResolver", issues);

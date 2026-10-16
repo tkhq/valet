@@ -2,7 +2,7 @@
  * Slack event normalization: subjects and bot detection (spec:
  * docs/specs/2026-10-15-event-wakeups-design.md, Part A1/A3/A5).
  */
-import type { EventSubjects } from "@valet/engine";
+import type { EventSubjects, NormalizedEvent } from "@valet/engine";
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
@@ -94,6 +94,22 @@ function label(subject: string): string {
  * permalink needs the workspace domain, which the subject does not carry. */
 function url(_subject: string): string | null {
   return null;
+}
+
+/** A `slack:<team>/<channel>` subject: the channel level, not a thread. */
+const CHANNEL_SUBJECT_RE = /^slack:[^/]+\/[^/]+$/;
+
+/**
+ * The channel an event belongs to (spec Part D). Slack defines no subject
+ * coarser than the channel, so an event that names no channel (e.g.
+ * `team_join`) returns null rather than falling back to the team.
+ */
+export function slackNaturalSubject(event: NormalizedEvent): { subject: string; label: string } | null {
+  const subject = event.subjects?.find((s) => CHANNEL_SUBJECT_RE.test(s));
+  if (!subject) return null;
+  const name = event.refs.channel_name;
+  const channelLabel = name ? `#${name}` : (event.refs.channel ?? subject.slice(subject.indexOf("/") + 1));
+  return { subject, label: channelLabel };
 }
 
 export const slackSubjects: EventSubjects = { fromUrl, label, url };
