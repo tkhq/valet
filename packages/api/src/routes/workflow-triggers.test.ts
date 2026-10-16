@@ -583,6 +583,8 @@ describe("GET /api/workflows/trigger-catalog", () => {
     const github = body.catalog.find((s) => s.service === "github");
     expect(github).toBeDefined();
     expect(github!.entries.length).toBeGreaterThan(0);
+    // Triggers are subscriptions, so the editor never offers a derived key.
+    expect(github!.entries.some((e) => e.key === "github.pull_request.checks_completed")).toBe(false);
   });
 });
 

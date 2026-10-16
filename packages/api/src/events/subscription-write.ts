@@ -11,7 +11,7 @@
 import { validatePresence } from "@valet/shared";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { allCatalogEntries } from "./ingest.js";
+import { allCatalogEntries, subscribableEntries } from "./ingest.js";
 import { eventKeyMatches, validateRegexPattern, type SubscriptionFilter } from "./match.js";
 import { enforceMentionScope, readMentionAudience } from "./mention-scope.js";
 import { validatePromptTemplate } from "./prompt-template.js";
@@ -62,7 +62,14 @@ export function validateSubscription(
     if (typeof pattern !== "string" || pattern.length === 0) {
       return "eventKeys entries must be non-empty strings";
     }
-    const matches = entries.filter((entry) => eventKeyMatches(entry.key, [pattern]));
+    const covered = entries.filter((entry) => eventKeyMatches(entry.key, [pattern]));
+    // Derived keys stay unavailable to subscriptions (spec 2026-10-15: event
+    // wakeups, Part G and Non-goals): the dispatcher has no derive step. A
+    // glob that also covers a derived key keeps only its plain entries.
+    const matches = subscribableEntries(covered);
+    if (matches.length === 0 && covered.length > 0) {
+      return `${pattern} is a derived event key, and subscriptions do not accept derived keys. Use wait_for_event in a session to wait for it.`;
+    }
     if (matches.length === 0) return `unknown event key: ${pattern}`;
     selectedEntries.push(...matches);
   }

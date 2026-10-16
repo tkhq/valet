@@ -669,4 +669,10 @@ webhook MUST include `Issue` and `Comment`. Add the Part J alert rule.
 
 ## Deviations
 
-None yet.
+- B1 step 2 reads at most 20 pages of 100 check runs. If a head SHA has
+  more, `derive` fails with an error that names `github.check_suite.completed`
+  as the alternative. A silent cut could report a false `success`.
+- The subscription editors' catalogs (`GET /api/events/catalog` and
+  `GET /api/workflows/trigger-catalog`) leave out derived keys, because
+  subscriptions refuse them (Part G). `workflows.list_event_types` lists them
+  with `derived: true`.

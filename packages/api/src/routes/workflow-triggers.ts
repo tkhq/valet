@@ -122,7 +122,9 @@ workflowTriggersRouter.get("/triggers", async (c) => {
 
 workflowTriggersRouter.get("/trigger-catalog", async (c) => {
   const { db, engineCredentials, plugins } = c.var.providers;
-  const catalog = listEventTypes(plugins);
+  // The trigger editor reads this catalog. Triggers are subscriptions, which
+  // do not accept derived keys (event wakeups spec, Part G).
+  const catalog = listEventTypes(plugins).map(item => ({ ...item, entries: item.entries.filter(e => !e.derived) }));
   const linear = catalog.some(item => item.service === "linear")
     ? await getLinearIngressStatus(db,engineCredentials,c.var.user.orgId) : undefined;
   const resp: GetWorkflowTriggerCatalogResponse = {

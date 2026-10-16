@@ -165,6 +165,8 @@ describe("GET /api/events/catalog", () => {
     expect(prOpened!.filters.map((f) => f.field)).toContain("repo");
     // Non-actioned family appears as a bare key.
     expect(github!.entries.some((e) => e.key === "github.push")).toBe(true);
+    // The subscription editor never offers a derived key (event wakeups spec, Part G).
+    expect(github!.entries.some((e) => e.key === "github.pull_request.checks_completed")).toBe(false);
   });
 });
 
