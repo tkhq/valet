@@ -15,6 +15,7 @@ import {
 } from "@valet/engine";
 import type {
   ChannelOrigin,
+  EventMatchDigest,
   JobPollOpts,
   Lease,
   LeaseOwnerKind,
@@ -335,21 +336,15 @@ export class WakeWatcher {
    */
   private async processEventRows(now: number, rows: readonly Wakeup[]): Promise<void> {
     const steps: Array<{ row: Wakeup | null; derived: boolean } | null> = rows.map(() => null);
-    let nextIndex = 0;
-    const worker = async (): Promise<void> => {
-      for (;;) {
-        if (this.stopping) return;
-        const index = nextIndex++;
-        const row = rows[index];
-        if (row === undefined) return;
-        try {
-          steps[index] = await this.deriveStep(row);
-        } catch (err) {
-          console.error(`WakeWatcher: derive step of event wakeup ${row.id} failed; it stays due for the next tick:`, err);
-        }
+    // One limit for every derive call of the pass, across rows and source commits.
+    const limit = concurrencyLimit(EVENT_DERIVE_CONCURRENCY);
+    await Promise.all(rows.map(async (row, index) => {
+      try {
+        steps[index] = await this.deriveStep(row, limit);
+      } catch (err) {
+        console.error(`WakeWatcher: derive step of event wakeup ${row.id} failed; it stays due for the next tick:`, err);
       }
-    };
-    await Promise.all(Array.from({ length: Math.min(EVENT_DERIVE_CONCURRENCY, rows.length) }, worker));
+    }));
     for (const [index, row] of rows.entries()) {
       if (this.stopping) return;
       const step = steps[index];
@@ -434,49 +429,57 @@ export class WakeWatcher {
   }
 
   /**
-   * Spec Part F step 1: at most one derive call per waiter per tick, for the
-   * latest digest marked `derive`. The buffer changes only by key, never by
-   * a whole-buffer write, so a digest that ingest appends meanwhile stays.
+   * Spec Part F step 1: at most one derive call per waiter, derive key, and
+   * source commit per tick, for the latest digest of that group. A derive
+   * reads the state of the source's own commit, so the latest source of a
+   * commit answers for that commit's older sources, and never for another
+   * commit's. A waiter indexed by its repository subject can hold sources
+   * of other pull requests' commits; their `null` must not remove the
+   * head commit's sources. The buffer changes only by key, never by a
+   * whole-buffer write, so a digest that ingest appends meanwhile stays.
    *
-   * - `event`: remove the source digests, then append the derived digest
-   *   when the `status` and `from_status` of a clause on the derived key
-   *   accept it. Otherwise no signal. `appendEventMatch` refuses a derived
-   *   key that the waiter already holds or delivered (INV-E4).
-   * - `null`: remove the source digests. No signal.
+   * Per group:
+   * - `event`: remove the group's source digests, then append the derived
+   *   digest when the `status` and `from_status` of a clause on the derived
+   *   key accept it. Otherwise no signal. `appendEventMatch` refuses a
+   *   derived key that the waiter already holds or delivered (INV-E4).
+   * - `null`: remove the group's source digests. No signal.
    * - `error`: keep them for the next tick.
    *
-   * The source digests are the latest one and every older digest with the
-   * same derive key. A derive reads the subject's current state, so the
-   * latest source answers for the older ones too.
-   *
-   * Returns the row to decide on, or null when it is gone, and whether a
-   * derive call ran.
+   * `limit` bounds the derive calls of the whole pass. Returns the row to
+   * decide on, or null when it is gone, and whether a derive call ran.
    */
-  private async deriveStep(row: Wakeup): Promise<{ row: Wakeup | null; derived: boolean }> {
-    const buffer = row.eventBuffer ?? [];
-    const latest = [...buffer].reverse().find((d) => d.derive !== undefined);
-    if (!latest) return { row, derived: false };
-    if (!this.deps.deriveEvent) {
-      console.error(`WakeWatcher: event wakeup ${row.id} holds a ${latest.derive} digest, but this watcher has no derive step; it stays buffered.`);
+  private async deriveStep(row: Wakeup, limit: ConcurrencyLimit): Promise<{ row: Wakeup | null; derived: boolean }> {
+    const groups = deriveGroups(row.eventBuffer ?? []);
+    if (groups.length === 0) return { row, derived: false };
+    const deriveEvent = this.deps.deriveEvent;
+    if (!deriveEvent) {
+      console.error(`WakeWatcher: event wakeup ${row.id} holds ${groups[0]?.latest.derive} digests, but this watcher has no derive step; they stay buffered.`);
       return { row, derived: false };
     }
-    let outcome: Awaited<ReturnType<EventWaiterDerive>>;
-    try {
-      outcome = await this.deps.deriveEvent(row, latest);
-    } catch (error) {
-      outcome = { result: "error", error };
-    }
-    if (outcome.result === "error") {
-      console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; it retries next tick:`, outcome.error);
-      return { row, derived: true };
-    }
-    const sources = buffer.filter((d) => d.derive === latest.derive).map((d) => d.dedupeKey);
-    const at = this.clock();
-    await this.deps.engineStore.removeEventMatches(row.id, sources, at);
-    const latestKey = latest.derive;
-    if (outcome.result === "event" && latestKey !== undefined && row.eventMatch && derivedClausesAccept(row.eventMatch, latestKey, outcome.digest)) {
-      await this.deps.engineStore.appendEventMatch(row.id, outcome.digest, at);
-    }
+    let ran = false;
+    await Promise.all(groups.map((group) => limit(async () => {
+      if (this.stopping) return;
+      ran = true;
+      const { latest, sources } = group;
+      let outcome: Awaited<ReturnType<EventWaiterDerive>>;
+      try {
+        outcome = await deriveEvent(row, latest);
+      } catch (error) {
+        outcome = { result: "error", error };
+      }
+      if (outcome.result === "error") {
+        console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; it retries next tick:`, outcome.error);
+        return;
+      }
+      const at = this.clock();
+      await this.deps.engineStore.removeEventMatches(row.id, sources, at);
+      const key = latest.derive;
+      if (outcome.result === "event" && key !== undefined && row.eventMatch && derivedClausesAccept(row.eventMatch, key, outcome.digest)) {
+        await this.deps.engineStore.appendEventMatch(row.id, outcome.digest, at);
+      }
+    })));
+    if (!ran) return { row, derived: false };
     return { row: await this.deps.engineStore.getWakeup(row.id), derived: true };
   }
 
@@ -923,4 +926,48 @@ async function loadColdSession(
       ownerId: data.owner.id,
     }),
   );
+}
+
+/** Runs at most `max` of the functions it wraps at once, in call order. */
+type ConcurrencyLimit = <T>(fn: () => Promise<T>) => Promise<T>;
+
+function concurrencyLimit(max: number): ConcurrencyLimit {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (active >= max) await new Promise<void>((resolve) => waiting.push(resolve));
+    active++;
+    try {
+      return await fn();
+    } finally {
+      active--;
+      waiting.shift()?.();
+    }
+  };
+}
+
+/** The commit subject (`<service>:<owner>/<repo>@<sha>`) of a digest, or "" when it has none. */
+function commitSubject(digest: EventMatchDigest): string {
+  return digest.subjects.find((subject) => /@[0-9a-f]+$/i.test(subject)) ?? "";
+}
+
+/**
+ * The buffered derive digests grouped by derive key and source commit,
+ * each with its latest digest and every source key of the group (spec
+ * Part F step 1).
+ */
+function deriveGroups(buffer: readonly EventMatchDigest[]): Array<{ latest: EventMatchDigest; sources: string[] }> {
+  const groups = new Map<string, { latest: EventMatchDigest; sources: string[] }>();
+  for (const digest of buffer) {
+    if (digest.derive === undefined) continue;
+    const key = `${digest.derive}\u0000${commitSubject(digest)}`;
+    const group = groups.get(key);
+    if (group) {
+      group.latest = digest;
+      group.sources.push(digest.dedupeKey);
+    } else {
+      groups.set(key, { latest: digest, sources: [digest.dedupeKey] });
+    }
+  }
+  return [...groups.values()];
 }

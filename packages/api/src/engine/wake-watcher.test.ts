@@ -1134,6 +1134,42 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect(h.prompt).not.toHaveBeenCalled();
   });
 
+  describe("one derive per source commit (re-review: repo-indexed waiters)", () => {
+    const HEAD = "github:acme/lean-proofs@aaaa";
+    const FOREIGN = "github:acme/lean-proofs@bbbb";
+    const source = (n: number, commit: string) =>
+      digest(n, { derive: CHECKS, subjects: ["github:acme/lean-proofs", commit], dedupeKey: `derive:${CHECKS}:d-${n}` });
+
+    it("still fires for the head commit when a newer source names another pull request's commit", async () => {
+      const h = harness();
+      await h.store.createWakeup(eventRow({ eventBuffer: [source(1, HEAD), source(2, FOREIGN)] }));
+      const deriveEvent = vi.fn(async (_row: Wakeup, d: EventMatchDigest): Promise<RunDeriveResult> =>
+        d.subjects.includes(HEAD) ? { result: "event", digest: derived } : { result: "null" });
+      await h.watcher({ deriveEvent }).sweep(NOW);
+      expect(deriveEvent).toHaveBeenCalledTimes(2);
+      expect((await h.store.getWakeup("wk_ev"))?.status).toBe("done");
+      expect(h.prompt).toHaveBeenCalledTimes(1);
+      const { content } = signalOf(h.prompt.mock.calls[0]);
+      expect(typeof content !== "string" && "body" in content ? content.body : "").toContain(`${CHECKS} · failure`);
+    });
+
+    it("a null for the foreign commit removes only that commit's digests, and an error keeps the head's", async () => {
+      const h = harness();
+      await h.store.createWakeup(eventRow({ eventBuffer: [source(1, HEAD), source(2, FOREIGN), source(3, FOREIGN)] }, false));
+      const deriveEvent = vi.fn(async (_row: Wakeup, d: EventMatchDigest): Promise<RunDeriveResult> =>
+        d.subjects.includes(HEAD) ? { result: "error", error: new Error("GitHub 502") } : { result: "null" });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      await h.watcher({ deriveEvent }).sweep(NOW);
+      warn.mockRestore();
+      // One call per commit, each for that commit's latest digest.
+      expect(deriveEvent.mock.calls.map((c) => c[1].dedupeKey).sort()).toEqual([`derive:${CHECKS}:d-1`, `derive:${CHECKS}:d-3`]);
+      const row = await h.store.getWakeup("wk_ev");
+      expect(row?.eventBuffer?.map((d) => d.dedupeKey)).toEqual([`derive:${CHECKS}:d-1`]);
+      expect(row?.eventSeen).toEqual([`derive:${CHECKS}:d-2`, `derive:${CHECKS}:d-3`]);
+      expect(h.prompt).not.toHaveBeenCalled();
+    });
+  });
+
   it("drops a digest whose derive returns null and sends no signal", async () => {
     const h = harness();
     await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS })] }));

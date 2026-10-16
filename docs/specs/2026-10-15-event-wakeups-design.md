@@ -594,12 +594,17 @@ The light pass never overlaps a full pass.
 1. For each digest marked `derive`, call the plugin's `derive`. Replace the
    digest with the derived event's digest when a clause on the derived key
    accepts its `status` and `from_status`. On `null`, or when no such
-   clause accepts it, drop the digest and send no signal. Process at
-   most one derive call per waiter per tick for the latest source digest.
-   That call answers for the older digests with the same derive key, so the
-   WakeWatcher removes them with it. One deadline of 20 seconds bounds the
+   clause accepts it, drop the digest and send no signal. Group the
+   derive digests by derive key and source commit (the `@<sha>` subject).
+   Process at most one derive call per group per tick, for the group's
+   latest digest. That call answers for the older digests of the same
+   commit, so on `event` or `null` the WakeWatcher removes that group's
+   digests only. A waiter indexed by its repository subject can hold
+   sources from other pull requests' commits, and their `null` never
+   removes the head commit's sources. One deadline of 20 seconds bounds the
    call. A call past it counts as an error, and the digests stay. At most
-   4 derive calls run at once, so 8 slow waiters take about two deadlines.
+   4 derive calls of a pass run at once, across waiters and commits, so 8
+   slow derive calls take about two deadlines.
 2. Once mode: CAS the row from `running` to `done` with cause `fired`. Then
    submit one `event.matched` signal with the first digest. List any other
    buffered digests under `Also matched`.
@@ -756,9 +761,11 @@ hour, with the first-series pattern of the wakeups spec.
 - **INV-E7 A digest's text is at most 4096 bytes, and delivery removes the
   digests it sent.** Mechanism: `appendEventMatch` cuts the text; delivery
   removes delivered digests by `dedupeKey` with `removeEventMatches`.
-- **INV-E8 Events caused by self never wake an agent unless a clause sets
-  `include_self`.** Mechanism: the matcher compares actor ids to `self`;
-  vectors C5 and E1.
+- **INV-E8 Events caused by self never wake an agent through a direct
+  clause unless the clause sets `include_self`.** Mechanism: the matcher
+  compares actor ids to `self`; vectors C5 and E1. A derived clause skips
+  the self check on its source event, because the agent's own push or CI
+  run is the usual source. The derived event has no actor.
 - **INV-E9 A derive call runs only for a waiter that names the derived
   key.** Mechanism: only the WakeWatcher calls `derive`, and only for a
   digest marked `derive`. Vector: zero fixture API calls when no waiter
