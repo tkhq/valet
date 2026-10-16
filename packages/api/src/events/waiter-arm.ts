@@ -84,7 +84,14 @@ export interface ArmContext {
   orgId: string;
 }
 
-export type ArmCheckResult = { ok: true; subjects: string[]; self: string[] } | { ok: false; text: string };
+/**
+ * The arm outcome. `subjects` lists the subject first. When a clause names
+ * a derived key, the repository subject follows it, and `primarySubject`
+ * names the subject that direct clauses need (spec Part C).
+ */
+export type ArmCheckResult =
+  | { ok: true; subjects: string[]; self: string[]; primarySubject?: string }
+  | { ok: false; text: string };
 
 const SERVICE_NAMES: Record<string, string> = { github: "GitHub", slack: "Slack", linear: "Linear" };
 
@@ -243,6 +250,15 @@ export async function checkArm(
   } catch (err) {
     console.warn("[wait_for_event] the self lookup failed; the waiter has an empty self set:", err);
     self = [];
+  }
+  // A derived key's sources can carry only the repository and commit
+  // subjects (a commit status names no pull request), so the waiter is
+  // indexed by the repository too. Direct clauses still need the pull
+  // request subject, and `derive` refuses a SHA that is not the head.
+  const derivedKeys = new Set(deps.plugins.flatMap((plugin) => (plugin.derivedEvents ?? []).map((def) => def.key)));
+  if (parsed.service === "github" && parsed.target.number !== undefined && req.on.some((clause) => derivedKeys.has(clause.key))) {
+    const repoSubject = `github:${parsed.target.owner}/${parsed.target.repo}`;
+    return { ok: true, subjects: [subject, repoSubject], self: [...new Set(self)], primarySubject: subject };
   }
   return { ok: true, subjects: [subject], self: [...new Set(self)] };
 }

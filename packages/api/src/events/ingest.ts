@@ -277,12 +277,13 @@ export async function ingestEvent(
     if (deps.waiters) {
       const waiters = deps.waiters;
       try {
-        const count = await matchEventWaiters({
+        const result = await matchEventWaiters({
           ...waiters,
           // The mention rule reuses the subscriptions this ingest already read.
           appMentionCovered: async (_orgId, mention) => appMentionCoveredBy(subs, mention, deps.plugins),
         }, orgId, service, event);
-        await appendReceiptStage(deps.db, receiptId, waiterMatchStage(count));
+        // An event that no running waiter shares a subject with adds no stage.
+        if (result.candidates > 0) await appendReceiptStage(deps.db, receiptId, waiterMatchStage(result.appended));
       } catch (error) {
         recordWaiterMatchFailure(waiters);
         console.error(`[ingest] receipt ${receiptId ?? "unavailable"} event waiter matching failed`, error);

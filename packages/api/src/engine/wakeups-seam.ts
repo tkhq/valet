@@ -20,6 +20,7 @@ import type {
 } from "@valet/engine";
 import { newExecId, newLeaseId, newWakeupId } from "@valet/engine/wakeups-ids";
 import { DEFAULT_JOB_LOG_MAX_BYTES } from "../providers/sandbox-backend.js";
+import type { ArmCheckResult } from "../events/waiter-arm.js";
 import { isSandboxGone } from "./wakeups-admin.js";
 
 /**
@@ -72,7 +73,7 @@ export interface WakeupsSeamDeps {
     threadId: string,
     req: ArmEventRequest,
     credentials: CredentialProvider | undefined,
-  ) => Promise<{ ok: true; subjects: string[]; self: string[] } | { ok: false; text: string }>;
+  ) => Promise<ArmCheckResult>;
 }
 
 const BASH_BACKGROUND_UNAVAILABLE =
@@ -389,6 +390,7 @@ export function buildWakeupsSeam(
         once: req.once,
         self: checked.self,
         ...(req.minIntervalMs !== undefined ? { minIntervalMs: req.minIntervalMs } : {}),
+        ...(checked.primarySubject !== undefined ? { primarySubject: checked.primarySubject } : {}),
       };
       try {
         return await createEvent(threadId, checked.subjects, match, req.reason, req.maxHours, origin);

@@ -14,13 +14,17 @@ export type WakeupKind = "process" | "watch" | "timer" | "event";
  * field except `key` narrows the match.
  */
 export interface EventClause {
-  /** The event key, such as `github.check_run.completed`. */
+  /**
+   * The event key, such as `github.check_run.completed`, or a derived key.
+   * On a derived key, `status` and `from_status` filter the derived event,
+   * and the other fields do not apply (spec Part E).
+   */
   key: string;
   /** Match only these normalized statuses. */
   status?: string[];
   /** Match only an update whose previous status is one of these. */
   from_status?: string[];
-  /** Match only this actor login. */
+  /** Match only this actor, by login or external id. */
   actor?: string;
   /** False drops events from bot actors. */
   bots?: boolean;
@@ -35,6 +39,13 @@ export interface EventMatchSpec {
   once: boolean;
   /** External actor ids the session acts as. Their events are dropped unless a clause sets `include_self`. */
   self: string[];
+  /**
+   * The subject a direct clause needs on the event. Set when the waiter
+   * also holds a wider subject for a derived key's sources, such as the
+   * repository of a pull request (spec Part C). Absent: any subject of
+   * the waiter counts.
+   */
+  primarySubject?: string;
   /**
    * Stream mode: the shortest gap between two `event.matched` signals (ms).
    * Absent means `WakeupLimits.watchMinIntervalMs`.

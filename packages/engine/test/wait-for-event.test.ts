@@ -207,6 +207,13 @@ describe("waitForEventTool", () => {
     expect(waitForEventTool.description).toContain("propose an event subscription instead");
   });
 
+  it("names who self covers and shows an include_self recipe (final review, item 7)", () => {
+    expect(waitForEventTool.description).toContain(
+      "Events by you, the person you act for, or the Valet app are skipped unless a clause sets include_self.",
+    );
+    expect(waitForEventTool.description).toContain('"include_self": true');
+  });
+
   it("returns wakeupsUnavailable without a seam", async () => {
     const result = await waitForEventTool.execute(VALID, makeCtx(null));
     expect(result.text).toBe(wakeupsUnavailable("wait_for_event"));
@@ -280,6 +287,30 @@ describe("waitForEventTool", () => {
         `github.pull_request.checks_completed until ${new Date(NOW + 6 * 3_600_000).toISOString()}. ` +
         "End your turn now; an event.matched signal starts your next turn.",
     );
+  });
+});
+
+describe("an event waiter with a primary subject (final review, item 3)", () => {
+  const indexed = () => eventWakeup({
+    subjects: ["github:acme/lean-proofs#42", "github:acme/lean-proofs"],
+    eventMatch: {
+      clauses: [{ key: "github.pull_request.checks_completed" }],
+      once: true,
+      self: [],
+      primarySubject: "github:acme/lean-proofs#42",
+    },
+  });
+
+  it("names only the primary subject in the arm result", async () => {
+    const armEvent = vi.fn(async () => ({ wakeup: indexed() }));
+    const result = await waitForEventTool.execute(VALID, makeCtx({ armEvent }));
+    expect(result.text).toMatch(/^waiting wk_ev1 on github:acme\/lean-proofs#42 for /);
+  });
+
+  it("names only the primary subject in wakeup_list", async () => {
+    const list = vi.fn(async () => ({ wakeups: [indexed()], leases: [], otherThreads: 0 }));
+    const result = await wakeupListTool.execute({}, makeCtx({ list }));
+    expect(result.text).toContain('"CI on #42" on github:acme/lean-proofs#42 (1 clause)');
   });
 });
 

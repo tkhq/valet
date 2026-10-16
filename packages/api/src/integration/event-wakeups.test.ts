@@ -70,6 +70,7 @@ const INSTALLATION = 77;
 const PR_URL = "https://github.com/acme/lean-proofs/pull/42";
 const PR_SUBJECT = "github:acme/lean-proofs#42";
 const HEAD_SHA = "aaaa000000000000000000000000000000000001";
+const REPO_SUBJECT = "github:acme/lean-proofs";
 const GITHUB_WEBHOOK_SECRET = "gh-webhook-secret";
 const { privateKey: APP_PEM } = generateKeyPairSync("rsa", {
   modulusLength: 2048,
@@ -300,7 +301,17 @@ interface CheckRunState {
   conclusion: string | null;
 }
 
-function startAcmeGithub(runs: { current: CheckRunState[] }): GithubFixture {
+interface CombinedStatus {
+  state: string;
+  statuses: { state: string; context: string; updated_at: string }[];
+}
+
+interface GithubRuns {
+  current: CheckRunState[];
+  combined: CombinedStatus;
+}
+
+function startAcmeGithub(runs: GithubRuns): GithubFixture {
   const notFound: GithubFixtureResponse = { status: 404, body: { message: "Not Found" } };
   return startGithubFixture({
     getApp: () => ({ body: { id: Number(APP_ID), slug: APP_SLUG, owner: { login: "acme", id: 5000, type: "Organization" } } }),
@@ -316,7 +327,7 @@ function startAcmeGithub(runs: { current: CheckRunState[] }): GithubFixture {
         ? { body: { number: 42, html_url: PR_URL, head: { sha: HEAD_SHA } } }
         : notFound,
     listCheckRuns: () => ({ body: { total_count: runs.current.length, check_runs: runs.current.map((r, i) => ({ id: i + 1, ...r })) } }),
-    getCombinedStatus: () => ({ body: { state: "pending", statuses: [] } }),
+    getCombinedStatus: () => ({ body: runs.combined }),
   });
 }
 
@@ -327,7 +338,7 @@ interface Universe {
   agent: ScriptedAgent;
   stub: ProviderStub;
   github: GithubFixture;
-  runs: { current: CheckRunState[] };
+  runs: GithubRuns;
   clock: { now: number };
   watcher: WakeWatcher;
   sessionId: string;
@@ -347,7 +358,7 @@ async function bootUniverse(): Promise<Universe> {
   vi.stubEnv("ANTHROPIC_API_KEY", "fixture-key");
   vi.stubEnv("VALET_PUBLIC_URL", PUBLIC_URL);
   __resetSlackWebhookThrottle();
-  const runs = { current: [] as CheckRunState[] };
+  const runs: GithubRuns = { current: [], combined: { state: "pending", statuses: [] } };
   const github = startAcmeGithub(runs);
   cleanups.push(() => github.close());
   vi.stubEnv("GITHUB_API_URL", github.url);
@@ -608,7 +619,10 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     expect(armed?.text).toContain(PR_SUBJECT);
     const waiterId = waiterIdFrom(armed?.text ?? "");
     const [row] = await eventWaiters(u);
-    expect(row).toMatchObject({ id: waiterId, kind: "event", status: "running", subjects: [PR_SUBJECT] });
+    // A derived clause indexes the waiter by the repository too, for commit
+    // statuses; direct clauses still need the pull request subject.
+    expect(row).toMatchObject({ id: waiterId, kind: "event", status: "running", subjects: [PR_SUBJECT, REPO_SUBJECT] });
+    expect(row?.eventMatch?.primarySubject).toBe(PR_SUBJECT);
     // self: ada's link, the actor behind her token, and the App bot user.
     expect([...(row?.eventMatch?.self ?? [])].sort()).toEqual(["1001", APP_ID]);
     expect(await eventWaiters(u)).toHaveLength(1);
@@ -647,6 +661,9 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     await u.watcher.sweep(u.clock.now);
     const [a4] = await awaitSignals(u, "event.matched", 1);
     expect(a4?.content).toContain("github.check_run.completed · failure");
+    // The failure also fed the derived clause; build still runs, so its
+    // derive digest was dropped with no signal.
+    expect((await p.engineStore.getWakeup(waiterId))?.eventSeen).toContain("derive:github.pull_request.checks_completed:gh-a4");
     await expectNoNewSignal(u, "event.matched", 1);
 
     // A5: build passes and no run is pending. The derived event reports the
@@ -673,6 +690,49 @@ describe("api integration: event wakeups acceptance scenarios", () => {
     await u.watcher.sweep(u.clock.now);
     await expectNoNewSignal(u, "event.matched", 2);
     expect(await signals(u, "event.ended")).toHaveLength(0);
+  }, 60_000);
+
+  it("Scenario A errata: a commit status completes the checks of a pull request (final review, item 3)", async () => {
+    const u = await bootUniverse();
+    const p = u.api.providers;
+    u.agent.on(/STEP AS1/, [{
+      name: "wait_for_event",
+      args: {
+        subject: PR_URL,
+        on: [{ key: "github.check_run.completed", status: PENDING_FAILURES }, { key: "github.pull_request.checks_completed" }],
+        once: true, reason: "CI on #42", max_hours: 6,
+      },
+    }]);
+    const [armed] = await prompt(u, "STEP AS1", 1);
+    const waiterId = waiterIdFrom(armed?.text ?? "");
+    u.runs.current = [{ name: "lint", status: "completed", conclusion: "success" }];
+    u.runs.combined = { state: "pending", statuses: [{ state: "pending", context: "ci/legacy", updated_at: new Date().toISOString() }] };
+
+    // A check run on another pull request of the repository fails. No
+    // direct clause matches it, and its SHA is not the head of #42.
+    const other = checkRunCompleted("test", "failure", 7);
+    const otherRun = asRecord(other.check_run) ?? {};
+    other.check_run = { ...otherRun, head_sha: "bbbb000000000000000000000000000000000002", pull_requests: [{ number: 7, head: { sha: "bbbb000000000000000000000000000000000002" } }] };
+    await postGithub(u, "check_run", "gh-as2", other);
+    u.clock.now += 1_000;
+    await u.watcher.sweep(u.clock.now);
+    await expectNoNewSignal(u, "event.matched", 0);
+    expect(await p.engineStore.getWakeup(waiterId)).toMatchObject({ status: "running", eventBuffer: [] });
+
+    // The legacy commit status passes. It names no pull request, only the
+    // repository and the commit, and it completes the last check.
+    u.runs.combined = { state: "success", statuses: [{ state: "success", context: "ci/legacy", updated_at: new Date().toISOString() }] };
+    await postGithub(u, "status", "gh-as3", {
+      sha: HEAD_SHA, state: "success", context: "ci/legacy",
+      repository: { full_name: "acme/lean-proofs", name: "lean-proofs", owner: { login: "acme" } },
+      installation: { id: INSTALLATION },
+      sender: { id: 1002, login: "ci-bot", type: "User" },
+    });
+    u.clock.now += 1_000;
+    await u.watcher.sweep(u.clock.now);
+    const [fired] = await awaitSignals(u, "event.matched", 1);
+    expect(fired?.content).toContain("github.pull_request.checks_completed · success");
+    expect(await p.engineStore.getWakeup(waiterId)).toMatchObject({ status: "done", cause: "fired" });
   }, 60_000);
 
   it("Scenario B: a Slack thread reply", async () => {

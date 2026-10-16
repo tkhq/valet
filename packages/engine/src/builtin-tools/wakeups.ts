@@ -66,10 +66,19 @@ function wakeupLine(w: Wakeup, now: number): string {
   const iso = isoOrUndefined(w.deadlineAt);
   if (w.kind === "event") {
     const n = w.eventMatch?.clauses.length ?? 0;
-    const on = `${base} on ${(w.subjects ?? []).join(", ")} (${n} ${n === 1 ? "clause" : "clauses"})`;
+    const on = `${base} on ${waiterSubject(w)} (${n} ${n === 1 ? "clause" : "clauses"})`;
     return iso ? `${on} deadline ${iso}, ${started}` : `${on}, ${started}`;
   }
   return iso ? `${base} deadline ${iso}, ${started}` : `${base}, ${started}`;
+}
+
+/**
+ * The subject an event waiter shows: its primary subject when it has one.
+ * The repository subject a derived clause adds is an index entry, not
+ * what the agent waits on (spec 2026-10-15, Part C).
+ */
+function waiterSubject(w: Wakeup): string {
+  return w.eventMatch?.primarySubject ?? (w.subjects ?? []).join(", ");
 }
 
 function leaseLine(l: Lease, now: number): string {
@@ -292,7 +301,8 @@ export const waitForEventTool = defineTool({
     'A Linear triage shift: subject the team triage URL, on [{ "key": "linear.issue.create", "status": ["triage"] }, ' +
     '{ "key": "linear.issue.update", "status": ["triage"], "from_status": ["backlog", "unstarted", "started", "completed", "canceled"] }], once false. ' +
     'A reply on a Linear issue: subject the issue URL, on [{ "key": "linear.comment.create" }]. ' +
-    "Events this session causes are skipped unless a clause sets include_self. " +
+    "Events by you, the person you act for, or the Valet app are skipped unless a clause sets include_self. " +
+    'To wait for a reply from the person you act for, set it: on [{ "key": "slack.message", "bots": false, "include_self": true }]. ' +
     "To watch something with no end, propose an event subscription instead.",
   parameters: Type.Object({
     subject: Type.String({ description: "A GitHub pull request, issue, commit, or repository URL, a Slack message permalink, or a Linear issue or team URL." }),
@@ -315,7 +325,7 @@ export const waitForEventTool = defineTool({
     const result = await seam.armEvent(ctx.threadId, validation.value, ctx.origin, ctx.credentials);
     if ("refused" in result) return { text: result.refused };
     const { wakeup } = result;
-    const subject = (wakeup.subjects ?? []).join(", ");
+    const subject = waiterSubject(wakeup);
     const clauses = validation.value.on.map(clauseText).join(", ");
     const deadline = isoOrUndefined(wakeup.deadlineAt) ?? "unknown";
     return {
