@@ -990,6 +990,46 @@ describe("schedule thread policy (spec 2026-10-16, Part A)", () => {
     expect(row.threadPolicy).toBeNull();
   });
 
+  it("checks a team schedule's pin against the team, not the caller", async () => {
+    const a = await boot();
+    await seedTeamWithCaller(a, "team_a");
+    const teamThread = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "team", id: "team_a" }, sessionId: "sess-team", threadId: "thr-team",
+    });
+    const personal = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "local-user" }, sessionId: "sess-personal", threadId: "thr-personal",
+    });
+    const create = (thread: unknown) => fetch(`${a.baseUrl}/api/workflows/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Team summary", cron: VALID_CRON, target: { kind: "orchestrator", prompt: "Summarize" }, teamId: "team_a", thread }),
+    });
+
+    const refused = await create({ mode: "existing", ...personal });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: "This thread belongs to another owner. Pick a thread in your workspace." });
+    expect(await a.providers.db.select().from(workflowSchedules)).toEqual([]);
+
+    const accepted = await create({ mode: "existing", ...teamThread });
+    expect(accepted.status).toBe(201);
+    const scheduleId = ((await accepted.json()) as WorkflowScheduleResponse).schedule.scheduleId;
+    const [row] = await a.providers.db.select().from(workflowSchedules).where(eq(workflowSchedules.id, scheduleId));
+    expect(row).toMatchObject({ ownerType: "team", ownerId: "team_a", threadPolicy: { mode: "existing", ...teamThread } });
+  });
+
+  it("refuses a patch to another owner's thread and keeps the stored policy", async () => {
+    const a = await boot();
+    const foreign = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "someone-else" }, sessionId: "sess-foreign", threadId: "thr-foreign",
+    });
+    const created = (await (await createSchedule(a, { mode: "new" })).json()) as WorkflowScheduleResponse;
+    const res = await patchSchedule(a, created.schedule.scheduleId, { thread: { mode: "existing", ...foreign } });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "This thread belongs to another owner. Pick a thread in your workspace." });
+    const [row] = await a.providers.db.select().from(workflowSchedules).where(eq(workflowSchedules.id, created.schedule.scheduleId));
+    expect(row.threadPolicy).toEqual({ mode: "new" });
+  });
+
   it("reads a schedule with no stored policy as absent", async () => {
     const a = await boot();
     await seedScheduleRow(a, "sched_legacy", "local-org", { owner: { type: "user", id: "local-user" } });

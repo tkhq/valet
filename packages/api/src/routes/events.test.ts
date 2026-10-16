@@ -2469,6 +2469,45 @@ describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
     expect(res.status).toBe(201);
     const created = (await res.json()) as CreateEventSubscriptionResponse;
     expect(created.target).toEqual({ kind: "orchestrator", thread: { mode: "existing", ...mine } });
+    const [row] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.id));
+    expect(row.target).toEqual({ kind: "orchestrator", thread: { mode: "existing", ...mine } });
+  });
+
+  it("refuses an owner's thread outside an assistant conversation", async () => {
+    const a = await boot();
+    const plain = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "local-user" }, sessionId: "sess-plain", threadId: "thr-plain", assistant: false,
+    });
+    const res = await postSubscription(a.baseUrl, withThread({ mode: "existing", ...plain }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "This thread is not in a live assistant conversation. Pick a thread in your assistant." });
+    expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+  });
+
+  it("checks a team rule's pin against the team, not the caller", async () => {
+    const a = await boot();
+    await a.providers.db.insert(teams).values({ id: "team_1", orgId: "local-org", name: "Platform", createdAt: Date.now() });
+    await a.providers.db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: "member" });
+    const teamThread = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "team", id: "team_1" }, sessionId: "sess-team", threadId: "thr-team",
+    });
+    const personal = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "test-member" }, sessionId: "sess-personal", threadId: "thr-personal",
+    });
+    const teamTarget = (thread: unknown) => ({ ...VALID_BODY, target: { kind: "orchestrator", orchestrator: "team", teamId: "team_1", thread } });
+    const asMember = { "x-valet-test-user-id": "test-member" };
+
+    const refused = await postSubscription(a.baseUrl, teamTarget({ mode: "existing", ...personal }), asMember);
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: CROSS_OWNER });
+    expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+
+    const accepted = await postSubscription(a.baseUrl, teamTarget({ mode: "existing", ...teamThread }), asMember);
+    expect(accepted.status).toBe(201);
+    const created = (await accepted.json()) as CreateEventSubscriptionResponse;
+    expect(created.ownerType).toBe("team");
+    const [row] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.id));
+    expect(row.target).toMatchObject({ thread: { mode: "existing", ...teamThread } });
   });
 
   it("patches the policy, refuses another owner's thread, and clears it with null", async () => {
