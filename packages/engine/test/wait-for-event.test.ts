@@ -196,6 +196,17 @@ describe("waitForEventTool", () => {
     expect(builtinTools.some((t) => t.name === "wait_for_event")).toBe(true);
   });
 
+  // Part I: the description carries one recipe per acceptance scenario
+  // (A, B, C) plus the Linear-issue-reply recipe, and says that a standing,
+  // unbounded watch is a subscription, not a one-off wait.
+  it("carries the four recipe headings and the subscription sentence", () => {
+    expect(waitForEventTool.description).toContain("CI on a pull request");
+    expect(waitForEventTool.description).toContain("A Slack reply");
+    expect(waitForEventTool.description).toContain("A Linear triage shift");
+    expect(waitForEventTool.description).toContain("A reply on a Linear issue");
+    expect(waitForEventTool.description).toContain("propose an event subscription instead");
+  });
+
   it("returns wakeupsUnavailable without a seam", async () => {
     const result = await waitForEventTool.execute(VALID, makeCtx(null));
     expect(result.text).toBe(wakeupsUnavailable("wait_for_event"));

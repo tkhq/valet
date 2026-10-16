@@ -149,7 +149,7 @@ import {
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
 import securityPlugin from "@valet/plugin-security/plugin";
-import { CHILD_TIMER_HOURS, codingSystemPrompt } from "./prompt-rules.js";
+import { CHILD_TIMER_HOURS, codingSystemPrompt, threadLinkContext } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool } from "../services/generated-files.js";
@@ -1124,6 +1124,13 @@ export class EngineHost {
     // team's skills, not the prompting member's. SessionOptions.owner below
     // uses the same principal.
     const principal = sessionPrincipal(meta);
+    // Event-wakeups Part I: the thread link sentence is per-thread, not
+    // per-session, so it rides the engine's `threadSystemContext` hook
+    // (resolved once per thread, unlike `systemPrompt`) rather than
+    // `codingSystemPrompt`. `publicUrl` is undefined on a deployment with
+    // no public URL, which omits the sentence entirely.
+    const publicUrl = publicUrlFromEnv(process.env);
+    const threadLink = (thread: { id: string }) => threadLinkContext(thread.id, publicUrl);
     const extras = await this.sessionExtras(
       principal,
       meta.orgId,
@@ -1339,6 +1346,7 @@ export class EngineHost {
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
             ...this.browserOptions(sessionId),
             extractDocument: extractDocumentText,
+            threadSystemContext: threadLink,
             ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
             ...this.leaseOptions(sessionId),
             ...this.threadAccessOptions(),
@@ -1373,6 +1381,7 @@ export class EngineHost {
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
           ...this.browserOptions(sessionId),
           extractDocument: extractDocumentText,
+          threadSystemContext: threadLink,
           ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
           ...this.leaseOptions(sessionId),
           ...this.threadAccessOptions(),
@@ -2931,6 +2940,17 @@ export class EngineHost {
     }
     const db = this.opts.db;
     const apiBaseUrl = this.opts.apiBaseUrl;
+    // Event-wakeups Part I: the thread link sentence, composed with the
+    // existing workflow editor/run context (both are per-thread, so they
+    // share the one `threadSystemContext` hook). `publicUrl` undefined
+    // omits the sentence.
+    const publicUrl = publicUrlFromEnv(process.env);
+    const assistantThreadContext = (thread: { id: string; key: string }): string | undefined => {
+      const parts = [threadLinkContext(thread.id, publicUrl), workflowThreadContext(thread)].filter(
+        (part): part is string => part !== undefined,
+      );
+      return parts.length > 0 ? parts.join("\n\n") : undefined;
+    };
 
     const assistant = await loadAssistant(db, assistantId);
     if (!assistant) {
@@ -3103,7 +3123,7 @@ export class EngineHost {
       } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       initialToolFocus: ({ key }: { key: string }) => /^workflow:wf_/.test(key) ? workflowToolFocus("diagnose") : undefined,
-      threadSystemContext: workflowThreadContext,
+      threadSystemContext: assistantThreadContext,
       unattendedThread: isWorkflowRunThread,
       automatedThread: isAutomatedDeliveryThread,
       // A team or org orchestrator is shared, so no one timezone applies.
