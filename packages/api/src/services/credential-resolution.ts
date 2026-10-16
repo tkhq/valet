@@ -11,7 +11,8 @@
  *     via `resolveUserCredentialRead` (user-owned runs) or
  *     `resolveOrgCredentialRead` (org-owned runs)
  *   - `ChannelHost`'s bot-token read (`channels/host.ts`) via
- *     `resolveOrgCredentialRead`
+ *     `resolveOrgChannelCredentialRead`, the one org read that keeps the
+ *     row's signing secrets
  *
  * The escalation is DECLARED, not assumed. Every caller states an
  * `OrgFallback`, and the default a caller derives from the plugin registry
@@ -31,9 +32,11 @@
  * carry: `plugin-slack` declares `requires.orgCredential`, so the policy
  * covers it without naming it.
  */
-import type { CredentialStore, StoredCredential, ValetPlugin } from "@valet/engine";
+import { credentialSecret, type CredentialStore, type StoredCredential, type ValetPlugin } from "@valet/engine";
 import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
+import { recordAppCredentialFallback, type AppFallbackReason } from "../observability/credential-metrics.js";
 import { findCredentialDeclaration } from "./integration-availability.js";
+import { LINEAR_CLIENT_CREDENTIALS_GRANT } from "./linear-app.js";
 import {
   ONEPASSWORD_SERVICE,
   OnePasswordAuthError,
@@ -182,16 +185,12 @@ export async function resolveUserCredentialRead(
   // `OAuthRefreshingCredentialStore` refreshes on read and writes the result
   // back under the owner it read, so an org read is an org write.
   if (orgFallback === "reference-only" && !deps.onePassword) return null;
-  // Falls through to the vault lookup below when no row answers.
-  const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
-  if (!orgRow) return lookupInOnePassword(deps, ctx, service);
   // A plain org row stays invisible. An org-owned `linear` row carries
   // `metadata.webhookSecret` (`plugins/http-linear-connection.ts`), so returning the
   // whole row to every member's session would hand out the webhook HMAC.
-  if (orgFallback === "reference-only" && !onePasswordMeta(orgRow)) {
-    return lookupInOnePassword(deps, ctx, service);
-  }
-  return resolveRow(deps, orgRow, ctx, "skip");
+  // With no row to answer, the read falls through to the vault lookup.
+  const fromOrg = await readOrgRow(deps, ctx, service, "skip", (row) => orgFallback === "org-provided" || !!onePasswordMeta(row));
+  return fromOrg === ABSENT ? lookupInOnePassword(deps, ctx, service) : fromOrg;
 }
 
 /**
@@ -246,6 +245,13 @@ export async function lookupInOnePassword(
  * `userId: ""`, which `OnePasswordService.resolveCredential` turns into the
  * typed `OnePasswordAuthError` (no personal token owner to look up) rather
  * than a silent null — callers must handle that error explicitly.
+ *
+ * An app credential row comes back as a bare token (`readOrgRow`): an
+ * org-owned session or workflow run gets `{ type, accessToken }` and none of
+ * the row's metadata, which holds the inbound webhook secret. Any other org
+ * row comes back without its signing secrets (`ORG_ROW_SECRET_METADATA_KEYS`),
+ * so the Slack bot row keeps `teamId` and the bot ids but not
+ * `webhookSecret`.
  */
 export async function resolveOrgCredentialRead(
   deps: CredentialReadDeps,
@@ -253,8 +259,242 @@ export async function resolveOrgCredentialRead(
   service: string,
 ): Promise<StoredCredential | null> {
   if (isDeniedCredentialService(service)) return null;
-  const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
-  return resolveRow(deps, orgRow, { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes: ctx.scopes ?? ["org"] }, "resolve");
+  const fromOrg = await readOrgRow(deps, { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes: ctx.scopes ?? ["org"] }, service, "resolve");
+  return fromOrg === ABSENT ? null : fromOrg;
+}
+
+/**
+ * The org row for a channel transport (`ChannelHost`), with its signing
+ * secrets kept. The Slack transport verifies inbound requests with
+ * `metadata.webhookSecret` and opens Socket Mode with `metadata.appToken`.
+ * Only the channel host may call this. Every action read goes through
+ * `resolveOrgCredentialRead`, which strips those keys (INV-P1).
+ */
+export async function resolveOrgChannelCredentialRead(
+  deps: CredentialReadDeps,
+  ctx: CredentialReadCtx,
+  service: string,
+): Promise<StoredCredential | null> {
+  if (isDeniedCredentialService(service)) return null;
+  const fromOrg = await readOrgRow(deps, { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes: ctx.scopes ?? ["org"] }, service, "resolve", undefined, "keep");
+  return fromOrg === ABSENT ? null : fromOrg;
+}
+
+/**
+ * Org row metadata keys that hold a secret only the host uses: inbound
+ * signature verification and the Slack Socket Mode app-level token. An
+ * action never needs them, so every org read that can reach an action drops
+ * them (INV-P1). The stored row keeps them.
+ */
+const ORG_ROW_SECRET_METADATA_KEYS: ReadonlySet<string> = new Set(["webhookSecret", "signingSecret", "clientSecret", "appToken"]);
+
+function withoutSecretMetadata(row: StoredCredential): StoredCredential {
+  const metadata = row.metadata;
+  if (!metadata || !Object.keys(metadata).some((key) => ORG_ROW_SECRET_METADATA_KEYS.has(key))) return row;
+  const kept = Object.fromEntries(Object.entries(metadata).filter(([key]) => !ORG_ROW_SECRET_METADATA_KEYS.has(key)));
+  return { ...row, metadata: kept };
+}
+
+/** `readOrgRow`'s answer when no org row exists, or the caller's `admit`
+ * turned the row away. It differs from `null`, a row that resolved to
+ * nothing, because the user read goes on to the vaults only on this one. */
+const ABSENT = Symbol("absent");
+
+/**
+ * The one door every org-row read passes through: the user read's org
+ * fallback, the team read's org-provided step, the org-owned read, and the
+ * app credential read. It reads the row, resolves a 1Password pointer on it
+ * (`resolveRow`), and then reduces an app credential row (INV-P1):
+ *
+ * - For a service whose org row is meant to hold the app credential
+ *   (`APP_CREDENTIAL_ROWS`), the caller gets a bare token.
+ * - For any other service, an app credential row reads as `null`
+ *   (native credential policy, Part D item 2).
+ *
+ * - Any other row loses its signing secrets (`ORG_ROW_SECRET_METADATA_KEYS`)
+ *   and keeps the rest of its metadata, unless `secrets` is `"keep"`.
+ *   Only the channel transport read keeps them.
+ *
+ * No caller can hand an app row's metadata, or an org row's signing secret,
+ * to an action, because no caller reads an org row any other way. `admit`
+ * sees the raw row before any resolution, for a caller that accepts only
+ * some rows.
+ */
+async function readOrgRow(
+  deps: CredentialReadDeps,
+  ctx: UserReadCtx,
+  service: string,
+  excluded: "skip" | "resolve",
+  admit: (row: StoredCredential) => boolean = () => true,
+  secrets: "strip" | "keep" = "strip",
+): Promise<StoredCredential | null | typeof ABSENT> {
+  const row = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
+  if (!row || !admit(row)) return ABSENT;
+  const resolved = await resolveRow(deps, row, ctx, excluded);
+  if (!resolved) return resolved;
+  if (!isAppCredentialRow(resolved)) return secrets === "keep" ? resolved : withoutSecretMetadata(resolved);
+  return APP_CREDENTIAL_ROW_SERVICES.has(service) ? bareAppToken(resolved) : null;
+}
+
+/**
+ * An org row that holds an app credential: a token the provider minted for
+ * the app itself (`grant: client_credentials`), not a person's connection.
+ * Today that is the org `linear` row (`plugins/http-linear-connection.ts`).
+ */
+function isAppCredentialRow(row: StoredCredential): boolean {
+  return row.metadata?.grant === LINEAR_CLIENT_CREDENTIALS_GRANT;
+}
+
+/**
+ * The app credential an action receives: the access token and nothing else
+ * (INV-P1). The row's metadata carries the inbound webhook HMAC secret, the
+ * workspace ID, and the connection ID, which no action needs. The store
+ * still reads, and renews, the full row (`LinearAppTokenStore`); only the
+ * value handed out is reduced. A row with no token reads as absent.
+ *
+ * A top-level `expiresAt` stays: it is not a secret, and the engine hands
+ * it to actions (`Session.credentialProvider`), which may use it to decide
+ * when a token is stale. The Linear row keeps its expiry in metadata
+ * (`tokenExpiresAt`), so its bare token carries none.
+ */
+function bareAppToken(row: StoredCredential): StoredCredential | null {
+  const accessToken = credentialSecret(row);
+  if (!accessToken) return null;
+  return typeof row.expiresAt === "number" ? { type: row.type, accessToken, expiresAt: row.expiresAt } : { type: row.type, accessToken };
+}
+
+/**
+ * The app credential services an org row answers, mapped to the service of
+ * that row. `github:installation` is minted from the GitHub App
+ * (`services/github-tokens.ts`), and the Slack app credential is the org
+ * `slack` row itself, read through the org-provided policy, so neither is
+ * listed here.
+ */
+const APP_CREDENTIAL_ROWS: ReadonlyMap<string, string> = new Map([["linear:app", "linear"]]);
+const APP_CREDENTIAL_ROW_SERVICES: ReadonlySet<string> = new Set(APP_CREDENTIAL_ROWS.values());
+
+/** Whether `service` is an app credential service an org row answers
+ * (`resolveAppCredentialRead`). */
+export function isAppCredentialRowService(service: string): boolean {
+  return APP_CREDENTIAL_ROWS.has(service);
+}
+
+/**
+ * Whether a native plugin names `service` as its app credential service
+ * (`ValetPlugin.appCredentialService`). This is the class check of native
+ * credential policy Part B: a service no native plugin names never resolves
+ * to an app token (INV-P2). Config-declared MCP servers are never native
+ * (`plugins/config-mcp.ts`).
+ */
+export function isNativeAppCredentialService(plugins: readonly ValetPlugin[] | undefined, service: string): boolean {
+  return (plugins ?? []).some((plugin) => plugin.native === true && plugin.appCredentialService === service);
+}
+
+/**
+ * The app credential service of the native plugin that declares `service`'s
+ * credential (`linear` → `linear:app`), or `undefined` when that plugin is
+ * not native or no plugin declares the service.
+ */
+export function nativeAppCredentialServiceFor(plugins: readonly ValetPlugin[] | undefined, service: string): string | undefined {
+  for (const plugin of plugins ?? []) {
+    if (plugin.native !== true) continue;
+    if ((plugin.credentials ?? []).some((decl) => (decl.service ?? plugin.name) === service)) return plugin.appCredentialService;
+  }
+  return undefined;
+}
+
+/**
+ * The app token for an app credential service that an org row answers:
+ * `linear:app` reads the org `linear` row and hands out its token only when
+ * that row is the app connection (`grant: client_credentials`). The answer
+ * is the same for every session owner, because the app identity belongs to
+ * the org. `null` when no native plugin names the service, when the service
+ * is not row-backed (`github:installation`, `slack`), or when the row is
+ * absent or not an app credential.
+ */
+export async function resolveAppCredentialRead(
+  deps: CredentialReadDeps,
+  ctx: { orgId: string },
+  service: string,
+  plugins: readonly ValetPlugin[] | undefined,
+): Promise<StoredCredential | null> {
+  const rowService = APP_CREDENTIAL_ROWS.get(service);
+  if (!rowService || !isNativeAppCredentialService(plugins, service)) return null;
+  // The app row is never a 1Password pointer, so the org scope alone is
+  // enough, and no person's vault is in reach.
+  const fromOrg = await readOrgRow(deps, { orgId: ctx.orgId, userId: "", scopes: ["org"] }, rowService, "resolve", isAppCredentialRow);
+  return fromOrg === ABSENT ? null : fromOrg;
+}
+
+/**
+ * The row-backed app credential service behind a native `service`
+ * (`linear` → `linear:app`), or `undefined`. Only these services have an app
+ * step that a resolver adds after the personal and delegated reads; the
+ * GitHub installation is minted on its own path, and the Slack bot row is
+ * the service's only identity.
+ */
+export function rowBackedAppServiceFor(plugins: readonly ValetPlugin[] | undefined, service: string): string | undefined {
+  const appService = nativeAppCredentialServiceFor(plugins, service);
+  return appService && isAppCredentialRowService(appService) ? appService : undefined;
+}
+
+/**
+ * Records a read of a native `service` that ended at its app token
+ * (`valet_credentials_app_fallback_total`). Call it after the personal or
+ * delegated read returned `null`: it counts only when the app token
+ * answers, so a read with no app connection is not a fallback.
+ */
+export async function noteAppCredentialFallback(
+  deps: CredentialReadDeps,
+  ctx: { orgId: string },
+  service: string,
+  reason: AppFallbackReason,
+  plugins: readonly ValetPlugin[] | undefined,
+): Promise<void> {
+  const appService = rowBackedAppServiceFor(plugins, service);
+  if (!appService) return;
+  if ((await resolveAppCredentialRead(deps, ctx, appService, plugins)) !== null) recordAppCredentialFallback(service, reason);
+}
+
+/**
+ * An org-owned read of a native `service` whose app credential is
+ * row-backed: the app token, counted as `org_owner`. `undefined` when the
+ * service has no such app step or the app token does not answer, so the
+ * caller goes on to its plain org read.
+ */
+export async function resolveOrgNativeAppRead(
+  deps: CredentialReadDeps,
+  ctx: { orgId: string },
+  service: string,
+  plugins: readonly ValetPlugin[] | undefined,
+): Promise<StoredCredential | undefined> {
+  const appService = rowBackedAppServiceFor(plugins, service);
+  if (!appService) return undefined;
+  const app = await resolveAppCredentialRead(deps, ctx, appService, plugins);
+  if (!app) return undefined;
+  recordAppCredentialFallback(service, "org_owner");
+  return app;
+}
+
+/**
+ * The app credential a workflow node pinned to `credential: "app"` acts as,
+ * for a native `service` whose app credential service is `appService`: the
+ * app token of a row-backed service (`linear:app`), or the org row when the
+ * org row is the app identity itself (the Slack bot). `null` when the org
+ * has no app connection. The GitHub installation is minted on its own path.
+ */
+export async function resolveNativeAppCredentialRead(
+  deps: CredentialReadDeps,
+  ctx: { orgId: string },
+  service: string,
+  appService: string,
+  plugins: readonly ValetPlugin[] | undefined,
+): Promise<StoredCredential | null> {
+  if (isAppCredentialRowService(appService)) return resolveAppCredentialRead(deps, ctx, appService, plugins);
+  if (appService === service && isNativeAppCredentialService(plugins, service)) {
+    return resolveOrgCredentialRead(deps, { orgId: ctx.orgId, scopes: ["org"] }, service);
+  }
+  return null;
 }
 
 /** Who a team read acts for, and which members it may borrow an account
@@ -267,6 +507,14 @@ export interface TeamReadCtx {
   userId?: string;
   scopes?: readonly OnePasswordScope[];
   mayBorrow?: (memberId: string) => Promise<boolean>;
+  /**
+   * Whether a tier after this read will answer: the native integration's app
+   * token (native credential policy, Part B). When it resolves true, a read
+   * that ends on a dead team connection or a broken share returns `null`, so
+   * the caller goes on to that tier instead of the dead row or the error.
+   * It is called only on those two paths.
+   */
+  laterTier?: () => Promise<boolean>;
 }
 
 /**
@@ -282,6 +530,8 @@ export interface TeamReadCtx {
  *
  * When nothing up to step 3 answers and another member's share would,
  * `approvalFrom` names that member: the action needs their approval first.
+ * With nothing at all, a dead team connection or a broken share is the last
+ * answer, unless `laterTier` says a later tier will answer.
  * A personal-tokenScope 1Password pointer on a team row fails closed through
  * `resolveRow` (`excluded: "resolve"`).
  */
@@ -319,9 +569,8 @@ export async function readTeamCredential(
   if (fromTeam && !deadTeam && !isUnusableOAuthCredential(fromTeam, Date.now())) return { credential: fromTeam };
   if (orgFallback !== "none") {
     if (orgFallback === "org-provided") {
-      const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
-      const fromOrg = await resolveRow(deps, orgRow, readCtx, "resolve");
-      if (fromOrg) return { credential: fromOrg };
+      const fromOrg = await readOrgRow(deps, readCtx, service, "resolve");
+      if (fromOrg !== ABSENT && fromOrg) return { credential: fromOrg };
     }
     const fromVault = await lookupInOnePassword(deps, readCtx, service);
     if (fromVault) return { credential: fromVault };
@@ -339,6 +588,7 @@ export async function readTeamCredential(
     // Only an account that would actually answer is worth an approval.
     if (!approved[i] && await fromShare(memberId)) return { credential: null, approvalFrom: memberId };
   }
+  if ((deadTeam || brokenShare) && await ctx.laterTier?.()) return { credential: null };
   if (deadTeam) return { credential: deadTeam };
   // A share whose member left their account unusable: name the fix.
   if (brokenShare) throw new CredentialReferenceBrokenError(service);

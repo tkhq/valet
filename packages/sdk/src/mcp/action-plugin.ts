@@ -3,7 +3,7 @@ import { Type } from 'typebox';
 import type { TSchema } from 'typebox';
 import type { ActionPlugin, CredentialProvider, PluginAction, RiskLevel } from '@valet/engine';
 import { hasToonCollectionMarker } from '@valet/shared';
-import { McpClient } from './client.js';
+import { McpClient, McpHttpError } from './client.js';
 import type { McpTool, McpToolResult } from './types.js';
 
 export interface McpActionPluginOptions {
@@ -21,7 +21,42 @@ export interface McpActionPluginOptions {
   staticToken?: string;
   /** Send the credential as this URL query param instead of an Authorization header. */
   authQueryParam?: string;
+  /**
+   * Credential service to fall back to when the caller has no personal
+   * `serviceName` credential connected — the native integration's app
+   * identity (docs/specs/2026-10-15-native-integration-credential-policy-design.md
+   * Part C). The personal credential always wins when present. Applies to
+   * both tool discovery and execute.
+   */
+  appCredentialService?: string;
+  /**
+   * Human-readable name for user-facing error text (e.g. "Linear"). Falls
+   * back to `serviceName` when absent.
+   */
+  displayName?: string;
+  /**
+   * Where an admin reconnects the app identity, as a settings path in words
+   * (for example "Settings, Organization, Linear"). The app-token rejection
+   * message names it. When absent, the message names no page.
+   */
+  appConnectHint?: string;
   description?: string;
+}
+
+/** The names an auth-rejection message uses. */
+interface RejectionText {
+  /** `displayName`, or `serviceName` when absent. */
+  label: string;
+  appConnectHint?: string;
+}
+
+/** Which credential answered the lookup — drives the auth-rejection message. */
+type CredentialSource = 'personal' | 'app';
+
+interface ResolvedToken {
+  token: string | undefined;
+  /** Absent for `noAuth`/`staticToken`: no personal or app connection to name. */
+  source?: CredentialSource;
 }
 
 /**
@@ -49,17 +84,26 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
   const defaultRiskLevel = opts.defaultRiskLevel;
   const noAuth = opts.noAuth ?? false;
   const staticToken = opts.staticToken;
+  const appCredentialService = opts.appCredentialService;
+  const messages: RejectionText = { label: opts.displayName ?? serviceName, appConnectHint: opts.appConnectHint };
 
   return {
     service: serviceName,
     description: opts.description,
     actions: [],
     requiresCredential: !noAuth && staticToken === undefined,
+    appCredentialService,
     resolveActions: async ({ credentials }: { credentials: CredentialProvider }) => {
-      const token = await resolveToken(credentials, serviceName, noAuth, staticToken);
-      const tools = await client.listTools(token);
+      const { token, source } = await resolveToken(credentials, serviceName, noAuth, staticToken, appCredentialService);
+      let tools: McpTool[];
+      try {
+        tools = await client.listTools(token);
+      } catch (err) {
+        const rejection = authRejectionMessage(err, source, messages);
+        throw rejection ? new Error(rejection) : err;
+      }
       return tools.map((tool) =>
-        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken),
+        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, messages),
       );
     },
   };
@@ -72,18 +116,55 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
  * seam is documented to throw here — the catalog turns it into a
  * `list_tools` warning (or a `call_tool` error string) rather than silently
  * hiding the service.
+ *
+ * When `appCredentialService` is set and the caller has no personal
+ * `serviceName` credential, fall back to the named app-identity service
+ * before refusing (Part C, native-integration-credential-policy). The
+ * personal credential always wins when present.
  */
 async function resolveToken(
   credentials: CredentialProvider,
   serviceName: string,
   noAuth: boolean,
   staticToken?: string,
-): Promise<string | undefined> {
-  if (noAuth) return undefined;
-  if (staticToken !== undefined) return staticToken;
+  appCredentialService?: string,
+): Promise<ResolvedToken> {
+  if (noAuth) return { token: undefined };
+  if (staticToken !== undefined) return { token: staticToken };
   const cred = await credentials.get();
-  if (!cred) throw new Error(`${serviceName}: no credential connected`);
-  return cred.accessToken;
+  if (cred) return { token: cred.accessToken, source: 'personal' };
+  if (appCredentialService) {
+    const appCred = await credentials.get(appCredentialService);
+    if (appCred) return { token: appCred.accessToken, source: 'app' };
+  }
+  throw new Error(`${serviceName}: no credential connected`);
+}
+
+/**
+ * The MCP server rejected the bearer token (401/403): the connection it
+ * answered with is bad, not the request. Name which credential it was and
+ * the fix, per CLAUDE.md's "every user-facing error names the corrective
+ * action" rule. Returns undefined for any other failure (bad request,
+ * transport error, 5xx) — those keep today's verbatim error text, and for
+ * `noAuth`/`staticToken` calls there is no personal/app connection to name.
+ *
+ * Detects the rejection via `McpHttpError.status`, not a text match on the
+ * message: the message's tail is the server's own response body (up to 200
+ * chars, verbatim), so a 500 whose body happens to say "upstream returned
+ * HTTP 401" must not be misclassified as an auth rejection.
+ */
+function authRejectionMessage(
+  err: unknown,
+  source: CredentialSource | undefined,
+  { label, appConnectHint }: RejectionText,
+): string | undefined {
+  if (!source) return undefined;
+  if (!(err instanceof McpHttpError) || (err.status !== 401 && err.status !== 403)) return undefined;
+  if (source === 'app') {
+    const where = appConnectHint ? ` in ${appConnectHint}` : '';
+    return `${label} rejected the Valet app's access. Ask an admin to reconnect the ${label} app${where}, or connect your own ${label} account on the Integrations page.`;
+  }
+  return `${label} rejected your connected account. Reconnect ${label} on the Integrations page.`;
 }
 
 function mapToolToAction(
@@ -92,7 +173,9 @@ function mapToolToAction(
   serviceName: string,
   defaultRiskLevel: RiskLevel,
   noAuth: boolean,
-  staticToken?: string,
+  staticToken: string | undefined,
+  appCredentialService: string | undefined,
+  messages: RejectionText,
 ): PluginAction {
   // `tool.inputSchema` is a JSON-Schema-shaped object from the MCP server.
   // TypeBox's `TSchema` is declared as an empty interface
@@ -108,11 +191,13 @@ function mapToolToAction(
     riskLevel: deriveRiskLevel(tool, defaultRiskLevel),
     parameters,
     execute: async (args, ctx) => {
-      const token = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken);
+      const { token, source } = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken, appCredentialService);
       try {
         const result = await client.callTool(token, tool.name, args);
         return mapToolResult(result);
       } catch (err) {
+        const rejection = authRejectionMessage(err, source, messages);
+        if (rejection) return { success: false, error: rejection };
         return { success: false, error: err instanceof Error ? err.message : String(err) };
       }
     },

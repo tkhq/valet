@@ -619,6 +619,20 @@ export interface ValetPlugin {
    * else rather than build an index from unsanitized text.
    */
   storeIndexes?: PluginStoreIndex[];
+  /**
+   * Marks a native integration: Valet owns an app identity for it, and an
+   * action falls back to that identity when no person's credential applies
+   * (docs/specs/2026-10-15-native-integration-credential-policy-design.md).
+   * Today only GitHub, Slack, and Linear set it. Config-declared MCP servers
+   * never do. A native plugin MUST name `appCredentialService`.
+   */
+  native?: boolean;
+  /**
+   * The credential service that answers with this integration's app
+   * identity, as a bare token: `github:installation`, `slack`, `linear:app`.
+   * Valid only with `native: true`.
+   */
+  appCredentialService?: string;
 }
 
 /** One declared `plugin_store` expression index (see `ValetPlugin.storeIndexes`). */
@@ -673,6 +687,17 @@ export function validateValetPlugin(
   }
   if (v.description !== undefined && typeof v.description !== "string") {
     issues.push({ path: "description", message: "must be a string when present" });
+  }
+
+  if (v.native !== undefined && typeof v.native !== "boolean") {
+    issues.push({ path: "native", message: "must be a boolean when present" });
+  }
+  if (v.appCredentialService !== undefined && (typeof v.appCredentialService !== "string" || v.appCredentialService.length === 0)) {
+    issues.push({ path: "appCredentialService", message: "must be a non-empty string when present" });
+  } else if (v.native === true && v.appCredentialService === undefined) {
+    issues.push({ path: "appCredentialService", message: "required when native is true" });
+  } else if (v.native !== true && v.appCredentialService !== undefined) {
+    issues.push({ path: "appCredentialService", message: "only valid when native is true" });
   }
 
   issues.push(...validatePluginHttpRoutes(v.httpRoutes));

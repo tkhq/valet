@@ -123,7 +123,7 @@ describe("teamServiceReadiness", () => {
   });
 
   function deps(plugins: ValetPlugin[] = [gmailPlugin, slackOrgPlugin, githubPlugin]) {
-    return { db, credentials, plugins, env: {} as NodeJS.ProcessEnv };
+    return { db, credentials, plugins, env: {} };
   }
 
   it("treats a direct team credential as ready", async () => {
@@ -793,5 +793,80 @@ describe("teamServiceReadiness", () => {
 
     expect(teamArmRefusals(result).map((r) => r.service)).toEqual(["linear", undefined]);
     expect(teamArmRefusals(result)).toHaveLength(2);
+  });
+});
+
+// Native credential policy, Part E item 2: an `app` node of a native
+// service is checked through that service's app credential.
+describe("teamServiceReadiness: native app identities", () => {
+  let db: AppDb;
+  let credentials: InMemoryCredentialStore;
+
+  const nativeLinear: ValetPlugin = { ...linearPlugin, native: true, appCredentialService: "linear:app" };
+  const nativeSlack: ValetPlugin = { ...slackOrgPlugin, native: true, appCredentialService: "slack" };
+  const linearAppRow = {
+    type: "oauth2" as const,
+    accessToken: "lin-app-token",
+    metadata: { grant: "client_credentials", webhookSecret: "hook" },
+  };
+
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+    credentials = new InMemoryCredentialStore();
+  });
+
+  function deps(plugins: ValetPlugin[] = [nativeLinear, nativeSlack, gmailPlugin, githubPlugin]) {
+    return { db, credentials, plugins, env: {} };
+  }
+
+  it("an app node of Linear is ready when the Linear app is connected", async () => {
+    await credentials.save({ type: "org", id: ORG }, "linear", linearAppRow);
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("linear", "app") });
+    expect(result.ready).toEqual(["linear"]);
+    expect(result.organizationProvided).toEqual(["linear"]);
+    expect(result.blocked).toEqual([]);
+  });
+
+  it("an app node of Linear is blocked with the fix when the Linear app is not connected", async () => {
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("linear", "app") });
+    expect(result.ready).toEqual([]);
+    expect(result.blocked).toEqual([{ service: "linear", reason: expect.stringContaining("Settings → Organization") }]);
+    expect(result.blocked[0]?.reason).not.toContain("GitHub");
+  });
+
+  it("an app node of Slack is ready on the org bot row", async () => {
+    await credentials.save({ type: "org", id: ORG }, "slack", { type: "bot_token", accessToken: "xoxb-org" });
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("slack", "app") });
+    expect(result.ready).toEqual(["slack"]);
+    expect(result.blocked).toEqual([]);
+  });
+
+  it("an auto Linear node is ready on the app token when the team holds no Linear credential", async () => {
+    await credentials.save({ type: "org", id: ORG }, "linear", linearAppRow);
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("linear") });
+    expect(result.ready).toEqual(["linear"]);
+    expect(result.blocked).toEqual([]);
+  });
+
+  it("a user Linear node stays blocked on the app token alone", async () => {
+    await credentials.save({ type: "org", id: ORG }, "linear", linearAppRow);
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("linear", "user") });
+    expect(result.ready).toEqual([]);
+    expect(result.blocked.map((b) => b.service)).toEqual(["linear"]);
+  });
+
+  it("a broken Linear share is ready on the app token, with a warning to repair it", async () => {
+    await credentials.save({ type: "org", id: ORG }, "linear", linearAppRow);
+    await db.insert(teamMembers).values({ teamId: TEAM, userId: "u-1", role: "member" });
+    await credentials.save({ type: "user", id: "u-1" }, "linear", { type: "oauth2", accessToken: "expired", expiresAt: 1 });
+    await shareCredential(db, { teamId: TEAM, service: "linear", userId: "u-1", createdAt: 1 });
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("linear") });
+    expect(result.ready).toEqual(["linear"]);
+    expect(result.warnings).toEqual([{ service: "linear", reason: expect.stringContaining("Share it again") }]);
+  });
+
+  it("an app node of a non-native service is blocked with the invoker's refusal", async () => {
+    const result = await teamServiceReadiness(deps(), { orgId: ORG, teamId: TEAM, definition: toolDefinition("gmail", "app") });
+    expect(result.blocked).toEqual([{ service: "gmail", reason: expect.stringContaining("Remove the credential field") }]);
   });
 });
