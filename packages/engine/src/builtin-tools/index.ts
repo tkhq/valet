@@ -21,6 +21,7 @@ import {
   processReadTool,
   wakeupListTool,
   wakeupCancelTool,
+  waitForEventTool,
   startBackgroundProcess,
 } from "./wakeups.js";
 export {
@@ -30,6 +31,7 @@ export {
   processReadTool,
   wakeupListTool,
   wakeupCancelTool,
+  waitForEventTool,
   startBackgroundProcess,
 } from "./wakeups.js";
 import { validateBackground, sleepRefusal } from "../wakeups/validate.js";
@@ -1027,6 +1029,7 @@ export const builtinTools: ToolDef[] = [
   processReadTool,
   wakeupListTool,
   wakeupCancelTool,
+  waitForEventTool,
   threadReadTool,
   listThreadsTool,
   switchModelTool,

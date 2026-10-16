@@ -2,13 +2,15 @@ import { Type } from "typebox";
 import { defineTool } from "./define.js";
 import {
   validateHold,
+  validateWaitForEvent,
   validateWakeAt,
   validateWatch,
+  WAIT_FOR_EVENT_WORKFLOW_REFUSAL,
   wakeupsLimitRefusal,
   wakeupsUnavailable,
 } from "../wakeups/validate.js";
 import { DEFAULT_WATCH_MIN_INTERVAL_MS, JOB_LOG_CAPPED_MARKER } from "../wakeups/types.js";
-import type { Lease, Wakeup, WakeupsSeam } from "../wakeups/types.js";
+import type { EventClause, Lease, Wakeup, WakeupsSeam } from "../wakeups/types.js";
 import type { ToolContext, ToolResult } from "../types.js";
 
 /**
@@ -62,6 +64,11 @@ function wakeupLine(w: Wakeup, now: number): string {
     return iso ? `${base} fires ${iso}, ${started}` : `${base}, ${started}`;
   }
   const iso = isoOrUndefined(w.deadlineAt);
+  if (w.kind === "event") {
+    const n = w.eventMatch?.clauses.length ?? 0;
+    const on = `${base} on ${(w.subjects ?? []).join(", ")} (${n} ${n === 1 ? "clause" : "clauses"})`;
+    return iso ? `${on} deadline ${iso}, ${started}` : `${on}, ${started}`;
+  }
   return iso ? `${base} deadline ${iso}, ${started}` : `${base}, ${started}`;
 }
 
@@ -257,11 +264,71 @@ export const processReadTool = defineTool({
   },
 });
 
+/** One clause for the D2 result text: the key, with its status filter when set. */
+function clauseText(clause: EventClause): string {
+  return clause.status && clause.status.length > 0 ? `${clause.key} (status ${clause.status.join(", ")})` : clause.key;
+}
+
+const clauseSchema = Type.Object({
+  key: Type.String({ description: "An event key from workflows.list_event_types, such as github.check_run.completed. A trailing .* matches a family." }),
+  status: Type.Optional(Type.Array(Type.String(), { description: "Match only these normalized statuses, such as failure or triage." })),
+  from_status: Type.Optional(Type.Array(Type.String(), { description: "Match only an update whose previous status is one of these." })),
+  actor: Type.Optional(Type.String({ description: "Match only this actor login or external id." })),
+  bots: Type.Optional(Type.Boolean({ description: "false drops events from bot actors." })),
+  include_self: Type.Optional(Type.Boolean({ description: "true keeps events that this session caused." })),
+});
+
+export const waitForEventTool = defineTool({
+  name: "wait_for_event",
+  description:
+    "Wait for an event in GitHub, Slack, or Linear without polling. Give the object's URL as `subject` and the " +
+    "event keys in `on`, then end your turn. An `event.matched` signal starts your next turn. The sandbox may " +
+    "hibernate while you wait. Arm the wait before the action that triggers it, for example before `git push`. " +
+    "`once` (default true) ends the wait at the first match; `once: false` streams every match until `max_hours`. " +
+    "Recipes: CI on a pull request: subject the PR URL, on " +
+    '[{ "key": "github.check_run.completed", "status": ["failure", "timed_out", "cancelled", "action_required", "startup_failure"] }, ' +
+    '{ "key": "github.pull_request.checks_completed" }], once false. ' +
+    'A Slack reply: subject the message permalink, on [{ "key": "slack.message", "bots": false }]. ' +
+    'A Linear triage shift: subject the team triage URL, on [{ "key": "linear.issue.create", "status": ["triage"] }, ' +
+    '{ "key": "linear.issue.update", "status": ["triage"], "from_status": ["backlog", "unstarted", "started", "completed", "canceled"] }], once false. ' +
+    'A reply on a Linear issue: subject the issue URL, on [{ "key": "linear.comment.create" }]. ' +
+    "Events this session causes are skipped unless a clause sets include_self. " +
+    "To watch something with no end, propose an event subscription instead.",
+  parameters: Type.Object({
+    subject: Type.String({ description: "A GitHub pull request, issue, commit, or repository URL, a Slack message permalink, or a Linear issue or team URL." }),
+    on: Type.Array(clauseSchema, { description: "1 to 8 clauses. Any clause that matches wakes you." }),
+    once: Type.Optional(Type.Boolean()),
+    reason: Type.String({ description: "1 to 200 characters. It shows in wakeup_list and the signal." }),
+    max_hours: Type.Number({ description: "1 to the deploy's timer maximum. The wait ends then." }),
+    min_interval_seconds: Type.Optional(Type.Integer({ description: "Stream mode only: 30 to 3600 seconds between two signals." })),
+  }),
+  execute: async (args, ctx) => {
+    const seam = ctx.wakeups;
+    if (!seam) return { text: wakeupsUnavailable("wait_for_event") };
+    if (!seam.armEvent) {
+      return { text: ctx.sessionPurpose === "workflow" ? WAIT_FOR_EVENT_WORKFLOW_REFUSAL : wakeupsUnavailable("wait_for_event") };
+    }
+    const validation = validateWaitForEvent(args, seam.limits);
+    if (!validation.ok) return { text: validation.text };
+    const limitRefusal = await assertUnderLimit(seam, ctx.threadId);
+    if (limitRefusal) return { text: limitRefusal };
+    const result = await seam.armEvent(ctx.threadId, validation.value, ctx.origin, ctx.credentials);
+    if ("refused" in result) return { text: result.refused };
+    const { wakeup } = result;
+    const subject = (wakeup.subjects ?? []).join(", ");
+    const clauses = validation.value.on.map(clauseText).join(", ");
+    const deadline = isoOrUndefined(wakeup.deadlineAt) ?? "unknown";
+    return {
+      text: `waiting ${wakeup.id} on ${subject} for ${clauses} until ${deadline}. End your turn now; an event.matched signal starts your next turn.`,
+    };
+  },
+});
+
 export const wakeupListTool = defineTool({
   name: "wakeup_list",
   concurrencySafe: true,
   description:
-    "List this thread's active background processes, watches, timers, and holds with their ids and deadlines. " +
+    "List this thread's active background processes, watches, timers, event waits, and holds with their ids and deadlines. " +
     "Work that other threads of this session started shows as one count.",
   parameters: Type.Object({}),
   execute: async (_args, ctx) => {
@@ -282,7 +349,7 @@ export const wakeupListTool = defineTool({
 export const wakeupCancelTool = defineTool({
   name: "wakeup_cancel",
   description:
-    "Cancel a background process, watch, timer, or hold by id. A process " +
+    "Cancel a background process, watch, timer, event wait, or hold by id. A process " +
     "or watch is killed and its lease released.",
   parameters: Type.Object({ id: Type.String() }),
   execute: async (args, ctx) => {

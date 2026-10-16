@@ -4,7 +4,7 @@
 // lease keeps a sandbox alive while a wakeup or an explicit hold needs it,
 // independent of session activity.
 
-import type { ChannelOrigin } from "../types.js";
+import type { ChannelOrigin, CredentialProvider } from "../types.js";
 
 /** What kind of background work a wakeup tracks. */
 export type WakeupKind = "process" | "watch" | "timer" | "event";
@@ -234,6 +234,23 @@ export interface WakeupsListing {
   otherThreads: number;
 }
 
+/**
+ * A validated `wait_for_event` call (spec 2026-10-15, Part D). `subject` is
+ * the raw input, a URL or a subject; the host's arm checks parse it.
+ */
+export interface ArmEventRequest {
+  subject: string;
+  on: EventClause[];
+  once: boolean;
+  reason: string;
+  maxHours: number;
+  /** Stream mode only: the shortest gap between two signals (ms). */
+  minIntervalMs?: number;
+}
+
+/** What `WakeupsSeam.armEvent` returns: the new event waiter, or the refusal text the tool returns. */
+export type ArmEventResult = { wakeup: Wakeup } | { refused: string };
+
 /** Host seam a tool context uses to create and manage wakeups and leases. */
 export interface WakeupsSeam {
   limits: WakeupLimits;
@@ -255,4 +272,16 @@ export interface WakeupsSeam {
     bytes: number,
     opts?: { tail?: boolean },
   ): Promise<{ text: string; nextOffset: number; eof: boolean; capped?: boolean }>;
+  /**
+   * Runs the arm checks (spec 2026-10-15, Part D1) and creates an event
+   * waiter. Absent on a session that cannot wait for events, such as a
+   * workflow run. `credentials` is the calling turn's credential provider:
+   * the arm checks read the subject with it (INV-E1).
+   */
+  armEvent?(
+    threadId: string,
+    req: ArmEventRequest,
+    origin?: ChannelOrigin,
+    credentials?: CredentialProvider,
+  ): Promise<ArmEventResult>;
 }
