@@ -47,7 +47,7 @@ import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../services/content-source-credential.js";
-import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
+import { buildAssistantTarget } from "../events/assistant-target.js";
 import { channelThreadContextFetcher } from "../events/channel-thread-context.js";
 import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
 import { resolveOrgId } from "../lib/org.js";
@@ -540,7 +540,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     db,
     workflowStore,
     workflowRunHost,
-    deliverToOrchestrator: buildOrchestratorTarget({
+    deliverToAssistant: buildAssistantTarget({
       db,
       engineHost,
       fetchThreadContext: channelThreadContextFetcher(channelHost),
@@ -551,7 +551,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     db,
     workflowRunHost,
     workflowStore,
-    deliverToOrchestrator: buildOrchestratorTarget({
+    deliverToAssistant: buildAssistantTarget({
       db,
       engineHost,
       fetchThreadContext: channelThreadContextFetcher(channelHost),

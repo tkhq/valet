@@ -18,7 +18,11 @@
  */
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
 import { and, eq, lte } from "drizzle-orm";
-import type { OrchestratorDeliverFn } from "../events/dispatcher.js";
+import { readThreadPolicy } from "@valet/shared";
+import { PinUnavailableError, PIN_UNAVAILABLE_MESSAGE } from "../events/assistant-delivery.js";
+import type { AssistantDeliverFn } from "../events/dispatcher.js";
+import { resolveDestination } from "../events/destination.js";
+import { destinationMetricReason, recordDeliveryDestination } from "../observability/delivery-metrics.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import { definitionVersionId } from "./definition-version.js";
@@ -31,10 +35,10 @@ export interface WorkflowSchedulerDeps {
   db: AppDb;
   workflowStore: WorkflowStore;
   workflowRunHost: RunHost;
-  /** Orchestrator-target fires submit the schedule's prompt through the
-   * same delivery seam event subscriptions use (idempotent by dispatchId,
-   * org-asserted, lands on a dedicated orchestrator thread). */
-  deliverToOrchestrator: OrchestratorDeliverFn;
+  /** Assistant-prompt fires submit the schedule's prompt through the same
+   * delivery seam event subscriptions use (idempotent by dispatchId,
+   * org-asserted, lands on the thread the schedule's policy names). */
+  deliverToAssistant: AssistantDeliverFn;
   /** Injectable clock for tests. */
   now?: () => number;
 }
@@ -100,25 +104,46 @@ export class WorkflowScheduler {
       if (!schedule.prompt || schedule.prompt.trim() === "") {
         return { error: "assistant-prompt schedule without a prompt. Edit the schedule and set a prompt." };
       }
-      await this.deps.deliverToOrchestrator({
-        orgId: schedule.orgId,
-        ownerType: schedule.ownerType,
-        ownerId: schedule.ownerId,
-        // Shared schedules never inherit their creator's personal authority.
-        actorUserId: schedule.ownerType === "user" ? schedule.createdBy : `${schedule.ownerType}:${schedule.ownerId}`,
-        signal: {
-          kind: "signal",
-          signalType: "schedule",
-          body: schedule.prompt,
-          attributes: {
-            scheduleId: schedule.id,
-            scheduleName: schedule.name,
-            cron: schedule.cron,
-            firedAt: new Date(slotMs).toISOString(),
-          },
-        },
-        dispatchId: `schedule:${schedule.id}:${slotMs}`,
+      // A schedule has no event, binding, or claim: its policy decides
+      // (spec 2026-10-16: delivery threads, Part B). `new` keys on the slot,
+      // so a retried fire reuses its thread.
+      const destination = resolveDestination({
+        rule: { id: schedule.id, kind: "schedule", name: schedule.name, policy: readThreadPolicy(schedule.threadPolicy) },
+        fireAt: slotMs,
+        binding: null,
+        claim: null,
       });
+      if (destination.kind === "skip") throw new Error("A schedule resolved to a skip. Report this schedule to Valet support.");
+      try {
+        await this.deps.deliverToAssistant({
+          orgId: schedule.orgId,
+          ownerType: schedule.ownerType,
+          ownerId: schedule.ownerId,
+          // Shared schedules never inherit their creator's personal authority.
+          actorUserId: schedule.ownerType === "user" ? schedule.createdBy : `${schedule.ownerType}:${schedule.ownerId}`,
+          signal: {
+            kind: "signal",
+            signalType: "schedule",
+            body: schedule.prompt,
+            attributes: {
+              scheduleId: schedule.id,
+              scheduleName: schedule.name,
+              cron: schedule.cron,
+              firedAt: new Date(slotMs).toISOString(),
+            },
+          },
+          dispatchId: `schedule:${schedule.id}:${slotMs}`,
+          destination,
+        });
+      } catch (err) {
+        // A pin that cannot receive deliveries never falls back to another
+        // mode (spec Part B step 4). The poll loop disables the schedule and
+        // logs this text; the counter pages a person.
+        if (!(err instanceof PinUnavailableError)) throw err;
+        recordDeliveryDestination("pin_unavailable");
+        return { error: PIN_UNAVAILABLE_MESSAGE };
+      }
+      recordDeliveryDestination(destinationMetricReason(destination));
       return "ok";
     }
 

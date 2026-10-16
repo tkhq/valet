@@ -1,7 +1,7 @@
 /**
  * EventDispatcher unit tests (event-system plan Task 6): real PGlite rows
  * for events/subscriptions/deliveries, recording fakes at the two seams
- * (`RunHost`, `deliverToOrchestrator`). `pollOnce()` is driven directly —
+ * (`RunHost`, `deliverToAssistant`). `pollOnce()` is driven directly —
  * no timers, no sleeps.
  */
 import { randomUUID } from "node:crypto";
@@ -31,9 +31,11 @@ import {
   threadPullRequests,
 } from "../schema/index.js";
 import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
-import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
+import { EventDispatcher, type AssistantDeliverFn } from "./dispatcher.js";
 
 const ORG = "org-1";
+/** The thread a recording delivery fake reports it landed in. */
+const LANDED = { sessionId: "sess-landed", threadId: "thr-landed" };
 
 function fakeRunHost(overrides: Partial<RunHost> = {}): RunHost {
   return {
@@ -142,8 +144,8 @@ describe("EventDispatcher", () => {
       eventKeys: ["github.issues.*"], filters: [], target: { kind: "orchestrator", orchestrator: "team", teamId: "coverage-team" },
       enabled, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
     });
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
-    const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver, plugins: [githubPlugin] });
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+    const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, plugins: [githubPlugin] });
     await dispatcher.pollOnce();
     expect((await getDelivery(deliveryId)).status).toBe(expected);
     expect(deliver).toHaveBeenCalledTimes(expected === "delivered" ? 1 : 0);
@@ -165,8 +167,8 @@ describe("EventDispatcher", () => {
       target: { kind: "orchestrator", orchestrator: "team", teamId: "subject-team" },
       enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
     });
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
-    const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver, plugins: [githubPlugin] });
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+    const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, plugins: [githubPlugin] });
     await dispatcher.pollOnce();
     expect((await getDelivery(deliveryId)).status).toBe("skipped");
     expect(deliver).not.toHaveBeenCalled();
@@ -185,8 +187,8 @@ describe("EventDispatcher", () => {
       target: { kind: "orchestrator", orchestrator: "team", teamId: "subject-team-2" },
       enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
     });
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
-    const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver, plugins: [githubPlugin] });
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+    const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, plugins: [githubPlugin] });
     await dispatcher.pollOnce();
     expect((await getDelivery(deliveryId)).status).toBe("delivered");
     expect(deliver).toHaveBeenCalledTimes(1);
@@ -197,8 +199,8 @@ describe("EventDispatcher", () => {
     const { deliveryId, subscriptionId } = await seedDelivery({ target: { kind: "orchestrator", deliveryPolicy: "ignoreIfAnyTeamSubscribed" }, status: "failed", attempts: 1 });
     await db.insert(teams).values({ id: "retry-team", orgId: ORG, name: "Retry", createdAt: Date.now() });
     await db.insert(eventSubscriptions).values({ id: "retry-rule", orgId: ORG, ownerType: "team", ownerId: "retry-team", name: "Coverage", eventKeys: ["github.issues.*"], filters: [], target: { kind: "orchestrator", orchestrator: "team", teamId: "retry-team" }, enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now() });
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
-    const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver, plugins: [githubPlugin] });
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+    const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, plugins: [githubPlugin] });
     await dispatcher.pollOnce();
     expect((await getDelivery(deliveryId)).status).toBe("skipped");
     const [personal] = await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, subscriptionId));
@@ -229,12 +231,12 @@ describe("EventDispatcher", () => {
     });
 
     const runHost = fakeRunHost();
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
     const dispatcher = new EventDispatcher({
       db,
       workflowRunHost: runHost,
       workflowStore: new PgWorkflowStore(tdb.pgdb),
-      deliverToOrchestrator: deliver,
+      deliverToAssistant: deliver,
     });
     await dispatcher.pollOnce();
 
@@ -303,7 +305,7 @@ describe("EventDispatcher", () => {
       db,
       workflowRunHost: runHost,
       workflowStore: new PgWorkflowStore(tdb.pgdb),
-      deliverToOrchestrator: vi.fn<OrchestratorDeliverFn>(async () => {}),
+      deliverToAssistant: vi.fn<AssistantDeliverFn>(async () => LANDED),
     });
     await dispatcher.pollOnce();
 
@@ -327,9 +329,9 @@ describe("EventDispatcher", () => {
       target: { kind: "orchestrator" }, eventKey: "github.issue_comment.created", eventKeys: ["github.issue_comment.*"],
       payload: { issue: { pull_request: { html_url: url } }, comment: { id: 501, body: "Done.", created_at: new Date(postedAt).toISOString(), user: { login: "me", type: "User" } } },
     });
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
     const dispatcher = new EventDispatcher({
-      db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver,
+      db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver,
     });
 
     await db.delete(threadPullRequests).where(eq(threadPullRequests.url, url));
@@ -350,30 +352,31 @@ describe("EventDispatcher", () => {
     expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped" });
   });
 
-  it("keeps a Slack event with no thread to reply into on its channel's events thread", async () => {
-    // A reaction in a channel has no Slack thread to answer, so it would land
-    // on the shared events thread; keyed by its channel, the channel's
-    // privacy governs who reads it.
-    await seedDelivery({
+  it("lands a Slack event with no thread to reply into by the rule's policy", async () => {
+    // A reaction in a channel has no Slack thread to answer. With no policy
+    // set, the rule's own thread holds it (spec 2026-10-16: delivery
+    // threads, Part A step 3).
+    const { subscriptionId } = await seedDelivery({
       target: { kind: "orchestrator" }, ownerType: "org",
       service: "slack", eventKey: "slack.reaction_added", eventKeys: ["slack.reaction_added"],
       refs: { channel: "CPRIV" }, summary: "reaction :eyes: added in CPRIV by U9",
       payload: { type: "reaction_added", item: { channel: "CPRIV", ts: "1.2" }, user: "U9", reaction: "eyes" },
     });
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
-    await new EventDispatcher({ db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver }).pollOnce();
-    expect(deliver.mock.calls[0]?.[0].threadKey).toBe("slack-events:CPRIV");
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+    await new EventDispatcher({ db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver }).pollOnce();
+    // The shared events thread is gone: the rule's own thread holds it.
+    expect(deliver.mock.calls[0]?.[0].destination).toEqual({ kind: "key", key: `sub:${subscriptionId}`, title: "test sub", reason: "policy_own" });
   });
 
   it("delivers an orchestrator-target delivery: seam gets SignalContent with signalType = event key; row -> delivered", async () => {
     const { eventId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator" }, ownerType: "org" });
 
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
     const dispatcher = new EventDispatcher({
       db: tdb.appDb,
       workflowRunHost: fakeRunHost(),
       workflowStore: new PgWorkflowStore(tdb.pgdb),
-      deliverToOrchestrator: deliver,
+      deliverToAssistant: deliver,
     });
     await dispatcher.pollOnce();
 
@@ -424,12 +427,12 @@ describe("EventDispatcher", () => {
       actor: { externalId: "U9" },
     });
 
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
     const dispatcher = new EventDispatcher({
       db: tdb.appDb,
       workflowRunHost: fakeRunHost(),
       workflowStore: new PgWorkflowStore(tdb.pgdb),
-      deliverToOrchestrator: deliver,
+      deliverToAssistant: deliver,
       resolveChannelOrigin: (service) =>
         service === "slack" ? { channelType: "slack", threadKey: "slack:C1:1.2" } : null,
     });
@@ -460,12 +463,12 @@ describe("EventDispatcher", () => {
       sender: { login: "octocat" },
     };
 
-    function dispatcherWith(deliver: OrchestratorDeliverFn): EventDispatcher {
+    function dispatcherWith(deliver: AssistantDeliverFn): EventDispatcher {
       return new EventDispatcher({
         db: tdb.appDb,
         workflowRunHost: fakeRunHost(),
         workflowStore: new PgWorkflowStore(tdb.pgdb),
-        deliverToOrchestrator: deliver,
+        deliverToAssistant: deliver,
         plugins: [githubPlugin],
       });
     }
@@ -478,7 +481,7 @@ describe("EventDispatcher", () => {
         },
         payload: PAYLOAD,
       });
-      const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
       await dispatcherWith(deliver).pollOnce();
 
       expect(deliver.mock.calls[0][0].signal.body).toBe(
@@ -491,7 +494,7 @@ describe("EventDispatcher", () => {
         target: { kind: "orchestrator", systemPrompt: "Triage {{event.key}}. Answer in one sentence." },
         payload: PAYLOAD,
       });
-      const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
       await dispatcherWith(deliver).pollOnce();
 
       const body = deliver.mock.calls[0][0].signal.body;
@@ -515,12 +518,12 @@ describe("EventDispatcher", () => {
         payload: { type: "app_mention", channel: "C1", user: "U9", text: "who are you", ts: "1.2" },
         actor: { externalId: "U9" },
       });
-      const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
       const dispatcher = new EventDispatcher({
         db: tdb.appDb,
         workflowRunHost: fakeRunHost(),
         workflowStore: new PgWorkflowStore(tdb.pgdb),
-        deliverToOrchestrator: deliver,
+        deliverToAssistant: deliver,
         resolveChannelOrigin: (service) =>
           service === "slack" ? { channelType: "slack", threadKey: "slack:C1:1.2" } : null,
         plugins: [githubPlugin],
@@ -532,7 +535,7 @@ describe("EventDispatcher", () => {
 
     it("delivers the default body untouched when the rule configures no template", async () => {
       await seedDelivery({ target: { kind: "orchestrator" }, payload: PAYLOAD });
-      const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
       await dispatcherWith(deliver).pollOnce();
 
       const [summary, excerpt] = deliver.mock.calls[0][0].signal.body.split("\n\n");
@@ -559,7 +562,7 @@ describe("EventDispatcher", () => {
         db: tdb.appDb,
         workflowRunHost: fakeRunHost(),
         workflowStore: new PgWorkflowStore(tdb.pgdb),
-        deliverToOrchestrator: vi.fn<OrchestratorDeliverFn>(async () => {}),
+        deliverToAssistant: vi.fn<AssistantDeliverFn>(async () => LANDED),
         resolveChannelOrigin: (service) =>
           service === "slack" ? { channelType: "slack", threadKey: "slack:C1:1.2" } : null,
       });
@@ -585,7 +588,7 @@ describe("EventDispatcher", () => {
     });
     const dispatcher = new EventDispatcher({
       db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
-      deliverToOrchestrator: vi.fn<OrchestratorDeliverFn>(async () => {}),
+      deliverToAssistant: vi.fn<AssistantDeliverFn>(async () => LANDED),
       resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2" }),
     });
     await dispatcher.pollOnce();
@@ -600,10 +603,10 @@ describe("EventDispatcher", () => {
       refs: { channel: "C1" }, summary: "Reply",
       payload: { type: "message", channel: "C1", user: "U9", text: "reply", ts: "1.3", thread_ts: "1.2" },
     });
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
     const dispatcher = new EventDispatcher({
       db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
-      deliverToOrchestrator: deliver,
+      deliverToAssistant: deliver,
       resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2" }),
     });
     await dispatcher.pollOnce();
@@ -713,11 +716,11 @@ describe("EventDispatcher", () => {
         actor: { externalId: "U9" },
         subjects: opts.subjects ?? ["slack:T001", CHANNEL_SUBJECT, "slack:T001/C1/1.2"],
       });
-      const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
       const fake = fakeStore(rows);
       await new EventDispatcher({
         db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
-        deliverToOrchestrator: deliver,
+        deliverToAssistant: deliver,
         resolveChannelOrigin: () => opts.origin ?? { channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" },
         engineStore: fake.store,
       }).pollOnce();
@@ -737,7 +740,7 @@ describe("EventDispatcher", () => {
       expect(lookups).toEqual([[CHANNEL_SUBJECT]]);
       expect(deliver).toHaveBeenCalledOnce();
       const args = deliver.mock.calls[0][0];
-      expect(args.target).toEqual({ sessionId: "sess-new", threadId: "thr-new" });
+      expect(args.destination).toEqual({ kind: "target", sessionId: "sess-new", threadId: "thr-new", reason: "claim_redirect" });
       // The routed delivery keeps the subscription delivery's dispatch id and the Slack origin.
       expect(args.dispatchId).toBe(`event:${deliveryId}`);
       expect(args.signal.origin).toEqual({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" });
@@ -758,7 +761,7 @@ describe("EventDispatcher", () => {
         waiter("other-org", "sess-other-org", { createdAt: 300 }),
         waiter("personal", "sess-personal", { createdAt: 200 }),
       ]);
-      expect(deliver.mock.calls[0][0].target).toEqual({ sessionId: "sess-mine", threadId: "thr-mine" });
+      expect(deliver.mock.calls[0][0].destination).toEqual({ kind: "target", sessionId: "sess-mine", threadId: "thr-mine", reason: "claim_redirect" });
     });
 
     it("keeps today's delivery and follow when no waiter watches the channel itself (Part A steps 4 and 7)", async () => {
@@ -776,7 +779,7 @@ describe("EventDispatcher", () => {
         waiter("other", "sess-2", { createdAt: 400 }),
       ]);
       expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].target).toBeUndefined();
+      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_own" });
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
     });
 
@@ -788,7 +791,7 @@ describe("EventDispatcher", () => {
         payload: { type: "app_mention", channel: "C1", user: "U9", text: "hi", ts: "1.2", team: "T001" },
       });
       expect(lookups).toEqual([[CHANNEL_SUBJECT]]);
-      expect(deliver.mock.calls[0][0].target).toEqual({ sessionId: "sess-1", threadId: "thr-w" });
+      expect(deliver.mock.calls[0][0].destination).toEqual({ kind: "target", sessionId: "sess-1", threadId: "thr-w", reason: "claim_redirect" });
     });
 
     it("does not route a refused sender (Part C)", async () => {
@@ -815,7 +818,7 @@ describe("EventDispatcher", () => {
         waiter("asst", "sess-asst", { createdAt: 100 }),
       ]);
       expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].target).toEqual({ sessionId: "sess-asst", threadId: "thr-asst" });
+      expect(deliver.mock.calls[0][0].destination).toEqual({ kind: "target", sessionId: "sess-asst", threadId: "thr-asst", reason: "claim_redirect" });
       expect((await getDelivery(deliveryId)).status).toBe("delivered");
       expect(await findFollowedThread(tdb.appDb, followKey)).toBeNull();
     });
@@ -828,7 +831,7 @@ describe("EventDispatcher", () => {
         waiter("archived", "sess-archived", { createdAt: 100 }),
       ]);
       expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].target).toBeUndefined();
+      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_own" });
       expect((await getDelivery(deliveryId)).status).toBe("delivered");
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
     });
@@ -846,7 +849,7 @@ describe("EventDispatcher", () => {
         origin: { channelType: "slack", threadKey: "slack:C1:1.1", messageTs: "1.2" },
       });
       expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].target).toBeUndefined();
+      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", key: "slack:C1:1.1", reason: "conversation_follow" });
       expect(lookups).toEqual([]);
     });
 
@@ -862,7 +865,7 @@ describe("EventDispatcher", () => {
         payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2", thread_ts: "1.1" },
         origin: { channelType: "slack", threadKey: "slack:C1:1.1", messageTs: "1.2" },
       });
-      expect(deliver.mock.calls[0][0].target).toEqual({ sessionId: "sess-1", threadId: "thr-w" });
+      expect(deliver.mock.calls[0][0].destination).toEqual({ kind: "target", sessionId: "sess-1", threadId: "thr-w", reason: "claim_redirect" });
     });
 
     it("skips a waiter that would not receive every later channel message (Part A step 4)", async () => {
@@ -883,7 +886,7 @@ describe("EventDispatcher", () => {
         waiter("primary", "sess-primary", { createdAt: 150, primarySubject: "slack:T001/C1/9.9" }),
       ]);
       expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].target).toBeUndefined();
+      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_own" });
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
     });
 
@@ -893,7 +896,7 @@ describe("EventDispatcher", () => {
       const { deliver } = await dispatchMention([
         waiter("mixed", "sess-1", { createdAt: 100, clauses: [{ key: "slack.message", actor: "U7" }, { key: "slack.message", bots: false }] }),
       ]);
-      expect(deliver.mock.calls[0][0].target).toEqual({ sessionId: "sess-1", threadId: "thr-mixed" });
+      expect(deliver.mock.calls[0][0].destination).toEqual({ kind: "target", sessionId: "sess-1", threadId: "thr-mixed", reason: "claim_redirect" });
     });
 
     it("falls back to today's behavior and binds the follow when only invalid candidates watch the channel", async () => {
@@ -906,7 +909,7 @@ describe("EventDispatcher", () => {
         waiter("archived", "sess-archived", { createdAt: 200 }),
       ]);
       expect(deliver).toHaveBeenCalledOnce();
-      expect(deliver.mock.calls[0][0].target).toBeUndefined();
+      expect(deliver.mock.calls[0][0].destination).toMatchObject({ kind: "key", reason: "policy_own" });
       expect((await getDelivery(deliveryId)).status).toBe("delivered");
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
     });
@@ -956,7 +959,7 @@ describe("EventDispatcher", () => {
       db,
       workflowRunHost: runHost,
       workflowStore: new PgWorkflowStore(tdb.pgdb),
-      deliverToOrchestrator: vi.fn<OrchestratorDeliverFn>(async () => {}),
+      deliverToAssistant: vi.fn<AssistantDeliverFn>(async () => LANDED),
     });
     await dispatcher.pollOnce();
 
@@ -980,14 +983,14 @@ describe("EventDispatcher", () => {
 
   it("failure increments attempts, sets next_attempt_at per backoff, records last_error", async () => {
     const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {
+    const deliver = vi.fn<AssistantDeliverFn>(async () => {
       throw new Error("orchestrator boom");
     });
     const dispatcher = new EventDispatcher({
       db: tdb.appDb,
       workflowRunHost: fakeRunHost(),
       workflowStore: new PgWorkflowStore(tdb.pgdb),
-      deliverToOrchestrator: deliver,
+      deliverToAssistant: deliver,
     });
 
     // Attempt 1 → 30s backoff.
@@ -1024,7 +1027,7 @@ describe("EventDispatcher", () => {
       db: tdb.appDb,
       workflowRunHost: fakeRunHost(),
       workflowStore: new PgWorkflowStore(tdb.pgdb),
-      deliverToOrchestrator: vi.fn<OrchestratorDeliverFn>(async () => {
+      deliverToAssistant: vi.fn<AssistantDeliverFn>(async () => {
         throw new Error("still broken");
       }),
     });
@@ -1044,9 +1047,9 @@ describe("EventDispatcher", () => {
     let release: () => void = () => {};
     const gate = new Promise<void>(resolve => { release = resolve; });
     const ingress = vi.fn(() => gate);
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
     const dispatcher = new EventDispatcher({ db: tdb.appDb, workflowRunHost: fakeRunHost(),
-      workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver });
+      workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver });
     dispatcher.setIngressDrain(ingress);
     try {
       for (let i = 0; i < 2; i++) {
@@ -1075,15 +1078,16 @@ describe("EventDispatcher", () => {
     const gate = new Promise<void>((r) => {
       release = r;
     });
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {
+    const deliver = vi.fn<AssistantDeliverFn>(async () => {
       await gate;
+      return LANDED;
     });
     const mkDispatcher = () =>
       new EventDispatcher({
         db: tdb.appDb,
         workflowRunHost: fakeRunHost(),
         workflowStore: new PgWorkflowStore(tdb.pgdb),
-        deliverToOrchestrator: deliver,
+        deliverToAssistant: deliver,
       });
     const d1 = mkDispatcher();
     const d2 = mkDispatcher();
@@ -1161,12 +1165,12 @@ describe("EventDispatcher — team-owned subscriptions", () => {
       createdAt: now,
     });
 
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
     await new EventDispatcher({
       db,
       workflowRunHost: fakeRunHost(),
       workflowStore: new PgWorkflowStore(tdb.pgdb),
-      deliverToOrchestrator: deliver,
+      deliverToAssistant: deliver,
     }).pollOnce();
     return deliver;
   }

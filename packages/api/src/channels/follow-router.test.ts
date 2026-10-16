@@ -413,7 +413,7 @@ describe("handleFollowedMessage", () => {
       type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "<@UBOT> help",
     }, "EvMessage") });
     const mention = () => deliverToAssistantThread(deps, {
-      orgId: ORG, owner: { type: "user", id: USER }, actorUserId: USER, threadKey: "slack:C1:1.2",
+      orgId: ORG, owner: { type: "user", id: USER }, actorUserId: USER, destination: { kind: "key", key: "slack:C1:1.2" },
       signal: { kind: "signal", signalType: "slack.app_mention", body: "help", origin: { channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.7", reply: "auto" } },
       dispatchId: "event:mention-delivery", mismatchReason: "test",
     });

@@ -1123,7 +1123,12 @@ CREATE TABLE "followed_threads" (
 	-- rule's CURRENT invocation audience, so a rule narrowed back to the team
 	-- narrows the threads it opened, and a disabled or deleted rule narrows
 	-- them too. NULL, like a rule that is gone, reads as team-only.
-	"subscription_id" text
+	"subscription_id" text,
+	-- The assistant thread the binding mention landed in. Later messages in
+	-- the Slack thread go to this thread. NULL on a follow bound before the
+	-- columns: the router keeps the Slack thread key for those.
+	"session_id" text,
+	"thread_id" text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "followed_threads_key" ON "followed_threads" ("org_id","channel_type","channel_id","thread_ts");
@@ -2579,6 +2584,8 @@ CREATE TABLE IF NOT EXISTS "event_receipts" (
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "event_receipts_page" ON "event_receipts" ("org_id", "created_at", "id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "event_receipts_event" ON "event_receipts" ("org_id", "event_id");
 
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "workspace_briefing_cache" (
