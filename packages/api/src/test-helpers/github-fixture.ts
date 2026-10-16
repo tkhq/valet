@@ -87,6 +87,19 @@ export interface GithubFixtureHandlers {
   /** `GET /repos/:owner/:repo/compare/:base...:head` — the diff-scoped re-scan
    * flow reads `files[].filename`. `range` is the raw `base...head` segment. */
   getCompare?: (owner: string, repo: string, range: string) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/issues/:number`. GitHub numbers issues and
+   * pull requests in one sequence; a pull request's issue carries
+   * `pull_request`. */
+  getIssue?: (owner: string, repo: string, number: string, authHeader: string | undefined) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/pulls/:number`. */
+  getPull?: (owner: string, repo: string, number: string) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/commits/:sha/check-runs`. Receives the parsed
+   * query string, so a fixture can page on `page`/`per_page`. */
+  listCheckRuns?: (owner: string, repo: string, sha: string, query: Record<string, string>) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/commits/:sha/status`, the combined status. */
+  getCombinedStatus?: (owner: string, repo: string, sha: string) => GithubFixtureResponse;
+  /** `GET /users/:login`. */
+  getUserByLogin?: (login: string) => GithubFixtureResponse;
 }
 
 export interface GithubFixture {
@@ -150,6 +163,11 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   getTree: () => ({ body: { sha: "fixture-tree-sha", tree: [], truncated: false } }),
   getContents: () => ({ status: 404, body: { message: "Not Found" } }),
   getCompare: () => ({ body: { files: [] } }),
+  getIssue: () => ({ status: 404, body: { message: "Not Found" } }),
+  getPull: () => ({ status: 404, body: { message: "Not Found" } }),
+  listCheckRuns: () => ({ body: { total_count: 0, check_runs: [] } }),
+  getCombinedStatus: () => ({ body: { state: "pending", statuses: [] } }),
+  getUserByLogin: () => ({ status: 404, body: { message: "Not Found" } }),
 };
 
 /**
@@ -371,6 +389,41 @@ export function startGithubFixture(overrides: GithubFixtureHandlers = {}): Githu
     const ref = c.req.query("ref");
     record(c, { owner, repo, path });
     const { status, body } = handlers.getContents(owner, repo, path, ref);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/issues/:number", (c) => {
+    const { owner, repo, number } = c.req.param();
+    record(c, { owner, repo, number });
+    const { status, body } = handlers.getIssue(owner, repo, number, c.req.header("authorization"));
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/pulls/:number", (c) => {
+    const { owner, repo, number } = c.req.param();
+    record(c, { owner, repo, number });
+    const { status, body } = handlers.getPull(owner, repo, number);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/commits/:sha/check-runs", (c) => {
+    const { owner, repo, sha } = c.req.param();
+    record(c, { owner, repo, sha });
+    const { status, body } = handlers.listCheckRuns(owner, repo, sha, c.req.query());
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/commits/:sha/status", (c) => {
+    const { owner, repo, sha } = c.req.param();
+    record(c, { owner, repo, sha });
+    const { status, body } = handlers.getCombinedStatus(owner, repo, sha);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/users/:login", (c) => {
+    const login = c.req.param("login");
+    record(c, { login });
+    const { status, body } = handlers.getUserByLogin(login);
     return c.json(body as object, status ?? 200);
   });
 

@@ -94,7 +94,7 @@ Universe:
 | A2 | The turn ends. Three minutes pass. | The session's sandbox is suspended by the idle sweep. The event waiter is still `running`. |
 | A3 | Fixture sends `check_run.completed` for check `lint`, conclusion `success`, PR `42`. The fixture API reports one pending check run. | No signal reaches `t-1` within 10 seconds. |
 | A4 | Fixture sends `check_run.completed` for check `test`, conclusion `failure`. The fixture API still reports one pending check run. | Within 5 seconds `t-1` receives one `event.matched` signal. Its body contains `github.check_run.completed · failure`. |
-| A5 | Fixture sends `check_run.completed` for check `build`, conclusion `success`. The fixture API reports no pending check runs. | Within 5 seconds `t-1` receives one `event.matched` signal whose body contains `github.pull_request.checks_completed · failure`. |
+| A5 | At least `watchMinIntervalMs` after A4's signal, fixture sends `check_run.completed` for check `build`, conclusion `success`. The fixture API reports no pending check runs. | Within 5 seconds `t-1` receives one `event.matched` signal whose body contains `github.pull_request.checks_completed · failure`. |
 | A6 | Agent calls `wakeup_cancel` with the waiter id. | The row is `cancelled`. No further signal reaches `t-1`. |
 
 ### Scenario B: a Slack thread reply
@@ -120,7 +120,7 @@ Universe:
 
 | Step | Action | Expected observation |
 |---|---|---|
-| D1 | Subject `https://github.com/acme/other/pull/1`, which installation `77` does not cover. | The result is the refusal text R2 (Part D). No row exists. |
+| D1 | Subject `https://github.com/umbrella/proofs/pull/1`. Installation `77` does not cover the owner `umbrella`. | The result is the refusal text R2 (Part D). No row exists. |
 | D2 | Subject a Slack permalink in channel `C002`, where the bot is not a member. | The result is the refusal text R4. |
 | D3 | Clause key `github.check_suite.done`. | The result is the refusal text R5. |
 
@@ -136,12 +136,26 @@ field, with path `channel.name`.
 |---|---|---|
 | E1 | Fixture sends `channel_created` for public channel `C900`, name `inc-db-latency`. | The team assistant receives one signal in a new thread `t-inc`. |
 | E2 | The agent calls `conversations.join` for `C900`, posts its thread link to `C900`, then calls `wait_for_event` with subject `slack:T001/C900`, clause `[{ key: "slack.message", bots: false }]`, `once: false`, `min_interval_seconds: 30`, reason `Incident inc-db-latency`, `max_hours: 168`. | The posted message contains the link `<public url>/threads/t-inc`. One running event waiter exists on `t-inc`. |
-| E3 | Fixture sends three messages from `U002` and `U003` in `C900` within 10 seconds. | `t-inc` receives one `event.matched` signal that lists all three. |
+| E3 | Fixture sends three messages from `U002` and `U003` in `C900` before the next WakeWatcher pass. | `t-inc` receives one `event.matched` signal that lists all three. |
 | E4 | 20 seconds after E3's signal, fixture sends one more message. | `t-inc` receives its signal no earlier than 30 seconds after E3's signal. |
-| E5 | Fixture sends a message `<@U-BOT> status?` and the matching `app_mention` event. | `t-inc` receives exactly one turn for that post, from the `slack.app_mention` subscription. The event waiter skips the `message` event. |
+| E5 | Fixture sends a top-level message `<@U-BOT> status?` from `U001` and the matching `app_mention` event. | The team assistant receives exactly one turn for that post, from the `slack.app_mention` subscription, in the thread for that Slack post. The event waiter skips the `message` event, so `t-inc` receives no signal for it. |
 
 Pass criterion: all steps of all five scenarios, in one run each, from a
 clean start.
+
+Scenario errata (Task 16):
+
+- D1 named `acme/other`. R2 checks owner coverage only (D1 errata), so a
+  repository under `acme` that the installation leaves out gets R3. D1 now
+  names an owner that installation `77` does not cover.
+- A5 and E3 depend on WakeWatcher passes. A stream waiter sends its first
+  signal at once and later signals after the min interval. A5 therefore
+  arrives after A4's interval, and E3's three messages arrive before one
+  pass.
+- E5 said `t-inc` receives the mention. A top-level mention opens its own
+  assistant thread, keyed by its Slack post (`slack:C900:<ts>`). The
+  mention rule holds: the subscription delivers the post once, and the
+  waiter does not.
 
 ## Part A: Normalization
 
