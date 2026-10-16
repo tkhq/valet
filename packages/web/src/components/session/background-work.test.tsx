@@ -210,11 +210,21 @@ describe("background work helpers", () => {
     });
   });
 
-  it("keeps the first event waiter's subject label per thread", () => {
+  it("names each thread's oldest event waiter and counts the rest", () => {
     const data = eventListing(NOW);
     const waits = threadEventWaits(data);
-    expect([...waits.entries()]).toEqual([["th-1", "acme/lean-proofs#42"]]);
+    expect([...waits.entries()]).toEqual([["th-1", { label: "acme/lean-proofs#42", moreCount: 0 }]]);
     expect(threadEventWaits(undefined).size).toBe(0);
+    const base = data.wakeups[0]!;
+    const several = {
+      ...data,
+      wakeups: [
+        { ...base, id: "wk_new", createdAt: NOW - 1_000, subjectLabel: "acme/lean-proofs#43" },
+        { ...base, id: "wk_old", createdAt: NOW - 9_000, subjectLabel: "acme/lean-proofs#41" },
+        { ...base, id: "wk_mid", createdAt: NOW - 5_000, subjectLabel: "acme/lean-proofs#42" },
+      ],
+    };
+    expect(threadEventWaits(several).get("th-1")).toEqual({ label: "acme/lean-proofs#41", moreCount: 2 });
   });
 });
 
@@ -375,5 +385,10 @@ describe("ThreadEventLine", () => {
   it("names the subject it waits on", () => {
     render(<ThreadEventLine label="acme/lean-proofs#42" />);
     expect(screen.getByText("Waiting on acme/lean-proofs#42")).toBeTruthy();
+  });
+
+  it("counts the other waits on the thread", () => {
+    render(<ThreadEventLine label="acme/lean-proofs#41" moreCount={2} />);
+    expect(screen.getByText("Waiting on acme/lean-proofs#41 +2 more")).toBeTruthy();
   });
 });

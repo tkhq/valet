@@ -697,7 +697,8 @@ adds the event kind to each:
 
 - Composer line: an event icon and the text `waiting on <subject label>`.
 - Card section: the subject as a link, the clause count, and the deadline.
-- Thread list: `Waiting on <subject label>` on the thread's row.
+- Thread list: `Waiting on <subject label>` on the thread's row, for its oldest
+  event waiter, plus `+N more` when the thread has other event waits.
 - Signal cards: an `event.matched` card shows the key, a status chip, the
   actor, the summary, and the link. A stream signal lists each digest.
 
