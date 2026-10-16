@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { eq, sql } from "drizzle-orm";
+import type { Wakeup } from "@valet/engine";
 import type { RunHost, WorkflowTriggerPayload } from "@valet/workflow";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
@@ -607,6 +608,140 @@ describe("EventDispatcher", () => {
     expect(deliver).toHaveBeenCalledOnce();
     expect((await getDelivery(deliveryId)).status).toBe("delivered");
     expect(await findFollowedThread(tdb.appDb, { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2" })).toBeNull();
+  });
+
+  /**
+   * Incident mention routing (spec 2026-10-15: incident mention routing).
+   * The waiter rows come from a fake `findEventWaiters`; the sessions they
+   * name are real `agent_sessions` rows, so the owner filter runs for real.
+   */
+  describe("incident mention routing", () => {
+    const CHANNEL_SUBJECT = "slack:T001/C1";
+
+    function waiter(id: string, sessionId: string, opts: { createdAt: number; once?: boolean; subjects?: string[]; status?: Wakeup["status"] }): Wakeup {
+      return {
+        id, sessionId, threadId: `thr-${id}`, kind: "event", status: opts.status ?? "running", reason: "Incident",
+        logOffset: 0, logTail: "", eventCount: 0, createdAt: opts.createdAt, updatedAt: opts.createdAt,
+        subjects: opts.subjects ?? [CHANNEL_SUBJECT],
+        eventMatch: { clauses: [{ key: "slack.message" }], once: opts.once ?? false, self: [] },
+      };
+    }
+
+    /** A store whose `findEventWaiters` returns the given rows that share a subject. */
+    function fakeStore(rows: Wakeup[]) {
+      const lookups: string[][] = [];
+      return {
+        lookups,
+        store: {
+          async findEventWaiters(subjects: readonly string[]): Promise<Wakeup[]> {
+            lookups.push([...subjects]);
+            return rows.filter((w) => (w.subjects ?? []).some((s) => subjects.includes(s)));
+          },
+        },
+      };
+    }
+
+    async function seedSession(id: string, ownerType: "user" | "team", ownerId: string, orgId = ORG) {
+      await tdb.appDb.insert(agentSessions).values({ id, orgId, userId: "member-9", ownerType, ownerId, workspace: "/workspace", createdAt: 1, updatedAt: 1 });
+    }
+
+    async function dispatchMention(rows: Wakeup[], opts: { subjects?: string[]; payload?: Record<string, unknown> } = {}) {
+      const { deliveryId } = await seedDelivery({
+        target: { kind: "orchestrator", follow: true },
+        ownerType: "team", ownerId: "team-x", service: "slack",
+        eventKey: "slack.app_mention", eventKeys: ["slack.app_mention"],
+        refs: { channel: "C1", user: "U9" }, summary: "Mention",
+        payload: opts.payload ?? { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2" },
+        actor: { externalId: "U9" },
+        subjects: opts.subjects ?? ["slack:T001", CHANNEL_SUBJECT, "slack:T001/C1/1.2"],
+      });
+      const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+      const fake = fakeStore(rows);
+      await new EventDispatcher({
+        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+        deliverToOrchestrator: deliver,
+        resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" }),
+        engineStore: fake.store,
+      }).pollOnce();
+      return { deliver, deliveryId, lookups: fake.lookups };
+    }
+
+    const followKey = { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2" };
+
+    it("routes the mention to the newest watching waiter of the owner and binds no follow (Part A, Part B)", async () => {
+      await seedMentionMember("team-x");
+      await seedSession("sess-old", "team", "team-x");
+      await seedSession("sess-new", "team", "team-x");
+      const { deliver, deliveryId, lookups } = await dispatchMention([
+        waiter("old", "sess-old", { createdAt: 100 }),
+        waiter("new", "sess-new", { createdAt: 200 }),
+      ]);
+      expect(lookups).toEqual([[CHANNEL_SUBJECT]]);
+      expect(deliver).toHaveBeenCalledOnce();
+      const args = deliver.mock.calls[0][0];
+      expect(args.target).toEqual({ sessionId: "sess-new", threadId: "thr-new" });
+      // The routed delivery keeps the subscription delivery's dispatch id and the Slack origin.
+      expect(args.dispatchId).toBe(`event:${deliveryId}`);
+      expect(args.signal.origin).toEqual({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" });
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+      expect(await findFollowedThread(tdb.appDb, followKey)).toBeNull();
+    });
+
+    it("never routes across owners or orgs (INV-M3)", async () => {
+      await seedMentionMember("team-x");
+      await tdb.appDb.insert(teams).values({ id: "team-z", orgId: ORG, name: "Other", createdAt: Date.now() });
+      await seedSession("sess-mine", "team", "team-x");
+      await seedSession("sess-other-team", "team", "team-z");
+      await seedSession("sess-other-org", "team", "team-x", "org-2");
+      await seedSession("sess-personal", "user", "member-9");
+      const { deliver } = await dispatchMention([
+        waiter("mine", "sess-mine", { createdAt: 100 }),
+        waiter("other-team", "sess-other-team", { createdAt: 400 }),
+        waiter("other-org", "sess-other-org", { createdAt: 300 }),
+        waiter("personal", "sess-personal", { createdAt: 200 }),
+      ]);
+      expect(deliver.mock.calls[0][0].target).toEqual({ sessionId: "sess-mine", threadId: "thr-mine" });
+    });
+
+    it("keeps today's delivery and follow when no waiter watches the channel itself (Part A steps 3 and 5)", async () => {
+      await seedMentionMember("team-x");
+      await seedSession("sess-1", "team", "team-x");
+      await seedSession("sess-2", "team", "team-z");
+      const { deliver } = await dispatchMention([
+        // A once-mode waiter waits for one reply, not a channel.
+        waiter("once", "sess-1", { createdAt: 100, once: true }),
+        // A waiter on a thread subject alone does not watch the channel.
+        waiter("thread", "sess-1", { createdAt: 200, subjects: ["slack:T001/C1/1.2"] }),
+        // A waiter that is no longer running.
+        waiter("done", "sess-1", { createdAt: 300, status: "done" }),
+        // Another owner's waiter.
+        waiter("other", "sess-2", { createdAt: 400 }),
+      ]);
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(deliver.mock.calls[0][0].target).toBeUndefined();
+      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
+    });
+
+    it("finds the Slack team from the payload when the event row has no subjects", async () => {
+      await seedMentionMember("team-x");
+      await seedSession("sess-1", "team", "team-x");
+      const { deliver, lookups } = await dispatchMention([waiter("w", "sess-1", { createdAt: 100 })], {
+        subjects: [],
+        payload: { type: "app_mention", channel: "C1", user: "U9", text: "hi", ts: "1.2", team: "T001" },
+      });
+      expect(lookups).toEqual([[CHANNEL_SUBJECT]]);
+      expect(deliver.mock.calls[0][0].target).toEqual({ sessionId: "sess-1", threadId: "thr-w" });
+    });
+
+    it("does not route a refused sender (Part C)", async () => {
+      // No identity link for U9: the team mention gate refuses the sender.
+      await tdb.appDb.insert(teams).values({ id: "team-x", orgId: ORG, name: "Team", createdAt: Date.now() });
+      await seedSession("sess-1", "team", "team-x");
+      const { deliver, deliveryId, lookups } = await dispatchMention([waiter("w", "sess-1", { createdAt: 100 })]);
+      expect(deliver).not.toHaveBeenCalled();
+      expect(lookups).toEqual([]);
+      expect((await getDelivery(deliveryId)).status).toBe("dead");
+    });
   });
 
   it("signal target: inserts workflow_signals for org runs parked on event:<key> and wakes them", async () => {

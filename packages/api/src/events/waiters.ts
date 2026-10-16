@@ -17,6 +17,7 @@ import {
   type ValetPlugin,
   type Wakeup,
 } from "@valet/engine";
+import type { AppDb } from "../lib/drizzle.js";
 import type { Providers } from "../providers/types.js";
 import { agentSessions, eventSubscriptions } from "../schema/index.js";
 import type { ChannelVisibility } from "../services/channels.js";
@@ -217,6 +218,20 @@ export function linearPreviousStatusRef(payload: unknown): { teamKey?: string; s
   return typeof teamKey === "string" && teamKey ? { teamKey, stateId } : { stateId };
 }
 
+/** A session's org and owner, or null when the session is gone or deleted. */
+export async function loadSessionOwner(
+  db: AppDb,
+  sessionId: string,
+): Promise<{ orgId: string; ownerType: string; ownerId: string } | null> {
+  const [row] = await db
+    .select({ orgId: agentSessions.orgId, ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId, status: agentSessions.status })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, sessionId))
+    .limit(1);
+  if (!row || row.status === "deleted") return null;
+  return { orgId: row.orgId, ownerType: row.ownerType, ownerId: row.ownerId };
+}
+
 type WaiterProviders = Pick<Providers, "db" | "engineStore" | "engineCredentials" | "plugins"> & {
   onePassword?: Providers["onePassword"];
 };
@@ -276,18 +291,9 @@ export function waiterMatchDeps(providers: WaiterProviders, opts: WaiterMatchDep
   // One channel check per viewer for the life of these deps, so the
   // credential and identity lookups it caches are shared.
   const viewers = new Map<string, ChannelVisibility>();
-  const sessionOrg: WaiterMatchDeps["sessionOrg"] = async (sessionId) => {
-    const [row] = await providers.db
-      .select({ orgId: agentSessions.orgId, ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId, status: agentSessions.status })
-      .from(agentSessions)
-      .where(eq(agentSessions.id, sessionId))
-      .limit(1);
-    if (!row || row.status === "deleted") return null;
-    return { orgId: row.orgId, ownerType: row.ownerType, ownerId: row.ownerId };
-  };
   return {
     engineStore: providers.engineStore,
-    sessionOrg,
+    sessionOrg: (sessionId) => loadSessionOwner(providers.db, sessionId),
     plugins: providers.plugins,
     // A personal session sees what its owner may see. A team session sees
     // only public channels, the rule for content every member reads.
