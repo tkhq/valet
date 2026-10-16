@@ -76,7 +76,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
   it("creates a shared runtime with a machine actor and persists that identity", async () => {
     const deps = { db: testDb.appDb, engineHost };
     await deliverToAssistantThread(deps, {
-      orgId: ORG, owner: OWNER, actorUserId: `org:${ORG}`, threadKey: "events",
+      orgId: ORG, owner: OWNER, actorUserId: `org:${ORG}`, destination: { kind: "key", key: "events" },
       signal: { kind: "signal", signalType: "github.issues.opened", body: "External issue" },
       dispatchId: "machine-delivery", mismatchReason: "test",
     });
@@ -89,7 +89,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     for (const actor of ["member-b", "member-c"]) {
       const threadKey = `slack:C1:${actor}`;
       await deliverToAssistantThread(deps, {
-        orgId: ORG, owner: OWNER, actorUserId: actor, threadKey,
+        orgId: ORG, owner: OWNER, actorUserId: actor, destination: { kind: "key", key: threadKey },
         signal: channelSignal(actor), dispatchId: actor, mismatchReason: "test",
       });
       expect(await firstUserEntry(deps, threadKey)).toMatchObject({ author: { id: actor } });
@@ -105,7 +105,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
       ["presence-default", undefined],
     ] as const) {
       await deliverToAssistantThread(deps, {
-        orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "events",
+        orgId: ORG, owner: OWNER, actorUserId: USER, destination: { kind: "key", key: "events" },
         signal: { kind: "signal", signalType: "test", body: dispatchId },
         dispatchId, presence, mismatchReason: "test",
       });
@@ -119,7 +119,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     const deps = { db: testDb.appDb, engineHost };
     for (const [dispatchId, unattended] of [["unattended-event", true], ["attended-event", undefined]] as const) {
       await deliverToAssistantThread(deps, {
-        orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "events",
+        orgId: ORG, owner: OWNER, actorUserId: USER, destination: { kind: "key", key: "events" },
         signal: { kind: "signal", signalType: "test", body: dispatchId },
         dispatchId, mismatchReason: "test", ...(unattended ? { unattended } : {}),
       });
@@ -142,7 +142,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
 
     await deliverToAssistantThread(deps, {
       orgId: ORG, owner: owner, actorUserId: USER,
-      threadKey: "slack:C1:1.2", signal: channelSignal("first"),
+      destination: { kind: "key", key: "slack:C1:1.2" }, signal: channelSignal("first"),
       dispatchId: "model-first", mismatchReason: "event_target_mismatch",
     });
     const restored = await defaultAssistantSessionFor(deps, owner, { actorUserId: USER, orgId: ORG });
@@ -154,7 +154,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     await testDb.appDb.update(teams).set({ defaultModel: null, defaultReasoning: null }).where(eq(teams.id, owner.id));
     await deliverToAssistantThread(deps, {
       orgId: ORG, owner: owner, actorUserId: USER,
-      threadKey: "slack:C1:next", signal: channelSignal("next"),
+      destination: { kind: "key", key: "slack:C1:next" }, signal: channelSignal("next"),
       dispatchId: "model-next", mismatchReason: "event_target_mismatch",
     });
     expect((await restored.threadByKey("slack:C1:next"))?.modelId()).toBe("s");
@@ -187,7 +187,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     engineHost.evictCache(original.id);
     for (let retry = 0; retry < 2; retry++) {
       await deliverToAssistantThread(deps, {
-        orgId: ORG, owner, actorUserId: USER, threadKey: "slack-events:C1", signal,
+        orgId: ORG, owner, actorUserId: USER, destination: { kind: "key", key: "slack-events:C1" }, signal,
         dispatchId: "event:cutover-delivery", mismatchReason: "event_target_mismatch",
       });
       engineHost.evictCache(original.id);
@@ -207,10 +207,10 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     const signal = channelSignal("review the change");
     const seeded = { ...signal, body: `Conversation so far in this thread:\nEarlier history\n\n---\n\n${signal.body}` };
     const admitted = await thread.submitPrompt(seeded, { dispatchId: "event:pr-cutover" });
-    const args = { orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "web:pr-origin",
-      target: { sessionId: "new-pr-runtime", threadId: "new-pr-thread" }, signal,
+    const args = { orgId: ORG, owner: OWNER, actorUserId: USER,
+      destination: { kind: "target" as const, sessionId: "new-pr-runtime", threadId: "new-pr-thread" }, signal,
       dispatchId: "event:pr-cutover", mismatchReason: "test" };
-    await expect(deliverToAssistantThread(deps, args)).resolves.toBeUndefined();
+    await expect(deliverToAssistantThread(deps, args)).resolves.toEqual({ sessionId: session.id, threadId: thread.id });
     await expect(deliverToAssistantThread(deps, { ...args, signal: channelSignal("changed work") })).rejects.toThrow("different content");
     expect((await session.providers.store.listUnsettledSubmissions(session.id)).map(item => item.id)).toEqual([admitted.queueItemId]);
     await expect(deliverToAssistantThread(deps, { ...args, owner: { type: "user", id: USER } })).rejects.toThrow("original event owner differs");
@@ -227,8 +227,8 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     const thread = await session.createThread("web:original-pr");
     await thread.pause();
     engineHost.evictCache(session.id);
-    const args = { orgId: ORG, owner, actorUserId: USER, threadKey: key,
-      target: { sessionId: session.id, threadId: thread.id }, signal: channelSignal("Review feedback"),
+    const args = { orgId: ORG, owner, actorUserId: USER,
+      destination: { kind: "target" as const, sessionId: session.id, threadId: thread.id }, signal: channelSignal("Review feedback"),
       dispatchId: "cold-pr-reply", mismatchReason: "test" };
     await deliverToAssistantThread(deps, args);
     const restored = engineHost.liveSession(session.id)!;
@@ -243,10 +243,10 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     let entered!: () => void;
     const waiting = new Promise<void>(resolve => { entered = resolve; });
     const fetchThreadContext = async () => { entered(); await new Promise<void>(resolve => { release = resolve; }); return "Earlier review"; };
-    const target = { sessionId: session.id, threadId: empty.id };
-    const first = deliverToAssistantThread({ ...deps, fetchThreadContext }, { ...args, target, dispatchId: "queued-first" });
+    const target = { kind: "target" as const, sessionId: session.id, threadId: empty.id };
+    const first = deliverToAssistantThread({ ...deps, fetchThreadContext }, { ...args, destination: target, dispatchId: "queued-first" });
     await waiting;
-    const second = deliverToAssistantThread(deps, { ...args, target, dispatchId: "queued-second" });
+    const second = deliverToAssistantThread(deps, { ...args, destination: target, dispatchId: "queued-second" });
     const results = Promise.allSettled([first, second]);
     await testDb.appDb.insert(sessionThreads).values({ id: empty.id, sessionId: session.id, createdAt: 1, archivedAt: Date.now() });
     release();
@@ -265,7 +265,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
         orgId: ORG,
         owner: OWNER,
         actorUserId: USER,
-        threadKey: "slack:C1:1.2",
+        destination: { kind: "key", key: "slack:C1:1.2" },
         signal: channelSignal("file an issue for this"),
         dispatchId: "d1",
         mismatchReason: "event_target_mismatch",
@@ -289,7 +289,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
         orgId: ORG,
         owner: OWNER,
         actorUserId: USER,
-        threadKey: "slack:C1:1.2",
+        destination: { kind: "key", key: "slack:C1:1.2" },
         signal: channelSignal("first"),
         dispatchId: "d1",
         mismatchReason: "event_target_mismatch",
@@ -304,7 +304,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
         orgId: ORG,
         owner: OWNER,
         actorUserId: USER,
-        threadKey: "slack:C1:1.2",
+        destination: { kind: "key", key: "slack:C1:1.2" },
         signal: channelSignal("second"),
         dispatchId: "d2",
         mismatchReason: "event_target_mismatch",
@@ -328,7 +328,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
           orgId: ORG,
           owner: OWNER,
           actorUserId: USER,
-          threadKey: "slack:C1:1.2",
+          destination: { kind: "key", key: "slack:C1:1.2" },
           signal: channelSignal("mention one"),
           dispatchId: "d1",
           mismatchReason: "event_target_mismatch",
@@ -340,7 +340,7 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
           orgId: ORG,
           owner: OWNER,
           actorUserId: USER,
-          threadKey: "slack:C1:1.2",
+          destination: { kind: "key", key: "slack:C1:1.2" },
           signal: channelSignal("mention two"),
           dispatchId: "d2",
           mismatchReason: "event_target_mismatch",
@@ -422,7 +422,7 @@ describe("deliverToAssistantThread — which assistant answers", () => {
 
     asks();
     await deliverToAssistantThread(deps, {
-      orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "events", unattended: true,
+      orgId: ORG, owner: OWNER, actorUserId: USER, destination: { kind: "key", key: "events" }, unattended: true,
       signal: signal("bot post"), dispatchId: "unattended-ask", mismatchReason: "event_target_mismatch",
     });
     await expect.poll(() => settled("unattended-ask"), { timeout: 15_000 }).toBe(true);
@@ -432,7 +432,7 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     // task's follow-up or an item queued before this change, is unattended too.
     asks();
     await deliverToAssistantThread(deps, {
-      orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "slack-events:C1",
+      orgId: ORG, owner: OWNER, actorUserId: USER, destination: { kind: "key", key: "slack-events:C1" },
       signal: signal("child settled"), dispatchId: "thread-rule-ask", mismatchReason: "event_target_mismatch",
     });
     await expect.poll(() => settled("thread-rule-ask"), { timeout: 15_000 }).toBe(true);
@@ -441,7 +441,7 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     // Without the flag, the same question parks the thread.
     asks();
     await deliverToAssistantThread(deps, {
-      orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "mentions",
+      orgId: ORG, owner: OWNER, actorUserId: USER, destination: { kind: "key", key: "mentions" },
       signal: signal("a person asks"), dispatchId: "attended-ask", mismatchReason: "event_target_mismatch",
     });
     await expect.poll(() => pending(), { timeout: 15_000 }).toBe(1);
@@ -478,7 +478,7 @@ describe("deliverToAssistantThread — which assistant answers", () => {
       for (const [threadKey, unattended] of [["events", true], ["slack-events:C1", undefined], ["signal:workflow:wfrun_1", undefined]] as const) {
         delegates();
         await deliverToAssistantThread(deps, {
-          orgId: ORG, owner: OWNER, actorUserId: USER, threadKey, signal: signal("delegate"), dispatchId: threadKey,
+          orgId: ORG, owner: OWNER, actorUserId: USER, destination: { kind: "key", key: threadKey }, signal: signal("delegate"), dispatchId: threadKey,
           mismatchReason: "event_target_mismatch", ...(unattended ? { unattended } : {}),
         });
         await expect.poll(() => settled(threadKey), { timeout: 15_000 }).toBe(true);
@@ -498,7 +498,7 @@ describe("deliverToAssistantThread — which assistant answers", () => {
   it("delivers into the owner's singleton and persists the initiating actor", async () => {
     const deps = { db: testDb.appDb, engineHost };
     await deliverToAssistantThread(deps, {
-      orgId: ORG, owner: OWNER, actorUserId: USER, threadKey: "events",
+      orgId: ORG, owner: OWNER, actorUserId: USER, destination: { kind: "key", key: "events" },
       signal: signal("go"), dispatchId: "d1", mismatchReason: "event_target_mismatch",
     });
     expect(await firstUserEntry(deps, "events")).toMatchObject({ content: "go", author: { id: USER } });

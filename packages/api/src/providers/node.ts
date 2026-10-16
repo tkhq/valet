@@ -73,7 +73,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
-import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
+import { buildAssistantTarget } from "../events/assistant-target.js";
 import { channelThreadContextFetcher } from "../events/channel-thread-context.js";
 import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
 import { FsBlobStore } from "./blob-fs.js";
@@ -807,12 +807,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Workflow schedule loop — cron-driven run starts (time-based counterpart
   // of the event dispatcher's workflow targets). `start()`/`stop()` from
   // main.ts alongside the dispatcher.
-  const deliverToOrchestrator = buildOrchestratorTarget({
+  const deliverToAssistant = buildAssistantTarget({
     db,
     engineHost,
     fetchThreadContext: channelThreadContextFetcher(channelHost),
   });
-  const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost, deliverToOrchestrator });
+  const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost, deliverToAssistant });
 
   // Coarse per-workflow cap for the public webhook-trigger route — bounds
   // what an unauthenticated caller holding a leaked/guessed URL can force
@@ -820,13 +820,13 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const webhookRateLimiter = new WorkflowWebhookRateLimiter({ limit: 30, windowMs: 60_000 });
 
   // Event dispatcher (event-system plan Task 6): drains event_deliveries
-  // into workflow/orchestrator/signal targets. `start()`/`stop()` are called
+  // into workflow/assistant/signal targets. `start()`/`stop()` are called
   // from main.ts; ingest routes pass `eventDispatcher.nudge` as `onIngest`.
   const eventDispatcher = new EventDispatcher({
     db,
     workflowRunHost,
     workflowStore,
-    deliverToOrchestrator,
+    deliverToAssistant,
     resolveChannelOrigin: channelOriginResolver(channelHost),
     normalizeChannelMessage: channelMessageNormalizer(channelHost),
     // The catalog a subscription's `{{payload.<field>}}` variable resolves

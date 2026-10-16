@@ -67,7 +67,7 @@ export async function findWatchingWaiter(
   owner: Principal,
   team: string,
   channel: string,
-): Promise<{ sessionId: string; threadId: string } | null> {
+): Promise<{ sessionId: string; threadId: string; waiterId: string } | null> {
   const subject = slackChannelSubject(team, channel);
   const candidates = (await deps.engineStore.findEventWaiters([subject]))
     .filter((w) => w.status === "running" && w.eventMatch?.once === false && (w.subjects ?? []).includes(subject)
@@ -79,7 +79,7 @@ export async function findWatchingWaiter(
     const session = await deps.sessionOwner(waiter.sessionId);
     if (!session || session.orgId !== orgId || session.ownerType !== owner.type || session.ownerId !== owner.id) continue;
     const target = { sessionId: waiter.sessionId, threadId: waiter.threadId };
-    if (await deps.isDeliverableTarget(target)) return target;
+    if (await deps.isDeliverableTarget(target)) return { ...target, waiterId: waiter.id };
   }
   return null;
 }

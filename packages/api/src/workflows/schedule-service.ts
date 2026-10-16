@@ -163,8 +163,8 @@ export async function createWorkflowSchedule(
   // The schedule row's own `ownerType`/`ownerId` (below) is unrelated to run
   // billing for a workflow target — `scheduler.ts`'s `fire()` bills
   // `def.ownerType`/`ownerId` (the workflow's real owner) directly, by
-  // design, never these fields. They matter only for an orchestrator-prompt
-  // target, which `deliverToOrchestrator` reads.
+  // design, never these fields. They matter only for an assistant-prompt
+  // target, which `deliverToAssistant` reads.
   let scheduleOwner: { ownerType: "user" | "team" | "org"; ownerId: string } = {
     ownerType: "user",
     ownerId: owner.userId,

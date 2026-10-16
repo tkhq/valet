@@ -19,6 +19,11 @@ import { InMemoryWorkflowStore, type RunHost, type RunParams } from "@valet/work
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowSchedules } from "../schema/index.js";
 import { WorkflowScheduler } from "./scheduler.js";
+import { PinUnavailableError, PIN_UNAVAILABLE_MESSAGE, type DeliveryDestination } from "../events/assistant-delivery.js";
+import { eq } from "drizzle-orm";
+
+/** The thread a recording delivery fake reports it landed in. */
+const LANDED = { sessionId: "sess-landed", threadId: "thr-landed" };
 
 class RecordingRunHost implements RunHost {
   started: Array<{ runId: string; params: RunParams; owner?: { ownerType: string; ownerId: string } }> = [];
@@ -93,7 +98,7 @@ describe("WorkflowScheduler fire ownership", () => {
       db,
       workflowStore: new InMemoryWorkflowStore(),
       workflowRunHost: runHost,
-      deliverToOrchestrator: async () => {
+      deliverToAssistant: async () => {
         throw new Error("not exercised by a workflow-target fire");
       },
       now: () => 1_000,
@@ -118,7 +123,7 @@ describe("WorkflowScheduler fire ownership", () => {
     const unattended: Array<boolean | undefined> = [];
     const scheduler = new WorkflowScheduler({
       db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
-      deliverToOrchestrator: async (args) => { actors.push(args.actorUserId); unattended.push(args.unattended); },
+      deliverToAssistant: async (args) => { actors.push(args.actorUserId); unattended.push(args.unattended); return LANDED; },
       now: () => 1000,
     });
     await scheduler.tick();
@@ -126,3 +131,59 @@ describe("WorkflowScheduler fire ownership", () => {
     // No person waits on a scheduled prompt, so it must not park on a question.
     expect(unattended).toEqual([true]);
   });
+
+describe("WorkflowScheduler thread policy", () => {
+  async function seedPromptSchedule(id: string, threadPolicy: unknown) {
+    await db.insert(workflowSchedules).values({
+      id, orgId: "org-1", ownerType: "user", ownerId: "user-1",
+      targetKind: "orchestrator", prompt: "Summarize the night", name: "Morning summary",
+      cron: "0 * * * *", timezone: "UTC", enabled: true, nextFireAt: 500,
+      createdBy: "user-1", createdAt: 100, updatedAt: 100, threadPolicy,
+    });
+  }
+
+  it("lands two firings of an own-policy schedule in schedule:<id> titled by its name", async () => {
+    await seedPromptSchedule("sched-own", null);
+    const destinations: DeliveryDestination[] = [];
+    let clock = 1_000;
+    const scheduler = new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
+      deliverToAssistant: async (args) => { destinations.push(args.destination); return LANDED; }, now: () => clock,
+    });
+    await scheduler.tick();
+    // Move the clock past the next slot so the schedule fires again.
+    clock = 10_000_000;
+    await scheduler.tick();
+    expect(destinations).toEqual([
+      { kind: "key", key: "schedule:sched-own", title: "Morning summary", reason: "policy_own" },
+      { kind: "key", key: "schedule:sched-own", title: "Morning summary", reason: "policy_own" },
+    ]);
+  });
+
+  it("keys a new-policy firing on its slot", async () => {
+    await seedPromptSchedule("sched-new", { mode: "new" });
+    const destinations: DeliveryDestination[] = [];
+    const scheduler = new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
+      deliverToAssistant: async (args) => { destinations.push(args.destination); return LANDED; }, now: () => 1_000,
+    });
+    await scheduler.tick();
+    expect(destinations).toEqual([
+      { kind: "key", key: "schedule:sched-new:500", title: "Morning summary · 1970-01-01", reason: "policy_new" },
+    ]);
+  });
+
+  it("disables a schedule whose pinned thread cannot receive deliveries", async () => {
+    await seedPromptSchedule("sched-pin", { mode: "existing", sessionId: "sess-1", threadId: "thr-1" });
+    const destinations: DeliveryDestination[] = [];
+    const scheduler = new WorkflowScheduler({
+      db, workflowStore: new InMemoryWorkflowStore(), workflowRunHost: new RecordingRunHost(),
+      deliverToAssistant: async (args) => { destinations.push(args.destination); throw new PinUnavailableError(); }, now: () => 1_000,
+    });
+    await scheduler.tick();
+    expect(destinations).toEqual([{ kind: "target", sessionId: "sess-1", threadId: "thr-1", reason: "policy_existing" }]);
+    const [row] = await db.select().from(workflowSchedules).where(eq(workflowSchedules.id, "sched-pin"));
+    expect(row?.enabled).toBe(false);
+    expect(PIN_UNAVAILABLE_MESSAGE).toBe("Pick another thread for this rule in Presence.");
+  });
+});

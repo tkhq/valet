@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eventDeliveries, eventDropLog, eventReceipts, events, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
-import { EventDispatcher, type OrchestratorDeliverFn } from "./dispatcher.js";
+import { EventDispatcher, type AssistantDeliverFn } from "./dispatcher.js";
 import { findFollowedThread } from "./followed-threads.js";
 import { __resetIngestDropThrottle, catalogForService, ingestEvent } from "./ingest.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
@@ -68,14 +68,14 @@ describe("team assistant mentions through the org bot event pipeline", () => {
     return ingestEvent({ db: tdb.appDb, plugins }, { orgId: ORG, service: "slack", event });
   }
   function dispatcher() {
-    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const deliver = vi.fn<AssistantDeliverFn>(async () => ({ sessionId: "sess-landed", threadId: "thr-landed" }));
     const workflowRunHost: RunHost = {
       start: vi.fn(async () => {}), wake: vi.fn(async () => {}), scheduleWake: vi.fn(async () => {}),
       terminate: vi.fn(async () => {}), startHost: vi.fn(), stopHost: vi.fn(async () => {}),
     };
     const host = new EventDispatcher({
       db: tdb.appDb, workflowStore: new PgWorkflowStore(tdb.pgdb), workflowRunHost,
-      deliverToOrchestrator: deliver,
+      deliverToAssistant: deliver,
       resolveChannelOrigin: (_service, _key, payload) => {
         if (typeof payload !== "object" || payload === null || !("channel" in payload) || !("ts" in payload)) return null;
         const threadTs = "thread_ts" in payload && payload.thread_ts ? payload.thread_ts : payload.ts;

@@ -523,6 +523,8 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   "created_at" bigint NOT NULL, "updated_at" bigint NOT NULL
 )` },
   { describe: "event receipts page index", probe: { kind: "index", index: "event_receipts_page" }, sql: 'CREATE INDEX IF NOT EXISTS "event_receipts_page" ON "event_receipts" ("org_id", "created_at", "id")' },
+  // The dispatcher appends a delivery's destination stage by event id.
+  { describe: "event receipts event index", probe: { kind: "index", index: "event_receipts_event" }, sql: 'CREATE INDEX IF NOT EXISTS "event_receipts_event" ON "event_receipts" ("org_id", "event_id")' },
   {
     describe: "workspace assistant singleton cutover",
     prepare: classifyLegacyRuntimes,
@@ -1996,6 +1998,18 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "workflow_schedules.thread_policy column",
     probe: { kind: "column", table: "workflow_schedules", column: "thread_policy" },
     sql: 'ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "thread_policy" jsonb',
+  },
+  {
+    // The assistant thread a follow binds to (spec 2026-10-16: delivery
+    // threads, Part B step 5). Null keeps the Slack thread key route.
+    describe: "followed_threads.session_id column",
+    probe: { kind: "column", table: "followed_threads", column: "session_id" },
+    sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "session_id" text',
+  },
+  {
+    describe: "followed_threads.thread_id column",
+    probe: { kind: "column", table: "followed_threads", column: "thread_id" },
+    sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "thread_id" text',
   },
 
 ];

@@ -4,8 +4,9 @@ import { UNATTENDED_DELIVERY_KEY, type Presence } from "@valet/shared";
  * resolve the session, assert its org against the delivery's org (the
  * second-layer defense `admitSignal` would have provided — an event has no
  * sender session, so there is no edge to authorize), then submit the signal on
- * the named thread. Both the dispatcher's orchestrator target
- * (`orchestrator-target.ts`) and the follow-router (`channels/follow-router.ts`)
+ * its destination thread. The dispatcher's assistant target
+ * (`assistant-target.ts`), the scheduler, and the follow-router
+ * (`channels/follow-router.ts`)
  * go through here, so the org check and delivery shape can never drift between
  * them.
  *
@@ -21,6 +22,8 @@ import { loadSessionMeta } from "../engine/session-meta.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { recordChannelMessage, type InboundChannelMessage } from "../services/channel-messages.js";
+import type { DestinationReason } from "./destination.js";
+import { reopenThread, seedThreadTitle } from "./delivery-thread.js";
 
 /**
  * Per-thread delivery serialization (TKAI-284 item 3). The first-turn seed
@@ -39,18 +42,44 @@ export interface AssistantDeliveryDeps {
   engineHost: EngineHost;
   /**
    * Seed a channel thread's earlier messages on the assistant's FIRST turn in
-   * it. Wired only on the mention path (`orchestrator-target`); the follow
+   * it. Wired only on the mention path (`assistant-target`); the follow
    * path never delivers first, so it leaves this unset.
    */
   fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
+}
+
+/**
+ * Where one delivery lands. A `key` resolves to a thread only at delivery
+ * time, and creates it with `title` when it is new (spec Part B step 3). A
+ * `target` names a thread that already exists. A resolver `Destination`
+ * other than a skip fits this type.
+ */
+export type DeliveryDestination =
+  | { kind: "key"; key: string; title?: string }
+  | { kind: "target"; sessionId: string; threadId: string; reason?: DestinationReason };
+
+/** The dead-letter text for an `existing` pin that cannot receive a delivery (spec Part B step 4). */
+export const PIN_UNAVAILABLE_MESSAGE = "Pick another thread for this rule in Presence.";
+
+/** A rule's pinned thread is archived, deleted, or outside the owner's live runtime. */
+export class PinUnavailableError extends Error {
+  constructor() {
+    super(PIN_UNAVAILABLE_MESSAGE);
+    this.name = "PinUnavailableError";
+  }
+}
+
+/** The thread a delivery landed in. */
+export interface DeliveredThread {
+  sessionId: string;
+  threadId: string;
 }
 
 export interface AssistantDeliveryArgs {
   orgId: string;
   owner: Principal;
   actorUserId: string;
-  threadKey: string;
-  target?: { sessionId: string; threadId: string };
+  destination: DeliveryDestination;
   signal: SignalContent;
   presence?: Presence;
   /**
@@ -127,36 +156,50 @@ export async function isDeliverableTarget(
   return isTargetThreadLive(deps.db, orgId, owner, target);
 }
 
+/**
+ * Deliver `args.signal` to its destination and return the thread it landed
+ * in. A pinned `existing` target that fails `isDeliverableTarget` throws
+ * `PinUnavailableError` before any thread is resolved, so a dead-letter
+ * creates no thread (INV-D3).
+ */
 export async function deliverToAssistantThread(
   deps: AssistantDeliveryDeps,
   args: AssistantDeliveryArgs,
-): Promise<void> {
+): Promise<DeliveredThread> {
   // A delivery can outlive a routing upgrade. The admitted dispatch belongs
   // to its original runtime, even if today's route selects another one.
-  if (args.dispatchId.startsWith("event:") && await recoverAdmittedEvent(deps, args)) return;
+  if (args.dispatchId.startsWith("event:")) {
+    const recovered = await recoverAdmittedEvent(deps, args);
+    if (recovered) return recovered;
+  }
+  const destination = args.destination;
   // Serialize by runtime session and thread so delivery paths share one queue.
   let session: Session;
-  if (args.target) {
-    if (!(await resolveLiveAssistant(deps.db, args.orgId, args.owner, args.target.sessionId))) {
+  if (destination.kind === "target") {
+    // A pin never falls back to another mode (spec Part B step 4).
+    if (destination.reason === "policy_existing" && !(await isDeliverableTarget(deps, args.orgId, args.owner, destination))) {
+      throw new PinUnavailableError();
+    }
+    if (!(await resolveLiveAssistant(deps.db, args.orgId, args.owner, destination.sessionId))) {
       throw new Error("The original conversation is unavailable. Restore its owner before retrying delivery.");
     }
-    const [row] = await deps.db.select().from(agentSessions).where(and(eq(agentSessions.id, args.target.sessionId),
+    const [row] = await deps.db.select().from(agentSessions).where(and(eq(agentSessions.id, destination.sessionId),
       eq(agentSessions.orgId, args.orgId), eq(agentSessions.ownerType, args.owner.type), eq(agentSessions.ownerId, args.owner.id))).limit(1);
     if (!row || row.status === "deleted") throw new Error("The original session is unavailable. Start a new conversation.");
     session = await deps.engineHost.sessionFor(row.id, await loadSessionMeta(deps.db, row));
   } else {
     ({ session } = await ensureAssistantExecution(deps, args.owner, {
       actorUserId: args.actorUserId, orgId: args.orgId,
-    }, args.threadKey));
+    }, destination.key, destination.title ? { title: destination.title } : undefined));
   }
-  const key = `${session.id}:${args.threadKey}`;
+  const key = `${session.id}:${destination.kind === "key" ? destination.key : `thread:${destination.threadId}`}`;
   const prior = deliveryChains.get(key) ?? Promise.resolve();
   const run = prior.then(() => deliverToAssistantThreadInner(deps, args, session));
   // The stored tail swallows the failure (the caller gets it from `run`) and
   // removes itself once it is still the tail, so the map does not keep one
   // settled promise per thread ever delivered to.
   const tail: Promise<void> = run
-    .catch(() => undefined)
+    .then(() => undefined, () => undefined)
     .then(() => {
       if (deliveryChains.get(key) === tail) deliveryChains.delete(key);
     });
@@ -164,14 +207,15 @@ export async function deliverToAssistantThread(
   return run;
 }
 
-/** Recover an existing admission without resubmitting or replaying its tools. */
-async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: AssistantDeliveryArgs): Promise<boolean> {
+/** Recover an existing admission without resubmitting or replaying its tools.
+ * Returns the thread the admission landed in, or null when none exists. */
+async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: AssistantDeliveryArgs): Promise<DeliveredThread | null> {
   const result = await deps.db.execute(sql`
     SELECT q.id, q.session_id, q.thread_id, q.content, q.status, s.owner_type, s.owner_id
     FROM engine_queue_items q JOIN agent_sessions s ON s.id = q.session_id
     WHERE q.dispatch_id = ${args.dispatchId} AND s.org_id = ${args.orgId}
     LIMIT 2`) as { rows: Array<{ id: string; session_id: string; thread_id: string; content: unknown; status: string; owner_type: string; owner_id: string }> };
-  if (result.rows.length === 0) return false;
+  if (result.rows.length === 0) return null;
   if (result.rows.length !== 1) throw new Error("This event has multiple admitted submissions. Inspect the original submissions before retrying delivery.");
   const prior = result.rows[0]!;
   if (prior.owner_type !== args.owner.type || prior.owner_id !== args.owner.id) {
@@ -201,14 +245,14 @@ async function recoverAdmittedEvent(deps: AssistantDeliveryDeps, args: Assistant
   if (args.inbound) await recordChannelMessage(deps.db, {
     ...args.inbound, orgId: args.orgId, sessionId: prior.session_id, threadId: prior.thread_id, direction: "in",
   });
-  return true;
+  return { sessionId: prior.session_id, threadId: prior.thread_id };
 }
 
 async function deliverToAssistantThreadInner(
   deps: AssistantDeliveryDeps,
   args: AssistantDeliveryArgs,
   session: Session,
-): Promise<void> {
+): Promise<DeliveredThread> {
   const data = await session.toData();
   if (data.orgId !== args.orgId) {
     await writeDropLog(deps.db, {
@@ -219,12 +263,21 @@ async function deliverToAssistantThreadInner(
     });
     throw new Error(`delivery refused: assistant org mismatch (${data.orgId} != ${args.orgId})`);
   }
-  const thread = args.target ? session.threadById(args.target.threadId) : await deps.engineHost.ensureFreshThread(session, args.threadKey, {
+  const destination = args.destination;
+  const thread = destination.kind === "target" ? session.threadById(destination.threadId) : await deps.engineHost.ensureFreshThread(session, destination.key, {
     userId: data.userId,
     orgId: data.orgId,
     workspace: data.workspace,
-  }, args.actorUserId);
+  }, args.actorUserId, destination.title ? { title: destination.title } : undefined);
   if (!thread) throw new Error("The original thread is unavailable. Restore it before retrying delivery.");
+  if (destination.kind === "key") {
+    // A thread found by key reopens on delivery (spec Part B step 4), and a
+    // new one shows its policy title in the thread list.
+    if (destination.title) {
+      await seedThreadTitle(deps.db, { sessionId: session.id, threadId: thread.id, createdAt: thread.toThreadData().createdAt }, destination.title);
+    }
+    await reopenThread(deps.db, session.id, thread.id);
+  }
   let signal = args.signal;
   // On the assistant's FIRST turn in a channel thread, prepend the thread's
   // earlier messages so it participates in the group conversation with full
@@ -248,8 +301,8 @@ async function deliverToAssistantThreadInner(
       }
     }
   }
-  if (args.target) {
-    if (!(await isTargetThreadLive(deps.db, args.orgId, args.owner, args.target))) {
+  if (destination.kind === "target") {
+    if (!(await isTargetThreadLive(deps.db, args.orgId, args.owner, destination))) {
       throw new Error("The original conversation was archived or deleted. Restore it before retrying delivery.");
     }
   }
@@ -267,4 +320,5 @@ async function deliverToAssistantThreadInner(
       ...args.inbound, orgId: args.orgId, sessionId: session.id, threadId: thread.id, direction: "in",
     });
   }
+  return { sessionId: session.id, threadId: thread.id };
 }
