@@ -1,7 +1,8 @@
 // Wakeup and lease contracts (spec 2026-10-08: sandbox scratch, wakeups, and
-// leases). A wakeup tracks one background unit of work (a detached process,
-// a watch, a timer, or an event waiter; spec 2026-10-15: event wakeups). A lease keeps a sandbox alive while a wakeup or an
-// explicit hold needs it, independent of session activity.
+// leases). A wakeup tracks one background unit of work: a detached process,
+// a watch, a timer, or an event waiter (spec 2026-10-15: event wakeups). A
+// lease keeps a sandbox alive while a wakeup or an explicit hold needs it,
+// independent of session activity.
 
 import type { ChannelOrigin } from "../types.js";
 
@@ -38,6 +39,12 @@ export interface EventMatchSpec {
 
 /** The most bytes of `EventMatchDigest.text` a store keeps (INV-E7). */
 export const EVENT_DIGEST_TEXT_MAX_BYTES = 4096;
+
+/** The most digests an event waiter buffers. `appendEventMatch` refuses past it. */
+export const EVENT_BUFFER_MAX_DIGESTS = 200;
+
+/** The most delivered dedupe keys an event waiter remembers, newest kept (INV-E4). */
+export const EVENT_SEEN_MAX_KEYS = 256;
 
 /** The bounded record of one matched event that an event waiter holds until delivery. */
 export interface EventMatchDigest {
@@ -107,8 +114,13 @@ export interface Wakeup {
   subjects?: string[];
   /** `event`: the clauses, the mode, and the self set. */
   eventMatch?: EventMatchSpec;
-  /** `event`: matched digests awaiting delivery. Delivery writes `[]`. */
+  /** `event`: matched digests awaiting delivery. Delivery removes them by dedupe key. */
   eventBuffer?: EventMatchDigest[];
+  /**
+   * `event`: the dedupe keys of the newest delivered digests, oldest first,
+   * at most `EVENT_SEEN_MAX_KEYS`. Only `removeEventMatches` writes it.
+   */
+  eventSeen?: string[];
 }
 
 /** What kind of owner holds a lease open. */

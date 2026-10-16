@@ -251,7 +251,8 @@ CREATE TABLE "engine_wakeups" (
 	"last_emit_at" bigint,
 	"match_json" text,
 	"subjects" text[],
-	"event_buffer" text
+	"event_buffer" text,
+	"event_seen" text
 );
 --> statement-breakpoint
 CREATE INDEX "engine_wakeups_session" ON "engine_wakeups" ("session_id","status");

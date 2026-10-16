@@ -33,8 +33,12 @@ describe("cutUtf8", () => {
 
 describe("boundEventDigest", () => {
   const base = { key: "k", subjects: ["s"], summary: "sum", occurredAt: "2026-10-15T00:00:00Z", dedupeKey: "d" };
-  it("returns a digest without text unchanged", () => {
-    expect(boundEventDigest(base)).toBe(base);
+  it("keeps a digest that needs no change equal to its input", () => {
+    expect(boundEventDigest(base)).toEqual(base);
+  });
+  it("strips NUL from every string field, then cuts text", () => {
+    const out = boundEventDigest({ ...base, key: "k\u0000", summary: "s\u0000um", subjects: ["a\u0000"], dedupeKey: "d\u0000", actor: "\u0000ada", text: "x\u0000y" });
+    expect(out).toEqual({ ...base, key: "k", summary: "sum", subjects: ["a"], dedupeKey: "d", actor: "ada", text: "xy" });
   });
   it("cuts text to EVENT_DIGEST_TEXT_MAX_BYTES", () => {
     const out = boundEventDigest({ ...base, text: "a".repeat(EVENT_DIGEST_TEXT_MAX_BYTES + 10) });

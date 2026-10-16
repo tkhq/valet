@@ -29,9 +29,28 @@ export function cutUtf8(text: string, maxBytes: number): string {
   return text.slice(0, end);
 }
 
-/** `digest` with `text` cut to `EVENT_DIGEST_TEXT_MAX_BYTES`. Stores call it in `appendEventMatch`. */
+function stripNul(value: string): string {
+  return value.replaceAll("\u0000", "");
+}
+
+/**
+ * `digest` with NUL removed from every string and `text` cut to
+ * `EVENT_DIGEST_TEXT_MAX_BYTES`. Postgres rejects NUL in text and jsonb, so
+ * both stores call this in `appendEventMatch` and accept the same digests.
+ */
 export function boundEventDigest(digest: EventMatchDigest): EventMatchDigest {
-  if (digest.text === undefined) return digest;
-  const text = cutUtf8(digest.text, EVENT_DIGEST_TEXT_MAX_BYTES);
-  return text === digest.text ? digest : { ...digest, text };
+  const out: EventMatchDigest = {
+    key: stripNul(digest.key),
+    subjects: digest.subjects.map(stripNul),
+    summary: stripNul(digest.summary),
+    occurredAt: stripNul(digest.occurredAt),
+    dedupeKey: stripNul(digest.dedupeKey),
+  };
+  const optional = ["status", "previousStatus", "url", "actor", "derive"] as const;
+  for (const field of optional) {
+    const value = digest[field];
+    if (value !== undefined) out[field] = stripNul(value);
+  }
+  if (digest.text !== undefined) out.text = cutUtf8(stripNul(digest.text), EVENT_DIGEST_TEXT_MAX_BYTES);
+  return out;
 }

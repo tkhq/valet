@@ -88,6 +88,7 @@ interface Instruments {
   scratchRefused: Counter;
   leasesOrphanReleased: Counter;
   wakeupBadRows: Counter;
+  eventWaiterBufferFull: Counter;
   wakeupSweepOkAt: ObservableGauge;
   wakeupSweepFailed: Counter;
   jobLogsPruned: Counter;
@@ -190,6 +191,10 @@ function inst(): Instruments {
     wakeupBadRows: meter.createCounter("valet.wakeups.bad_rows", {
       description:
         "engine_wakeups or engine_leases rows a store read skipped because a field held an unknown value, by table. Any count needs a human: the row is never probed or released.",
+    }),
+    eventWaiterBufferFull: meter.createCounter("valet.event_waiter.buffer_full", {
+      description:
+        "Event matches a store refused because the event waiter already buffered EVENT_BUFFER_MAX_DIGESTS digests. Prometheus exports it as valet_event_waiter_buffer_full_total. A count means delivery is stalled for that waiter: find out why the WakeWatcher does not drain it.",
     }),
     wakeupSweepOkAt: meter.createObservableGauge("valet.wakeups.sweep_ok_at", {
       unit: "s",
@@ -416,6 +421,11 @@ export function recordLeaseOrphanReleased(ownerKind: LeaseOwnerKind, reason: Orp
 export function recordWakeupBadRow(table: "engine_wakeups" | "engine_leases", count = 1): void {
   if (count <= 0) return;
   inst().wakeupBadRows.add(count, { table });
+}
+
+/** A store refused an event match because the waiter's buffer was full. */
+export function recordEventWaiterBufferFull(): void {
+  inst().eventWaiterBufferFull.add(1);
 }
 
 /** The WakeWatcher finished a pass at `unixSeconds`. */

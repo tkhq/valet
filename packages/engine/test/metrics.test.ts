@@ -54,6 +54,7 @@ import {
   recordCompactionCoverageGap,
   recordLeaseOrphanReleased,
   recordWakeupBadRow,
+  recordEventWaiterBufferFull,
   recordDockerJobOutputDropped,
   recordJobLogsPruned,
   recordWakeupSweepFailed,
@@ -260,6 +261,11 @@ describe("fix wave 2 wakeup and lease metrics", () => {
       value: 1,
       attributes: { table: "engine_leases" },
     });
+  });
+
+  it("counts an event match refused at the buffer cap", () => {
+    recordEventWaiterBufferFull();
+    expect(metricState.points).toContainEqual({ name: "valet.event_waiter.buffer_full", value: 1, attributes: undefined });
   });
 
   it("reports the last successful sweep time and counts failed sweeps (M5)", () => {
