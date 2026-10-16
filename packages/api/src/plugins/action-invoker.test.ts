@@ -1968,6 +1968,28 @@ describe("buildActionInvoker: github service resolution", () => {
     expect(result).toEqual({ ok: true, result: { token: "inst-501" } });
   });
 
+  it("org-owned auto: an installation mint error surfaces and never falls back to the org PAT", async () => {
+    const { appDb, credentials } = await harness();
+    await seedTwoInstallationsAndOrgPat(appDb, credentials);
+    fixture = startGithubFixture({
+      createInstallationToken: () => ({ status: 500, body: { message: "boom" } }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "create_comment", params: { owner: "acme", repo: "app" }, invocationId: "workflow:r1:org-mint-error" },
+      { userId: `org:${orgId}`, orgId, owner: { type: "org", id: orgId } },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("org-pat");
+  });
+
   it("org-owned auto: with no installation to use, the org PAT still answers", async () => {
     const { appDb, credentials } = await harness();
     await credentials.save({ type: "org", id: orgId }, "github", { type: "oauth2", accessToken: "org-pat" });
