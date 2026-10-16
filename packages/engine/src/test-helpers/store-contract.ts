@@ -811,6 +811,7 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
             ],
             once: false,
             self: ["github:9001"],
+            minIntervalMs: 30_000,
           },
           eventBuffer: [digest({ status: "failure", previousStatus: "queued", url: "https://x", actor: "ada", text: "t", derive: "github.pull_request.checks_completed" })],
           eventSeen: ["d-0"],

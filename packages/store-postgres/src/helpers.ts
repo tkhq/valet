@@ -883,10 +883,15 @@ export function parseEventMatchJson(raw: string): EventMatchSpec {
   if (!Array.isArray(parsed.clauses)) throw new Error(`${field}.clauses is not an array`);
   if (typeof parsed.once !== "boolean") throw new Error(`${field}.once is not a boolean`);
   if (!isStringArray(parsed.self)) throw new Error(`${field}.self is not a string array`);
+  const minIntervalMs = parsed.minIntervalMs;
+  if (minIntervalMs !== undefined && (typeof minIntervalMs !== "number" || !Number.isFinite(minIntervalMs) || minIntervalMs < 0)) {
+    throw new Error(`${field}.minIntervalMs is not a non-negative number`);
+  }
   return {
     clauses: parsed.clauses.map((c, i) => toEventClause(c, `${field}.clauses[${i}]`)),
     once: parsed.once,
     self: parsed.self,
+    ...(minIntervalMs !== undefined ? { minIntervalMs } : {}),
   };
 }
 
