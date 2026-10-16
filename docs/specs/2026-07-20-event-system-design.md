@@ -571,7 +571,7 @@ Readiness requires the installation, the signing secret, and a matching workspac
 
 The Linear plugin serves GET, PUT, and DELETE at `/api/plugins/linear/http/connection`. The host keeps `/api/org/linear` as an alias with the same authentication and responses ([Plugin HTTP interfaces](2026-10-07-plugin-http-interfaces-design.md#linear-connection-binding)).
 
-Deployment environment variables (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`) are no longer a fallback. App credentials stay excluded from agent and workflow credential resolution, and generic credential routes cannot change them.
+Deployment environment variables (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`) are no longer a fallback. Generic credential routes cannot change app credentials. Agent and workflow credential resolution follows the class rule of the [native integration credential policy](2026-10-15-native-integration-credential-policy-design.md). A native integration (GitHub, Slack, Linear) falls back to its app identity when no person's credential applies. The resolver hands that identity to an action as a bare token, never as the stored row, so the webhook signing secret does not reach an action. A non-native service never receives an app credential.
 
 Known gaps: when a workspace removes the app, Linear sends a signed `OAuthApp` `revoked` event. The ingress acknowledges it and drop-logs it as `unsupported_event` with a reconnect instruction, but does not mark the connection broken. Valet does not revoke tokens with Linear on disconnect.
 

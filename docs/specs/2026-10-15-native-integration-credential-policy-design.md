@@ -1,6 +1,6 @@
 # Native integration credential policy
 
-Date: 2026-10-15. Status: proposed.
+Date: 2026-10-15. Status: implemented.
 
 Depends on: `2026-07-20-event-system-design.md` (the Linear app connection),
 `2026-08-24-team-credentials-and-workflow-bootstrap-design.md` (team rows,
@@ -136,6 +136,12 @@ does not, Linear actions with the app token MUST go through native GraphQL
 actions for the tools agents use most (comments, issue state, labels,
 assignees), and this spec records that deviation before code.
 
+Resolution (2026-10-16): Linear's MCP documentation states that the server
+accepts a bearer OAuth token and that an `actor=app` token acts as the app
+user. The native GraphQL fallback was not built. The live check (a comment
+made with the app token shows the Valet app as its author) runs on the dev
+deployment after merge.
+
 ## Invariants
 
 - **INV-P1 An app credential reaches an action as a bare token.**
@@ -176,4 +182,48 @@ assignees), and this spec records that deviation before code.
 
 ## Deviations
 
-None yet.
+1. **INV-P2 holds per service, not per caller.** The resolver gives an app
+   token to any read of a service that a native plugin names
+   (`appCredentialService`). It does not check which plugin makes the read.
+   First-party plugins share one trust boundary, so this is acceptable. A
+   config-declared MCP server cannot reach an app token, because it is
+   never native and cannot name a native service's app credential.
+2. **Org-owned GitHub workflow runs on `auto` use the installation, then
+   the org PAT row.** A strict app-only order breaks orgs that use only a
+   PAT. The PAT answers only when no installation resolves (`null`). If
+   the installation mint fails with an error, the run fails with that
+   error and does not use the PAT. `action-invoker.test.ts` holds this.
+3. **Spike S1 was resolved from Linear's documentation**, not from a live
+   call. The live check runs on the dev deployment after merge.
+4. **The app credential row map is a fixed list.**
+   `APP_CREDENTIAL_ROWS` in `services/credential-resolution.ts` maps
+   `linear:app` to the org `linear` row. A new native service with a
+   row-backed app credential needs a new entry.
+5. **Fallbacks to the app token are counted.** The counter
+   `valet_credentials_app_fallback_total{service,reason}` (OTel name
+   `valet.credentials.app_fallback`) increments when a read ends at a
+   row-backed app token: in session reads (`engine/host.ts`) and in
+   workflow tool-node reads (`plugins/action-invoker.ts`). Reasons:
+   `no_personal` (a user owner had no row), `no_delegated` (a team had no
+   share and no team row), `dead_delegated` (a team share or team row
+   existed but could not answer), and `org_owner` (an org-owned read).
+   A broken delegated credential keeps working through the app, so alert
+   on `dead_delegated` instead of letting the app token hide it. GitHub
+   installation fallbacks and the Slack bot row are not counted: the
+   Slack bot row is that service's only identity, and GitHub has its own
+   token-source path.
+6. **MCP 401 and 403 responses name the credential and the fix.** The MCP
+   client throws a typed `McpHttpError` with the HTTP status.
+   `mcpActionPlugin` checks the status, not the response text, during
+   discovery and calls. With the app token, the message asks an admin to
+   reconnect the app, or the person to connect their own account. With a
+   personal token, it asks the person to reconnect.
+7. **Workflow tool nodes follow Part B on `auto`, and Part E for pins.**
+   `auto` reads a person's credential first and the app token last. A
+   team run is not refused when the app token answers, and it keeps
+   today's borrow approval for another member's share. `app` reads the
+   app identity: the Linear app token, or the org Slack bot row. A run
+   pinned to `app` with no app connection is refused with the admin fix.
+   `user` never reaches the app token, and an org-owned run pinned to
+   `user` is refused, because it has no person to act as. Team readiness
+   gives the same answers (team credentials design, deviation 26).
