@@ -148,9 +148,13 @@ deployment after merge.
 
 ## Invariants
 
-- **INV-P1 An app credential reaches an action as a bare token.**
-  Mechanism: the resolver builds `{ accessToken }` for every app credential
-  service; a test asserts no metadata key survives. Vector: P5.
+- **INV-P1 An app credential reaches an action without a secret other
+  than its token.** Mechanism: the resolver builds `{ accessToken }` for
+  every row-backed app credential service (`linear:app`), and a test
+  asserts no metadata key survives. The Slack bot row is the `slack`
+  service's app identity; it keeps its non-secret metadata, and
+  `readOrgRow` strips its signing secrets (Deviation 8). Vectors: P5, and
+  an org-owned and an app-pinned read of `slack` with no `webhookSecret`.
 - **INV-P2 A non-native service never receives an app token.** Mechanism:
   Part B consults `native` before the app step; a test for a config MCP
   server. Vector: P6.
@@ -190,8 +194,8 @@ deployment after merge.
    token to any read of a service that a native plugin names
    (`appCredentialService`). It does not check which plugin makes the read.
    First-party plugins share one trust boundary, so this is acceptable. A
-   config-declared MCP server cannot reach an app token, because it is
-   never native and cannot name a native service's app credential.
+   config-declared MCP server cannot reach an app token, because
+   it is never native and cannot name a native service's app credential.
 2. **Org-owned GitHub workflow runs on `auto` use the installation, then
    the org PAT row.** A strict app-only order breaks orgs that use only a
    PAT. The PAT answers only when no installation resolves (`null`). If
@@ -231,3 +235,14 @@ deployment after merge.
    `user` never reaches the app token, and an org-owned run pinned to
    `user` is refused, because it has no person to act as. Team readiness
    gives the same answers (team credentials design, deviation 26).
+8. **The Slack bot row reaches an action with its non-secret metadata.**
+   The org `slack` row is the Slack app identity, so it is not reduced to
+   a bare token. `readOrgRow` in `services/credential-resolution.ts`
+   removes `webhookSecret`, `signingSecret`, `clientSecret`, and
+   `appToken` from the metadata of every org row that it returns. It
+   keeps the other keys, for example `teamId`, `teamName`, `botUserId`,
+   and `botId`. This applies to org-owned reads, org-provided fallbacks,
+   and workflow nodes pinned to `app`. The stored row keeps its secrets.
+   The channel transport (`channels/host.ts`) is the only reader that
+   gets them, through `resolveOrgChannelCredentialRead`, because it
+   verifies inbound requests and opens Socket Mode.
