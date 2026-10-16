@@ -426,6 +426,8 @@ D1 errata (Task 11):
   A personal session uses its owner's channel visibility. These are the
   match-time rules of Part E, step 4. A canonical Slack subject from
   another workspace gets R3.
+- R4 reads `is_member` with the org's bot token, because R4 is about
+  the bot. The read with the session's credential decides only R3.
 - R4 also covers a channel that `conversations.info` reports as
   `channel_not_found`, because the bot cannot see a private channel it is
   not in. The text names `<#C…>` when Slack gives no channel name.
@@ -440,8 +442,11 @@ D1 errata (Task 11):
 - `self` at arm holds the owner's linked external id for the service, the
   actor id behind the session's resolved credential (GitHub `/user`, Slack
   `auth.test`, Linear `viewer`), and the app actor id (the GitHub App bot
-  user, the Slack `botUserId`, the Linear app actor). A lookup that fails
-  is left out.
+  user, the Slack `botUserId`, the Linear app actor). Each lookup has its
+  own time limit. A lookup that fails or times out is left out, and the
+  other ids stay.
+- Only `armEvent` creates an event waiter. The seam's generic `create`
+  refuses `kind: "event"`, so every event waiter passes the arm checks.
 - `min_interval_seconds` is an integer from 30 to 3600. It is refused in
   once mode, including the default `once: true`. The row stores it as
   `minIntervalMs`.

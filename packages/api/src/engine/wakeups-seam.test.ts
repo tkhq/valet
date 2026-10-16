@@ -858,6 +858,21 @@ describe("buildWakeupsSeam", () => {
       expect(await store.listWakeups("session-1", ["pending", "running"])).toEqual([]);
     });
 
+    it("create refuses an event waiter: only armEvent creates one", async () => {
+      const store = await storeWithSession();
+      const checkArm = vi.fn();
+      const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => NOW, checkArm }, "session-1", () => undefined);
+      await expect(seam.create("thread-1", {
+        kind: "event",
+        subjects: ["github:acme/lean-proofs#42"],
+        match: { clauses: [{ key: "github.check_run.completed" }], once: true, self: [] },
+        reason: "CI",
+        maxHours: 6,
+      })).rejects.toThrow(/^\[wait_for_event\] Event waiters start only through the wait_for_event tool\./);
+      expect(checkArm).not.toHaveBeenCalled();
+      expect(await store.listWakeups("session-1", ["pending", "running"])).toEqual([]);
+    });
+
     it("process_read refuses an event waiter with the D2 text, and wakeup_cancel ends it", async () => {
       const store = await storeWithSession();
       const seam = buildWakeupsSeam(
