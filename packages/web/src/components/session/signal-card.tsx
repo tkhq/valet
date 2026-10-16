@@ -246,6 +246,16 @@ function looksLikeDigestHeader(line: string): boolean {
   return true;
 }
 
+/**
+ * Pure: a digest text line without its `> ` quote (spec Part F: every text
+ * line is quoted, so it cannot read as a header). An unquoted line, from a
+ * signal stored before quoting, stays as it is.
+ */
+function unquote(line: string): string {
+  if (line.startsWith("> ")) return line.slice(2);
+  return line === ">" ? "" : line;
+}
+
 function parseDigestBlock(lines: string[]): EventDigestBlock {
   const headerParts = (lines[0] ?? "").split(" · ");
   const key = headerParts[0] ?? "";
@@ -258,7 +268,7 @@ function parseDigestBlock(lines: string[]): EventDigestBlock {
   const summary = lines[1] ?? "";
   const rest = lines.slice(2);
   const url = rest[0] !== undefined && DIGEST_URL_PATTERN.test(rest[0]) ? rest[0] : undefined;
-  const text = (url !== undefined ? rest.slice(1) : rest).join("\n");
+  const text = (url !== undefined ? rest.slice(1) : rest).map(unquote).join("\n");
   return {
     key,
     ...(status !== undefined ? { status } : {}),
@@ -310,6 +320,66 @@ export function parseEventMatchedBody(body: string): { blocks: EventDigestBlock[
   return { blocks, alsoMatched: [] };
 }
 
+function optionalString(rec: Record<string, unknown>, key: string): string | undefined {
+  const value = rec[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * Pure: the `digests` attribute of an `event.matched` signal (spec Part
+ * F), a JSON array of `{ key, status?, actor?, summary, url? }` with no
+ * text. Null when it is absent or unreadable, so the caller parses the
+ * body instead. A URL that is not `http(s)://` is left out.
+ */
+export function parseEventDigestsAttribute(raw: string | undefined): EventDigestBlock[] | null {
+  if (raw === undefined) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const out: EventDigestBlock[] = [];
+  for (const item of parsed) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return null;
+    // Narrowed to a non-null, non-array object above; each field is checked below.
+    const rec = item as Record<string, unknown>;
+    const key = optionalString(rec, "key");
+    const summary = optionalString(rec, "summary");
+    if (key === undefined || summary === undefined) return null;
+    const status = optionalString(rec, "status");
+    const actor = optionalString(rec, "actor");
+    const url = optionalString(rec, "url");
+    out.push({
+      key,
+      ...(status !== undefined ? { status } : {}),
+      ...(actor !== undefined ? { actor } : {}),
+      summary,
+      ...(url !== undefined && DIGEST_URL_PATTERN.test(url) ? { url } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * Pure: the digest blocks and `Also matched` lines an `event.matched`
+ * card shows. With a readable `digests` attribute, the blocks come from
+ * it, and each takes its text from the body block at the same position
+ * when that block has the same key. Otherwise the body parser decides.
+ */
+export function eventMatchedView(body: string, digestsAttribute: string | undefined): { blocks: EventDigestBlock[]; alsoMatched: string[] } {
+  const parsed = parseEventMatchedBody(body);
+  const structured = parseEventDigestsAttribute(digestsAttribute);
+  if (!structured) return parsed;
+  const blocks = structured.map((entry, index) => {
+    const fromBody = parsed.blocks[index];
+    const text = fromBody?.key === entry.key ? fromBody.text : undefined;
+    return text !== undefined ? { ...entry, text } : entry;
+  });
+  return { blocks, alsoMatched: parsed.alsoMatched };
+}
+
 /**
  * An `event.matched` signal (spec Part H): each digest block shows its
  * key, a status chip, the actor, the summary, and a link. A stream
@@ -319,7 +389,7 @@ export function parseEventMatchedBody(body: string): { blocks: EventDigestBlock[
 function EventMatchedCard({ message, signal }: { message: Message; signal: MessageSignal }) {
   const attrs = signal.attributes ?? {};
   const origin = originLabel(signal);
-  const { blocks, alsoMatched } = parseEventMatchedBody(message.content);
+  const { blocks, alsoMatched } = eventMatchedView(message.content, attrs.digests);
   return (
     <CardShell>
       <div className="flex flex-wrap items-center gap-2">
@@ -357,8 +427,9 @@ function EventMatchedCard({ message, signal }: { message: Message; signal: Messa
 
 /**
  * Background work: the reason as the title, the outcome, and the log as
- * plain text. An event waiter carries no `reason`, so the title falls
- * back to its `subject` (spec Part F/H), e.g. `event.ended`.
+ * plain text. The WakeWatcher's event signals carry no `reason`, so their
+ * title falls back to the `subject` (spec Part F/H), e.g. `event.ended`. A
+ * person's cancel of an event wait carries the reason.
  */
 function WakeupCard({ message, signal }: { message: Message; signal: MessageSignal }) {
   const attrs = signal.attributes ?? {};
