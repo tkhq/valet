@@ -31,19 +31,10 @@ interface CapturedRequest {
 }
 
 function jsonResponse(body: unknown, headers: Record<string, string> = {}): Response {
-  const lowered: Record<string, string> = {};
-  for (const [k, v] of Object.entries(headers)) lowered[k.toLowerCase()] = v;
-  if (!lowered['content-type']) lowered['content-type'] = 'application/json';
-  // Hand-rolled Response double for the test's mocked `fetch` — McpClient
-  // only reads .ok/.headers.get/.json/.text, so a full DOM Response isn't
-  // needed. The cast bridges this minimal shape to the global fetch type.
-  return {
-    ok: true,
+  return new Response(JSON.stringify(body), {
     status: 200,
-    headers: { get: (k: string) => lowered[k.toLowerCase()] ?? null },
-    json: async () => body,
-    text: async () => JSON.stringify(body),
-  } as Response;
+    headers: { 'content-type': 'application/json', ...headers },
+  });
 }
 
 function makeFetchMock(opts: {
@@ -828,15 +819,7 @@ describe('mcpActionPlugin appCredentialService fallback', () => {
 // ── auth-rejection messages on HTTP 401/403 (fix round 1) ───────────────
 
 function errorResponse(status: number, body: string): Response {
-  // Hand-rolled non-ok Response double — McpClient only reads
-  // .ok/.status/.headers.get/.text for a failed response.
-  return {
-    ok: false,
-    status,
-    headers: { get: (_name: string) => null },
-    json: async () => ({}),
-    text: async () => body,
-  } as Response;
+  return new Response(body, { status });
 }
 
 function makeFetchMockFailingCall(status: number, body = 'nope') {
@@ -872,6 +855,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
       defaultRiskLevel: 'medium',
       appCredentialService: 'linear:app',
       displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
     });
     const credentials = fakeScopedCredentialProvider({
       personal: null,
@@ -885,7 +869,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
     expect(result).toEqual({
       success: false,
       error:
-        "linear rejected the Valet app's access. Ask an admin to reconnect the Linear app in Settings, Integrations, or connect your own Linear account.",
+        "Linear rejected the Valet app's access. Ask an admin to reconnect the Linear app in Settings, Organization, Linear, or connect your own Linear account on the Integrations page.",
     });
   });
 
@@ -897,6 +881,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
       defaultRiskLevel: 'medium',
       appCredentialService: 'linear:app',
       displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
     });
     const credentials = fakeScopedCredentialProvider({
       personal: { accessToken: 'personal-token' },
@@ -909,7 +894,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
 
     expect(result).toEqual({
       success: false,
-      error: 'linear rejected your connected account. Reconnect Linear in Settings, Integrations.',
+      error: 'Linear rejected your connected account. Reconnect Linear on the Integrations page.',
     });
   });
 
@@ -928,7 +913,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
     expect(result).toEqual({
       success: false,
       error:
-        "example rejected your connected account. Reconnect example in Settings, Integrations.",
+        "example rejected your connected account. Reconnect example on the Integrations page.",
     });
   });
 
@@ -940,6 +925,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
       defaultRiskLevel: 'medium',
       appCredentialService: 'linear:app',
       displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
     });
     const credentials = fakeScopedCredentialProvider({
       personal: { accessToken: 'personal-token' },
@@ -967,6 +953,7 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
       defaultRiskLevel: 'medium',
       appCredentialService: 'linear:app',
       displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
     });
     const credentials = fakeScopedCredentialProvider({
       personal: { accessToken: 'personal-token' },
@@ -1014,6 +1001,7 @@ describe('mcpActionPlugin auth-rejection messages on discovery (HTTP 401/403)', 
       defaultRiskLevel: 'medium',
       appCredentialService: 'linear:app',
       displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
     });
     const credentials = fakeScopedCredentialProvider({
       personal: null,
@@ -1022,7 +1010,7 @@ describe('mcpActionPlugin auth-rejection messages on discovery (HTTP 401/403)', 
     });
 
     await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
-      "linear rejected the Valet app's access. Ask an admin to reconnect the Linear app in Settings, Integrations, or connect your own Linear account.",
+      "Linear rejected the Valet app's access. Ask an admin to reconnect the Linear app in Settings, Organization, Linear, or connect your own Linear account on the Integrations page.",
     );
   });
 
@@ -1034,6 +1022,7 @@ describe('mcpActionPlugin auth-rejection messages on discovery (HTTP 401/403)', 
       defaultRiskLevel: 'medium',
       appCredentialService: 'linear:app',
       displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
     });
     const credentials = fakeScopedCredentialProvider({
       personal: { accessToken: 'personal-token' },
@@ -1042,7 +1031,7 @@ describe('mcpActionPlugin auth-rejection messages on discovery (HTTP 401/403)', 
     });
 
     await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
-      'linear rejected your connected account. Reconnect Linear in Settings, Integrations.',
+      'Linear rejected your connected account. Reconnect Linear on the Integrations page.',
     );
   });
 
@@ -1054,6 +1043,7 @@ describe('mcpActionPlugin auth-rejection messages on discovery (HTTP 401/403)', 
       defaultRiskLevel: 'medium',
       appCredentialService: 'linear:app',
       displayName: 'Linear',
+      appConnectHint: 'Settings, Organization, Linear',
     });
     const credentials = fakeScopedCredentialProvider({
       personal: { accessToken: 'personal-token' },

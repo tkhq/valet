@@ -223,9 +223,16 @@ deployment after merge.
 6. **MCP 401 and 403 responses name the credential and the fix.** The MCP
    client throws a typed `McpHttpError` with the HTTP status.
    `mcpActionPlugin` checks the status, not the response text, during
-   discovery and calls. With the app token, the message asks an admin to
-   reconnect the app, or the person to connect their own account. With a
-   personal token, it asks the person to reconnect.
+   discovery and calls. Each message starts with the service's
+   `displayName`. The plugin names the admin page in `appConnectHint`; for
+   Linear it is `Settings, Organization, Linear`
+   (`/settings/organization/linear`). People connect their own accounts
+   on the Integrations page (`/integrations`). The texts for Linear:
+   - App token: "Linear rejected the Valet app's access. Ask an admin to
+     reconnect the Linear app in Settings, Organization, Linear, or
+     connect your own Linear account on the Integrations page."
+   - Personal token: "Linear rejected your connected account. Reconnect
+     Linear on the Integrations page."
 7. **Workflow tool nodes follow Part B on `auto`, and Part E for pins.**
    `auto` reads a person's credential first and the app token last. A
    team run is not refused when the app token answers, and it keeps
