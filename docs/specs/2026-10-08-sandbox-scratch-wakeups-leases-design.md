@@ -229,7 +229,7 @@ the `SCHEMA_REPAIRS` entry, do not bump `ENGINE_SCHEMA_VERSION`.
 | `id` | text PK | `wk_` + 20 base32 chars |
 | `session_id` | text | |
 | `thread_id` | text | the thread that receives signals |
-| `kind` | text | `process` \| `watch` \| `timer` |
+| `kind` | text | `process` \| `watch` \| `timer` \| `event` |
 | `status` | text | `pending` \| `running` \| `done` \| `cancelled` \| `expired` \| `lost` |
 | `reason` | text | human-visible; for `timer` the first 80 chars of `prompt` |
 | `command` | text null | `process`, `watch` |
@@ -249,6 +249,10 @@ the `SCHEMA_REPAIRS` entry, do not bump `ENGINE_SCHEMA_VERSION`.
 | `window_count` | int null | `watch`: polls with new output in the window |
 | `watch_buffer` | text null | `watch`: lines read but not yet sent; `''` when empty |
 | `last_emit_at` | bigint null | `watch`: when the last `watch.event` went out |
+
+The `event` kind (an event waiter) adds `subjects`, a match spec, and an
+`event_buffer` of unsent digests. It holds no lease. See [Event wakeups](2026-10-15-event-wakeups-design.md)
+Part C for its columns and Part F for delivery.
 
 Store methods: `createWakeup`, `createWakeupWithLease(wakeup, lease)` (both
 rows in one transaction), `getWakeup`, `listWakeups(sessionId, statuses?)`,

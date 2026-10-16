@@ -748,3 +748,17 @@ webhook MUST include `Issue` and `Comment`. Add the Part J alert rule.
   sending it twice, which keeps INV-E4. A failed removal rolls the CAS back
   and stops the tick before the submit, so the digests go out once on the
   next tick.
+- Worst-case arm latency on a Slack thread subject is about 28 seconds.
+  `checkArm` makes 5 sequential reads before `selfIds`
+  (`ARM_PROVIDER_TIMEOUT_MS` is 4 seconds each, so 20 seconds when every
+  one times out), then `selfIds` adds its own-token read (4 seconds)
+  before its parallel id lookups (4 more). A faster per-check timeout
+  would cut this at the cost of more false R3 refusals on a slow API.
+- `readSlackChannel` reads `conversations.info` with the session's own
+  credential first, and returns early on `channel_not_found` without ever
+  reading with the org's bot token. `checkArm` then returns R4 ("Invite
+  @Valet to the channel") for what may be the session's own credential
+  failing to see the channel, not the bot. The fix text can be wrong
+  (telling a person to invite a bot that is already a member) for a
+  personal session whose own token cannot read a private channel the bot
+  can.
