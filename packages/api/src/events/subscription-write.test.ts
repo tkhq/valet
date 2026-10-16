@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import githubPlugin from "@valet/plugin-github/plugin";
+import type { ValetPlugin } from "@valet/engine";
 import { validateSubscription } from "./subscription-write.js";
+import { subjectModeAllowed } from "./thread-policy-write.js";
 
 describe("subscription presence", () => {
   it.each([{ kind: "workflow", workflowId: "workflow" }, { kind: "orchestrator" }])("validates identity for $kind targets", (target) => {
@@ -39,5 +41,42 @@ describe("derived event keys (spec Part G, Non-goals)", () => {
 
   it("keeps a glob that also covers a derived key, without selecting it", () => {
     expect(validateSubscription([githubPlugin], { ...body, eventKeys: ["github.pull_request.*"] })).toBeNull();
+  });
+});
+
+describe("thread policy (spec 2026-10-16: delivery threads, Part A)", () => {
+  const body = { name: "PR helper", eventKeys: ["github.pull_request.opened"], filters: [] };
+  // The same catalog with no subject hook: its events name no natural subject.
+  const { naturalSubject: _hook, ...subjectless } = githubPlugin;
+  const githubWithoutSubject: ValetPlugin = subjectless;
+
+  it("accepts every mode on an assistant target", () => {
+    for (const thread of [{ mode: "new" }, { mode: "subject" }, { mode: "own" }, { mode: "existing", sessionId: "s1", threadId: "t1" }]) {
+      expect(validateSubscription([githubPlugin], { ...body, target: { kind: "orchestrator", thread } })).toBeNull();
+    }
+  });
+
+  it("refuses a malformed policy with the shape text", () => {
+    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "orchestrator", thread: { mode: "bogus" } } }))
+      .toBe("Thread policy mode must be new, subject, own, or existing.");
+    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "orchestrator", thread: { mode: "own", extra: 1 } } }))
+      .toBe('Thread policy has an unknown field "extra". Remove it.');
+  });
+
+  it("refuses subject when no selected event names a subject", () => {
+    expect(validateSubscription([githubWithoutSubject], { ...body, target: { kind: "orchestrator", thread: { mode: "subject" } } }))
+      .toBe("This rule's events have no subject to group by. Pick another thread option.");
+  });
+
+  it("refuses a thread policy on a workflow target", () => {
+    expect(validateSubscription([githubPlugin], { ...body, target: { kind: "workflow", workflowId: "wf", thread: { mode: "new" } } }))
+      .toBe("A thread policy applies only to an assistant target. Remove thread from this workflow rule.");
+  });
+
+  it("allows subject per plugin, from the plugin that owns the keys", () => {
+    expect(subjectModeAllowed(["github.pull_request.opened"], [githubPlugin])).toBe(true);
+    expect(subjectModeAllowed(["github.*"], [githubPlugin])).toBe(true);
+    expect(subjectModeAllowed(["github.pull_request.opened"], [githubWithoutSubject])).toBe(false);
+    expect(subjectModeAllowed(["linear.issue.update"], [githubPlugin])).toBe(false);
   });
 });

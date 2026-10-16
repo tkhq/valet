@@ -2048,10 +2048,10 @@ export const workflowSchedules = pgTable(
     /** Prompt submitted to the orchestrator's "schedules" thread when
      * `target_kind = 'orchestrator'`. */
     prompt: text("prompt"),
-    /** Which of the owner's assistants the prompt goes to, when
-     * `target_kind = 'orchestrator'`. Null on rows from before the column, and
-     * on any schedule that named none — both read as "the owner's default".
-     * Ignored for a `workflow` target, which has no assistant. */
+    /** Where an orchestrator-prompt schedule's prompts land: an
+     * `AssistantThreadPolicy` (spec 2026-10-16: delivery threads, Part A).
+     * Null reads as `{ mode: "own" }`. Always null for a `workflow` target. */
+    threadPolicy: jsonb("thread_policy"),
     name: text("name").notNull(),
     cron: text("cron").notNull(),
     timezone: text("timezone").notNull().default("UTC"),

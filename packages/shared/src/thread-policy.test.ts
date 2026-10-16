@@ -27,6 +27,18 @@ describe("thread-policy", () => {
     );
   });
 
+  it("rejects an unknown field", () => {
+    expect(validateThreadPolicy({ mode: "own", extra: 1 })).toBe(
+      'Thread policy has an unknown field "extra". Remove it.',
+    );
+    expect(validateThreadPolicy({ mode: "new", sessionId: "s1" })).toBe(
+      'Thread policy has an unknown field "sessionId". Remove it.',
+    );
+    expect(validateThreadPolicy({ mode: "existing", sessionId: "s1", threadId: "t1", title: "x" })).toBe(
+      'Thread policy has an unknown field "title". Remove it.',
+    );
+  });
+
   it("rejects a non-object value", () => {
     expect(validateThreadPolicy(null)).toBe("Thread policy must be an object with a mode.");
     expect(validateThreadPolicy("new")).toBe("Thread policy must be an object with a mode.");

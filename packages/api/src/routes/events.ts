@@ -24,6 +24,7 @@ import { allCatalogEntries, catalogForService, subscribableEntries } from "../ev
 import type { SubscriptionFilter } from "../events/match.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
+import { existingThreadError } from "../events/thread-policy-write.js";
 import { authorizedSubscriptionMatchesEvent, isTeamAssistantRule } from "../events/team-slack-gate.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
@@ -659,6 +660,9 @@ eventsRouter.post("/event-subscriptions", async (c) => {
       ownerType = "team";
       ownerId = teamId;
     }
+    // `existing` names a thread, which must belong to the owner just resolved.
+    const threadError = await existingThreadError(db, user.orgId, { type: ownerType, id: ownerId }, body.target.thread);
+    if (threadError) return c.json({ error: threadError }, 400);
   }
 
   // Collision gate (TKAI-294). Checked over the FINAL filters (after the
@@ -855,6 +859,19 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       ...(body.pauseOnOverlap !== undefined ? { pauseOnOverlap: body.pauseOnOverlap } : {}),
     };
   }
+  // `null` clears the policy, so the rule reads as `own` again. The merged
+  // re-validation below checks a new policy's shape and subject mode.
+  if (body.thread !== undefined) {
+    if (patchedTarget.kind !== "orchestrator") {
+      return c.json({ error: "A thread policy applies only to an assistant target. Remove thread from this workflow rule." }, 400);
+    }
+    if (body.thread === null) {
+      const { thread: _cleared, ...rest } = patchedTarget;
+      patchedTarget = rest;
+    } else {
+      patchedTarget = { ...patchedTarget, thread: body.thread };
+    }
+  }
   if (body.enabled === true && patchedTarget.kind === "orchestrator") {
     const { overlapPausedAt: _pause, ...rest } = patchedTarget;
     patchedTarget = rest;
@@ -910,6 +927,12 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   if (!write.ok) return c.json({ error: write.error }, 400);
   const filters = write.filters;
   const audience = write.audience ?? null;
+  // Only a patch that sets the policy re-checks its thread. A rename of a rule
+  // whose pinned thread was archived later must still work.
+  if (body.thread != null && patchedTarget.kind === "orchestrator") {
+    const threadError = await existingThreadError(db, user.orgId, { type: row.ownerType, id: row.ownerId }, patchedTarget.thread);
+    if (threadError) return c.json({ error: threadError }, 400);
+  }
 
   // Collision gate (TKAI-294), against the row as it would exist after the
   // patch, minus itself. Runs when the result can fire AND the patch changes
