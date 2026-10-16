@@ -54,9 +54,25 @@ describe("checkArm passes", () => {
     const readGithub = vi.fn(async () => ({ readable: true, pullRequest: true }));
     const covers = vi.fn(async () => true);
     const result = await checkArm(deps({ readGithub, githubInstallationCovers: covers }), CTX, req());
-    expect(result).toEqual({ ok: true, subjects: ["github:acme/lean-proofs#42"], self: ["1001", "9001"] });
+    // The derived clause adds the repository subject, and direct clauses
+    // keep the pull request as the primary subject (final review, item 3).
+    expect(result).toEqual({
+      ok: true,
+      subjects: ["github:acme/lean-proofs#42", "github:acme/lean-proofs"],
+      self: ["1001", "9001"],
+      primarySubject: "github:acme/lean-proofs#42",
+    });
     expect(covers).toHaveBeenCalledWith("acme");
     expect(readGithub).toHaveBeenCalledWith({ owner: "acme", repo: "lean-proofs", number: 42 });
+  });
+
+  it("A1: a pull request wait with no derived clause keeps one subject", async () => {
+    const result = await checkArm(
+      deps({ readGithub: async () => ({ readable: true, pullRequest: true }) }),
+      CTX,
+      req({ on: [{ key: "github.check_run.completed", status: ["failure"] }] }),
+    );
+    expect(result).toEqual({ ok: true, subjects: ["github:acme/lean-proofs#42"], self: ["1001", "9001"] });
   });
 
   it("B1: a Slack permalink resolves the org's team id", async () => {

@@ -820,6 +820,23 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
         expect(await store.getWakeup("wk_ev")).toEqual(full);
       });
 
+      it("round-trips a match spec's primarySubject and finds the waiter by its repository subject", async () => {
+        const indexed = eventWaiter({
+          subjects: ["github:acme/lean-proofs#42", "github:acme/lean-proofs"],
+          eventMatch: {
+            clauses: [{ key: "github.pull_request.checks_completed" }],
+            once: true,
+            self: [],
+            primarySubject: "github:acme/lean-proofs#42",
+          },
+        });
+        await store.createWakeup(indexed);
+        expect(await store.getWakeup("wk_ev")).toEqual(indexed);
+        const rows = await store.findEventWaiters(["github:acme", "github:acme/lean-proofs", "github:acme/lean-proofs@aaaa"]);
+        expect(rows.map((r) => r.id)).toEqual(["wk_ev"]);
+        expect(rows[0]?.eventMatch?.primarySubject).toBe("github:acme/lean-proofs#42");
+      });
+
       it("findEventWaiters returns running event rows that share a subject", async () => {
         await store.createWakeup(eventWaiter());
         await store.createWakeup(eventWaiter({ id: "wk_other", subjects: ["github:acme/other#1"] }));

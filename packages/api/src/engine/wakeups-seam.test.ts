@@ -846,6 +846,22 @@ describe("buildWakeupsSeam", () => {
       expect((await seam.list("thread-1")).wakeups.map((w) => w.id)).toEqual([result.wakeup.id]);
     });
 
+    it("stores the arm's primarySubject in the match spec beside the wider subjects (final review, item 3)", async () => {
+      const store = await storeWithSession();
+      const checkArm = async () => ({
+        ok: true as const,
+        subjects: ["github:acme/lean-proofs#42", "github:acme/lean-proofs"],
+        self: [],
+        primarySubject: "github:acme/lean-proofs#42",
+      });
+      const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => NOW, checkArm }, "session-1", () => undefined);
+      const result = await seam.armEvent!("thread-1", REQ);
+      if (!("wakeup" in result)) throw new Error(`refused: ${result.refused}`);
+      const row = await store.getWakeup(result.wakeup.id);
+      expect(row?.subjects).toEqual(["github:acme/lean-proofs#42", "github:acme/lean-proofs"]);
+      expect(row?.eventMatch?.primarySubject).toBe("github:acme/lean-proofs#42");
+    });
+
     it("a refused arm writes no row (Review Focus 5: R6)", async () => {
       const store = await storeWithSession();
       const text = "[wait_for_event] This thread already receives replies from that Slack thread. No wait is needed.";

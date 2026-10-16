@@ -90,7 +90,7 @@ Universe:
 
 | Step | Action | Expected observation |
 |---|---|---|
-| A1 | Agent calls `wait_for_event` with subject `https://github.com/acme/lean-proofs/pull/42`, clauses `[{ key: "github.check_run.completed", status: ["failure", "timed_out", "cancelled", "action_required", "startup_failure"] }, { key: "github.pull_request.checks_completed" }]`, `once: false`, reason `CI on #42`, `max_hours: 6`. | The result text starts `waiting wk_` and names `github:acme/lean-proofs#42`. One `wakeups` row exists with kind `event`, status `running`, subjects `["github:acme/lean-proofs#42"]`. No `leases` row exists. |
+| A1 | Agent calls `wait_for_event` with subject `https://github.com/acme/lean-proofs/pull/42`, clauses `[{ key: "github.check_run.completed", status: ["failure", "timed_out", "cancelled", "action_required", "startup_failure"] }, { key: "github.pull_request.checks_completed" }]`, `once: false`, reason `CI on #42`, `max_hours: 6`. | The result text starts `waiting wk_` and names `github:acme/lean-proofs#42`. One `wakeups` row exists with kind `event`, status `running`, subjects `["github:acme/lean-proofs#42", "github:acme/lean-proofs"]`, and `primarySubject` `github:acme/lean-proofs#42`. No `leases` row exists. |
 | A2 | The turn ends. Three minutes pass. | The session's sandbox is suspended by the idle sweep. The event waiter is still `running`. |
 | A3 | Fixture sends `check_run.completed` for check `lint`, conclusion `success`, PR `42`. The fixture API reports one pending check run. | No signal reaches `t-1` within 10 seconds. |
 | A4 | Fixture sends `check_run.completed` for check `test`, conclusion `failure`. The fixture API still reports one pending check run. | Within 5 seconds `t-1` receives one `event.matched` signal. Its body contains `github.check_run.completed · failure`. |
@@ -152,6 +152,11 @@ Scenario errata (Task 16):
   signal at once and later signals after the min interval. A5 therefore
   arrives after A4's interval, and E3's three messages arrive before one
   pass.
+- A1 named one subject. A clause on a derived key also indexes the waiter
+  by the repository subject, so a commit status reaches it (Part C, final
+  review). A second test, "Scenario A errata", covers that path: a
+  check run on another pull request sends no signal, and a commit status
+  that completes the last check sends `checks_completed · success`.
 - E5 said `t-inc` receives the mention. A top-level mention opens its own
   assistant thread, keyed by its Slack post (`slack:C900:<ts>`). The
   mention rule holds: the subscription delivers the post once, and the
@@ -338,7 +343,7 @@ An event waiter is a `wakeups` row with `kind = "event"`. Four nullable
 columns hold its state:
 
 ```sql
-"match_json"   text,    -- { clauses, once, self, minIntervalMs }
+"match_json"   text,    -- { clauses, once, self, minIntervalMs, primarySubject }
 "subjects"     text[],  -- the subjects it waits on
 "event_buffer" text,    -- JSON array of match digests awaiting delivery
 "event_seen"   text     -- JSON array of delivered dedupe keys, oldest first
@@ -352,6 +357,15 @@ CREATE INDEX "engine_wakeups_event_subjects" ON "engine_wakeups"
 - `WakeupKind` gains `event`. `WakeupCause` uses the existing `fired`,
   `deadline`, `cancelled`, and `rate`.
 - A clause is `{ key, status?, from_status?, actor?, bots?, include_self? }`.
+  `actor` is a login or an external id.
+- `subjects` lists the subject first. When a clause names a derived key on
+  a pull request subject, arm adds the repository subject
+  (`github:<owner>/<repo>`) and stores the pull request subject as
+  `primarySubject` in `match_json`. A commit status names no pull request,
+  so this index entry is how it reaches the waiter. Direct clauses match
+  only an event whose subjects include `primarySubject`. `wakeup_list`, the
+  arm result, and the signals name `primarySubject`. No schema change
+  carries it: it is a field of `match_json`.
 - An event waiter MUST NOT create a lease.
 
 `SessionStore` gains three methods, all covered by the conformance suite.
@@ -375,7 +389,9 @@ Each write method is one statement.
 
 A match digest holds `key`, `status`, `previousStatus`, `subjects`,
 `summary`, `url`, `actor` login, `occurredAt`, `dedupeKey`, `text`, and an
-optional `derive` key. `text` is the message or comment body, cut to 4096
+optional `derive` key. A derive digest's `dedupeKey` is
+`derive:<derived key>:<event dedupeKey>`, so the direct digest and the
+derive digest of one event can both be buffered. `text` is the message or comment body, cut to 4096
 bytes on a UTF-8 code point boundary. Before it stores a digest, the store
 removes every NUL character from the digest's strings, because Postgres
 rejects NUL in `text` and `jsonb`.
@@ -486,19 +502,28 @@ step that returns early for an event that no subscription matched.
 1. `findEventWaiters(event.subjects)`.
 2. For each candidate, keep it only when the session's org equals the
    event's org.
-3. Evaluate the clauses. A clause matches when all of these hold:
-   - the key glob matches the event key, or the clause key is a derived key
-     whose `sources` match the event key;
+3. Evaluate every clause. A direct clause (its key glob matches the event
+   key) matches when all of these hold:
+   - the event's subjects include `primarySubject`, when the spec has one;
    - `status`, when set, contains the event's status;
    - `from_status`, when set, contains the previous status;
    - `actor`, when set, equals the actor login or external id;
    - `bots` is unset or true, or the actor is no bot;
    - `include_self` is true, or the actor id is outside `self`.
+
+   A derived clause (its key is a derived key whose `sources` match the
+   event key) matches on the key alone, through any subject of the waiter.
+   Its `status` and `from_status` filter the derived event in the
+   WakeWatcher (Part F step 1). Its `actor`, `bots`, and `include_self`
+   do not apply: the derived event has no actor, and a CI bot is the usual
+   source actor. A direct match and a derived match on one event each
+   append their own digest.
 4. Slack only: re-check the arm-time channel visibility decision against the
    cached channel privacy. Drop the candidate when it no longer holds.
-5. `appendEventMatch` with the digest. A derived clause's digest carries
+5. `appendEventMatch` with each digest. A derived clause's digest carries
    `derive: <derived key>`.
-6. Nudge the WakeWatcher.
+6. Nudge the WakeWatcher with the ids of the waiters that got a digest.
+   The nudge runs a light pass over those rows only (Part F).
 
 Mention rule: a `slack.message` event whose text contains `<@bot user id>`
 MUST NOT match an event waiter when an enabled subscription naming
@@ -506,11 +531,15 @@ MUST NOT match an event waiter when an enabled subscription naming
 subscription with the existing subscription matcher against the same
 payload. The mention then reaches the agent once, through the subscription.
 7. Append a receipt stage `waiter_match` with the count of waiters that
-   matched. The stage holds metadata only.
+   matched. The stage holds metadata only. An event with no candidate
+   waiter adds no stage.
 
 The tool fixes `self` at arm. It holds three ids for the subject's
 service: the session owner's linked external id, the external id of a
 shared personal credential that the session resolves, and the app's actor id.
+So events by the agent, the person it acts for, or the Valet app are
+skipped unless a clause sets `include_self`. The tool description says
+this and shows `include_self: true` for a wait on the owner's own reply.
 
 `from_status` resolution: when a candidate clause names `from_status` and
 the event has no `previousStatus`, the matcher calls the plugin's status
@@ -532,6 +561,11 @@ fail ingestion. The matcher increments
 | `{ key: "slack.message", include_self: true }` | actor id in `self` | match |
 | `{ key: "linear.issue.update", status: ["triage"], from_status: ["backlog"] }` | title-only update, state `triage` | no match |
 | `{ key: "github.pull_request.checks_completed" }` | `github.check_run.completed` | match, digest marked `derive` |
+| `{ key: "github.pull_request.checks_completed", status: ["success"] }` | a `success` check run; `derive` returns status `failure` | the source matches; the derived event fails the status filter, so no signal |
+| `{ key: "github.pull_request.checks_completed", bots: false }` | a check run by `github-actions[bot]` | match, digest marked `derive` |
+| `[{ key: "github.pull_request.checks_completed" }, { key: "github.check_run.completed", status: ["failure"] }]` | a mid-run `failure` | two digests: the direct one, and `derive:<key>:<dedupeKey>` |
+| a direct clause, `primarySubject` `#42` | a check run on `#7` in the same repository | no direct match |
+| `{ key: "github.pull_request.checks_completed" }`, `primarySubject` `#42` | `github.status` with repository and commit subjects only | match through the repository subject, digest marked `derive` |
 | any clause | event org differs from session org | no match |
 
 ## Part F: Delivery and lifecycle

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DerivedEventDef, EventMatchSpec, NormalizedEvent } from "@valet/engine";
-import { keyMatches, matchClauses, mentionsBot, needsPreviousStatus, toDigest } from "./waiter-match.js";
+import { derivedClausesAccept, keyMatches, matchClauses, mentionsBot, needsPreviousStatus, toDigest } from "./waiter-match.js";
 
 const SELF_ID = "U-SELF";
 const OTHER_ID = "U-OTHER";
@@ -47,7 +47,7 @@ describe("matchClauses — E1 vectors", () => {
       event({ key: "github.check_run.completed" }),
       [],
     );
-    expect(result).toEqual({ matched: true });
+    expect(result).toEqual({ direct: true, derive: [] });
   });
 
   it("E1 row 2: a status clause excludes a non-matching status", () => {
@@ -56,7 +56,7 @@ describe("matchClauses — E1 vectors", () => {
       event({ key: "github.check_run.completed", status: "success" }),
       [],
     );
-    expect(result).toEqual({ matched: false });
+    expect(result).toEqual({ direct: false, derive: [] });
   });
 
   it("E1 row 3: bots:false excludes a bot actor", () => {
@@ -65,7 +65,7 @@ describe("matchClauses — E1 vectors", () => {
       event({ key: "slack.message", actor: { externalId: "U-BOT", bot: true } }),
       [],
     );
-    expect(result).toEqual({ matched: false });
+    expect(result).toEqual({ direct: false, derive: [] });
   });
 
   it("E1 row 4: an actor in self is dropped with no include_self", () => {
@@ -74,7 +74,7 @@ describe("matchClauses — E1 vectors", () => {
       event({ key: "slack.message", actor: { externalId: SELF_ID } }),
       [],
     );
-    expect(result).toEqual({ matched: false });
+    expect(result).toEqual({ direct: false, derive: [] });
   });
 
   it("E1 row 5: include_self:true keeps an actor in self", () => {
@@ -83,7 +83,7 @@ describe("matchClauses — E1 vectors", () => {
       event({ key: "slack.message", actor: { externalId: SELF_ID } }),
       [],
     );
-    expect(result).toEqual({ matched: true });
+    expect(result).toEqual({ direct: true, derive: [] });
   });
 
   it("E1 row 6: from_status with no previousStatus (title-only update) is no match", () => {
@@ -92,7 +92,7 @@ describe("matchClauses — E1 vectors", () => {
       event({ key: "linear.issue.update", status: "triage", previousStatus: undefined }),
       [],
     );
-    expect(result).toEqual({ matched: false });
+    expect(result).toEqual({ direct: false, derive: [] });
   });
 
   it("E1 row 7: a derived key matches through its sources and marks derive", () => {
@@ -101,7 +101,7 @@ describe("matchClauses — E1 vectors", () => {
       event({ key: "github.check_run.completed" }),
       [CHECKS_COMPLETED],
     );
-    expect(result).toEqual({ matched: true, derive: "github.pull_request.checks_completed" });
+    expect(result).toEqual({ direct: false, derive: ["github.pull_request.checks_completed"] });
   });
 
   // E1 row 8 ("any clause | event org differs from session org | no match") is
@@ -117,7 +117,7 @@ describe("matchClauses — additional vectors", () => {
       event({ key: "github.check_run.completed", status: undefined }),
       [],
     );
-    expect(result).toEqual({ matched: false });
+    expect(result).toEqual({ direct: false, derive: [] });
   });
 
   it("actor matches by login", () => {
@@ -126,7 +126,7 @@ describe("matchClauses — additional vectors", () => {
       event({ key: "slack.message", actor: { externalId: "U-1", login: "conner" } }),
       [],
     );
-    expect(result).toEqual({ matched: true });
+    expect(result).toEqual({ direct: true, derive: [] });
   });
 
   it("actor matches by external id", () => {
@@ -135,7 +135,7 @@ describe("matchClauses — additional vectors", () => {
       event({ key: "slack.message", actor: { externalId: "U-1" } }),
       [],
     );
-    expect(result).toEqual({ matched: true });
+    expect(result).toEqual({ direct: true, derive: [] });
   });
 
   it("actor clause excludes a non-matching actor", () => {
@@ -144,7 +144,7 @@ describe("matchClauses — additional vectors", () => {
       event({ key: "slack.message", actor: { externalId: "U-1", login: "someone-else" } }),
       [],
     );
-    expect(result).toEqual({ matched: false });
+    expect(result).toEqual({ direct: false, derive: [] });
   });
 
   it("include_self absent with an actor outside self matches", () => {
@@ -153,7 +153,7 @@ describe("matchClauses — additional vectors", () => {
       event({ key: "slack.message", actor: { externalId: OTHER_ID } }),
       [],
     );
-    expect(result).toEqual({ matched: true });
+    expect(result).toEqual({ direct: true, derive: [] });
   });
 
   it("a non-matching key and no derived def is no match", () => {
@@ -162,7 +162,77 @@ describe("matchClauses — additional vectors", () => {
       event({ key: "github.check_run.completed" }),
       [],
     );
-    expect(result).toEqual({ matched: false });
+    expect(result).toEqual({ direct: false, derive: [] });
+  });
+});
+
+describe("matchClauses — derived clauses (final review, items 1 to 3)", () => {
+  const CHECKS = "github.pull_request.checks_completed";
+  const PR = "github:acme/lean-proofs#42";
+  const REPO = "github:acme/lean-proofs";
+
+  it("E1: a derived clause's status filter does not apply to the source event", () => {
+    const result = matchClauses(
+      spec([{ key: CHECKS, status: ["success"] }]),
+      event({ key: "github.check_run.completed", status: "failure" }),
+      [CHECKS_COMPLETED],
+    );
+    expect(result).toEqual({ direct: false, derive: [CHECKS] });
+  });
+
+  it("E1: bots:false on a derived clause does not drop a github-actions[bot] source", () => {
+    const result = matchClauses(
+      spec([{ key: CHECKS, bots: false }]),
+      event({ key: "github.check_run.completed", actor: { externalId: "41898282", login: "github-actions[bot]", bot: true } }),
+      [CHECKS_COMPLETED],
+    );
+    expect(result).toEqual({ direct: false, derive: [CHECKS] });
+  });
+
+  it("a derived clause ignores self, actor, and from_status on the source", () => {
+    const result = matchClauses(
+      spec([{ key: CHECKS, actor: "nobody", from_status: ["queued"] }], ["9001"]),
+      event({ key: "github.check_run.completed", actor: { externalId: "9001" } }),
+      [CHECKS_COMPLETED],
+    );
+    expect(result).toEqual({ direct: false, derive: [CHECKS] });
+  });
+
+  it("a direct and a derived clause both match one mid-run failure", () => {
+    const result = matchClauses(
+      spec([{ key: CHECKS }, { key: "github.check_run.completed", status: ["failure"] }]),
+      event({ key: "github.check_run.completed", status: "failure", subjects: [REPO, PR] }),
+      [CHECKS_COMPLETED],
+    );
+    expect(result).toEqual({ direct: true, derive: [CHECKS] });
+  });
+
+  it("with a primarySubject, a direct clause needs it on the event", () => {
+    const withPrimary: EventMatchSpec = { ...spec([{ key: "github.check_run.completed" }, { key: CHECKS }]), primarySubject: PR };
+    const otherPr = event({ key: "github.check_run.completed", status: "failure", subjects: [REPO, "github:acme/lean-proofs#7"] });
+    expect(matchClauses(withPrimary, otherPr, [CHECKS_COMPLETED])).toEqual({ direct: false, derive: [CHECKS] });
+    const ownPr = event({ key: "github.check_run.completed", status: "failure", subjects: [REPO, PR] });
+    expect(matchClauses(withPrimary, ownPr, [CHECKS_COMPLETED])).toEqual({ direct: true, derive: [CHECKS] });
+  });
+
+  it("with a primarySubject, a derived clause matches a commit status through the repository subject", () => {
+    const withPrimary: EventMatchSpec = { ...spec([{ key: CHECKS }]), primarySubject: PR };
+    const status = event({ key: "github.status", status: "success", subjects: ["github:acme", REPO, `${REPO}@aaaa`] });
+    expect(matchClauses(withPrimary, status, [CHECKS_COMPLETED])).toEqual({ direct: false, derive: [CHECKS] });
+  });
+
+  it("derivedClausesAccept checks status and from_status on the derived event", () => {
+    const derived = { key: CHECKS, status: "failure", subjects: [PR], summary: "s", occurredAt: "t", dedupeKey: "k" };
+    expect(derivedClausesAccept(spec([{ key: CHECKS, status: ["success"] }]), CHECKS, derived)).toBe(false);
+    expect(derivedClausesAccept(spec([{ key: CHECKS, status: ["failure"] }]), CHECKS, derived)).toBe(true);
+    expect(derivedClausesAccept(spec([{ key: CHECKS, status: ["success"] }, { key: CHECKS }]), CHECKS, derived)).toBe(true);
+    expect(derivedClausesAccept(spec([{ key: CHECKS, from_status: ["success"] }]), CHECKS, derived)).toBe(false);
+    expect(derivedClausesAccept(spec([{ key: "github.check_run.completed" }]), CHECKS, derived)).toBe(false);
+  });
+
+  it("toDigest gives a derive digest its own dedupe key", () => {
+    expect(toDigest(event({ dedupeKey: "dk-9" }), CHECKS).dedupeKey).toBe(`derive:${CHECKS}:dk-9`);
+    expect(toDigest(event({ dedupeKey: "dk-9" })).dedupeKey).toBe("dk-9");
   });
 });
 
@@ -174,6 +244,9 @@ describe("needsPreviousStatus", () => {
   });
   it("is false when no clause names from_status", () => {
     expect(needsPreviousStatus(spec([{ key: "linear.issue.update", status: ["triage"] }]))).toBe(false);
+  });
+  it("is false when only a derived clause names from_status", () => {
+    expect(needsPreviousStatus(spec([{ key: CHECKS_COMPLETED.key, from_status: ["failure"] }]), [CHECKS_COMPLETED])).toBe(false);
   });
 });
 

@@ -142,10 +142,11 @@ function subjectFilterMatches(subjects: string[] | undefined, filter: Subscripti
  * these columns, which writes exactly these types.
  *
  * `subjects` is the event's normalized subjects array (spec Part A1), used
- * only by the implicit `subject` filter field. Callers that do not have it
- * (redelivery over a stored event row, which carries no subjects column)
- * omit it; a subscription with a `subject` filter then fails closed on that
- * path, same as any other field it cannot evaluate.
+ * only by the implicit `subject` filter field. Redelivery and the team
+ * coverage recheck pass the stored event row's `subjects` column (Part G).
+ * A row stored before that column existed holds null, which callers pass
+ * as undefined; a subscription with a `subject` filter then fails closed,
+ * same as any other field it cannot evaluate.
  */
 export function subscriptionMatchesEvent(
   sub: { eventKeys: unknown; filters: unknown },

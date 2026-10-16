@@ -12,7 +12,16 @@ import type {
 } from "@valet/engine";
 import { eventKeyMatches } from "./match.js";
 
-export type ClauseResult = { matched: false } | { matched: true; derive?: string };
+/**
+ * What the clauses of a waiter matched in one event (spec Part E, step 3).
+ * `direct` is true when a clause on the event's own key matched. `derive`
+ * lists, in clause order and without repeats, the derived keys whose
+ * clauses matched through their `sources`. Both can hold for one event.
+ */
+export interface ClauseMatches {
+  direct: boolean;
+  derive: string[];
+}
 
 /** The subscription glob rule: an exact key, or a pattern with a trailing `.*`. */
 export function keyMatches(pattern: string, key: string): boolean {
@@ -33,61 +42,107 @@ function matchedKey(
   return { ok: false };
 }
 
-/** One clause against one event (spec Part E, step 3). */
-function evaluateClause(
-  clause: EventClause,
-  event: NormalizedEvent,
-  derived: readonly DerivedEventDef[],
-  self: readonly string[],
-): ClauseResult {
-  const key = matchedKey(clause, event, derived);
-  if (!key.ok) return { matched: false };
-
-  if (clause.status && (event.status === undefined || !clause.status.includes(event.status))) {
-    return { matched: false };
-  }
+/**
+ * The status, previous-status, actor, bot, and self filters of one clause
+ * against one event. A direct clause applies them to the event at ingest.
+ * A derived clause applies `status` and `from_status` to the derived event
+ * in the WakeWatcher (`derivedClausesAccept`).
+ */
+function filtersAccept(clause: EventClause, event: NormalizedEvent, self: readonly string[]): boolean {
+  if (clause.status && (event.status === undefined || !clause.status.includes(event.status))) return false;
   if (
     clause.from_status &&
     (event.previousStatus === undefined || !clause.from_status.includes(event.previousStatus))
   ) {
-    return { matched: false };
+    return false;
   }
   if (clause.actor !== undefined) {
     const actor = event.actor;
-    if (!actor || (actor.login !== clause.actor && actor.externalId !== clause.actor)) {
-      return { matched: false };
-    }
+    if (!actor || (actor.login !== clause.actor && actor.externalId !== clause.actor)) return false;
   }
-  if (clause.bots === false && event.actor?.bot === true) {
-    return { matched: false };
-  }
+  if (clause.bots === false && event.actor?.bot === true) return false;
   if (!clause.include_self) {
     const actorId = event.actor?.externalId;
-    if (actorId !== undefined && self.includes(actorId)) return { matched: false };
+    if (actorId !== undefined && self.includes(actorId)) return false;
   }
-  return key.derive !== undefined ? { matched: true, derive: key.derive } : { matched: true };
+  return true;
 }
 
 /**
- * Whether any clause of `spec` matches `event` (spec Part E, step 3). A
- * match through a derived key's `sources` carries that key as `derive`, so
- * the caller marks the digest for the WakeWatcher to resolve (Part B).
+ * One clause against one event (spec Part E, step 3). A derived clause
+ * matches a source event on its key alone: its filters describe the
+ * derived event, so the WakeWatcher checks them after `derive` returns.
+ * A direct clause matches only an event that carries the waiter's
+ * `primarySubject`, when the spec has one: the waiter's other subjects
+ * exist for derived sources only (spec Part C).
+ */
+function evaluateClause(
+  clause: EventClause,
+  event: NormalizedEvent,
+  derived: readonly DerivedEventDef[],
+  spec: EventMatchSpec,
+): { matched: false } | { matched: true; derive?: string } {
+  const key = matchedKey(clause, event, derived);
+  if (!key.ok) return { matched: false };
+  if (key.derive !== undefined) return { matched: true, derive: key.derive };
+  if (spec.primarySubject !== undefined && !(event.subjects ?? []).includes(spec.primarySubject)) {
+    return { matched: false };
+  }
+  return filtersAccept(clause, event, spec.self) ? { matched: true } : { matched: false };
+}
+
+/**
+ * What the clauses of `spec` match in `event` (spec Part E, step 3). Every
+ * clause is evaluated: a direct match and a derived match on one event
+ * each produce a digest, so a mid-run failure goes out now and the derive
+ * digest stays for the WakeWatcher (Part B).
  */
 export function matchClauses(
   spec: EventMatchSpec,
   event: NormalizedEvent,
   derived: readonly DerivedEventDef[],
-): ClauseResult {
+): ClauseMatches {
+  const result: ClauseMatches = { direct: false, derive: [] };
   for (const clause of spec.clauses) {
-    const result = evaluateClause(clause, event, derived, spec.self);
-    if (result.matched) return result;
+    const one = evaluateClause(clause, event, derived, spec);
+    if (!one.matched) continue;
+    if (one.derive === undefined) result.direct = true;
+    else if (!result.derive.includes(one.derive)) result.derive.push(one.derive);
   }
-  return { matched: false };
+  return result;
 }
 
-/** True when a candidate clause names `from_status` (spec Part A4, Part E). */
-export function needsPreviousStatus(spec: EventMatchSpec): boolean {
-  return spec.clauses.some((clause) => clause.from_status !== undefined);
+/** True when `matches` asks for at least one digest. */
+export function anyMatch(matches: ClauseMatches): boolean {
+  return matches.direct || matches.derive.length > 0;
+}
+
+/**
+ * Whether a derived event passes the `status` and `from_status` filters of
+ * at least one clause on its derived key (spec Part F, step 1). The
+ * WakeWatcher calls it after `derive` returns an event; a derived event
+ * that no clause accepts sends no signal.
+ */
+export function derivedClausesAccept(spec: EventMatchSpec, deriveKey: string, derivedEvent: EventMatchDigest): boolean {
+  return spec.clauses.some((clause) => {
+    if (clause.key !== deriveKey) return false;
+    if (clause.status && (derivedEvent.status === undefined || !clause.status.includes(derivedEvent.status))) return false;
+    if (
+      clause.from_status &&
+      (derivedEvent.previousStatus === undefined || !clause.from_status.includes(derivedEvent.previousStatus))
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
+
+/**
+ * True when a direct clause names `from_status` (spec Part A4, Part E). A
+ * derived clause's `from_status` reads the derived event, not the source.
+ */
+export function needsPreviousStatus(spec: EventMatchSpec, derived: readonly DerivedEventDef[] = []): boolean {
+  return spec.clauses.some((clause) => clause.from_status !== undefined && !derived.some((d) => d.key === clause.key));
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -141,7 +196,9 @@ function urlFromPayload(event: NormalizedEvent): string | undefined {
  * The buffered digest for a match (spec Part C). `derive` is the derived
  * key the WakeWatcher must resolve before delivery, when the clause
  * matched through a derived def's `sources` rather than the event's own
- * key.
+ * key. A derive digest's `dedupeKey` is `derive:<derived key>:<event
+ * dedupeKey>`, so it and the direct digest of the same event are both
+ * buffered (INV-E4 holds per key).
  */
 export function toDigest(event: NormalizedEvent, derive?: string): EventMatchDigest {
   const digest: EventMatchDigest = {
@@ -149,7 +206,7 @@ export function toDigest(event: NormalizedEvent, derive?: string): EventMatchDig
     subjects: event.subjects ?? [],
     summary: event.summary,
     occurredAt: event.occurredAt,
-    dedupeKey: event.dedupeKey,
+    dedupeKey: derive !== undefined ? `derive:${derive}:${event.dedupeKey}` : event.dedupeKey,
   };
   if (event.status !== undefined) digest.status = event.status;
   if (event.previousStatus !== undefined) digest.previousStatus = event.previousStatus;

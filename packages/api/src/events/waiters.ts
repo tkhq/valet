@@ -24,7 +24,7 @@ import { channelVisibility, orgSlackCredential, slackEventChannel } from "../ser
 import { LINEAR_CLIENT_CREDENTIALS_GRANT, LINEAR_CREDENTIAL_SERVICE } from "../services/linear-app.js";
 import { subscriptionMatchesEvent } from "./match.js";
 import { isTeamAssistantMention } from "./team-slack-gate.js";
-import { matchClauses, mentionsBot, needsPreviousStatus, toDigest } from "./waiter-match.js";
+import { anyMatch, matchClauses, mentionsBot, needsPreviousStatus, toDigest } from "./waiter-match.js";
 
 /** The counters the matcher writes (spec Part J). Tests replace them. */
 export interface WaiterMatchMetrics {
@@ -54,8 +54,8 @@ export interface WaiterMatchDeps {
   slackStillVisible(session: WaiterSession, channelId: string): Promise<boolean>;
   /** The event's previous status from provider state, or null when unknown. */
   resolvePreviousStatus(service: string, orgId: string, event: NormalizedEvent): Promise<string | null>;
-  /** Wakes the WakeWatcher after an append. Absent until the WakeWatcher has a nudge. */
-  nudge?: () => void;
+  /** Wakes the WakeWatcher for the waiters that got a digest. */
+  nudge?: (wakeupIds: string[]) => void;
   now(): number;
   /** Slack bot user id for the org, for the mention rule. */
   slackBotUserId(orgId: string): Promise<string | undefined>;
@@ -73,9 +73,15 @@ export function recordWaiterMatchFailure(deps: Pick<WaiterMatchDeps, "metrics">)
   metricsOf(deps).failed();
 }
 
+/** What one matching pass did: the candidates it read and the waiters that got a new digest. */
+export interface WaiterMatchResult {
+  candidates: number;
+  appended: number;
+}
+
 /**
  * Matches `event` against the running event waiters that share one of its
- * subjects (spec Part E, steps 1 to 6). Returns the number of waiters that
+ * subjects (spec Part E, steps 1 to 6). `appended` counts the waiters that
  * got a new digest. A redelivered event that a waiter already holds or
  * already delivered does not count (INV-E4).
  *
@@ -87,11 +93,11 @@ export async function matchEventWaiters(
   orgId: string,
   service: string,
   event: NormalizedEvent,
-): Promise<number> {
+): Promise<WaiterMatchResult> {
   const subjects = event.subjects ?? [];
-  if (subjects.length === 0) return 0;
+  if (subjects.length === 0) return { candidates: 0, appended: 0 };
   const candidates = await deps.engineStore.findEventWaiters(subjects);
-  if (candidates.length === 0) return 0;
+  if (candidates.length === 0) return { candidates: 0, appended: 0 };
 
   const metrics = metricsOf(deps);
   const derived = deps.plugins.flatMap((plugin) => plugin.derivedEvents ?? []);
@@ -125,13 +131,13 @@ export async function matchEventWaiters(
     const session: WaiterSession = { sessionId: waiter.sessionId, ...owner };
 
     let candidate = event;
-    if (needsPreviousStatus(spec) && event.previousStatus === undefined) {
+    if (needsPreviousStatus(spec, derived) && event.previousStatus === undefined) {
       previousStatus ??= deps.resolvePreviousStatus(service, orgId, event);
       const previous = await previousStatus;
       if (previous !== null) candidate = { ...event, previousStatus: previous };
     }
     const result = matchClauses(spec, candidate, derived);
-    if (!result.matched) return false;
+    if (!anyMatch(result)) return false;
 
     // The mention reaches the agent once, through the app_mention subscription.
     if (await mentionRuleSkips()) return false;
@@ -140,14 +146,24 @@ export async function matchEventWaiters(
       // A Slack event with no channel cannot be checked, so it is dropped.
       if (!channel || !(await stillVisible(session, channel))) return false;
     }
-    return deps.engineStore.appendEventMatch(waiter.id, toDigest(candidate, result.derive), deps.now());
+    // A direct match and each derived match append their own digest, so a
+    // mid-run failure goes out now and the derive digest waits (Part E).
+    const digests = [
+      ...(result.direct ? [toDigest(candidate)] : []),
+      ...result.derive.map((key) => toDigest(candidate, key)),
+    ];
+    let any = false;
+    for (const digest of digests) {
+      if (await deps.engineStore.appendEventMatch(waiter.id, digest, deps.now())) any = true;
+    }
+    return any;
   };
 
-  let appended = 0;
+  const appended: string[] = [];
   for (const waiter of candidates) {
     try {
       if (await matchOne(waiter)) {
-        appended++;
+        appended.push(waiter.id);
         metrics.matched(service);
       }
     } catch (error) {
@@ -155,8 +171,8 @@ export async function matchEventWaiters(
       console.error(`[event-waiters] matching failed for waiter ${waiter.id}`, error);
     }
   }
-  if (appended > 0) deps.nudge?.();
-  return appended;
+  if (appended.length > 0) deps.nudge?.(appended);
+  return { candidates: candidates.length, appended: appended.length };
 }
 
 /** The receipt stage for a matching pass (spec Part E, step 7). Metadata only. */
@@ -232,8 +248,8 @@ export function boundedFetch(fetchImpl: typeof fetch, ms: number): typeof fetch 
 }
 
 export interface WaiterMatchDepsOptions {
-  /** Wakes the WakeWatcher after an append. */
-  nudge?: () => void;
+  /** Wakes the WakeWatcher for the waiters that got a digest. */
+  nudge?: (wakeupIds: string[]) => void;
   /** Overrides `WAITER_PROVIDER_TIMEOUT_MS`. Tests only. */
   providerTimeoutMs?: number;
   /** The fetch the Linear state lookup uses. Tests only. */

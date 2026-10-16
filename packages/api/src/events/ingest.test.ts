@@ -103,6 +103,13 @@ describe("ingestEvent event waiter matching", () => {
     expect(nudge).not.toHaveBeenCalled();
   });
 
+  it("adds no waiter_match stage when no running waiter shares a subject", async () => {
+    const elsewhere = { ...message("Ev-9"), subjects: ["slack:T001", "slack:T001/C777"], refs: { channel: "C777" } };
+    await ingest(elsewhere, waiterDeps());
+    expect((await stagesOf()).map((s) => s.stage)).not.toContain("waiter_match");
+    expect(nudge).not.toHaveBeenCalled();
+  });
+
   it("appends a redelivered event once", async () => {
     await ingest(message("Ev-1"), waiterDeps());
     await ingest(message("Ev-1"), waiterDeps());
