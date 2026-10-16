@@ -814,3 +814,135 @@ describe('mcpActionPlugin appCredentialService fallback', () => {
     expect(getSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+// ── auth-rejection messages on HTTP 401/403 (fix round 1) ───────────────
+
+function errorResponse(status: number, body: string): Response {
+  // Hand-rolled non-ok Response double — McpClient only reads
+  // .ok/.status/.headers.get/.text for a failed response.
+  return {
+    ok: false,
+    status,
+    headers: { get: (_name: string) => null },
+    json: async () => ({}),
+    text: async () => body,
+  } as Response;
+}
+
+function makeFetchMockFailingCall(status: number, body = 'nope') {
+  return vi.fn(async (url: string | URL, init?: RequestInit) => {
+    const reqBody = JSON.parse(String(init?.body ?? '{}')) as { method: string; id?: number };
+    if (reqBody.method === 'initialize') {
+      return jsonResponse(
+        {
+          jsonrpc: '2.0',
+          id: reqBody.id,
+          result: { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'test-server', version: '1.0.0' } },
+        },
+        { 'mcp-session-id': 'sess-1' },
+      );
+    }
+    if (reqBody.method === 'notifications/initialized') return jsonResponse({});
+    if (reqBody.method === 'tools/list') {
+      return jsonResponse({ jsonrpc: '2.0', id: reqBody.id, result: { tools: [fixtureTools[0]] } });
+    }
+    if (reqBody.method === 'tools/call') {
+      return errorResponse(status, body);
+    }
+    throw new Error(`unexpected MCP method in test fixture: ${reqBody.method}`);
+  });
+}
+
+describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
+  it('names the Valet app and the admin fix when the APP token is rejected', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(401));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: null,
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+
+    expect(result).toEqual({
+      success: false,
+      error:
+        "linear rejected the Valet app's access. Ask an admin to reconnect the Linear app in Settings, Integrations, or connect your own Linear account.",
+    });
+  });
+
+  it('names the reconnect fix when the PERSONAL token is rejected', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(403));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+
+    expect(result).toEqual({
+      success: false,
+      error: 'linear rejected your connected account. Reconnect Linear in Settings, Integrations.',
+    });
+  });
+
+  it('falls back to the service id when no displayName is configured', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(401));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.example.com/mcp',
+      serviceName: 'example',
+      defaultRiskLevel: 'medium',
+    });
+    const credentials = fakeCredentialProvider({ accessToken: 'tok' });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+
+    expect(result).toEqual({
+      success: false,
+      error:
+        "example rejected your connected account. Reconnect example in Settings, Integrations.",
+    });
+  });
+
+  it('keeps today\'s verbatim text for a non-auth failure (HTTP 500)', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(500, 'server exploded'));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: null,
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+
+    expect(result).toEqual({
+      success: false,
+      error: 'MCP linear tools/call failed: HTTP 500 — server exploded',
+    });
+  });
+});
