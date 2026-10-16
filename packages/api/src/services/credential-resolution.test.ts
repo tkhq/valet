@@ -21,6 +21,8 @@ import {
   isNativeAppCredentialService,
   nativeAppCredentialServiceFor,
   resolveAppCredentialRead,
+  resolveNativeAppCredentialRead,
+  resolveOrgChannelCredentialRead,
 } from "./credential-resolution.js";
 import type { ValetPlugin } from "@valet/engine";
 import linearPlugin from "@valet/plugin-linear/plugin";
@@ -402,12 +404,28 @@ describe("resolveOrgCredentialRead", () => {
       expect(await resolveOrgCredentialRead({ credentials }, { orgId }, "linear")).toBeNull();
     });
 
-    it("leaves an org row that is not an app credential unchanged", async () => {
+    it("strips signing secrets from an org row that is not an app credential, and keeps the rest", async () => {
       const credentials = fakeCredentialStore();
-      const botRow: StoredCredential = { type: "bot_token", apiKey: "xoxb-1", metadata: { webhookSecret: "slack-signing" } };
+      const botRow: StoredCredential = {
+        type: "bot_token",
+        apiKey: "xoxb-1",
+        metadata: { webhookSecret: "slack-signing", signingSecret: "slack-signing-2", clientSecret: "slack-client", appToken: "xapp-1", teamId: "T1", botUserId: "U1" },
+      };
       await credentials.save({ type: "org", id: orgId }, "slack", botRow);
 
-      expect(await resolveOrgCredentialRead({ credentials }, { orgId }, "slack")).toEqual(botRow);
+      const read = await resolveOrgCredentialRead({ credentials }, { orgId }, "slack");
+      expect(read).toEqual({ type: "bot_token", apiKey: "xoxb-1", metadata: { teamId: "T1", botUserId: "U1" } });
+      for (const leaked of ["slack-signing", "slack-client", "xapp-1"]) expect(JSON.stringify(read)).not.toContain(leaked);
+      // The stored row keeps its secrets for inbound verification.
+      expect((await credentials.get({ type: "org", id: orgId }, "slack"))?.metadata?.webhookSecret).toBe("slack-signing");
+    });
+
+    it("hands the channel transport the whole org row, secrets included", async () => {
+      const credentials = fakeCredentialStore();
+      const botRow: StoredCredential = { type: "bot_token", apiKey: "xoxb-1", metadata: { webhookSecret: "slack-signing", teamId: "T1" } };
+      await credentials.save({ type: "org", id: orgId }, "slack", botRow);
+
+      expect(await resolveOrgChannelCredentialRead({ credentials }, { orgId }, "slack")).toEqual(botRow);
     });
   });
 });
@@ -936,6 +954,19 @@ describe("native app credentials", () => {
       expect(result.credential?.accessToken).toBe("team-linear");
       expect(calls).toBe(0);
     });
+  });
+
+  it("an app-pinned read of slack carries the bot token without the signing secret (INV-P1)", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "org", id: orgId }, "slack", {
+      type: "bot_token",
+      accessToken: "xoxb-app",
+      metadata: { webhookSecret: "slack-signing", teamId: "T1" },
+    });
+
+    const read = await resolveNativeAppCredentialRead({ credentials }, { orgId }, "slack", "slack", plugins);
+    expect(read).toEqual({ type: "bot_token", accessToken: "xoxb-app", metadata: { teamId: "T1" } });
+    expect(JSON.stringify(read)).not.toContain("webhookSecret");
   });
 
   describe("resolveAppCredentialRead", () => {

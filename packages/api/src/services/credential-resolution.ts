@@ -11,7 +11,8 @@
  *     via `resolveUserCredentialRead` (user-owned runs) or
  *     `resolveOrgCredentialRead` (org-owned runs)
  *   - `ChannelHost`'s bot-token read (`channels/host.ts`) via
- *     `resolveOrgCredentialRead`
+ *     `resolveOrgChannelCredentialRead`, the one org read that keeps the
+ *     row's signing secrets
  *
  * The escalation is DECLARED, not assumed. Every caller states an
  * `OrgFallback`, and the default a caller derives from the plugin registry
@@ -247,7 +248,10 @@ export async function lookupInOnePassword(
  *
  * An app credential row comes back as a bare token (`readOrgRow`): an
  * org-owned session or workflow run gets `{ type, accessToken }` and none of
- * the row's metadata, which holds the inbound webhook secret.
+ * the row's metadata, which holds the inbound webhook secret. Any other org
+ * row comes back without its signing secrets (`ORG_ROW_SECRET_METADATA_KEYS`),
+ * so the Slack bot row keeps `teamId` and the bot ids but not
+ * `webhookSecret`.
  */
 export async function resolveOrgCredentialRead(
   deps: CredentialReadDeps,
@@ -257,6 +261,38 @@ export async function resolveOrgCredentialRead(
   if (isDeniedCredentialService(service)) return null;
   const fromOrg = await readOrgRow(deps, { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes: ctx.scopes ?? ["org"] }, service, "resolve");
   return fromOrg === ABSENT ? null : fromOrg;
+}
+
+/**
+ * The org row for a channel transport (`ChannelHost`), with its signing
+ * secrets kept. The Slack transport verifies inbound requests with
+ * `metadata.webhookSecret` and opens Socket Mode with `metadata.appToken`.
+ * Only the channel host may call this. Every action read goes through
+ * `resolveOrgCredentialRead`, which strips those keys (INV-P1).
+ */
+export async function resolveOrgChannelCredentialRead(
+  deps: CredentialReadDeps,
+  ctx: CredentialReadCtx,
+  service: string,
+): Promise<StoredCredential | null> {
+  if (isDeniedCredentialService(service)) return null;
+  const fromOrg = await readOrgRow(deps, { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes: ctx.scopes ?? ["org"] }, service, "resolve", undefined, "keep");
+  return fromOrg === ABSENT ? null : fromOrg;
+}
+
+/**
+ * Org row metadata keys that hold a secret only the host uses: inbound
+ * signature verification and the Slack Socket Mode app-level token. An
+ * action never needs them, so every org read that can reach an action drops
+ * them (INV-P1). The stored row keeps them.
+ */
+const ORG_ROW_SECRET_METADATA_KEYS: ReadonlySet<string> = new Set(["webhookSecret", "signingSecret", "clientSecret", "appToken"]);
+
+function withoutSecretMetadata(row: StoredCredential): StoredCredential {
+  const metadata = row.metadata;
+  if (!metadata || !Object.keys(metadata).some((key) => ORG_ROW_SECRET_METADATA_KEYS.has(key))) return row;
+  const kept = Object.fromEntries(Object.entries(metadata).filter(([key]) => !ORG_ROW_SECRET_METADATA_KEYS.has(key)));
+  return { ...row, metadata: kept };
 }
 
 /** `readOrgRow`'s answer when no org row exists, or the caller's `admit`
@@ -275,9 +311,14 @@ const ABSENT = Symbol("absent");
  * - For any other service, an app credential row reads as `null`
  *   (native credential policy, Part D item 2).
  *
- * No caller can hand an app row's metadata to an action, because no caller
- * reads an org row any other way. `admit` sees the raw row before any
- * resolution, for a caller that accepts only some rows.
+ * - Any other row loses its signing secrets (`ORG_ROW_SECRET_METADATA_KEYS`)
+ *   and keeps the rest of its metadata, unless `secrets` is `"keep"`.
+ *   Only the channel transport read keeps them.
+ *
+ * No caller can hand an app row's metadata, or an org row's signing secret,
+ * to an action, because no caller reads an org row any other way. `admit`
+ * sees the raw row before any resolution, for a caller that accepts only
+ * some rows.
  */
 async function readOrgRow(
   deps: CredentialReadDeps,
@@ -285,11 +326,13 @@ async function readOrgRow(
   service: string,
   excluded: "skip" | "resolve",
   admit: (row: StoredCredential) => boolean = () => true,
+  secrets: "strip" | "keep" = "strip",
 ): Promise<StoredCredential | null | typeof ABSENT> {
   const row = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
   if (!row || !admit(row)) return ABSENT;
   const resolved = await resolveRow(deps, row, ctx, excluded);
-  if (!resolved || !isAppCredentialRow(resolved)) return resolved;
+  if (!resolved) return resolved;
+  if (!isAppCredentialRow(resolved)) return secrets === "keep" ? resolved : withoutSecretMetadata(resolved);
   return APP_CREDENTIAL_ROW_SERVICES.has(service) ? bareAppToken(resolved) : null;
 }
 
