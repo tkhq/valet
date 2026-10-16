@@ -107,7 +107,11 @@ For a native integration, the host credential resolver MUST try, in order:
   2. `mcpActionPlugin` gains `appCredentialService?: string`. When
      `credentials.get()` returns null, it calls
      `credentials.get(appCredentialService)` before it refuses. It applies
-     this to tool discovery and to calls.
+     this to tool discovery and to calls. It also sets
+     `appCredentialService` on the `ActionPlugin` it returns. The
+     `list_tools` probe in `plugin-catalog.ts` tries that service when the
+     personal credential is absent. If either one answers, the probe counts
+     the service as connected and does not hide its tools.
   3. The Linear plugin passes `appCredentialService: "linear:app"`.
 
 ## Part D: The org row leak

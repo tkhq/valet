@@ -79,6 +79,7 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
     description: opts.description,
     actions: [],
     requiresCredential: !noAuth && staticToken === undefined,
+    appCredentialService,
     resolveActions: async ({ credentials }: { credentials: CredentialProvider }) => {
       const { token, source } = await resolveToken(credentials, serviceName, noAuth, staticToken, appCredentialService);
       let tools: McpTool[];

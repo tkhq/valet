@@ -638,6 +638,58 @@ describe("pluginCatalogTools: list_tools", () => {
     const gmailWarning = payload.warnings?.find((w) => w.service === "gmail");
     expect(gmailWarning).toBeUndefined();
   });
+
+  describe("native app credential fallback", () => {
+    const linearAction: PluginAction = {
+      id: "linear.list_issues",
+      name: "List Issues",
+      description: "List Linear issues.",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async () => ({ success: true, data: {} }),
+    };
+    const linearPlugin: ActionPlugin = {
+      service: "linear",
+      actions: [linearAction],
+      requiresCredential: true,
+      appCredentialService: "linear:app",
+    };
+    const ctxAnswering = (answers: Record<string, string>) =>
+      makeCtx({
+        credentials: {
+          get: async (service?: string): Promise<Credential | null> => {
+            const token = service === undefined ? undefined : answers[service];
+            return token ? { accessToken: token } : null;
+          },
+          request: async (): Promise<Credential> => {
+            throw new Error("not implemented in test stub");
+          },
+        },
+      });
+
+    it("lists linear tools without a warning when only the app service answers", async () => {
+      const [listTool] = pluginCatalogTools({ plugins: [linearPlugin] });
+      const result = await listTool.execute({}, ctxAnswering({ "linear:app": "app-token" }));
+      const payload = decode(result.text) as {
+        tools: Array<{ tool_id: string }>;
+        warnings?: Array<{ service: string; reason: string }>;
+      };
+      expect(payload.tools.map((t) => t.tool_id)).toEqual(["linear.list_issues"]);
+      expect(payload.warnings).toBeUndefined();
+    });
+
+    it("still hides linear tools with a warning when neither service answers", async () => {
+      const [listTool] = pluginCatalogTools({ plugins: [linearPlugin] });
+      const result = await listTool.execute({}, ctxAnswering({}));
+      const payload = decode(result.text) as {
+        tools: Array<{ tool_id: string }>;
+        warnings?: Array<{ service: string; reason: string }>;
+      };
+      expect(payload.tools).toEqual([]);
+      expect(payload.warnings?.[0]?.service).toBe("linear");
+      expect(payload.warnings?.[0]?.reason).toMatch(/tools hidden/);
+    });
+  });
 });
 
 describe("pluginCatalogTools: capability boundaries", () => {

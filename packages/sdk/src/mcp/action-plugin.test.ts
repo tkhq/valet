@@ -658,6 +658,16 @@ describe('mcpActionPlugin generated action execute', () => {
 // ── appCredentialService fallback (Part C Linear) ───────────────────────
 
 describe('mcpActionPlugin appCredentialService fallback', () => {
+  it('exposes appCredentialService on the plugin so the catalog probe can use it', () => {
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+    });
+    expect(plugin.appCredentialService).toBe('linear:app');
+  });
+
   it('sends the app token as Bearer at discovery when no personal credential is connected', async () => {
     let listRequest: CapturedRequest | undefined;
     vi.stubGlobal(
