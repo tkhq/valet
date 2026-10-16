@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 import { slackPlugin } from "./actions/actions.js";
 import { slackHttpRoutes } from "./http.js";
+import { slackSubjects } from "./subjects.js";
 import { slackFilterOptionResolvers } from "./transport/filter-options.js";
 import { slackTransportFactory } from "./transport/transport.js";
 import { slackTriggerDefs } from "./triggers.js";
@@ -23,6 +24,7 @@ const plugin: ValetPlugin = {
   appCredentialService: "slack",
   actions: [slackPlugin],
   triggers: slackTriggerDefs,
+  eventSubjects: slackSubjects,
   httpRoutes: slackHttpRoutes,
   transports: [slackTransportFactory],
   filterOptionResolvers: slackFilterOptionResolvers,
