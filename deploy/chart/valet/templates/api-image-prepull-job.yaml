@@ -1,0 +1,84 @@
+{{- if .Values.api.imagePrepull.enabled }}
+# Image pre-pull for the Recreate rollout. The api Deployment stops the old
+# pod before it creates the new one, so an image pull on the new pod is pure
+# 503 time. Helm runs this Job before it upgrades the Deployment and waits
+# for it: each pod starts the NEW api image (forcing the pull) and exits.
+#
+# Placement copies the api's node placement: nodeSelector, tolerations, and
+# api.affinity.nodeAffinity. It does not copy podAffinity/podAntiAffinity:
+# those terms are written relative to api pods, and an anti-affinity against
+# the api would push the pre-pull away from the node the api runs on.
+#
+# A hard spread puts one pod on each eligible node while replicas is at most
+# the node count; with more replicas than nodes the extra pods share nodes.
+# nodeTaintsPolicy: Honor leaves cordoned and NotReady nodes out of the
+# spread, so a node the api cannot use does not block the hook. A pod that
+# still cannot schedule fails the hook at activeDeadlineSeconds, before the
+# Deployment changes.
+#
+# The pod labels do not match the api Service selector, so these pods never
+# receive traffic.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "valet.fullname" . }}-api-image-prepull
+  labels:
+    {{- include "valet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api-image-prepull
+  annotations:
+    "helm.sh/hook": pre-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  completions: {{ .Values.api.imagePrepull.replicas }}
+  parallelism: {{ .Values.api.imagePrepull.replicas }}
+  backoffLimit: 2
+  activeDeadlineSeconds: {{ .Values.api.imagePrepull.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "valet.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api-image-prepull
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (.Values.api.affinity | default dict).nodeAffinity }}
+      affinity:
+        nodeAffinity:
+          {{- toYaml . | nindent 10 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          nodeAffinityPolicy: Honor
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels:
+              {{- include "valet.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api-image-prepull
+      containers:
+        - name: prepull
+          image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          command: ["node", "--version"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+{{- end }}

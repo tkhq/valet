@@ -36,10 +36,19 @@ existence for API groups it does not own.
 
 The API completes database upgrades before it binds the HTTP listener.
 Large retained usage histories can require several minutes of backfill.
-The startup probe permits 30 minutes by default: `api.startupProbe.failureThreshold: 360` at a fixed five-second interval.
+The startup probe permits 30 minutes by default: `api.startupProbe.failureThreshold: 360`, counted in five-second units. The probe itself polls every second, and the chart multiplies the value by 5.
 `api.progressDeadlineSeconds: 2100` permits 35 minutes of Deployment rollout progress.
 These limits cover database initialization. Session restore runs after the listener binds and remains controlled by readiness.
-During a rolling upgrade, the old ready pod continues to serve traffic until the new pod becomes ready.
+
+## Upgrade downtime
+
+The api Deployment uses the `Recreate` strategy: the old pod stops before the new pod starts, so the Service has no ready pod during an upgrade and the ingress returns 503.
+The chart keeps this window short:
+
+1. A `pre-upgrade` hook Job (`api.imagePrepull`) pulls the new api image onto the api nodes before Helm changes the Deployment. The Job copies the api's `nodeSelector`, tolerations, and `affinity.nodeAffinity`, and puts one pod on each eligible node. Set `api.imagePrepull.replicas` to the number of eligible nodes. With fewer replicas, some nodes stay cold.
+2. The startup and readiness probes poll every second, so traffic returns within a second of the boot chain finishing.
+
+If the pre-pull Job cannot finish in `api.imagePrepull.activeDeadlineSeconds`, the upgrade fails before the old pod stops.
 
 For the first usage-rollup upgrade, set the Helm timeout to at least 35 minutes.
 Use `--wait --timeout 40m` to allow additional deployment work:

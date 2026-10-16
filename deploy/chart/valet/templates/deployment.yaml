@@ -155,20 +155,29 @@ spec:
           #
           # Database upgrades finish before the listener binds. The startup
           # budget permits those upgrades; session restore still runs after bind.
-          # Startup and liveness use /api/health. Readiness uses /api/ready,
-          # so the old ready pod serves traffic until the new boot chain finishes.
+          # Startup and liveness use /api/health. Readiness uses /api/ready.
+          #
+          # Recreate means no pod serves traffic during a rollout, so every
+          # second between "ready" and "probe notices" is a second of 503s.
+          # Both gating probes poll every second. Readiness does not start
+          # until startup passes, so a slow startup period delays it too.
+          # api.startupProbe.failureThreshold stays in 5-second units (the
+          # 30-minute budget contract in values.yaml), so it is scaled by 5.
           startupProbe:
             httpGet:
               path: /api/health
               port: http
-            periodSeconds: 5
-            failureThreshold: {{ (.Values.api.startupProbe | default dict).failureThreshold | default 360 }}
+            periodSeconds: 1
+            failureThreshold: {{ mul 5 ((.Values.api.startupProbe | default dict).failureThreshold | default 360) }}
+          # /api/ready flips once, at the end of the boot chain. After that a
+          # failure means a stalled event loop; 15 x 1s keeps the old 15s
+          # tolerance before the only replica leaves the Service.
           readinessProbe:
             httpGet:
               path: /api/ready
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 5
+            periodSeconds: 1
+            failureThreshold: 15
           livenessProbe:
             httpGet:
               path: /api/health

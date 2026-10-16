@@ -12,8 +12,20 @@ api:
   # for that work and 35 minutes for rollout progress. Session restore runs
   # after bind and remains controlled by readiness.
   startupProbe:
-    failureThreshold: 360 # 5 seconds per probe = 30 minutes.
+    failureThreshold: 360 # 5-second units = 30 minutes. The probe polls every 1s.
   progressDeadlineSeconds: 2100
+
+  # Pull the new api image onto the nodes before the Recreate rollout stops
+  # the old pod. A pre-upgrade hook Job runs `replicas` pods of the new image,
+  # one per node that matches the api's nodeSelector, tolerations, and
+  # affinity.nodeAffinity, and Helm waits for them. This removes the image
+  # pull (~10s on agents-dev) from the 503 window. Set replicas to the number
+  # of nodes the api can schedule on: with fewer, some nodes stay cold. If a
+  # pod cannot finish within activeDeadlineSeconds, the hook fails the upgrade.
+  imagePrepull:
+    enabled: true
+    replicas: 2
+    activeDeadlineSeconds: 300
 
   # Defaults target the local reference env (`make k8s-build` images, visible
   # to k3s via Rancher Desktop moby mode). CI publishes multi-arch images to

@@ -9,6 +9,7 @@ import { Link, Outlet, createRootRouteWithContext, useRouterState } from "@tanst
 import type { QueryClient } from "@tanstack/react-query";
 import { TooltipProvider } from "~/components/primitives/tooltip";
 import { ProductAnnouncement } from "~/components/product-announcement";
+import { ApiReconnectingBanner } from "~/components/api-reconnecting-banner";
 import { AppShell } from "~/components/layout/app-shell";
 import { TopNav } from "~/components/layout/top-nav";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
@@ -107,6 +108,7 @@ function RootLayout() {
   if (isPublic) {
     return (
       <TooltipProvider>
+        <ApiReconnectingBanner />
         <Outlet />
       </TooltipProvider>
     );
@@ -119,6 +121,7 @@ function RootLayout() {
     <WorkspaceScopeProvider persist={!gallery}>
       <WorkspaceAssistantProvider>
         <SignedInEffects />
+        <ApiReconnectingBanner />
         <ProductAnnouncement />
         <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)} rightPanel={<WorkspaceAssistantDock />}>
           {/* Keybindings must sit under AppShell so sidebar controls resolve. */}

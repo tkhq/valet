@@ -257,6 +257,7 @@ import type {
   SearchMemoryResponse,
 } from "./memory-types";
 import { safeNextPath } from "~/lib/next-path";
+import { useApiAvailability } from "~/stores/api-availability";
 
 const BASE = "/api"; // Vite proxies /api → server; same in production.
 
@@ -304,6 +305,55 @@ class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/**
+ * The api did not answer: the ingress returned a gateway error, or the
+ * network failed. During a deploy the single api pod is down for some
+ * seconds (Recreate rollout), so GETs retry this error and mutations show it.
+ */
+class ApiUnavailableError extends ApiError {
+  constructor(method: string, path: string, status: number) {
+    super(status, `${method} ${path} got no answer from Valet. Valet may be restarting. Wait a few seconds, then try again.`);
+    this.name = "ApiUnavailableError";
+  }
+}
+
+/** Statuses the ingress returns itself when no api pod is ready. nginx
+ * answers 502/503/504. Traefik (the chart default) drops the route for a
+ * Service with no endpoints and answers a plain-text 404. */
+const GATEWAY_STATUSES = new Set([404, 502, 503, 504]);
+
+/** True when the ingress, not the api, produced this response. The api
+ * answers every error with JSON, including unknown routes (`app.notFound`),
+ * so a non-JSON answer with one of these statuses came from the ingress. */
+function isGatewayResponse(res: Response): boolean {
+  if (!GATEWAY_STATUSES.has(res.status)) return false;
+  const type = res.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  return type !== "application/json";
+}
+
+/** Total time a GET keeps retrying an unavailable api. A deploy window on
+ * agents-dev measured 29 to 40 seconds. */
+const UNAVAILABLE_RETRY_BUDGET_MS = 45_000;
+const UNAVAILABLE_RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000];
+
+function waitForRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export interface MemoryCopyRequest {
@@ -429,7 +479,34 @@ function uploadProfilePicture(path: string, file: File): Promise<ProfilePictureU
   return requestForm<ProfilePictureUploadResponse>(path, form);
 }
 
+/**
+ * One REST call. If the api is unavailable, a GET retries with backoff for
+ * up to `UNAVAILABLE_RETRY_BUDGET_MS`, so a deploy window shows the
+ * reconnecting banner instead of errors. Other methods do not retry: a
+ * mutation may have reached the api before the pod stopped.
+ */
 async function request<T>(method: string, path: string, body?: unknown, callerSignal?: AbortSignal): Promise<T> {
+  const availability = useApiAvailability.getState();
+  const startedAt = Date.now();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const result = await requestOnce<T>(method, path, body, callerSignal);
+      availability.markAvailable();
+      return result;
+    } catch (err) {
+      if (!(err instanceof ApiUnavailableError)) {
+        if (err instanceof ApiError && err.status !== NO_RESPONSE_STATUS) availability.markAvailable();
+        throw err;
+      }
+      availability.markUnavailable();
+      const delay = UNAVAILABLE_RETRY_DELAYS_MS[Math.min(attempt, UNAVAILABLE_RETRY_DELAYS_MS.length - 1)] ?? 0;
+      if (method !== "GET" || Date.now() - startedAt + delay > UNAVAILABLE_RETRY_BUDGET_MS) throw err;
+      await waitForRetry(delay, callerSignal);
+    }
+  }
+}
+
+async function requestOnce<T>(method: string, path: string, body?: unknown, callerSignal?: AbortSignal): Promise<T> {
   const controller = new AbortController();
   let timedOut = false;
   const forwardAbort = () => controller.abort(callerSignal?.reason);
@@ -441,14 +518,26 @@ async function request<T>(method: string, path: string, body?: unknown, callerSi
     controller.abort();
   }, REQUEST_TIMEOUT_MS);
   try {
-    const res = await fetch(`${BASE}${path}`, {
-      method,
-      headers: body ? { "Content-Type": "application/json" } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
-      // The signal also covers reading the body below, so a response whose
-      // stream stalls part way is cut off on the same deadline.
-      signal: controller.signal,
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${BASE}${path}`, {
+        method,
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+        // The signal also covers reading the body below, so a response whose
+        // stream stalls part way is cut off on the same deadline.
+        signal: controller.signal,
+      });
+    } catch (err) {
+      // fetch rejects with a TypeError only for a network failure. An abort
+      // (timeout or caller) rejects with an AbortError and is handled below.
+      if (err instanceof TypeError) throw new ApiUnavailableError(method, path, NO_RESPONSE_STATUS);
+      throw err;
+    }
+    if (isGatewayResponse(res)) {
+      await res.body?.cancel();
+      throw new ApiUnavailableError(method, path, res.status);
+    }
     if (!res.ok) {
       const text = await res.text();
       let payload: unknown = text;
@@ -1523,4 +1612,4 @@ export const api = {
     request<ProxySettingsResponse>("PUT", "/proxy/settings", patch),
 };
 
-export { ApiError };
+export { ApiError, ApiUnavailableError };

@@ -322,3 +322,17 @@ During a rolling upgrade, the old ready pod serves traffic until the new pod bec
 For the first usage-rollup upgrade, operators must set the Helm timeout to at least 35 minutes.
 The runbook uses `--wait --timeout 40m` to allow additional deployment work.
 Golden chart tests verify the default budgets and explicit overrides without contacting a cluster.
+
+## Update (2026-10-14): shorter Recreate upgrade window
+
+The api Deployment uses `Recreate`, so each upgrade has a window with no ready pod and the ingress returns 503.
+On agents-dev on 2026-10-14, each of six auto-promotions made a 29 to 40 second window.
+The measured split was 11 seconds of scheduling and image pull, 14 seconds of process start before the listener binds, 5 seconds of boot chain, and up to 5 seconds of probe delay.
+The 2026-09-26 note above says the old pod serves traffic during the upgrade. That is not correct for `Recreate`.
+
+Chart 0.10.20 removes two parts of the window:
+
+- A `pre-upgrade` hook Job (`api.imagePrepull`) starts the new api image on the api nodes before Helm changes the Deployment. Helm waits for the Job, so the new pod starts from a cached image. The Job copies the api's node placement (nodeSelector, tolerations, `affinity.nodeAffinity`) and uses a hard hostname spread with `nodeTaintsPolicy: Honor`, so each eligible node gets one pod while `replicas` is at most the node count. It does not copy api pod affinity terms, because they are written relative to api pods. If the Job does not finish in `api.imagePrepull.activeDeadlineSeconds`, the upgrade fails before the old pod stops.
+- The startup and readiness probes poll every second. `api.startupProbe.failureThreshold` keeps its five-second units, and the chart multiplies it by 5, so the 30-minute budget and existing overrides do not change. Readiness tolerates 15 consecutive failures, the same 15 seconds as before.
+
+Process start and the boot chain are not changed by this update.
