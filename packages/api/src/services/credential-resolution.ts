@@ -31,9 +31,10 @@
  * carry: `plugin-slack` declares `requires.orgCredential`, so the policy
  * covers it without naming it.
  */
-import type { CredentialStore, StoredCredential, ValetPlugin } from "@valet/engine";
+import { credentialSecret, type CredentialStore, type StoredCredential, type ValetPlugin } from "@valet/engine";
 import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
 import { findCredentialDeclaration } from "./integration-availability.js";
+import { LINEAR_CLIENT_CREDENTIALS_GRANT } from "./linear-app.js";
 import {
   ONEPASSWORD_SERVICE,
   OnePasswordAuthError,
@@ -246,6 +247,10 @@ export async function lookupInOnePassword(
  * `userId: ""`, which `OnePasswordService.resolveCredential` turns into the
  * typed `OnePasswordAuthError` (no personal token owner to look up) rather
  * than a silent null — callers must handle that error explicitly.
+ *
+ * An app credential row comes back as a bare token (`bareAppToken`): an
+ * org-owned session or workflow run gets `{ type, accessToken }` and none of
+ * the row's metadata, which holds the inbound webhook secret.
  */
 export async function resolveOrgCredentialRead(
   deps: CredentialReadDeps,
@@ -254,7 +259,29 @@ export async function resolveOrgCredentialRead(
 ): Promise<StoredCredential | null> {
   if (isDeniedCredentialService(service)) return null;
   const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
-  return resolveRow(deps, orgRow, { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes: ctx.scopes ?? ["org"] }, "resolve");
+  const resolved = await resolveRow(deps, orgRow, { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes: ctx.scopes ?? ["org"] }, "resolve");
+  return resolved && isAppCredentialRow(resolved) ? bareAppToken(resolved) : resolved;
+}
+
+/**
+ * An org row that holds an app credential: a token the provider minted for
+ * the app itself (`grant: client_credentials`), not a person's connection.
+ * Today that is the org `linear` row (`plugins/http-linear-connection.ts`).
+ */
+function isAppCredentialRow(row: StoredCredential): boolean {
+  return row.metadata?.grant === LINEAR_CLIENT_CREDENTIALS_GRANT;
+}
+
+/**
+ * The app credential an action receives: the access token and nothing else
+ * (INV-P1). The row's metadata carries the inbound webhook HMAC secret, the
+ * workspace ID, and the connection ID, which no action needs. The store
+ * still reads, and renews, the full row (`LinearAppTokenStore`); only the
+ * value handed out is reduced. A row with no token reads as absent.
+ */
+function bareAppToken(row: StoredCredential): StoredCredential | null {
+  const accessToken = credentialSecret(row);
+  return accessToken ? { type: row.type, accessToken } : null;
 }
 
 /** Who a team read acts for, and which members it may borrow an account
