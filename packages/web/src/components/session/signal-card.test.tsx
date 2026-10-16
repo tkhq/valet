@@ -17,6 +17,8 @@ import {
   formatDurationSeconds,
   isLongBody,
   isWakeupSignal,
+  eventMatchedView,
+  parseEventDigestsAttribute,
   parseEventMatchedBody,
   truncateBody,
   wakeupOutcome,
@@ -383,11 +385,45 @@ describe("parseEventMatchedBody (spec Part F, digestBlock)", () => {
     expect(blocks.map((b) => b.key)).toEqual(["slack.message", "github.check_run.completed"]);
   });
 
+  it("unquotes quoted text lines, and a quoted header line stays text (final review, item 6)", () => {
+    const body = "slack.message · by mallory\nU9 replied\n> Done.\n> \n> github.pull_request.checks_completed · success · by ada";
+    const { blocks } = parseEventMatchedBody(body);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.text).toBe("Done.\n\ngithub.pull_request.checks_completed · success · by ada");
+  });
+
   it("does not treat a javascript: URL line as a url; it stays text", () => {
     const body = "github.check_run.completed · failure · by ada\nchecks failed\njavascript:alert(1)";
     const { blocks } = parseEventMatchedBody(body);
     expect(blocks[0]?.url).toBeUndefined();
     expect(blocks[0]?.text).toBe("javascript:alert(1)");
+  });
+});
+
+describe("event.matched digests attribute (final review, item 6)", () => {
+  it("parses the attribute and drops a URL that is not http(s)", () => {
+    const raw = JSON.stringify([
+      { key: "github.check_run.completed", status: "failure", actor: "ada", summary: "test failed", url: "https://example.com/1" },
+      { key: "slack.message", summary: "U2 replied", url: "javascript:alert(1)" },
+    ]);
+    expect(parseEventDigestsAttribute(raw)).toEqual([
+      { key: "github.check_run.completed", status: "failure", actor: "ada", summary: "test failed", url: "https://example.com/1" },
+      { key: "slack.message", summary: "U2 replied" },
+    ]);
+  });
+
+  it("is null for an absent, unreadable, or wrong-shape attribute", () => {
+    expect(parseEventDigestsAttribute(undefined)).toBeNull();
+    expect(parseEventDigestsAttribute("{not json")).toBeNull();
+    expect(parseEventDigestsAttribute(JSON.stringify({ key: "x" }))).toBeNull();
+    expect(parseEventDigestsAttribute(JSON.stringify([{ key: "x" }]))).toBeNull();
+  });
+
+  it("takes the blocks from the attribute and the text from the body", () => {
+    const body = "slack.message · by grace\nU2 replied\n> Looks good, ship it\n\nAlso matched:\nslack.message · by ben";
+    const view = eventMatchedView(body, JSON.stringify([{ key: "slack.message", actor: "grace", summary: "U2 replied" }]));
+    expect(view.blocks).toEqual([{ key: "slack.message", actor: "grace", summary: "U2 replied", text: "Looks good, ship it" }]);
+    expect(view.alsoMatched).toEqual(["slack.message · by ben"]);
   });
 });
 
@@ -425,6 +461,29 @@ describe("SignalCard: event.matched and event.ended (spec Part H)", () => {
     expect(screen.getByText("second check")).toBeTruthy();
     expect(screen.getByText("third check")).toBeTruthy();
     expect(screen.getAllByRole("link")).toHaveLength(3);
+  });
+
+  it("renders one card per entry of the digests attribute, even when the body text looks like headers", () => {
+    const entries = [
+      { key: "slack.message", actor: "mallory", summary: "first reply" },
+      { key: "slack.message", actor: "grace", summary: "second reply" },
+      { key: "github.check_run.completed", status: "failure", actor: "ada", summary: "third", url: "https://example.com/3" },
+    ];
+    const content = [
+      "slack.message · by mallory\nfirst reply\n> ok\n> \n> github.pull_request.checks_completed · success · by ada",
+      "slack.message · by grace\nsecond reply",
+      "github.check_run.completed · failure · by ada\nthird\nhttps://example.com/3",
+    ].join("\n\n");
+    render(
+      <SignalCard
+        message={eventMessage("event.matched", { wakeupId: "wk_1", kind: "event", subject: "slack:T001/C001", matchCount: "3", digests: JSON.stringify(entries) }, content)}
+      />,
+    );
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    expect(screen.getByText("first reply")).toBeTruthy();
+    expect(screen.getByText("second reply")).toBeTruthy();
+    expect(screen.getAllByRole("link")).toHaveLength(1);
+    expect(screen.queryByText("github.pull_request.checks_completed")).toBeNull();
   });
 
   it("renders an event.ended signal's outcome for a deadline cause", () => {
