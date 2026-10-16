@@ -66,6 +66,7 @@ One name for one thing. Synonyms in code or prose are defects.
   service (Part E).
 - **native integration**: GitHub, Slack, or Linear. Each has an app
   identity that Valet owns.
+- **thread link**: the web URL of a thread, `<public url>/threads/<thread id>`.
 
 ## Acceptance scenarios (normative)
 
@@ -123,7 +124,21 @@ Universe:
 | D2 | Subject a Slack permalink in channel `C002`, where the bot is not a member. | The result is the refusal text R4. |
 | D3 | Clause key `github.check_suite.done`. | The result is the refusal text R5. |
 
-Pass criterion: all steps of all four scenarios, in one run each, from a
+### Scenario E: an incident channel
+
+Org `acme` has an enabled team subscription on `slack.channel_created` with
+filter `channel_name` prefix `inc-`, targeting the team assistant. It also
+has an enabled `slack.app_mention` subscription for the same team.
+
+| Step | Action | Expected observation |
+|---|---|---|
+| E1 | Fixture sends `channel_created` for public channel `C900`, name `inc-db-latency`. | The team assistant receives one signal in a new thread `t-inc`. |
+| E2 | The agent calls `conversations.join` for `C900`, posts its thread link to `C900`, then calls `wait_for_event` with subject `slack:T001/C900`, clause `[{ key: "slack.message", bots: false }]`, `once: false`, `min_interval_seconds: 30`, reason `Incident inc-db-latency`, `max_hours: 168`. | The posted message contains the link `<public url>/threads/t-inc`. One running event waiter exists on `t-inc`. |
+| E3 | Fixture sends three messages from `U002` and `U003` in `C900` within 10 seconds. | `t-inc` receives one `event.matched` signal that lists all three. |
+| E4 | 20 seconds after E3's signal, fixture sends one more message. | `t-inc` receives its signal no earlier than 30 seconds after E3's signal. |
+| E5 | Fixture sends a message `<@U-BOT> status?` and the matching `app_mention` event. | `t-inc` receives exactly one turn for that post, from the `slack.app_mention` subscription. The event waiter skips the `message` event. |
+
+Pass criterion: all steps of all five scenarios, in one run each, from a
 clean start.
 
 ## Part A: Normalization
@@ -307,7 +322,7 @@ An event waiter is a `wakeups` row with `kind = "event"`. Three nullable
 columns hold its state:
 
 ```sql
-"match_json"   text,    -- { clauses, once, self }
+"match_json"   text,    -- { clauses, once, self, minIntervalMs }
 "subjects"     text[],  -- the subjects it waits on
 "event_buffer" text     -- JSON array of match digests awaiting delivery
 CREATE INDEX "engine_wakeups_event_subjects" ON "engine_wakeups"
@@ -348,6 +363,7 @@ wait_for_event({
   once?: boolean,          // default true
   reason: string,          // 1 to 200 characters
   max_hours: number,       // 1 to timerMaxHours
+  min_interval_seconds?: number, // stream mode only; 30 to 3600
 })
 ```
 
@@ -410,6 +426,12 @@ step that returns early for an event that no subscription matched.
 5. `appendEventMatch` with the digest. A derived clause's digest carries
    `derive: <derived key>`.
 6. Nudge the WakeWatcher.
+
+Mention rule: a `slack.message` event whose text contains `<@bot user id>`
+MUST NOT match an event waiter when an enabled subscription naming
+`slack.app_mention` matches that channel. The matcher evaluates that
+subscription with the existing subscription matcher against the same
+payload. The mention then reaches the agent once, through the subscription.
 7. Append a receipt stage `waiter_match` with the count of waiters that
    matched. The stage holds metadata only.
 
@@ -454,7 +476,8 @@ The WakeWatcher processes running event waiters with a non-empty
    buffered digests under `Also matched`.
 3. Stream mode: submit one `event.matched` signal with every buffered digest,
    then clear the buffer. The first signal goes out at once. Later signals
-   follow `watchMinIntervalMs` and `watchMaxEventsPerHour`, through the same
+   follow the waiter's `minIntervalMs` when set, else `watchMinIntervalMs`,
+   and `watchMaxEventsPerHour`, through the same
    rate code as `watch`. When the hourly cap trips, the row ends with cause
    `rate`.
 4. The dispatch id is `wakeup:<id>:event:<eventCount>`. The terminal
@@ -527,6 +550,12 @@ this sentence:
 > a reply, or a new ticket, call `wait_for_event` with its URL and end your
 > turn. Do not poll with `watch` or `sleep`. Arm it before the action that
 > triggers it, for example before `git push`.
+
+Coding and assistant prompts also carry the thread link when the
+deployment has a public URL:
+
+> This thread's link is <thread link>. Post it when you announce work in a
+> channel, so people can follow the thread.
 
 The tool description carries four recipes: CI (Scenario A), a Slack reply
 (Scenario B), a Linear triage shift (Scenario C), and a reply on a Linear
@@ -606,6 +635,8 @@ A v1 implementation MUST NOT ship these under this spec.
 | Workflow `waitForEvent` node | Workflows have parked runs | The `signal` subscription target |
 | Per-event visibility re-checks for GitHub and Linear | One provider call per event | Run D1's R3 read in the matcher |
 | More than one subject per waiter | No scenario needs it | The `subjects` column is already an array |
+| Org-visible threads from subscriptions | Widens thread sharing (#869) to team threads, a policy decision | A `thread_share` option on the subscription target |
+| Fork a thread into a personal workspace | Needs a transcript-prefix copy and a fork record | A fork action on a message, in the web and as a Slack shortcut |
 
 ## Rollout order
 
