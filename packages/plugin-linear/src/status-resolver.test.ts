@@ -6,6 +6,10 @@ function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
 }
 
+function fetchStub(body: unknown): typeof fetch {
+  return vi.fn<typeof fetch>(async () => jsonResponse(body));
+}
+
 function makeCtx(fetchImpl: typeof fetch): DeriveContext {
   return {
     orgId: "org-1",
@@ -27,8 +31,8 @@ const WORKFLOW_STATES_RESPONSE = {
 
 describe("linearStatusResolver", () => {
   it("returns the status type for a known state id", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse(WORKFLOW_STATES_RESPONSE));
-    const ctx = makeCtx(fetchImpl as unknown as typeof fetch);
+    const fetchImpl = fetchStub(WORKFLOW_STATES_RESPONSE);
+    const ctx = makeCtx(fetchImpl);
 
     const status = await linearStatusResolver.resolve(ctx, { teamKey: "ENG", stateId: "state-backlog" });
 
@@ -36,8 +40,8 @@ describe("linearStatusResolver", () => {
   });
 
   it("makes one GraphQL call for two lookups within the hour", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse(WORKFLOW_STATES_RESPONSE));
-    const ctx = makeCtx(fetchImpl as unknown as typeof fetch);
+    const fetchImpl = fetchStub(WORKFLOW_STATES_RESPONSE);
+    const ctx = makeCtx(fetchImpl);
 
     await linearStatusResolver.resolve(ctx, { teamKey: "ENG-CACHE", stateId: "state-backlog" });
     await linearStatusResolver.resolve(ctx, { teamKey: "ENG-CACHE", stateId: "state-started" });
@@ -46,8 +50,8 @@ describe("linearStatusResolver", () => {
   });
 
   it("returns null for an unknown state id", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse(WORKFLOW_STATES_RESPONSE));
-    const ctx = makeCtx(fetchImpl as unknown as typeof fetch);
+    const fetchImpl = fetchStub(WORKFLOW_STATES_RESPONSE);
+    const ctx = makeCtx(fetchImpl);
 
     const status = await linearStatusResolver.resolve(ctx, { teamKey: "ENG-UNKNOWN", stateId: "state-nope" });
 
