@@ -360,6 +360,35 @@ describe("parseEventMatchedBody (spec Part F, digestBlock)", () => {
       "github.check_run.completed · success · by cy · third check",
     ]);
   });
+
+  it("keeps a blank line inside a digest's own text as one block (fix round 1, H2)", () => {
+    // Slack-style text: a blank line, then a line that does not look like
+    // a dotted event-key header, so the block must not split here.
+    const body = "slack.message · by ada\nNew message in #general\nhttps://slack.com/archives/C1/p1\nHey team,\n\nlet's ship this today.";
+    const { blocks } = parseEventMatchedBody(body);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({
+      key: "slack.message",
+      actor: "ada",
+      summary: "New message in #general",
+      url: "https://slack.com/archives/C1/p1",
+      text: "Hey team,\n\nlet's ship this today.",
+    });
+  });
+
+  it("still splits two blocks when the blank line is followed by a real header (regression)", () => {
+    const body = "slack.message · by ada\nfirst\nhttps://example.com/1\n\ngithub.check_run.completed · success · by ben\nsecond\nhttps://example.com/2";
+    const { blocks } = parseEventMatchedBody(body);
+    expect(blocks).toHaveLength(2);
+    expect(blocks.map((b) => b.key)).toEqual(["slack.message", "github.check_run.completed"]);
+  });
+
+  it("does not treat a javascript: URL line as a url; it stays text", () => {
+    const body = "github.check_run.completed · failure · by ada\nchecks failed\njavascript:alert(1)";
+    const { blocks } = parseEventMatchedBody(body);
+    expect(blocks[0]?.url).toBeUndefined();
+    expect(blocks[0]?.text).toBe("javascript:alert(1)");
+  });
 });
 
 describe("SignalCard: event.matched and event.ended (spec Part H)", () => {
@@ -406,5 +435,14 @@ describe("SignalCard: event.matched and event.ended (spec Part H)", () => {
     );
     expect(screen.getByText("deadline reached").className).toContain("danger");
     expect(screen.getByText("github:acme/x#1")).toBeTruthy();
+  });
+
+  it("renders a javascript: digest URL as inert text, not a link (fix round 1, H3)", () => {
+    const content = "github.check_run.completed · failure · by ada\nchecks failed\njavascript:alert(1)";
+    render(
+      <SignalCard message={eventMessage("event.matched", { wakeupId: "wk_1", kind: "event", subject: "github:acme/x#1", matchCount: "1" }, content)} />,
+    );
+    expect(screen.getByText("javascript:alert(1)")).toBeTruthy();
+    expect(screen.queryByRole("link")).toBeNull();
   });
 });

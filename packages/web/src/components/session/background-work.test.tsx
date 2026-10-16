@@ -171,11 +171,34 @@ describe("background work helpers", () => {
     });
   });
 
-  it("the composer line shows an event waiter by its subject, not a count", () => {
+  it("the composer line shows a single event waiter by its subject, not a count", () => {
     const items = backgroundItems(eventListing(NOW));
     const line = statusLine(items, "th-1", NOW);
-    expect(line.eventWaits).toEqual([{ id: "wk_e1", label: "acme/lean-proofs#42" }]);
+    expect(line.eventWait).toEqual({ id: "wk_e1", label: "acme/lean-proofs#42", moreCount: 0 });
     expect(statusLineText(line)).toBe("next deadline in 20h · waiting on acme/lean-proofs#42");
+  });
+
+  it("collapses several event waiters to the oldest one's subject plus a count (fix round 1)", () => {
+    const data = eventListing(NOW);
+    data.wakeups.push(
+      { id: "wk_e2", threadId: "th-1", kind: "event", status: "running", reason: "wait 2", subjectLabel: "acme/other#1", deadlineAt: NOW + 5 * HOUR, createdAt: NOW + MINUTE },
+      { id: "wk_e3", threadId: "th-1", kind: "event", status: "running", reason: "wait 3", subjectLabel: "acme/third#9", deadlineAt: NOW + 5 * HOUR, createdAt: NOW - MINUTE },
+    );
+    const line = statusLine(backgroundItems(data), "th-1", NOW);
+    // wk_e3 is oldest (createdAt NOW - MINUTE), so it names the line; the other two collapse into "+2 more".
+    expect(line.eventWait).toEqual({ id: "wk_e3", label: "acme/third#9", moreCount: 2 });
+    expect(statusLineText(line)).toContain("waiting on acme/third#9 +2 more");
+  });
+
+  it("counts other threads' work the same whether the open thread has one or several event waiters", () => {
+    const data = eventListing(NOW);
+    data.wakeups.push(
+      { id: "wk_e2", threadId: "th-1", kind: "event", status: "running", reason: "wait 2", subjectLabel: "acme/other#1", deadlineAt: NOW + 5 * HOUR, createdAt: NOW + MINUTE },
+      { id: "wk_other", threadId: "th-2", kind: "watch", status: "running", reason: "other thread watch", deadlineAt: NOW + 4 * HOUR, createdAt: NOW },
+    );
+    const line = statusLine(backgroundItems(data), "th-1", NOW);
+    expect(line.otherCount).toBe(1);
+    expect(statusLineText(line)).not.toContain("acme/other#1");
   });
 
   it("the card section's event detail names the subject, clause count, and deadline", () => {

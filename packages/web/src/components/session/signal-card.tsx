@@ -227,44 +227,87 @@ export interface EventDigestBlock {
   text?: string;
 }
 
+/** A digest block's key, e.g. `github.check_run.completed` (fix round 1: distinguishes a new block from a blank line inside a digest's own text). */
+const DIGEST_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
+/** A digest's or block's link: `http(s)://` only (fix round 1, H3) — a `javascript:` URL renders as inert text. */
+const DIGEST_URL_PATTERN = /^https?:\/\//i;
+
+/**
+ * Pure: whether `line` looks like a digest block's header (`digestHeader`
+ * in `wake-watcher-decide.ts`): a dotted event key, then optionally a
+ * status, then optionally `by <actor>`.
+ */
+function looksLikeDigestHeader(line: string): boolean {
+  const parts = line.split(" · ");
+  if (parts.length === 0 || parts.length > 3) return false;
+  const key = parts[0];
+  if (key === undefined || !DIGEST_KEY_PATTERN.test(key)) return false;
+  if (parts.length === 3 && !(parts[2] ?? "").startsWith("by ")) return false;
+  return true;
+}
+
+function parseDigestBlock(lines: string[]): EventDigestBlock {
+  const headerParts = (lines[0] ?? "").split(" · ");
+  const key = headerParts[0] ?? "";
+  let status: string | undefined;
+  let actor: string | undefined;
+  for (const part of headerParts.slice(1)) {
+    if (part.startsWith("by ")) actor = part.slice(3);
+    else status = part;
+  }
+  const summary = lines[1] ?? "";
+  const rest = lines.slice(2);
+  const url = rest[0] !== undefined && DIGEST_URL_PATTERN.test(rest[0]) ? rest[0] : undefined;
+  const text = (url !== undefined ? rest.slice(1) : rest).join("\n");
+  return {
+    key,
+    ...(status !== undefined ? { status } : {}),
+    ...(actor !== undefined ? { actor } : {}),
+    summary,
+    ...(url !== undefined ? { url } : {}),
+    ...(text !== "" ? { text } : {}),
+  };
+}
+
 /**
  * Pure: parses an `event.matched` signal body into its digest blocks
  * (spec Part F, `eventMatchedSignal`/`digestBlock`). Each block's header
  * is `<key> · <status> · by <actor>`, then a summary line, an optional
- * URL, then optional text. Once mode's extra digests come back after an
- * `Also matched:` line, one per digest, and are not full blocks.
+ * URL, then optional text. A new block starts only at a blank line
+ * followed by another header line (fix round 1) — a digest's own text
+ * may itself contain a blank line (e.g. a multi-paragraph Slack message)
+ * without splitting into a bogus second block. Once mode's extra digests
+ * come back after an `Also matched:` line, one per digest, and are not
+ * full blocks.
  */
 export function parseEventMatchedBody(body: string): { blocks: EventDigestBlock[]; alsoMatched: string[] } {
+  const lines = body.split("\n");
   const blocks: EventDigestBlock[] = [];
-  let alsoMatched: string[] = [];
-  for (const segment of body.split("\n\n")) {
-    const lines = segment.split("\n");
-    if (lines[0] === "Also matched:") {
-      alsoMatched = lines.slice(1).filter((line) => line !== "");
-      continue;
+  let current: string[] = [];
+  const flush = () => {
+    if (current.length > 0) blocks.push(parseDigestBlock(current));
+    current = [];
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line === "") {
+      const next = lines[i + 1];
+      if (next === "Also matched:") {
+        flush();
+        return { blocks, alsoMatched: lines.slice(i + 2).filter((l) => l !== "") };
+      }
+      if (next !== undefined && looksLikeDigestHeader(next)) {
+        flush();
+        i += 1;
+        continue;
+      }
     }
-    const headerParts = (lines[0] ?? "").split(" · ");
-    const key = headerParts[0] ?? "";
-    let status: string | undefined;
-    let actor: string | undefined;
-    for (const part of headerParts.slice(1)) {
-      if (part.startsWith("by ")) actor = part.slice(3);
-      else status = part;
-    }
-    const summary = lines[1] ?? "";
-    const rest = lines.slice(2);
-    const url = rest[0]?.startsWith("http") ? rest[0] : undefined;
-    const text = (url !== undefined ? rest.slice(1) : rest).join("\n");
-    blocks.push({
-      key,
-      ...(status !== undefined ? { status } : {}),
-      ...(actor !== undefined ? { actor } : {}),
-      summary,
-      ...(url !== undefined ? { url } : {}),
-      ...(text !== "" ? { text } : {}),
-    });
+    current.push(line);
+    i += 1;
   }
-  return { blocks, alsoMatched };
+  flush();
+  return { blocks, alsoMatched: [] };
 }
 
 /**
@@ -294,7 +337,7 @@ function EventMatchedCard({ message, signal }: { message: Message; signal: Messa
             </div>
             <p className="text-muted">{block.summary}</p>
             {block.url && (
-              <a href={block.url} target="_blank" rel="noreferrer" className="break-all text-xs text-moss hover:underline">
+              <a href={block.url} target="_blank" rel="noopener noreferrer" className="break-all text-xs text-moss hover:underline">
                 {block.url}
               </a>
             )}

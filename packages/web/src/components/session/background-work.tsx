@@ -130,15 +130,24 @@ const KIND_ICON: Record<BackgroundItem["kind"], LucideIcon> = {
   hold: Lock,
 };
 
+/** The open thread's event waiters, collapsed to the oldest one plus a count of the rest. */
+export interface EventWaitLine {
+  id: string;
+  label: string;
+  /** Other event waiters of the open thread, named nowhere (spec Part H fix round 1). */
+  moreCount: number;
+}
+
 /** The status line's content: the soonest event, the open thread's counts per kind, and a count of the rest. */
 export interface StatusLine {
   next?: string;
   kinds: Array<{ kind: BackgroundItem["kind"]; label: string }>;
   /**
-   * This thread's event waiters, each named by its subject instead of
-   * counted generically (spec Part H): "waiting on <subject label>".
+   * The open thread's event waiters, named by the oldest one's subject
+   * instead of counted generically (spec Part H): "waiting on <subject
+   * label>", or "waiting on <subject label> +N more" for several.
    */
-  eventWaits: Array<{ id: string; label: string }>;
+  eventWait?: EventWaitLine;
   /** Items outside the open thread. The line counts them and never names them. */
   otherCount: number;
 }
@@ -157,10 +166,18 @@ export function statusLine(items: BackgroundItem[], threadId: string | undefined
     const [singular, plural] = KIND_NOUN[kind];
     return [{ kind, label: `${count} ${count === 1 ? singular : plural}` }];
   });
-  const eventWaits = own
-    .filter((i) => i.kind === "event")
-    .map((i) => ({ id: i.id, label: i.subjectLabel ?? i.reason }));
-  return { ...(next !== undefined ? { next } : {}), kinds, eventWaits, otherCount: other.length };
+  // Several event waiters collapse to the oldest one's subject plus a
+  // count, rather than naming each (fix round 1, controller ruling).
+  const eventItems = own.filter((i) => i.kind === "event").sort((a, b) => a.createdAt - b.createdAt);
+  const [oldest] = eventItems;
+  const eventWait: EventWaitLine | undefined =
+    oldest === undefined ? undefined : { id: oldest.id, label: oldest.subjectLabel ?? oldest.reason, moreCount: eventItems.length - 1 };
+  return { ...(next !== undefined ? { next } : {}), kinds, ...(eventWait !== undefined ? { eventWait } : {}), otherCount: other.length };
+}
+
+/** Pure: the text form of an event-wait line: "waiting on X" or "waiting on X +2 more". */
+export function eventWaitText(wait: EventWaitLine): string {
+  return wait.moreCount > 0 ? `waiting on ${wait.label} +${wait.moreCount} more` : `waiting on ${wait.label}`;
 }
 
 /** Pure: the status line as one string, such as "next wakeup in 26m · 1 process · +2 in other threads". */
@@ -168,7 +185,7 @@ export function statusLineText(line: StatusLine): string {
   return [
     ...(line.next !== undefined ? [line.next] : []),
     ...line.kinds.map((k) => k.label),
-    ...line.eventWaits.map((w) => `waiting on ${w.label}`),
+    ...(line.eventWait !== undefined ? [eventWaitText(line.eventWait)] : []),
     ...(line.otherCount > 0 ? [`+${line.otherCount} in other threads`] : []),
   ].join(" · ");
 }
@@ -404,9 +421,9 @@ export function BackgroundWorkStatusLine({
     ...line.kinds.map((k) => (
       <span key={k.kind} className="inline-flex items-center gap-1"><KindIcon kind={k.kind} />{k.label}</span>
     )),
-    ...line.eventWaits.map((w) => (
-      <span key={`event-${w.id}`} className="inline-flex items-center gap-1"><KindIcon kind="event" />waiting on {w.label}</span>
-    )),
+    ...(line.eventWait !== undefined
+      ? [<span key={`event-${line.eventWait.id}`} className="inline-flex items-center gap-1"><KindIcon kind="event" />{eventWaitText(line.eventWait)}</span>]
+      : []),
     ...(line.otherCount > 0 ? [<span key="other">+{line.otherCount} in other threads</span>] : []),
   ];
 
