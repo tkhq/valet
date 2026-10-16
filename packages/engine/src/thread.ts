@@ -4704,10 +4704,18 @@ export class Thread {
       name: tool.name, description: tool.description, parameters: tool.parameters,
     }))));
     const fixedPrompt = this.modelSystemPrompt(this.agent.state.systemPrompt, effectiveModel);
-    const cut = selectCutPoint({ entries: effectiveEntries, model: effectiveModel, cfg,
-      ...(retainedTask ? { reservedTokens: retainedTokens + estimateTokens(fixedPrompt ?? "") + toolTokens,
-        tokenize: (entry: SessionEntry) => entry.id === retainedTask.id ? 0 : estimateEntryTokens(entry) } : {}),
-    });
+    const supersededCheckpoint = findMostRecentCompaction(entries);
+    const selectTail = (checkpoint: CompactionEntry | undefined) => {
+      const reservedMessages = retainedTask ? entriesToAgentMessages([
+        retainedTask, ...(checkpoint ? [checkpoint] : []),
+      ], effectiveModel, { attributeAuthors: this.attributeAuthors, threadKey: this.key, taskSourceQueueItemId: taskSource })
+        .filter((message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult") : [];
+      return selectCutPoint({ entries: effectiveEntries, model: effectiveModel, cfg,
+        ...(retainedTask ? { reservedTokens: estimateContextTokens(fixedPrompt, reservedMessages) + toolTokens,
+          tokenize: (entry: SessionEntry) => entry.id === retainedTask.id || entry.type === "compaction" ? 0 : estimateEntryTokens(entry) } : {}),
+      });
+    };
+    let cut = selectTail(supersededCheckpoint);
     if (cut.cutIndex === 0 || cut.cutIndex === entries.length) {
       // Nothing to compact: either the tail already fits everything, or
       // there's no tail to preserve. The pruning pass above may have been
@@ -4759,7 +4767,6 @@ export class Thread {
     // content reaches this summary through `previousSummary`, and
     // `entriesToAgentMessages` reads only the NEWEST checkpoint, so leaving
     // them out would put them back into the context an earlier pass removed.
-    const supersededCheckpoint = findMostRecentCompaction(entries);
     const carriedCoverage = new Set(supersededCheckpoint?.coveredEntryIds ?? []);
     const pendingHead = head.filter((e) => !carriedCoverage.has(e.id));
     if (!pendingHead.some((e) => e.type === "message")) {
@@ -4942,6 +4949,10 @@ export class Thread {
         createdAt: Date.now(),
       };
       if (retainedTask && usable > 0) {
+        // The generated summary can displace older tail entries. Keep those
+        // entries uncovered until a later bounded pass actually reads them.
+        // Reserve the rendered checkpoint, including its transcript link.
+        cut = selectTail(compactionEntry);
         const tail = effectiveEntries.slice(cut.cutIndex);
         const required = entriesToAgentMessages([
           ...(!tail.some(entry => entry.id === retainedTask.id) ? [retainedTask] : []),
@@ -4960,7 +4971,8 @@ export class Thread {
       // context, not lost history, so this is a size signal and not a
       // violation: a head that needs many passes shows up here as a large
       // deferral that shrinks pass over pass.
-      const deferredHead = pendingHead.filter((e) => !summarized.has(e.id));
+      const deferredHead = effectiveEntries.slice(0, cut.cutIndex)
+        .filter((e) => !carriedCoverage.has(e.id) && !summarized.has(e.id));
       span?.setAttributes({
         "valet.compaction.tokens_before": compactionEntry.tokenCountBefore,
         "valet.compaction.tokens_after": compactionEntry.tokenCountAfter,

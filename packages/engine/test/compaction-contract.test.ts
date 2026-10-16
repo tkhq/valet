@@ -58,6 +58,25 @@ describe("compaction summary acceptance", () => {
     expect(faux.state.callCount).toBe(1);
   });
 
+  it.each([
+    ["additional subsection", COMPLETE_SUMMARY.replace("## Critical Context\n", "## Critical Context\n### Open questions\n")],
+    ["heading punctuation", COMPLETE_SUMMARY.replace("## Goal", "## Goal:")],
+    ["heading case and spacing", COMPLETE_SUMMARY.replace("## Goal", "##   GOAL: ##")],
+  ])("accepts complete summaries with %s", async (_name, summary) => {
+    const faux = provider();
+    faux.setResponses([fauxAssistantMessage(summary)]);
+    expect((await summarize({ headEntries: [user("task", "Inspect records")], model: modelFor(faux) })).summary).toBe(summary);
+  });
+
+  it.each([
+    ["only a subsection heading", COMPLETE_SUMMARY.replace("- Prior successful work must not be repeated.", "### Open questions")],
+    ["only content in another section", COMPLETE_SUMMARY.replace("- Finish the requested inspection.", "## Commentary\n- Additional notes")],
+  ])("rejects an empty required section containing %s", async (_name, summary) => {
+    const faux = provider();
+    faux.setResponses([fauxAssistantMessage(summary)]);
+    await expect(summarize({ headEntries: [user("task", "Inspect records")], model: modelFor(faux) })).rejects.toThrow(/summary/i);
+  });
+
   it("accepts closed code fences without treating quoted headings as sections", async () => {
     const faux = provider();
     const summary = COMPLETE_SUMMARY.replace("## Relevant Files\n- (none)", "## Relevant Files\n- Error example:\n```text\n## Goal\nerror details\n```");
@@ -382,4 +401,30 @@ it("retires an actively retained contract before the next ordinary hot turn", as
   const next = await session.prompt("Now discuss an unrelated topic");
   expect((await session.thread().awaitResult(next.queueItemId)).outcome).toBe("completed");
   expect(nextContext).not.toContain("OLD_COMPLETED_TASK");
+});
+
+
+it("continues a turn when pre-request compaction adds a harmless summary subsection", async () => {
+  const faux = registerFauxProvider({ provider: "summary-format-continuation", models: [{ id: "tiny", name: "tiny", contextWindow: 20_000, maxTokens: 5 }] });
+  cleanups.push(() => faux.unregister());
+  const summary = COMPLETE_SUMMARY.replace("## Critical Context\n", "## Critical Context\n### Open questions\n");
+  faux.setResponses([fauxAssistantMessage(summary), fauxAssistantMessage("Inspection complete")]);
+  const store = new InMemorySessionStore();
+  const session = await new Engine({ providers: { store, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider() } }).createSession({
+    userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: modelFor(faux, "tiny"), compaction: { tailTurns: 1, autoContinue: false },
+  });
+  const thread = session.thread();
+  const entries: SessionEntry[] = [
+    { ...user("format-task", "Inspect records"), sessionId: session.id, threadId: thread.id },
+    { ...user("format-evidence", "evidence ".repeat(12_000)), sessionId: session.id, threadId: thread.id, role: "assistant", parentId: "format-task" },
+    { ...user("format-recent", "Finish inspecting"), sessionId: session.id, threadId: thread.id, parentId: "format-evidence" },
+  ];
+  await store.appendEntries(session.id, thread.id, entries);
+  thread.rehydrateTranscript(entries);
+  const next = await session.prompt("Return the inspection");
+  const result = await thread.awaitResult(next.queueItemId);
+  expect(result.outcome).toBe("completed");
+  expect(result.text).toBe("Inspection complete");
+  expect((await store.getEntries(session.id, thread.id)).filter(entry => entry.type === "compaction")).toHaveLength(1);
+  expect(faux.state.callCount).toBe(2);
 });

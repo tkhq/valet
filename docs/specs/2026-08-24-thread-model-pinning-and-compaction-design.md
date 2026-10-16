@@ -555,7 +555,9 @@ Proxy inference requires a model; batches remain unavailable because uploaded re
 ## Amendment (2026-10-16): summary acceptance and task retention
 
 A new compaction checkpoint requires a terminal `stop` response without tool calls.
-After scratchpad removal, the summary must contain every template heading once, in order, with content in each leaf section.
+After scratchpad removal, the summary must contain every required template section once, in order, with content in each leaf section.
+Heading checks ignore case, repeated spaces, and a trailing colon. Additional subsections can organize a required section's content.
+An optional heading alone does not supply content, and a separate optional section cannot fill an empty required section.
 Headings inside code fences do not count. Unclosed fences, missing sections, duplicate sections, and empty sections fail acceptance.
 Failure keeps the accepted checkpoint and unsummarized messages. It does not add a retry loop or bypass the existing compaction failure limits.
 Existing checkpoints remain readable. These checks apply when accepting a new summary, not when loading history.
@@ -571,7 +573,9 @@ A new repair can recover an original entry admitted before task markers existed,
 Already-queued repairs without a source reference are not rewritten.
 Restart, interrupted continuation, and gate replay restore the active submission's task reference.
 Before an unrelated submission runs, the engine removes any contract injected into the running context.
-Cut-point selection reserves the rendered task, system prompt, and current tool definitions before choosing the recent tail.
+Cut-point selection reserves the rendered task, accepted summary, system prompt, and current tool definitions before choosing the recent tail.
+After generation, the engine selects the tail again with the new summary's measured size, including its wrapper and transcript link.
+Displaced tail entries stay live and uncovered until an existing bounded compaction pass summarizes them.
 Checkpoint size includes a covered task that remains in context.
 The engine rejects a new checkpoint if the required task, summary, recent tail, and fixed context cannot fit.
 Deferred older history can still use the existing bounded compaction passes.
