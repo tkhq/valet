@@ -341,6 +341,7 @@ const triggerSpecs: TriggerSpec[] = [
         description: "When a channel is created",
         filters: [
           { field: "channel", path: "channel.id", description: "New channel id" },
+          { field: "channel_name", path: "channel.name", description: "New channel name, for a prefix such as inc-" },
           { field: "creator", path: "channel.creator", description: "Slack user id of the creator" },
         ],
       },

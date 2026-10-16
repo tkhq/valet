@@ -128,7 +128,9 @@ Universe:
 
 Org `acme` has an enabled team subscription on `slack.channel_created` with
 filter `channel_name` prefix `inc-`, targeting the team assistant. It also
-has an enabled `slack.app_mention` subscription for the same team.
+has an enabled `slack.app_mention` subscription for the same team. The
+`slack.channel_created` catalog entry declares the `channel_name` filter
+field, with path `channel.name`.
 
 | Step | Action | Expected observation |
 |---|---|---|
