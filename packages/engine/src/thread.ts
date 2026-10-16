@@ -3937,6 +3937,23 @@ export class Thread {
       }
     }
 
+    // A repair may target a task compacted before task retention existed.
+    // Rebuild its prior context using the durable source, before runAgent
+    // appends the repair message. Existing replay entries already carry it.
+    const taskSource = item.metadata?.taskSourceQueueItemId;
+    if (item.metadata?.preserveTask === true && typeof taskSource === "string") {
+      const snapshot = await this.transcriptSnapshot();
+      if (!snapshot.entries.some(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === item.id)) {
+        this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.agent.state.model, {
+          attributeAuthors: this.attributeAuthors,
+          threadKey: this.key,
+          activeLeafEntryId: this.activeLeafEntryId,
+          taskSourceQueueItemId: taskSource,
+        }));
+        this.prevCacheSnapshot = undefined;
+      }
+    }
+
     // Persist the user message entry (shared helper — the claim loop's
     // credential-cap branch appends the same entry shape). Threading
     // `attachments` through to `runAgent` is what keeps a turn-1 image in
@@ -6485,6 +6502,8 @@ export function entriesToAgentMessages(
     threadKey?: string;
     /** Durable leaf of the active transcript branch. */
     activeLeafEntryId?: string;
+    /** Original task for a repair whose user entry has not been appended yet. */
+    taskSourceQueueItemId?: string;
   },
 ): AgentMessage[] {
   const activeEntries = walkTranscriptDag(entries, opts?.activeLeafEntryId);
@@ -6494,6 +6513,25 @@ export function entriesToAgentMessages(
     const e = activeEntries[i];
     if (e.type === "compaction") {
       activeCompaction = { summary: e.summary, covered: new Set(e.coveredEntryIds) };
+      break;
+    }
+  }
+
+  // A workflow task is a durable source entry, not summary prose. Keep only
+  // the latest task contract; repair points back to the first submission.
+  // Resolve it on the active branch so another branch cannot supply context.
+  let taskEntryId: string | undefined;
+  if (activeCompaction && opts?.taskSourceQueueItemId) {
+    taskEntryId = activeEntries.find(entry => entry.type === "message" && entry.role === "user"
+      && entry.queueItemId === opts.taskSourceQueueItemId)?.id;
+  } else if (activeCompaction) {
+    for (let i = activeEntries.length - 1; i >= 0; i--) {
+      const entry = activeEntries[i];
+      if (entry.type !== "message" || entry.role !== "user" || entry.metadata?.preserveTask !== true) continue;
+      const source = entry.metadata.taskSourceQueueItemId;
+      const queueItemId = typeof source === "string" ? source : entry.queueItemId;
+      if (queueItemId) taskEntryId = activeEntries.slice(0, i + 1).find(candidate =>
+        candidate.type === "message" && candidate.role === "user" && candidate.queueItemId === queueItemId)?.id;
       break;
     }
   }
@@ -6520,7 +6558,7 @@ export function entriesToAgentMessages(
 
   for (const e of activeEntries) {
     if (e.type !== "message") continue;
-    if (activeCompaction?.covered.has(e.id)) continue;
+    if (activeCompaction?.covered.has(e.id) && e.id !== taskEntryId) continue;
 
     if (e.role === "user") {
       // A spilled entry keeps the full paste in `content` but must reach the

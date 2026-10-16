@@ -550,3 +550,22 @@ Unrestricted organizations can select any active model, including Astra.
 Historical usage pricing remains available. Session restoration preserves resolvable saved model IDs, including Astra.
 The recording proxy retains its existing gateway rules; it does not enforce the organization model approval list.
 Proxy inference requires a model; batches remain unavailable because uploaded request files cannot be checked before submission.
+
+
+## Amendment (2026-10-16): summary acceptance and task retention
+
+A new compaction checkpoint requires a terminal `stop` response without tool calls.
+After scratchpad removal, the summary must contain every template heading once, in order, with content in each leaf section.
+Headings inside code fences do not count. Unclosed fences, missing sections, duplicate sections, and empty sections fail acceptance.
+Failure keeps the accepted checkpoint and unsummarized messages. It does not add a retry loop or bypass the existing compaction failure limits.
+Existing checkpoints remain readable. These checks apply when accepting a new summary, not when loading history.
+A valid structure does not prove that every fact in the summary is correct.
+
+Workflow admissions mark their user entry with `metadata.preserveTask`.
+Compaction retains that original rendered task once, independently of the summary, using the existing sender, signal, attachment, and input-spill rendering.
+The latest marked task replaces an older task contract. A schema repair carries `taskSourceQueueItemId` from the first submission receipt.
+The engine resolves that source only on the active transcript branch and keeps the original task rather than the repair instructions.
+It rebuilds repair context before appending the repair message, so the repair itself appears once.
+A new repair can recover an original entry admitted before task markers existed, in both running and restarted sessions.
+Already-queued repairs without a source reference are not rewritten.
+The existing per-request context check budgets the retained task before calling the provider.

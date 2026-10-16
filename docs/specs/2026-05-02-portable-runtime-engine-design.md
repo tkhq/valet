@@ -430,6 +430,13 @@ Normal settlement, crash settlement, and `awaitResult` reject length, error, and
 
 The engine does not substitute an earlier answer, recover streamed text, or replay the submission. A clean-stop schema failure retains the workflow's existing exactly-one repair opportunity. If the repair also fails validation, the workflow fails with separate original and repair receipts. Incomplete or failed transport does not trigger schema repair. Intentional silence does not require a channel-specific exception.
 
+Workflow prompts retain their original rendered user entry through compaction using `metadata.preserveTask`.
+Session and orchestrator repairs carry `taskSourceQueueItemId` from the first submission receipt, including after checkpoint resume.
+The host persists that reference in prompt metadata. The engine restores the original task only from the active transcript branch.
+It does not rerender the task from edited inputs, reread the whole thread through a tool, add a workflow node, or change schema validation.
+The existing single repair limit and side-effect reuse instructions still apply.
+
+
 Each assistant entry records bounded response metadata: adapted stop reason, raw stop reason when exposed, model, provider, API, response ID, end-turn flag, block types, text length, thinking presence, tool-call count, and streamed text length. Thinking text, prompts, and full responses are excluded. Requested output limits are separate from effective output limits because adapters can transform them. Unexposed effective limits, request IDs, provider terminal status, and incomplete reasons are null. Workflow node diagnostics return only these allowed fields. Missing metadata is null.
 
 Workflow skills distinguish adapted stops from exposed raw stop labels. They report null fields as unknown and matching UTF-16 lengths as consistency between recorded layers. Replies separate observations, inferences, and unknowns. Full provider-response capture remains unverified without the raw response.

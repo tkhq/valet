@@ -58,7 +58,7 @@ export interface SubmissionNodeHooks<TDispatched, TSettled> {
   /** Issues (or, on re-entry with an identical `dispatchId`, re-issues idempotently) the primary submission. */
   dispatch(dispatchId: string): Promise<SubmissionDispatch>;
   /** Issues the ONE bounded repair submission against the already-dispatched session. */
-  dispatchRepair(repairDispatchId: string, repairPrompt: string, sessionId: string): Promise<WorkflowPromptReceipt>;
+  dispatchRepair(repairDispatchId: string, repairPrompt: string, sessionId: string, taskSourceQueueItemId: string): Promise<WorkflowPromptReceipt>;
   buildDispatchedResult(dispatch: SubmissionDispatch): TDispatched;
   buildSettledResult(sessionId: string, result: SubmissionResult, receipt: WorkflowPromptReceipt): TSettled;
 }
@@ -262,7 +262,7 @@ async function handleOutcome<TDispatched, TSettled>(
   // error settles the node, never poisons the drive.
   let repairReceipt: WorkflowPromptReceipt;
   try {
-    repairReceipt = await hooks.dispatchRepair(`${hooks.dispatchId}:repair`, repairText, sessionId);
+    repairReceipt = await hooks.dispatchRepair(`${hooks.dispatchId}:repair`, repairText, sessionId, firstQueueItemId ?? receipt.queueItemId);
   } catch (err) {
     if (!(err instanceof ValidationError)) throw err;
     const error = err.message;

@@ -1,3 +1,4 @@
+import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as catalog from "../src/model-catalog.js";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
@@ -39,7 +40,7 @@ describe("provider request context protection", () => {
     faux.setResponses([fauxAssistantMessage("old inspection " + "x".repeat(500_000))]);
     await settled(events, (await session.prompt("inspect earlier work")).queueItemId);
     expect((await store.getEntries(session.id, session.thread().id)).some((entry) => entry.type === "compaction")).toBe(false);
-    summarizer.setResponses([fauxAssistantMessage("## Progress\n- Earlier inspection complete")]);
+    summarizer.setResponses([fauxAssistantMessage(COMPLETE_SUMMARY)]);
     let nextRequest = "";
     faux.setResponses([
       fauxAssistantMessage([fauxToolCall("collect_evidence", {}, { id: "evidence-call" })], { stopReason: "toolUse" }),
@@ -101,7 +102,7 @@ describe("provider request context protection", () => {
       await settled(events, (await session.prompt("inspect more slides")).queueItemId);
       const smallRequests: string[] = [];
       small.setResponses([
-        (context) => { smallRequests.push(JSON.stringify(context)); return fauxAssistantMessage("## Goal\n- Edit slides\n## Progress\n- Inspection complete"); },
+        (context) => { smallRequests.push(JSON.stringify(context)); return fauxAssistantMessage(COMPLETE_SUMMARY); },
         (context) => { smallRequests.push(JSON.stringify(context)); return fauxAssistantMessage("slides updated"); },
       ]);
       if (selection === "pin") await thread.setModel(smallSpec);
@@ -142,7 +143,7 @@ describe("provider request context protection", () => {
     let retry = "";
     faux.setResponses([
       fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long: 289792 tokens > 200000 maximum" }),
-      fauxAssistantMessage("## Goal\n- Edit slides\n## Progress\n- Inspection complete"),
+      fauxAssistantMessage(COMPLETE_SUMMARY),
       (context) => { retry = JSON.stringify(context); return fauxAssistantMessage("recovered"); },
     ]);
     await settled(events, (await session.prompt("unique edit request")).queueItemId);
@@ -231,7 +232,7 @@ describe("provider request context protection", () => {
       expect((await store.getQueueItem(session.id, receipt.queueItemId))?.outcome?.outcome).toBe("aborted");
     }
     small.setResponses([
-      fauxAssistantMessage("## Goal\n- Edit slides\n## Progress\n- Inspection complete"),
+      fauxAssistantMessage(COMPLETE_SUMMARY),
       fauxAssistantMessage("slides updated after cancellation"),
     ]);
     const recovered = await session.prompt("try again");

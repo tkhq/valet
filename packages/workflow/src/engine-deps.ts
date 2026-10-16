@@ -22,6 +22,8 @@ export interface WorkflowCreateSessionOptions {
 }
 
 export interface WorkflowPromptOptions {
+  /** Original submission whose task must survive compaction during schema repair. */
+  taskSourceQueueItemId?: string;
   /** Idempotent admission key: `workflow:{runId}:{nodeId}[:{iteration}][:repair]`. */
   dispatchId: string;
   model?: string;
@@ -78,6 +80,8 @@ export interface WorkflowLlmCompleteResult {
 }
 
 export interface WorkflowPromptOrchestratorOptions {
+  /** Original submission whose task must survive compaction during schema repair. */
+  taskSourceQueueItemId?: string;
   /** Idempotent admission key: `workflow:{runId}:{nodeId}[:{iteration}][:repair]`. */
   dispatchId: string;
   /**

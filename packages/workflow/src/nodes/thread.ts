@@ -100,9 +100,10 @@ export async function executeThread(args: NodeExecutorArgs<ThreadNode>): Promise
           receipt: { threadId: dispatched.threadId, queueItemId: dispatched.queueItemId },
         };
       },
-      dispatchRepair: async (repairDispatchId, repairPrompt) => {
+      dispatchRepair: async (repairDispatchId, repairPrompt, _sessionId, taskSourceQueueItemId) => {
         const dispatched = await engine.promptOrchestrator(repairPrompt, {
           dispatchId: repairDispatchId,
+          taskSourceQueueItemId,
           queueMode: 'followup',
           ownerHint: owner,
         });

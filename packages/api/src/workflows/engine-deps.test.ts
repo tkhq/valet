@@ -996,3 +996,24 @@ it("keys a run a Slack channel's event started by that channel", () => {
   expect(workflowRunThreadKey("run_1")).toBe("signal:workflow:run_1");
   expect(workflowRunThreadKey("run_1", "CPRIV")).toBe("slack-events:CPRIV:workflow:run_1");
 });
+
+
+it("retains durable task references for both workflow dispatch paths and their repairs", async () => {
+  api = await bootTestApi();
+  const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+  await seedRun(api, "task-contract-run", "task-contract-workflow");
+  const deps = buildWorkflowEngineDeps({ host: engineHost, store: workflowStore, db, engineStore, actionPluginByService, credentials: engineCredentials });
+  const sessionId = "wf:task-contract-run:session";
+  const task = "Exclude internal repos; return URL, owner, and evidence.";
+  const primary = await deps.prompt(sessionId, task, { dispatchId: "workflow:task-contract-run:session" });
+  const repair = await deps.prompt(sessionId, "Correct the JSON", { dispatchId: "workflow:task-contract-run:session:repair", taskSourceQueueItemId: primary.queueItemId, queueMode: "followup" });
+  expect((await engineStore.getQueueItem(sessionId, primary.queueItemId))?.metadata).toMatchObject({ preserveTask: true });
+  expect((await engineStore.getQueueItem(sessionId, repair.queueItemId))?.metadata).toMatchObject({ preserveTask: true, taskSourceQueueItemId: primary.queueItemId });
+  const ownerHint = { ownerType: "user", ownerId: LOCAL_USER.id };
+  const report = await deps.promptOrchestrator(task, { dispatchId: "workflow:task-contract-run:report", ownerHint, queueMode: "followup" });
+  const reportRepair = await deps.promptOrchestrator("Correct the JSON", { dispatchId: "workflow:task-contract-run:report:repair", ownerHint, queueMode: "followup", taskSourceQueueItemId: report.queueItemId });
+  expect(reportRepair.sessionId).toBe(report.sessionId);
+  expect(reportRepair.threadId).toBe(report.threadId);
+  expect((await engineStore.getQueueItem(report.sessionId, report.queueItemId))?.metadata).toMatchObject({ preserveTask: true });
+  expect((await engineStore.getQueueItem(reportRepair.sessionId, reportRepair.queueItemId))?.metadata).toMatchObject({ preserveTask: true, taskSourceQueueItemId: report.queueItemId });
+});
