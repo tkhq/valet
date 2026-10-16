@@ -430,6 +430,19 @@ Normal settlement, crash settlement, and `awaitResult` reject length, error, and
 
 The engine does not substitute an earlier answer, recover streamed text, or replay the submission. A clean-stop schema failure retains the workflow's existing exactly-one repair opportunity. If the repair also fails validation, the workflow fails with separate original and repair receipts. Incomplete or failed transport does not trigger schema repair. Intentional silence does not require a channel-specific exception.
 
+Workflow prompts retain their original rendered user entry through compaction using `metadata.preserveTask`.
+Session and orchestrator repairs carry `taskSourceQueueItemId` from the first submission receipt, including after checkpoint resume.
+The host persists that reference in prompt metadata. The engine restores the original task only for an active submission on its transcript branch.
+Restart and gate replay retain this scope. An unrelated submission removes a previously injected contract.
+Completed task markers do not restore old requests.
+Compaction reserves the rendered active task and fixed context before selecting the recent tail.
+It rejects a checkpoint when the required task, summary, and recent tail cannot fit with that fixed context.
+It does not rerender the task from edited inputs, reread the whole thread through a tool, add a workflow node, or change schema validation.
+The existing single repair limit and side-effect reuse instructions still apply.
+Repair context preserves failed-tool diagnostics and operation receipts across transcript reconstruction and restart.
+One text reader serves live tool persistence and context reconstruction. Summarization retains explicit interruption errors as well as stored failure results.
+
+
 Each assistant entry records bounded response metadata: adapted stop reason, raw stop reason when exposed, model, provider, API, response ID, end-turn flag, block types, text length, thinking presence, tool-call count, and streamed text length. Thinking text, prompts, and full responses are excluded. Requested output limits are separate from effective output limits because adapters can transform them. Unexposed effective limits, request IDs, provider terminal status, and incomplete reasons are null. Workflow node diagnostics return only these allowed fields. Missing metadata is null.
 
 Workflow skills distinguish adapted stops from exposed raw stop labels. They report null fields as unknown and matching UTF-16 lengths as consistency between recorded layers. Replies separate observations, inferences, and unknowns. Full provider-response capture remains unverified without the raw response.

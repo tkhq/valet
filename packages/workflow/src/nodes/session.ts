@@ -67,8 +67,8 @@ export async function executeSession(args: NodeExecutorArgs<SessionNode>): Promi
         const receipt = await engine.prompt(sessionId, promptText, { dispatchId: id, model: node.model });
         return { sessionId, receipt };
       },
-      dispatchRepair: async (repairDispatchId, repairPrompt, id) =>
-        await engine.prompt(id, repairPrompt, { dispatchId: repairDispatchId, model: node.model, queueMode: 'followup' }),
+      dispatchRepair: async (repairDispatchId, repairPrompt, id, taskSourceQueueItemId) =>
+        await engine.prompt(id, repairPrompt, { dispatchId: repairDispatchId, model: node.model, queueMode: 'followup', taskSourceQueueItemId }),
       buildDispatchedResult: (dispatch) => ({ sessionId: dispatch.sessionId, receipt: dispatch.receipt }),
       buildSettledResult: (id, result) => ({ sessionId: id, response: result.text, output: result.output }),
     },

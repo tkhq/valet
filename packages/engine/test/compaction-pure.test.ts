@@ -930,3 +930,11 @@ describe("compaction: elided results and the summarizer (TKAI-305)", () => {
     expect(text).not.toContain("blue-green");
   });
 });
+
+
+it("reserves retained task and fixed context before choosing a compaction tail", () => {
+  const entries: SessionEntry[] = [user("task", "a".repeat(60_000)), assistant("old", "b".repeat(8_000)), user("latest", "c".repeat(8_000))];
+  const cut = selectCutPoint({ entries, model: { ...MODEL, contextWindow: 20_000, maxTokens: 5 }, cfg: { tailTurns: 2 }, reservedTokens: 18_000,
+    tokenize: entry => entry.id === "task" ? 0 : estimateEntryTokens(entry) });
+  expect(cut.cutIndex).toBe(2);
+});

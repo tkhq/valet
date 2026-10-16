@@ -87,7 +87,7 @@ function makeEngine(
       return { id: opts.id };
     },
     prompt: async (sessionId, text, opts) => {
-      calls.push({ kind: 'prompt', sessionId, text, dispatchId: opts.dispatchId, model: opts.model, queueMode: opts.queueMode });
+      calls.push({ kind: 'prompt', sessionId, text, dispatchId: opts.dispatchId, model: opts.model, queueMode: opts.queueMode, taskSourceQueueItemId: opts.taskSourceQueueItemId });
       let receipt = receiptsByDispatch.get(opts.dispatchId);
       if (!receipt) {
         receiptCounter += 1;
@@ -378,6 +378,7 @@ describe('executeSession: schema validation failure triggers exactly one repair'
     const repairCalls = calls.filter((c) => c.kind === 'prompt' && c.dispatchId === 'workflow:run-7:s:repair');
     expect(repairCalls).toHaveLength(1);
     expect(repairCalls[0]?.queueMode).toBe('followup');
+    expect(repairCalls[0]?.taskSourceQueueItemId).toBe('queue-1');
     const repairText = String(repairCalls[0]?.text);
     expect(repairText).toContain(JSON.stringify(outputSchema));
     expect(repairText).toContain('missing value');
@@ -745,4 +746,27 @@ describe('executeSession: actionable repair through the real engine', () => {
       faux.unregister();
     }
   });
+});
+
+
+it('repairs a resumed loop iteration using its own first receipt rather than another iteration', async () => {
+  const store = new InMemoryWorkflowStore();
+  const clock = makeClock();
+  const { engine, calls } = makeEngine({ isSettledQueue: [true], awaitResultQueue: [{ outcome: 'completed', text: 'not JSON', error: 'missing report' }] });
+  const definition = sessionDefinition({ outputSchema: { type: 'object', properties: { report: { type: 'string' } }, required: ['report'] } });
+  await store.createRun('iteration-contract', runParams(), definition, 'v1');
+  const attempt = await claimAttempt(store, 'iteration-contract');
+  const run = await store.getRun('iteration-contract');
+  const node = definition.nodes.find((candidate): candidate is SessionNode => candidate.id === 's');
+  if (!run || !node) throw new Error('Missing workflow fixture');
+  const args = { run, node, attempt, store, clock: clock.now, engine, templateContext: { trigger: undefined, nodes: {} } };
+  await executeSession({ ...args, iteration: 0 });
+  await executeSession({ ...args, iteration: 2 });
+  const checkpoint = (await store.getCheckpoints(run.runId)).find(cp => cp.nodeId === node.id && cp.iteration === 2);
+  if (!checkpoint) throw new Error('Missing iteration receipt');
+  expect(checkpoint.effects?.receipt).toMatchObject({ queueItemId: 'queue-2' });
+  await executeSession({ ...args, iteration: 2, existingCheckpoint: checkpoint });
+  const repair = calls.find(call => call.kind === 'prompt' && call.dispatchId === 'workflow:iteration-contract:s:2:repair');
+  expect(repair?.taskSourceQueueItemId).toBe('queue-2');
+  expect(calls.filter(call => call.dispatchId === 'workflow:iteration-contract:s:2:repair')).toHaveLength(1);
 });

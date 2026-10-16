@@ -550,3 +550,53 @@ Unrestricted organizations can select any active model, including Astra.
 Historical usage pricing remains available. Session restoration preserves resolvable saved model IDs, including Astra.
 The recording proxy retains its existing gateway rules; it does not enforce the organization model approval list.
 Proxy inference requires a model; batches remain unavailable because uploaded request files cannot be checked before submission.
+
+
+## Amendment (2026-10-16): summary acceptance and task retention
+
+A new compaction checkpoint requires a terminal `stop` response without tool calls.
+After scratchpad removal, the summary must contain every required template section once, in order, with content in each leaf section.
+Heading checks ignore case, repeated spaces, and a trailing colon. Additional subsections can organize a required section's content.
+An optional heading alone does not supply content, and a separate optional section cannot fill an empty required section.
+Headings inside code fences do not count. Unclosed fences, missing sections, duplicate sections, and empty sections fail acceptance.
+Failure keeps the accepted checkpoint and unsummarized messages. It does not add a retry loop or bypass the existing compaction failure limits.
+Existing checkpoints remain readable. These checks apply when accepting a new summary, not when loading history.
+A valid structure does not prove that every fact in the summary is correct.
+
+Workflow admissions mark their user entry with `metadata.preserveTask`.
+Compaction retains that original rendered task once, independently of the summary, using the existing sender, signal, attachment, and input-spill rendering.
+Only the active submission selects a retained task. Historical task markers cannot restore a completed request.
+A schema repair carries `taskSourceQueueItemId` from the first submission receipt.
+The engine resolves that source only on the active transcript branch and keeps the original task rather than the repair instructions.
+It rebuilds repair context before appending the repair message, so the repair itself appears once.
+A new repair can recover an original entry admitted before task markers existed, in both running and restarted sessions.
+Already-queued repairs without a source reference are not rewritten.
+Restart, interrupted continuation, and gate replay restore the active submission's task reference.
+Before an unrelated submission runs, the engine removes any contract injected into the running context.
+Cut-point selection reserves the rendered task, accepted summary, system prompt, and current tool definitions before choosing the recent tail.
+After generation, the engine selects the tail again with the new summary's measured size, including its wrapper and transcript link.
+Displaced tail entries stay live and uncovered until an existing bounded compaction pass summarizes them.
+Checkpoint size includes a covered task that remains in context.
+The engine rejects a new checkpoint if the required task, summary, recent tail, and fixed context cannot fit.
+Deferred older history can still use the existing bounded compaction passes.
+The existing per-request context check budgets the retained task before calling the provider.
+
+
+### Tool evidence during reconstruction
+
+Live tool-result persistence and transcript reconstruction use one text reader.
+Failed calls retain their stored result text, including operation receipts and recovery instructions.
+If a call also has an explicit interruption error, both texts remain available without duplicating identical text.
+The summarizer receives the same failure evidence, including errors without a stored result.
+Successful elided results keep their existing live-context elision policy. Stored results remain available to the summarizer.
+A schema repair rebuilds its prefix only when the active checkpoint covers its original source entry.
+An uncompacted running session keeps its live prefix. A restarted session reconstructs failed-tool evidence from storage.
+
+This design keeps essential instructions outside summary prose while preserving the context needed to continue.
+Anthropic documents retaining selected instruction messages after compaction: https://platform.claude.com/docs/en/build-with-claude/compaction-threshold.
+OpenAI documents treating the returned compacted window as the canonical next context: https://developers.openai.com/api/docs/guides/compaction.
+These references support the retention principle; the engine keeps its provider-independent compaction implementation.
+
+Regression coverage combines the workflow interpreter, PostgreSQL-compatible storage, original task retention, compaction, restart, and one bounded repair.
+Session nodes and team orchestrator nodes retain operation receipts. They reuse completed operations and deliver only validated output.
+A blocked repair fails the workflow without posting a fabricated report.

@@ -1,3 +1,4 @@
+import { failedToolResultText, toolResultText } from "./tool-result-text.js";
 import { renderAppPageHint } from "./app-page-hint.js";
 import { actionInScope, CONTINUATION_TOOL_SCOPE_KEY, INHERIT_TOOL_SCOPE_KEY, intersectToolScopes, readToolScope, toolInScope, TOOL_SCOPE_KEY, type ToolScope } from "@valet/shared";
 import { mergePresence, readPresence, type Presence } from "@valet/shared";
@@ -93,6 +94,7 @@ import {
   estimateContextTokens,
   estimateLiveContextTokens,
   estimateTokens,
+  estimateEntryTokens,
   estimateSummaryEntryTokens,
   estimateTotalTokens,
   extractFileContext,
@@ -540,6 +542,8 @@ export class Thread {
    * hit the model with an over-budget context.
    */
   private rehydratedCheckPending = false;
+  /** The contract added by the last reconstruction; retire it on an unrelated turn. */
+  private retainedTaskSourceQueueItemId?: string;
   /**
    * Per-thread model override (id string, e.g. "claude-opus-4-7"). When set,
    * overlays the session-default at turn start and is restored after.
@@ -1510,7 +1514,7 @@ export class Thread {
     await this.persistReplayedToolResult(suspended.toolCallId, toolResult);
     await this.fencedEmit({
       type: "tool_end", threadId: this.id, tool: suspended.toolName, callId: suspended.toolCallId,
-      result: renderToolResult(toolResult), isError: false,
+      result: toolResultText(toolResult), isError: false,
       ...(toolResultImages(toolResult).length > 0 ? { resultData: toolResult } : {}),
       ...toolOutcome(toolResult),
     }, { queueItemId: suspended.queueItemId });
@@ -1623,7 +1627,7 @@ export class Thread {
         part.status = "completed";
         const structured =
           result && typeof result === "object" ? (result as Record<string, unknown>) : {};
-        part.result = { ...structured, text: renderToolResult(result) };
+        part.result = { ...structured, text: toolResultText(result) };
         await this.fencedWrite(() =>
           store.updateEntry(this.session.id, this.id, e, this.fence),
         );
@@ -2164,7 +2168,8 @@ export class Thread {
       attributeAuthors: this.attributeAuthors,
       threadKey: this.key,
       activeLeafEntryId: this.activeLeafEntryId,
-    }));
+      taskSourceQueueItemId: this.taskSourceFor(),
+    }), this.taskSourceFor());
     // Arm the pre-turn proactive check (spec decision 5) so the first
     // post-restart turn is protected. The trigger estimates the rehydrated
     // transcript directly (TKAI-305), so no usage seeding is needed and a
@@ -3322,6 +3327,14 @@ export class Thread {
   ): Promise<void> {
     // Load before taking ownership so a store failure cannot strand a retained gate claim.
     await this.ensureTranscript();
+    const taskSource = this.taskSourceFor(item);
+    if (taskSource) {
+      const snapshot = await this.transcriptSnapshot();
+      this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.effectiveModelLenient(), {
+        attributeAuthors: this.attributeAuthors, threadKey: this.key,
+        activeLeafEntryId: this.activeLeafEntryId, taskSourceQueueItemId: taskSource,
+      }), taskSource);
+    }
     const store = this.session.providers.store;
     const attemptId = uid("att");
     const expectedAttemptId = item.attemptId;
@@ -3510,8 +3523,9 @@ export class Thread {
           attributeAuthors: this.attributeAuthors,
           threadKey: this.key,
           activeLeafEntryId: this.activeLeafEntryId,
+          taskSourceQueueItemId: this.taskSourceFor(),
         },
-      ));
+      ), this.taskSourceFor());
       this.transcriptPending = false;
       this.agent.state.tools = this.buildTools();
 
@@ -3937,6 +3951,28 @@ export class Thread {
       }
     }
 
+    // Restore a compacted active task before appending its next message.
+    // A repair can reference an older task without retention metadata.
+    // Retire an injected contract before an unrelated submission runs.
+    const taskSource = this.taskSourceFor(item);
+    if (taskSource || this.retainedTaskSourceQueueItemId) {
+      const snapshot = await this.transcriptSnapshot();
+      const activeEntries = walkTranscriptDag(snapshot.entries, this.activeLeafEntryId);
+      const source = activeEntries.find(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === taskSource);
+      const checkpoint = findMostRecentCompaction(activeEntries);
+      const retirePrior = this.retainedTaskSourceQueueItemId !== undefined && this.retainedTaskSourceQueueItemId !== taskSource;
+      if (((source && checkpoint?.coveredEntryIds.includes(source.id)) || retirePrior)
+        && !activeEntries.some(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === item.id)) {
+        this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.agent.state.model, {
+          attributeAuthors: this.attributeAuthors,
+          threadKey: this.key,
+          activeLeafEntryId: this.activeLeafEntryId,
+          taskSourceQueueItemId: taskSource,
+        }), taskSource);
+        this.prevCacheSnapshot = undefined;
+      }
+    }
+
     // Persist the user message entry (shared helper — the claim loop's
     // credential-cap branch appends the same entry shape). Threading
     // `attachments` through to `runAgent` is what keeps a turn-1 image in
@@ -4043,7 +4079,14 @@ export class Thread {
     }];
   }
 
-  private replaceAgentMessages(messages: AgentMessage[]): void {
+  private taskSourceFor(item: QueueItem | null = this.runningItem): string | undefined {
+    if (item?.metadata?.preserveTask !== true) return undefined;
+    const source = item.metadata.taskSourceQueueItemId;
+    return typeof source === "string" ? source : item.id;
+  }
+
+  private replaceAgentMessages(messages: AgentMessage[], taskSourceQueueItemId?: string): void {
+    this.retainedTaskSourceQueueItemId = taskSourceQueueItemId;
     const system = getCurrentSystemMessage(this.agent.state.messages);
     this.agent.state.messages = system ? [system, ...messages] : messages;
   }
@@ -4648,8 +4691,31 @@ export class Thread {
       effectiveEntries = mutable;
     }
 
-    // Step 2: cut-point selection.
-    const cut = selectCutPoint({ entries, model: effectiveModel, cfg });
+    // Step 2: cut-point selection. The active task is retained independently
+    // of the summary, so reserve it before choosing the recent tail.
+    const taskSource = this.taskSourceFor();
+    const retainedTask = taskSource ? effectiveEntries.find(entry => entry.type === "message"
+      && entry.role === "user" && entry.queueItemId === taskSource) : undefined;
+    const retainedMessages = retainedTask ? entriesToAgentMessages([retainedTask], effectiveModel, {
+      attributeAuthors: this.attributeAuthors,
+    }).filter((message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult") : [];
+    const retainedTokens = estimateContextTokens(undefined, retainedMessages);
+    const toolTokens = estimateTokens(JSON.stringify(this.buildTools().map(tool => ({
+      name: tool.name, description: tool.description, parameters: tool.parameters,
+    }))));
+    const fixedPrompt = this.modelSystemPrompt(this.agent.state.systemPrompt, effectiveModel);
+    const supersededCheckpoint = findMostRecentCompaction(entries);
+    const selectTail = (checkpoint: CompactionEntry | undefined) => {
+      const reservedMessages = retainedTask ? entriesToAgentMessages([
+        retainedTask, ...(checkpoint ? [checkpoint] : []),
+      ], effectiveModel, { attributeAuthors: this.attributeAuthors, threadKey: this.key, taskSourceQueueItemId: taskSource })
+        .filter((message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult") : [];
+      return selectCutPoint({ entries: effectiveEntries, model: effectiveModel, cfg,
+        ...(retainedTask ? { reservedTokens: estimateContextTokens(fixedPrompt, reservedMessages) + toolTokens,
+          tokenize: (entry: SessionEntry) => entry.id === retainedTask.id || entry.type === "compaction" ? 0 : estimateEntryTokens(entry) } : {}),
+      });
+    };
+    let cut = selectTail(supersededCheckpoint);
     if (cut.cutIndex === 0 || cut.cutIndex === entries.length) {
       // Nothing to compact: either the tail already fits everything, or
       // there's no tail to preserve. The pruning pass above may have been
@@ -4701,7 +4767,6 @@ export class Thread {
     // content reaches this summary through `previousSummary`, and
     // `entriesToAgentMessages` reads only the NEWEST checkpoint, so leaving
     // them out would put them back into the context an earlier pass removed.
-    const supersededCheckpoint = findMostRecentCompaction(entries);
     const carriedCoverage = new Set(supersededCheckpoint?.coveredEntryIds ?? []);
     const pendingHead = head.filter((e) => !carriedCoverage.has(e.id));
     if (!pendingHead.some((e) => e.type === "message")) {
@@ -4879,15 +4944,35 @@ export class Thread {
         summary: summaryResult.summary,
         coveredEntryIds: coveredEntries.map((e) => e.id),
         tokenCountBefore: estimateTotalTokens(coveredEntries),
-        tokenCountAfter: estimateTokens(summaryResult.summary),
+        tokenCountAfter: estimateTokens(summaryResult.summary) + (retainedTask && covered.has(retainedTask.id) ? retainedTokens : 0),
         fileContext: extractFileContext(coveredEntries),
         createdAt: Date.now(),
       };
+      if (retainedTask && usable > 0) {
+        // The generated summary can displace older tail entries. Keep those
+        // entries uncovered until a later bounded pass actually reads them.
+        // Reserve the rendered checkpoint, including its transcript link.
+        cut = selectTail(compactionEntry);
+        const tail = effectiveEntries.slice(cut.cutIndex);
+        const required = entriesToAgentMessages([
+          ...(!tail.some(entry => entry.id === retainedTask.id) ? [retainedTask] : []),
+          ...tail, compactionEntry,
+        ], effectiveModel, { attributeAuthors: this.attributeAuthors, threadKey: this.key, taskSourceQueueItemId: taskSource })
+          .filter((message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult");
+        const requiredTokens = estimateContextTokens(fixedPrompt, required) + toolTokens;
+        if (requiredTokens >= usable) {
+          span?.setAttributes({ "valet.compaction.insufficient_reason": "retained_task_too_large", "valet.compaction.required_tokens": requiredTokens });
+          this.emitError("context_overflow_unrecoverable",
+            "The active task, summary, and recent context do not fit the selected model. Choose a larger model or shorten the task.");
+          return "insufficient";
+        }
+      }
       // Head entries this pass deferred to the next one. They are live
       // context, not lost history, so this is a size signal and not a
       // violation: a head that needs many passes shows up here as a large
       // deferral that shrinks pass over pass.
-      const deferredHead = pendingHead.filter((e) => !summarized.has(e.id));
+      const deferredHead = effectiveEntries.slice(0, cut.cutIndex)
+        .filter((e) => !carriedCoverage.has(e.id) && !summarized.has(e.id));
       span?.setAttributes({
         "valet.compaction.tokens_before": compactionEntry.tokenCountBefore,
         "valet.compaction.tokens_after": compactionEntry.tokenCountAfter,
@@ -4917,8 +5002,9 @@ export class Thread {
           attributeAuthors: this.attributeAuthors,
           threadKey: this.key,
           activeLeafEntryId: this.activeLeafEntryId,
+          taskSourceQueueItemId: this.taskSourceFor(),
         },
-      ));
+      ), this.taskSourceFor());
       // Compaction legitimately rewrites the prefix — the next turn's cache
       // reads SHOULD drop. Reset the break-detector baseline so the expected
       // drop is not counted as a break (TKAI-320).
@@ -5635,7 +5721,7 @@ export class Thread {
         break;
       case "tool_execution_end": {
         const part = this.currentToolCalls.get(event.toolCallId);
-        const resultText = renderToolResult(event.result);
+        const resultText = toolResultText(event.result);
         if (part && part.type === "tool_call") {
           part.status = event.isError ? "error" : "completed";
           // Persist the *flattened* text alongside the raw structured
@@ -6234,16 +6320,6 @@ function textOf(message: AgentMessage): string {
   return parts.map((p) => p.text).join("");
 }
 
-function renderToolResult(result: unknown): string {
-  if (!result || typeof result !== "object") return String(result ?? "");
-  const r = result as { content?: Array<{ type: string; text?: string }> };
-  if (!r.content) return JSON.stringify(result);
-  return r.content
-    .filter((c) => c.type === "text")
-    .map((c) => c.text ?? "")
-    .join("");
-}
-
 interface RoleOverlay {
   restore: boolean;
   model?: PiModel;
@@ -6276,22 +6352,6 @@ export function resolveModelId(spec: string): PiModel | undefined {
 
 // Back-compat alias used by applyRoleForTurn in this file.
 const resolveRoleModel = resolveModelId;
-
-/** Extract readable text from a persisted tool_call `result` (any shape). */
-function toolResultText(result: unknown): string {
-  if (result && typeof result === "object") {
-    const r = result as { text?: unknown; content?: Array<{ type: string; text?: string }> };
-    if (typeof r.text === "string") return r.text;
-    if (Array.isArray(r.content)) {
-      return r.content
-        .filter((c) => c.type === "text")
-        .map((c) => c.text ?? "")
-        .join("");
-    }
-    return JSON.stringify(result);
-  }
-  return String(result ?? "");
-}
 
 /** Retain selected tool evidence on reload without reviving malformed content. */
 function toolResultImages(result: unknown): ImageContent[] {
@@ -6485,6 +6545,8 @@ export function entriesToAgentMessages(
     threadKey?: string;
     /** Durable leaf of the active transcript branch. */
     activeLeafEntryId?: string;
+    /** Original task of the active submission or repair. Omit for settled history. */
+    taskSourceQueueItemId?: string;
   },
 ): AgentMessage[] {
   const activeEntries = walkTranscriptDag(entries, opts?.activeLeafEntryId);
@@ -6497,6 +6559,13 @@ export function entriesToAgentMessages(
       break;
     }
   }
+
+  // Only a caller holding an active submission selects a task contract.
+  // Historical markers alone must not resurrect completed workflow requests.
+  const taskEntryId = activeCompaction && opts?.taskSourceQueueItemId
+    ? activeEntries.find(entry => entry.type === "message" && entry.role === "user"
+      && entry.queueItemId === opts.taskSourceQueueItemId)?.id
+    : undefined;
 
   const out: AgentMessage[] = [];
   if (activeCompaction) {
@@ -6520,7 +6589,7 @@ export function entriesToAgentMessages(
 
   for (const e of activeEntries) {
     if (e.type !== "message") continue;
-    if (activeCompaction?.covered.has(e.id)) continue;
+    if (activeCompaction?.covered.has(e.id) && e.id !== taskEntryId) continue;
 
     if (e.role === "user") {
       // A spilled entry keeps the full paste in `content` but must reach the
@@ -6609,7 +6678,7 @@ export function entriesToAgentMessages(
               // Elided parts keep their stored result for the summarizer and
               // the UI; the LIVE context is where the elision applies.
               text: isError
-                ? p.error ?? "tool call failed"
+                ? failedToolResultText(p)
                 : p.elided
                   ? ELIDED_TOOL_OUTPUT
                   : toolResultText(p.result),

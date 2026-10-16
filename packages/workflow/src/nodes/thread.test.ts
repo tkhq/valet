@@ -104,7 +104,7 @@ function makeEngine(
       throw new Error('llmComplete not exercised by this fixture');
     },
     promptOrchestrator: async (prompt, opts) => {
-      calls.push({ kind: 'promptOrchestrator', prompt, dispatchId: opts.dispatchId, queueMode: opts.queueMode, ownerHint: opts.ownerHint });
+      calls.push({ kind: 'promptOrchestrator', prompt, dispatchId: opts.dispatchId, queueMode: opts.queueMode, taskSourceQueueItemId: opts.taskSourceQueueItemId, ownerHint: opts.ownerHint });
       let receipt = receiptsByDispatch.get(opts.dispatchId);
       if (!receipt) {
         receiptCounter += 1;
@@ -291,6 +291,7 @@ describe('executeThread: schema validation failure triggers exactly one repair',
     const repairCalls = calls.filter((c) => c.kind === 'promptOrchestrator' && c.dispatchId === 'workflow:run-6:o:repair');
     expect(repairCalls).toHaveLength(1);
     expect(repairCalls[0]?.queueMode).toBe('followup');
+    expect(repairCalls[0]?.taskSourceQueueItemId).toBe('queue-1');
     expect(repairCalls[0]?.ownerHint).toEqual(OWNER);
     const repairText = String(repairCalls[0]?.prompt);
     expect(repairText).toContain(JSON.stringify(outputSchema));

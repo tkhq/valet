@@ -391,7 +391,8 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       const receipt = await thread.submitPrompt(text, {
         dispatchId: promptOpts.dispatchId,
         model: promptOpts.model,
-        ...(context.presence ? { metadata: { presence: context.presence } } : {}),
+        metadata: { preserveTask: true, ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
+          ...(context.presence ? { presence: context.presence } : {}) },
         queueMode: promptOpts.queueMode,
       });
       return { threadId: thread.id, queueItemId: receipt.queueItemId };
@@ -638,7 +639,8 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
         attributes: { runId },
       };
       const receipt = await thread.submitPrompt(content, {
-        metadata: { ...(ctx.presence ? { presence: ctx.presence } : {}), ...(toolScope ? { toolScope } : {}) },
+        metadata: { preserveTask: true, ...(promptOpts.taskSourceQueueItemId ? { taskSourceQueueItemId: promptOpts.taskSourceQueueItemId } : {}),
+          ...(ctx.presence ? { presence: ctx.presence } : {}), ...(toolScope ? { toolScope } : {}) },
         dispatchId: promptOpts.dispatchId,
         queueMode: promptOpts.queueMode,
       });

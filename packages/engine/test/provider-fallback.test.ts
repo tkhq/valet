@@ -1,3 +1,4 @@
+import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type BusEvent, type CreateSessionOptions, type ResolvedModel, type ToolDef } from "../src/index.js";
@@ -132,7 +133,7 @@ describe("automatic provider fallback", () => {
     await waitFor(() => events.some(({ event }) => event.type === "submission_settled" && event.queueItemId === first.queueItemId));
     primary.setResponses([
       failed("prompt is too long: 289792 tokens > 200000 maximum"),
-      fauxAssistantMessage("## Goal\n- Edit work\n## Progress\n- Inspection complete"),
+      fauxAssistantMessage(COMPLETE_SUMMARY),
       failed(),
     ]);
     backup.setResponses([(context, options) => {
