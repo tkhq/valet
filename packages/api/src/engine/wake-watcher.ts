@@ -53,7 +53,7 @@ export const WAKE_WATCHER_INTERVAL_MS = 30_000;
 export const WAKE_WATCHER_BATCH = 200;
 
 const TERMINAL: readonly WakeupStatus[] = ["done", "cancelled", "expired", "lost"];
-const WAKEUP_KINDS: readonly WakeupKind[] = ["process", "watch", "timer"];
+const WAKEUP_KINDS: readonly WakeupKind[] = ["process", "watch", "timer", "event"];
 const LEASE_OWNER_KINDS: readonly LeaseOwnerKind[] = ["process", "watch", "hold"];
 
 /** The slice of an engine `Session` the watcher uses. */
@@ -265,9 +265,14 @@ export class WakeWatcher {
   private async processRow(now: number, row: Wakeup, progress: { pastCas: boolean }): Promise<void> {
     let sandbox: Sandbox | null = null;
     let probe: WakeupProbe;
-    if (row.kind === "timer" || (row.status === "pending" && now - row.createdAt < PENDING_START_GRACE_MS)) {
-      // A pending process or watch inside its start grace is not probed:
-      // the seam may still be starting it.
+    if (
+      row.kind === "timer" ||
+      row.kind === "event" ||
+      (row.status === "pending" && now - row.createdAt < PENDING_START_GRACE_MS)
+    ) {
+      // A timer and an event waiter run no job, so nothing is probed. A
+      // pending process or watch inside its start grace is not probed: the
+      // seam may still be starting it.
       probe = { kind: "none" };
     } else if (row.execId === undefined) {
       console.error(`WakeWatcher: ${row.kind} wakeup ${row.id} has no execId; it expires at its deadline.`);

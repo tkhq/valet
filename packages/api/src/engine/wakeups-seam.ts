@@ -321,6 +321,11 @@ export function buildWakeupsSeam(
       if (input.kind === "timer") {
         return createTimer(threadId, input.prompt, input.fireAt, input.origin);
       }
+      if (input.kind === "event") {
+        // No tool creates an event waiter through this seam yet; the arm
+        // path (spec 2026-10-15, Part D) replaces this refusal.
+        throw new Error("[wait_for_event] This host cannot create event waiters. Use wake_at to check back later.");
+      }
       const hours = input.kind === "process" ? input.deadlineHours : input.maxHours;
       return createProcessOrWatch(threadId, input.kind, input.command, input.reason, hours, input.origin);
     },

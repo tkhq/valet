@@ -818,7 +818,7 @@ export interface PauseSessionResponse {
 
 // ── REST: background work (wakeups and leases) ───────────────────────────
 
-export type WakeupKindWire = "process" | "watch" | "timer";
+export type WakeupKindWire = "process" | "watch" | "timer" | "event";
 export type WakeupStatusWire = "pending" | "running";
 
 /** One open wakeup of a session (spec 2026-10-08, B1). The command and the in-sandbox exec id are not shipped. */
