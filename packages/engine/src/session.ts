@@ -219,6 +219,8 @@ export interface EmitOptions {
 export interface ThreadInitialSettings {
   model?: string;
   reasoning?: ReasoningLevel;
+  /** A display title for the new thread, stored as `metadata.title`. */
+  title?: string;
 }
 
 export class Session {
@@ -844,7 +846,8 @@ export class Session {
       // Stamped with `createdAt` and never rewritten: a later timezone change
       // must not alter this thread's prompt (TKAI-584).
       metadata: { [THREAD_USER_TIMEZONE_KEY]: this.latestUserTimezone ?? null,
-        ...(this.options.initialToolFocus?.({ key }) ? { [TOOL_SCOPE_KEY]: this.options.initialToolFocus({ key }) } : {}) },
+        ...(this.options.initialToolFocus?.({ key }) ? { [TOOL_SCOPE_KEY]: this.options.initialToolFocus({ key }) } : {}),
+        ...(initial?.title ? { title: initial.title } : {}) },
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
