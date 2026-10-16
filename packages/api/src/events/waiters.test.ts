@@ -107,9 +107,18 @@ describe("matchEventWaiters", () => {
     const h = harness({ slackStillVisible: visible });
     await h.store.createWakeup(waiter());
     expect(await matchEventWaiters(h.deps, ORG, "slack", slackMessage())).toBe(0);
-    expect(visible).toHaveBeenCalledWith("s-1", "C001");
+    expect(visible).toHaveBeenCalledWith({ sessionId: "s-1", orgId: ORG, ownerType: "user", ownerId: "u-001" }, "C001");
     expect((await h.store.getWakeup("wk_1"))?.eventBuffer).toEqual([]);
     expect(h.nudge).not.toHaveBeenCalled();
+  });
+
+  it("checks Slack visibility once per owner and channel for one event", async () => {
+    const visible = vi.fn(async () => true);
+    const h = harness({ slackStillVisible: visible }, { "s-1": ORG, "s-2": ORG });
+    await h.store.createWakeup(waiter());
+    await h.store.createWakeup(waiter({ id: "wk_2", threadId: "t-2", createdAt: 2 }));
+    expect(await matchEventWaiters(h.deps, ORG, "slack", slackMessage())).toBe(2);
+    expect(visible).toHaveBeenCalledTimes(1);
   });
 
   it("does not nudge when no clause matches", async () => {

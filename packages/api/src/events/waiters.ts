@@ -19,6 +19,7 @@ import {
 } from "@valet/engine";
 import type { Providers } from "../providers/types.js";
 import { agentSessions, eventSubscriptions } from "../schema/index.js";
+import type { ChannelVisibility } from "../services/channels.js";
 import { channelVisibility, orgSlackCredential, slackEventChannel } from "../services/thread-access.js";
 import { LINEAR_CLIENT_CREDENTIALS_GRANT, LINEAR_CREDENTIAL_SERVICE } from "../services/linear-app.js";
 import { subscriptionMatchesEvent } from "./match.js";
@@ -36,13 +37,21 @@ const DEFAULT_METRICS: WaiterMatchMetrics = {
   failed: recordEventMatchFailed,
 };
 
+/** A candidate waiter's session, as `sessionOrg` loaded it. */
+export interface WaiterSession {
+  sessionId: string;
+  orgId: string;
+  ownerType: string;
+  ownerId: string;
+}
+
 export interface WaiterMatchDeps {
   engineStore: SessionStore;
   /** The session's org and owner, or null when the session is gone. */
   sessionOrg(sessionId: string): Promise<{ orgId: string; ownerType: string; ownerId: string } | null>;
   plugins: ValetPlugin[];
   /** Whether the session may still read the Slack channel (spec Part E, step 4). */
-  slackStillVisible(sessionId: string, channelId: string): Promise<boolean>;
+  slackStillVisible(session: WaiterSession, channelId: string): Promise<boolean>;
   /** The event's previous status from provider state, or null when unknown. */
   resolvePreviousStatus(service: string, orgId: string, event: NormalizedEvent): Promise<string | null>;
   /** Wakes the WakeWatcher after an append. Absent until the WakeWatcher has a nudge. */
@@ -89,6 +98,17 @@ export async function matchEventWaiters(
   // Each lookup below runs at most once per event, and only when a
   // candidate needs it.
   let previousStatus: Promise<string | null> | undefined;
+  // Waiters of one owner share one visibility answer per channel.
+  const visible = new Map<string, Promise<boolean>>();
+  const stillVisible = (session: WaiterSession, channel: string) => {
+    const key = `${session.orgId}\u0000${session.ownerType}\u0000${session.ownerId}\u0000${channel}`;
+    let answer = visible.get(key);
+    if (!answer) {
+      answer = deps.slackStillVisible(session, channel);
+      visible.set(key, answer);
+    }
+    return answer;
+  };
   let mentionSkipped: Promise<boolean> | undefined;
   const mentionRuleSkips = () => (mentionSkipped ??= (async () => {
     if (event.key !== "slack.message") return false;
@@ -100,8 +120,9 @@ export async function matchEventWaiters(
     const spec = waiter.eventMatch;
     if (!spec) return false;
     // INV-E1: drop a candidate from another org before clause evaluation.
-    const session = await deps.sessionOrg(waiter.sessionId);
-    if (!session || session.orgId !== orgId) return false;
+    const owner = await deps.sessionOrg(waiter.sessionId);
+    if (!owner || owner.orgId !== orgId) return false;
+    const session: WaiterSession = { sessionId: waiter.sessionId, ...owner };
 
     let candidate = event;
     if (needsPreviousStatus(spec) && event.previousStatus === undefined) {
@@ -117,7 +138,7 @@ export async function matchEventWaiters(
     if (service === "slack") {
       const channel = slackEventChannel({ service, refs: event.refs, payload: event.payload });
       // A Slack event with no channel cannot be checked, so it is dropped.
-      if (!channel || !(await deps.slackStillVisible(waiter.sessionId, channel))) return false;
+      if (!channel || !(await stillVisible(session, channel))) return false;
     }
     return deps.engineStore.appendEventMatch(waiter.id, toDigest(candidate, result.derive), deps.now());
   };
@@ -180,7 +201,46 @@ export function linearPreviousStatusRef(payload: unknown): { teamKey?: string; s
   return typeof teamKey === "string" && teamKey ? { teamKey, stateId } : { stateId };
 }
 
-type WaiterProviders = Pick<Providers, "db" | "engineStore" | "engineCredentials" | "onePassword" | "plugins">;
+type WaiterProviders = Pick<Providers, "db" | "engineStore" | "engineCredentials" | "plugins"> & {
+  onePassword?: Providers["onePassword"];
+};
+
+/**
+ * The longest time ingest waits for one provider call in the matcher: the
+ * Linear state lookup or the Slack channel check. Ingest awaits the
+ * matcher inside the webhook request, so a stalled provider must not stall
+ * the response or the subscription deliveries after it (INV-E2).
+ */
+export const WAITER_PROVIDER_TIMEOUT_MS = 2_000;
+
+/** Resolves to `fallback` when `work` does not settle within `ms`. */
+export function withTimeout<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** `fetchImpl` with an abort after `ms`, combined with any caller signal. */
+export function boundedFetch(fetchImpl: typeof fetch, ms: number): typeof fetch {
+  return (input, init) => {
+    const timeout = AbortSignal.timeout(ms);
+    const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    return fetchImpl(input, { ...init, signal });
+  };
+}
+
+export interface WaiterMatchDepsOptions {
+  /** Wakes the WakeWatcher after an append. */
+  nudge?: () => void;
+  /** Overrides `WAITER_PROVIDER_TIMEOUT_MS`. Tests only. */
+  providerTimeoutMs?: number;
+  /** The fetch the Linear state lookup uses. Tests only. */
+  fetch?: typeof fetch;
+  /** Builds the Slack channel check for one viewer. Tests only. */
+  channelVisibility?: (viewer: { orgId: string; userId: string | undefined }) => ChannelVisibility;
+}
 
 /** The org's Linear app-actor token, or null when Linear is not connected with an app. */
 async function linearAppToken(providers: WaiterProviders, orgId: string): Promise<string | null> {
@@ -193,7 +253,13 @@ async function linearAppToken(providers: WaiterProviders, orgId: string): Promis
  * The production matcher deps over the API's providers. Ingest replaces
  * `appMentionCovered` with a check over the subscriptions it already read.
  */
-export function waiterMatchDeps(providers: WaiterProviders, opts: { nudge?: () => void } = {}): WaiterMatchDeps {
+export function waiterMatchDeps(providers: WaiterProviders, opts: WaiterMatchDepsOptions = {}): WaiterMatchDeps {
+  const timeoutMs = opts.providerTimeoutMs ?? WAITER_PROVIDER_TIMEOUT_MS;
+  const linearFetch = boundedFetch(opts.fetch ?? fetch, timeoutMs);
+  const visibilityFor = opts.channelVisibility ?? ((viewer) => channelVisibility(providers, viewer));
+  // One channel check per viewer for the life of these deps, so the
+  // credential and identity lookups it caches are shared.
+  const viewers = new Map<string, ChannelVisibility>();
   const sessionOrg: WaiterMatchDeps["sessionOrg"] = async (sessionId) => {
     const [row] = await providers.db
       .select({ orgId: agentSessions.orgId, ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId, status: agentSessions.status })
@@ -209,19 +275,27 @@ export function waiterMatchDeps(providers: WaiterProviders, opts: { nudge?: () =
     plugins: providers.plugins,
     // A personal session sees what its owner may see. A team session sees
     // only public channels, the rule for content every member reads.
-    async slackStillVisible(sessionId, channelId) {
-      const session = await sessionOrg(sessionId);
-      if (!session) return false;
+    // The live membership check takes no signal, so a slow Slack answer
+    // fails closed after the timeout.
+    async slackStillVisible(session, channelId) {
       const userId = session.ownerType === "user" ? session.ownerId : undefined;
-      return channelVisibility(providers, { orgId: session.orgId, userId })(`slack:${channelId}`);
+      const viewerKey = `${session.orgId}\u0000${userId ?? ""}`;
+      let canSee = viewers.get(viewerKey);
+      if (!canSee) {
+        canSee = visibilityFor({ orgId: session.orgId, userId });
+        viewers.set(viewerKey, canSee);
+      }
+      return withTimeout(canSee(`slack:${channelId}`), timeoutMs, false);
     },
     async resolvePreviousStatus(service, orgId, event) {
       const resolver = providers.plugins.find((p) => p.name === service)?.statusResolver;
       if (!resolver || service !== "linear") return null;
       const ref = linearPreviousStatusRef(event.payload);
       if (!ref) return null;
-      const ctx: DeriveContext = { orgId, appToken: () => linearAppToken(providers, orgId), fetch };
-      return resolver.resolve(ctx, ref);
+      const ctx: DeriveContext = { orgId, appToken: () => linearAppToken(providers, orgId), fetch: linearFetch };
+      // The fetch aborts after the timeout. The race also bounds a fetch
+      // that ignores its signal. No previous status means no match.
+      return withTimeout(resolver.resolve(ctx, ref), timeoutMs, null);
     },
     ...(opts.nudge ? { nudge: opts.nudge } : {}),
     now: Date.now,
