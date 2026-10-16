@@ -18,6 +18,12 @@ export interface BackgroundItem {
   deadlineAt?: number;
   /** When a timer fires. */
   fireAt?: number;
+  /** `event`: the subject's display label (spec Part H). */
+  subjectLabel?: string;
+  /** `event`: the subject's link, when the owning plugin returns one. */
+  subjectUrl?: string;
+  /** `event`: the number of match clauses it waits on. */
+  clauseCount?: number;
   createdAt: number;
   /** `pending` while a process or watch is still starting. A hold is always running. */
   status: WakeupSummary["status"];
@@ -33,6 +39,9 @@ export function backgroundItems(data: ListSessionWakeupsResponse | undefined): B
     threadId: w.threadId,
     ...(w.deadlineAt !== undefined ? { deadlineAt: w.deadlineAt } : {}),
     ...(w.fireAt !== undefined ? { fireAt: w.fireAt } : {}),
+    ...(w.subjectLabel !== undefined ? { subjectLabel: w.subjectLabel } : {}),
+    ...(w.subjectUrl !== undefined ? { subjectUrl: w.subjectUrl } : {}),
+    ...(w.clauseCount !== undefined ? { clauseCount: w.clauseCount } : {}),
     createdAt: w.createdAt,
     status: w.status,
   }));
@@ -125,6 +134,11 @@ const KIND_ICON: Record<BackgroundItem["kind"], LucideIcon> = {
 export interface StatusLine {
   next?: string;
   kinds: Array<{ kind: BackgroundItem["kind"]; label: string }>;
+  /**
+   * This thread's event waiters, each named by its subject instead of
+   * counted generically (spec Part H): "waiting on <subject label>".
+   */
+  eventWaits: Array<{ id: string; label: string }>;
   /** Items outside the open thread. The line counts them and never names them. */
   otherCount: number;
 }
@@ -143,7 +157,10 @@ export function statusLine(items: BackgroundItem[], threadId: string | undefined
     const [singular, plural] = KIND_NOUN[kind];
     return [{ kind, label: `${count} ${count === 1 ? singular : plural}` }];
   });
-  return { ...(next !== undefined ? { next } : {}), kinds, otherCount: other.length };
+  const eventWaits = own
+    .filter((i) => i.kind === "event")
+    .map((i) => ({ id: i.id, label: i.subjectLabel ?? i.reason }));
+  return { ...(next !== undefined ? { next } : {}), kinds, eventWaits, otherCount: other.length };
 }
 
 /** Pure: the status line as one string, such as "next wakeup in 26m · 1 process · +2 in other threads". */
@@ -151,6 +168,7 @@ export function statusLineText(line: StatusLine): string {
   return [
     ...(line.next !== undefined ? [line.next] : []),
     ...line.kinds.map((k) => k.label),
+    ...line.eventWaits.map((w) => `waiting on ${w.label}`),
     ...(line.otherCount > 0 ? [`+${line.otherCount} in other threads`] : []),
   ].join(" · ");
 }
@@ -197,6 +215,26 @@ export function sectionDetail(item: BackgroundItem, now: number = Date.now()): s
   return parts.join(" · ");
 }
 
+/** The event card section's detail: the subject label, the clause count, and the deadline. */
+export interface EventSectionDetail {
+  label: string;
+  clauses?: string;
+  deadline?: string;
+}
+
+/**
+ * Pure: the thread card section's detail for one event waiter (spec Part
+ * H): the subject's display label, the clause count, and the deadline.
+ * The caller renders the label as a link when the item carries a
+ * `subjectUrl`.
+ */
+export function eventSectionDetail(item: BackgroundItem, now: number = Date.now()): EventSectionDetail {
+  const label = item.subjectLabel ?? item.reason;
+  const clauses = item.clauseCount !== undefined ? `${item.clauseCount} ${item.clauseCount === 1 ? "clause" : "clauses"}` : undefined;
+  const deadline = item.deadlineAt !== undefined ? `deadline ${timeUntil(item.deadlineAt, now)}` : undefined;
+  return { label, ...(clauses !== undefined ? { clauses } : {}), ...(deadline !== undefined ? { deadline } : {}) };
+}
+
 /** Pure: the exact time behind an item's relative time, for a hover title. */
 export function itemTimeTitle(item: BackgroundItem): string | undefined {
   if (item.fireAt !== undefined) return `Fires ${formatWhen(item.fireAt)}`;
@@ -211,6 +249,16 @@ export function threadTimerWaits(data: ListSessionWakeupsResponse | undefined): 
     if (w.kind !== "timer" || w.fireAt === undefined) continue;
     const current = waits.get(w.threadId);
     if (current === undefined || w.fireAt < current) waits.set(w.threadId, w.fireAt);
+  }
+  return waits;
+}
+
+/** Pure: each thread's event waiter, by its subject label. Keeps the first one when a thread holds several. */
+export function threadEventWaits(data: ListSessionWakeupsResponse | undefined): Map<string, string> {
+  const waits = new Map<string, string>();
+  for (const w of data?.wakeups ?? []) {
+    if (w.kind !== "event" || w.subjectLabel === undefined || waits.has(w.threadId)) continue;
+    waits.set(w.threadId, w.subjectLabel);
   }
   return waits;
 }
@@ -356,6 +404,9 @@ export function BackgroundWorkStatusLine({
     ...line.kinds.map((k) => (
       <span key={k.kind} className="inline-flex items-center gap-1"><KindIcon kind={k.kind} />{k.label}</span>
     )),
+    ...line.eventWaits.map((w) => (
+      <span key={`event-${w.id}`} className="inline-flex items-center gap-1"><KindIcon kind="event" />waiting on {w.label}</span>
+    )),
     ...(line.otherCount > 0 ? [<span key="other">+{line.otherCount} in other threads</span>] : []),
   ];
 
@@ -418,20 +469,34 @@ export function BackgroundWorkSection({
     <section aria-label="Background work" className="border-t border-line py-3">
       <h2 className="mb-2 font-medium text-muted">Background work</h2>
       <ul>
-        {own.map((item) => (
-          <li key={item.id} className="flex w-full min-w-0 items-start gap-2.5 py-1.5 text-sm text-muted">
-            <KindIcon kind={item.kind} className="mt-0.5 h-4 w-4 text-ink" />
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-ink" title={item.reason}>{item.reason}</p>
-              <p className="text-xs" title={itemTimeTitle(item)}>{sectionDetail(item, now)}</p>
-            </div>
-            {canCancel && (
-              <Button variant="ghost" size="sm" className="shrink-0" onClick={() => ask(item)} aria-label={`Cancel ${item.reason}`}>
-                Cancel
-              </Button>
-            )}
-          </li>
-        ))}
+        {own.map((item) => {
+          const event = item.kind === "event" ? eventSectionDetail(item, now) : null;
+          return (
+            <li key={item.id} className="flex w-full min-w-0 items-start gap-2.5 py-1.5 text-sm text-muted">
+              <KindIcon kind={item.kind} className="mt-0.5 h-4 w-4 text-ink" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-ink" title={item.reason}>{item.reason}</p>
+                {event ? (
+                  <p className="text-xs" title={itemTimeTitle(item)}>
+                    {item.subjectUrl ? (
+                      <a href={item.subjectUrl} target="_blank" rel="noreferrer" className="text-moss hover:underline">{event.label}</a>
+                    ) : (
+                      event.label
+                    )}
+                    {[event.clauses, event.deadline].filter((part): part is string => part !== undefined).map((part) => ` · ${part}`)}
+                  </p>
+                ) : (
+                  <p className="text-xs" title={itemTimeTitle(item)}>{sectionDetail(item, now)}</p>
+                )}
+              </div>
+              {canCancel && (
+                <Button variant="ghost" size="sm" className="shrink-0" onClick={() => ask(item)} aria-label={`Cancel ${item.reason}`}>
+                  Cancel
+                </Button>
+              )}
+            </li>
+          );
+        })}
       </ul>
       {dialog}
     </section>
@@ -450,5 +515,17 @@ export function ThreadTimerLine({ fireAt, className }: { fireAt: number; classNa
         Waiting · next wakeup {timeUntil(fireAt, now)}
       </p>
     </Tooltip>
+  );
+}
+
+/**
+ * The thread list's quiet line under a thread that waits on an event:
+ * "Waiting on <subject label>" (spec Part H).
+ */
+export function ThreadEventLine({ label, className }: { label: string; className?: string }) {
+  return (
+    <p className={cn("truncate text-[11px] leading-4 text-muted", className)}>
+      Waiting on {label}
+    </p>
   );
 }
