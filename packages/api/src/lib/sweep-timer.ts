@@ -28,19 +28,18 @@ export function startSweepTimer(name: string, intervalMs: number, pass: () => Pr
   let inFlight: Promise<void> | null = null;
   let again = false;
   let stopped = false;
-  const begin = () => {
-    inFlight = (async () => {
-      do {
-        again = false;
-        try {
-          await pass();
-        } catch (err) {
-          console.error(`${name}: sweep failed:`, err);
-        }
-      } while (again && !stopped);
-    })().finally(() => {
-      inFlight = null;
-    });
+  // One pass per `begin`. The follow-up check runs in `finally`, after
+  // `inFlight` clears, so a `runNow` that lands while a pass settles is
+  // never lost between the check and the clear.
+  const begin = (): void => {
+    again = false;
+    inFlight = pass()
+      .then(() => undefined)
+      .catch((err) => console.error(`${name}: sweep failed:`, err))
+      .finally(() => {
+        inFlight = null;
+        if (again && !stopped) begin();
+      });
   };
   const timer = setInterval(() => {
     if (inFlight || stopped) return;

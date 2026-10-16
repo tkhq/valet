@@ -91,6 +91,28 @@ describe("startSweepTimer (fix wave 2, M3)", () => {
       }
     });
 
+    it("still runs one more pass when runNow lands as a pass is settling", async () => {
+      // Each delay puts the runNow call at a different microtask after the
+      // pass resolves, so one of them lands between the end of the pass
+      // and the moment the timer clears its in-flight mark.
+      for (let delay = 0; delay < 8; delay++) {
+        let calls = 0;
+        let timer: ReturnType<typeof startSweepTimer> | undefined;
+        timer = startSweepTimer("test", 60_000, async () => {
+          calls++;
+          if (calls === 1) {
+            void (async () => {
+              for (let i = 0; i < delay; i++) await null;
+              timer?.runNow();
+            })();
+          }
+        });
+        timer.runNow();
+        await vi.waitFor(() => expect(calls).toBe(2));
+        await timer.stop();
+      }
+    });
+
     it("runs nothing after stop()", async () => {
       vi.useFakeTimers();
       try {

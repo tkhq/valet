@@ -61,7 +61,7 @@ interface Harness {
   wakeupEnded: ReturnType<typeof vi.fn<(kind: WakeupKind, cause: WakeupCause) => void>>;
   signalLost: ReturnType<typeof vi.fn<(kind: WakeupKind | "hold") => void>>;
   leasesUnannotated: ReturnType<typeof vi.fn<(count: number) => void>>;
-  watcher(extra?: Partial<Pick<WakeWatcherDeps, "batchSize" | "metrics" | "jobLogDir" | "sweepIntervalMs" | "deriveEvent">>): WakeWatcher;
+  watcher(extra?: Partial<Pick<WakeWatcherDeps, "batchSize" | "metrics" | "jobLogDir" | "sweepIntervalMs" | "deriveEvent" | "now">>): WakeWatcher;
 }
 
 function harness(poll: PollScript = async () => ({ status: "running", output: "", nextOffset: 0 })): Harness {
@@ -1232,6 +1232,53 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     releases.shift()?.();
     await watcher.stop();
     expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps an event waiter's details out of the main thread when its thread is gone, with no process_read advice", async () => {
+    const h = harness();
+    h.threads.clear();
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { text: "secret reply" })] }));
+    await h.watcher().sweep(NOW);
+    const { content, opts } = signalOf(h.prompt.mock.calls[0]);
+    expect(opts.threadId).toBeUndefined();
+    const body = typeof content !== "string" && "body" in content ? content.body : "";
+    expect(body).toContain("removed thread matched an event");
+    expect(body).not.toContain("process_read");
+    expect(body).not.toContain("secret reply");
+  });
+
+  it("decides with the watcher clock after a derive, not the pass start", async () => {
+    const h = harness();
+    let clock = NOW;
+    // Stream mode, 100 s after the last emit: inside the 120 s default at
+    // the pass start, past it once the derive took 30 s.
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS })], eventCount: 1, lastEmitAt: NOW - 100_000 }, false));
+    const deriveEvent = async (): Promise<RunDeriveResult> => {
+      clock = NOW + 30_000;
+      return { result: "event", digest: derived };
+    };
+    await h.watcher({ deriveEvent, now: () => clock }).sweep(NOW);
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    expect(signalOf(h.prompt.mock.calls[0]).opts.dispatchId).toBe("wakeup:wk_ev:event:2");
+  });
+
+  it("rolls back the emit when removeEventMatches fails after the CAS: no double count, no duplicate signal", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1)] }, false));
+    const remove = h.store.removeEventMatches.bind(h.store);
+    const spy = vi.spyOn(h.store, "removeEventMatches").mockRejectedValueOnce(new Error("connection reset"));
+    await h.watcher().sweep(NOW);
+    expect(h.prompt).not.toHaveBeenCalled();
+    const after = await h.store.getWakeup("wk_ev");
+    expect(after).toMatchObject({ status: "running", eventCount: 0, windowCount: 0 });
+    expect(after?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["d-1"]);
+    spy.mockImplementation(remove);
+    await h.watcher().sweep(NOW + 1);
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    expect(signalOf(h.prompt.mock.calls[0]).opts.dispatchId).toBe("wakeup:wk_ev:event:1");
+    expect(await h.store.getWakeup("wk_ev")).toMatchObject({ eventCount: 1, windowCount: 1, eventBuffer: [] });
+    await h.watcher().sweep(NOW + 2);
+    expect(h.prompt).toHaveBeenCalledTimes(1);
   });
 
   it("ignores nudge() before start()", async () => {
