@@ -1,11 +1,12 @@
-import { InMemorySessionStore, type NormalizedEvent, type Wakeup } from "@valet/engine";
+import { InMemorySessionStore, type CredentialStore, type NormalizedEvent, type Wakeup } from "@valet/engine";
+import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eventReceipts, eventSubscriptions } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { __resetIngestDropThrottle, ingestEvent, type IngestDeps, type IngestResult } from "./ingest.js";
 import { sanitizeReceiptStages } from "./receipts.js";
-import type { WaiterMatchDeps } from "./waiters.js";
+import { waiterMatchDeps, type WaiterMatchDeps } from "./waiters.js";
 
 const ORG = "acme";
 const THREAD_SUBJECT = "slack:T001/C001/1712345678.000100";
@@ -125,20 +126,75 @@ describe("ingestEvent event waiter matching", () => {
     errors.mockRestore();
   });
 
-  it("keeps the delivery path when the matcher throws for a matched subscription (INV-E2)", async () => {
-    await db.appDb.insert(eventSubscriptions).values({
+  it("keeps the delivery path and receipt stages when the matcher throws for a matched subscription (INV-E2)", async () => {
+    const subscribeMessages = () => db.appDb.insert(eventSubscriptions).values({
       id: "msg-sub", orgId: ORG, ownerType: "user", ownerId: "u-001", createdBy: "u-001",
       name: "Messages", eventKeys: ["slack.message"], filters: [],
       target: { kind: "orchestrator" }, enabled: true, createdAt: 1, updatedAt: 1,
     });
+    await subscribeMessages();
+    const baseline = await ingest(message("Ev-1"));
+    const baselineStages = await stagesOf();
+    db = await freshTestPgDb();
+    __resetIngestDropThrottle();
+    await subscribeMessages();
     const broken = new InMemorySessionStore();
     vi.spyOn(broken, "findEventWaiters").mockRejectedValue(new Error("store down"));
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const result = await ingest(message("Ev-1"), waiterDeps({ engineStore: broken }));
     expect(result).toMatchObject({ duplicate: false, deliveries: 1 });
-    expect((await stagesOf()).map((s) => s.stage)).not.toContain("waiter_match");
+    expect({ ...result, eventId: "" }).toEqual({ ...baseline, eventId: "" });
+    expect(await stagesOf()).toEqual(baselineStages);
     expect(failed).toHaveBeenCalledTimes(1);
     errors.mockRestore();
+  });
+
+  describe("bounded provider calls", () => {
+    const never = () => new Promise<never>(() => undefined);
+    const credentials: CredentialStore = {
+      get: async (_owner, service) => (service === "linear"
+        ? { type: "oauth2", accessToken: "lin-app-token", metadata: { grant: "client_credentials" } }
+        : null),
+      save: async () => undefined,
+      delete: async () => undefined,
+      list: async () => [],
+      compareAndSwap: async () => false,
+    };
+    function boundedDeps(opts: Parameters<typeof waiterMatchDeps>[1]): WaiterMatchDeps {
+      const base = waiterMatchDeps({ db: db.appDb, engineStore: store, engineCredentials: credentials, plugins: [slackPlugin, linearPlugin] }, opts);
+      return { ...base, sessionOrg: async () => ({ orgId: ORG, ownerType: "user", ownerId: "u-001" }), metrics: { matched: vi.fn(), failed } };
+    }
+
+    it("completes ingest and drops the candidate when the Linear state lookup never answers", async () => {
+      const lookups = vi.fn(never);
+      await store.createWakeup({
+        ...waiter(), id: "wk_lin", subjects: ["linear:team/ENG"], createdAt: 2,
+        eventMatch: { clauses: [{ key: "linear.issue.update", status: ["triage"], from_status: ["backlog"] }], once: false, self: [] },
+      });
+      const update: NormalizedEvent = {
+        key: "linear.issue.update", dedupeKey: "lin-timeout-1", occurredAt: "2026-10-15T00:00:00.000Z",
+        refs: {}, summary: "ENG-9 moved", status: "triage", subjects: ["linear:team/ENG", "linear:ENG-9"],
+        payload: { data: { team: { key: "ENG-TIMEOUT" } }, updatedFrom: { stateId: "state-backlog" } },
+      };
+      const started = Date.now();
+      const result = await ingestEvent(
+        { db: db.appDb, plugins: [linearPlugin], waiters: boundedDeps({ providerTimeoutMs: 50, fetch: lookups }) },
+        { orgId: ORG, service: "linear", event: update },
+      );
+      expect(Date.now() - started).toBeLessThan(1_500);
+      expect(result).toMatchObject({ skipped: true });
+      expect(lookups).toHaveBeenCalledTimes(1);
+      expect((await store.getWakeup("wk_lin"))?.eventBuffer).toEqual([]);
+      expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "none", detail: "0 event waiters matched." });
+      expect(failed).not.toHaveBeenCalled();
+    });
+
+    it("completes ingest and drops the candidate when the Slack channel check never answers", async () => {
+      const result = await ingest(message("Ev-slow"), boundedDeps({ providerTimeoutMs: 50, channelVisibility: () => never }));
+      expect(result).toMatchObject({ skipped: true });
+      expect((await store.getWakeup("wk_1"))?.eventBuffer).toEqual([]);
+      expect(await stagesOf()).toContainEqual({ stage: "waiter_match", outcome: "none", detail: "0 event waiters matched." });
+    });
   });
 
   it("skips a bot mention that an enabled app_mention subscription covers (mention rule)", async () => {

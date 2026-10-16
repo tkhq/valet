@@ -402,8 +402,10 @@ export async function drainSlackIngress(providers: Providers): Promise<void> {
         resolveBotIdentity: accessToken ? () => resolveSlackBotIdentity(providers.engineCredentials,
           { orgId: row.orgId, accessToken, teamId: credentialTeamId }) : undefined,
         triggerDefs: slackTriggerDefs(providers.plugins), onIngest: providers.eventDispatcher.nudge,
-        waiters: waiterMatchDeps(providers),
       };
+      const waiters = waiterMatchDeps(providers);
+      // Reuse the bot user id this drain already read, or later resolved.
+      deps.waiters = { ...waiters, slackBotUserId: async (orgId) => deps.botUserId ?? waiters.slackBotUserId(orgId) };
       for (const raw of payload.raws) {
         const receiptId = await recordVerifiedReceipt(db, row.orgId, raw, payload.credentialTeamId, deps,
           { retryNum: typeof payload.retryNum === "string" ? payload.retryNum : undefined,
