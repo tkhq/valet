@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import type { SubmissionResult } from '@valet/engine';
-import { extractStructuredOutput, ValidationError } from '@valet/engine';
+import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, extractStructuredOutput, ValidationError } from '@valet/engine';
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from '@valet/engine/test-helpers';
+import { Type } from 'typebox';
 
 import type { SessionNode } from '../dag/nodes.js';
 import type { WorkflowDefinition } from '../dag/shape.js';
@@ -383,7 +385,13 @@ describe('executeSession: schema validation failure triggers exactly one repair'
     expect(repairText).toContain('Do not repeat actions with side effects');
     expect(repairText).toContain('Do not invent empty arrays');
     expect(repairText).toContain('If work remains incomplete but actionable');
-    expect(repairText).toContain('JSON-only applies to your final reply');
+    expect(repairText).toContain('using available read tools');
+    expect(repairText).toContain('before returning the result');
+    expect(repairText).toContain('remaining authorized work');
+    expect(repairText).toContain('Reuse completed work and do not repeat side effects');
+    expect(repairText).toContain('If a genuine blocker prevents completion');
+    expect(repairText).toContain('report it truthfully');
+    expect(repairText).toContain('JSON-only applies to your final reply, not to intervening tool use');
     const primary = calls.find((call) => call.kind === 'prompt' && call.dispatchId === 'workflow:run-7:s');
     expect(String(primary?.text)).toContain(JSON.stringify(outputSchema));
     expect(String(primary?.text)).toContain('End it with one fenced ```json block');
@@ -605,5 +613,136 @@ describe('sessionDefinition: structured inventory results', () => {
       expect(checkpoint?.result).toMatchObject({ output: { candidates: [] } });
     }
     expect(calls.filter((call) => call.kind === 'prompt')).toHaveLength(2);
+  });
+});
+
+// Scripted compliance verifies runtime wiring, not live model task completion.
+describe('executeSession: actionable repair through the real engine', () => {
+  it.each([false, true])('finishes inspection or fails truthfully when blocked=%s', async (blocked) => {
+    const faux = registerFauxProvider({ provider: `workflow-actionable-repair-${blocked}` });
+    const sessionStore = new InMemorySessionStore();
+    const runtime = new Engine({ providers: {
+      store: sessionStore, stream: new InMemoryEventStream(), sandboxProvider: new VirtualSandboxProvider(),
+    } });
+    const store = new InMemoryWorkflowStore();
+    const reads: string[] = [];
+    let completedActions = 0;
+    const posts: Record<string, unknown>[] = [];
+    const dispatches: WorkflowPromptReceipt[] = [];
+    const { engine } = makeEngine();
+    engine.createSession = async (opts) => runtime.createSession({
+      ...opts, userId: 'u', orgId: 'o', workspace: '/', sandbox: {}, model: faux.getModel(),
+      tools: [
+        {
+          name: 'inspect_repo', description: 'Read repository evidence.',
+          parameters: Type.Object({ repo: Type.String() }),
+          execute: async (args) => {
+            if (!args || typeof args !== 'object' || !('repo' in args) || typeof args.repo !== 'string') {
+              throw new Error('repo is required');
+            }
+            reads.push(args.repo);
+            if (blocked && args.repo === 'beta') {
+              throw new Error('Repository access denied. Request access from the repository owner.');
+            }
+            return { text: `${args.repo}: inspected` };
+          },
+        },
+        {
+          name: 'save_marker', description: 'Record the authorized inspection start once.', parameters: Type.Object({}),
+          execute: async () => { completedActions++; return { text: 'marker saved' }; },
+        },
+      ],
+    });
+    engine.prompt = async (id, text, opts) => {
+      const session = runtime.getSession(id);
+      if (!session) throw new Error('session missing');
+      const receipt = await session.prompt(text, opts);
+      dispatches.push(receipt);
+      return receipt;
+    };
+    engine.isSettled = async (id, queueItemId) => (await sessionStore.getQueueItem(id, queueItemId))?.status === 'settled';
+    engine.awaitResult = async (id, threadId, queueItemId, opts) => {
+      const thread = runtime.getSession(id)?.threadById(threadId);
+      if (!thread) throw new Error('thread missing');
+      return thread.awaitResult(queueItemId, opts);
+    };
+    engine.invokeAction = async (req) => { posts.push(req.params); return { ok: true, result: { posted: true } }; };
+    const output = { repos: ['alpha: inspected', 'beta: inspected'] };
+    const outputSchema = { type: 'object', properties: { repos: { type: 'array', items: { type: 'string' }, minItems: 2 } }, required: ['repos'] };
+    const definition = sessionDefinition({
+      prompt: 'Save the start marker once. Inspect alpha and beta. Return both repository findings.', outputSchema,
+    });
+    definition.nodes.splice(2, 0, {
+      id: 'post', type: 'tool', service: 'test', action: 'post', params: { report: '{{nodes.s.output.output}}' },
+    });
+    definition.edges = [{ from: 't', to: 's' }, { from: 's', to: 'post' }, { from: 'post', to: 'e' }];
+    faux.setResponses([
+      fauxAssistantMessage([
+        fauxToolCall('save_marker', {}, { id: 'marker' }),
+        fauxToolCall('inspect_repo', { repo: 'alpha' }, { id: 'alpha' }),
+      ], { stopReason: 'toolUse' }),
+      fauxAssistantMessage('Alpha evidence recovered. Beta inspection is unfinished.'),
+      (context) => {
+        const last = context.messages.at(-1);
+        const prompt = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content);
+        expect(prompt).toContain('before returning the result');
+        expect(prompt).toContain('JSON-only applies to your final reply, not to intervening tool use');
+        expect(JSON.stringify(context.messages)).toContain('alpha: inspected');
+        return fauxAssistantMessage([fauxToolCall('inspect_repo', { repo: 'beta' }, { id: 'beta' })], { stopReason: 'toolUse' });
+      },
+      (context) => {
+        expect(JSON.stringify(context.messages)).toContain(blocked ? 'Repository access denied' : 'beta: inspected');
+        return fauxAssistantMessage(blocked
+          ? 'Blocked: beta repository access denied. Request access from the repository owner.'
+          : JSON.stringify(output));
+      },
+    ]);
+    const runId = `actionable-${blocked}`;
+    try {
+      await store.createRun(runId, runParams(), definition, 'v1');
+      for (let i = 0; i < 3; i++) {
+        const result = await driveUntilPark(runId, await claimAttempt(store, runId, `owner-${i}`), {
+          store, engine, clock: Date.now,
+        });
+        if (i < 2) {
+          expect(result.status).toBe('parked');
+          const receipt = dispatches[i];
+          const thread = runtime.getSession(`wf:${runId}:s`)?.threadById(receipt.threadId);
+          if (!thread) throw new Error('thread missing');
+          await thread.awaitResult(receipt.queueItemId, { timeoutMs: 2000 });
+        } else {
+          expect(result).toMatchObject({ status: 'settled', outcome: blocked ? 'failed' : 'completed' });
+        }
+      }
+      const checkpoints = await store.getCheckpoints(runId);
+      const research = checkpoints.find((cp) => cp.nodeId === 's');
+      expect(research?.status).toBe(blocked ? 'failed' : 'completed');
+      expect(research?.effects).toMatchObject({ repairAttempted: true, firstQueueItemId: dispatches[0].queueItemId });
+      expect(dispatches).toHaveLength(2);
+      const items = await Promise.all(dispatches.map((receipt) => sessionStore.getQueueItem(`wf:${runId}:s`, receipt.queueItemId)));
+      expect(items.map((item) => item?.dispatchId)).toEqual([`workflow:${runId}:s`, `workflow:${runId}:s:repair`]);
+      expect(items.every((item) => item?.attemptCount === 1 && item.status === 'settled')).toBe(true);
+      const entries = await sessionStore.getEntries(`wf:${runId}:s`, dispatches[0].threadId);
+      const betaCall = entries.find((entry) => entry.type === 'message' && entry.parts?.some((part) => part.type === 'tool_call' && part.callId === 'beta'));
+      expect(betaCall?.queueItemId).toBe(dispatches[1].queueItemId);
+      expect(new Set(dispatches.map((receipt) => receipt.threadId)).size).toBe(1);
+      expect(new Set(dispatches.map((receipt) => receipt.queueItemId)).size).toBe(2);
+      expect(reads).toEqual(['alpha', 'beta']);
+      expect(completedActions).toBe(1);
+      expect(faux.getPendingResponseCount()).toBe(0);
+      if (blocked) {
+        expect(research?.result).toBeUndefined();
+        expect(research?.error).toContain('JSON');
+        expect(entries.at(-1)).toMatchObject({ content: 'Blocked: beta repository access denied. Request access from the repository owner.' });
+        expect(checkpoints.find((cp) => cp.nodeId === 'post')?.status).not.toBe('completed');
+        expect(posts).toEqual([]);
+      } else {
+        expect(research?.result).toMatchObject({ output });
+        expect(posts).toEqual([{ report: output }]);
+      }
+    } finally {
+      await runtime.deleteSession(`wf:${runId}:s`);
+      faux.unregister();
+    }
   });
 });

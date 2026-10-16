@@ -276,9 +276,9 @@ describe("compaction: rehydrate replaces covered entries with the summary", () =
 });
 
 describe("compaction: auto-continue", () => {
-  it.each([undefined, "workflow"] as const)("after proactive compaction, continues with guidance for purpose=%s", async (purpose) => {
+  it.each([undefined, "interactive", "orchestrator", "child", "workflow"] as const)("continues purpose %s inside the original submission after compaction", async (purpose) => {
     const faux = registerFauxProvider({
-      provider: "compact-autocontinue",
+      provider: `compact-autocontinue-${purpose ?? "default"}`,
       models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
     });
     faux.setResponses([
@@ -289,7 +289,15 @@ describe("compaction: auto-continue", () => {
         "## Goal\n- t\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- (none)\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
       ),
       // Auto-continue turn → assistant response.
-      fauxAssistantMessage("continued from where I left off"),
+      (context) => {
+        const last = context.messages.at(-1);
+        expect(last?.role).toBe("user");
+        const text = typeof last?.content === "string" ? last.content : JSON.stringify(last?.content);
+        expect(text).toContain(purpose === "workflow"
+          ? "Finish the remaining authorized work"
+          : "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.");
+        return fauxAssistantMessage(purpose === "interactive" ? "Which optional task should I do next?" : "continued from where I left off");
+      },
     ]);
     const { engine, store, events } = makeEngine();
     const session = await engine.createSession({
@@ -347,7 +355,18 @@ describe("compaction: auto-continue", () => {
     );
     expect(autoContinue).toBeDefined();
     if (autoContinue?.type === "message") {
-      expect(autoContinue.content).toContain(purpose === "workflow" ? "A progress recap is not completion" : "Continue if you have next steps");
+      if (purpose === "workflow") {
+        expect(autoContinue.content).toContain("Finish the remaining authorized work");
+        expect(autoContinue.content).toContain("A progress recap is not completion");
+        expect(autoContinue.content).toContain("Return the required final result");
+        expect(autoContinue.content).toContain("report that blocker truthfully");
+        expect(autoContinue.content).toContain("Do not invent results, bypass approvals, or repeat completed side effects");
+      } else {
+        expect(autoContinue.content).toBe(
+          "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
+        );
+      }
+      expect(autoContinue.metadata).toEqual({ compaction_continue: true, synthetic: true });
       // The continuation answers the same reader as the turn it continues:
       // it inherits the interrupted item's channel mark, so the outbound
       // channel path does not classify it as a web prompt (TKAI-323).
@@ -358,18 +377,19 @@ describe("compaction: auto-continue", () => {
     expect(autoContinue?.queueItemId).toBe(receipt.queueItemId);
     const compaction = entries.find((entry) => entry.type === "compaction");
     expect(autoContinue?.parentId).toBe(compaction?.id);
+    const expectedText = purpose === "interactive" ? "Which optional task should I do next?" : "continued from where I left off";
     const lastAssistant = entries
       .filter((e) => e.type === "message" && e.role === "assistant")
       .at(-1);
     expect(lastAssistant?.type === "message" && lastAssistant.content).toBe(
-      "continued from where I left off",
+      expectedText,
     );
     expect(lastAssistant?.queueItemId).toBe(receipt.queueItemId);
     expect(lastAssistant?.parentId).toBe(autoContinue?.id);
     const result = await thread.awaitResult(receipt.queueItemId);
     expect(result).toMatchObject({
       outcome: "completed",
-      text: "continued from where I left off",
+      text: expectedText,
     });
     const settled = events.filter(
       (event) =>
@@ -512,9 +532,52 @@ describe("compaction: auto-continue", () => {
     faux.unregister();
   });
 
-  it("autoContinue: false suppresses the synthetic follow-up", async () => {
+  it.each(["original", "summarizer"] as const)("does not call the continuation provider after a workflow abort during the %s call", async (phase) => {
     const faux = registerFauxProvider({
-      provider: "compact-autocontinue-off",
+      provider: `compact-workflow-abort-${phase}`,
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    let started = false;
+    let finishSummary: (() => void) | undefined;
+    const pending = (_context: unknown, options: { signal?: AbortSignal } | undefined) => new Promise<ReturnType<typeof fauxAssistantMessage>>((resolve, reject) => {
+      finishSummary = () => resolve(fauxAssistantMessage("## Goal\n- Finish inspection"));
+      started = true;
+      options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+    faux.setResponses([
+      ...(phase === "summarizer" ? [fauxAssistantMessage("unfinished inspection")] : []),
+      pending,
+      fauxAssistantMessage("must not continue"),
+    ]);
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u", orgId: "o", workspace: "/", sandbox: {}, model: faux.getModel("tiny")!,
+      purpose: "workflow", compaction: { tailTurns: 1 },
+    });
+    const thread = session.thread();
+    try {
+      await store.appendEntries(session.id, thread.id, [
+        { id: "u-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "first prompt", createdAt: 1 },
+        { id: "a-1", sessionId: session.id, threadId: thread.id, parentId: "u-1", type: "message", role: "assistant", content: "first response", createdAt: 2 },
+      ]);
+      const receipt = await session.prompt(OVER_BUDGET_PROMPT);
+      await waitFor(() => started);
+      await thread.abortSubmission(receipt.queueItemId);
+      // Post-turn summarization has no agent-loop signal. Let it return after cancellation.
+      if (phase === "summarizer") finishSummary?.();
+      expect(await thread.awaitResult(receipt.queueItemId)).toMatchObject({ outcome: "aborted" });
+      expect((await store.getEntries(session.id, thread.id)).some((entry) => entry.type === "message" && entry.content === "must not continue")).toBe(false);
+      expect(faux.getPendingResponseCount()).toBe(1);
+    } finally {
+      finishSummary?.();
+      await engine.deleteSession(session.id);
+      faux.unregister();
+    }
+  });
+
+  it.each(["interactive", "workflow"] as const)("autoContinue: false suppresses the %s synthetic follow-up", async (purpose) => {
+    const faux = registerFauxProvider({
+      provider: `compact-autocontinue-off-${purpose}`,
       models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
     });
     faux.setResponses([
@@ -530,6 +593,7 @@ describe("compaction: auto-continue", () => {
       workspace: "/",
       sandbox: {},
       model: faux.getModel("tiny")!,
+      purpose,
       compaction: { tailTurns: 1, autoContinue: false },
     });
     const thread = session.thread();
