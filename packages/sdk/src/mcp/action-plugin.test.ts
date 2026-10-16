@@ -945,4 +945,114 @@ describe('mcpActionPlugin auth-rejection messages (HTTP 401/403)', () => {
       error: 'MCP linear tools/call failed: HTTP 500 — server exploded',
     });
   });
+
+  it('does not misclassify a 500 whose body text contains "HTTP 401" as an auth rejection', async () => {
+    // Fix round 2, finding 1: detection must key off McpHttpError.status, not
+    // a text match on the message — the message's tail is the server's own
+    // response body, verbatim.
+    vi.stubGlobal('fetch', makeFetchMockFailingCall(500, 'upstream returned HTTP 401'));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: null,
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+
+    expect(result).toEqual({
+      success: false,
+      error: 'MCP linear tools/call failed: HTTP 500 — upstream returned HTTP 401',
+    });
+  });
+});
+
+// ── auth-rejection messages on discovery (fix round 2, finding 2) ──────
+
+function makeFetchMockFailingList(status: number, body = 'nope') {
+  return vi.fn(async (url: string | URL, init?: RequestInit) => {
+    const reqBody = JSON.parse(String(init?.body ?? '{}')) as { method: string; id?: number };
+    if (reqBody.method === 'initialize') {
+      return jsonResponse(
+        {
+          jsonrpc: '2.0',
+          id: reqBody.id,
+          result: { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'test-server', version: '1.0.0' } },
+        },
+        { 'mcp-session-id': 'sess-1' },
+      );
+    }
+    if (reqBody.method === 'notifications/initialized') return jsonResponse({});
+    if (reqBody.method === 'tools/list') return errorResponse(status, body);
+    throw new Error(`unexpected MCP method in test fixture: ${reqBody.method}`);
+  });
+}
+
+describe('mcpActionPlugin auth-rejection messages on discovery (HTTP 401/403)', () => {
+  it('rethrows the app-token guidance when discovery is rejected using the app token', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingList(401));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: null,
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+
+    await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
+      "linear rejected the Valet app's access. Ask an admin to reconnect the Linear app in Settings, Integrations, or connect your own Linear account.",
+    );
+  });
+
+  it('rethrows the personal reconnect guidance when discovery is rejected using the personal token', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingList(403));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+
+    await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
+      'linear rejected your connected account. Reconnect Linear in Settings, Integrations.',
+    );
+  });
+
+  it('rethrows a non-auth discovery failure unchanged (HTTP 500)', async () => {
+    vi.stubGlobal('fetch', makeFetchMockFailingList(500, 'server exploded'));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+      displayName: 'Linear',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: null,
+      appService: 'linear:app',
+    });
+
+    await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
+      'MCP linear tools/list failed: HTTP 500 — server exploded',
+    );
+  });
 });
