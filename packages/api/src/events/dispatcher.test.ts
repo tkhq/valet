@@ -119,6 +119,30 @@ describe("EventDispatcher", () => {
     return row;
   }
 
+  it.each(["new", "existing"] as const)("routes an explicit %s conversation before native event routing", async mode => {
+    const target = mode === "new" ? { mode } : { mode, sessionId: "chosen-session", threadId: "chosen-thread" };
+    const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator", thread: target } });
+    const delivered: Parameters<OrchestratorDeliverFn>[0][] = [];
+    const dispatcher = new EventDispatcher({ db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+      deliverToOrchestrator: async args => { delivered.push(args); }, plugins: [githubPlugin] });
+    await dispatcher.pollOnce();
+    expect((await getDelivery(deliveryId)).status).toBe("delivered");
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({ subscriptionThread: target, destinationUserId: "user-1", threadKey: mode === "new" ? `web:event:${deliveryId}` : "subscription:chosen-session:chosen-thread" });
+    if (mode === "existing") expect(delivered[0]).toMatchObject({ target: { sessionId: "chosen-session", threadId: "chosen-thread" } });
+  });
+
+  it("passes the Slack source audience to the admission path", async () => {
+    const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator", thread: { mode: "new" } },
+      service: "slack", eventKey: "slack.reaction_added", payload: { item: { channel: "C-source" } } });
+    const delivered: Parameters<OrchestratorDeliverFn>[0][] = [];
+    const dispatcher = new EventDispatcher({ db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+      deliverToOrchestrator: async args => { delivered.push(args); }, plugins: [githubPlugin] });
+    await dispatcher.pollOnce();
+    expect((await getDelivery(deliveryId)).status).toBe("delivered");
+    expect(delivered[0]).toMatchObject({ subscriptionSourceKey: "slack-events:C-source" });
+  });
+
   it.each([
     { policy: "always", member: true, enabled: true, sameOrg: true, expected: "delivered" },
     { policy: "ignoreIfMyTeamSubscribed", member: true, enabled: true, sameOrg: true, expected: "skipped" },

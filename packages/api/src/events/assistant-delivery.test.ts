@@ -8,10 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EngineHost } from "../engine/host.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
-import { assistantExecutions, assistants, sessionThreads, teams, users } from "../schema/index.js";
+import { assistantExecutions, assistants, sessionThreads, teams, teamMembers, orgMembers, slackChannelPrivacy, users } from "../schema/index.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
+import { resetThreadAccessCache } from "../services/thread-access.js";
 import { deliverToAssistantThread } from "./assistant-delivery.js";
 
 const ORG = "org-1";
@@ -57,6 +58,8 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
+    resetThreadAccessCache();
     await engineHost.destroyAll();
     faux.unregister();
     vi.unstubAllEnvs();
@@ -68,6 +71,108 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     body,
     attributes: {},
     origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "auto" as const },
+  });
+
+  it.each(["user", "team"] as const)("delivers new visible %s conversations once across retries", async type => {
+    const deps = { db: testDb.appDb, engineHost };
+    const owner = { type, id: type === "user" ? USER : "subscription-team" };
+    await testDb.appDb.insert(orgMembers).values({ orgId: ORG, userId: USER, role: "member" });
+    if (type === "team") {
+      await testDb.appDb.insert(teams).values({ id: owner.id, orgId: ORG, name: "Subscriptions", createdAt: 1 });
+      await testDb.appDb.insert(teamMembers).values({ teamId: owner.id, userId: USER, role: "member" });
+    }
+    const args = { orgId: ORG, owner, actorUserId: USER, destinationUserId: USER,
+      subscriptionThread: { mode: "new" as const }, threadKey: "web:event:visible-retry",
+      signal: { kind: "signal" as const, signalType: "github.issues.opened", body: "Subscription event" },
+      dispatchId: "event:visible-retry", mismatchReason: "test" };
+    await deliverToAssistantThread(deps, args);
+    engineHost.evictAll();
+    await deliverToAssistantThread(deps, args);
+    const result = await testDb.appDb.execute(sql`SELECT q.session_id, t.key FROM engine_queue_items q
+      JOIN engine_threads t ON t.id = q.thread_id AND t.session_id = q.session_id WHERE q.dispatch_id = 'event:visible-retry'`) as { rows: Array<{ session_id: string; key: string }> };
+    expect(result.rows).toEqual([{ session_id: expect.any(String), key: "web:event:visible-retry" }]);
+  });
+
+  it.each(["user", "team"] as const)("rechecks %s destinations before delivery and never falls back after revocation", async type => {
+    const deps = { db: testDb.appDb, engineHost };
+    const owner = { type, id: type === "user" ? USER : "subscription-existing-team" };
+    await testDb.appDb.insert(orgMembers).values({ orgId: ORG, userId: USER, role: "member" });
+    if (type === "team") {
+      await testDb.appDb.insert(teams).values({ id: owner.id, orgId: ORG, name: "Subscriptions", createdAt: 1 });
+      await testDb.appDb.insert(teamMembers).values({ teamId: owner.id, userId: USER, role: "member" });
+    }
+    const { session } = await ensureAssistantExecution(deps, owner, { actorUserId: USER, orgId: ORG }, "web:existing-target");
+    const thread = await session.createThread("web:existing-target");
+    await thread.pause();
+    const target = { sessionId: session.id, threadId: thread.id };
+    const args = { orgId: ORG, owner, actorUserId: USER, destinationUserId: USER,
+      subscriptionThread: { mode: "existing" as const, ...target }, target,
+      threadKey: "subscription:existing-target", signal: channelSignal("selected conversation"),
+      dispatchId: "event:existing-first", mismatchReason: "test" };
+    await deliverToAssistantThread(deps, args);
+    await testDb.appDb.insert(sessionThreads).values({ id: thread.id, sessionId: session.id, createdAt: 1, archivedAt: 1 });
+    await expect(deliverToAssistantThread(deps, { ...args, dispatchId: "event:existing-archived" })).rejects.toThrow();
+    await testDb.appDb.update(sessionThreads).set({ archivedAt: null }).where(eq(sessionThreads.id, thread.id));
+    await testDb.appDb.delete(orgMembers).where(eq(orgMembers.userId, USER));
+    await expect(deliverToAssistantThread(deps, { ...args, dispatchId: "event:existing-revoked" })).rejects.toThrow("Choose an active conversation");
+    expect((await session.providers.store.listUnsettledSubmissions(session.id)).map(item => item.dispatchId)).toEqual(["event:existing-first"]);
+    // An already admitted event remains recoverable after access changes.
+    await expect(deliverToAssistantThread(deps, args)).resolves.toBeUndefined();
+  });
+
+  it.each([
+    { type: "team" as const, privateChannel: true, allowed: false },
+    { type: "team" as const, privateChannel: false, allowed: true },
+    { type: "user" as const, privateChannel: true, allowed: true },
+  ])("checks the $type Slack source audience after admission recovery (private=$privateChannel)", async ({ type, privateChannel, allowed }) => {
+    const db = testDb.appDb;
+    const deps = { db, engineHost };
+    const owner = { type, id: type === "user" ? USER : "source-team" };
+    await db.insert(orgMembers).values({ orgId: ORG, userId: USER, role: "member" });
+    if (type === "team") {
+      await db.insert(teams).values({ id: owner.id, orgId: ORG, name: "Sources", createdAt: 1 });
+      await db.insert(teamMembers).values({ teamId: owner.id, userId: USER, role: "member" });
+    }
+    await db.insert(slackChannelPrivacy).values({ orgId: ORG, channelId: "C-source", isPrivate: privateChannel, checkedAt: Date.now() });
+    const args = { orgId: ORG, owner, actorUserId: USER, destinationUserId: USER,
+      subscriptionThread: { mode: "new" as const }, subscriptionSourceKey: "slack-events:C-source",
+      threadKey: "web:event:source-audience", signal: channelSignal("Source event"), dispatchId: "event:source-audience", mismatchReason: "test" };
+    if (!allowed) {
+      await expect(deliverToAssistantThread(deps, args)).rejects.toThrow("channel routing");
+      const rows = await db.execute(sql`SELECT id FROM engine_queue_items WHERE dispatch_id = 'event:source-audience'`) as { rows: unknown[] };
+      expect(rows.rows).toHaveLength(0);
+    } else {
+      await deliverToAssistantThread(deps, args);
+      await db.update(slackChannelPrivacy).set({ isPrivate: true }).where(eq(slackChannelPrivacy.orgId, ORG));
+      // Retrying acknowledges the original admission even after its source changes.
+      await expect(deliverToAssistantThread(deps, args)).resolves.toBeUndefined();
+      const rows = await db.execute(sql`SELECT id FROM engine_queue_items WHERE dispatch_id = 'event:source-audience'`) as { rows: unknown[] };
+      expect(rows.rows).toHaveLength(1);
+    }
+  });
+
+  it("refreshes a stale public Slack source before admitting a new delivery", async () => {
+    const db = testDb.appDb;
+    const owner = { type: "team", id: "stale-source-team" } as const;
+    await db.insert(orgMembers).values({ orgId: ORG, userId: USER, role: "member" });
+    await db.insert(teams).values({ id: owner.id, orgId: ORG, name: "Sources", createdAt: 1 });
+    await db.insert(teamMembers).values({ teamId: owner.id, userId: USER, role: "member" });
+    await db.insert(slackChannelPrivacy).values({ orgId: ORG, channelId: "C-stale-source", isPrivate: false, checkedAt: 1 });
+    const engineCredentials = new PgCredentialStore(testDb.pgdb, deriveSecretKey("test-key"));
+    await engineCredentials.save({ type: "org", id: ORG }, "slack", { type: "oauth2", accessToken: "xoxb-test" });
+    const realFetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.hostname !== "slack.com") return realFetch(input, init);
+      return new Response(JSON.stringify({ ok: true, channel: { name: "source", is_private: false } }), { headers: { "content-type": "application/json" } });
+    });
+    await deliverToAssistantThread({ db, engineHost, engineCredentials }, {
+      orgId: ORG, owner, actorUserId: USER, destinationUserId: USER, subscriptionThread: { mode: "new" },
+      subscriptionSourceKey: "slack-events:C-stale-source", threadKey: "web:event:stale-source",
+      signal: channelSignal("Public source event"), dispatchId: "event:stale-source", mismatchReason: "test",
+    });
+    const [privacy] = await db.select().from(slackChannelPrivacy).where(eq(slackChannelPrivacy.channelId, "C-stale-source"));
+    expect(privacy?.checkedAt).toBeGreaterThan(1);
   });
 
   it("creates a shared runtime with a machine actor and persists that identity", async () => {

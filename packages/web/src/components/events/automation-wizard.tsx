@@ -38,13 +38,14 @@ import { useSubscriptionMatch, validateSubscriptionFilters } from "./subscriptio
 import { Link } from "@tanstack/react-router";
 import type {
   EventSubscriptionAudienceWire,
+  EventSubscriptionThreadWire,
   EventSubscriptionCollisionsWire,
   EventSubscriptionFilterWire,
 } from "@valet/api/wire";
 import { useEffect, useRef, useState } from "react";
 import { useCreateEventSubscription, useEventCatalog, useFilterOptions } from "~/api/events";
 import { useIdentityLinks } from "~/api/queries";
-import { useTeams } from "~/api/settings";
+import { useMe, useTeams } from "~/api/settings";
 import { useCreateSchedule, useWorkflows } from "~/api/workflows";
 import { CollisionNotice, collisionsFromError } from "~/components/events/collision-notice";
 import {
@@ -69,6 +70,8 @@ import { errorText } from "~/lib/error-text";
 // The reply outcome always subscribes to this one event key, so the reader
 // never sees a raw event picker for it.
 import { useActiveWorkspace } from "~/components/workspace-clause";
+import { describeThreadDestination } from "./subscription-labels";
+import { SubscriptionThreadDestination } from "./subscription-thread-destination";
 import { SLACK_APP_MENTION } from "~/lib/slack-mention";
 
 /** One picked channel: the Slack id plus the display label the picker showed. */
@@ -149,6 +152,8 @@ export function AutomationWizard({
   });
   // Seeded from the active workspace at mount, then resynced when the
   // workspace changes (below) unless the reader already picked a target.
+  const me = useMe();
+  const [threadChoice, setThreadChoice] = useState<EventSubscriptionThreadWire | null | undefined>();
   const [target, setTarget] = useState<TargetChoice>(() => initialTarget(scopedTeamId));
   // The reply outcome's own channel selection and follow toggle. Held apart
   // from `filterRows` so the raw-filter machinery stays owned by the other
@@ -178,6 +183,7 @@ export function AutomationWizard({
   // different outcome's flow, so an outcome switch resets both.
   function chooseOutcome(next: Outcome) {
     setOutcome(next);
+    setThreadChoice(undefined);
     setAnyChannel(false);
     setReplyChannels([]);
   }
@@ -193,6 +199,7 @@ export function AutomationWizard({
   function chooseTarget(next: TargetChoice) {
     userTouched.current = true;
     setTarget(next);
+    setThreadChoice(undefined);
   }
   useEffect(() => {
     setTarget((held) => {
@@ -216,6 +223,11 @@ export function AutomationWizard({
   // outcome forbids.
   const isEventOutcome = outcome === "workflow" || outcome === "notify" || outcome === "advanced" || outcome === "thread";
 
+  const destination = threadChoice === undefined ? ([...keys].some(key => key.startsWith("slack.")) ? null : { mode: "new" as const }) : threadChoice;
+  const usesDestination = isEventOutcome && target.kind === "orchestrator" && target.orchestrator !== "org";
+  const destinationReady = !usesDestination || destination?.mode !== "existing" || (!!destination.sessionId && !!destination.threadId);
+  const targetScopeKey = target.kind === "orchestrator" ? target.orchestrator === "team" ? target.teamId : target.orchestrator : target.workflowId;
+  useEffect(() => setThreadChoice(undefined), [targetScopeKey]);
   const workflowChosen = target.kind === "workflow" && target.workflowId.length > 0;
   const targetReady = replyTeam
     ? target.kind === "orchestrator" && target.orchestrator === "team" && target.teamId === replyTeam.id
@@ -237,13 +249,13 @@ export function AutomationWizard({
       if (outcome === "thread") return threadPreset !== null;
       return isSchedule ? cron.trim().length > 0 : keys.size > 0;
     }
-    if (step === 3) return targetReady;
+    if (step === 3) return targetReady && destinationReady;
     return true;
   }
 
   const isLastStep = step === plan.count;
   const canCreate =
-    name.trim().length > 0 && targetReady && (outcome !== "reply" || replyScoped) && !isPending;
+    name.trim().length > 0 && targetReady && (target.kind !== "orchestrator" || destinationReady) && (outcome !== "reply" || replyScoped) && !isPending;
 
   function next() {
     setError(null);
@@ -360,7 +372,7 @@ export function AutomationWizard({
           name: name.trim(),
           eventKeys: [...keys],
           filters,
-          target: { ...eventTarget, ...presenceFields },
+          target: { ...eventTarget, ...presenceFields, ...(eventTarget.kind === "orchestrator" && eventTarget.orchestrator !== "org" && destination ? { thread: destination } : {}) },
           // The raw picker can select `slack.app_mention` too; the flag only
           // means anything there, and the server ignores it elsewhere.
           ...(anyChannel && keys.has(SLACK_APP_MENTION) ? { anyChannel: true } : {}),
@@ -472,19 +484,26 @@ export function AutomationWizard({
           )}
 
           {step === 3 && (isEventOutcome || isSchedule) && (
-            <ThenStep
-              target={target}
-              onTargetChange={chooseTarget}
-              scopedTeam={scopedTeam}
-              workflows={workflows}
-              isSchedule={isSchedule}
-              allowWorkflow={outcome === "workflow" || isSchedule || outcome === "advanced"}
-              allowOrchestrator={outcome !== "workflow"}
-              prompt={prompt}
-              onPromptChange={setPrompt}
-              promptTemplates={promptTemplates}
-              onPromptTemplatesChange={setPromptTemplates}
-            />
+            <>
+              <ThenStep
+                target={target}
+                onTargetChange={chooseTarget}
+                scopedTeam={scopedTeam}
+                workflows={workflows}
+                isSchedule={isSchedule}
+                allowWorkflow={outcome === "workflow" || isSchedule || outcome === "advanced"}
+                allowOrchestrator={outcome !== "workflow"}
+                prompt={prompt}
+                onPromptChange={setPrompt}
+                promptTemplates={promptTemplates}
+                onPromptTemplatesChange={setPromptTemplates}
+              />
+              {!isSchedule && target.kind === "orchestrator" && target.orchestrator !== "org" && me.data && (
+                <SubscriptionThreadDestination key={target.orchestrator === "team" ? target.teamId : me.data.id}
+                  owner={{ ownerType: target.orchestrator === "team" ? "team" : "user", ownerId: target.orchestrator === "team" ? target.teamId : me.data.id }}
+                  value={destination} onChange={setThreadChoice} />
+              )}
+            </>
           )}
 
           {isLastStep && !isSchedule && target.kind === "orchestrator" && target.orchestrator === "user" && (
@@ -502,7 +521,7 @@ export function AutomationWizard({
               workflowId={target.kind === "workflow" ? target.workflowId : undefined}
               when={isSchedule ? `${cron} (${timezone})` : outcome === "reply" ? "Slack @-mention" : [...keys].join(", ")}
               scope={outcome === "reply" ? (anyChannel ? "Any accessible channel" : replyChannels.map(c => c.label).join(", ")) : isSchedule ? (scopedTeam?.name ?? "Personal") : describeFilters(filterRows) || "All matching events"}
-              destination={describeTarget(target, workflows, teams, scopedTeam)}
+              destination={`${describeTarget(target, workflows, teams, scopedTeam)}${usesDestination ? ` · ${describeThreadDestination(destination)}` : ""}`}
               summary={summarize({
                 outcome,
                 keys,
@@ -575,6 +594,7 @@ export function AutomationWizard({
 type EventSubscriptionTarget =
   | { kind: "workflow"; workflowId: string }
   | (OrchestratorChoice & {
+      thread?: EventSubscriptionThreadWire;
       deliveryPolicy?: DeliveryPreferencesValue["deliveryPolicy"];
       pauseOnOverlap?: boolean;
       follow?: boolean;

@@ -4,12 +4,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import { ApiError } from "~/api/client";
 import type { EventSubscriptionWire } from "@valet/api/wire";
-import { EditSubscriptionDialog } from "./edit-subscription-dialog";
+import { EditSubscriptionForm } from "./edit-subscription-form";
 
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...await importOriginal<typeof import("@tanstack/react-router")>(),
   Link: ({ to, children }: { to: string; children: ReactNode }) => <a href={to}>{children}</a>,
 }));
+vi.mock("./subscription-thread-destination", () => ({ SubscriptionThreadDestination: () => <div>Run in</div> }));
 const patch = vi.fn();
 vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: { services: [{ service: "slack", entries: [
@@ -28,12 +29,12 @@ const sub: EventSubscriptionWire = {
 const save = () => fireEvent.click(screen.getByRole("button", { name: "Save" }));
 function edit(value = sub) {
   const close = vi.fn();
-  render(<EditSubscriptionDialog open sub={value} targetLabel="Personal assistant" onOpenChange={close} />);
+  render(<EditSubscriptionForm sub={value} targetLabel="Personal assistant" onOpenChange={close} />);
   return close;
 }
 beforeEach(() => patch.mockReset());
 
-describe("EditSubscriptionDialog match form", () => {
+describe("EditSubscriptionForm match form", () => {
   it("closes an unchanged multi-channel rule and sends only a changed name", () => {
     const close = edit();
     save();
@@ -129,4 +130,13 @@ it("rejects an insecure avatar URL before sending a subscription edit", () => {
   save();
   expect(patch).not.toHaveBeenCalled();
   expect(screen.getAllByText(/Enter an HTTPS URL/).length).toBeGreaterThan(0);
+});
+
+it("does not overwrite fields changed by another editor during a same-ID refresh", () => {
+  const value: EventSubscriptionWire = { ...sub, target: { kind: "orchestrator", orchestrator: "user" } };
+  const view = render(<EditSubscriptionForm sub={value} targetLabel="Personal assistant" onOpenChange={() => {}} />);
+  view.rerender(<EditSubscriptionForm sub={{ ...value, filters: [], target: { kind: "orchestrator", orchestrator: "user", systemPrompt: "New instructions" } }} targetLabel="Personal assistant" onOpenChange={() => {}} />);
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "My rename" } });
+  save();
+  expect(patch.mock.calls[0][0]).toEqual({ id: "sub-1", body: { name: "My rename" } });
 });

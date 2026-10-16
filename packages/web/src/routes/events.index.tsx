@@ -49,6 +49,9 @@ export function EventsPage() {
   // this module and never builds a real router context.
   const search = readEventsSearch(useSearch({ strict: false }));
   const navigate = useNavigate();
+  useEffect(() => {
+    if (search.review) void navigate({ to: "/events/subscriptions/$subscriptionId", params: { subscriptionId: search.review }, replace: true });
+  }, [search.review, navigate]);
   const [selectedTab, setTab] = useState<TabId>(search.tab ?? "channels");
   const tab = selectedTab;
   useEffect(() => setTab(search.tab ?? "channels"), [search.tab]);
@@ -107,7 +110,7 @@ export function EventsPage() {
               onQueryChange={(q) => setLog({ q })}
             />
           )}
-          {tab === "subscriptions" && <SubscriptionsPanel reviewId={search.review} onReviewClose={() => void navigate({ to: "/events", search: { tab: "subscriptions" } })} />}
+          {tab === "subscriptions" && <SubscriptionsPanel />}
         </div>
       </div>
     </div>

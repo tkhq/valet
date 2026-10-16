@@ -306,14 +306,14 @@ Superseded on 2026-09-29 by "Organization Linear application setup" below. The o
   queued for the replaced version when it turns off are skipped at dispatch,
   as for any disabled subscription, and the replacement gets no delivery for
   an event ingested before it was on. A swap can therefore miss an event
-  that arrives during it. The review dialog
+  that arrives during it. The review page
   says when the replaced version is already off instead of promising to turn
   it off. The enable clears `target.replaces` and records the ID as
   `target.replaced`, so turning the new version off and on later leaves the
   old one alone. A repeated proposal key returns the stored proposal before it
   checks `replaces`; a retry matches the spent form only when `replaced`
   names the same ID, so adding `replaces` to a proposal stored without one is
-  a key conflict. The review dialog names the
+  a key conflict. The review page names the
   replaced subscription. An agent still cannot enable or change a live
   subscription.
 - Workflow editor: an "event" trigger node type whose save/update syncs an
@@ -341,21 +341,43 @@ list (`components/events/delivery-list.tsx`) shows "Open thread" or "Open
 run" on a delivery that carries a `thread` or a `runId`. A reader can then
 open the transcript or the run that the event caused.
 
-Each mutable row's menu opens an edit dialog
-(`components/events/edit-subscription-dialog.tsx`): name, event keys, and
-filters, through the same match step the wizard's advanced outcome uses. A
-save PATCHes only the changed fields (`subscription-patch.ts`), so a rename
-does not re-run the collision gate on an unchanged match. The target is
-shown read-only — the PATCH route pins the target's kind and owner (only a
-same-owner `assistantId` re-point is accepted, which the dialog does not
-offer yet), so a different target is a new subscription, and the dialog
-says so.
+Each subscription opens at `/events/subscriptions/:id`. The list, channel
+page, and legacy `?review=:id` links use this full-page editor. Sharing the
+URL does not change access. Members of the same organization can read it;
+only the owner or a member of the owning team can edit it.
 
-The creation wizard and the edit dialog render the collision gate's answer
-inline (`components/events/collision-notice.tsx`): a blocked write lists the
-rules it would cover, each with name, owner, target kind, and filter
-summary, and offers an explicit "Create anyway" / "Save anyway"; a committed
-overlap shows the same list as a warning before the dialog closes.
+`edit-subscription-form.tsx` reuses the wizard's match step. It edits the
+name, filters, prompts, presence, preferences, and conversation destination.
+The target kind and owner stay fixed. The form compares changes against
+its opened revision. A background refresh cannot overwrite untouched fields
+from another editor. Switching subscription IDs mounts a fresh draft.
+
+The wizard and editor show collision warnings inline. A blocked write offers
+"Create anyway" or "Save anyway". A committed overlap shows a warning and
+requires Done. Reviewing a paused proposal does not enable it until confirmation.
+
+### Conversation destinations (2026-10-16)
+
+An assistant target can store `thread: { mode: "new" }` or
+`thread: { mode: "existing", sessionId, threadId }`. A null PATCH clears the
+choice. An absent choice keeps native channel and pull-request routing.
+Slack reply presets keep this behavior. New general rules for non-Slack events
+default to a visible thread for each event.
+
+New destinations use `web:event:<deliveryId>`. Personal rules use the personal
+runtime; team rules use an execution governed by that shared conversation.
+Durable event admission recovery keeps the original submission on retries.
+Existing destinations must be active assistant conversations in the same
+organization and owning workspace. Team destinations must be visible to the
+whole team. Private helpers, workflow execution histories, and archived
+threads cannot be destinations. Delivery checks current access again.
+Private Slack events cannot enter a conversation shared with the whole team.
+Pausing a rule remains possible after its destination becomes unavailable.
+
+`GET /api/event-subscriptions/:id` reads one subscription by organization.
+`GET /api/event-subscription-threads` lists eligible destinations for an
+authorized personal or team owner. Search and cursor pagination bound each
+read. Listing does not start a runtime or sandbox.
 
 ## Error handling
 

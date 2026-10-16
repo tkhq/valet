@@ -17,6 +17,7 @@ import type {
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OwnerFilter } from "~/api/client";
+import { replacementNote } from "./subscription-labels";
 import { TooltipProvider } from "~/components/primitives";
 
 function subscription(over: Partial<EventSubscriptionWire> = {}): EventSubscriptionWire {
@@ -106,6 +107,7 @@ vi.mock("~/api/workflows", () => ({
 // wants a router this suite has no reason to mount. `params` is serialized
 // so a case can read the assistant a badge navigates to.
 vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => vi.fn(),
   Link: ({
     children,
     params,
@@ -186,16 +188,16 @@ describe("SubscriptionsPanel", () => {
       subscription({ id: "sub_live", name: "Replies v1" }),
       subscription({ id: "sub_next", name: "Replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_live" } }),
     ] };
-    render(<TooltipProvider><SubscriptionsPanel reviewId="sub_next" /></TooltipProvider>);
-    expect(screen.getByText("Replaces").nextElementSibling?.textContent).toBe("Replies v1. Enabling this subscription turns that one off.");
+    render(<TooltipProvider><SubscriptionsPanel /></TooltipProvider>);
+    expect(replacementNote(subscriptionsData.subscriptions[subscriptionsData.subscriptions.length - 1], subscriptionsData.subscriptions)).toBe("Replies v1. Enabling this subscription turns that one off.");
   });
 
   it("says a removed replaced subscription was removed, instead of promising to turn it off", () => {
     subscriptionsData = { subscriptions: [
       subscription({ id: "sub_next", name: "Replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_gone" } }),
     ] };
-    render(<TooltipProvider><SubscriptionsPanel reviewId="sub_next" /></TooltipProvider>);
-    expect(screen.getByText("Replaces").nextElementSibling?.textContent)
+    render(<TooltipProvider><SubscriptionsPanel /></TooltipProvider>);
+    expect(replacementNote(subscriptionsData.subscriptions[subscriptionsData.subscriptions.length - 1], subscriptionsData.subscriptions))
       .toBe("A subscription that was removed. Delete this proposal, then ask the assistant for a new one.");
   });
 
@@ -204,8 +206,8 @@ describe("SubscriptionsPanel", () => {
       subscription({ id: "sub_live", name: "Replies v1", enabled: false }),
       subscription({ id: "sub_next", name: "Replies v2", enabled: false, target: { kind: "orchestrator", replaces: "sub_live" } }),
     ] };
-    render(<TooltipProvider><SubscriptionsPanel reviewId="sub_next" /></TooltipProvider>);
-    expect(screen.getByText("Replaces").nextElementSibling?.textContent).toBe("Replies v1, which is already off.");
+    render(<TooltipProvider><SubscriptionsPanel /></TooltipProvider>);
+    expect(replacementNote(subscriptionsData.subscriptions[subscriptionsData.subscriptions.length - 1], subscriptionsData.subscriptions)).toBe("Replies v1, which is already off.");
   });
 
   it("resets the organization filter when the workspace changes", () => {

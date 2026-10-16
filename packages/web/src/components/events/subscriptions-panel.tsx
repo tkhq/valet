@@ -1,6 +1,5 @@
 import { useWorkspaceAssistant } from "~/components/layout/workspace-assistant";
 import type {
-  EventSubscriptionTargetWire,
   EventSubscriptionWire
 } from "@valet/api/wire";
 import { MoreHorizontal, Plus } from "lucide-react";
@@ -32,20 +31,9 @@ import { errorText } from "~/lib/error-text";
 import { selectsSlackMention } from "~/lib/slack-mention";
 import { useListOwner } from "~/lib/use-list-owner";
 import { AutomationWizard } from "./automation-wizard";
-import { EditSubscriptionDialog } from "./edit-subscription-dialog";
-
-/** Mirrors the server's `canMutateSubscription`: an org-owned subscription
- * is everyone's to manage, a team's belongs to its members, and a personal
- * one to its owner. */
-export function canMutate(
-  sub: EventSubscriptionWire,
-  userId: string | undefined,
-  memberTeamIds: ReadonlySet<string>,
-): boolean {
-  if (sub.ownerType === "org") return true;
-  if (sub.ownerType === "team") return memberTeamIds.has(sub.ownerId);
-  return sub.ownerId === userId;
-}
+import { useNavigate, Link } from "@tanstack/react-router";
+import { canMutate, describeTarget } from "./subscription-labels";
+export { canMutate } from "./subscription-labels";
 
 /**
  * The channel scope of a `slack.app_mention` subscription, or null for any
@@ -84,40 +72,10 @@ export function mentionAudienceLabel(sub: EventSubscriptionWire): string | null 
   return sub.audience === "organization" ? "org members" : "team only";
 }
 
-function describeTarget(
-  target: EventSubscriptionTargetWire,
-  workflowNames: Map<string, string>,
-  teamNames: Map<string, string>,
-): string {
-  if (target.kind === "workflow") {
-    return `Run workflow: ${workflowNames.get(target.workflowId) ?? target.workflowId}`;
-  }
-  if (target.orchestrator === "org") return "Notify the org assistant";
-  if (target.orchestrator === "team") {
-    const name = target.teamId !== undefined ? teamNames.get(target.teamId) : undefined;
-    return name !== undefined ? `Notify ${name}'s assistant` : "Notify the team's assistant";
-  }
-  return "Notify your assistant";
-}
-
-/** What enabling `sub` does to the subscription it replaces. Undefined when
- * `sub` replaces nothing. The list holds every subscription of `sub`'s owner,
- * and a replacement names only one of those, so an ID the list lacks was
- * removed: the server refuses that enable, and the note says so. A version
- * that is already off is not turned off again. */
-function replacementNote(sub: EventSubscriptionWire, subscriptions: EventSubscriptionWire[]): string | undefined {
-  const id = sub.target.kind === "orchestrator" ? sub.target.replaces : undefined;
-  if (id === undefined) return undefined;
-  const replaced = subscriptions.find((s) => s.id === id);
-  if (!replaced) return "A subscription that was removed. Delete this proposal, then ask the assistant for a new one.";
-  if (!replaced.enabled) return `${replaced.name}, which is already off.`;
-  return `${replaced.name}. Enabling this subscription turns that one off.`;
-}
-
 /**
  * Event subscriptions: the rules that turn an ingested event into action —
  * a workflow run or an orchestrator prompt. List with enable/disable,
- * edit (`EditSubscriptionDialog`), and delete; create via
+ * edit at a dedicated URL, and delete; create via
  * `AutomationWizard`.
  *
  * The list is the active workspace's, plus every org-owned subscription. An
@@ -125,7 +83,7 @@ function replacementNote(sub: EventSubscriptionWire, subscriptions: EventSubscri
  * all of them — otherwise the create dialog's "Notify the org assistant"
  * option writes a row this page can never disable.
  */
-export function SubscriptionsPanel({ reviewId, onReviewClose }: { reviewId?: string; onReviewClose?: () => void } = {}) {
+export function SubscriptionsPanel() {
   const assistant = useWorkspaceAssistant();
   const owner = useListOwner();
   const meQ = useMe();
@@ -169,7 +127,7 @@ export function SubscriptionsPanel({ reviewId, onReviewClose }: { reviewId?: str
     [teamsQ.data, orgQ.data],
   );
 
-  const proposed = subscriptions.find(sub => sub.id === reviewId);
+
 
   return (
     <div className="space-y-4">
@@ -216,7 +174,6 @@ export function SubscriptionsPanel({ reviewId, onReviewClose }: { reviewId?: str
               teamNames={teamNames}
               viewerId={meQ.data?.id}
               mutable={canMutate(sub, meQ.data?.id, memberTeamIds)}
-              replacesNote={replacementNote(sub, subscriptions)}
             />
           ))}
         </div>
@@ -227,10 +184,6 @@ export function SubscriptionsPanel({ reviewId, onReviewClose }: { reviewId?: str
           Also keeps its catalog/workflow queries off the tab's initial
           load. */}
       {creating && <AutomationWizard open onOpenChange={setCreating} />}
-      {reviewId && subsQ.data && !proposed && <ErrorRow>This proposal is not in the selected workspace. Switch to its workspace and reopen the review link.</ErrorRow>}
-      {proposed && canMutate(proposed, meQ.data?.id, memberTeamIds) && <EditSubscriptionDialog key={proposed.id} open review sub={proposed} replacesNote={replacementNote(proposed, subscriptions)}
-        targetLabel={describeTarget(proposed.target, workflowNames, teamNames)} onOpenChange={(open) => { if (!open) onReviewClose?.(); }} />}
-
     </div>
   );
 }
@@ -241,7 +194,6 @@ function SubscriptionRow({
   teamNames,
   viewerId,
   mutable,
-  replacesNote,
 }: {
   sub: EventSubscriptionWire;
   workflowNames: Map<string, string>;
@@ -250,11 +202,11 @@ function SubscriptionRow({
   viewerId: string | undefined;
   /** False for a colleague's personal subscription — visible, not actionable. */
   mutable: boolean;
-  replacesNote?: string;
 }) {
   const patch = usePatchEventSubscription();
   const del = useDeleteEventSubscription();
-  const [editing, setEditing] = useState(false);
+  const navigate = useNavigate();
+  const edit = () => void navigate({ to: "/events/subscriptions/$subscriptionId", params: { subscriptionId: sub.id } });
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [toggleError, setToggleError] = useState<string | null>(null);
   const channelScope = mentionChannelScope(sub);
@@ -264,7 +216,7 @@ function SubscriptionRow({
     <div className="flex flex-wrap items-center gap-3 py-3 sm:flex-nowrap">
       <div className="min-w-0 basis-full sm:basis-auto sm:flex-1">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="break-words text-sm font-medium text-ink">{sub.name}</span>
+          <Link to="/events/subscriptions/$subscriptionId" params={{ subscriptionId: sub.id }} className="break-words text-sm font-medium text-ink hover:underline">{sub.name}</Link>
           {/* Show the workspace owner, independent of its runtime identity. */}
           {sub.ownerType === "org" && (
             <Badge variant="accent" className="shrink-0">
@@ -304,13 +256,13 @@ function SubscriptionRow({
         {toggleError && <p className="mt-1 text-xs text-danger-500">{toggleError}</p>}
       </div>
 
-      {!sub.enabled && mutable && <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>Review</Button>}
+      {!sub.enabled && mutable && <Button size="sm" variant="secondary" onClick={() => edit()}>Review</Button>}
       <Switch
         checked={sub.enabled}
         disabled={patch.isPending || !mutable}
         aria-label={sub.enabled ? `Disable ${sub.name}` : `Enable ${sub.name}`}
         onCheckedChange={(enabled) => {
-          if (enabled) { setEditing(true); return; }
+          if (enabled) { edit(); return; }
           setToggleError(null);
           patch.mutate(
             { id: sub.id, body: { enabled } },
@@ -327,7 +279,7 @@ function SubscriptionRow({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onSelect={() => setEditing(true)}>
+            <DropdownMenuItem onSelect={() => edit()}>
               Edit subscription
             </DropdownMenuItem>
             <DropdownMenuItem className="text-danger-500" onSelect={() => setConfirmDelete(true)}>
@@ -335,19 +287,6 @@ function SubscriptionRow({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-      )}
-
-      {/* Mounted only while open: the form seeds from `sub` at mount (see the
-          dialog's header comment). */}
-      {editing && (
-        <EditSubscriptionDialog
-          open
-          onOpenChange={setEditing}
-          sub={sub}
-          review={!sub.enabled}
-          replacesNote={replacesNote}
-          targetLabel={describeTarget(sub.target, workflowNames, teamNames)}
-        />
       )}
 
       <ConfirmDialog

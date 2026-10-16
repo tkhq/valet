@@ -201,6 +201,7 @@ import type {
   EventLogResponse,
   ListEventReceiptsResponse,
   ListEventSubscriptionsResponse,
+  GetEventSubscriptionResponse,
   PatchEventSubscriptionRequest,
   PatchEventSubscriptionResponse,
   PutPolicyOverrideRequest,
@@ -1062,6 +1063,14 @@ export const api = {
     request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),
   listEventSubscriptions: (owner?: OwnerFilter) =>
     request<ListEventSubscriptionsResponse>("GET", `/event-subscriptions${ownerQuery(owner)}`),
+  getEventSubscription: (id: string) =>
+    request<GetEventSubscriptionResponse>("GET", `/event-subscriptions/${encodeURIComponent(id)}`),
+  listEventSubscriptionThreads: (owner: OwnerFilter, opts: { q?: string; cursor?: string } = {}) => {
+    const params = new URLSearchParams({ ownerType: owner.ownerType, ownerId: owner.ownerId, limit: "50" });
+    if (opts.q) params.set("q", opts.q);
+    if (opts.cursor) params.set("cursor", opts.cursor);
+    return request<ListThreadsResponse>("GET", `/event-subscription-threads?${params}`);
+  },
   createEventSubscription: (body: CreateEventSubscriptionRequest) =>
     request<CreateEventSubscriptionResponse>("POST", "/event-subscriptions", body),
   patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) =>

@@ -17,6 +17,7 @@ import type {
   FilterOptionsResponse,
   GetEventCatalogResponse,
   GetEventResponse,
+  GetEventSubscriptionResponse,
   ListEventReceiptsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
@@ -54,6 +55,8 @@ export const qkEvents = {
   log: (owner: OwnerFilter | undefined, problems: boolean, q?: string, diagnostics = false) =>
     ["events", "log", owner?.ownerType ?? "", owner?.ownerId ?? "", problems ? "problems" : "all", q ?? "", diagnostics] as const,
   detail: (id: string) => ["events", "detail", id] as const,
+  subscription: (id: string) => ["events", "subscription", id] as const,
+  subscriptionThreads: (owner: OwnerFilter, q: string) => ["events", "subscription-threads", owner.ownerType, owner.ownerId, q] as const,
   subscriptions: (owner?: OwnerFilter, held = false) =>
     ["events", "subscriptions", ...ownerKey(owner, held)] as const,
 };
@@ -147,12 +150,28 @@ export function useEventSubscriptions(
   });
 }
 
+export function useEventSubscription(id: string) {
+  return useQuery<GetEventSubscriptionResponse>({
+    queryKey: qkEvents.subscription(id), queryFn: () => api.getEventSubscription(id), retry: false,
+  });
+}
+
+export function useEventSubscriptionThreads(owner: OwnerFilter, q: string) {
+  return useInfiniteQuery({
+    queryKey: qkEvents.subscriptionThreads(owner, q),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => api.listEventSubscriptionThreads(owner, { q, cursor: pageParam }),
+    getNextPageParam: page => page.nextCursor ?? undefined,
+  });
+}
+
 /** A workflow-target subscription is the same row the workflow page lists as
  * an event trigger (`["workflows", "triggers", …]`), so every subscription
  * mutation invalidates that key too — else the trigger list serves a stale
  * snapshot after an edit here. Raw prefix, matching `api/workflows.ts`. */
 function invalidateSubscriptionReaders(qc: ReturnType<typeof useQueryClient>) {
   void qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
+  void qc.invalidateQueries({ queryKey: ["events", "subscription"] });
   void qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
 }
 

@@ -521,6 +521,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     deliverToOrchestrator: buildOrchestratorTarget({
       db,
       engineHost,
+      engineCredentials,
+      onePassword,
       fetchThreadContext: channelThreadContextFetcher(channelHost),
     }),
   });
@@ -532,6 +534,8 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     deliverToOrchestrator: buildOrchestratorTarget({
       db,
       engineHost,
+      engineCredentials,
+      onePassword,
       fetchThreadContext: channelThreadContextFetcher(channelHost),
     }),
     resolveChannelOrigin: channelOriginResolver(channelHost),
