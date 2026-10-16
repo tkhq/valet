@@ -93,6 +93,9 @@ export interface VerifiedEvent {
   eventType: string;
   deliveryId: string;
   payload: unknown;
+  /** Envelope-level facts the inner payload may not carry, e.g. Slack's
+   * `team_id` for an inner event with no `team` field (spec Part A3). */
+  context?: Record<string, string>;
 }
 
 /** Why a trigger declined a request. Only `bad_signature` means the request
