@@ -35,6 +35,11 @@ export interface EventMatchSpec {
   once: boolean;
   /** External actor ids the session acts as. Their events are dropped unless a clause sets `include_self`. */
   self: string[];
+  /**
+   * Stream mode: the shortest gap between two `event.matched` signals (ms).
+   * Absent means `WakeupLimits.watchMinIntervalMs`.
+   */
+  minIntervalMs?: number;
 }
 
 /** The most bytes of `EventMatchDigest.text` a store keeps (INV-E7). */
