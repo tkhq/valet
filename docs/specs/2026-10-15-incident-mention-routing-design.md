@@ -48,7 +48,7 @@ enabled `slack.app_mention` subscription with `follow: true`.
 
 | Step | Action | Expected observation |
 |---|---|---|
-| M1 | Fixture sends a top-level message `<@U-BOT> status?` from `U002` in `C900`, and its `app_mention` event. | `t-inc` receives exactly one turn for the post, from the `slack.app_mention` subscription. No new assistant thread exists. |
+| M1 | Fixture sends a top-level message `<@U-BOT> status?` from `U001` in `C900`, and its `app_mention` event. | `t-inc` receives exactly one turn for the post, from the `slack.app_mention` subscription. No new assistant thread exists. |
 | M2 | Inspect `followed_threads`. | No row exists for that message's Slack thread. |
 | M3 | Fixture sends a threaded reply under the mention from `U003`. | `t-inc` receives the reply once, through the event waiter. |
 | M4 | The agent replies in its turn for M1. | The reply posts in the mention's Slack thread (the signal's origin route). |
@@ -138,15 +138,11 @@ Pass criterion: all steps, in one run, from a clean start.
 | Routing to once-mode waiters | A once waiter waits for one reply, not a channel | Part A step 4 |
 | Merging an existing mention thread into the watching thread | Threads have no merge operation | A thread fork or merge spec |
 | Replies under a routed mention after the watching waiter ends | The routed mention bound no follow (Part B), so later replies under it reach no thread until the next mention | Part B: bind a follow for routed mentions when the waiter ends |
+| Mentions that another owner's subscription admits in a watched channel | The event-wakeups mention rule skips a mention for every waiter when any admitting subscription covers it, so a waiter of a different owner never sees it | The event-wakeups mention rule, scoped per owner |
 
 ## Deviations
 
-- M1 sends the mention from `U001`, not `U002`. In the Scenario E
-  universe, only `U001` links to a Valet user. M1 checks the subscription
-  path, and the team mention gate refuses an unlinked sender, so M1 needs
-  a linked sender. M5 sends the mention from the unlinked `U002` and
-  checks that it reaches `t-inc` through the event waiter (Part C step 3).
-- M5's cancel runs in a real agent turn. A channel message in `C900`
+- M6's cancel runs in a real agent turn. A channel message in `C900`
   reaches `t-inc` through the event waiter, and the agent calls
   `wakeup_cancel` in that turn.
 - The dispatcher reads the Slack team from the event row's channel
