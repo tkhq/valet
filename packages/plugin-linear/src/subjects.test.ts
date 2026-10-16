@@ -60,6 +60,19 @@ describe("linearEventSubjects", () => {
     expect(r.subjects).toEqual(["linear:team/ENG", "linear:ENG-7"]);
   });
 
+  it("a comment in Linear's documented shape (data has only issueId) takes its parent from the url", () => {
+    const r = linearEventSubjects("Comment", {
+      action: "create",
+      type: "Comment",
+      actor: { id: "u-1", type: "user", name: "Ada" },
+      createdAt: "2026-10-15T00:00:00.000Z",
+      url: "https://linear.app/acme/issue/ENG-7/fix-login#comment-c3",
+      data: { id: "c-3", body: "ping", issueId: "539068e2-ae88-4d09-bd75-22eb4a59612f", userId: "u-1" },
+    });
+    expect(r.subjects).toEqual(["linear:team/ENG", "linear:ENG-7"]);
+    expect(r.bot).toBe(false);
+  });
+
   it("issueFromUrl reads the identifier and team key, or null", () => {
     expect(issueFromUrl("https://linear.app/acme/issue/ENG-7/fix-login")).toEqual({ identifier: "ENG-7", teamKey: "ENG" });
     expect(issueFromUrl("https://linear.app/acme/issue/A2B-12")).toEqual({ identifier: "A2B-12", teamKey: "A2B" });

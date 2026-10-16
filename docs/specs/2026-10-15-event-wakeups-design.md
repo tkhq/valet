@@ -233,12 +233,12 @@ and issues in one sequence, so a comment on pull request 42 carries
 
 - Issue events carry `linear:team/<data.team.key>` and
   `linear:<data.identifier>`.
-- Comment events carry the team subject and, when the payload includes it,
-  the parent issue's identifier. When `data.issue` has no `identifier` or
-  `team.key` (a payload can carry only `{ id, title }`), the normalizer
-  reads the identifier (`[A-Z][A-Z0-9]*-\d+`) from the top-level `url`
-  (`https://linear.app/<workspace>/issue/ENG-7/...`) and takes the team
-  key from its prefix.
+- Comment events carry the team subject and the parent issue's identifier.
+  Linear's documented Comment payload gives `data.issueId` only, so the
+  normalizer reads the identifier (`[A-Z][A-Z0-9]*-\d+`) from the top-level
+  `url` (`https://linear.app/<workspace>/issue/ENG-7/...#comment-...`) and
+  takes the team key from its prefix. It uses `data.issue.identifier` and
+  `data.issue.team.key` first when a payload includes them.
 - Status is the issue state's `type`: `triage`, `backlog`, `unstarted`,
   `started`, `completed`, or `canceled`.
 - `previousStatus`: Linear's `updatedFrom` reports a state id only. The
