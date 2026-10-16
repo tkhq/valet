@@ -1919,6 +1919,130 @@ describe("buildActionInvoker: github service resolution", () => {
     });
   });
 
+  // ── org-owned `auto`: the installation before the org PAT ─────────────
+  //
+  // Native credential policy Part C: an org-owned run has no person, so its
+  // `auto` read uses the App installation, as an org session does. The org
+  // PAT row stays the tier behind it.
+
+  async function seedTwoInstallationsAndOrgPat(appDb: AppDb, credentials: PgCredentialStore): Promise<void> {
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    for (const [id, installationId, accountLogin] of [["ghi_acme", 501, "acme"], ["ghi_other", 502, "other"]] as const) {
+      await appDb.insert(githubInstallations).values({
+        id,
+        orgId,
+        installationId,
+        accountLogin,
+        accountType: "Organization",
+        repositorySelection: "all",
+        suspended: false,
+        cachedToken: null,
+        cachedTokenExpiresAt: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      });
+    }
+    await credentials.save({ type: "org", id: orgId }, "github", { type: "oauth2", accessToken: "org-pat" });
+  }
+
+  it("org-owned auto: the action's repository owner picks the installation over the org PAT", async () => {
+    const { appDb, credentials } = await harness();
+    await seedTwoInstallationsAndOrgPat(appDb, credentials);
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "create_comment", params: { owner: "acme", repo: "app" }, invocationId: "workflow:r1:org-auto" },
+      { userId: `org:${orgId}`, orgId, owner: { type: "org", id: orgId } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "inst-501" } });
+  });
+
+  it("org-owned auto: with no installation to use, the org PAT still answers", async () => {
+    const { appDb, credentials } = await harness();
+    await credentials.save({ type: "org", id: orgId }, "github", { type: "oauth2", accessToken: "org-pat" });
+    fixture = startGithubFixture();
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:org-pat" },
+      { userId: `org:${orgId}`, orgId, owner: { type: "org", id: orgId } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "org-pat" } });
+  });
+
+  it("org-owned auto: a session binding that names its own auth still wins", async () => {
+    const { appDb, credentials } = await harness();
+    await seedTwoInstallationsAndOrgPat(appDb, credentials);
+    const sessionId = "sess-org-bound";
+    await appDb.insert(sessionRepos).values({
+      sessionId,
+      host: "github",
+      fullName: "other/repo",
+      cloneUrl: "https://github.com/other/repo.git",
+      auth: "app",
+      position: 0,
+    });
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "create_comment", params: { owner: "acme", repo: "app" }, invocationId: "workflow:r1:org-bound" },
+      { userId: `org:${orgId}`, orgId, owner: { type: "org", id: orgId }, sessionId },
+    );
+
+    // The binding's repository owner, not the params owner.
+    expect(result).toEqual({ ok: true, result: { token: "inst-502" } });
+  });
+
+  it("org-owned explicit credential \"user\" never takes the installation", async () => {
+    const { appDb, credentials } = await harness();
+    await seedTwoInstallationsAndOrgPat(appDb, credentials);
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "create_comment", params: { owner: "acme", repo: "app" }, invocationId: "workflow:r1:org-user", credential: "user" },
+      { userId: `org:${orgId}`, orgId, owner: { type: "org", id: orgId } },
+    );
+
+    expect(JSON.stringify(result)).not.toContain("inst-");
+  });
+
   // ── credential: "app" — the bot identity, or a loud failure ───────────
   //
   // A user-owned review workflow must comment as the GitHub App, not as the

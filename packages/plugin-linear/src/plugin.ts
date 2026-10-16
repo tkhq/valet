@@ -10,6 +10,9 @@ const plugin: ValetPlugin = {
   name: 'linear',
   version: '0.1.0',
   description: 'Linear integration for issue tracking and project management',
+  // The app identity is the org Linear app connection's `actor=app` token.
+  native: true,
+  appCredentialService: 'linear:app',
   actions: [
     mcpActionPlugin({
       mcpUrl: 'https://mcp.linear.app/mcp',

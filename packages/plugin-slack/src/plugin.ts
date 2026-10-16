@@ -17,6 +17,10 @@ const plugin: ValetPlugin = {
   name: "slack",
   version: "0.1.0",
   description: "Slack integration for messages, channels, and users",
+  // The app identity is the org bot token: `slack.*` actions act as the bot
+  // by design. The person's identity is the separate `slack-user` service.
+  native: true,
+  appCredentialService: "slack",
   actions: [slackPlugin],
   triggers: slackTriggerDefs,
   httpRoutes: slackHttpRoutes,
