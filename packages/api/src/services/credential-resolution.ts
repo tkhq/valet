@@ -433,6 +433,27 @@ export async function resolveOrgNativeAppRead(
   return app;
 }
 
+/**
+ * The app credential a workflow node pinned to `credential: "app"` acts as,
+ * for a native `service` whose app credential service is `appService`: the
+ * app token of a row-backed service (`linear:app`), or the org row when the
+ * org row is the app identity itself (the Slack bot). `null` when the org
+ * has no app connection. The GitHub installation is minted on its own path.
+ */
+export async function resolveNativeAppCredentialRead(
+  deps: CredentialReadDeps,
+  ctx: { orgId: string },
+  service: string,
+  appService: string,
+  plugins: readonly ValetPlugin[] | undefined,
+): Promise<StoredCredential | null> {
+  if (isAppCredentialRowService(appService)) return resolveAppCredentialRead(deps, ctx, appService, plugins);
+  if (appService === service && isNativeAppCredentialService(plugins, service)) {
+    return resolveOrgCredentialRead(deps, { orgId: ctx.orgId, scopes: ["org"] }, service);
+  }
+  return null;
+}
+
 /** Who a team read acts for, and which members it may borrow an account
  * from. `userId` is the acting member: their own share is used first. A
  * share of anyone else is used only when `mayBorrow` says that member

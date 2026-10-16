@@ -39,6 +39,7 @@ import {
   type Principal,
   type RiskLevel,
   type Sandbox,
+  type StoredCredential,
   type ValetPlugin,
   credentialSecret,
 } from "@valet/engine";
@@ -57,7 +58,13 @@ import {
   type GitHubTokenDeps,
 } from "../services/github-tokens.js";
 import {
+  isAppCredentialRowService,
+  nativeAppCredentialServiceFor,
+  noteAppCredentialFallback,
   orgFallbackPolicy,
+  resolveAppCredentialRead,
+  resolveNativeAppCredentialRead,
+  resolveOrgNativeAppRead,
   resolveOrgCredentialRead,
   readTeamCredential,
   resolveTeamCredentialRead,
@@ -390,11 +397,16 @@ async function computeResult(
       };
     }
   }
-  // `github` is the only service that resolves a credential identity today.
-  // Any other service would IGNORE the selection, and a node that asked to
-  // act as the application would silently act as the workflow owner —
-  // exactly the failure `credential` exists to prevent. Refuse instead.
-  if (req.credential !== undefined && req.credential !== "auto" && credentialService !== "github") {
+  // A tool node's `credential` picks the identity it acts as. GitHub picks
+  // through its own provider below. Any other native service may pick its
+  // app identity or a person's credential (native credential policy, Part
+  // E). A non-native service would IGNORE the selection, and a node that
+  // asked to act as the application would silently act as the workflow
+  // owner, which is exactly the failure `credential` exists to prevent.
+  // Refuse instead.
+  const selection = req.credential ?? "auto";
+  const appService = credentialService === "github" ? undefined : nativeAppCredentialServiceFor(registry, credentialService);
+  if (selection !== "auto" && credentialService !== "github" && !appService) {
     return {
       ok: false,
       error:
@@ -402,13 +414,34 @@ async function computeResult(
         `Remove the credential field from this tool node.`,
     };
   }
+  if (appService && selection === "user" && ctx.owner.type === "org") {
+    return {
+      ok: false,
+      error:
+        `An organization-owned workflow has no person to act as, so this ${req.service} node cannot use the "user" credential. ` +
+        `Set credential to "app", or remove the credential field.`,
+    };
+  }
+  if (appService && selection === "app") {
+    const app = await resolveNativeAppCredentialRead(
+      { credentials: opts.credentials, onePassword: opts.onePassword }, { orgId: ctx.orgId }, credentialService, appService, registry,
+    );
+    if (!app) {
+      return {
+        ok: false,
+        error:
+          `This ${req.service} node uses the "app" credential, and the ${credentialService} app is not connected for this organization. ` +
+          `An admin can connect it in Settings → Organization, or remove the credential field.`,
+      };
+    }
+  }
   // User→org owner precedence + 1Password reference resolution, matching
   // `engine/host.ts`. A user-owned run reads the user row first and falls
   // back to the org row; an org-owned run reads the org row only.
   const baseProvider =
     credentialService === "github"
       ? buildGithubCredentialProvider(opts, req, ctx, owner)
-      : buildCredentialProvider(opts, ctx, owner, credentialService);
+      : buildCredentialProvider(opts, ctx, owner, credentialService, { selection, appService });
   // Identity enrichment, the second half of the session path's slack branch
   // (`engine/host.ts`): the resolved token alone cannot answer "may the run
   // owner read this private channel" — `slack.dm_owner` and the private-
@@ -449,16 +482,19 @@ async function computeResult(
   // before discovery: discovery would only echo the plugin's own generic
   // "no credential connected" message, which names no fix.
   const teamGated = ctx.owner.type === "team" && declared !== null && mode !== "org";
+  // An `auto` team read of a native service ends at the app token (Part B),
+  // so a team with no person's credential is not refused when it answers.
+  const teamAppTier = selection === "auto" && appService && isAppCredentialRowService(appService) ? appService : undefined;
   // A team run that would use another member's shared account parks until
   // that member approves (`services/credential-borrow.ts`).
-  if (ctx.owner.type === "team" && !req.approval) {
+  if (ctx.owner.type === "team" && !req.approval && selection !== "app") {
     const approver = await sharedAccountApprover(opts, ctx, ctx.owner.id, credentialService);
     if (approver) return { ok: false, requiresApproval: true, provenance: "shared_account", approver };
   }
   let action = findAction(entry.actionPlugin.actions, req.service, req.action);
   if (!action && entry.actionPlugin.resolveActions) {
     if (teamGated) {
-      const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
+      const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService, teamAppTier);
       if (refusal) return refusal;
     }
     // A credential read can throw a typed refusal (a broken share, a
@@ -477,7 +513,7 @@ async function computeResult(
   if (!action) return unknownAction(req);
 
   if (teamGated) {
-    const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService);
+    const refusal = await refuseTeamRunWithoutCredential(credentials, credentialService, teamAppTier);
     if (refusal) return refusal;
   }
 
@@ -586,9 +622,11 @@ function unknownAction(req: WorkflowInvokeActionRequest): WorkflowInvokeActionRe
 async function refuseTeamRunWithoutCredential(
   credentials: CredentialProvider,
   service: string,
+  appTier?: string,
 ): Promise<WorkflowInvokeActionResult | null> {
   try {
     if ((await credentials.get()) !== null) return null;
+    if (appTier && (await credentials.get(appTier)) !== null) return null;
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -902,52 +940,43 @@ function credentialOwnerFor(owner: Principal): CredentialOwner | null {
  * personal-tokenScope 1Password reference to resolve against. Either path
  * fills a `metadata.onepassword` row's secret when `opts.onePassword` is
  * wired; absent onePassword or a non-reference row passes through raw.
+ *
+ * For a native service, `pick` applies the native credential policy
+ * (docs/specs/2026-10-15-native-integration-credential-policy-design.md):
+ *
+ *   - `"auto"` keeps the order above and adds the app step: a read of the
+ *     row-backed app credential service (`linear:app`) returns the bare app
+ *     token. An org-owned run reads the app token first. A read that ends
+ *     at the app token is counted (`valet_credentials_app_fallback_total`).
+ *   - `"app"` returns the app identity for the service and for its app step.
+ *   - `"user"` reads a person's credential only. It never reaches the app
+ *     step, and an org-provided org row does not count as a person's.
  */
 function buildCredentialProvider(
   opts: ActionInvokerOpts,
   ctx: ActionInvocationContext,
   owner: CredentialOwner,
   defaultService: string,
+  pick: { selection: "auto" | "app" | "user"; appService?: string } = {
+    selection: "auto",
+    appService: nativeAppCredentialServiceFor(registryOf(opts), defaultService),
+  },
 ): CredentialProvider {
   const deps = { credentials: opts.credentials, onePassword: opts.onePassword, shares: (teamId: string, svc: string) => membersSharing(opts.db, teamId, svc) };
+  const readDeps = { credentials: opts.credentials, onePassword: opts.onePassword };
   // A run borrows another member's account only once that member approved it
   // for this run (`services/credential-borrow.ts`).
   const mayBorrow = (svc: string) => async (memberId: string) =>
     ctx.workflowExecutionId && owner.type === "team" ? canBorrowCredential(opts.db, { orgId: ctx.orgId, teamId: owner.id, actorId: ctx.userId, sessionId: `wf:${ctx.workflowExecutionId}`, service: svc, memberId }) : false;
+  const { selection, appService } = pick;
+  // The app step a plugin reads after its own service (`linear:app`), the
+  // last tier of the Part B order. Only a row-backed app credential is one.
+  const appTier = appService && isAppCredentialRowService(appService) ? appService : undefined;
   return {
     async get(service?: string): Promise<Credential | null> {
       const svc = service ?? defaultService;
-      // Escalation applies to THIS provider's own service only. An incidental
-      // read of some other service must not reach the org's credentials, even
-      // when that other service is org-provided in its own right.
-      //
-      // The registry falls back to the plugins behind `actionPluginByService`,
-      // the same way the availability gate above resolves it: a caller that
-      // wires only the action map still gets declaration-driven escalation
-      // rather than silently losing it.
-      const registry =
-        registryOf(opts);
-      const fallback = svc === defaultService ? orgFallbackPolicy(registry, svc) : "none";
-      const stored =
-        owner.type === "user"
-          ? await resolveUserCredentialRead(
-              deps,
-              { orgId: ctx.orgId, userId: owner.id, scopes: onePasswordScopesFor("user") },
-              svc,
-              fallback,
-            )
-          : owner.type === "team"
-            ? await resolveTeamCredentialRead(
-                deps,
-                {
-                  orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id),
-                  // Discovery can contact the provider, so it requires the same approval.
-                  mayBorrow: mayBorrow(svc),
-                },
-                svc,
-                fallback,
-              )
-            : await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes: ["org"] }, svc);
+      const registry = registryOf(opts);
+      const stored = await read(svc, registry);
       if (!stored) return null;
       const accessToken = credentialSecret(stored) ?? "";
       if (accessToken === "") return null;
@@ -963,6 +992,76 @@ function buildCredentialProvider(
       return Promise.reject(new Error("credential requests are not supported in workflow action invocation"));
     },
   };
+
+  async function read(svc: string, registry: ValetPlugin[]): Promise<StoredCredential | null> {
+    // A node pinned to `app` acts as the app identity for its own service
+    // and for the app step alike (native credential policy, Part E).
+    if (appService && selection === "app" && (svc === defaultService || svc === appService)) {
+      return resolveNativeAppCredentialRead(readDeps, { orgId: ctx.orgId }, defaultService, appService, registry);
+    }
+    // The app step. A node pinned to `user` never reaches it.
+    if (appTier && svc === appTier) {
+      return selection === "user" ? null : resolveAppCredentialRead(readDeps, { orgId: ctx.orgId }, appTier, registry);
+    }
+    // Escalation applies to THIS provider's own service only. An incidental
+    // read of some other service must not reach the org's credentials, even
+    // when that other service is org-provided in its own right.
+    //
+    // The registry falls back to the plugins behind `actionPluginByService`,
+    // the same way the availability gate above resolves it: a caller that
+    // wires only the action map still gets declaration-driven escalation
+    // rather than silently losing it.
+    const policy = svc === defaultService ? orgFallbackPolicy(registry, svc) : "none";
+    // A node pinned to `user` reads a person's credential only. For a native
+    // service, an org-provided org row is the app identity, so it is not one.
+    const fallback = selection === "user" && appService && policy === "org-provided" ? "reference-only" : policy;
+    // An `auto` read of the provider's own service ends at the app token
+    // when nothing else answers. That fallback is counted
+    // (`valet_credentials_app_fallback_total`).
+    const countsFallback = selection === "auto" && appTier !== undefined && svc === defaultService;
+    if (owner.type === "user") {
+      const stored = await resolveUserCredentialRead(
+        deps,
+        { orgId: ctx.orgId, userId: owner.id, scopes: onePasswordScopesFor("user") },
+        svc,
+        fallback,
+      );
+      if (!stored && countsFallback) await noteAppCredentialFallback(readDeps, { orgId: ctx.orgId }, svc, "no_personal", registry);
+      return stored;
+    }
+    if (owner.type === "team") {
+      let deadDelegated = false;
+      const stored = await resolveTeamCredentialRead(
+        deps,
+        {
+          orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team", owner.id),
+          // Discovery can contact the provider, so it requires the same approval.
+          mayBorrow: mayBorrow(svc),
+          // A dead team connection or a broken share gives way to the app
+          // token, the same as in a session (`engine/host.ts`).
+          ...(countsFallback && appTier
+            ? {
+                laterTier: async () => {
+                  deadDelegated = (await resolveAppCredentialRead(readDeps, { orgId: ctx.orgId }, appTier, registry)) !== null;
+                  return deadDelegated;
+                },
+              }
+            : {}),
+        },
+        svc,
+        fallback,
+      );
+      if (!stored && countsFallback) {
+        await noteAppCredentialFallback(readDeps, { orgId: ctx.orgId }, svc, deadDelegated ? "dead_delegated" : "no_delegated", registry);
+      }
+      return stored;
+    }
+    if (countsFallback) {
+      const app = await resolveOrgNativeAppRead(readDeps, { orgId: ctx.orgId }, svc, registry);
+      if (app) return app;
+    }
+    return resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes: ["org"] }, svc);
+  }
 }
 
 /** The member whose shared account a team run would use for `service`, when
