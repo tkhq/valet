@@ -321,9 +321,10 @@
   export function keyMatches(pattern: string, key: string): boolean; // same glob rule as subscriptions (trailing ".*")
   export function needsPreviousStatus(spec: EventMatchSpec): boolean;
   export function toDigest(event: NormalizedEvent, derive?: string): EventMatchDigest;
+  export function mentionsBot(event: NormalizedEvent, botUserId: string | undefined): boolean; // slack.message text contains `<@botUserId>`
   ```
 
-- [ ] **Step 1:** Encode every row of spec E1 as `it.each`, plus: `status` with no event status is no match; `actor` matches login or external id; `include_self` absent with an actor outside `self` matches. `toDigest` takes `text` from the payload (`text` for Slack, `comment.body`/`review.body` for GitHub, `data.body` for Linear) and the URL from the payload's `html_url`, `refs.url`, or none.
+- [ ] **Step 1:** Encode every row of spec E1 as `it.each`, plus: `status` with no event status is no match; `actor` matches login or external id; `include_self` absent with an actor outside `self` matches. `mentionsBot` is true only for `slack.message` with `<@U-BOT>` in `text` and false for a missing bot id. `toDigest` takes `text` from the payload (`text` for Slack, `comment.body`/`review.body` for GitHub, `data.body` for Linear) and the URL from the payload's `html_url`, `refs.url`, or none.
 - [ ] **Step 2:** Run `pnpm --filter @valet/api test waiter-match`. Expect FAIL.
 - [ ] **Step 3:** Implement. Reuse the subscription key-glob function from `packages/api/src/events/match.ts` (export it if private).
 - [ ] **Step 4:** Run. Expect PASS.
@@ -350,6 +351,10 @@
     resolvePreviousStatus(service: string, orgId: string, event: NormalizedEvent): Promise<string | null>;
     nudge(): void;
     now(): number;
+    /** Slack bot user id for the org, for the mention rule. */
+    slackBotUserId(orgId: string): Promise<string | undefined>;
+    /** True when an enabled slack.app_mention subscription matches this event's channel. */
+    appMentionCovered(orgId: string, event: NormalizedEvent): Promise<boolean>;
   }
   export async function matchEventWaiters(deps: WaiterMatchDeps, orgId: string, service: string, event: NormalizedEvent): Promise<number>;
   // IngestDeps gains: waiters?: WaiterMatchDeps
@@ -363,6 +368,7 @@
   - A `matchEventWaiters` that throws leaves the subscription outcome and receipt stages identical to a run without waiters, and increments the failed counter (INV-E2).
   - A Slack candidate whose `slackStillVisible` is false is dropped.
   - `nudge` is called once when at least one digest was appended, and never otherwise.
+  - Mention rule (spec Part E): a `slack.message` containing `<@U-BOT>` is skipped when an enabled subscription naming `slack.app_mention` matches the channel (evaluate it with the existing subscription matcher against the same payload), and matches when no such subscription exists.
 - [ ] **Step 2:** Run `pnpm --filter @valet/api test waiters ingest`. Expect FAIL.
 - [ ] **Step 3:** Implement `matchEventWaiters` per spec Part E steps 1 to 6. In `ingestEvent`, call it inside its own `try/catch` before the early return at `:265`, then append the receipt stage (step 7). Wire `waiters` at the three ingest call sites from providers (`engineStore`, the sessions table for `sessionOrg`, `channelVisibility` for Slack, `wakeWatcher.nudge`).
 - [ ] **Step 4:** Run. Expect PASS. Run `pnpm typecheck`.
@@ -414,6 +420,7 @@
   - once mode, three digests: body lists the first, then `Also matched` with two lines.
   - stream mode, first emit: `to: "running"`, signal dispatch id `wakeup:<id>:event:1`, `eventCount` 1, `lastEmitAt` now.
   - stream mode inside `watchMinIntervalMs` of `lastEmitAt`: returns `null` (keep buffer).
+  - stream mode with `eventMatch.minIntervalMs: 30_000`: a digest 20 s after `lastEmitAt` waits; at 30 s it emits (spec Scenario E4).
   - stream mode, burst of 50 digests: one signal with 50 blocks (Review Focus 3).
   - stream mode past `watchMaxEventsPerHour` in the window: `to: "done"`, cause `rate`, `event.ended` with the F1 rate text.
   - deadline passed with empty buffer: `to: "expired"`, cause `deadline`, `event.ended` with the F1 deadline text.
@@ -436,7 +443,8 @@
 - Produces:
   ```ts
   // engine
-  export interface ArmEventRequest { subject: string; on: EventClause[]; once: boolean; reason: string; maxHours: number }
+  export interface ArmEventRequest { subject: string; on: EventClause[]; once: boolean; reason: string; maxHours: number; minIntervalMs?: number }
+  // EventMatchSpec (Task 2) gains: minIntervalMs?: number
   // WakeupsSeam gains:
   armEvent?(threadId: string, req: ArmEventRequest, origin?: ChannelOrigin): Promise<{ wakeup: Wakeup } | { refused: string }>;
   export function validateWaitForEvent(args: unknown, limits: WakeupLimits): Validation<ArmEventRequest>;
@@ -451,7 +459,7 @@
 - Workflow sessions: `armEvent` is absent, so the tool returns `[wait_for_event] Workflow runs cannot wait for events. Use a workflow trigger instead.` (spec errata: add as R9).
 - `self`: the owner's linked external id for the service, the shared credential owner's external id when the session resolves one, and the app actor id.
 
-- [ ] **Step 1:** Engine tests for `validateWaitForEvent`: 0 clauses, 9 clauses, empty reason, 201-character reason, `max_hours` 0 and over `timerMaxHours`, default `once` true. Tool tests with a fake seam: result text matches D2; a `{ refused }` result returns its text; a missing seam returns `wakeupsUnavailable("wait_for_event")`; at the per-session limit returns the `[wakeups_limit]` text.
+- [ ] **Step 1:** Engine tests for `validateWaitForEvent`: 0 clauses, 9 clauses, empty reason, 201-character reason, `max_hours` 0 and over `timerMaxHours`, default `once` true, `min_interval_seconds` 29 and 3601 refused, 30 accepted as `minIntervalMs: 30000`, `min_interval_seconds` with `once: true` refused (stream mode only). Tool tests with a fake seam: result text matches D2; a `{ refused }` result returns its text; a missing seam returns `wakeupsUnavailable("wait_for_event")`; at the per-session limit returns the `[wakeups_limit]` text.
 - [ ] **Step 2:** api tests for `checkArm`, one per refusal R1 to R9 with stubbed deps, plus a pass case that returns subjects and `self`. Include Review Focus 5 (R6 for a followed thread).
 - [ ] **Step 3:** Run `pnpm --filter @valet/engine test wait-for-event` and `pnpm --filter @valet/api test waiter-arm`. Expect FAIL.
 - [ ] **Step 4:** Implement. `armEvent` in the seam: run `checkArm`; on pass, create the row (`kind: "event"`, `status: "running"`, `deadlineAt: now + maxHours * 3_600_000`, `subjects`, `eventMatch`, `eventBuffer: []`), no lease (INV-E3). `wakeup_list` shows `subject` and clause count; `process_read` refuses an event waiter with the D2 text.
@@ -500,11 +508,11 @@
 ### Task 15: Agent guidance and docs
 
 **Files:**
-- Modify: `packages/api/src/engine/prompt-rules.ts:168-175`, `packages/api/src/orchestrator/persona.ts:277-279`, `packages/engine/src/builtin-tools/wakeups.ts` (tool description recipes)
+- Modify: `packages/api/src/engine/prompt-rules.ts:168-175`, `packages/api/src/orchestrator/persona.ts:277-279`, the host prompt builders in `packages/api/src/engine/host.ts` (pass the thread link; find the public URL setting the api already uses for links, e.g. `BETTER_AUTH_URL`/the configured public URL), `packages/engine/src/builtin-tools/wakeups.ts` (tool description recipes)
 - Modify: `docs/api-reference.md` (wakeups route fields), `docs/specs/2026-07-20-event-system-design.md` (subjects, derived events, `subject` filter), `docs/specs/2026-10-08-sandbox-scratch-wakeups-leases-design.md` (`event` kind in the wakeup list), `docs/specs/2026-10-15-event-wakeups-design.md` (errata from Tasks 6 and 11, Deviations)
 - Test: `packages/api/src/engine/prompt-rules.test.ts`, `packages/api/src/orchestrator/persona.test.ts`
 
-- [ ] **Step 1:** Failing tests: the coding prompt and persona contain `call \`wait_for_event\` with its URL`; the tool description contains the four recipe headings `CI on a pull request`, `A Slack reply`, `A Linear triage shift`, `A reply on a Linear issue`, and the sentence about subscriptions.
+- [ ] **Step 1:** Failing tests: with a public URL configured, the coding prompt and persona contain `This thread's link is https://valet.example/threads/<thread id>.`; without one, they omit the sentence. The coding prompt and persona contain `call \`wait_for_event\` with its URL`; the tool description contains the four recipe headings `CI on a pull request`, `A Slack reply`, `A Linear triage shift`, `A reply on a Linear issue`, and the sentence about subscriptions.
 - [ ] **Step 2:** Run. Expect FAIL.
 - [ ] **Step 3:** Implement the Part I text verbatim. Update the docs.
 - [ ] **Step 4:** Run tests and `python3 scripts/docs/docs_lint.py`. Expect PASS.
@@ -516,7 +524,7 @@
 - Create: `packages/api/src/integration/event-wakeups.test.ts`
 - Modify: `scripts/e2e/lib.ts` only if the integration suite needs registration
 
-- [ ] **Step 1:** Write Scenarios A to D from the spec as four `it` blocks using the existing integration setup (`packages/api/src/integration/_setup.ts`), the GitHub fixture server (`startGithubFixture`), signed webhook helpers for Slack and Linear, and a fake clock for the WakeWatcher. Every expected observation in the spec tables is an assertion.
+- [ ] **Step 1:** Write Scenarios A to E from the spec as five `it` blocks using the existing integration setup (`packages/api/src/integration/_setup.ts`), the GitHub fixture server (`startGithubFixture`), signed webhook helpers for Slack and Linear, and a fake clock for the WakeWatcher. Every expected observation in the spec tables is an assertion.
 - [ ] **Step 2:** Run `pnpm --filter @valet/api test event-wakeups`. Fix code (not the scenarios) until PASS. If a scenario step is wrong, fix the spec in the same commit.
 - [ ] **Step 3:** Run `make e2e 2>&1 | tee /tmp/e2e-event-wakeups.log`. Every red row MUST be a named, pre-existing environmental failure.
 - [ ] **Step 4:** Local Kubernetes check: `make k8s-build-fast`, roll the api, run Scenario A by hand against the cluster; confirm with `kubectl --context rancher-desktop -n valet-sandboxes get pods` that the session's pod is gone during steps A2 to A5 and the signals still arrive.
