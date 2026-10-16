@@ -4,6 +4,12 @@ import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResul
 
 export const REPORT_URL = "https://docs-analytics.vercel.app/api/report";
 
+/** The deployment-level report token. The operator sets it once on the API
+ * (`.env` locally, `api.secrets.docsAnalyticsToken` in the Helm chart). No
+ * user, team, or org admin connects anything: every session in every org
+ * reports through this one token. */
+export const TOKEN_ENV = "DOCS_ANALYTICS_TOKEN";
+
 const dateParameter = Type.Optional(
   Type.String({
     pattern: "^(?:\\d{4}-\\d{2}-\\d{2}|today|yesterday)$",
@@ -90,13 +96,13 @@ async function reportError(response: Response, token: string): Promise<PluginAct
   if (response.status === 401) {
     return {
       success: false,
-      error: "Docs Analytics rejected the organization credential. Ask an organization admin to add, renew, or replace the Docs Analytics credential.",
+      error: `Docs Analytics rejected the server token. Ask the Valet operator to renew ${TOKEN_ENV} on the API.`,
     };
   }
   if (response.status === 403) {
     return {
       success: false,
-      error: "Docs Analytics denied access to this report. Ask an organization admin to verify the Docs Analytics organization credential.",
+      error: `Docs Analytics denied access to this report. Ask the Valet operator to check ${TOKEN_ENV} on the API.`,
     };
   }
   if (response.status === 429) {
@@ -118,17 +124,17 @@ async function reportError(response: Response, token: string): Promise<PluginAct
 }
 
 async function executeReport(args: ReportArgs, ctx: PluginActionContext): Promise<PluginActionResult> {
-  const token = (await ctx.credentials.get())?.accessToken;
+  const token = process.env[TOKEN_ENV];
   if (!token) {
     return {
       success: false,
-      error: "Docs Analytics organization credential is not configured. Ask an organization admin to add the credential.",
+      error: `Docs Analytics is not configured on this server. Set ${TOKEN_ENV} in the API environment and restart the API.`,
     };
   }
   if (!isSafeBearerToken(token)) {
     return {
       success: false,
-      error: "Docs Analytics organization credential is malformed. Ask an organization admin to replace the credential.",
+      error: `${TOKEN_ENV} is malformed. Set it to the report token with no spaces or line breaks, then restart the API.`,
     };
   }
 
@@ -162,7 +168,9 @@ async function executeReport(args: ReportArgs, ctx: PluginActionContext): Promis
 export const docsAnalyticsPlugin: ActionPlugin = {
   service: "docs_analytics",
   description: "Read-only documentation analytics reports.",
-  requiresCredential: true,
+  // No credential: the report token is a deployment setting (`TOKEN_ENV`),
+  // so the tool is listed for every session and never probed for a
+  // connected account.
   actions: [
     action(reportParameters)({
       id: "docs_analytics.report",

@@ -7,14 +7,12 @@ describe("docs analytics plugin manifest", () => {
     expect(validateValetPlugin(plugin)).toEqual({ ok: true, plugin });
   });
 
-  it("declares an organization-owned API key for the report action", () => {
-    expect(plugin.credentials).toContainEqual({
-      service: "docs_analytics",
-      type: "api_key",
-      configKeys: ["accessToken"],
-      connectLabel: "Docs Analytics report token",
-      requires: { orgCredential: true },
-    });
+  // The report token is a deployment setting, so no user, team, or org
+  // connects anything. A credential declaration here would put the plugin
+  // on the Integrations page and gate its tool behind a connection.
+  it("declares no credential and exposes the report action to every session", () => {
+    expect(plugin.credentials).toBeUndefined();
+    expect(plugin.actions?.[0]?.requiresCredential).toBeUndefined();
     expect(plugin.actions?.[0]?.actions.map((action) => action.id)).toContain("docs_analytics.report");
   });
 });

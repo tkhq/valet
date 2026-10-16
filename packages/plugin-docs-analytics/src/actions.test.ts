@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Credential, PluginActionContext, Sandbox } from "@valet/engine";
-import { docsAnalyticsPlugin } from "./actions.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { PluginActionContext, Sandbox } from "@valet/engine";
+import { docsAnalyticsPlugin, TOKEN_ENV } from "./actions.js";
 
 const action = docsAnalyticsPlugin.actions[0];
 if (!action) throw new Error("Docs Analytics report action is missing.");
@@ -18,7 +18,9 @@ const sandbox: Sandbox = {
   exec: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
 };
 
-function context(credential: Credential | null = { accessToken: "test-token" }): PluginActionContext {
+// The token comes from the deployment environment, never from the
+// credential store, so the context's credential accessor returns nothing.
+function context(): PluginActionContext {
   return {
     actionId: "docs_analytics.report",
     service: "docs_analytics",
@@ -27,7 +29,7 @@ function context(credential: Credential | null = { accessToken: "test-token" }):
     sessionId: "session-1",
     threadId: "thread-1",
     credentials: {
-      get: async () => credential,
+      get: async () => null,
       request: async () => {
         throw new Error("unused");
       },
@@ -45,7 +47,11 @@ function context(credential: Credential | null = { accessToken: "test-token" }):
   };
 }
 
-afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => vi.stubEnv(TOKEN_ENV, "test-token"));
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+});
 
 describe("docs_analytics.report", () => {
   it("constructs an inclusive JSON report request and preserves coverage fields", async () => {
@@ -99,8 +105,9 @@ describe("docs_analytics.report", () => {
     });
   });
 
-  it("redacts the credential from a JSON 400 error while keeping its context", async () => {
+  it("redacts the server token from a JSON 400 error while keeping its context", async () => {
     const token = "test-token";
+    vi.stubEnv(TOKEN_ENV, token);
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response(JSON.stringify({
@@ -109,7 +116,7 @@ describe("docs_analytics.report", () => {
       }), { status: 400 })),
     );
 
-    const result = await action.execute({ format: "json" }, context({ accessToken: token }));
+    const result = await action.execute({ format: "json" }, context());
     expect(result).toEqual({
       success: false,
       error: "Docs Analytics rejected the report parameters: Range error. Authorization: Bearer [redacted]",
@@ -119,7 +126,7 @@ describe("docs_analytics.report", () => {
   });
 
   it.each([
-    [401, "Docs Analytics rejected the organization credential"],
+    [401, "Docs Analytics rejected the server token"],
     [403, "Docs Analytics denied access to this report"],
     [429, "Docs Analytics rate limited this report request"],
     [500, "Docs Analytics could not generate the report"],
@@ -132,15 +139,16 @@ describe("docs_analytics.report", () => {
     expect(JSON.stringify(result)).not.toContain("test-token");
   });
 
-  it("rejects an unsafe stored token before fetch without exposing it", async () => {
+  it("rejects an unsafe server token before fetch without exposing it", async () => {
     const unsafeToken = "unsafe\r\ntoken";
+    vi.stubEnv(TOKEN_ENV, unsafeToken);
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await action.execute({ format: "json" }, context({ accessToken: unsafeToken }));
+    const result = await action.execute({ format: "json" }, context());
     expect(result).toEqual({
       success: false,
-      error: "Docs Analytics organization credential is malformed. Ask an organization admin to replace the credential.",
+      error: "DOCS_ANALYTICS_TOKEN is malformed. Set it to the report token with no spaces or line breaks, then restart the API.",
     });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(JSON.stringify(result)).not.toContain(unsafeToken);
@@ -166,10 +174,15 @@ describe("docs_analytics.report", () => {
     });
   });
 
-  it("tells the caller how to configure a missing organization credential", async () => {
-    await expect(action.execute({ format: "json" }, context(null))).resolves.toEqual({
+  it("names the environment variable when the server token is missing", async () => {
+    vi.stubEnv(TOKEN_ENV, "");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(action.execute({ format: "json" }, context())).resolves.toEqual({
       success: false,
-      error: "Docs Analytics organization credential is not configured. Ask an organization admin to add the credential.",
+      error: "Docs Analytics is not configured on this server. Set DOCS_ANALYTICS_TOKEN in the API environment and restart the API.",
     });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
