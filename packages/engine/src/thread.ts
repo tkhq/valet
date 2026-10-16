@@ -581,8 +581,6 @@ export class Thread {
   /** Snapshot at turn resolution: a user can change the next turn's pin while this one runs. */
   private assignedModelSpec?: string;
   private fallbackModelSpec?: string;
-  /** Last conversational request model; a switch must recheck the live context. */
-  private lastRequestModel: PiModel;
   private requestedMaxOutputTokens?: number;
   private requestEvidence: ReturnType<typeof modelRequestEvidence> & { requestId?: string | null } = modelRequestEvidence(undefined);
   private streamedTextLength = 0;
@@ -626,7 +624,6 @@ export class Thread {
     const persistedTimezone = data.metadata?.[THREAD_USER_TIMEZONE_KEY];
     this.threadUserTimezone = typeof persistedTimezone === "string" ? persistedTimezone : undefined;
     this.activeLeafEntryId = data.activeLeafEntryId;
-    this.lastRequestModel = session.options.model;
     this.agent = this.buildAgent();
   }
 
@@ -4505,13 +4502,12 @@ export class Thread {
     return estimated >= usable;
   }
 
-  /** Model changes can shrink the window while the thread or tool loop stays hot. */
-  private async fitContextAfterModelChange(
+  /** Tool results and model changes can exhaust the budget within one agent loop. */
+  private async fitContextBeforeRequest(
     context: AgentContext,
     model: PiModel,
     signal?: AbortSignal,
   ): Promise<AgentContext | undefined> {
-    if (model === this.lastRequestModel) return undefined;
     const cfg = this.session.options.compaction;
     const budget = usableTokens(model, cfg);
     if (budget === 0) return undefined;
@@ -5102,7 +5098,6 @@ export class Thread {
       // from its own config wins — pinning here would silently disable the
       // upstream knob forever.
       streamFn: async (model, context, options) => {
-        this.lastRequestModel = model;
         this.requestedMaxOutputTokens = options?.maxTokens;
         this.requestEvidence = modelRequestEvidence(undefined);
         await this.persistSkillContextAttributions();
@@ -5196,7 +5191,7 @@ export class Thread {
       // here is what makes "takes effect on the next LLM call" true.
       prepareNextTurnWithContext: ({ context }) => ({ model: this.agent.state.model, context: { ...context, tools: this.buildTools() } }),
       prepareRequest: async ({ context, model }, signal) => {
-        const fitted = await this.fitContextAfterModelChange(context, model, signal);
+        const fitted = await this.fitContextBeforeRequest(context, model, signal);
         return fitted ? { context: fitted } : undefined;
       },
       // A stale fenced publication means a successor owns this submission.
