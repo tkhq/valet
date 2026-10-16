@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
-import { Check, ClipboardCopy, ExternalLink } from "lucide-react";
+import { Check, ClipboardCopy, ExternalLink, Info } from "lucide-react";
 import type { ChangelogCategory } from "@valet/api/wire";
 import { useChangelog } from "~/api/changelog";
 import { useMe } from "~/api/settings";
 import { Pager } from "~/components/pager";
-import { Badge, Spinner, pageClass } from "~/components/primitives";
+import { Badge, Button, Label, Spinner, cardClass, pageClass, textLinkClass } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
 import {
   CHANGELOG_CATEGORIES,
@@ -24,6 +24,7 @@ import {
   unreadCheckpointIds,
   type ChangelogReadState,
 } from "~/lib/changelog-read-state";
+import { cn } from "~/lib/cn";
 import { textParam } from "~/lib/search-params";
 import { useCopyToClipboard } from "~/lib/use-copy";
 
@@ -64,6 +65,12 @@ const CATEGORY: Record<ChangelogCategory, { label: string }> = {
   security: { label: "Security" },
 };
 
+// Mix palette tokens locally so small text stays readable without changing other pages.
+const secondaryTextClass = "text-[color:color-mix(in_oklch,var(--muted),var(--ink)_20%)]";
+const newBadgeClass = "shrink-0 rounded-full border border-moss bg-moss-wash px-2.5 text-ink tracking-normal dark:bg-moss-wash dark:text-ink";
+const focusClass = "rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss focus-visible:ring-offset-2 focus-visible:ring-offset-paper";
+const selectClass = "h-12 w-full min-w-0 rounded-xl border border-line bg-paper px-3 text-base text-ink sm:h-11 sm:rounded sm:text-sm focus-visible:border-moss focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss";
+
 function releaseDate(value: string): string {
   return new Intl.DateTimeFormat(undefined, {
     year: "numeric",
@@ -93,6 +100,7 @@ export function ChangelogPage() {
   const { copied, copy } = useCopyToClipboard();
   const checkpoints = changelog.data?.manifest.checkpoints ?? [];
   const runningSha = changelog.data?.artifact.sha;
+  const [emptyStatusReady, setEmptyStatusReady] = useState(false);
   const [seenWhenOpened, setSeenWhenOpened] = useState<ChangelogReadState | null>();
   const openingSnapshot = useRef<ChangelogReadState | null | undefined>(undefined);
   const search = readChangelogSearch(useSearch({ strict: false }));
@@ -134,28 +142,38 @@ export function ChangelogPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [changelog.isPending, currentPage, requestedPage]);
 
+  useEffect(() => {
+    if (changelog.isPending || changelog.isError) {
+      setEmptyStatusReady(false);
+      return;
+    }
+    // Register the empty live region before adding text, including on a direct no-match URL.
+    const timer = window.setTimeout(() => setEmptyStatusReady(true), 0);
+    return () => window.clearTimeout(timer);
+  }, [changelog.isPending, changelog.isError]);
+
   if (changelog.isPending) {
     return (
-      <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted">
-        <Spinner size={14} /> Loading changelog…
+      <div role="status" className={cn("flex flex-1 items-center justify-center gap-2 p-6 text-sm", secondaryTextClass)}>
+        <span aria-hidden="true"><Spinner size={14} className="motion-reduce:animate-none" /></span> Loading changelog…
       </div>
     );
   }
   if (changelog.isError) {
     return (
-      <div className="flex-1 p-8 text-sm text-danger-500">
+      <div role="alert" className="flex-1 p-8 text-sm text-danger-600 dark:text-danger-500">
         Could not load the changelog. Reload the page to try again.
       </div>
     );
   }
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className={pageClass}>
-        <h1 className="font-display text-2xl text-ink">Changelog</h1>
-        <p className="mt-2 text-sm text-muted">Changes in rolling builds and released versions.</p>
+    <div className="min-w-0 flex-1 overflow-y-auto">
+      <div className={cn(pageClass, "[container-type:inline-size]")}>
+        <h1 className="font-display text-2xl font-medium text-ink">Changelog</h1>
+        <p className={cn("mt-2 text-sm leading-6", secondaryTextClass)}>Changes in rolling builds and released versions.</p>
         {runningSha && (
-          <div className="mt-3 flex flex-wrap items-center gap-x-2 text-sm text-muted">
+          <div className={cn("mt-3 flex flex-wrap items-center gap-x-2 text-xs", secondaryTextClass)}>
             <span>Running commit</span>
             <a
               href={`https://github.com/tkhq/valet/commit/${runningSha}`}
@@ -163,98 +181,126 @@ export function ChangelogPage() {
               rel="noreferrer"
               aria-label={`Running commit ${runningSha}`}
               title={runningSha}
-              className="font-mono hover:text-moss hover:underline"
+              className={cn(textLinkClass, focusClass, "min-h-6 font-mono max-sm:min-h-11 max-sm:min-w-11")}
             >
               {runningSha.slice(0, 9)}
             </a>
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="icon"
               aria-label="Copy running commit"
               onClick={() => void copy(runningSha)}
-              className="inline-flex max-sm:min-h-11 items-center hover:text-moss"
+              className="text-ink hover:bg-moss-wash hover:text-moss focus-visible:ring-moss dark:text-ink dark:hover:bg-moss-wash dark:hover:text-moss"
             >
               {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <ClipboardCopy className="h-3.5 w-3.5" aria-hidden />}
-            </button>
+            </Button>
           </div>
         )}
 
         {changelog.data.artifact.status === "latest-known" && (
-          <div className="mt-6 rounded border border-line bg-ink-wash px-3 py-2 text-sm text-ink">
-            This build has no release checkpoint. The latest known checkpoint is shown.
+          <div role="note" aria-label="Build information" className={cn(cardClass, "mt-6 flex gap-3 border-l-4 border-l-moss bg-moss-wash px-4 py-4 text-sm leading-6 text-ink sm:px-5")}>
+            <Info className="mt-0.5 h-5 w-5 shrink-0 text-moss" aria-hidden="true" />
+            <p>This build has no release checkpoint. The latest known checkpoint is shown.</p>
           </div>
         )}
 
         {checkpoints.length > 0 && (
-          <div className="mt-6 grid gap-3 rounded border border-line bg-ink-wash p-3 sm:grid-cols-[minmax(12rem,1fr)_auto_auto] sm:items-center">
-            <SearchInput
-              value={query}
-              onSettled={(value) =>
-                go({ q: value.trim().length === 0 ? undefined : value, page: undefined })
-              }
-              placeholder="Search changes…"
-              aria-label="Search changes"
-              className="bg-paper"
-            />
-            <select
-              aria-label="Filter by change type"
-              value={category}
-              onChange={(event) => {
-                const next = CHANGELOG_CATEGORIES.find((value) => value === event.target.value);
-                go({ category: next, page: undefined });
-              }}
-              className="h-9 max-sm:min-h-11 max-sm:text-base rounded border border-line bg-paper px-3 text-sm text-ink"
-            >
-              <option value="all">All change types</option>
-              {CHANGELOG_CATEGORIES.map((value) => (
-                <option key={value} value={value}>{CATEGORY[value].label}</option>
-              ))}
-            </select>
-            <select
-              aria-label="Sort releases"
-              value={sort}
-              onChange={(event) =>
-                go({ sort: event.target.value === "oldest" ? "oldest" : undefined, page: undefined })
-              }
-              className="h-9 max-sm:min-h-11 max-sm:text-base rounded border border-line bg-paper px-3 text-sm text-ink"
-            >
-              <option value="newest">Newest first</option>
-              <option value="oldest">Oldest first</option>
-            </select>
+          <div
+            role="group"
+            aria-label="Changelog filters"
+            className={cn(cardClass, "mt-8 grid gap-4 p-4 sm:p-5 [@container(min-width:32rem)]:grid-cols-2 [@container(min-width:48rem)]:grid-cols-[minmax(0,1fr)_auto_auto]")}
+          >
+            <div className="min-w-0 space-y-2 [@container(min-width:32rem)]:col-span-2 [@container(min-width:48rem)]:col-span-1">
+              <Label htmlFor="changelog-search" className={secondaryTextClass}>Search changes</Label>
+              <SearchInput
+                id="changelog-search"
+                value={query}
+                onSettled={(value) =>
+                  go({ q: value.trim().length === 0 ? undefined : value, page: undefined })
+                }
+                placeholder="Search changes…"
+                className="h-12 bg-paper placeholder:text-[color:color-mix(in_oklch,var(--muted),var(--ink)_20%)] focus-visible:border-moss focus-visible:ring-moss max-sm:focus-visible:ring-2 max-sm:focus-visible:ring-moss sm:h-11"
+              />
+            </div>
+            <div className="min-w-0 space-y-2">
+              <Label htmlFor="changelog-category" className={secondaryTextClass}>Change type</Label>
+              <select
+                id="changelog-category"
+                value={category}
+                onChange={(event) => {
+                  const next = CHANGELOG_CATEGORIES.find((value) => value === event.target.value);
+                  go({ category: next, page: undefined });
+                }}
+                className={selectClass}
+              >
+                <option value="all">All change types</option>
+                {CHANGELOG_CATEGORIES.map((value) => (
+                  <option key={value} value={value}>{CATEGORY[value].label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="min-w-0 space-y-2">
+              <Label htmlFor="changelog-sort" className={secondaryTextClass}>Sort releases</Label>
+              <select
+                id="changelog-sort"
+                value={sort}
+                onChange={(event) =>
+                  go({ sort: event.target.value === "oldest" ? "oldest" : undefined, page: undefined })
+                }
+                className={selectClass}
+              >
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+              </select>
+            </div>
           </div>
         )}
 
+        <div
+          role="status"
+          aria-atomic="true"
+          className={emptyStatusReady && checkpoints.length > 0 && visibleCheckpoints.length === 0
+            ? cn(cardClass, "mt-8 px-4 py-10 text-center")
+            : "sr-only"}
+        >
+          {emptyStatusReady && checkpoints.length > 0 && visibleCheckpoints.length === 0 && (
+            <>
+              <p className="text-sm font-medium text-ink">No changes match these filters.</p>
+              <p className={cn("mt-2 text-sm leading-6", secondaryTextClass)}>Change the type filter or search terms.</p>
+            </>
+          )}
+        </div>
         {checkpoints.length === 0 ? (
-          <p className="mt-10 text-sm text-muted">No release checkpoints are available for this build.</p>
-        ) : visibleCheckpoints.length === 0 ? (
-          <div className="mt-10 rounded border border-line px-4 py-8 text-center">
-            <p className="text-sm font-medium text-ink">No changes match these filters.</p>
-            <p className="mt-1 text-sm text-muted">Change the type filter or search terms.</p>
-          </div>
-        ) : (
+          <p className={cn(cardClass, "mt-8 px-4 py-10 text-center text-sm", secondaryTextClass)}>No release checkpoints are available for this build.</p>
+        ) : visibleCheckpoints.length === 0 ? null : (
           <>
-            <div className="mt-8 space-y-10">
+            <div className="mt-10 space-y-8">
               {pageCheckpoints.map((checkpoint) => {
                 const unreleased = checkpoint.kind === "unreleased";
                 const checkpointSha = unreleased ? checkpoint.buildSha : checkpoint.releasedSha;
                 const checkpointUrl = unreleased ? checkpoint.buildUrl : checkpoint.releaseUrl;
                 const groups = groupChangelogEntries(checkpoint.entries);
                 return (
-                  <section key={checkpoint.id} aria-labelledby={`release-${checkpoint.id}`}>
-                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line pb-2">
-                      <h2 id={`release-${checkpoint.id}`} className="font-display text-xl text-ink">
-                        {unreleased ? "Unreleased" : checkpoint.version}
-                      </h2>
-                      <span className="text-sm text-muted">
-                        {unreleased ? buildDate(checkpoint.builtAt) : releaseDate(checkpoint.releasedAt)}
-                      </span>
-                      {unread.has(checkpoint.id) && <Badge variant="accent">New</Badge>}
-                      <div className="ml-auto flex items-center gap-3 text-xs text-muted">
+                  <section key={checkpoint.id} aria-labelledby={`release-${checkpoint.id}`} className={cn(cardClass, "min-w-0")}>
+                    <div className="flex flex-col gap-3 border-b border-line px-4 py-5 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:px-5">
+                      <div className="min-w-0 space-y-1.5">
+                        <div className="flex flex-wrap items-center gap-3">
+                          <h2 id={`release-${checkpoint.id}`} className="break-words font-display text-xl font-semibold text-ink">
+                            {unreleased ? "Unreleased" : checkpoint.version}
+                          </h2>
+                          {unread.has(checkpoint.id) && <Badge variant="accent" className={newBadgeClass}>New</Badge>}
+                        </div>
+                        <time dateTime={unreleased ? checkpoint.builtAt : checkpoint.releasedAt} className={cn("block text-sm", secondaryTextClass)}>
+                          {unreleased ? buildDate(checkpoint.builtAt) : releaseDate(checkpoint.releasedAt)}
+                        </time>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
                         {unreleased && (
                           <a
                             href={`https://github.com/tkhq/valet/commit/${checkpointSha}`}
                             target="_blank"
                             rel="noreferrer"
-                            className="inline-flex max-sm:min-h-11 items-center font-mono hover:text-moss hover:underline"
+                            className={cn(textLinkClass, focusClass, "min-h-6 font-mono max-sm:min-h-11 max-sm:min-w-11")}
                           >
                             Build {checkpointSha.slice(0, 9)}
                           </a>
@@ -264,7 +310,7 @@ export function ChangelogPage() {
                             href={checkpointUrl}
                             target="_blank"
                             rel="noreferrer"
-                            className="inline-flex max-sm:min-h-11 items-center gap-1 text-moss hover:underline"
+                            className={cn(textLinkClass, focusClass, "min-h-6 max-sm:min-h-11 max-sm:min-w-11")}
                           >
                             {unreleased ? "Build" : "Release"} <ExternalLink className="h-3 w-3" aria-hidden />
                           </a>
@@ -273,21 +319,21 @@ export function ChangelogPage() {
                     </div>
 
                     {checkpoint.entries.length === 0 ? (
-                      <p className="py-4 text-sm text-muted">
+                      <p className={cn("px-4 py-6 text-sm leading-6 sm:px-5", secondaryTextClass)}>
                         {unreleased
                           ? "No user-facing changes are pending in this build."
                           : "No user-facing changes shipped in this release."}
                       </p>
                     ) : (
-                      <div className="divide-y divide-line">
+                      <div className="divide-y divide-line px-4 sm:px-5">
                         {groups.map((group) => {
                           const presentation = CATEGORY[group.category];
                           return (
-                            <div key={group.category} className="grid py-3 md:grid-cols-[8rem_minmax(0,1fr)] md:gap-4">
-                              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted md:mb-0 md:pt-0.5">
+                            <div key={group.category} className="grid min-w-0 py-5 [@container(min-width:40rem)]:grid-cols-[8rem_minmax(0,1fr)] [@container(min-width:40rem)]:gap-5">
+                              <h3 className={cn("text-xs font-semibold uppercase tracking-wide [@container(min-width:40rem)]:pt-4", secondaryTextClass)}>
                                 {presentation.label}
                               </h3>
-                              <ul className="divide-y divide-line">
+                              <ul className="min-w-0 divide-y divide-line">
                                 {group.entries.map((entry) => {
                                   const commit = entry.sources.commitSha;
                                   const entryUnread = isUnreadChangelogEntry(
@@ -299,19 +345,19 @@ export function ChangelogPage() {
                                   return (
                                     <li
                                       key={`${checkpoint.id}-${commit}`}
-                                      className={`py-2 first:pt-0 last:pb-0${entryUnread ? " -mx-2 rounded border-l-2 border-accent-500 bg-ink-wash px-2" : ""}`}
+                                      className="py-4"
                                     >
-                                      <div className="grid gap-1 sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-x-4">
+                                      <div className="min-w-0 space-y-2">
                                         <div className="min-w-0">
                                           <div className="flex flex-wrap items-center gap-2">
-                                            <h4 className="font-medium leading-5 text-ink">{entry.title}</h4>
-                                            {entryUnread && <Badge variant="accent">New</Badge>}
+                                            <h4 className="min-w-0 font-medium leading-6 text-ink [overflow-wrap:anywhere]">{entry.title}</h4>
+                                            {entryUnread && <Badge variant="accent" className={newBadgeClass}>New</Badge>}
                                           </div>
                                           {entry.description && (
-                                            <p className="mt-0.5 text-sm leading-5 text-muted">{entry.description}</p>
+                                            <p className="mt-1 text-sm leading-6 text-ink [overflow-wrap:anywhere]">{entry.description}</p>
                                           )}
                                         </div>
-                                        <div className="flex items-start gap-3 text-xs text-muted sm:pt-0.5">
+                                        <div className={cn("flex flex-wrap items-center gap-x-4 gap-y-1 text-xs", secondaryTextClass)}>
                                           {entryDate(entry.authoredAt) && (
                                             <time dateTime={entry.authoredAt}>{entryDate(entry.authoredAt)}</time>
                                           )}
@@ -320,7 +366,7 @@ export function ChangelogPage() {
                                               href={`https://github.com/tkhq/valet/pull/${entry.sources.pullRequest}`}
                                               target="_blank"
                                               rel="noreferrer"
-                                              className="inline-flex max-sm:min-h-11 items-center whitespace-nowrap hover:text-moss hover:underline"
+                                              className={cn(textLinkClass, focusClass, "min-h-6 whitespace-nowrap max-sm:min-h-11 max-sm:min-w-11")}
                                             >
                                               PR #{entry.sources.pullRequest}
                                             </a>
@@ -330,7 +376,7 @@ export function ChangelogPage() {
                                             target="_blank"
                                             rel="noreferrer"
                                             aria-label={`Commit ${commit}`}
-                                            className="inline-flex max-sm:min-h-11 items-center font-mono hover:text-moss hover:underline"
+                                            className={cn(textLinkClass, focusClass, "min-h-6 font-mono max-sm:min-h-11 max-sm:min-w-11")}
                                           >
                                             {commit.slice(0, 9)}
                                           </a>
