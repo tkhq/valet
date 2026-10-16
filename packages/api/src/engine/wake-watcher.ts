@@ -31,6 +31,7 @@ import type {
   WakeupStatus,
 } from "@valet/engine";
 import type { EventWaiterDerive } from "../events/derive.js";
+import { derivedClausesAccept } from "../events/waiter-match.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { agentSessions } from "../schema/index.js";
@@ -53,6 +54,12 @@ import { isSandboxGone } from "./wakeups-admin.js";
 export const WAKE_WATCHER_INTERVAL_MS = 30_000;
 /** Max due rows one page reads (spec B5). A tick reads every page. */
 export const WAKE_WATCHER_BATCH = 200;
+/**
+ * Most event waiters whose derive step runs at once (event wakeups spec,
+ * Part F step 1). A derive can take its whole 20 s deadline, so one at a
+ * time would let a few slow waiters hold the pass for minutes.
+ */
+export const EVENT_DERIVE_CONCURRENCY = 4;
 
 const TERMINAL: readonly WakeupStatus[] = ["done", "cancelled", "expired", "lost"];
 const WAKEUP_KINDS: readonly WakeupKind[] = ["process", "watch", "timer", "event"];
@@ -172,6 +179,8 @@ export class WakeWatcher {
   private lastPassAt: number | undefined;
   /** Set by `stop()`. A pass checks it before each row and stops there. */
   private stopping = false;
+  /** Event waiters that ingest appended to since the last light pass read them. */
+  private readonly nudged = new Set<string>();
 
   constructor(private readonly deps: WakeWatcherDeps) {
     this.intervalMs = deps.sweepIntervalMs ?? WAKE_WATCHER_INTERVAL_MS;
@@ -199,7 +208,7 @@ export class WakeWatcher {
     // The liveness series exists from the start, so a watcher that never
     // finishes a pass still trips the staleness alert (fix wave 3, data L3).
     this.metrics.sweepOk(Math.floor(this.clock() / 1000));
-    this.timer = startSweepTimer("WakeWatcher", this.intervalMs, () => this.sweep());
+    this.timer = startSweepTimer("WakeWatcher", this.intervalMs, () => this.sweep(), { light: () => this.eventPass() });
   }
 
   /**
@@ -216,13 +225,38 @@ export class WakeWatcher {
   }
 
   /**
-   * Runs one pass soon, for an event waiter that ingest just appended to
-   * (spec 2026-10-15, Part E step 6). It never overlaps a running pass:
-   * a nudge during a pass runs exactly one more pass after it. Before
+   * Runs a light pass soon for event waiters that ingest just appended to
+   * (spec 2026-10-15, Part E step 6). The light pass reads only those rows
+   * by id: no due-row scan, no probe, no lease work. It never overlaps a
+   * full pass: a nudge during a pass runs one light pass after it. Before
    * `start()` and after `stop()`, it does nothing.
    */
-  nudge(): void {
-    this.timer?.runNow();
+  nudge(wakeupIds: readonly string[]): void {
+    if (!this.timer) return;
+    for (const id of wakeupIds) this.nudged.add(id);
+    this.timer.runLight();
+  }
+
+  /**
+   * The nudge's light pass: the nudged event waiters that are still
+   * running with a non-empty buffer, through the same event-row step as
+   * the full pass. A nudged id that this pass misses (a crash, a stop)
+   * stays due, and the next full pass reads it.
+   */
+  async eventPass(now: number = this.clock()): Promise<void> {
+    const ids = [...this.nudged];
+    this.nudged.clear();
+    const rows: Wakeup[] = [];
+    for (const id of ids) {
+      if (this.stopping) return;
+      try {
+        const row = await this.deps.engineStore.getWakeup(id);
+        if (row && row.kind === "event" && row.status === "running" && (row.eventBuffer ?? []).length > 0) rows.push(row);
+      } catch (err) {
+        console.error(`WakeWatcher: reading nudged event wakeup ${id} failed; the next full pass handles it:`, err);
+      }
+    }
+    await this.processEventRows(now, rows);
   }
 
   /** One pass. Records its liveness: `sweep_ok_at` on success, `sweep_failed` on a throw (fix wave 2, M5). */
@@ -247,25 +281,24 @@ export class WakeWatcher {
     // process rows starve newer timers once more than one batch was due.
     // The store's cursor counts unreadable rows too, so one bad row never
     // ends the scan early (fix wave 4, data N1).
+    // Event waiters run after the other rows, so a slow derive never holds
+    // up a process, watch, or timer row (spec 2026-10-15, Part F step 1).
+    const eventRows: Wakeup[] = [];
     let after: WakeupCursor | undefined;
     for (;;) {
       const { rows, next } = await this.deps.engineStore.listDueWakeups(now, this.batchSize, after);
       for (const row of rows) {
         if (this.stopping) return;
-        const progress = { pastCas: false };
-        try {
-          await this.processRow(now, row, progress);
-        } catch (err) {
-          if (progress.pastCas) {
-            console.error(`WakeWatcher: wakeup ${row.id} failed after its transition was stored:`, err);
-          } else {
-            console.error(`WakeWatcher: wakeup ${row.id} failed this tick; it stays due for the next tick:`, err);
-          }
+        if (row.kind === "event") {
+          eventRows.push(row);
+          continue;
         }
+        await this.guardedRow(row, (progress) => this.processRow(now, row, progress));
       }
       if (next === null) break;
       after = next;
     }
+    await this.processEventRows(now, eventRows);
     if (this.stopping) return;
     // Every pending or running row, not just the due ones: a pending timer
     // is not due until it fires (fix wave 2, M11).
@@ -280,11 +313,58 @@ export class WakeWatcher {
     await this.reconcileLeases(now);
   }
 
-  private async processRow(now: number, row: Wakeup, progress: { pastCas: boolean }): Promise<void> {
-    if (row.kind === "event") {
-      await this.processEventRow(now, row, progress);
-      return;
+  /** Runs one row's step and logs a throw, so one bad row never ends the pass. */
+  private async guardedRow(row: Wakeup, step: (progress: { pastCas: boolean }) => Promise<void>): Promise<void> {
+    const progress = { pastCas: false };
+    try {
+      await step(progress);
+    } catch (err) {
+      if (progress.pastCas) {
+        console.error(`WakeWatcher: wakeup ${row.id} failed after its transition was stored:`, err);
+      } else {
+        console.error(`WakeWatcher: wakeup ${row.id} failed this tick; it stays due for the next tick:`, err);
+      }
     }
+  }
+
+  /**
+   * Due event waiters (spec 2026-10-15, Part F): the derive steps first,
+   * at most `EVENT_DERIVE_CONCURRENCY` at once, then each row's decision
+   * and delivery one at a time. Each row is one waiter, so two derive
+   * steps never write the same row.
+   */
+  private async processEventRows(now: number, rows: readonly Wakeup[]): Promise<void> {
+    const steps: Array<{ row: Wakeup | null; derived: boolean } | null> = rows.map(() => null);
+    let nextIndex = 0;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        if (this.stopping) return;
+        const index = nextIndex++;
+        const row = rows[index];
+        if (row === undefined) return;
+        try {
+          steps[index] = await this.deriveStep(row);
+        } catch (err) {
+          console.error(`WakeWatcher: derive step of event wakeup ${row.id} failed; it stays due for the next tick:`, err);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(EVENT_DERIVE_CONCURRENCY, rows.length) }, worker));
+    for (const [index, row] of rows.entries()) {
+      if (this.stopping) return;
+      const step = steps[index];
+      if (!step?.row) continue;
+      const current = step.row;
+      // A derive can take up to its 20 s deadline, so the decision after one
+      // reads the clock again instead of the pass start.
+      const at = step.derived ? this.clock() : now;
+      await this.guardedRow(row, (progress) => this.decideEventRow(at, current, progress));
+    }
+  }
+
+  /** One due process, watch, or timer row. Event waiters go through `processEventRows`. */
+  private async processRow(now: number, row: Wakeup, progress: { pastCas: boolean }): Promise<void> {
+    if (row.kind === "event") return;
     let sandbox: Sandbox | null = null;
     let probe: WakeupProbe;
     if (row.kind === "timer" || (row.status === "pending" && now - row.createdAt < PENDING_START_GRACE_MS)) {
@@ -339,22 +419,18 @@ export class WakeWatcher {
   }
 
   /**
-   * One due event waiter (spec 2026-10-15, Part F): the derive step, then
-   * `decideEventWaiter` through the shared `applyDecision`. An event waiter
-   * runs no job, so it has no probe, lease, or kill.
+   * One event waiter after its derive step: `decideEventWaiter` through
+   * the shared `applyDecision`. An event waiter runs no job, so it has no
+   * probe, lease, or kill.
    */
-  private async processEventRow(now: number, row: Wakeup, progress: { pastCas: boolean }): Promise<void> {
-    const { row: current, derived } = await this.deriveStep(row);
-    if (!current) return;
-    // A derive can take up to its 20 s deadline, so the decision after one
-    // reads the clock again instead of the pass start.
-    const decision = decideEventWaiter(derived ? this.clock() : now, current, this.decideOptions);
+  private async decideEventRow(now: number, row: Wakeup, progress: { pastCas: boolean }): Promise<void> {
+    const decision = decideEventWaiter(now, row, this.decideOptions);
     if (!decision) return;
     if (decision.badRow) {
       this.metrics.badRow("engine_wakeups");
       console.error(`WakeWatcher: event wakeup ${row.id} has no match spec; it ends as ${decision.to}.`);
     }
-    await this.applyDecision(current, decision, null, progress);
+    await this.applyDecision(row, decision, null, progress);
   }
 
   /**
@@ -362,9 +438,10 @@ export class WakeWatcher {
    * latest digest marked `derive`. The buffer changes only by key, never by
    * a whole-buffer write, so a digest that ingest appends meanwhile stays.
    *
-   * - `event`: remove the source digests, then append the derived digest.
-   *   `appendEventMatch` refuses a derived key that the waiter already
-   *   holds or delivered (INV-E4).
+   * - `event`: remove the source digests, then append the derived digest
+   *   when the `status` and `from_status` of a clause on the derived key
+   *   accept it. Otherwise no signal. `appendEventMatch` refuses a derived
+   *   key that the waiter already holds or delivered (INV-E4).
    * - `null`: remove the source digests. No signal.
    * - `error`: keep them for the next tick.
    *
@@ -396,7 +473,10 @@ export class WakeWatcher {
     const sources = buffer.filter((d) => d.derive === latest.derive).map((d) => d.dedupeKey);
     const at = this.clock();
     await this.deps.engineStore.removeEventMatches(row.id, sources, at);
-    if (outcome.result === "event") await this.deps.engineStore.appendEventMatch(row.id, outcome.digest, at);
+    const latestKey = latest.derive;
+    if (outcome.result === "event" && latestKey !== undefined && row.eventMatch && derivedClausesAccept(row.eventMatch, latestKey, outcome.digest)) {
+      await this.deps.engineStore.appendEventMatch(row.id, outcome.digest, at);
+    }
     return { row: await this.deps.engineStore.getWakeup(row.id), derived: true };
   }
 
@@ -594,8 +674,10 @@ export class WakeWatcher {
       // On a team session that thread can have readers the work's thread
       // did not have: keep the output and the channel origin out of it,
       // as a human cancel does (fix wave 4, security N3).
+      // The digests attribute carries summaries and links, so it stays out too.
       const { origin: _origin, ...plain } = content;
-      await session.prompt({ ...plain, body: removedThreadBody(draft) }, base);
+      const { digests: _digests, ...attributes } = draft.attributes;
+      await session.prompt({ ...plain, attributes, body: removedThreadBody(draft) }, base);
       return;
     }
     await session.prompt(content, { threadId, ...base });

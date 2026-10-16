@@ -1212,26 +1212,111 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect(derive).not.toHaveBeenCalled();
   });
 
-  it("runs exactly one more pass after it when nudge() arrives during a running pass", async () => {
+  it("runs exactly one more light pass after it when nudge() arrives during a running pass", async () => {
     const h = harness();
     const releases: Array<() => void> = [];
-    const list = h.store.listDueWakeups.bind(h.store);
-    const spy = vi.spyOn(h.store, "listDueWakeups").mockImplementation(async (...args) => {
+    const get = h.store.getWakeup.bind(h.store);
+    const spy = vi.spyOn(h.store, "getWakeup").mockImplementation(async (id) => {
       await new Promise<void>((resolve) => releases.push(resolve));
-      return list(...args);
+      return get(id);
     });
+    const due = vi.spyOn(h.store, "listDueWakeups");
     const watcher = h.watcher({ sweepIntervalMs: HOUR });
     watcher.start();
-    watcher.nudge();
+    watcher.nudge(["wk_ev"]);
     await vi.waitFor(() => expect(releases).toHaveLength(1));
-    watcher.nudge();
-    watcher.nudge();
+    watcher.nudge(["wk_ev"]);
+    watcher.nudge(["wk_ev"]);
     releases.shift()?.();
     await vi.waitFor(() => expect(releases).toHaveLength(1));
     expect(spy).toHaveBeenCalledTimes(2);
     releases.shift()?.();
     await watcher.stop();
     expect(spy).toHaveBeenCalledTimes(2);
+    expect(due).not.toHaveBeenCalled();
+  });
+
+  it("delivers a nudged waiter's digest with no due-row scan, probe, or lease work (final review, item 5)", async () => {
+    const h = harness();
+    await seedProcess(h.store);
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1)] }));
+    const due = vi.spyOn(h.store, "listDueWakeups");
+    const leases = vi.spyOn(h.store, "listAllActiveLeases");
+    const watcher = h.watcher({ sweepIntervalMs: HOUR });
+    watcher.start();
+    watcher.nudge(["wk_ev"]);
+    await vi.waitFor(() => expect(h.prompt).toHaveBeenCalledTimes(1));
+    await watcher.stop();
+    expect((await h.store.getWakeup("wk_ev"))?.status).toBe("done");
+    expect(due).not.toHaveBeenCalled();
+    expect(leases).not.toHaveBeenCalled();
+    expect(h.restore).not.toHaveBeenCalled();
+    expect(h.setEvictionProtection).not.toHaveBeenCalled();
+    // The process row was not touched.
+    expect((await h.store.getWakeup("wk_a"))?.status).toBe("running");
+  });
+
+  it("runs derive steps four at a time, so 8 slow derives take about two derive times (final review, item 5)", async () => {
+    const h = harness();
+    for (let i = 0; i < 8; i++) {
+      await h.store.createWakeup(eventRow({ id: `wk_ev${i}`, createdAt: NOW - 60_000 + i, eventBuffer: [digest(i, { derive: CHECKS })] }));
+    }
+    const DERIVE_MS = 150;
+    let running = 0;
+    let maxRunning = 0;
+    const deriveEvent = vi.fn(async (): Promise<RunDeriveResult> => {
+      running++;
+      maxRunning = Math.max(maxRunning, running);
+      await new Promise((resolve) => setTimeout(resolve, DERIVE_MS));
+      running--;
+      return { result: "null" };
+    });
+    const started = Date.now();
+    await h.watcher({ deriveEvent }).sweep(NOW);
+    const elapsed = Date.now() - started;
+    expect(deriveEvent).toHaveBeenCalledTimes(8);
+    expect(maxRunning).toBe(4);
+    expect(elapsed).toBeLessThan(4 * DERIVE_MS);
+  });
+
+  it("processes process rows before event rows, so a slow derive does not hold them up", async () => {
+    const order: string[] = [];
+    const h = harness(async () => {
+      order.push("poll");
+      return { status: "running", output: "", nextOffset: 0 };
+    });
+    await h.store.createWakeup(eventRow({ createdAt: NOW - 120_000, eventBuffer: [digest(1, { derive: CHECKS })] }));
+    await seedProcess(h.store);
+    const deriveEvent = async (): Promise<RunDeriveResult> => {
+      order.push("derive");
+      return { result: "null" };
+    };
+    await h.watcher({ deriveEvent }).sweep(NOW);
+    expect(order).toEqual(["poll", "derive"]);
+  });
+
+  it("drops a derived event whose status no clause on the derived key accepts (final review, item 1)", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({
+      eventBuffer: [digest(1, { status: "success", derive: CHECKS })],
+      eventMatch: { clauses: [{ key: CHECKS, status: ["success"] }], once: true, self: [] },
+    }));
+    await h.watcher({ deriveEvent: async () => ({ result: "event", digest: derived }) }).sweep(NOW);
+    const row = await h.store.getWakeup("wk_ev");
+    expect(row?.status).toBe("running");
+    expect(row?.eventBuffer).toEqual([]);
+    expect(h.prompt).not.toHaveBeenCalled();
+  });
+
+  it("delivers a derived event whose status a clause on the derived key accepts", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({
+      eventBuffer: [digest(1, { status: "success", derive: CHECKS })],
+      eventMatch: { clauses: [{ key: CHECKS, status: ["failure"] }], once: true, self: [] },
+    }));
+    await h.watcher({ deriveEvent: async () => ({ result: "event", digest: derived }) }).sweep(NOW);
+    expect((await h.store.getWakeup("wk_ev"))?.status).toBe("done");
+    expect(h.prompt).toHaveBeenCalledTimes(1);
   });
 
   it("keeps an event waiter's details out of the main thread when its thread is gone, with no process_read advice", async () => {
@@ -1245,6 +1330,9 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
     expect(body).toContain("removed thread matched an event");
     expect(body).not.toContain("process_read");
     expect(body).not.toContain("secret reply");
+    // The structured digests carry summaries, so they stay out too.
+    expect(attr(content, "digests")).toBeUndefined();
+    expect(attr(content, "wakeupId")).toBe("wk_ev");
   });
 
   it("decides with the watcher clock after a derive, not the pass start", async () => {
@@ -1283,8 +1371,8 @@ describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
 
   it("ignores nudge() before start()", async () => {
     const h = harness();
-    const spy = vi.spyOn(h.store, "listDueWakeups");
-    h.watcher({ sweepIntervalMs: HOUR }).nudge();
+    const spy = vi.spyOn(h.store, "getWakeup");
+    h.watcher({ sweepIntervalMs: HOUR }).nudge(["wk_ev"]);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(spy).not.toHaveBeenCalled();
   });

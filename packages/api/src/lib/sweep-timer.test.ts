@@ -127,4 +127,91 @@ describe("startSweepTimer (fix wave 2, M3)", () => {
       }
     });
   });
+
+  describe("runLight (event wakeups final review, item 5)", () => {
+    it("runs the light pass, not the full pass", async () => {
+      vi.useFakeTimers();
+      try {
+        const pass = vi.fn(async () => {});
+        const light = vi.fn(async () => {});
+        const timer = startSweepTimer("test", 60_000, pass, { light });
+        timer.runLight();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(light).toHaveBeenCalledTimes(1);
+        expect(pass).not.toHaveBeenCalled();
+        await timer.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("never overlaps a full pass and runs one light pass after it", async () => {
+      vi.useFakeTimers();
+      try {
+        const releases: Array<() => void> = [];
+        let running = 0;
+        let maxRunning = 0;
+        const tracked = (fn: () => Promise<void>) => async () => {
+          running++;
+          maxRunning = Math.max(maxRunning, running);
+          await fn();
+          running--;
+        };
+        const pass = vi.fn(tracked(() => new Promise<void>((resolve) => releases.push(resolve))));
+        const light = vi.fn(tracked(async () => {}));
+        const timer = startSweepTimer("test", 60_000, pass, { light });
+        timer.runNow();
+        await vi.advanceTimersByTimeAsync(0);
+        timer.runLight();
+        timer.runLight();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(light).not.toHaveBeenCalled();
+        releases.shift()?.();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(light).toHaveBeenCalledTimes(1);
+        expect(pass).toHaveBeenCalledTimes(1);
+        expect(maxRunning).toBe(1);
+        await timer.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("runs only the full pass when both are scheduled during a pass", async () => {
+      vi.useFakeTimers();
+      try {
+        const releases: Array<() => void> = [];
+        const pass = vi.fn(() => new Promise<void>((resolve) => releases.push(resolve)));
+        const light = vi.fn(async () => {});
+        const timer = startSweepTimer("test", 60_000, pass, { light });
+        timer.runNow();
+        await vi.advanceTimersByTimeAsync(0);
+        timer.runLight();
+        timer.runNow();
+        releases.shift()?.();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(pass).toHaveBeenCalledTimes(2);
+        releases.shift()?.();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(light).not.toHaveBeenCalled();
+        await timer.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("falls back to the full pass with no light pass configured", async () => {
+      vi.useFakeTimers();
+      try {
+        const pass = vi.fn(async () => {});
+        const timer = startSweepTimer("test", 60_000, pass);
+        timer.runLight();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(pass).toHaveBeenCalledTimes(1);
+        await timer.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });
