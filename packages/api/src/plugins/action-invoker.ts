@@ -65,7 +65,7 @@ import {
   onePasswordScopesFor,
 } from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
-import { resolveSessionGitHubToken } from "../services/session-github-token.js";
+import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { extractDocumentText } from "../services/pdf-extract.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome, type AuditInvocationRow } from "../policies/service.js";
 import { shareGeneration, canBorrowCredential } from "../services/credential-borrow.js";
@@ -1119,6 +1119,18 @@ function buildGithubCredentialProvider(
         if (selection === "user") return null;
         const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner);
         return token === null ? null : { accessToken: token };
+      }
+      if (owner.type === "org" && selection === "auto") {
+        // An org-owned run acts for no person, so `auto` uses the App
+        // installation first, as an org session does (native credential
+        // policy, Part C). The org PAT row stays the tier behind it, through
+        // the `auto` read below. A session binding that names its own `auth`
+        // still wins, so the read skips this step for it.
+        const binding = ctx.sessionId ? await primaryRepoBinding(opts.db, ctx.sessionId) : undefined;
+        if (!binding || binding.auth === "auto") {
+          const token = await resolveInstallationApiToken(deps, ctx.orgId, repoFromParams(req.params)?.owner ?? binding?.repo.owner);
+          if (token !== null) return { accessToken: token };
+        }
       }
       // `params` are template-rendered, so a webhook payload can choose this
       // repo. That is safe only because `mintInstallationToken` looks an
