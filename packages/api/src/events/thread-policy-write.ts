@@ -6,7 +6,7 @@
  */
 import { sql } from "drizzle-orm";
 import type { Principal, ValetPlugin } from "@valet/engine";
-import { readThreadPolicy } from "@valet/shared";
+import { readThreadPolicy, validateThreadPolicy } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { isDeliverableTarget } from "./assistant-delivery.js";
 import { eventKeyMatches } from "./match.js";
@@ -65,7 +65,8 @@ export async function validateExistingThread(
 /**
  * `validateExistingThread` for a stored or requested policy value, when its
  * mode is `existing`. Returns null for an absent policy and for every other
- * mode. Call it after the shape check, once the rule's owner is known.
+ * valid mode. A malformed policy returns the shape text, so a caller that
+ * skipped the shape check fails closed. Call it once the rule's owner is known.
  */
 export async function existingThreadError(
   db: AppDb,
@@ -74,6 +75,8 @@ export async function existingThreadError(
   policy: unknown,
 ): Promise<string | null> {
   if (policy === undefined || policy === null) return null;
+  const shapeError = validateThreadPolicy(policy);
+  if (shapeError) return shapeError;
   const read = readThreadPolicy(policy);
   return read.mode === "existing" ? validateExistingThread(db, orgId, owner, read) : null;
 }

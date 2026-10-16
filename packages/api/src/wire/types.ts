@@ -2896,7 +2896,7 @@ export type CreateWorkflowScheduleRequest = {
    * create-workflow take.
    */
   teamId?: string;
-  /** Where the prompts land, for an orchestrator target only. Absent reads
+  /** Where the prompts land, for an assistant-prompt schedule only. Absent reads
    * as `{ mode: "own" }`. The server refuses `subject` and a policy on a
    * workflow target. */
   thread?: AssistantThreadPolicy;
@@ -5086,7 +5086,12 @@ export interface PatchEventSubscriptionRequest {
   /**
    * Replace this assistant rule's thread policy. `null` clears it, so the
    * rule reads as `{ mode: "own" }` again. Absent leaves it alone. See
-   * `EventSubscriptionTargetWire` for the checks.
+   * `EventSubscriptionTargetWire` for the checks. An `existing` thread is
+   * checked against the row's stored owner.
+   *
+   * The owner is not patchable. Changing the owner is not a field edit: it
+   * decides the row's mutation ACL and its collision peers. A rule that
+   * should belong elsewhere is rewritten, not patched.
    */
   thread?: AssistantThreadPolicy | null;
   /**

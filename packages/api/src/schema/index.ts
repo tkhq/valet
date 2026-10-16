@@ -2048,7 +2048,7 @@ export const workflowSchedules = pgTable(
     /** Prompt submitted to the orchestrator's "schedules" thread when
      * `target_kind = 'orchestrator'`. */
     prompt: text("prompt"),
-    /** Where an orchestrator-prompt schedule's prompts land: an
+    /** Where an assistant-prompt schedule's prompts land: an
      * `AssistantThreadPolicy` (spec 2026-10-16: delivery threads, Part A).
      * Null reads as `{ mode: "own" }`. Always null for a `workflow` target. */
     threadPolicy: jsonb("thread_policy"),
