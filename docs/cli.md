@@ -298,6 +298,24 @@ the flag with `xattr -d com.apple.quarantine ./valet-darwin-<arch>`, or
 download via curl (the install script above, or `curl -LO`). A curl
 download sets no quarantine flag and just runs.
 
+**NixOS:** the Linux binary is dynamically linked against glibc and expects
+the loader at `/lib64/ld-linux-x86-64.so.2`, which NixOS does not have. The
+raw binary fails there with "Could not start dynamically linked executable".
+The repo flake packages the release binary in an FHS environment, so it runs
+without `programs.nix-ld`:
+
+```bash
+nix run github:tkhq/valet/dev-v2 -- --help
+nix profile install github:tkhq/valet/dev-v2
+```
+
+The flake supports `x86_64-linux` only. The `valet/v0.1.0` linux-arm64 binary
+fails on every command, so the flake does not offer `aarch64-linux`. The flake
+pins a versioned release (`nix/valet.nix`). Run
+`nix/update.sh <version>` to move it to a newer `valet/v<version>` release.
+The binary stays dynamically linked. This is a NixOS-compatible package, not a
+static executable. It needs unprivileged user namespaces (the NixOS default).
+
 Or build from source:
 
 ```bash
