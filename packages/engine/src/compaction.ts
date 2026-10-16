@@ -747,6 +747,30 @@ Rules:
 - Next Steps must follow the user's most recent explicit requests — do not resurrect tangential or already-completed work.
 - Do not mention the summary process or that context was compacted.`;
 
+/** Reject a partial handoff before it can replace usable context. */
+function validateSummaryStructure(summary: string): void {
+  const required = [...SUMMARY_TEMPLATE.matchAll(/^#{2,3} .+$/gm)].map(match => match[0]);
+  const headings: Array<{ name: string; body: string[] }> = [];
+  let fence: { marker: string; length: number } | undefined;
+  for (const line of summary.split(/\r?\n/)) {
+    const boundary = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (boundary) {
+      const marker = boundary[1][0];
+      if (!fence) fence = { marker, length: boundary[1].length };
+      else if (marker === fence.marker && boundary[1].length >= fence.length && !boundary[2].trim()) fence = undefined;
+      continue;
+    }
+    const heading = !fence && /^ {0,3}(#{2,3})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/.exec(line);
+    if (heading) headings.push({ name: `${heading[1]} ${heading[2]}`, body: [] });
+    else headings.at(-1)?.body.push(line);
+  }
+  const valid = !fence && headings.length === required.length && headings.every((heading, index) =>
+    heading.name === required[index] && (heading.name === "## Progress" || heading.body.some(line => line.replace(/^\s*[-*+]\s*/, "").trim().length > 0)));
+  if (!valid) throw new Error(
+    "The summarizer returned an incomplete or malformed summary. Keep every required section in order with its content. Run /compact to retry.",
+  );
+}
+
 export interface SummarizeOptions {
   /** Entries to summarize (the head — everything before the cut point). */
   headEntries: readonly SessionEntry[];
@@ -883,9 +907,7 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
   // unclosed <analysis> block), and the caller can retry with less input.
   // The contextWindow argument matches the reactive path's overflow check.
   if (
-    result.stopReason === "error" ||
-    result.stopReason === "aborted" ||
-    result.stopReason === "length"
+    result.stopReason !== "stop" || result.content.some(block => block.type === "toolCall")
   ) {
     if (isContextOverflow(result, opts.model.contextWindow)) {
       throw new SummarizeOverflowError(result.errorMessage);
@@ -908,6 +930,8 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
       "The summarizer returned no summary text. Run /compact to retry.",
     );
   }
+
+  validateSummaryStructure(summary);
 
   return {
     summary,

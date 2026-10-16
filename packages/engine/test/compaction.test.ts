@@ -1,3 +1,4 @@
+import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 import { describe, it, expect } from "vitest";
 import {
   fauxAssistantMessage,
@@ -59,8 +60,7 @@ describe("compaction: proactive (token threshold)", () => {
     // summarizer completion (one-shot completeSimple from compactThread).
     faux2.setResponses([
       boundaryResponse("third response"),
-      fauxAssistantMessage(
-        "## Goal\n- test\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- prior turns\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
+      fauxAssistantMessage(COMPLETE_SUMMARY,
       ),
     ]);
     const { engine: engine2, store: store2, events: events2 } = makeEngine();
@@ -166,8 +166,7 @@ describe("compaction: proactive (token threshold)", () => {
     };
     const recordSummary = (_ctx: unknown, opts: { apiKey?: string } | undefined) => {
       seenKeys.push(opts?.apiKey);
-      return fauxAssistantMessage(
-        "## Goal\n- test\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- prior turns\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
+      return fauxAssistantMessage(COMPLETE_SUMMARY,
       );
     };
     faux.setResponses([record, recordSummary]);
@@ -286,8 +285,7 @@ describe("compaction: auto-continue", () => {
       // Third user prompt → assistant response (triggers proactive compaction).
       boundaryResponse("third response"),
       // Summarizer one-shot.
-      fauxAssistantMessage(
-        "## Goal\n- t\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- (none)\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
+      fauxAssistantMessage(COMPLETE_SUMMARY,
       ),
       // Auto-continue turn → assistant response.
       (context) => {
@@ -415,8 +413,7 @@ describe("compaction: auto-continue", () => {
     });
     faux.setResponses([
       boundaryResponse("implementation reached the boundary"),
-      fauxAssistantMessage(
-        "## Goal\n- finish child work\n\n## Continuation Checkpoint\n- Branch: fix/child\n- Next Action: continue implementation",
+      fauxAssistantMessage(COMPLETE_SUMMARY,
       ),
     ]);
     const { engine, store, events } = makeEngine();
@@ -544,7 +541,7 @@ describe("compaction: auto-continue", () => {
     let started = false;
     let finishSummary: (() => void) | undefined;
     const pending = (_context: unknown, options: { signal?: AbortSignal } | undefined) => new Promise<ReturnType<typeof fauxAssistantMessage>>((resolve, reject) => {
-      finishSummary = () => resolve(fauxAssistantMessage("## Goal\n- Finish inspection"));
+      finishSummary = () => resolve(fauxAssistantMessage(COMPLETE_SUMMARY));
       started = true;
       options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
     });
@@ -587,8 +584,7 @@ describe("compaction: auto-continue", () => {
     });
     faux.setResponses([
       boundaryResponse("third response"),
-      fauxAssistantMessage(
-        "## Goal\n- t\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- (none)\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
+      fauxAssistantMessage(COMPLETE_SUMMARY,
       ),
     ]);
     const { engine, store, events } = makeEngine();
@@ -655,8 +651,7 @@ describe("compaction: pruning persists via updateEntry", () => {
     });
     faux.setResponses([
       boundaryResponse("trigger response"),
-      fauxAssistantMessage(
-        "## Goal\n- t\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- (none)\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
+      fauxAssistantMessage(COMPLETE_SUMMARY,
       ),
     ]);
     const { engine, store, events } = makeEngine();
@@ -772,8 +767,7 @@ describe("compaction: pruning persists via updateEntry", () => {
   });
 });
 
-const SUMMARY_RESPONSE =
-  "## Goal\n- test\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- prior turns\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)";
+const SUMMARY_RESPONSE = COMPLETE_SUMMARY;
 
 describe("compaction: /compact instructions", () => {
   it("uses an explicitly configured Astra summarizer", async () => {
@@ -827,8 +821,7 @@ describe("compaction: /compact instructions", () => {
 });
 
 describe("compaction: summarizer input (TKAI-305)", () => {
-  const SUMMARY_WITH_NEW_SECTIONS =
-    "## Goal\n- t\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- (none)\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Agreed Approach\n- (none)\n\n## Active Tools & Skills\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)";
+  const SUMMARY_WITH_NEW_SECTIONS = COMPLETE_SUMMARY;
 
   it("a pruned tool result still reaches the summarizer; the template carries the new sections", async () => {
     const captured: string[] = [];
@@ -997,7 +990,7 @@ describe("compaction: summarizer failure handling (TKAI-306)", () => {
       models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 1_000 }],
     });
     faux.setResponses([
-      fauxAssistantMessage("<analysis>\nchronological notes\n</analysis>\n\n## Goal\n- ship"),
+      fauxAssistantMessage("<analysis>\nchronological notes\n</analysis>\n\n" + COMPLETE_SUMMARY),
     ]);
     const result = await summarize({
       headEntries: [
@@ -1005,7 +998,7 @@ describe("compaction: summarizer failure handling (TKAI-306)", () => {
       ],
       model: faux.getModel("tiny")!,
     });
-    expect(result.summary).toBe("## Goal\n- ship");
+    expect(result.summary).toBe(COMPLETE_SUMMARY);
     expect(result.summary).not.toContain("chronological notes");
     faux.unregister();
   });

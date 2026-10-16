@@ -1,3 +1,4 @@
+import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 import { describe, it, expect } from "vitest";
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
@@ -256,7 +257,7 @@ describe("session service hooks (systemContext, toolConfig, owner, compaction ho
       // The manual compaction's summarizer completion. Before TKAI-306 an
       // exhausted faux queue surfaced as an errored completion that
       // summarize() silently turned into an empty summary; it now throws.
-      fauxAssistantMessage("## Goal\n- test summary"),
+      fauxAssistantMessage(COMPLETE_SUMMARY),
     ]);
 
     const calls: string[] = [];

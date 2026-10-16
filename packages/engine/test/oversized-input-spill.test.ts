@@ -1,3 +1,4 @@
+import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 import { describe, it, expect } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
@@ -267,8 +268,7 @@ describe("compaction fail-safe: newest turn larger than the window", () => {
     });
     // One summarizer response for the head; the tail is elided, not summarized.
     faux.setResponses([
-      fauxAssistantMessage(
-        "## Goal\n- t\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- x\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
+      fauxAssistantMessage(COMPLETE_SUMMARY,
       ),
     ]);
 
