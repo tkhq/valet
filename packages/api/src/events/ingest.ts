@@ -10,7 +10,7 @@ import { and, eq } from "drizzle-orm";
 import type { EventCatalogEntry, NormalizedEvent, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
-import { filtersMatch, type SubscriptionFilter, subscriptionMatchesEvent, subscriptionNamesKey } from "./match.js";
+import { filtersMatch, type SubscriptionFilter, subscriptionMatchesEvent, subscriptionNamesKey, withSubjectFilter } from "./match.js";
 import { authorizedSlackDiagnosticSubscription, isTeamAssistantRule, subscriptionMatchOutcome } from "./team-slack-gate.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { appMentionCoveredBy, matchEventWaiters, recordWaiterMatchFailure, waiterMatchStage, type WaiterMatchDeps } from "./waiters.js";
@@ -41,13 +41,15 @@ export function catalogForService(plugins: ValetPlugin[], service: string): Even
   return plugins.flatMap((p) => [
     ...(p.triggers ?? []).filter((t) => t.service === service).flatMap((t) => t.catalog),
     ...derivedCatalogEntries(p, service),
-  ]);
+  ]).map(withSubjectFilter);
 }
 
 /** The merged catalog across every plugin and service, derived keys included
  * (marked `derived: true`). The one traversal the subscription validator,
  * the mention-scope gate, and the filter-options lookup all share, so a
- * catalog-shape change lands in one place. */
+ * catalog-shape change lands in one place. Every entry also carries the
+ * implicit `subject` filter field (spec 2026-10-15: event wakeups, Part G),
+ * added here so no individual plugin declares it. */
 export function allCatalogEntries(plugins: ValetPlugin[]): EventCatalogEntry[] {
   return plugins.flatMap((p) => {
     const services = [...new Set((p.triggers ?? []).map((t) => t.service))];
@@ -55,7 +57,7 @@ export function allCatalogEntries(plugins: ValetPlugin[]): EventCatalogEntry[] {
       ...(p.triggers ?? []).flatMap((t) => t.catalog),
       ...services.flatMap((service) => derivedCatalogEntries(p, service)),
     ];
-  });
+  }).map(withSubjectFilter);
 }
 
 /** Catalog entries a subscription may name: every entry except derived keys
@@ -196,13 +198,13 @@ async function logSlackBotDiagnostic(
   await logFilterExcludedDrop(db, orgId, eventKey, retainMetadata ? payload : undefined, detail, throttleKey, false, reason);
 }
 
-function failedFilterFields(filters: unknown, key: string, payload: unknown, catalog: EventCatalogEntry[], teamMention: boolean) {
+function failedFilterFields(filters: unknown, key: string, payload: unknown, catalog: EventCatalogEntry[], teamMention: boolean, subjects?: string[]) {
   if (!Array.isArray(filters)) return [];
   const valid = filters.filter((f): f is SubscriptionFilter => isRecord(f) && typeof f.field === "string" &&
     (f.op === "eq" || f.op === "in" || f.op === "prefix" || f.op === "contains" || f.op === "regex") &&
     (typeof f.value === "string" || Array.isArray(f.value) && f.value.every(v => typeof v === "string")));
   return valid.filter(f => !(teamMention && key === "slack.app_mention" && f.field === "user") &&
-    !filtersMatch(payload, key, [f], catalog)).slice(0, 20).map(f => ({ field: f.field, op: f.op }));
+    !filtersMatch(payload, key, [f], catalog, subjects)).slice(0, 20).map(f => ({ field: f.field, op: f.op }));
 }
 
 export async function ingestEvent(
@@ -250,14 +252,14 @@ export async function ingestEvent(
     let authorizationDenied = false;
     phase = "subscription filter and sender authorization checks";
     for (const sub of subs) {
-      const outcome = await subscriptionMatchOutcome(deps.db, sub, event.key, event.payload, catalog);
+      const outcome = await subscriptionMatchOutcome(deps.db, sub, event.key, event.payload, catalog, true, event.subjects);
       if (outcome === "matched") matched.push(sub);
       if (outcome === "authorization_denied") authorizationDenied = true;
       if (subscriptionNamesKey(sub, event.key)) decisions.push({
         id: sub.id, name: sub.name, ownerType: sub.ownerType, ownerId: sub.ownerId,
         target: isRecord(sub.target) && typeof sub.target.kind === "string" ? sub.target.kind : "unknown",
         outcome: outcome === "not_matched" ? "filter_excluded" : outcome,
-        ...(outcome === "not_matched" ? { failedFilters: failedFilterFields(sub.filters, event.key, event.payload, catalog, isTeamAssistantRule(sub.ownerType, sub.target)) } : {}),
+        ...(outcome === "not_matched" ? { failedFilters: failedFilterFields(sub.filters, event.key, event.payload, catalog, isTeamAssistantRule(sub.ownerType, sub.target), event.subjects) } : {}),
         ...(isRecord(sub.target) && sub.target.kind === "workflow" && typeof sub.target.workflowId === "string" ? { targetId: sub.target.workflowId } : {}),
       });
     }

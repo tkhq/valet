@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { eventKeyMatches, filtersMatch, resolvePath, validateRegexPattern } from "./match.js";
+import {
+  eventKeyMatches,
+  filtersMatch,
+  resolvePath,
+  SUBJECT_FILTER_FIELD,
+  subscriptionMatchesEvent,
+  subscriptionNamesKey,
+  validateRegexPattern,
+  withSubjectFilter,
+} from "./match.js";
 import type { EventCatalogEntry } from "@valet/engine";
 
 const CATALOG: EventCatalogEntry[] = [
@@ -78,5 +87,46 @@ describe("filtersMatch", () => {
 
   it("empty filter list always matches", () => {
     expect(filtersMatch(payload, "github.pull_request.opened", [], CATALOG)).toBe(true);
+  });
+});
+
+describe("subject filter (spec 2026-10-15 event wakeups, Part G)", () => {
+  const key = "github.check_run.completed";
+  // No individual plugin declares `subject`; it is implicit for every key, so
+  // the test catalog entry declares no filters at all (`withSubjectFilter` is
+  // what the real catalog builders apply).
+  const catalog: EventCatalogEntry[] = [{ key, description: "", filters: [] }];
+  const pr42 = ["github:acme", "github:acme/lean-proofs", "github:acme/lean-proofs#42"];
+  const pr43 = ["github:acme", "github:acme/lean-proofs", "github:acme/lean-proofs#43"];
+
+  it("eq matches when any subject equals the value", () => {
+    expect(filtersMatch({}, key, [{ field: "subject", op: "eq", value: "github:acme/lean-proofs#42" }], catalog, pr42)).toBe(true);
+    expect(filtersMatch({}, key, [{ field: "subject", op: "eq", value: "github:acme/lean-proofs#42" }], catalog, pr43)).toBe(false);
+  });
+
+  it("prefix matches when any subject starts with the value", () => {
+    expect(filtersMatch({}, key, [{ field: "subject", op: "prefix", value: "github:acme/lean-proofs" }], catalog, pr42)).toBe(true);
+    expect(filtersMatch({}, key, [{ field: "subject", op: "prefix", value: "github:acme/lean-proofs" }], catalog, pr43)).toBe(true);
+    expect(filtersMatch({}, key, [{ field: "subject", op: "prefix", value: "github:other/repo" }], catalog, pr42)).toBe(false);
+  });
+
+  it("fails closed with no subjects and on ops the spec does not define for subject", () => {
+    expect(filtersMatch({}, key, [{ field: "subject", op: "eq", value: "github:acme/lean-proofs#42" }], catalog, undefined)).toBe(false);
+    expect(filtersMatch({}, key, [{ field: "subject", op: "eq", value: "github:acme/lean-proofs#42" }], catalog, [])).toBe(false);
+    expect(filtersMatch({}, key, [{ field: "subject", op: "contains", value: "lean-proofs" }], catalog, pr42)).toBe(false);
+  });
+
+  it("subscriptionMatchesEvent: a key match with a differing subject is a filter miss, not a key miss", () => {
+    const sub = { eventKeys: [key], filters: [{ field: "subject", op: "eq" as const, value: "github:acme/lean-proofs#42" }] };
+    expect(subscriptionNamesKey(sub, key)).toBe(true);
+    expect(subscriptionMatchesEvent(sub, key, {}, catalog, false, pr43)).toBe(false);
+    expect(subscriptionMatchesEvent(sub, key, {}, catalog, false, pr42)).toBe(true);
+  });
+
+  it("withSubjectFilter adds the implicit field once, idempotently", () => {
+    const entry: EventCatalogEntry = { key, description: "", filters: [{ field: "repo", path: "repository.full_name", description: "" }] };
+    const withSubject = withSubjectFilter(entry);
+    expect(withSubject.filters.map((f) => f.field)).toEqual(["repo", SUBJECT_FILTER_FIELD]);
+    expect(withSubjectFilter(withSubject).filters.length).toBe(2);
   });
 });
