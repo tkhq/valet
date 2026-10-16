@@ -83,6 +83,9 @@ const READ_NOT_RUNNING =
 
 const HOUR_MS = 3_600_000;
 
+const EVENT_CREATE_REFUSAL =
+  "[wait_for_event] Event waiters start only through the wait_for_event tool. Call wait_for_event with the subject and clauses.";
+
 /**
  * Builds the `ToolContext.wakeups` seam for one session (Task 15,
  * spec 2026-10-08). The seam is the only path the engine's background-work
@@ -405,9 +408,9 @@ export function buildWakeupsSeam(
         return createTimer(threadId, input.prompt, input.fireAt, input.origin);
       }
       if (input.kind === "event") {
-        // The arm checks run in `armEvent`. This path is for a caller that
-        // already holds checked subjects and a self set.
-        return createEvent(threadId, input.subjects, input.match, input.reason, input.maxHours, input.origin);
+        // Only `armEvent` creates event waiters, so every one passes the
+        // arm checks (INV-E1).
+        throw new Error(EVENT_CREATE_REFUSAL);
       }
       const hours = input.kind === "process" ? input.deadlineHours : input.maxHours;
       return createProcessOrWatch(threadId, input.kind, input.command, input.reason, hours, input.origin);

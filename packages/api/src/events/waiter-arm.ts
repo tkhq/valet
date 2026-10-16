@@ -9,6 +9,7 @@
  * that does not answer in time reads as "cannot read" (R3), never a hang.
  */
 import {
+  credentialSecret,
   subjectService,
   type ArmEventRequest,
   type CredentialProvider,
@@ -24,6 +25,7 @@ import { loadAppConfig } from "../services/github-app.js";
 import { resolveGithubApiUrl } from "../services/github-env.js";
 import { installationResolvesFor } from "../services/github-tokens.js";
 import { LINEAR_CLIENT_CREDENTIALS_GRANT, LINEAR_CREDENTIAL_SERVICE } from "../services/linear-app.js";
+import type { ChannelVisibility } from "../services/channels.js";
 import { channelVisibility, orgSlackCredential } from "../services/thread-access.js";
 import { findFollowedThread } from "./followed-threads.js";
 import { catalogForService } from "./ingest.js";
@@ -233,7 +235,15 @@ export async function checkArm(
     if (!(await bounded(() => deps.readLinear(parsed.target), ms, false))) return { ok: false, text: R3(subject) };
   }
 
-  const self = await bounded(() => deps.selfIds(parsed.service), ms, []);
+  // No outer limit here: `selfIds` bounds each of its lookups, so a slow
+  // bot-id lookup drops only that id, never the owner's link.
+  let self: string[];
+  try {
+    self = await deps.selfIds(parsed.service);
+  } catch (err) {
+    console.warn("[wait_for_event] the self lookup failed; the waiter has an empty self set:", err);
+    self = [];
+  }
   return { ok: true, subjects: [subject], self: [...new Set(self)] };
 }
 
@@ -259,6 +269,8 @@ export interface ArmDepsOptions {
   slackApiUrl?: string;
   linearApiUrl?: string;
   env?: NodeJS.ProcessEnv;
+  /** Builds the Slack channel check for a personal session's owner. Tests only. */
+  channelVisibility?: (viewer: { orgId: string; userId: string | undefined }) => ChannelVisibility;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -292,7 +304,8 @@ export function armDeps(
   opts: ArmDepsOptions = {},
 ): ArmDeps {
   const env = opts.env ?? process.env;
-  const http = boundedFetch(opts.fetch ?? fetch, opts.timeoutMs ?? ARM_PROVIDER_TIMEOUT_MS);
+  const timeoutMs = opts.timeoutMs ?? ARM_PROVIDER_TIMEOUT_MS;
+  const http = boundedFetch(opts.fetch ?? fetch, timeoutMs);
   const githubApi = opts.githubApiUrl ?? resolveGithubApiUrl(env);
   const slackApi = opts.slackApiUrl ?? "https://slack.com/api";
   const linearApi = opts.linearApiUrl ?? (env.LINEAR_API_URL || "https://api.linear.app");
@@ -411,9 +424,22 @@ export function armDeps(
       if (!channel) return { ok: false, reason: "error" };
       const isPrivate = channel.is_private === true || channel.is_im === true || channel.is_mpim === true;
       const name = typeof channel.name === "string" ? channel.name : undefined;
-      // The session's Slack credential is the org's bot in every shipped
-      // path, so `is_member` is the bot's membership (R4).
-      return { ok: true, isPrivate, isMember: channel.is_member === true, ...(name ? { name } : {}) };
+      // R4 is the bot's membership, so it is read with the org's bot token.
+      // The session's read above decides only R3.
+      const bot = credentialSecret(await slackOrg());
+      if (!bot) return { ok: false, reason: "error" };
+      let isMember = channel.is_member === true;
+      if (bot !== own.token) {
+        const botBody = await jsonOf(await slack("conversations.info", bot, { channel: channelId }));
+        if (botBody?.ok !== true) {
+          // The bot cannot see a private channel it is not in.
+          if (botBody?.error !== "channel_not_found") return { ok: false, reason: "error" };
+          isMember = false;
+        } else {
+          isMember = asRecord(botBody.channel)?.is_member === true;
+        }
+      }
+      return { ok: true, isPrivate, isMember, ...(name ? { name } : {}) };
     },
 
     async sessionMayReadSlackChannel(channelId, isPrivate) {
@@ -422,7 +448,8 @@ export function armDeps(
       // what its owner may see.
       if (session.ownerType !== "user") return !isPrivate;
       if (!isPrivate) return true;
-      return channelVisibility(accessDeps, { orgId: session.orgId, userId: session.ownerId })(`slack:${channelId}`);
+      const visibilityFor = opts.channelVisibility ?? ((viewer) => channelVisibility(accessDeps, viewer));
+      return visibilityFor({ orgId: session.orgId, userId: session.ownerId })(`slack:${channelId}`);
     },
 
     async readLinear(target) {
@@ -449,17 +476,21 @@ export function armDeps(
     },
 
     async selfIds(service) {
-      const own = await token(service).catch(() => null);
-      const ids = await Promise.allSettled([
+      // Each lookup has its own time limit, so one slow lookup drops only
+      // its own id. `checkArm` sets no outer limit on this call.
+      const own = await withTimeout(token(service), timeoutMs, null).catch(() => null);
+      const lookup = (work: () => Promise<string | undefined>) =>
+        withTimeout(work(), timeoutMs, undefined).catch(() => undefined);
+      const ids = await Promise.all([
         session.ownerType === "user"
-          ? identityForUser(providers.db, service, session.ownerId).then((link) => link?.externalId)
+          ? lookup(() => identityForUser(providers.db, service, session.ownerId).then((link) => link?.externalId))
           : Promise.resolve(undefined),
         // The resolved credential may be a teammate's shared account. Its
         // events are the session's own too.
-        own ? whoami(service, own.token) : Promise.resolve(undefined),
-        appActor(service, own?.token),
+        own ? lookup(() => whoami(service, own.token)) : Promise.resolve(undefined),
+        lookup(() => appActor(service, own?.token)),
       ]);
-      return [...new Set(ids.flatMap((r) => (r.status === "fulfilled" && r.value ? [r.value] : [])))];
+      return [...new Set(ids.filter((id): id is string => id !== undefined && id !== ""))];
     },
   };
 }

@@ -310,6 +310,18 @@ describe("armDeps", () => {
 
   const personal = { sessionId: "s-1", orgId: "acme", ownerType: "user" as const, ownerId: "u-001" };
 
+  /** Providers whose org Slack credential is the bot token `bot` in team T001. */
+  function orgSlack(bot: string): ArmProviders {
+    const engineCredentials: CredentialStore = {
+      ...noCredentials,
+      get: async (owner, service) =>
+        owner.type === "org" && service === "slack"
+          ? { type: "bot_token", accessToken: bot, metadata: { botUserId: "U-BOT", teamId: "T001" } }
+          : null,
+    };
+    return { ...providers(), engineCredentials };
+  }
+
   function credentials(byService: Record<string, Credential>): CredentialProvider {
     return {
       get: async (service?: string) => (service ? byService[service] ?? null : null),
@@ -371,12 +383,107 @@ describe("armDeps", () => {
       String(url).includes("C404")
         ? new Response(JSON.stringify({ ok: false, error: "channel_not_found" }))
         : new Response(JSON.stringify({ ok: true, channel: { id: "C001", name: "general", is_private: false, is_member: true } })));
-    const d = armDeps(providers(), personal, credentials({ slack: { accessToken: "xoxb" } }), {
+    const d = armDeps(orgSlack("xoxb"), personal, credentials({ slack: { accessToken: "xoxb" } }), {
       fetch: fetchImpl,
       slackApiUrl: "https://slack.test/api",
     });
     expect(await d.readSlackChannel("C404")).toEqual({ ok: false, reason: "not_found" });
     expect(await d.readSlackChannel("C001")).toEqual({ ok: true, isPrivate: false, isMember: true, name: "general" });
+  });
+
+  /** conversations.info answers by token: `memberFor[token]` is that token's `is_member`. */
+  function infoByToken(memberFor: Record<string, boolean>, isPrivate = false) {
+    return vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const auth = new Headers(init?.headers).get("Authorization") ?? "";
+      const bearer = auth.replace(/^Bearer /, "");
+      return new Response(JSON.stringify({ ok: true, channel: { id: "C001", name: "general", is_private: isPrivate, is_member: memberFor[bearer] === true } }));
+    });
+  }
+
+  it("R4 reads is_member with the org bot token: the session says member, the bot says not", async () => {
+    const fetchImpl = infoByToken({ "xoxp-user": true, "xoxb-bot": false });
+    const d = armDeps(orgSlack("xoxb-bot"), personal, credentials({ slack: { accessToken: "xoxp-user" } }), {
+      fetch: fetchImpl,
+      slackApiUrl: "https://slack.test/api",
+    });
+    const result = await checkArm(d, CTX, req({ subject: "https://acme.slack.com/archives/C001", on: [{ key: "slack.message" }] }));
+    expect(result).toEqual({
+      ok: false,
+      text: "[wait_for_event] Valet is not in #general, so it does not receive its messages. Invite @Valet to the channel, then wait again.",
+    });
+  });
+
+  it("R4 reads is_member with the org bot token: the session says not, the bot says member", async () => {
+    const fetchImpl = infoByToken({ "xoxp-user": false, "xoxb-bot": true });
+    const d = armDeps(orgSlack("xoxb-bot"), personal, credentials({ slack: { accessToken: "xoxp-user" } }), {
+      fetch: fetchImpl,
+      slackApiUrl: "https://slack.test/api",
+    });
+    const result = await checkArm(d, CTX, req({ subject: "https://acme.slack.com/archives/C001", on: [{ key: "slack.message" }] }));
+    expect(result).toMatchObject({ ok: true, subjects: ["slack:T001/C001"] });
+  });
+
+  it("a personal session on a private channel passes R3 only when channelVisibility says the owner may see it", async () => {
+    const subject = { subject: "https://acme.slack.com/archives/C001", on: [{ key: "slack.message" }] };
+    for (const visible of [true, false]) {
+      const visibilityFor = vi.fn(() => async (key: string) => key === "slack:C001" && visible);
+      const d = armDeps(orgSlack("xoxb-bot"), personal, credentials({ slack: { accessToken: "xoxb-bot" } }), {
+        fetch: infoByToken({ "xoxb-bot": true }, true),
+        slackApiUrl: "https://slack.test/api",
+        channelVisibility: visibilityFor,
+      });
+      const result = await checkArm(d, CTX, req(subject));
+      expect(visibilityFor).toHaveBeenCalledWith({ orgId: "acme", userId: "u-001" });
+      if (visible) {
+        expect(result).toMatchObject({ ok: true, subjects: ["slack:T001/C001"] });
+      } else {
+        expect(result).toEqual({
+          ok: false,
+          text: "[wait_for_event] This session cannot read slack:T001/C001. Connect an account that can, or ask an admin to grant the app access.",
+        });
+      }
+    }
+  });
+
+  it("checkArm without the turn's credentials refuses with R3 (Slack and Linear)", async () => {
+    const slack = await checkArm(
+      armDeps(orgSlack("xoxb-bot"), personal, undefined, { fetch: infoByToken({ "xoxb-bot": true }), slackApiUrl: "https://slack.test/api" }),
+      CTX,
+      req({ subject: "https://acme.slack.com/archives/C001", on: [{ key: "slack.message" }] }),
+    );
+    expect(slack.ok === false && slack.text).toMatch(/^\[wait_for_event\] This session cannot read slack:T001\/C001\./);
+
+    const engineCredentials: CredentialStore = {
+      ...noCredentials,
+      get: async (owner, service) =>
+        owner.type === "org" && service === "linear" ? { type: "oauth2", accessToken: "app", metadata: { grant: "client_credentials" } } : null,
+    };
+    const linear = await checkArm(
+      armDeps({ ...providers(), engineCredentials }, personal, undefined, { fetch: vi.fn(async () => new Response("{}")) }),
+      CTX,
+      req({ subject: "https://linear.app/acme/issue/ENG-7/fix-login", on: [{ key: "linear.comment.create" }] }),
+    );
+    expect(linear).toEqual({
+      ok: false,
+      text: "[wait_for_event] This session cannot read linear:ENG-7. Connect an account that can, or ask an admin to grant the app access.",
+    });
+  });
+
+  it("a bot-id lookup that never answers drops only the bot id from self", async () => {
+    await linkIdentity(tdb.appDb, { provider: "slack", externalId: "U001", userId: "u-001" });
+    const engineCredentials: CredentialStore = {
+      ...noCredentials,
+      // The org Slack credential holds the bot user id. Its read never settles.
+      get: () => new Promise(() => undefined),
+    };
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ ok: true, user_id: "U-SHARED" })));
+    const d = armDeps({ ...providers(), engineCredentials }, personal, credentials({ slack: { accessToken: "xoxp-shared" } }), {
+      fetch: fetchImpl,
+      slackApiUrl: "https://slack.test/api",
+      timeoutMs: 30,
+    });
+    const self = await d.selfIds("slack");
+    expect(self.sort()).toEqual(["U-SHARED", "U001"]);
   });
 
   it("sessionMayReadSlackChannel: a team session reads public channels only", async () => {
