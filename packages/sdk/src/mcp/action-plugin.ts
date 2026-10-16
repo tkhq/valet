@@ -29,7 +29,21 @@ export interface McpActionPluginOptions {
    * both tool discovery and execute.
    */
   appCredentialService?: string;
+  /**
+   * Human-readable name for user-facing error text (e.g. "Linear"). Falls
+   * back to `serviceName` when absent.
+   */
+  displayName?: string;
   description?: string;
+}
+
+/** Which credential answered the lookup — drives the auth-rejection message. */
+type CredentialSource = 'personal' | 'app';
+
+interface ResolvedToken {
+  token: string | undefined;
+  /** Absent for `noAuth`/`staticToken`: no personal or app connection to name. */
+  source?: CredentialSource;
 }
 
 /**
@@ -58,6 +72,7 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
   const noAuth = opts.noAuth ?? false;
   const staticToken = opts.staticToken;
   const appCredentialService = opts.appCredentialService;
+  const displayName = opts.displayName;
 
   return {
     service: serviceName,
@@ -65,10 +80,10 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
     actions: [],
     requiresCredential: !noAuth && staticToken === undefined,
     resolveActions: async ({ credentials }: { credentials: CredentialProvider }) => {
-      const token = await resolveToken(credentials, serviceName, noAuth, staticToken, appCredentialService);
+      const { token } = await resolveToken(credentials, serviceName, noAuth, staticToken, appCredentialService);
       const tools = await client.listTools(token);
       return tools.map((tool) =>
-        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService),
+        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, displayName),
       );
     },
   };
@@ -93,16 +108,40 @@ async function resolveToken(
   noAuth: boolean,
   staticToken?: string,
   appCredentialService?: string,
-): Promise<string | undefined> {
-  if (noAuth) return undefined;
-  if (staticToken !== undefined) return staticToken;
+): Promise<ResolvedToken> {
+  if (noAuth) return { token: undefined };
+  if (staticToken !== undefined) return { token: staticToken };
   const cred = await credentials.get();
-  if (cred) return cred.accessToken;
+  if (cred) return { token: cred.accessToken, source: 'personal' };
   if (appCredentialService) {
     const appCred = await credentials.get(appCredentialService);
-    if (appCred) return appCred.accessToken;
+    if (appCred) return { token: appCred.accessToken, source: 'app' };
   }
   throw new Error(`${serviceName}: no credential connected`);
+}
+
+/**
+ * The MCP server rejected the bearer token (401/403): the connection it
+ * answered with is bad, not the request. Name which credential it was and
+ * the fix, per CLAUDE.md's "every user-facing error names the corrective
+ * action" rule. Returns undefined for any other failure (bad request,
+ * transport error, 5xx) — those keep today's verbatim error text, and for
+ * `noAuth`/`staticToken` calls there is no personal/app connection to name.
+ */
+function authRejectionMessage(
+  err: unknown,
+  source: CredentialSource | undefined,
+  serviceName: string,
+  displayName?: string,
+): string | undefined {
+  if (!source) return undefined;
+  const message = err instanceof Error ? err.message : String(err);
+  if (!/\bHTTP (401|403)\b/.test(message)) return undefined;
+  const label = displayName ?? serviceName;
+  if (source === 'app') {
+    return `${serviceName} rejected the Valet app's access. Ask an admin to reconnect the ${label} app in Settings, Integrations, or connect your own ${label} account.`;
+  }
+  return `${serviceName} rejected your connected account. Reconnect ${label} in Settings, Integrations.`;
 }
 
 function mapToolToAction(
@@ -113,6 +152,7 @@ function mapToolToAction(
   noAuth: boolean,
   staticToken?: string,
   appCredentialService?: string,
+  displayName?: string,
 ): PluginAction {
   // `tool.inputSchema` is a JSON-Schema-shaped object from the MCP server.
   // TypeBox's `TSchema` is declared as an empty interface
@@ -128,11 +168,13 @@ function mapToolToAction(
     riskLevel: deriveRiskLevel(tool, defaultRiskLevel),
     parameters,
     execute: async (args, ctx) => {
-      const token = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken, appCredentialService);
+      const { token, source } = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken, appCredentialService);
       try {
         const result = await client.callTool(token, tool.name, args);
         return mapToolResult(result);
       } catch (err) {
+        const rejection = authRejectionMessage(err, source, serviceName, displayName);
+        if (rejection) return { success: false, error: rejection };
         return { success: false, error: err instanceof Error ? err.message : String(err) };
       }
     },
