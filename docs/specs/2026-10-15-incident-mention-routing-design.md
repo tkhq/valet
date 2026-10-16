@@ -65,11 +65,19 @@ Pass criterion: all steps, in one run, from a clean start.
 3. It MUST keep only stream waiters (`eventMatch.once === false`) whose
    `subjects` contain the channel subject itself. A waiter on a thread
    subject alone does not watch the channel.
-4. When one or more remain, the dispatcher MUST deliver the mention with an
+4. It MUST then keep only waiters whose target would resolve for
+   `deliverToAssistantThread`: the session names a live, non-archived
+   assistant or execution of the target owner, and its thread is not
+   archived. The dispatcher reuses `assistant-delivery.ts`'s own gate
+   (`isDeliverableTarget`) for this check, so a candidate that would
+   dead-letter there is never chosen here. A team-owned child or plain
+   session carrying a stream waiter, or a waiter on an archived thread, does
+   not qualify.
+5. When one or more remain, the dispatcher MUST deliver the mention with an
    explicit target `{ sessionId, threadId }` of the newest remaining waiter
    (largest `createdAt`). The signal keeps its Slack origin, so a reply
    posts in the mention's Slack thread.
-5. When none remain, the dispatcher MUST keep today's behavior.
+6. When none remain, the dispatcher MUST keep today's behavior.
 
 ## Part B: Follow binding
 
@@ -99,7 +107,7 @@ Pass criterion: all steps, in one run, from a clean start.
 
 ## Testing
 
-- Dispatcher unit tests for Part A steps 1 to 5 and Part B.
+- Dispatcher unit tests for Part A steps 1 to 6 and Part B.
 - INV-M3 vector with two teams watching the same channel.
 - The acceptance scenario as an integration test, extending
   `packages/api/src/integration/event-wakeups.test.ts` Scenario E.
@@ -123,7 +131,12 @@ Pass criterion: all steps, in one run, from a clean start.
   `wakeup_cancel` in that turn.
 - The dispatcher reads the Slack team from the event row's channel
   subject, and falls back to the payload's `team`. When neither names a
-  team, the dispatcher keeps today's behavior (Part A step 5).
+  team, the dispatcher keeps today's behavior (Part A step 6).
 - The `engineStore` dispatcher dependency is optional. A dispatcher built
   without it keeps today's behavior for every mention. Both production
   builders (`providers/node.ts`, `integration/_setup.ts`) wire it.
+- Part A step 4's deliverability check extracts `isDeliverableTarget` out of
+  `assistant-delivery.ts`, where `deliverToAssistantThread` already enforces
+  the same resolve-and-not-archived gate for an explicit target. The
+  dispatcher's `watchingTarget` wires it with the live `AppDb`, so
+  `findWatchingWaiter` never chooses a candidate that delivery would refuse.

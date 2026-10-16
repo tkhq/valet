@@ -48,6 +48,7 @@ import {
 import { resolvePath } from "./match.js";
 import { loadSessionOwner } from "./waiters.js";
 import { findWatchingWaiter, slackEventTeam } from "./watching-waiter.js";
+import { isDeliverableTarget } from "./assistant-delivery.js";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
 const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
@@ -504,7 +505,11 @@ export class EventDispatcher {
     if (!team) return null;
     const db = this.deps.db;
     return findWatchingWaiter(
-      { engineStore, sessionOwner: (sessionId) => loadSessionOwner(db, sessionId) },
+      {
+        engineStore,
+        sessionOwner: (sessionId) => loadSessionOwner(db, sessionId),
+        isDeliverableTarget: (target) => isDeliverableTarget({ db }, event.orgId, owner, target),
+      },
       event.orgId, owner, team, channel,
     );
   }

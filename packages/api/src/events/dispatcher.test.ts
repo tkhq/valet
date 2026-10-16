@@ -26,6 +26,8 @@ import {
   workflowSignals,
   agentSessions,
   assistants,
+  assistantExecutions,
+  sessionThreads,
   threadPullRequests,
 } from "../schema/index.js";
 import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
@@ -648,7 +650,9 @@ describe("EventDispatcher", () => {
   /**
    * Incident mention routing (spec 2026-10-15: incident mention routing).
    * The waiter rows come from a fake `findEventWaiters`; the sessions they
-   * name are real `agent_sessions` rows, so the owner filter runs for real.
+   * name are real `agent_sessions` (+ `assistants` / `assistant_executions` /
+   * `engine_threads`) rows, so the owner filter AND the deliverability gate
+   * (`isDeliverableTarget`, shared with `assistant-delivery.ts`) run for real.
    */
   describe("incident mention routing", () => {
     const CHANNEL_SUBJECT = "slack:T001/C1";
@@ -662,7 +666,16 @@ describe("EventDispatcher", () => {
       };
     }
 
-    /** A store whose `findEventWaiters` returns the given rows that share a subject. */
+    /**
+     * A store whose `findEventWaiters` returns every seeded row, ignoring the
+     * queried subjects. A real store already filters by subject overlap
+     * (`store.ts` `findEventWaiters`, `subjects && $1`) before `dispatcher.ts`
+     * ever calls it with a single-element array — so that overlap can never
+     * exclude anything `findWatchingWaiter` wouldn't exclude itself. Returning
+     * everything here instead routes a thread-subject-only waiter through
+     * `findWatchingWaiter`'s OWN step-3 filter, so the guard is the thing
+     * under test, not the fake.
+     */
     function fakeStore(rows: Wakeup[]) {
       const lookups: string[][] = [];
       return {
@@ -670,14 +683,56 @@ describe("EventDispatcher", () => {
         store: {
           async findEventWaiters(subjects: readonly string[]): Promise<Wakeup[]> {
             lookups.push([...subjects]);
-            return rows.filter((w) => (w.subjects ?? []).some((s) => subjects.includes(s)));
+            return rows;
           },
         },
       };
     }
 
-    async function seedSession(id: string, ownerType: "user" | "team", ownerId: string, orgId = ORG) {
+    /** One root assistant + governing thread per (owner, org), reused across
+     * every execution session of that owner (idempotent: `assistants` has a
+     * unique index per org/owner, so a second seed of the same owner is a
+     * no-op). */
+    async function seedAssistant(ownerType: "user" | "team", ownerId: string, orgId: string) {
+      const assistantId = `asst-${orgId}-${ownerType}-${ownerId}`;
+      const rootSessionId = `root-${assistantId}`;
+      const governingThreadId = `gov-${assistantId}`;
+      await tdb.appDb.insert(agentSessions).values({
+        id: rootSessionId, orgId, userId: "member-9", ownerType, ownerId, workspace: "/workspace", createdAt: 1, updatedAt: 1,
+      }).onConflictDoNothing();
+      await tdb.appDb.insert(assistants).values({
+        id: assistantId, orgId, ownerType, ownerId, sessionId: rootSessionId, createdAt: 1,
+      }).onConflictDoNothing();
+      await tdb.appDb.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+        VALUES (${governingThreadId}, ${rootSessionId}, ${governingThreadId}, 'idle', 'steer', 1, 1)
+        ON CONFLICT (id) DO NOTHING`);
+      return { assistantId, governingThreadId };
+    }
+
+    /** A deliverable watching-waiter session: a real execution of the
+     * owner's assistant, with its own thread — the shape
+     * `deliverToAssistantThread` requires for an explicit target. */
+    async function seedSession(id: string, ownerType: "user" | "team", ownerId: string, threadId: string, orgId = ORG) {
+      const { assistantId, governingThreadId } = await seedAssistant(ownerType, ownerId, orgId);
       await tdb.appDb.insert(agentSessions).values({ id, orgId, userId: "member-9", ownerType, ownerId, workspace: "/workspace", createdAt: 1, updatedAt: 1 });
+      await tdb.appDb.insert(assistantExecutions).values({
+        sessionId: id, assistantId, conversationKey: `conv-${id}`, governingThreadId, createdAt: 1,
+      });
+      await tdb.appDb.execute(sql`INSERT INTO engine_threads (id, session_id, key, status, queue_mode, created_at, updated_at)
+        VALUES (${threadId}, ${id}, ${threadId}, 'idle', 'steer', 1, 1)`);
+    }
+
+    /** A session with no `assistants` / `assistant_executions` row at all —
+     * "a team-owned child or plain session" (review finding 1): it would
+     * dead-letter `deliverToAssistantThread`, so `findWatchingWaiter` must
+     * skip it. */
+    async function seedPlainSession(id: string, ownerType: "user" | "team", ownerId: string, orgId = ORG) {
+      await tdb.appDb.insert(agentSessions).values({ id, orgId, userId: "member-9", ownerType, ownerId, workspace: "/workspace", createdAt: 1, updatedAt: 1 });
+    }
+
+    /** Marks a session's thread archived (display-state only, `session_threads`). */
+    async function archiveThread(sessionId: string, threadId: string) {
+      await tdb.appDb.insert(sessionThreads).values({ id: threadId, sessionId, createdAt: 1, archivedAt: Date.now() });
     }
 
     async function dispatchMention(rows: Wakeup[], opts: { subjects?: string[]; payload?: Record<string, unknown> } = {}) {
@@ -705,8 +760,8 @@ describe("EventDispatcher", () => {
 
     it("routes the mention to the newest watching waiter of the owner and binds no follow (Part A, Part B)", async () => {
       await seedMentionMember("team-x");
-      await seedSession("sess-old", "team", "team-x");
-      await seedSession("sess-new", "team", "team-x");
+      await seedSession("sess-old", "team", "team-x", "thr-old");
+      await seedSession("sess-new", "team", "team-x", "thr-new");
       const { deliver, deliveryId, lookups } = await dispatchMention([
         waiter("old", "sess-old", { createdAt: 100 }),
         waiter("new", "sess-new", { createdAt: 200 }),
@@ -725,10 +780,10 @@ describe("EventDispatcher", () => {
     it("never routes across owners or orgs (INV-M3)", async () => {
       await seedMentionMember("team-x");
       await tdb.appDb.insert(teams).values({ id: "team-z", orgId: ORG, name: "Other", createdAt: Date.now() });
-      await seedSession("sess-mine", "team", "team-x");
-      await seedSession("sess-other-team", "team", "team-z");
-      await seedSession("sess-other-org", "team", "team-x", "org-2");
-      await seedSession("sess-personal", "user", "member-9");
+      await seedSession("sess-mine", "team", "team-x", "thr-mine");
+      await seedSession("sess-other-team", "team", "team-z", "thr-other-team");
+      await seedSession("sess-other-org", "team", "team-x", "thr-other-org", "org-2");
+      await seedSession("sess-personal", "user", "member-9", "thr-personal");
       const { deliver } = await dispatchMention([
         waiter("mine", "sess-mine", { createdAt: 100 }),
         waiter("other-team", "sess-other-team", { createdAt: 400 }),
@@ -740,8 +795,8 @@ describe("EventDispatcher", () => {
 
     it("keeps today's delivery and follow when no waiter watches the channel itself (Part A steps 3 and 5)", async () => {
       await seedMentionMember("team-x");
-      await seedSession("sess-1", "team", "team-x");
-      await seedSession("sess-2", "team", "team-z");
+      await seedSession("sess-1", "team", "team-x", "thr-sess-1");
+      await seedSession("sess-2", "team", "team-z", "thr-sess-2");
       const { deliver } = await dispatchMention([
         // A once-mode waiter waits for one reply, not a channel.
         waiter("once", "sess-1", { createdAt: 100, once: true }),
@@ -759,7 +814,7 @@ describe("EventDispatcher", () => {
 
     it("finds the Slack team from the payload when the event row has no subjects", async () => {
       await seedMentionMember("team-x");
-      await seedSession("sess-1", "team", "team-x");
+      await seedSession("sess-1", "team", "team-x", "thr-w");
       const { deliver, lookups } = await dispatchMention([waiter("w", "sess-1", { createdAt: 100 })], {
         subjects: [],
         payload: { type: "app_mention", channel: "C1", user: "U9", text: "hi", ts: "1.2", team: "T001" },
@@ -771,11 +826,60 @@ describe("EventDispatcher", () => {
     it("does not route a refused sender (Part C)", async () => {
       // No identity link for U9: the team mention gate refuses the sender.
       await tdb.appDb.insert(teams).values({ id: "team-x", orgId: ORG, name: "Team", createdAt: Date.now() });
-      await seedSession("sess-1", "team", "team-x");
+      await seedSession("sess-1", "team", "team-x", "thr-w");
       const { deliver, deliveryId, lookups } = await dispatchMention([waiter("w", "sess-1", { createdAt: 100 })]);
       expect(deliver).not.toHaveBeenCalled();
       expect(lookups).toEqual([]);
       expect((await getDelivery(deliveryId)).status).toBe("dead");
+    });
+
+    // Review finding 1: `findWatchingWaiter` must only pick a candidate that
+    // `deliverToAssistantThread` would actually deliver to. It reuses that
+    // function's own gate (`isDeliverableTarget`) rather than a looser,
+    // duplicated owner-only check.
+    it("a newer waiter in a non-assistant session loses to an older assistant one", async () => {
+      await seedMentionMember("team-x");
+      // A plain `agent_sessions` row with no `assistants` / `assistant_executions`
+      // wiring — a team-owned child or ad hoc session that would dead-letter
+      // `deliverToAssistantThread`'s explicit-target check.
+      await seedPlainSession("sess-plain", "team", "team-x");
+      await seedSession("sess-asst", "team", "team-x", "thr-asst");
+      const { deliver, deliveryId } = await dispatchMention([
+        waiter("plain", "sess-plain", { createdAt: 500 }),
+        waiter("asst", "sess-asst", { createdAt: 100 }),
+      ]);
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(deliver.mock.calls[0][0].target).toEqual({ sessionId: "sess-asst", threadId: "thr-asst" });
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+      expect(await findFollowedThread(tdb.appDb, followKey)).toBeNull();
+    });
+
+    it("skips a waiter on an archived thread and falls back to today's behavior", async () => {
+      await seedMentionMember("team-x");
+      await seedSession("sess-archived", "team", "team-x", "thr-archived");
+      await archiveThread("sess-archived", "thr-archived");
+      const { deliver, deliveryId } = await dispatchMention([
+        waiter("archived", "sess-archived", { createdAt: 100 }),
+      ]);
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(deliver.mock.calls[0][0].target).toBeUndefined();
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
+    });
+
+    it("falls back to today's behavior and binds the follow when only invalid candidates watch the channel", async () => {
+      await seedMentionMember("team-x");
+      await seedPlainSession("sess-plain", "team", "team-x");
+      await seedSession("sess-archived", "team", "team-x", "thr-archived-2");
+      await archiveThread("sess-archived", "thr-archived-2");
+      const { deliver, deliveryId } = await dispatchMention([
+        waiter("plain", "sess-plain", { createdAt: 300 }),
+        waiter("archived", "sess-archived", { createdAt: 200 }),
+      ]);
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(deliver.mock.calls[0][0].target).toBeUndefined();
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
     });
   });
 

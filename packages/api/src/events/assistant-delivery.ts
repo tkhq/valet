@@ -16,7 +16,7 @@ import type { ChannelOrigin, Principal, PromptAuthor, Session, SignalContent } f
 import { ensureAssistantExecution, loadAssistantBySessionId } from "../assistants/service.js";
 import type { EngineHost } from "../engine/host.js";
 import { and, eq, sql } from "drizzle-orm";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, type AssistantRow } from "../schema/index.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { writeDropLog } from "../orchestrator/signals.js";
@@ -68,6 +68,66 @@ export interface AssistantDeliveryArgs {
   author?: PromptAuthor;
 }
 
+/** Resolve `sessionId` to its assistant row, for `orgId`/`owner`, when it is
+ * live and not archived. Shared by `deliverToAssistantThread`'s explicit-
+ * target check and `isDeliverableTarget` below. */
+async function resolveLiveAssistant(
+  db: AppDb,
+  orgId: string,
+  owner: Principal,
+  sessionId: string,
+): Promise<AssistantRow | undefined> {
+  const assistant = await loadAssistantBySessionId(db, sessionId);
+  if (!assistant || assistant.archivedAt !== null || assistant.orgId !== orgId
+    || assistant.ownerType !== owner.type || assistant.ownerId !== owner.id) {
+    return undefined;
+  }
+  return assistant;
+}
+
+/** True when `target`'s thread is live: the session is not deleted, the
+ * thread is not archived, and — for an execution session — its assistant and
+ * governing thread are not archived either. Shared by
+ * `deliverToAssistantThread`'s pre-submit check and `isDeliverableTarget`
+ * below. */
+async function isTargetThreadLive(
+  db: AppDb,
+  orgId: string,
+  owner: Principal,
+  target: { sessionId: string; threadId: string },
+): Promise<boolean> {
+  const result = await db.execute(sql`
+      SELECT s.id FROM agent_sessions s
+      JOIN engine_threads t ON t.session_id = s.id AND t.id = ${target.threadId}
+      LEFT JOIN session_threads m ON m.session_id = s.id AND m.id = t.id
+      LEFT JOIN assistant_executions x ON x.session_id = s.id
+      LEFT JOIN assistants a ON a.id = x.assistant_id
+      LEFT JOIN engine_threads g ON g.session_id = a.session_id AND g.id = x.governing_thread_id
+      LEFT JOIN session_threads gm ON gm.session_id = a.session_id AND gm.id = g.id
+      WHERE s.id = ${target.sessionId} AND s.org_id = ${orgId} AND s.status <> 'deleted'
+        AND s.owner_type = ${owner.type} AND s.owner_id = ${owner.id} AND m.archived_at IS NULL
+        AND (x.session_id IS NULL OR (a.archived_at IS NULL AND g.id IS NOT NULL AND gm.archived_at IS NULL))
+      LIMIT 1`) as { rows: Array<{ id: string }> };
+  return result.rows.length > 0;
+}
+
+/**
+ * True when `target` would resolve for `deliverToAssistantThread`: the
+ * session names a live, non-archived assistant (or execution) of `owner` in
+ * `orgId`, and its thread is not archived. Incident mention routing
+ * (`watching-waiter.ts`) reuses this gate so a watching waiter that would
+ * dead-letter here is filtered out before it is chosen as a target.
+ */
+export async function isDeliverableTarget(
+  deps: { db: AppDb },
+  orgId: string,
+  owner: Principal,
+  target: { sessionId: string; threadId: string },
+): Promise<boolean> {
+  if (!(await resolveLiveAssistant(deps.db, orgId, owner, target.sessionId))) return false;
+  return isTargetThreadLive(deps.db, orgId, owner, target);
+}
+
 export async function deliverToAssistantThread(
   deps: AssistantDeliveryDeps,
   args: AssistantDeliveryArgs,
@@ -78,9 +138,7 @@ export async function deliverToAssistantThread(
   // Serialize by runtime session and thread so delivery paths share one queue.
   let session: Session;
   if (args.target) {
-    const assistant = await loadAssistantBySessionId(deps.db, args.target.sessionId);
-    if (!assistant || assistant.archivedAt !== null || assistant.orgId !== args.orgId
-      || assistant.ownerType !== args.owner.type || assistant.ownerId !== args.owner.id) {
+    if (!(await resolveLiveAssistant(deps.db, args.orgId, args.owner, args.target.sessionId))) {
       throw new Error("The original conversation is unavailable. Restore its owner before retrying delivery.");
     }
     const [row] = await deps.db.select().from(agentSessions).where(and(eq(agentSessions.id, args.target.sessionId),
@@ -192,19 +250,9 @@ async function deliverToAssistantThreadInner(
     }
   }
   if (args.target) {
-    const result = await deps.db.execute(sql`
-      SELECT s.id FROM agent_sessions s
-      JOIN engine_threads t ON t.session_id = s.id AND t.id = ${args.target.threadId}
-      LEFT JOIN session_threads m ON m.session_id = s.id AND m.id = t.id
-      LEFT JOIN assistant_executions x ON x.session_id = s.id
-      LEFT JOIN assistants a ON a.id = x.assistant_id
-      LEFT JOIN engine_threads g ON g.session_id = a.session_id AND g.id = x.governing_thread_id
-      LEFT JOIN session_threads gm ON gm.session_id = a.session_id AND gm.id = g.id
-      WHERE s.id = ${args.target.sessionId} AND s.org_id = ${args.orgId} AND s.status <> 'deleted'
-        AND s.owner_type = ${args.owner.type} AND s.owner_id = ${args.owner.id} AND m.archived_at IS NULL
-        AND (x.session_id IS NULL OR (a.archived_at IS NULL AND g.id IS NOT NULL AND gm.archived_at IS NULL))
-      LIMIT 1`) as { rows: Array<{ id: string }> };
-    if (!result.rows.length) throw new Error("The original conversation was archived or deleted. Restore it before retrying delivery.");
+    if (!(await isTargetThreadLive(deps.db, args.orgId, args.owner, args.target))) {
+      throw new Error("The original conversation was archived or deleted. Restore it before retrying delivery.");
+    }
   }
   const metadata = {
     ...(args.presence ? { presence: args.presence } : {}),
