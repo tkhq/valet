@@ -315,6 +315,15 @@ describe("slackTriggerDefs catalog", () => {
     ]);
   });
 
+  it("lets a slack.channel_created rule filter on the channel name", () => {
+    const entry = findTrigger("slack.channel").catalog.find((e) => e.key === "slack.channel_created");
+    expect(entry?.filters.map((f) => `${f.field}:${f.path}`)).toEqual([
+      "channel:channel.id",
+      "channel_name:channel.name",
+      "creator:channel.creator",
+    ]);
+  });
+
   it("all defs use service slack", () => {
     for (const trigger of slackTriggerDefs) expect(trigger.service).toBe("slack");
   });
