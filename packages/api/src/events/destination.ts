@@ -110,6 +110,10 @@ export function resolveDestination(input: DestinationInput): Destination {
     };
   }
   if (claim !== null) {
+    // A schedule's `event` is always undefined, so `event?.conversational`
+    // is never `true` for one: a claim paired with a schedule always skips.
+    // That combination is reachable only through the type signature — in
+    // practice a claim always pairs with a subscription's event.
     if (event?.conversational === true) {
       return { kind: "target", sessionId: claim.sessionId, threadId: claim.threadId, reason: "claim_redirect" };
     }
