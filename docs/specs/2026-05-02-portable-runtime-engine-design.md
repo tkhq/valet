@@ -435,6 +435,8 @@ Session and orchestrator repairs carry `taskSourceQueueItemId` from the first su
 The host persists that reference in prompt metadata. The engine restores the original task only from the active transcript branch.
 It does not rerender the task from edited inputs, reread the whole thread through a tool, add a workflow node, or change schema validation.
 The existing single repair limit and side-effect reuse instructions still apply.
+Repair context preserves failed-tool diagnostics and operation receipts across transcript reconstruction and restart.
+One text reader serves live tool persistence and context reconstruction. Summarization retains explicit interruption errors as well as stored failure results.
 
 
 Each assistant entry records bounded response metadata: adapted stop reason, raw stop reason when exposed, model, provider, API, response ID, end-turn flag, block types, text length, thinking presence, tool-call count, and streamed text length. Thinking text, prompts, and full responses are excluded. Requested output limits are separate from effective output limits because adapters can transform them. Unexposed effective limits, request IDs, provider terminal status, and incomplete reasons are null. Workflow node diagnostics return only these allowed fields. Missing metadata is null.
