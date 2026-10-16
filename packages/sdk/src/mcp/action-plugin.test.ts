@@ -95,6 +95,27 @@ function fakeCredentialProvider(cred: Credential | null): CredentialProvider {
   };
 }
 
+/**
+ * A provider that answers differently per service name, for exercising the
+ * personal-vs-app fallback: `credentials.get()` (no arg, or the plugin's own
+ * service) returns `personal`; `credentials.get(appService)` returns `app`.
+ */
+function fakeScopedCredentialProvider(opts: {
+  personal: Credential | null;
+  app: Credential | null;
+  appService: string;
+}): CredentialProvider {
+  return {
+    get: vi.fn(async (service?: string) => {
+      if (service === opts.appService) return opts.app;
+      return opts.personal;
+    }),
+    request: vi.fn(async () => {
+      throw new Error('request() not implemented in test fixture');
+    }),
+  };
+}
+
 function fakeContext(credentials: CredentialProvider): PluginActionContext {
   const notImplemented = () => {
     throw new Error('not implemented in test fixture');
@@ -631,5 +652,165 @@ describe('mcpActionPlugin generated action execute', () => {
     const result = await action.execute({}, fakeContext(credentials));
 
     expect(result).toEqual({ success: false, error: 'MCP tool returned empty response' });
+  });
+});
+
+// ── appCredentialService fallback (Part C Linear) ───────────────────────
+
+describe('mcpActionPlugin appCredentialService fallback', () => {
+  it('sends the app token as Bearer at discovery when no personal credential is connected', async () => {
+    let listRequest: CapturedRequest | undefined;
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMock({
+        tools: [fixtureTools[0]],
+        onRequest: (req) => {
+          if (req.body.method === 'tools/list') listRequest = req;
+        },
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: null,
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+
+    const actions = await plugin.resolveActions!({ credentials });
+
+    expect(actions).toHaveLength(1);
+    expect(listRequest?.headers.Authorization).toBe('Bearer app-token');
+  });
+
+  it('sends the app token as Bearer on a call when no personal credential is connected', async () => {
+    let callRequest: CapturedRequest | undefined;
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMock({
+        tools: [fixtureTools[0]],
+        callResult: { content: [{ type: 'text', text: 'ok' }] },
+        onRequest: (req) => {
+          if (req.body.method === 'tools/call') callRequest = req;
+        },
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: null,
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    const result = await action.execute({}, fakeContext(credentials));
+
+    expect(result).toEqual({ success: true, data: 'ok' });
+    expect(callRequest?.headers.Authorization).toBe('Bearer app-token');
+  });
+
+  it('prefers the personal credential over the app token at discovery', async () => {
+    let listRequest: CapturedRequest | undefined;
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMock({
+        tools: [fixtureTools[0]],
+        onRequest: (req) => {
+          if (req.body.method === 'tools/list') listRequest = req;
+        },
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+
+    await plugin.resolveActions!({ credentials });
+
+    expect(listRequest?.headers.Authorization).toBe('Bearer personal-token');
+  });
+
+  it('prefers the personal credential over the app token on a call', async () => {
+    let callRequest: CapturedRequest | undefined;
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMock({
+        tools: [fixtureTools[0]],
+        callResult: { content: [{ type: 'text', text: 'ok' }] },
+        onRequest: (req) => {
+          if (req.body.method === 'tools/call') callRequest = req;
+        },
+      }),
+    );
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: { accessToken: 'personal-token' },
+      app: { accessToken: 'app-token' },
+      appService: 'linear:app',
+    });
+    const [action] = await plugin.resolveActions!({ credentials });
+
+    await action.execute({}, fakeContext(credentials));
+
+    expect(callRequest?.headers.Authorization).toBe('Bearer personal-token');
+  });
+
+  it('throws the unchanged refusal text when neither personal nor app credential is connected', async () => {
+    vi.stubGlobal('fetch', makeFetchMock({ tools: [fixtureTools[0]] }));
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.linear.app/mcp',
+      serviceName: 'linear',
+      defaultRiskLevel: 'medium',
+      appCredentialService: 'linear:app',
+    });
+    const credentials = fakeScopedCredentialProvider({
+      personal: null,
+      app: null,
+      appService: 'linear:app',
+    });
+
+    await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
+      'linear: no credential connected',
+    );
+  });
+
+  it('leaves behavior unchanged when appCredentialService is absent (no fallback attempted)', async () => {
+    const plugin = mcpActionPlugin({
+      mcpUrl: 'https://mcp.example.com/mcp',
+      serviceName: 'example',
+      defaultRiskLevel: 'medium',
+    });
+    const getSpy = vi.fn(async (service?: string) => {
+      // Only the no-arg (personal) lookup should ever happen.
+      expect(service).toBeUndefined();
+      return null;
+    });
+    const credentials: CredentialProvider = { get: getSpy, request: vi.fn() };
+
+    await expect(plugin.resolveActions!({ credentials })).rejects.toThrow(
+      'example: no credential connected',
+    );
+    expect(getSpy).toHaveBeenCalledTimes(1);
   });
 });

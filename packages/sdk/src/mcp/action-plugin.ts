@@ -21,6 +21,14 @@ export interface McpActionPluginOptions {
   staticToken?: string;
   /** Send the credential as this URL query param instead of an Authorization header. */
   authQueryParam?: string;
+  /**
+   * Credential service to fall back to when the caller has no personal
+   * `serviceName` credential connected — the native integration's app
+   * identity (docs/specs/2026-10-15-native-integration-credential-policy-design.md
+   * Part C). The personal credential always wins when present. Applies to
+   * both tool discovery and execute.
+   */
+  appCredentialService?: string;
   description?: string;
 }
 
@@ -49,6 +57,7 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
   const defaultRiskLevel = opts.defaultRiskLevel;
   const noAuth = opts.noAuth ?? false;
   const staticToken = opts.staticToken;
+  const appCredentialService = opts.appCredentialService;
 
   return {
     service: serviceName,
@@ -56,10 +65,10 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
     actions: [],
     requiresCredential: !noAuth && staticToken === undefined,
     resolveActions: async ({ credentials }: { credentials: CredentialProvider }) => {
-      const token = await resolveToken(credentials, serviceName, noAuth, staticToken);
+      const token = await resolveToken(credentials, serviceName, noAuth, staticToken, appCredentialService);
       const tools = await client.listTools(token);
       return tools.map((tool) =>
-        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken),
+        mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService),
       );
     },
   };
@@ -72,18 +81,28 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
  * seam is documented to throw here — the catalog turns it into a
  * `list_tools` warning (or a `call_tool` error string) rather than silently
  * hiding the service.
+ *
+ * When `appCredentialService` is set and the caller has no personal
+ * `serviceName` credential, fall back to the named app-identity service
+ * before refusing (Part C, native-integration-credential-policy). The
+ * personal credential always wins when present.
  */
 async function resolveToken(
   credentials: CredentialProvider,
   serviceName: string,
   noAuth: boolean,
   staticToken?: string,
+  appCredentialService?: string,
 ): Promise<string | undefined> {
   if (noAuth) return undefined;
   if (staticToken !== undefined) return staticToken;
   const cred = await credentials.get();
-  if (!cred) throw new Error(`${serviceName}: no credential connected`);
-  return cred.accessToken;
+  if (cred) return cred.accessToken;
+  if (appCredentialService) {
+    const appCred = await credentials.get(appCredentialService);
+    if (appCred) return appCred.accessToken;
+  }
+  throw new Error(`${serviceName}: no credential connected`);
 }
 
 function mapToolToAction(
@@ -93,6 +112,7 @@ function mapToolToAction(
   defaultRiskLevel: RiskLevel,
   noAuth: boolean,
   staticToken?: string,
+  appCredentialService?: string,
 ): PluginAction {
   // `tool.inputSchema` is a JSON-Schema-shaped object from the MCP server.
   // TypeBox's `TSchema` is declared as an empty interface
@@ -108,7 +128,7 @@ function mapToolToAction(
     riskLevel: deriveRiskLevel(tool, defaultRiskLevel),
     parameters,
     execute: async (args, ctx) => {
-      const token = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken);
+      const token = await resolveToken(ctx.credentials, serviceName, noAuth, staticToken, appCredentialService);
       try {
         const result = await client.callTool(token, tool.name, args);
         return mapToolResult(result);
