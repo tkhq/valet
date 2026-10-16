@@ -3,7 +3,7 @@ import { Type } from 'typebox';
 import type { TSchema } from 'typebox';
 import type { ActionPlugin, CredentialProvider, PluginAction, RiskLevel } from '@valet/engine';
 import { hasToonCollectionMarker } from '@valet/shared';
-import { McpClient } from './client.js';
+import { McpClient, McpHttpError } from './client.js';
 import type { McpTool, McpToolResult } from './types.js';
 
 export interface McpActionPluginOptions {
@@ -80,8 +80,14 @@ export function mcpActionPlugin(opts: McpActionPluginOptions): ActionPlugin {
     actions: [],
     requiresCredential: !noAuth && staticToken === undefined,
     resolveActions: async ({ credentials }: { credentials: CredentialProvider }) => {
-      const { token } = await resolveToken(credentials, serviceName, noAuth, staticToken, appCredentialService);
-      const tools = await client.listTools(token);
+      const { token, source } = await resolveToken(credentials, serviceName, noAuth, staticToken, appCredentialService);
+      let tools: McpTool[];
+      try {
+        tools = await client.listTools(token);
+      } catch (err) {
+        const rejection = authRejectionMessage(err, source, serviceName, displayName);
+        throw rejection ? new Error(rejection) : err;
+      }
       return tools.map((tool) =>
         mapToolToAction(tool, client, serviceName, defaultRiskLevel, noAuth, staticToken, appCredentialService, displayName),
       );
@@ -127,6 +133,11 @@ async function resolveToken(
  * action" rule. Returns undefined for any other failure (bad request,
  * transport error, 5xx) — those keep today's verbatim error text, and for
  * `noAuth`/`staticToken` calls there is no personal/app connection to name.
+ *
+ * Detects the rejection via `McpHttpError.status`, not a text match on the
+ * message: the message's tail is the server's own response body (up to 200
+ * chars, verbatim), so a 500 whose body happens to say "upstream returned
+ * HTTP 401" must not be misclassified as an auth rejection.
  */
 function authRejectionMessage(
   err: unknown,
@@ -135,8 +146,7 @@ function authRejectionMessage(
   displayName?: string,
 ): string | undefined {
   if (!source) return undefined;
-  const message = err instanceof Error ? err.message : String(err);
-  if (!/\bHTTP (401|403)\b/.test(message)) return undefined;
+  if (!(err instanceof McpHttpError) || (err.status !== 401 && err.status !== 403)) return undefined;
   const label = displayName ?? serviceName;
   if (source === 'app') {
     return `${serviceName} rejected the Valet app's access. Ask an admin to reconnect the ${label} app in Settings, Integrations, or connect your own ${label} account.`;
