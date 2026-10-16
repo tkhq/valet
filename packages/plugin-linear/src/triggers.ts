@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { EventCatalogEntry, NormalizedEvent, TriggerDef, TriggerRejection, VerifiedEvent } from "@valet/engine";
+import { linearEventSubjects } from "./subjects.js";
 
 const LINEAR_TYPES = ["Issue", "Comment", "Project", "Cycle", "IssueLabel", "Reaction"] as const;
 const ACTIONS = ["create", "update", "remove"] as const;
@@ -107,6 +108,10 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
+function rec(v: unknown): Record<string, unknown> | undefined {
+  return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+}
+
 function toEvent(event: VerifiedEvent): NormalizedEvent {
   const payload = event.payload as Record<string, unknown>;
   const action = str(payload.action) ?? "unknown";
@@ -124,16 +129,19 @@ function toEvent(event: VerifiedEvent): NormalizedEvent {
   if (url) refs.url = url;
 
   const title = str(data.title) ?? str(data.body)?.slice(0, 80) ?? str(data.name) ?? "";
-  const actorId = str(data.creatorId) ?? str(data.userId);
+  const actorId = str(rec(payload.actor)?.id) ?? str(data.creatorId) ?? str(data.userId);
   const family = event.eventType.toLowerCase();
+  const { subjects, status, bot } = linearEventSubjects(event.eventType, payload);
   return {
     key: `linear.${family}.${action}`,
     dedupeKey: event.deliveryId,
     occurredAt: str(payload.createdAt) ?? new Date().toISOString(),
-    actor: actorId ? { externalId: actorId } : undefined,
+    actor: actorId ? { externalId: actorId, bot } : undefined,
     refs,
     summary: [identifier, `${family} ${action}`, title && `— ${title}`].filter(Boolean).join(" "),
     payload: event.payload,
+    subjects,
+    status,
   };
 }
 
