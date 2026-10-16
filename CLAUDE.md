@@ -87,6 +87,7 @@ Use STE-flavored prose for everything else — READMEs, specs, PR descriptions, 
 Two repo-specific rules:
 
 - **Every user-facing error message names the corrective action when one exists.** "Missing GitHub access token. Connect the GitHub integration in Settings." is the model. A bare fact ("expected an array response") is incomplete when the user can act.
+- **Terminology:** the per-workspace agent is the **assistant**. "Orchestrator" is its legacy name. Do not introduce it in new code, specs, or UI copy. The stored values that still say it (`target.kind`, `target_kind`, the well-known id `orchestrator:{userId}`, `make smoke-orchestrator`) are compatibility constants until the rename sweep; read them, do not add new ones.
 - **Terminology:** "workspace" is overloaded — `SessionData.workspace` is a display label, `/workspace` is the in-sandbox path, workspace prep is the clone subsystem, and in web UI copy a workspace is the nav switcher's scope: personal or a team (`docs/specs/2026-08-17-team-workspace-ui-design.md`). Say which one you mean. UI copy reserves "workspace" for the switcher scope and calls the in-sandbox path the "working directory". Spell the session start reference "start-ref" in prose and `startRef` in code.
 
 `make e2e E2E_ARGS="--only docs-lint"` runs the STE lint (`scripts/docs/docs_lint.py`) over the maintained docs with per-file thresholds; CI runs the same script as a blocking check on every PR. The `ste-plain-writing` skill has the full ruleset and a linter (`python3 scripts/ste_lint.py <file>` from the skill directory). The linter is diagnostic, not certification — code blocks and deliberate style choices produce false positives.
@@ -101,7 +102,7 @@ This section governs new and edited prose. Do not rewrite existing documents who
 2. **Pluggable providers** — `SessionStore` and `SandboxProvider` swap behind engine contracts with shared conformance suites.
 3. **REST is authoritative for thread history** — `GET /api/sessions/:id/messages`. The WS `init` event is metadata-only; never add messages back to it.
 4. **Plugins self-describe** — one `ValetPlugin` manifest per `packages/plugin-*`, exported from `./plugin`; `make generate-registries` regenerates `packages/api/src/plugins/registry.gen.ts` from `plugin.yaml` (`v2: true`).
-5. **Orchestrators are full agent sessions** — one assistant identity per personal or team workspace, resolved by workspace ownership. Team conversations use separate execution sessions and sandboxes. Children use the same engine APIs.
+5. **Assistants are full agent sessions** — one assistant identity per personal or team workspace, resolved by workspace ownership. "Orchestrator" is the legacy name for the same thing (see Terminology). Team conversations use separate execution sessions and sandboxes. Children use the same engine APIs.
 6. **Auth is better-auth** — email/password + optional OIDC; `VALET_LOCAL_AUTH=1` is the dev stub (see `docs/specs/2026-07-14-auth-v2-design.md`).
 
 ## Rules learned the hard way

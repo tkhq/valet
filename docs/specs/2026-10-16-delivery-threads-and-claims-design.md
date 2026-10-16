@@ -5,7 +5,7 @@ Date: 2026-10-16. Status: proposed.
 Depends on: `2026-10-15-event-wakeups-design.md` (event waiters, digests,
 Scenario E), `2026-07-20-event-system-design.md` (subscriptions, the
 dispatcher, followed threads), `2026-08-15-workflow-triggers-ui-design.md`
-(schedules and their orchestrator prompts).
+(schedules and their assistant prompts).
 
 Supersedes: `2026-10-15-incident-mention-routing-design.md`. Its Part A
 becomes the conversational leg of Part C here. Its acceptance scenario
@@ -51,9 +51,11 @@ these words is informative.
 
 - **owner**: a user, a team, or an org; the party a subscription, schedule,
   or session belongs to.
-- **assistant delivery**: a subscription delivery with an orchestrator
-  target, or a schedule firing with an orchestrator prompt. Workflow and
-  `signal` targets are not assistant deliveries.
+- **assistant delivery**: a subscription delivery with an assistant
+  target, or a schedule firing with an assistant prompt. Workflow and
+  `signal` targets are not assistant deliveries. The stored discriminator
+  for an assistant target is still the legacy value `orchestrator` until
+  the Presence hub spec Part H renames it.
 - **thread policy**: the rule's choice of destination thread. Modes: `new`,
   `subject`, `own`, `existing`.
 - **natural subject**: the subject a plugin names as the grouping unit for
@@ -86,7 +88,7 @@ named in each step.
 
 | Step | Action | Expected observation |
 |---|---|---|
-| T1 | Create R1: `github.pull_request_review` and `github.check_run.completed` on `acme/api`, orchestrator target, policy `subject`. A review on `#12` arrives. | One thread with key `subject:github:acme/api#12` and title `acme/api#12` exists in `u-001`'s assistant and holds the delivery. |
+| T1 | Create R1: `github.pull_request_review` and `github.check_run.completed` on `acme/api`, assistant target, policy `subject`. A review on `#12` arrives. | One thread with key `subject:github:acme/api#12` and title `acme/api#12` exists in `u-001`'s assistant and holds the delivery. |
 | T2 | A check run completes on `#12`. | The same thread holds the second delivery. No new thread exists. |
 | T3 | A review on `#13` arrives. | A second thread, `acme/api#13`, holds it. |
 | T4 | Create R3: `linear.issue.update` for team `ENG`, policy `own`, name `ENG triage`. Updates arrive on `ENG-42` and `ENG-43`. | One thread with key `sub:<R3>` and title `ENG triage` holds both deliveries. |
@@ -147,8 +149,8 @@ start.
      | { mode: "existing"; sessionId: string; threadId: string };
    ```
 
-2. The orchestrator subscription target (`EventSubscriptionTargetWire`,
-   kind `orchestrator`) and the schedule row gain `thread?:
+2. The assistant subscription target (`EventSubscriptionTargetWire`,
+   stored kind `orchestrator`) and the schedule row gain `thread?:
    AssistantThreadPolicy`. The subscription stores it inside the `target`
    JSON. The schedule stores it in a new nullable `thread_policy` jsonb
    column on `workflow_schedules`, edited in place in `0000_app.sql`, with
@@ -219,8 +221,11 @@ Destination =
 5. A `follow: true` rule MUST bind the Slack thread to whichever thread the
    delivery landed in, as today. The binding then wins step 1 for later
    events in that Slack thread.
-6. `EVENTS_THREAD_KEY` and `slackEventsThreadKey` are removed. The scheduler
-   MUST pass its resolved destination to `deliverToOrchestrator`.
+6. `EVENTS_THREAD_KEY` is removed. The dispatcher MUST NOT use
+   `slackEventsThreadKey` as a destination; the function stays for the
+   workflow attention audience keys that use it. The scheduler MUST pass
+   its resolved destination to `deliverToAssistant` (today's
+   `deliverToOrchestrator`, renamed with this part).
 
 ## Part C: Claims
 
@@ -231,7 +236,7 @@ incident routing spec's Parts A and B.
 
 1. Ingest MUST compute claims after the subscription match and the waiter
    clause evaluation, before it inserts deliveries. It computes them per
-   matched orchestrator subscription with owner O. A claim candidate is a
+   matched assistant subscription with owner O. A claim candidate is a
    running waiter that meets all of these:
    - its session belongs to O and to the event's org;
    - its clauses accept the event (event wakeups Part E steps 2 to 4, with
@@ -262,7 +267,7 @@ incident routing spec's Parts A and B.
    `slack.app_mention`, in either order. Each ingest predicts the other
    half through the plugin's `conversationalTwin` (Part D).
    - At the `slack.message` ingest, a waiter appends no digest when an
-     orchestrator subscription of its owner would deliver the
+     assistant subscription of its owner would deliver the
      `slack.app_mention` twin. The sender gate (`mentionSenderActor`)
      applies to that prediction.
    - At the `slack.app_mention` ingest, ingest evaluates the claim
@@ -330,7 +335,7 @@ event wakeups spec Part A.
   Part C step 7; a test injects a throwing resolver and asserts the delivery
   lands by policy and the waiter appends.
 - **INV-D7 Workflow and `signal` targets never yield.** Mechanism: the
-  resolver runs for orchestrator targets only. Vector: C12.
+  resolver runs for assistant targets only. Vector: C12.
 - **INV-D8 Every rule of one owner that groups by a subject shares one
   thread for it.** Mechanism: the `subject` key carries no rule id. Vector:
   T1 to T3 with a second rule on `acme/api`.
@@ -370,5 +375,5 @@ None yet.
 - Incident mention routing: superseded. Its header says so.
 - Event system "Dispatcher": the thread heuristics paragraph points to Part
   B here.
-- Workflow triggers UI: orchestrator-prompt schedules carry a thread policy
+- Workflow triggers UI: assistant-prompt schedules carry a thread policy
   (Part A step 2).
