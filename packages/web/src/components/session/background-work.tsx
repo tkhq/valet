@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState, type ReactNode } from "react";
-import { Clock, Eye, Lock, Terminal, Timer, type LucideIcon } from "lucide-react";
+import { Bell, Clock, Eye, Lock, Terminal, Timer, type LucideIcon } from "lucide-react";
 import type { LeaseSummary, ListSessionWakeupsResponse, WakeupSummary } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 import { useCancelSessionWakeup, useSessionWakeups } from "~/api/queries";
@@ -109,6 +109,7 @@ const KIND_NOUN: Record<BackgroundItem["kind"], [singular: string, plural: strin
   process: ["process", "processes"],
   watch: ["watch", "watches"],
   timer: ["timer", "timers"],
+  event: ["event waiter", "event waiters"],
   hold: ["hold", "holds"],
 };
 
@@ -116,6 +117,7 @@ const KIND_ICON: Record<BackgroundItem["kind"], LucideIcon> = {
   process: Terminal,
   watch: Eye,
   timer: Timer,
+  event: Bell,
   hold: Lock,
 };
 
@@ -157,6 +159,7 @@ const KIND_LABEL: Record<BackgroundItem["kind"], string> = {
   process: "Process",
   watch: "Watch",
   timer: "Timer",
+  event: "Event waiter",
   hold: "Hold",
 };
 

@@ -1,12 +1,63 @@
 // Wakeup and lease contracts (spec 2026-10-08: sandbox scratch, wakeups, and
 // leases). A wakeup tracks one background unit of work (a detached process,
-// a watch, or a timer). A lease keeps a sandbox alive while a wakeup or an
+// a watch, a timer, or an event waiter; spec 2026-10-15: event wakeups). A lease keeps a sandbox alive while a wakeup or an
 // explicit hold needs it, independent of session activity.
 
 import type { ChannelOrigin } from "../types.js";
 
 /** What kind of background work a wakeup tracks. */
-export type WakeupKind = "process" | "watch" | "timer";
+export type WakeupKind = "process" | "watch" | "timer" | "event";
+
+/**
+ * One entry of an event waiter's `on` list (spec 2026-10-15, Part C). Every
+ * field except `key` narrows the match.
+ */
+export interface EventClause {
+  /** The event key, such as `github.check_run.completed`. */
+  key: string;
+  /** Match only these normalized statuses. */
+  status?: string[];
+  /** Match only an update whose previous status is one of these. */
+  from_status?: string[];
+  /** Match only this actor login. */
+  actor?: string;
+  /** False drops events from bot actors. */
+  bots?: boolean;
+  /** True keeps events whose actor is in the waiter's `self` set. */
+  include_self?: boolean;
+}
+
+/** What an event waiter matches, stored as `match_json`. */
+export interface EventMatchSpec {
+  clauses: EventClause[];
+  /** True: the first match ends the waiter. False: stream mode. */
+  once: boolean;
+  /** External actor ids the session acts as. Their events are dropped unless a clause sets `include_self`. */
+  self: string[];
+}
+
+/** The most bytes of `EventMatchDigest.text` a store keeps (INV-E7). */
+export const EVENT_DIGEST_TEXT_MAX_BYTES = 4096;
+
+/** The bounded record of one matched event that an event waiter holds until delivery. */
+export interface EventMatchDigest {
+  key: string;
+  status?: string;
+  previousStatus?: string;
+  subjects: string[];
+  summary: string;
+  url?: string;
+  /** The actor's login. */
+  actor?: string;
+  /** ISO 8601 time of the event. */
+  occurredAt: string;
+  /** Unique per event. A waiter buffers one digest per `dedupeKey` (INV-E4). */
+  dedupeKey: string;
+  /** The message or comment body, at most `EVENT_DIGEST_TEXT_MAX_BYTES` bytes. */
+  text?: string;
+  /** The derived key the WakeWatcher must resolve before delivery. */
+  derive?: string;
+}
 
 /** Lifecycle status of a wakeup. Terminal: done, cancelled, expired, lost. */
 export type WakeupStatus = "pending" | "running" | "done" | "cancelled" | "expired" | "lost";
@@ -52,6 +103,12 @@ export interface Wakeup {
   watchBuffer?: string;
   /** `watch`: when the last `watch.event` went out (ms). */
   lastEmitAt?: number;
+  /** `event`: the subjects the waiter waits on. */
+  subjects?: string[];
+  /** `event`: the clauses, the mode, and the self set. */
+  eventMatch?: EventMatchSpec;
+  /** `event`: matched digests awaiting delivery. Delivery writes `[]`. */
+  eventBuffer?: EventMatchDigest[];
 }
 
 /** What kind of owner holds a lease open. */
@@ -93,6 +150,7 @@ export type WakeupPatch = Partial<
     | "windowCount"
     | "watchBuffer"
     | "lastEmitAt"
+    | "eventBuffer"
   >
 >;
 
@@ -135,6 +193,7 @@ export type WakeupCreateInput = (
   | { kind: "process"; command: string; reason: string; deadlineHours: number }
   | { kind: "watch"; command: string; reason: string; maxHours: number }
   | { kind: "timer"; prompt: string; fireAt: number }
+  | { kind: "event"; subjects: string[]; match: EventMatchSpec; reason: string; maxHours: number }
 ) & {
   /** The calling turn's channel origin (`ToolContext.origin`). */
   origin?: ChannelOrigin;

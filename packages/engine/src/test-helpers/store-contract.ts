@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type {
   DecisionGate,
+  EventMatchDigest,
   Lease,
   MessageEntry,
   QueueItem,
@@ -787,6 +788,78 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
           expect(second.next).toBeNull();
         },
       );
+
+      const eventWaiter = (over: Partial<Wakeup> = {}): Wakeup => wakeup({
+        id: "wk_ev", kind: "event", status: "running", reason: "CI on #42",
+        command: undefined, execId: undefined, leaseId: undefined,
+        subjects: ["github:acme/lean-proofs#42"], deadlineAt: 10_000,
+        eventMatch: { clauses: [{ key: "github.check_run.completed" }], once: true, self: [] },
+        eventBuffer: [], ...over,
+      });
+      const digest = (over: Partial<EventMatchDigest> = {}): EventMatchDigest => ({
+        key: "github.check_run.completed", subjects: ["github:acme/lean-proofs#42"],
+        summary: "acme/lean-proofs: check_run completed", occurredAt: "2026-10-15T00:00:00Z",
+        dedupeKey: "d-1", ...over,
+      });
+
+      it("round-trips an event waiter's subjects, match spec, and buffer", async () => {
+        const full = eventWaiter({
+          eventMatch: {
+            clauses: [
+              { key: "github.check_run.completed", status: ["failure"], from_status: ["queued"], actor: "ada", bots: false, include_self: true },
+              { key: "github.pull_request.checks_completed" },
+            ],
+            once: false,
+            self: ["github:9001"],
+          },
+          eventBuffer: [digest({ status: "failure", previousStatus: "queued", url: "https://x", actor: "ada", text: "t", derive: "github.pull_request.checks_completed" })],
+        });
+        await store.createWakeup(full);
+        expect(await store.getWakeup("wk_ev")).toEqual(full);
+      });
+
+      it("findEventWaiters returns running event rows that share a subject", async () => {
+        await store.createWakeup(eventWaiter());
+        await store.createWakeup(eventWaiter({ id: "wk_other", subjects: ["github:acme/other#1"] }));
+        await store.createWakeup(eventWaiter({ id: "wk_done", status: "done" }));
+        const rows = await store.findEventWaiters(["github:acme/lean-proofs", "github:acme/lean-proofs#42"]);
+        expect(rows.map((r) => r.id)).toEqual(["wk_ev"]);
+        expect(await store.findEventWaiters([])).toEqual([]);
+      });
+
+      it("appendEventMatch appends once per dedupeKey and only while running", async () => {
+        await store.createWakeup(eventWaiter());
+        expect(await store.appendEventMatch("wk_ev", digest(), 20)).toBe(true);
+        expect(await store.appendEventMatch("wk_ev", digest(), 21)).toBe(false);
+        expect((await store.getWakeup("wk_ev"))?.updatedAt).toBe(20);
+        await store.transitionWakeup("wk_ev", ["running"], "cancelled", { cause: "cancelled", endedAt: 22 }, 22);
+        expect(await store.appendEventMatch("wk_ev", digest({ dedupeKey: "d-2" }), 23)).toBe(false);
+        expect((await store.getWakeup("wk_ev"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["d-1"]);
+        expect(await store.appendEventMatch("missing", digest(), 24)).toBe(false);
+      });
+
+      it("appendEventMatch cuts text to 4096 bytes", async () => {
+        await store.createWakeup(eventWaiter());
+        await store.appendEventMatch("wk_ev", digest({ text: "é".repeat(5000) }), 20);
+        const text = (await store.getWakeup("wk_ev"))?.eventBuffer?.[0]?.text ?? "";
+        expect(Buffer.byteLength(text)).toBeLessThanOrEqual(4096);
+        expect(text).toBe("é".repeat(2048));
+      });
+
+      it("listDueWakeups returns event rows with a buffer or a passed deadline", async () => {
+        await store.createWakeup(eventWaiter({ id: "wk_idle" }));
+        await store.createWakeup(eventWaiter({ id: "wk_buf", eventBuffer: [digest()] }));
+        await store.createWakeup(eventWaiter({ id: "wk_late", deadlineAt: 5 }));
+        const { rows } = await store.listDueWakeups(100, 50);
+        expect(rows.map((r) => r.id).sort()).toEqual(["wk_buf", "wk_late"]);
+      });
+
+      it("transitionWakeup clears eventBuffer when the patch sets []", async () => {
+        await store.createWakeup(eventWaiter({ eventBuffer: [digest()] }));
+        const row = await store.transitionWakeup("wk_ev", ["running"], "running", { eventBuffer: [] }, 30);
+        expect(row?.eventBuffer).toEqual([]);
+        expect((await store.getWakeup("wk_ev"))?.eventBuffer).toEqual([]);
+      });
 
       it("fills a missing lease sandbox id once, and only on an active lease", async () => {
         await store.createLease(lease({ sandboxId: undefined }));
