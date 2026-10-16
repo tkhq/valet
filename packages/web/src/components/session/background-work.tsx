@@ -270,12 +270,25 @@ export function threadTimerWaits(data: ListSessionWakeupsResponse | undefined): 
   return waits;
 }
 
-/** Pure: each thread's event waiter, by its subject label. Keeps the first one when a thread holds several. */
-export function threadEventWaits(data: ListSessionWakeupsResponse | undefined): Map<string, string> {
-  const waits = new Map<string, string>();
+/** One thread's event waits for its list row: the oldest waiter's subject label and how many others wait. */
+export interface ThreadEventWait {
+  label: string;
+  moreCount: number;
+}
+
+/** Pure: each thread's event waits, named by the oldest waiter, like the composer line. */
+export function threadEventWaits(data: ListSessionWakeupsResponse | undefined): Map<string, ThreadEventWait> {
+  const byThread = new Map<string, Array<{ createdAt: number; label: string }>>();
   for (const w of data?.wakeups ?? []) {
-    if (w.kind !== "event" || w.subjectLabel === undefined || waits.has(w.threadId)) continue;
-    waits.set(w.threadId, w.subjectLabel);
+    if (w.kind !== "event" || w.subjectLabel === undefined) continue;
+    const list = byThread.get(w.threadId) ?? [];
+    list.push({ createdAt: w.createdAt, label: w.subjectLabel });
+    byThread.set(w.threadId, list);
+  }
+  const waits = new Map<string, ThreadEventWait>();
+  for (const [threadId, list] of byThread) {
+    const oldest = list.reduce((a, b) => (b.createdAt < a.createdAt ? b : a));
+    waits.set(threadId, { label: oldest.label, moreCount: list.length - 1 });
   }
   return waits;
 }
@@ -537,12 +550,13 @@ export function ThreadTimerLine({ fireAt, className }: { fireAt: number; classNa
 
 /**
  * The thread list's quiet line under a thread that waits on an event:
- * "Waiting on <subject label>" (spec Part H).
+ * "Waiting on <subject label>", plus "+N more" when the thread has other
+ * event waits (spec Part H).
  */
-export function ThreadEventLine({ label, className }: { label: string; className?: string }) {
+export function ThreadEventLine({ label, moreCount = 0, className }: { label: string; moreCount?: number; className?: string }) {
   return (
     <p className={cn("truncate text-[11px] leading-4 text-muted", className)}>
-      Waiting on {label}
+      {moreCount > 0 ? `Waiting on ${label} +${moreCount} more` : `Waiting on ${label}`}
     </p>
   );
 }
