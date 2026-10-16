@@ -8,7 +8,10 @@
  * is the one owner of the `valet_event_waiter_derive_total` counter: it
  * records exactly one result per call.
  */
-import { recordEventDerive, type DeriveContext, type DerivedEventDef, type EventDeriveResult, type EventMatchDigest, type NormalizedEvent, type ValetPlugin } from "@valet/engine";
+import { eq } from "drizzle-orm";
+import { recordEventDerive, type DeriveContext, type DerivedEventDef, type EventDeriveResult, type EventMatchDigest, type NormalizedEvent, type ValetPlugin, type Wakeup } from "@valet/engine";
+import type { AppDb } from "../lib/drizzle.js";
+import { agentSessions } from "../schema/index.js";
 import { resolveInstallationApiToken, type GitHubTokenDeps } from "../services/github-tokens.js";
 import { toDigest } from "./waiter-match.js";
 
@@ -110,4 +113,93 @@ export function githubDeriveContext(
 ): DeriveContext {
   const owner = /^github:([^/#@\s]+)/.exec(subject)?.[1]?.toLowerCase();
   return { orgId, appToken: () => tokenFor(orgId, owner), fetch: fetchImpl };
+}
+
+/**
+ * The longest time the WakeWatcher waits for one derive call. One derive
+ * can make about 22 sequential requests of up to 5 s each, and a pass
+ * handles its rows one at a time. Past this, the call is an `error`, so
+ * the source digest stays for the next tick.
+ */
+export const EVENT_DERIVE_DEADLINE_MS = 20_000;
+
+/** Resolves one digest marked `derive` for a waiter row. The WakeWatcher's `deriveEvent` dep. */
+export type EventWaiterDerive = (row: Wakeup, digest: EventMatchDigest) => Promise<RunDeriveResult>;
+
+export interface EventWaiterDeriverDeps {
+  plugins: ValetPlugin[];
+  /** The session's org id, or null when the session is gone. */
+  sessionOrg(sessionId: string): Promise<string | null>;
+  /** The derive context for `key` on `subject`. Its `fetch` must honor `signal`. */
+  contextFor(orgId: string, key: string, subject: string, signal: AbortSignal): DeriveContext;
+  /** Overrides `EVENT_DERIVE_DEADLINE_MS`. Tests only. */
+  deadlineMs?: number;
+  /** Overrides `recordEventDerive`. Tests only. */
+  record?: (key: string, result: EventDeriveResult) => void;
+}
+
+/**
+ * Builds the WakeWatcher's derive step over `runDerive` (spec Part F step
+ * 1). It bounds the whole call with one deadline: the deadline aborts the
+ * context's requests, and a derive that ignores the abort still returns
+ * `error` at the deadline. `runDerive` stays the one recorder of
+ * `valet_event_waiter_derive_total`.
+ */
+export function eventWaiterDeriver(deps: EventWaiterDeriverDeps): EventWaiterDerive {
+  const deadlineMs = deps.deadlineMs ?? EVENT_DERIVE_DEADLINE_MS;
+  return async (row, digest) => {
+    const subject = row.subjects?.[0];
+    if (subject === undefined || digest.derive === undefined) {
+      return { result: "error", error: new Error(`Event waiter ${row.id} has no subject or digest ${digest.dedupeKey} has no derive key.`) };
+    }
+    const orgId = await deps.sessionOrg(row.sessionId);
+    if (orgId === null) {
+      return { result: "error", error: new Error(`The session ${row.sessionId} of event waiter ${row.id} no longer exists.`) };
+    }
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<RunDeriveResult>((resolve) => {
+      timer = setTimeout(() => {
+        const error = new Error(`The derive of ${digest.derive} for event waiter ${row.id} passed its ${deadlineMs} ms deadline.`);
+        controller.abort(error);
+        resolve({ result: "error", error });
+      }, deadlineMs);
+    });
+    const ctx = deps.contextFor(orgId, digest.derive, subject, controller.signal);
+    try {
+      return await Promise.race([runDerive(deps.plugins, orgId, digest, subject, ctx, deps.record), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
+/** `fetchImpl` that also aborts when `signal` aborts. */
+function abortableFetch(fetchImpl: typeof fetch, signal: AbortSignal): typeof fetch {
+  return (input, init) => fetchImpl(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
+}
+
+/**
+ * The production derive step: the session's org from `agent_sessions`, and
+ * the org's GitHub App token for a GitHub derived key. A key of another
+ * service gets no app token.
+ */
+export function productionEventWaiterDeriver(deps: { db: AppDb; plugins: ValetPlugin[]; githubTokenDeps: GitHubTokenDeps }): EventWaiterDerive {
+  const tokenFor = githubInstallationTokenFor(deps.githubTokenDeps);
+  return eventWaiterDeriver({
+    plugins: deps.plugins,
+    async sessionOrg(sessionId) {
+      const [row] = await deps.db
+        .select({ orgId: agentSessions.orgId, status: agentSessions.status })
+        .from(agentSessions)
+        .where(eq(agentSessions.id, sessionId))
+        .limit(1);
+      return row && row.status !== "deleted" ? row.orgId : null;
+    },
+    contextFor(orgId, key, subject, signal) {
+      const bounded = abortableFetch(fetch, signal);
+      if (key.startsWith("github.")) return githubDeriveContext(orgId, subject, tokenFor, bounded);
+      return { orgId, appToken: async () => null, fetch: bounded };
+    },
+  });
 }

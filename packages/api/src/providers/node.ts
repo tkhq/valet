@@ -42,6 +42,7 @@ import { workflowsActionPlugin } from "../workflows/actions.js";
 import { profilePictureActions } from "../services/profile-picture-actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { eventsActionPlugin } from "../events/actions.js";
+import { productionEventWaiterDeriver } from "../events/derive.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { SkillCollector } from "../services/content-sync/skill-collector.js";
 import { WorkflowCollector } from "../services/content-sync/workflow-collector.js";
@@ -614,6 +615,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineHost,
     provider: sandboxProvider,
     limits: wakeupLimits,
+    deriveEvent: productionEventWaiterDeriver({
+      db,
+      plugins,
+      githubTokenDeps: { db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) },
+    }),
     // Kubernetes keeps detached logs on disk in the pod, so exit signals
     // can name the file. Docker keeps them in api memory (no path).
     ...(parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND) === "kubernetes"

@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import type { Wakeup } from "@valet/engine";
-import { decideWakeup, tail, LOG_TAIL_BYTES, WATCH_BUFFER_BYTES, WATCH_READ_BYTES, type DecideOptions, type WakeupDecision, type WakeupProbe } from "./wake-watcher-decide.js";
+import type { EventMatchDigest, EventMatchSpec, Wakeup } from "@valet/engine";
+import { decideEventWaiter, decideWakeup, tail, LOG_TAIL_BYTES, WATCH_BUFFER_BYTES, WATCH_READ_BYTES, type DecideOptions, type WakeupDecision, type WakeupProbe } from "./wake-watcher-decide.js";
 
 interface Vector {
   name: string;
@@ -337,5 +337,179 @@ describe("deadline guidance (fix wave 4, UX N14)", () => {
     expect(body).toContain("the watch reached its max_hours");
     expect(body).toContain("larger max_hours");
     expect(body).not.toContain("process");
+  });
+});
+
+describe("decideEventWaiter (event wakeups spec, Part F)", () => {
+  const NOW = 1_700_000_000_000;
+  const HOUR = 3_600_000;
+  const OPTS: DecideOptions = { watchMaxEventsPerHour: 120, watchMinIntervalMs: 120_000, tickMs: 30_000 };
+
+  const digest = (n: number, over: Partial<EventMatchDigest> = {}): EventMatchDigest => ({
+    key: "github.check_run.completed",
+    status: "failure",
+    subjects: ["github:acme/lean-proofs#42"],
+    summary: `acme/lean-proofs: check_run completed (test-${n})`,
+    url: `https://github.com/acme/lean-proofs/runs/${n}`,
+    actor: "ada",
+    occurredAt: "2026-10-15T00:00:00Z",
+    dedupeKey: `d-${n}`,
+    ...over,
+  });
+
+  const waiter = (over: Partial<Wakeup> = {}, match: Partial<EventMatchSpec> = {}): Wakeup => ({
+    id: "wk_ev",
+    sessionId: "sess-1",
+    threadId: "thread-1",
+    kind: "event",
+    status: "running",
+    reason: "CI on #42",
+    deadlineAt: NOW + 5 * HOUR,
+    logOffset: 0,
+    logTail: "",
+    eventCount: 0,
+    createdAt: NOW - HOUR,
+    updatedAt: NOW - HOUR,
+    subjects: ["github:acme/lean-proofs#42"],
+    eventMatch: { clauses: [{ key: "github.check_run.completed" }], once: true, self: [], ...match },
+    eventBuffer: [digest(1)],
+    ...over,
+  });
+
+  it("once mode, one digest: fires once as terminal and clears the buffer", () => {
+    const d = decideEventWaiter(NOW, waiter(), OPTS);
+    expect(d).toEqual({
+      to: "done",
+      cause: "fired",
+      patch: { cause: "fired", endedAt: NOW, eventBuffer: [] },
+      signals: [
+        {
+          signalType: "event.matched",
+          body:
+            "github.check_run.completed · failure · by ada\n" +
+            "acme/lean-proofs: check_run completed (test-1)\n" +
+            "https://github.com/acme/lean-proofs/runs/1",
+          attributes: { wakeupId: "wk_ev", kind: "event", subject: "github:acme/lean-proofs#42", matchCount: "1" },
+          dispatchId: "wakeup:wk_ev:terminal",
+        },
+      ],
+    });
+  });
+
+  it("adds a digest's text after its URL", () => {
+    const d = decideEventWaiter(NOW, waiter({ eventBuffer: [digest(1, { key: "slack.message", status: undefined, url: undefined, actor: "grace", text: "Looks good, ship it" })] }), OPTS);
+    expect(d?.signals[0]?.body).toBe("slack.message · by grace\nacme/lean-proofs: check_run completed (test-1)\nLooks good, ship it");
+  });
+
+  it("once mode, three digests: lists the first, then Also matched with one line each", () => {
+    const d = decideEventWaiter(NOW, waiter({ eventBuffer: [digest(1), digest(2), digest(3)] }), OPTS);
+    expect(d?.to).toBe("done");
+    expect(d?.signals).toHaveLength(1);
+    const body = d?.signals[0]?.body ?? "";
+    const [first, also] = body.split("\n\nAlso matched:\n");
+    expect(first).toContain("(test-1)");
+    expect(first).not.toContain("(test-2)");
+    expect(also?.split("\n")).toEqual([
+      "github.check_run.completed · failure · by ada · acme/lean-proofs: check_run completed (test-2)",
+      "github.check_run.completed · failure · by ada · acme/lean-proofs: check_run completed (test-3)",
+    ]);
+    expect(d?.signals[0]?.attributes.matchCount).toBe("3");
+  });
+
+  it("stream mode, first emit: emits event 1 at once and names the delivered keys", () => {
+    const d = decideEventWaiter(NOW, waiter({}, { once: false }), OPTS);
+    expect(d?.to).toBe("running");
+    expect(d?.cause).toBeUndefined();
+    expect(d?.signals.map((s) => [s.signalType, s.dispatchId])).toEqual([["event.matched", "wakeup:wk_ev:event:1"]]);
+    expect(d?.patch).toEqual({ eventCount: 1, lastEmitAt: NOW, windowStartAt: NOW, windowCount: 1 });
+    expect(d?.deliveredKeys).toEqual(["d-1"]);
+  });
+
+  it("stream mode inside watchMinIntervalMs of lastEmitAt keeps the buffer", () => {
+    expect(decideEventWaiter(NOW, waiter({ lastEmitAt: NOW - 60_000, eventCount: 1 }, { once: false }), OPTS)).toBeNull();
+  });
+
+  it("stream mode with minIntervalMs 30 000 waits at 20 s and emits at 30 s (Scenario E4)", () => {
+    const row = (lastEmitAt: number) => waiter({ lastEmitAt, eventCount: 1, windowStartAt: NOW - HOUR / 2, windowCount: 3 }, { once: false, minIntervalMs: 30_000 });
+    expect(decideEventWaiter(NOW, row(NOW - 20_000), OPTS)).toBeNull();
+    const d = decideEventWaiter(NOW, row(NOW - 30_000), OPTS);
+    expect(d?.signals[0]?.dispatchId).toBe("wakeup:wk_ev:event:2");
+    expect(d?.patch).toMatchObject({ eventCount: 2, lastEmitAt: NOW, windowCount: 4 });
+  });
+
+  it("stream mode, burst of 50 digests: one signal with 50 blocks", () => {
+    const buffer = Array.from({ length: 50 }, (_, i) => digest(i + 1));
+    const d = decideEventWaiter(NOW, waiter({ eventBuffer: buffer }, { once: false }), OPTS);
+    expect(d?.signals).toHaveLength(1);
+    expect(d?.signals[0]?.body.split("\n\n")).toHaveLength(50);
+    expect(d?.signals[0]?.attributes.matchCount).toBe("50");
+    expect(d?.deliveredKeys).toHaveLength(50);
+    expect(d?.patch.windowCount).toBe(50);
+  });
+
+  it("stream mode past watchMaxEventsPerHour in the window ends with cause rate", () => {
+    const row = waiter({ lastEmitAt: NOW - 200_000, eventCount: 7, windowStartAt: NOW - HOUR / 2, windowCount: 120 }, { once: false });
+    const d = decideEventWaiter(NOW, row, OPTS);
+    expect(d).toEqual({
+      to: "done",
+      cause: "rate",
+      patch: { cause: "rate", endedAt: NOW, eventBuffer: [] },
+      signals: [
+        {
+          signalType: "event.ended",
+          body: "Ended after 121 events in an hour. Narrow the clauses, then wait again.",
+          attributes: { wakeupId: "wk_ev", kind: "event", subject: "github:acme/lean-proofs#42", cause: "rate" },
+          dispatchId: "wakeup:wk_ev:terminal",
+        },
+      ],
+    });
+  });
+
+  it("starts a new rate window once the old one is more than an hour plus a tick old", () => {
+    const row = waiter({ lastEmitAt: NOW - 200_000, eventCount: 7, windowStartAt: NOW - HOUR - 31_000, windowCount: 120 }, { once: false });
+    expect(decideEventWaiter(NOW, row, OPTS)?.patch).toMatchObject({ windowStartAt: NOW, windowCount: 1 });
+  });
+
+  it("deadline passed with an empty buffer: expires with the F1 deadline text", () => {
+    const d = decideEventWaiter(NOW, waiter({ eventBuffer: [], deadlineAt: NOW - 1, createdAt: NOW - 6 * HOUR }), OPTS);
+    expect(d).toEqual({
+      to: "expired",
+      cause: "deadline",
+      patch: { cause: "deadline", endedAt: NOW, eventBuffer: [] },
+      signals: [
+        {
+          signalType: "event.ended",
+          body: "No matching event arrived within 6 hours. Check the subject's state before you wait again.",
+          attributes: { wakeupId: "wk_ev", kind: "event", subject: "github:acme/lean-proofs#42", cause: "deadline" },
+          dispatchId: "wakeup:wk_ev:terminal",
+        },
+      ],
+    });
+  });
+
+  it("stream mode past the deadline sends the buffered matches, then the ending", () => {
+    const d = decideEventWaiter(NOW, waiter({ deadlineAt: NOW - 1, createdAt: NOW - 6 * HOUR, lastEmitAt: NOW - 1_000, eventCount: 2 }, { once: false }), OPTS);
+    expect(d?.to).toBe("expired");
+    expect(d?.signals.map((s) => [s.signalType, s.dispatchId])).toEqual([
+      ["event.matched", "wakeup:wk_ev:event:3"],
+      ["event.ended", "wakeup:wk_ev:terminal"],
+    ]);
+  });
+
+  it("never delivers a digest marked derive", () => {
+    const pending = digest(1, { derive: "github.pull_request.checks_completed" });
+    expect(decideEventWaiter(NOW, waiter({ eventBuffer: [pending] }), OPTS)).toBeNull();
+    const d = decideEventWaiter(NOW, waiter({ eventBuffer: [pending, digest(2)] }, { once: false }), OPTS);
+    expect(d?.signals[0]?.body).toContain("(test-2)");
+    expect(d?.signals[0]?.body).not.toContain("(test-1)");
+    expect(d?.deliveredKeys).toEqual(["d-2"]);
+  });
+
+  it("does nothing for a running waiter with an empty buffer before its deadline", () => {
+    expect(decideEventWaiter(NOW, waiter({ eventBuffer: [] }), OPTS)).toBeNull();
+  });
+
+  it("ends a waiter with no match spec as a bad row", () => {
+    expect(decideEventWaiter(NOW, waiter({ eventMatch: undefined }), OPTS)).toEqual({ to: "lost", patch: { endedAt: NOW }, signals: [], badRow: true });
   });
 });

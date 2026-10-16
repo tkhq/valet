@@ -534,7 +534,7 @@ function deliveryEffects(
       && installationServesOrg({ db, apiUrl: resolveGithubApiUrl(process.env) }, config, orgId, installationId),
     emit: async (event) => {
       await ingestEvent(
-        { db, plugins: providers.plugins, onIngest: providers.eventDispatcher.nudge, waiters: waiterMatchDeps(providers) },
+        { db, plugins: providers.plugins, onIngest: providers.eventDispatcher.nudge, waiters: waiterMatchDeps(providers, { nudge: () => providers.wakeWatcher.nudge() }) },
         { orgId, service: "github", event },
       );
     },
