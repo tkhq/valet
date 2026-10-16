@@ -1791,6 +1791,28 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "last_emit_at" bigint',
   },
   {
+    // Event waiters (spec 2026-10-15: event wakeups, Part C). Engine table:
+    // the same ENGINE_SCHEMA_VERSION caveat as above.
+    describe: "engine_wakeups.match_json column",
+    probe: { kind: "column", table: "engine_wakeups", column: "match_json" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "match_json" text',
+  },
+  {
+    describe: "engine_wakeups.subjects column",
+    probe: { kind: "column", table: "engine_wakeups", column: "subjects" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "subjects" text[]',
+  },
+  {
+    describe: "engine_wakeups.event_buffer column",
+    probe: { kind: "column", table: "engine_wakeups", column: "event_buffer" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "event_buffer" text',
+  },
+  {
+    describe: "engine_wakeups.event_seen column",
+    probe: { kind: "column", table: "engine_wakeups", column: "event_seen" },
+    sql: 'ALTER TABLE "engine_wakeups" ADD COLUMN IF NOT EXISTS "event_seen" text',
+  },
+  {
     describe: "engine_wakeups_session index (spec 2026-10-08)",
     probe: { kind: "index", index: "engine_wakeups_session" },
     sql: 'CREATE INDEX IF NOT EXISTS "engine_wakeups_session" ON "engine_wakeups" ("session_id","status")',
@@ -1799,6 +1821,12 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     describe: "engine_wakeups_due index (spec 2026-10-08)",
     probe: { kind: "index", index: "engine_wakeups_due" },
     sql: 'CREATE INDEX IF NOT EXISTS "engine_wakeups_due" ON "engine_wakeups" ("status","kind","fire_at")',
+  },
+  {
+    // After the subjects column repair, which it indexes (spec 2026-10-15, Part C).
+    describe: "engine_wakeups_event_subjects index",
+    probe: { kind: "index", index: "engine_wakeups_event_subjects" },
+    sql: 'CREATE INDEX IF NOT EXISTS "engine_wakeups_event_subjects" ON "engine_wakeups" USING gin ("subjects") WHERE "kind" = \'event\' AND "status" = \'running\'',
   },
   {
     // engine_leases table (spec 2026-10-08). Engine table: the same caveat.
@@ -1942,6 +1970,17 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   // After every rollup and its views: the backfill moves facts, and their
   // triggers move the hours and days.
   { describe: "usage workflow step attribution", probe: { kind: "column", table: "usage_step_attribution_ready", column: "version" }, prepare: prepareUsageStepAttribution, sql: USAGE_STEP_ATTRIBUTION_PUBLISH_SQL },
+
+  {
+    // Normalized subjects on the stored event (spec 2026-10-15: event
+    // wakeups, Part G). Delivery-time rechecks (team-coverage, redeliver)
+    // read this column so they match the implicit `subject` filter the same
+    // way ingest did; a row stored before this column existed reads null,
+    // which that matching treats as no subjects (fails closed).
+    describe: "events.subjects column",
+    probe: { kind: "column", table: "events", column: "subjects" },
+    sql: 'ALTER TABLE "events" ADD COLUMN IF NOT EXISTS "subjects" text[]',
+  },
 
 ];
 

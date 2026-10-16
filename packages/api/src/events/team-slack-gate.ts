@@ -180,9 +180,13 @@ export async function subscriptionMatchOutcome(
   // Off for a re-check, such as a personal rule's team-coverage test, so
   // a denial ingest already logged is not logged again on every delivery.
   logDenied = true,
+  // The event's normalized subjects (spec Part A1), for the implicit
+  // `subject` filter field. Omitted by callers with no subjects to hand
+  // (e.g. redelivery over a stored event row).
+  subjects?: string[],
 ): Promise<SubscriptionMatchOutcome> {
   const teamMention = isTeamAssistantMention(sub, eventKey);
-  if (!subscriptionMatchesEvent(sub, eventKey, payload, catalog, teamMention)) return "not_matched";
+  if (!subscriptionMatchesEvent(sub, eventKey, payload, catalog, teamMention, subjects)) return "not_matched";
   if (!teamMention || await teamMentionActor(db, sub, payload, logDenied) !== null) return "matched";
   return "authorization_denied";
 }
@@ -197,8 +201,12 @@ export async function authorizedSubscriptionMatchesEvent(
   eventKey: string,
   payload: unknown,
   catalog: EventCatalogEntry[],
+  // The event's normalized subjects (spec Part A1), from the stored event
+  // row (spec 2026-10-15: event wakeups, Part G). Omitted callers get the
+  // pre-existing fail-closed behavior for a `subject` filter.
+  subjects?: string[],
 ): Promise<boolean> {
-  return (await subscriptionMatchOutcome(db, sub, eventKey, payload, catalog)) === "matched";
+  return (await subscriptionMatchOutcome(db, sub, eventKey, payload, catalog, true, subjects)) === "matched";
 }
 
 /** Validate the saved actor against the team's current org and membership.

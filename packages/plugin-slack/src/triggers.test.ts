@@ -192,7 +192,7 @@ describe("slackTriggerDefs toEvent", () => {
     expect(normalized.key).toBe("slack.reaction_added");
     expect(normalized.dedupeKey).toBe("Ev-r2");
     expect(normalized.occurredAt).toBe(new Date(1700000005.0002 * 1000).toISOString());
-    expect(normalized.actor).toEqual({ externalId: "U0456" });
+    expect(normalized.actor).toEqual({ externalId: "U0456", bot: false });
     expect(normalized.refs).toMatchObject({ channel: "C0123", user: "U0456", reaction: "tada", item_user: "U0789" });
     expect(normalized.summary).toBe("reaction :tada: added in C0123 by U0456");
     expect(normalized.payload).toEqual(REACTION_EVENT);
@@ -203,7 +203,7 @@ describe("slackTriggerDefs toEvent", () => {
     const event = { type: "app_mention", user: "U1", channel: "C9", text: "<@UBOT> hi", ts: "1700.5" };
     const normalized = trigger.toEvent({ eventType: "app_mention", deliveryId: "Ev-am1", payload: event });
     expect(normalized.key).toBe("slack.app_mention");
-    expect(normalized.actor).toEqual({ externalId: "U1" });
+    expect(normalized.actor).toEqual({ externalId: "U1", bot: false });
     expect(normalized.refs).toMatchObject({ channel: "C9", user: "U1" });
     expect(normalized.summary).toBe("app mentioned in C9 by U1");
   });
@@ -235,7 +235,7 @@ describe("slackTriggerDefs toEvent", () => {
     const event = { type: "team_join", user: { id: "U-new", team_id: "T1", name: "newbie" } };
     const normalized = trigger.toEvent({ eventType: "team_join", deliveryId: "Ev-t1", payload: event });
     expect(normalized.key).toBe("slack.team_join");
-    expect(normalized.actor).toEqual({ externalId: "U-new" });
+    expect(normalized.actor).toEqual({ externalId: "U-new", bot: false });
     expect(normalized.summary).toBe("U-new joined the workspace");
   });
 
@@ -312,6 +312,15 @@ describe("slackTriggerDefs catalog", () => {
       "thread_ts:thread_ts",
       "user:user",
       "text:text",
+    ]);
+  });
+
+  it("lets a slack.channel_created rule filter on the channel name", () => {
+    const entry = findTrigger("slack.channel").catalog.find((e) => e.key === "slack.channel_created");
+    expect(entry?.filters.map((f) => `${f.field}:${f.path}`)).toEqual([
+      "channel:channel.id",
+      "channel_name:channel.name",
+      "creator:channel.creator",
     ]);
   });
 

@@ -16,7 +16,7 @@
  */
 import { Hono, type Context } from "hono";
 import { and, eq, inArray } from "drizzle-orm";
-import type { Lease, Wakeup } from "@valet/engine";
+import { subjectService, type Lease, type ValetPlugin, type Wakeup } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import type { RequestPrincipal } from "../lib/request-principal.js";
@@ -141,7 +141,21 @@ export async function gateBackgroundWork(
   return { kind: "refused", response: c.json(body, force && !mayCancel ? 403 : 409) };
 }
 
-function wakeupToSummary(w: Wakeup): WakeupSummary {
+/**
+ * The label and link for an event waiter's subject (spec 2026-10-15, Part
+ * H): the owning plugin's `eventSubjects`, found by the subject's service
+ * prefix (`subjectService`). Absent when no plugin claims the service, or
+ * for a subject the plugin's `url` does not resolve.
+ */
+function eventSubjectFields(subject: string, plugins: readonly ValetPlugin[]): { subjectLabel: string; subjectUrl?: string } {
+  const plugin = plugins.find((p) => p.name === subjectService(subject));
+  const subjectLabel = plugin?.eventSubjects?.label(subject) ?? subject;
+  const subjectUrl = plugin?.eventSubjects?.url(subject) ?? undefined;
+  return { subjectLabel, ...(subjectUrl !== undefined ? { subjectUrl } : {}) };
+}
+
+function wakeupToSummary(w: Wakeup, plugins: readonly ValetPlugin[]): WakeupSummary {
+  const subject = w.kind === "event" ? w.subjects?.[0] : undefined;
   return {
     id: w.id,
     threadId: w.threadId,
@@ -151,6 +165,8 @@ function wakeupToSummary(w: Wakeup): WakeupSummary {
     reason: w.reason,
     ...(w.deadlineAt !== undefined ? { deadlineAt: w.deadlineAt } : {}),
     ...(w.fireAt !== undefined ? { fireAt: w.fireAt } : {}),
+    ...(subject !== undefined ? { subject, ...eventSubjectFields(subject, plugins) } : {}),
+    ...(w.eventMatch !== undefined ? { clauseCount: w.eventMatch.clauses.length } : {}),
     createdAt: w.createdAt,
   };
 }
@@ -187,8 +203,9 @@ wakeupsRouter.get("/:id/wakeups", async (c) => {
   }
   const work = await listBackgroundWork(engineStore, id);
   const mayCancel = await canCancelSessionWakeup(db, row, c.var.principal);
+  const plugins = c.var.providers.plugins;
   const body: ListSessionWakeupsResponse = {
-    wakeups: (await keepVisibleWork(c, row, work.wakeups, mayCancel)).map(wakeupToSummary),
+    wakeups: (await keepVisibleWork(c, row, work.wakeups, mayCancel)).map((w) => wakeupToSummary(w, plugins)),
     leases: (await keepVisibleWork(c, row, work.leases, mayCancel)).map(leaseToSummary),
   };
   return c.json(body);

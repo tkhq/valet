@@ -248,12 +248,18 @@ CREATE TABLE "engine_wakeups" (
 	"window_start_at" bigint,
 	"window_count" integer,
 	"watch_buffer" text,
-	"last_emit_at" bigint
+	"last_emit_at" bigint,
+	"match_json" text,
+	"subjects" text[],
+	"event_buffer" text,
+	"event_seen" text
 );
 --> statement-breakpoint
 CREATE INDEX "engine_wakeups_session" ON "engine_wakeups" ("session_id","status");
 --> statement-breakpoint
 CREATE INDEX "engine_wakeups_due" ON "engine_wakeups" ("status","kind","fire_at");
+--> statement-breakpoint
+CREATE INDEX "engine_wakeups_event_subjects" ON "engine_wakeups" USING gin ("subjects") WHERE "kind" = 'event' AND "status" = 'running';
 --> statement-breakpoint
 CREATE TABLE "engine_leases" (
 	"id" text PRIMARY KEY NOT NULL,

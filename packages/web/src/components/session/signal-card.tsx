@@ -137,13 +137,14 @@ function WorkflowRequestCard({ message, signal }: { message: Message; signal: Me
   );
 }
 
-const WAKEUP_PREFIXES = ["process.", "watch.", "timer.", "lease."];
+const WAKEUP_PREFIXES = ["process.", "watch.", "timer.", "lease.", "event."];
 
 /**
- * Pure: whether a signal reports background work (spec 2026-10-08, B6):
- * `process.*`, `watch.*`, `timer.*`, or `lease.*` with a wakeup or lease
- * id. The wire does not ship the envelope tag, so the id attribute marks
- * the signal as the WakeWatcher's or a human cancel's.
+ * Pure: whether a signal reports background work (spec 2026-10-08, B6;
+ * 2026-10-15, Part H): `process.*`, `watch.*`, `timer.*`, `lease.*`, or
+ * `event.*` with a wakeup or lease id. The wire does not ship the envelope
+ * tag, so the id attribute marks the signal as the WakeWatcher's or a
+ * human cancel's.
  */
 export function isWakeupSignal(signal: MessageSignal): boolean {
   const attrs = signal.attributes ?? {};
@@ -216,7 +217,220 @@ export function originLabel(signal: MessageSignal): string | null {
   return `from ${CHANNEL_LABEL[type] ?? type}`;
 }
 
-/** Background work: the reason as the title, the outcome, and the log as plain text. */
+/** One digest block of an `event.matched` signal body: a key, an optional status and actor, a summary, and an optional URL and text. */
+export interface EventDigestBlock {
+  key: string;
+  status?: string;
+  actor?: string;
+  summary: string;
+  url?: string;
+  text?: string;
+}
+
+/** A digest block's key, e.g. `github.check_run.completed` (fix round 1: distinguishes a new block from a blank line inside a digest's own text). */
+const DIGEST_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
+/** A digest's or block's link: `http(s)://` only (fix round 1, H3) — a `javascript:` URL renders as inert text. */
+const DIGEST_URL_PATTERN = /^https?:\/\//i;
+
+/**
+ * Pure: whether `line` looks like a digest block's header (`digestHeader`
+ * in `wake-watcher-decide.ts`): a dotted event key, then optionally a
+ * status, then optionally `by <actor>`.
+ */
+function looksLikeDigestHeader(line: string): boolean {
+  const parts = line.split(" · ");
+  if (parts.length === 0 || parts.length > 3) return false;
+  const key = parts[0];
+  if (key === undefined || !DIGEST_KEY_PATTERN.test(key)) return false;
+  if (parts.length === 3 && !(parts[2] ?? "").startsWith("by ")) return false;
+  return true;
+}
+
+/**
+ * Pure: a digest text line without its `> ` quote (spec Part F: every text
+ * line is quoted, so it cannot read as a header). An unquoted line, from a
+ * signal stored before quoting, stays as it is.
+ */
+function unquote(line: string): string {
+  if (line.startsWith("> ")) return line.slice(2);
+  return line === ">" ? "" : line;
+}
+
+function parseDigestBlock(lines: string[]): EventDigestBlock {
+  const headerParts = (lines[0] ?? "").split(" · ");
+  const key = headerParts[0] ?? "";
+  let status: string | undefined;
+  let actor: string | undefined;
+  for (const part of headerParts.slice(1)) {
+    if (part.startsWith("by ")) actor = part.slice(3);
+    else status = part;
+  }
+  const summary = lines[1] ?? "";
+  const rest = lines.slice(2);
+  const url = rest[0] !== undefined && DIGEST_URL_PATTERN.test(rest[0]) ? rest[0] : undefined;
+  const text = (url !== undefined ? rest.slice(1) : rest).map(unquote).join("\n");
+  return {
+    key,
+    ...(status !== undefined ? { status } : {}),
+    ...(actor !== undefined ? { actor } : {}),
+    summary,
+    ...(url !== undefined ? { url } : {}),
+    ...(text !== "" ? { text } : {}),
+  };
+}
+
+/**
+ * Pure: parses an `event.matched` signal body into its digest blocks
+ * (spec Part F, `eventMatchedSignal`/`digestBlock`). Each block's header
+ * is `<key> · <status> · by <actor>`, then a summary line, an optional
+ * URL, then optional text. A new block starts only at a blank line
+ * followed by another header line (fix round 1) — a digest's own text
+ * may itself contain a blank line (e.g. a multi-paragraph Slack message)
+ * without splitting into a bogus second block. Once mode's extra digests
+ * come back after an `Also matched:` line, one per digest, and are not
+ * full blocks.
+ */
+export function parseEventMatchedBody(body: string): { blocks: EventDigestBlock[]; alsoMatched: string[] } {
+  const lines = body.split("\n");
+  const blocks: EventDigestBlock[] = [];
+  let current: string[] = [];
+  const flush = () => {
+    if (current.length > 0) blocks.push(parseDigestBlock(current));
+    current = [];
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line === "") {
+      const next = lines[i + 1];
+      if (next === "Also matched:") {
+        flush();
+        return { blocks, alsoMatched: lines.slice(i + 2).filter((l) => l !== "") };
+      }
+      if (next !== undefined && looksLikeDigestHeader(next)) {
+        flush();
+        i += 1;
+        continue;
+      }
+    }
+    current.push(line);
+    i += 1;
+  }
+  flush();
+  return { blocks, alsoMatched: [] };
+}
+
+function optionalString(rec: Record<string, unknown>, key: string): string | undefined {
+  const value = rec[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * Pure: the `digests` attribute of an `event.matched` signal (spec Part
+ * F), a JSON array of `{ key, status?, actor?, summary, url? }` with no
+ * text. Null when it is absent or unreadable, so the caller parses the
+ * body instead. A URL that is not `http(s)://` is left out.
+ */
+export function parseEventDigestsAttribute(raw: string | undefined): EventDigestBlock[] | null {
+  if (raw === undefined) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const out: EventDigestBlock[] = [];
+  for (const item of parsed) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return null;
+    // Narrowed to a non-null, non-array object above; each field is checked below.
+    const rec = item as Record<string, unknown>;
+    const key = optionalString(rec, "key");
+    const summary = optionalString(rec, "summary");
+    if (key === undefined || summary === undefined) return null;
+    const status = optionalString(rec, "status");
+    const actor = optionalString(rec, "actor");
+    const url = optionalString(rec, "url");
+    out.push({
+      key,
+      ...(status !== undefined ? { status } : {}),
+      ...(actor !== undefined ? { actor } : {}),
+      summary,
+      ...(url !== undefined && DIGEST_URL_PATTERN.test(url) ? { url } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * Pure: the digest blocks and `Also matched` lines an `event.matched`
+ * card shows. With a readable `digests` attribute, the blocks come from
+ * it, and each takes its text from the body block at the same position
+ * when that block has the same key. Otherwise the body parser decides.
+ */
+export function eventMatchedView(body: string, digestsAttribute: string | undefined): { blocks: EventDigestBlock[]; alsoMatched: string[] } {
+  const parsed = parseEventMatchedBody(body);
+  const structured = parseEventDigestsAttribute(digestsAttribute);
+  if (!structured) return parsed;
+  const blocks = structured.map((entry, index) => {
+    const fromBody = parsed.blocks[index];
+    const text = fromBody?.key === entry.key ? fromBody.text : undefined;
+    return text !== undefined ? { ...entry, text } : entry;
+  });
+  return { blocks, alsoMatched: parsed.alsoMatched };
+}
+
+/**
+ * An `event.matched` signal (spec Part H): each digest block shows its
+ * key, a status chip, the actor, the summary, and a link. A stream
+ * signal lists every digest it carries; a once-mode signal lists the
+ * extra digests it caught under "Also matched".
+ */
+function EventMatchedCard({ message, signal }: { message: Message; signal: MessageSignal }) {
+  const attrs = signal.attributes ?? {};
+  const origin = originLabel(signal);
+  const { blocks, alsoMatched } = eventMatchedView(message.content, attrs.digests);
+  return (
+    <CardShell>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="min-w-0 truncate text-sm font-medium text-ink">{attrs.subject || "Event matched"}</span>
+        <Badge variant="neutral">event.matched</Badge>
+        {origin && <span className="text-xs text-muted">{origin}</span>}
+      </div>
+      <ul className="mt-1.5 space-y-2">
+        {blocks.map((block, index) => (
+          <li key={index} className="text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="min-w-0 truncate font-medium text-ink">{block.key}</span>
+              {block.status && <Badge variant="neutral">{block.status}</Badge>}
+              {block.actor && <span className="text-xs text-muted">by {block.actor}</span>}
+            </div>
+            <p className="text-muted">{block.summary}</p>
+            {block.url && (
+              <a href={block.url} target="_blank" rel="noopener noreferrer" className="break-all text-xs text-moss hover:underline">
+                {block.url}
+              </a>
+            )}
+            {block.text && <p className="text-xs text-muted whitespace-pre-wrap">{block.text}</p>}
+          </li>
+        ))}
+      </ul>
+      {alsoMatched.length > 0 && (
+        <div className="mt-1.5 text-xs text-muted">
+          <p>Also matched:</p>
+          {alsoMatched.map((line, index) => <p key={index}>{line}</p>)}
+        </div>
+      )}
+    </CardShell>
+  );
+}
+
+/**
+ * Background work: the reason as the title, the outcome, and the log as
+ * plain text. The WakeWatcher's event signals carry no `reason`, so their
+ * title falls back to the `subject` (spec Part F/H), e.g. `event.ended`. A
+ * person's cancel of an event wait carries the reason.
+ */
 function WakeupCard({ message, signal }: { message: Message; signal: MessageSignal }) {
   const attrs = signal.attributes ?? {};
   const outcome = wakeupOutcome(attrs);
@@ -226,7 +440,7 @@ function WakeupCard({ message, signal }: { message: Message; signal: MessageSign
   return (
     <CardShell>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="min-w-0 truncate text-sm font-medium text-ink">{attrs.reason || signal.signalType}</span>
+        <span className="min-w-0 truncate text-sm font-medium text-ink">{attrs.reason || attrs.subject || signal.signalType}</span>
         <Badge variant="neutral">{signal.signalType}</Badge>
         {outcome && <Badge variant={outcome.tone}>{outcome.label}</Badge>}
         {cancelledBy && <span className="text-xs text-muted">{cancelledBy}</span>}
@@ -352,6 +566,9 @@ function EnvelopeCard({ message, signal }: { message: Message; signal: MessageSi
   // thread that started it (`workflow.settled`, `run-attention.ts`).
   if (signal.signalType === "workflow.request" || signal.signalType === "workflow.settled") {
     return <WorkflowRequestCard key={message.id} message={message} signal={signal} />;
+  }
+  if (signal.signalType === "event.matched") {
+    return <EventMatchedCard message={message} signal={signal} />;
   }
   if (isWakeupSignal(signal)) {
     return <WakeupCard message={message} signal={signal} />;

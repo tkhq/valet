@@ -799,4 +799,112 @@ describe("buildWakeupsSeam", () => {
       expect(await seam.readLog("wk_c", 0, 10)).toEqual({ text: "head", nextOffset: 4, eof: true, capped: true });
     });
   });
+
+  describe("armEvent (spec 2026-10-15, Part D)", () => {
+    const REQ = {
+      subject: "https://github.com/acme/lean-proofs/pull/42",
+      on: [{ key: "github.check_run.completed", status: ["failure"] }, { key: "github.pull_request.checks_completed" }],
+      once: false,
+      reason: "CI on #42",
+      maxHours: 6,
+      minIntervalMs: 60_000,
+    };
+
+    it("is absent without arm checks, as in a workflow run (R9)", async () => {
+      const store = await storeWithSession();
+      const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => NOW }, "session-1", () => undefined);
+      expect(seam.armEvent).toBeUndefined();
+    });
+
+    it("A1: creates a running event waiter with no lease (INV-E3)", async () => {
+      const store = await storeWithSession();
+      const checkArm = vi.fn(async () => ({ ok: true as const, subjects: ["github:acme/lean-proofs#42"], self: ["1001", "9001"] }));
+      const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => NOW, checkArm }, "session-1", () => undefined);
+      const origin = { channelType: "slack", threadKey: "slack:C001:1.2", reply: "manual" as const };
+      const credentials = { get: async () => null, request: async () => { throw new Error("not used"); } };
+
+      const result = await seam.armEvent!("thread-1", REQ, origin, credentials);
+
+      expect(checkArm).toHaveBeenCalledWith("thread-1", REQ, credentials);
+      if (!("wakeup" in result)) throw new Error(`refused: ${result.refused}`);
+      const row = await store.getWakeup(result.wakeup.id);
+      expect(row).toMatchObject({
+        sessionId: "session-1",
+        threadId: "thread-1",
+        kind: "event",
+        status: "running",
+        reason: "CI on #42",
+        deadlineAt: NOW + 6 * 3_600_000,
+        subjects: ["github:acme/lean-proofs#42"],
+        eventMatch: { clauses: REQ.on, once: false, self: ["1001", "9001"], minIntervalMs: 60_000 },
+        eventBuffer: [],
+        origin,
+      });
+      expect(row?.leaseId).toBeUndefined();
+      expect(await store.listActiveLeases("session-1")).toEqual([]);
+      // The waiter counts toward the per-thread limit.
+      expect((await seam.list("thread-1")).wakeups.map((w) => w.id)).toEqual([result.wakeup.id]);
+    });
+
+    it("stores the arm's primarySubject in the match spec beside the wider subjects (final review, item 3)", async () => {
+      const store = await storeWithSession();
+      const checkArm = async () => ({
+        ok: true as const,
+        subjects: ["github:acme/lean-proofs#42", "github:acme/lean-proofs"],
+        self: [],
+        primarySubject: "github:acme/lean-proofs#42",
+      });
+      const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => NOW, checkArm }, "session-1", () => undefined);
+      const result = await seam.armEvent!("thread-1", REQ);
+      if (!("wakeup" in result)) throw new Error(`refused: ${result.refused}`);
+      const row = await store.getWakeup(result.wakeup.id);
+      expect(row?.subjects).toEqual(["github:acme/lean-proofs#42", "github:acme/lean-proofs"]);
+      expect(row?.eventMatch?.primarySubject).toBe("github:acme/lean-proofs#42");
+    });
+
+    it("a refused arm writes no row (Review Focus 5: R6)", async () => {
+      const store = await storeWithSession();
+      const text = "[wait_for_event] This thread already receives replies from that Slack thread. No wait is needed.";
+      const seam = buildWakeupsSeam(
+        { engineStore: store, limits: LIMITS, now: () => NOW, checkArm: async () => ({ ok: false as const, text }) },
+        "session-1",
+        () => undefined,
+      );
+      expect(await seam.armEvent!("thread-1", REQ)).toEqual({ refused: text });
+      expect(await store.listWakeups("session-1", ["pending", "running"])).toEqual([]);
+    });
+
+    it("create refuses an event waiter: only armEvent creates one", async () => {
+      const store = await storeWithSession();
+      const checkArm = vi.fn();
+      const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => NOW, checkArm }, "session-1", () => undefined);
+      await expect(seam.create("thread-1", {
+        kind: "event",
+        subjects: ["github:acme/lean-proofs#42"],
+        match: { clauses: [{ key: "github.check_run.completed" }], once: true, self: [] },
+        reason: "CI",
+        maxHours: 6,
+      })).rejects.toThrow(/^\[wait_for_event\] Event waiters start only through the wait_for_event tool\./);
+      expect(checkArm).not.toHaveBeenCalled();
+      expect(await store.listWakeups("session-1", ["pending", "running"])).toEqual([]);
+    });
+
+    it("process_read refuses an event waiter with the D2 text, and wakeup_cancel ends it", async () => {
+      const store = await storeWithSession();
+      const seam = buildWakeupsSeam(
+        {
+          engineStore: store, limits: LIMITS, now: () => NOW,
+          checkArm: async () => ({ ok: true as const, subjects: ["slack:T001/C001/1712345678.000100"], self: [] }),
+        },
+        "session-1",
+        () => undefined,
+      );
+      const result = await seam.armEvent!("thread-1", { ...REQ, once: true, minIntervalMs: undefined });
+      if (!("wakeup" in result)) throw new Error(`refused: ${result.refused}`);
+      const id = result.wakeup.id;
+      await expect(seam.readLog(id, 0, 10)).rejects.toThrow(`[process_read] ${id} is an event waiter and has no log.`);
+      expect(await seam.cancel(id)).toEqual({ kind: "wakeup" });
+      expect((await store.getWakeup(id))?.status).toBe("cancelled");
+    });
+  });
 });

@@ -117,6 +117,7 @@ Three new tables plus a Linear installation mapping (Drizzle schema in
 | `summary` | text |
 | `payload` | jsonb (raw provider payload) |
 | `occurred_at`, `received_at` | timestamps |
+| `subjects` | `text[]`, nullable. Canonical subjects the event concerns, coarse to fine (e.g. `github:acme`, `github:acme/lean-proofs#42`). See [Event wakeups](2026-10-15-event-wakeups-design.md) Part A. Null on a row stored before this column existed |
 
 A retention job (default 30 days) is a deferred follow-up; nothing prunes
 `events` yet.
@@ -129,7 +130,7 @@ A retention job (default 30 days) is a deferred follow-up; nothing prunes
 | `org_id`, `owner_type`, `owner_id` | scoping |
 | `name` | display name |
 | `event_keys` | `text[]`; supports trailing-wildcard patterns (`github.pull_request.*`) |
-| `filters` | jsonb: `{ field, op: eq\|in\|prefix\|contains, value }[]` over catalog fields; a filter's `field` must be declared by a catalog entry actually selected by `event_keys` (not merely by any service's catalog — a cross-service field would validate and then never match at ingest) |
+| `filters` | jsonb: `{ field, op: eq\|in\|prefix\|contains, value }[]` over catalog fields; a filter's `field` must be declared by a catalog entry actually selected by `event_keys` (not merely by any service's catalog — a cross-service field would validate and then never match at ingest). Every catalog entry also carries the implicit field `subject`, matched against the event's `subjects` column with `eq` or `prefix` (2026-10-15) |
 | `target` | jsonb: `{ kind: "workflow" \| "orchestrator", ...ref }`. `signal` is designed (dispatcher supports it) but REJECTED by the CRUD validator until a workflow node exists that parks on the `event:{key}` signal shape; accepting it earlier would create silently-inert subscriptions. An orchestrator target may also carry `systemPrompt` and `userPromptTemplate` (see "Orchestrator prompt templates") |
 | `enabled` | bool |
 | `created_by`, timestamps | |
@@ -576,3 +577,21 @@ Deployment environment variables (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`) ar
 Known gaps: when a workspace removes the app, Linear sends a signed `OAuthApp` `revoked` event. The ingress acknowledges it and drop-logs it as `unsupported_event` with a reconnect instruction, but does not mark the connection broken. Valet does not revoke tokens with Linear on disconnect.
 
 The Events Log defaults to subscription delivery history. Disabling a subscription stops new matching and preserves existing history. Show diagnostics includes organization-wide ingestion problems and exposes raw receipts to administrators. A filter miss (`filter_excluded`) is the exception to organization-wide: it shows only in a workspace whose enabled subscriptions, or the organization's, name its event key, exactly or through a `prefix.*` pattern. A workspace that never subscribed to the event does not see another workspace's filter miss as its own. The diagnostics filter is part of both the query cache key and page cursor scope.
+
+## Subjects, status, and derived events (2026-10-15)
+
+[Event wakeups](2026-10-15-event-wakeups-design.md) adds three fields to
+`NormalizedEvent`: `subjects` (canonical strings that name the GitHub,
+Slack, or Linear object an event concerns, coarse to fine), `status` (one
+normalized outcome, when the event has one, such as `failure` or
+`triage`), and `previousStatus` (the status before an update, when the
+provider reports it). Every plugin event now carries at least one subject.
+The `events` table stores `subjects` so delivery-time rechecks (team
+coverage, redeliver) match a `subject` filter the same way ingest did.
+
+A native plugin may also declare a derived event key: one computed from a
+source event by one extra provider read, such as
+`github.pull_request.checks_completed` from a pull request's check runs.
+Subscriptions reject derived keys; `workflows.list_event_types` lists them
+marked `derived`. See that spec's Parts A, B, and G for the full grammar,
+mapping, and vectors.

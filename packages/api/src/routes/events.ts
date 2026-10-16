@@ -20,7 +20,7 @@ import { randomUUID } from "node:crypto";
 import type { AppEnv } from "../env.js";
 import { computeCollisions, type CollisionReport } from "../events/collisions.js";
 import { eventDeliveryDispatchId, eventDeliveryRunId } from "../events/dispatcher.js";
-import { allCatalogEntries, catalogForService } from "../events/ingest.js";
+import { allCatalogEntries, catalogForService, subscribableEntries } from "../events/ingest.js";
 import type { SubscriptionFilter } from "../events/match.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
@@ -223,12 +223,14 @@ function collisionBlockMessage(report: CollisionReport<NarrowedSubscriptionRow>)
 
 // ── Catalog ─────────────────────────────────────────────────────────────────
 
+// The subscription editor reads this catalog, so it leaves out derived keys,
+// which subscriptions do not accept (event wakeups spec, Part G).
 eventsRouter.get("/events/catalog", async (c) => {
   const { plugins, db, engineCredentials } = c.var.providers;
   const services = [...new Set(plugins.flatMap((p) => p.triggers ?? []).map((t) => t.service))];
   const linear = services.includes("linear") ? await getLinearIngressStatus(db,engineCredentials,c.var.user.orgId) : undefined;
   const resp: GetEventCatalogResponse = {
-    services: services.map((service) => ({ service, entries: catalogForService(plugins, service), ...(service === "linear" && linear ? { readiness: { ready: linear.ready, ...(linear.reason ? { reason: linear.reason } : {}) } } : {}) })),
+    services: services.map((service) => ({ service, entries: subscribableEntries(catalogForService(plugins, service)), ...(service === "linear" && linear ? { readiness: { ready: linear.ready, ...(linear.reason ? { reason: linear.reason } : {}) } } : {}) })),
   };
   return c.json(resp);
 });
@@ -571,7 +573,7 @@ eventsRouter.post("/events/:id/redeliver", async (c) => {
   const catalog = catalogForService(plugins, event.service);
   const matched: typeof subs = [];
   for (const sub of subs) {
-    if (await authorizedSubscriptionMatchesEvent(db, sub, event.eventKey, event.payload, catalog)) matched.push(sub);
+    if (await authorizedSubscriptionMatchesEvent(db, sub, event.eventKey, event.payload, catalog, event.subjects ?? undefined)) matched.push(sub);
   }
 
   if (matched.length > 0) {

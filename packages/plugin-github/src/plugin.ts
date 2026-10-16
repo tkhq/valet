@@ -2,8 +2,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 import { githubPlugin } from "./actions/actions.js";
+import { githubDerivedEvents } from "./derived.js";
 import { githubFilterOptionResolvers } from "./filter-options.js";
 import { githubHttpRoutes } from "./http/index.js";
+import { githubSubjects } from "./subjects.js";
 import { githubTemplates } from "./templates.js";
 import { githubTriggerDefs } from "./triggers.js";
 
@@ -15,6 +17,8 @@ const plugin: ValetPlugin = {
   description: "GitHub integration for PRs, issues, repos, and webhooks",
   actions: [githubPlugin],
   triggers: githubTriggerDefs,
+  eventSubjects: githubSubjects,
+  derivedEvents: githubDerivedEvents,
   filterOptionResolvers: githubFilterOptionResolvers,
   skills: [loadSkillFromMarkdown(skillMd, "plugin", "github")],
   templates: githubTemplates,

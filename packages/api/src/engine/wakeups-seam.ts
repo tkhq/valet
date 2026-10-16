@@ -1,6 +1,10 @@
 import { recordWakeupEnded } from "@valet/engine";
 import type {
+  ArmEventRequest,
+  ArmEventResult,
   ChannelOrigin,
+  CredentialProvider,
+  EventMatchSpec,
   HoldInput,
   Lease,
   Sandbox,
@@ -16,6 +20,7 @@ import type {
 } from "@valet/engine";
 import { newExecId, newLeaseId, newWakeupId } from "@valet/engine/wakeups-ids";
 import { DEFAULT_JOB_LOG_MAX_BYTES } from "../providers/sandbox-backend.js";
+import type { ArmCheckResult } from "../events/waiter-arm.js";
 import { isSandboxGone } from "./wakeups-admin.js";
 
 /**
@@ -59,6 +64,16 @@ export interface WakeupsSeamDeps {
    */
   scratchBytes?: () => number | undefined;
   now?: () => number;
+  /**
+   * Runs the `wait_for_event` arm checks (spec 2026-10-15, Part D1) for
+   * this session. Absent for a workflow run: the seam then has no
+   * `armEvent`, and the tool returns R9.
+   */
+  checkArm?: (
+    threadId: string,
+    req: ArmEventRequest,
+    credentials: CredentialProvider | undefined,
+  ) => Promise<ArmCheckResult>;
 }
 
 const BASH_BACKGROUND_UNAVAILABLE =
@@ -68,6 +83,9 @@ const READ_NOT_RUNNING =
   "[process_read] The sandbox is not running, so the log is gone with it. The process.exited signal kept the last 4 KB of output, and files in /workspace remain.";
 
 const HOUR_MS = 3_600_000;
+
+const EVENT_CREATE_REFUSAL =
+  "[wait_for_event] Event waiters start only through the wait_for_event tool. Call wait_for_event with the subject and clauses.";
 
 /**
  * Builds the `ToolContext.wakeups` seam for one session (Task 15,
@@ -314,12 +332,87 @@ export function buildWakeupsSeam(
     return { wakeup };
   }
 
+  /**
+   * Creates a running event waiter (spec 2026-10-15, Part C). It holds no
+   * lease (INV-E3), so the sandbox may hibernate while it waits. The
+   * WakeWatcher ends it at `deadlineAt`.
+   */
+  async function createEvent(
+    threadId: string,
+    subjects: string[],
+    match: EventMatchSpec,
+    reason: string,
+    maxHours: number,
+    origin: ChannelOrigin | undefined,
+  ): Promise<{ wakeup: Wakeup }> {
+    if (!(maxHours > 0) || maxHours > limits.timerMaxHours) {
+      throw new Error(`[wait_for_event] Set max_hours (1 to ${limits.timerMaxHours}).`);
+    }
+    const nowMs = now();
+    const wakeup: Wakeup = {
+      id: newWakeupId(),
+      sessionId,
+      threadId,
+      kind: "event",
+      status: "running",
+      reason,
+      deadlineAt: nowMs + maxHours * HOUR_MS,
+      logOffset: 0,
+      logTail: "",
+      eventCount: 0,
+      createdAt: nowMs,
+      updatedAt: nowMs,
+      subjects,
+      eventMatch: match,
+      eventBuffer: [],
+      ...(origin !== undefined ? { origin } : {}),
+    };
+    await engineStore.createWakeup(wakeup);
+    if (await sessionGone()) {
+      await deleteLateRows({ wakeupId: wakeup.id });
+      throw new Error("[wait_for_event] This session was deleted, so the wait was not set.");
+    }
+    return { wakeup };
+  }
+
+  const checkArm = deps.checkArm;
+  const armEvent = checkArm
+    ? async (
+      threadId: string,
+      req: ArmEventRequest,
+      origin?: ChannelOrigin,
+      credentials?: CredentialProvider,
+    ): Promise<ArmEventResult> => {
+      const checked = await checkArm(threadId, req, credentials);
+      if (!checked.ok) return { refused: checked.text };
+      const match: EventMatchSpec = {
+        clauses: req.on,
+        once: req.once,
+        self: checked.self,
+        ...(req.minIntervalMs !== undefined ? { minIntervalMs: req.minIntervalMs } : {}),
+        ...(checked.primarySubject !== undefined ? { primarySubject: checked.primarySubject } : {}),
+      };
+      try {
+        return await createEvent(threadId, checked.subjects, match, req.reason, req.maxHours, origin);
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith("[wait_for_event]")) return { refused: err.message };
+        throw err;
+      }
+    }
+    : undefined;
+
   return {
     limits,
+    ...(armEvent ? { armEvent } : {}),
 
     async create(threadId: string, input: WakeupCreateInput) {
       if (input.kind === "timer") {
         return createTimer(threadId, input.prompt, input.fireAt, input.origin);
+      }
+      if (input.kind === "event") {
+        // Only `armEvent` creates event waiters, so every one passes the
+        // arm checks (INV-E1).
+        throw new Error(EVENT_CREATE_REFUSAL);
       }
       const hours = input.kind === "process" ? input.deadlineHours : input.maxHours;
       return createProcessOrWatch(threadId, input.kind, input.command, input.reason, hours, input.origin);
@@ -417,6 +510,9 @@ export function buildWakeupsSeam(
       const wakeup = await ownWakeup(id);
       if (!wakeup) {
         throw new Error(`[process_read] ${id} is not a background process or watch of this session. Call wakeup_list to see this thread's ids.`);
+      }
+      if (wakeup.kind === "event") {
+        throw new Error(`[process_read] ${id} is an event waiter and has no log.`);
       }
       if (!wakeup.execId) {
         throw new Error(

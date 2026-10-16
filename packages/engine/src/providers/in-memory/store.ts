@@ -5,6 +5,7 @@ import type {
   DecisionGate,
   DecisionGateEntry,
   DecisionGateRef,
+  EventMatchDigest,
   Lease,
   LeaseReleaseCause,
   ListOpts,
@@ -27,7 +28,9 @@ import type {
   WakeupStatus,
   WriteFence,
 } from "../../types.js";
-import { recordWakeupEnded } from "../../metrics.js";
+import { recordEventWaiterBufferFull, recordWakeupEnded } from "../../metrics.js";
+import { boundEventDigest } from "../../wakeups/digest.js";
+import { EVENT_BUFFER_MAX_DIGESTS, EVENT_SEEN_MAX_KEYS } from "../../wakeups/types.js";
 
 const DEFAULT_LEASE_MS = 30_000;
 
@@ -297,7 +300,7 @@ export class InMemorySessionStore implements SessionStore {
 
   async createWakeup(wakeup: Wakeup): Promise<void> {
     if (this.wakeups.has(wakeup.id)) throw new ConflictError(`wakeup ${wakeup.id} already exists`);
-    this.wakeups.set(wakeup.id, { ...wakeup });
+    this.wakeups.set(wakeup.id, copyWakeup(wakeup));
   }
 
   async createWakeupWithLease(wakeup: Wakeup, lease: Lease): Promise<void> {
@@ -305,7 +308,7 @@ export class InMemorySessionStore implements SessionStore {
     if (this.wakeups.has(wakeup.id)) throw new ConflictError(`wakeup ${wakeup.id} already exists`);
     if (this.leases.has(lease.id)) throw new ConflictError(`lease ${lease.id} already exists`);
     this.leases.set(lease.id, { ...lease });
-    this.wakeups.set(wakeup.id, { ...wakeup });
+    this.wakeups.set(wakeup.id, copyWakeup(wakeup));
   }
 
   async countWakeupsByKindAndStatus(statuses: readonly WakeupStatus[]): Promise<WakeupCount[]> {
@@ -332,23 +335,23 @@ export class InMemorySessionStore implements SessionStore {
     // together like the Postgres single statement.
     const w = this.wakeups.get(id);
     if (!w || !from.includes(w.status)) return null;
-    const next: Wakeup = { ...w, ...patch, status: to, updatedAt };
+    const next: Wakeup = copyWakeup({ ...w, ...patch, status: to, updatedAt });
     this.wakeups.set(id, next);
     const l = next.leaseId === undefined ? undefined : this.leases.get(next.leaseId);
     if (l && l.releasedAt === undefined) this.leases.set(l.id, { ...l, releasedAt: updatedAt, releaseCause });
-    return { ...next };
+    return copyWakeup(next);
   }
 
   async getWakeup(id: string): Promise<Wakeup | null> {
     const w = this.wakeups.get(id);
-    return w ? { ...w } : null;
+    return w ? copyWakeup(w) : null;
   }
 
   async listWakeups(sessionId: string, statuses?: readonly WakeupStatus[]): Promise<Wakeup[]> {
     return [...this.wakeups.values()]
       .filter((w) => w.sessionId === sessionId && (!statuses || statuses.length === 0 || statuses.includes(w.status)))
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-      .map((w) => ({ ...w }));
+      .map(copyWakeup);
   }
 
   async listDueWakeups(now: number, limit: number, after?: WakeupCursor): Promise<{ rows: Wakeup[]; next: WakeupCursor | null }> {
@@ -356,12 +359,15 @@ export class InMemorySessionStore implements SessionStore {
       .filter(
         (w) =>
           ((w.status === "running" || w.status === "pending") && (w.kind === "process" || w.kind === "watch")) ||
-          (w.status === "pending" && w.kind === "timer" && w.fireAt !== undefined && w.fireAt <= now),
+          (w.status === "pending" && w.kind === "timer" && w.fireAt !== undefined && w.fireAt <= now) ||
+          (w.status === "running" &&
+            w.kind === "event" &&
+            ((w.eventBuffer?.length ?? 0) > 0 || (w.deadlineAt !== undefined && w.deadlineAt <= now))),
       )
       .filter((w) => !after || w.createdAt > after.createdAt || (w.createdAt === after.createdAt && w.id > after.id))
       .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .slice(0, limit)
-      .map((w) => ({ ...w }));
+      .map(copyWakeup);
     const last = rows[rows.length - 1];
     return { rows, next: rows.length < limit || !last ? null : { createdAt: last.createdAt, id: last.id } };
   }
@@ -375,9 +381,44 @@ export class InMemorySessionStore implements SessionStore {
   ): Promise<Wakeup | null> {
     const w = this.wakeups.get(id);
     if (!w || !from.includes(w.status)) return null;
-    const next: Wakeup = { ...w, ...patch, status: to, updatedAt };
+    const next: Wakeup = copyWakeup({ ...w, ...patch, status: to, updatedAt });
     this.wakeups.set(id, next);
-    return { ...next };
+    return copyWakeup(next);
+  }
+
+  async findEventWaiters(subjects: readonly string[]): Promise<Wakeup[]> {
+    const wanted = new Set(subjects);
+    return [...this.wakeups.values()]
+      .filter((w) => w.kind === "event" && w.status === "running" && (w.subjects ?? []).some((s) => wanted.has(s)))
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map(copyWakeup);
+  }
+
+  async appendEventMatch(id: string, digest: EventMatchDigest, updatedAt: number): Promise<boolean> {
+    // The check and the write happen with no await between them, like the
+    // Postgres single statement.
+    const w = this.wakeups.get(id);
+    if (!w || w.kind !== "event" || w.status !== "running") return false;
+    const bounded = boundEventDigest(digest);
+    const buffer = w.eventBuffer ?? [];
+    if (buffer.some((d) => d.dedupeKey === bounded.dedupeKey)) return false;
+    if ((w.eventSeen ?? []).includes(bounded.dedupeKey)) return false;
+    if (buffer.length >= EVENT_BUFFER_MAX_DIGESTS) {
+      recordEventWaiterBufferFull();
+      return false;
+    }
+    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer: [...buffer, bounded], updatedAt }));
+    return true;
+  }
+
+  async removeEventMatches(id: string, dedupeKeys: readonly string[], updatedAt: number): Promise<boolean> {
+    const w = this.wakeups.get(id);
+    if (!w || w.kind !== "event") return false;
+    const removed = new Set(dedupeKeys);
+    const eventSeen = [...(w.eventSeen ?? []).filter((k) => !removed.has(k)), ...removed].slice(-EVENT_SEEN_MAX_KEYS);
+    const eventBuffer = (w.eventBuffer ?? []).filter((d) => !removed.has(d.dedupeKey));
+    this.wakeups.set(id, copyWakeup({ ...w, eventBuffer, eventSeen, updatedAt }));
+    return true;
   }
 
   async createLease(lease: Lease): Promise<void> {
@@ -912,4 +953,12 @@ export class InMemorySessionStore implements SessionStore {
     item.status = blocked ? "blocked_on_decision_gate" : "running";
     item.updatedAt = Date.now();
   }
+}
+
+/**
+ * A copy that shares no array or object with `w`, so a caller that mutates
+ * a returned wakeup never changes the stored one.
+ */
+function copyWakeup(w: Wakeup): Wakeup {
+  return structuredClone(w);
 }

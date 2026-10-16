@@ -88,6 +88,10 @@ interface Instruments {
   scratchRefused: Counter;
   leasesOrphanReleased: Counter;
   wakeupBadRows: Counter;
+  eventWaiterBufferFull: Counter;
+  eventWaiterMatches: Counter;
+  eventDerive: Counter;
+  eventMatchFailed: Counter;
   wakeupSweepOkAt: ObservableGauge;
   wakeupSweepFailed: Counter;
   jobLogsPruned: Counter;
@@ -190,6 +194,22 @@ function inst(): Instruments {
     wakeupBadRows: meter.createCounter("valet.wakeups.bad_rows", {
       description:
         "engine_wakeups or engine_leases rows a store read skipped because a field held an unknown value, by table. Any count needs a human: the row is never probed or released.",
+    }),
+    eventWaiterBufferFull: meter.createCounter("valet.event_waiter.buffer_full", {
+      description:
+        "Event matches a store refused because the event waiter already buffered EVENT_BUFFER_MAX_DIGESTS digests. Prometheus exports it as valet_event_waiter_buffer_full_total. A count means delivery is stalled for that waiter: find out why the WakeWatcher does not drain it.",
+    }),
+    eventWaiterMatches: meter.createCounter("valet.event_waiter.matches", {
+      description:
+        "Event matches that ingest appended to an event waiter's buffer, by service. Prometheus exports it as valet_event_waiter_matches_total. A redelivered event the waiter already holds is not counted.",
+    }),
+    eventDerive: meter.createCounter("valet.event_waiter.derive", {
+      description:
+        "Derived event computations for event waiters, by derived key and result (event, null, error). Prometheus exports it as valet_event_waiter_derive_total. result=error means a provider read failed and the match digest was kept; a sustained rate means the provider or its credential is broken.",
+    }),
+    eventMatchFailed: meter.createCounter("valet.wakeups.event_match_failed", {
+      description:
+        "Event waiter matching passes, or single waiter candidates, that failed with an error during ingest. Prometheus exports it as valet_wakeups_event_match_failed_total. The subscription outcome does not change, but a waiter can miss the event: alert on any increase.",
     }),
     wakeupSweepOkAt: meter.createObservableGauge("valet.wakeups.sweep_ok_at", {
       unit: "s",
@@ -416,6 +436,29 @@ export function recordLeaseOrphanReleased(ownerKind: LeaseOwnerKind, reason: Orp
 export function recordWakeupBadRow(table: "engine_wakeups" | "engine_leases", count = 1): void {
   if (count <= 0) return;
   inst().wakeupBadRows.add(count, { table });
+}
+
+/** A store refused an event match because the waiter's buffer was full. */
+export function recordEventWaiterBufferFull(): void {
+  inst().eventWaiterBufferFull.add(1);
+}
+
+/** Ingest appended one event match to an event waiter for `service`. */
+export function recordEventWaiterMatch(service: string): void {
+  inst().eventWaiterMatches.add(1, { service });
+}
+
+/** The outcome of one derived event computation (spec Part J). */
+export type EventDeriveResult = "event" | "null" | "error";
+
+/** One `DerivedEventDef.derive` call finished with `result`. */
+export function recordEventDerive(key: string, result: EventDeriveResult): void {
+  inst().eventDerive.add(1, { key, result });
+}
+
+/** Event waiter matching failed during ingest. */
+export function recordEventMatchFailed(): void {
+  inst().eventMatchFailed.add(1);
 }
 
 /** The WakeWatcher finished a pass at `unixSeconds`. */
