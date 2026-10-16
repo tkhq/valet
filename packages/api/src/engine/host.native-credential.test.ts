@@ -7,7 +7,7 @@
  * Linear plugin reads `linear` first and `linear:app` when that is null
  * (Task 3), so `partB` composes those two reads the same way.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type StoredCredential, type ValetPlugin } from "@valet/engine";
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
@@ -20,6 +20,7 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { shareCredential } from "../services/credential-shares.js";
 import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
+import * as credentialMetrics from "../observability/credential-metrics.js";
 import { EngineHost } from "./host.js";
 
 const orgId = "native-org";
@@ -40,6 +41,7 @@ describe("EngineHost native credential policy (Part B)", () => {
   let host: EngineHost | undefined;
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     host?.evictAll();
     host = undefined;
     await fixture?.close();
@@ -220,5 +222,62 @@ describe("EngineHost native credential policy (Part B)", () => {
     const cred = await session.credentialProvider().get("slack");
     expect(cred?.accessToken).toBe("xoxb-org");
     expect(cred?.metadata?.["team_id"]).toBe("T1");
+  });
+  // Controller addition 1: a fallback to the app token stays visible, so a
+  // broken delegated credential is reported, not hidden.
+  describe("valet_credentials_app_fallback_total", () => {
+    it("counts a user read with no personal connection as no_personal", async () => {
+      const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
+      const { appDb, credentials } = await harness();
+      const session = await makeHost(appDb, credentials).sessionFor("sess-m1", userMeta);
+      expectAppToken(await partB(session.credentialProvider()));
+      expect(record.mock.calls).toEqual([["linear", "no_personal"]]);
+    });
+
+    it("counts a team read with no share or team row as no_delegated", async () => {
+      const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
+      const { appDb, credentials } = await harness();
+      const session = await makeHost(appDb, credentials).sessionFor("sess-m2", teamMeta);
+      expectAppToken(await partB(session.credentialProvider({ actorId: userId })));
+      expect(record.mock.calls).toEqual([["linear", "no_delegated"]]);
+    });
+
+    it("counts a broken team share as dead_delegated", async () => {
+      const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
+      const { appDb, credentials } = await harness();
+      await credentials.save({ type: "user", id: userId }, "linear", { type: "oauth2", accessToken: "expired", expiresAt: 1 });
+      await shareCredential(appDb, { teamId, service: "linear", userId, createdAt: 1 });
+      const session = await makeHost(appDb, credentials).sessionFor("sess-m3", teamMeta);
+      expectAppToken(await partB(session.credentialProvider({ actorId: userId })));
+      expect(record.mock.calls).toEqual([["linear", "dead_delegated"]]);
+    });
+
+    it("counts a dead team connection as dead_delegated", async () => {
+      const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
+      const { appDb, credentials } = await harness();
+      await credentials.save({ type: "team", id: teamId }, "linear", { type: "oauth2", accessToken: "dead", expiresAt: 1, metadata: { refreshRefused: true } });
+      const session = await makeHost(appDb, credentials).sessionFor("sess-m4", teamMeta);
+      expectAppToken(await partB(session.credentialProvider({ actorId: userId })));
+      expect(record.mock.calls).toEqual([["linear", "dead_delegated"]]);
+    });
+
+    it("counts an org-owned read as org_owner", async () => {
+      const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
+      const { appDb, credentials } = await harness();
+      const session = await makeHost(appDb, credentials).sessionFor("sess-m5", orgMeta);
+      expectAppToken(await session.credentialProvider().get("linear"));
+      expect(record.mock.calls).toEqual([["linear", "org_owner"]]);
+    });
+
+    it("counts nothing when a person's credential answers or no app is connected", async () => {
+      const record = vi.spyOn(credentialMetrics, "recordAppCredentialFallback");
+      const { appDb, credentials } = await harness();
+      await credentials.save({ type: "user", id: userId }, "linear", { type: "oauth2", accessToken: "personal-linear" });
+      const h = makeHost(appDb, credentials);
+      expect((await partB((await h.sessionFor("sess-m6", userMeta)).credentialProvider()))?.accessToken).toBe("personal-linear");
+      await credentials.delete({ type: "org", id: orgId }, "linear");
+      expect(await partB((await h.sessionFor("sess-m7", teamMeta)).credentialProvider({ actorId: userId }))).toBeNull();
+      expect(record).not.toHaveBeenCalled();
+    });
   });
 });
