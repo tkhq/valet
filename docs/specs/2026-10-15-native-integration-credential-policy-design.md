@@ -93,9 +93,14 @@ For a native integration, the host credential resolver MUST try, in order:
 ## Part C: Per integration
 
 - **GitHub.** Today's behavior already matches Part B for user and team
-  sessions. Change: an org-owned workflow run on `auto` MUST use the
-  installation, as org sessions do, before the org personal-access-token
-  row (`action-invoker.ts` passes no `auth` today).
+  sessions. Before this change, an org-owned workflow run on `auto` (no
+  `userId`, `purpose: "api"`) already tried the installation of the
+  session binding's repository owner, then the org's sole installation,
+  then the org personal-access-token row. Change: the action's repository
+  owner (its `owner` parameter) MUST pick the installation first, before
+  the binding owner. An org with several installations then gets the
+  installation for the action's repository, and does not fall through to
+  the PAT row.
 - **Slack.** No change. `slack.*` actions act as the bot by design, so its
   messages never appear as a person. The person's identity is the separate
   `slack-user` service (`slack-user.*` tools), which is personal or
@@ -193,12 +198,16 @@ deployment after merge.
 1. **INV-P2 holds per service, not per caller.** The resolver gives an app
    token to any read of a service that a native plugin names
    (`appCredentialService`). It does not check which plugin makes the read.
-   First-party plugins share one trust boundary, so this is acceptable. A
-   config-declared MCP server cannot reach an app token, because
+   The trust boundary is in-process code. First-party plugins and plugins
+   that `loadNodeModulesPlugins` (`providers/node.ts`) loads from
+   `node_modules` run in the api process, and the api trusts that code
+   fully. A config-declared MCP server cannot reach an app token, because
    it is never native and cannot name a native service's app credential.
 2. **Org-owned GitHub workflow runs on `auto` use the installation, then
-   the org PAT row.** A strict app-only order breaks orgs that use only a
-   PAT. The PAT answers only when no installation resolves (`null`). If
+   the org PAT row.** That order is not new. The change is that the
+   action's repository owner now picks the installation, so an org with
+   several installations stops falling through to the PAT row. A strict
+   app-only order breaks orgs that use only a PAT. The PAT answers only when no installation resolves (`null`). If
    the installation mint fails with an error, the run fails with that
    error and does not use the PAT. `action-invoker.test.ts` holds this.
 3. **Spike S1 was resolved from Linear's documentation**, not from a live
