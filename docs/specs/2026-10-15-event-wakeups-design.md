@@ -380,7 +380,7 @@ wait_for_event({
 ```
 
 The tool is available in coding sessions, child sessions, and assistant
-sessions. It is absent from workflow runs.
+sessions. A workflow run has no arm path, so the tool refuses there with R9.
 
 ### D1. Arm checks
 
@@ -396,6 +396,7 @@ The tool runs these checks in order. Each refusal MUST use the text below.
 | R6 | The thread already receives this Slack thread's replies through a follow. | `[wait_for_event] This thread already receives replies from that Slack thread. No wait is needed.` |
 | R7 | The service is not connected for the org. | `[wait_for_event] <Service> is not connected for this organization. Connect it in Settings, Integrations.` |
 | R8 | The thread is at `wakeupsPerSession`. | The existing `[wakeups_limit]` text. |
+| R9 | The session is a workflow run. | `[wait_for_event] Workflow runs cannot wait for events. Use a workflow trigger instead.` |
 
 R3 is the visibility rule (INV-E1). The tool gets the session's native
 credential from the host credential resolver. Then it reads the subject
@@ -405,6 +406,45 @@ Slack, the issue or team on Linear.
 Until the native integration credential policy ships, Linear has no app
 fallback for sessions. A session without a connected Linear credential
 gets R3 for a Linear subject.
+
+D1 errata (Task 11):
+
+- Order. The checks run as R9, argument validation, R8, then R1, R5, R7,
+  R2, R3, R4, R6. The checks with no provider call run first, and a
+  disconnected service gets R7 before any read. The tool checks R9 and R8.
+  The host's `checkArm` (`packages/api/src/events/waiter-arm.ts`) checks
+  the rest.
+- R2 checks owner coverage only: `installationResolvesFor` with
+  `strictOwner`. R3's read with the session's credential catches a
+  repository that the installation leaves out. An org with no GitHub App
+  gets R7.
+- R3 reads with the calling turn's credential provider
+  (`ToolContext.credentials`). The tool passes it to `armEvent`, so the
+  host credential resolver stays private to the host. A read that does not
+  answer within 4 seconds, or that throws, gets R3.
+- R3 for Slack: a team or org session may wait on public channels only.
+  A personal session uses its owner's channel visibility. These are the
+  match-time rules of Part E, step 4. A canonical Slack subject from
+  another workspace gets R3.
+- R4 also covers a channel that `conversations.info` reports as
+  `channel_not_found`, because the bot cannot see a private channel it is
+  not in. The text names `<#C…>` when Slack gives no channel name.
+- R3 for Linear needs the session's own Linear credential. The org's
+  app-actor token (`grant = client_credentials`) does not count.
+- R5 also refuses `github.pull_request.checks_completed` unless the
+  subject is a pull request: `[wait_for_event] <key> needs a pull request
+  subject. Pass the pull request URL.` An issue number gets the same text
+  after R3's read.
+- R1 also refuses a GitHub owner alone (`github:acme`). The tool supports
+  repository, pull request, issue, and commit subjects.
+- `self` at arm holds the owner's linked external id for the service, the
+  actor id behind the session's resolved credential (GitHub `/user`, Slack
+  `auth.test`, Linear `viewer`), and the app actor id (the GitHub App bot
+  user, the Slack `botUserId`, the Linear app actor). A lookup that fails
+  is left out.
+- `min_interval_seconds` is an integer from 30 to 3600. It is refused in
+  once mode, including the default `once: true`. The row stores it as
+  `minIntervalMs`.
 
 ### D2. Result text
 

@@ -1,6 +1,10 @@
 import { recordWakeupEnded } from "@valet/engine";
 import type {
+  ArmEventRequest,
+  ArmEventResult,
   ChannelOrigin,
+  CredentialProvider,
+  EventMatchSpec,
   HoldInput,
   Lease,
   Sandbox,
@@ -59,6 +63,16 @@ export interface WakeupsSeamDeps {
    */
   scratchBytes?: () => number | undefined;
   now?: () => number;
+  /**
+   * Runs the `wait_for_event` arm checks (spec 2026-10-15, Part D1) for
+   * this session. Absent for a workflow run: the seam then has no
+   * `armEvent`, and the tool returns R9.
+   */
+  checkArm?: (
+    threadId: string,
+    req: ArmEventRequest,
+    credentials: CredentialProvider | undefined,
+  ) => Promise<{ ok: true; subjects: string[]; self: string[] } | { ok: false; text: string }>;
 }
 
 const BASH_BACKGROUND_UNAVAILABLE =
@@ -314,17 +328,86 @@ export function buildWakeupsSeam(
     return { wakeup };
   }
 
+  /**
+   * Creates a running event waiter (spec 2026-10-15, Part C). It holds no
+   * lease (INV-E3), so the sandbox may hibernate while it waits. The
+   * WakeWatcher ends it at `deadlineAt`.
+   */
+  async function createEvent(
+    threadId: string,
+    subjects: string[],
+    match: EventMatchSpec,
+    reason: string,
+    maxHours: number,
+    origin: ChannelOrigin | undefined,
+  ): Promise<{ wakeup: Wakeup }> {
+    if (!(maxHours > 0) || maxHours > limits.timerMaxHours) {
+      throw new Error(`[wait_for_event] Set max_hours (1 to ${limits.timerMaxHours}).`);
+    }
+    const nowMs = now();
+    const wakeup: Wakeup = {
+      id: newWakeupId(),
+      sessionId,
+      threadId,
+      kind: "event",
+      status: "running",
+      reason,
+      deadlineAt: nowMs + maxHours * HOUR_MS,
+      logOffset: 0,
+      logTail: "",
+      eventCount: 0,
+      createdAt: nowMs,
+      updatedAt: nowMs,
+      subjects,
+      eventMatch: match,
+      eventBuffer: [],
+      ...(origin !== undefined ? { origin } : {}),
+    };
+    await engineStore.createWakeup(wakeup);
+    if (await sessionGone()) {
+      await deleteLateRows({ wakeupId: wakeup.id });
+      throw new Error("[wait_for_event] This session was deleted, so the wait was not set.");
+    }
+    return { wakeup };
+  }
+
+  const checkArm = deps.checkArm;
+  const armEvent = checkArm
+    ? async (
+      threadId: string,
+      req: ArmEventRequest,
+      origin?: ChannelOrigin,
+      credentials?: CredentialProvider,
+    ): Promise<ArmEventResult> => {
+      const checked = await checkArm(threadId, req, credentials);
+      if (!checked.ok) return { refused: checked.text };
+      const match: EventMatchSpec = {
+        clauses: req.on,
+        once: req.once,
+        self: checked.self,
+        ...(req.minIntervalMs !== undefined ? { minIntervalMs: req.minIntervalMs } : {}),
+      };
+      try {
+        return await createEvent(threadId, checked.subjects, match, req.reason, req.maxHours, origin);
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith("[wait_for_event]")) return { refused: err.message };
+        throw err;
+      }
+    }
+    : undefined;
+
   return {
     limits,
+    ...(armEvent ? { armEvent } : {}),
 
     async create(threadId: string, input: WakeupCreateInput) {
       if (input.kind === "timer") {
         return createTimer(threadId, input.prompt, input.fireAt, input.origin);
       }
       if (input.kind === "event") {
-        // No tool creates an event waiter through this seam yet; the arm
-        // path (spec 2026-10-15, Part D) replaces this refusal.
-        throw new Error("[wait_for_event] This host cannot create event waiters. Use wake_at to check back later.");
+        // The arm checks run in `armEvent`. This path is for a caller that
+        // already holds checked subjects and a self set.
+        return createEvent(threadId, input.subjects, input.match, input.reason, input.maxHours, input.origin);
       }
       const hours = input.kind === "process" ? input.deadlineHours : input.maxHours;
       return createProcessOrWatch(threadId, input.kind, input.command, input.reason, hours, input.origin);
@@ -422,6 +505,9 @@ export function buildWakeupsSeam(
       const wakeup = await ownWakeup(id);
       if (!wakeup) {
         throw new Error(`[process_read] ${id} is not a background process or watch of this session. Call wakeup_list to see this thread's ids.`);
+      }
+      if (wakeup.kind === "event") {
+        throw new Error(`[process_read] ${id} is an event waiter and has no log.`);
       }
       if (!wakeup.execId) {
         throw new Error(
