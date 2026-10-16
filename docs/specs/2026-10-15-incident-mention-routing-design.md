@@ -1,6 +1,6 @@
 # Incident mention routing
 
-Date: 2026-10-15. Status: proposed.
+Date: 2026-10-15. Status: implemented.
 
 Depends on: `2026-10-15-event-wakeups-design.md` (event waiters, the
 mention rule, Scenario E) and `2026-07-20-event-system-design.md`
@@ -114,4 +114,16 @@ Pass criterion: all steps, in one run, from a clean start.
 
 ## Deviations
 
-None yet.
+- M1 sends the mention from `U001`, not `U002`. In the Scenario E
+  universe, only `U001` links to a Valet user. The team mention gate
+  refuses an unlinked sender (Part C), so a mention from `U002` never
+  reaches routing.
+- M5's cancel runs in a real agent turn. A channel message in `C900`
+  reaches `t-inc` through the event waiter, and the agent calls
+  `wakeup_cancel` in that turn.
+- The dispatcher reads the Slack team from the event row's channel
+  subject, and falls back to the payload's `team`. When neither names a
+  team, the dispatcher keeps today's behavior (Part A step 5).
+- The `engineStore` dispatcher dependency is optional. A dispatcher built
+  without it keeps today's behavior for every mention. Both production
+  builders (`providers/node.ts`, `integration/_setup.ts`) wire it.

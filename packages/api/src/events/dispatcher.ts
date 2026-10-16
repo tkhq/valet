@@ -26,7 +26,7 @@ import type { Presence } from "@valet/shared";
  * becomes due again when the lease lapses.
  */
 import { slackEventChannel, slackEventsThreadKey } from "../services/thread-access.js";
-import type { ChannelOrigin, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
+import type { ChannelOrigin, PromptAuthor, SessionStore, SignalContent, ValetPlugin } from "@valet/engine";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
@@ -46,6 +46,8 @@ import {
   teamMentionActor,
 } from "./team-slack-gate.js";
 import { resolvePath } from "./match.js";
+import { loadSessionOwner } from "./waiters.js";
+import { findWatchingWaiter, slackEventTeam } from "./watching-waiter.js";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
 const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
@@ -114,6 +116,13 @@ export interface EventDispatcherDeps {
    * plugins delivers every default body unchanged.
    */
   plugins?: ValetPlugin[];
+  /**
+   * The engine store, for incident mention routing
+   * (`watching-waiter.ts`): a `slack.app_mention` in a channel that a stream
+   * event waiter of the same owner watches goes to that waiter's thread.
+   * Absent → every mention keeps the thread keyed by its own Slack post.
+   */
+  engineStore?: Pick<SessionStore, "findEventWaiters">;
 }
 
 /** The message text on a channel event payload (`text`), when present. */
@@ -381,6 +390,10 @@ export class EventDispatcher {
         const inbound = origin
           ? inboundSlackMessage(origin.threadKey, origin.messageTs, attributes.sender, channelBody)
           : prThreadKey && prComment ? prComment.message : undefined;
+        // A mention in a channel that this owner already watches goes to the
+        // watching thread (spec 2026-10-15: incident mention routing, Part A).
+        // The sender gate above has already run (Part C).
+        const watching = await this.watchingTarget(event, origin, slackChannel, { type: sub.ownerType, id: sub.ownerId });
         const author = teamMention
           ? await newcomerAuthor(db, event.orgId, actorUserId, resolvePath(event.payload, "user"), attributes.sender)
           : sub.ownerType === "team" && event.service === "slack"
@@ -400,7 +413,8 @@ export class EventDispatcher {
           },
           ...(target.presence ? { presence: target.presence } : {}),
           dispatchId: eventDeliveryDispatchId(delivery.id),
-          ...(prComment && commentThread ? { target: { sessionId: commentThread.sessionId, threadId: commentThread.threadId } } : {}),
+          ...(watching ? { target: watching }
+            : prComment && commentThread ? { target: { sessionId: commentThread.sessionId, threadId: commentThread.threadId } } : {}),
           ...(prThreadKey ? { threadKey: prThreadKey } : !origin && slackChannel ? { threadKey: slackEventsThreadKey(slackChannel) } : {}),
           ...(inbound ? { inbound } : {}),
           ...(author ? { author } : {}),
@@ -415,7 +429,9 @@ export class EventDispatcher {
         // threadKey is `{channelType}:{channelId}:{threadTs}`.
         // Message subscriptions already deliver later replies. A second follow
         // binding would submit each reply twice and outlive the subscription.
-        if (target.follow && origin && event.eventKey === "slack.app_mention") {
+        // A mention routed to a watching thread binds no follow: its event
+        // waiter already receives the later replies (Part B, INV-M2).
+        if (target.follow && origin && event.eventKey === "slack.app_mention" && !watching) {
           const parts = origin.threadKey.split(":");
           if (parts.length === 3 && parts[1] !== "" && parts[2] !== "") {
             const key = {
@@ -473,6 +489,24 @@ export class EventDispatcher {
         })
         .where(eq(eventDeliveries.id, deliveryId));
     }
+  }
+
+  /** The watching waiter's thread for a Slack mention, or null (Part A). */
+  private async watchingTarget(
+    event: typeof events.$inferSelect,
+    origin: ChannelOrigin | null,
+    channel: string | undefined,
+    owner: { type: "user" | "team" | "org"; id: string },
+  ): Promise<{ sessionId: string; threadId: string } | null> {
+    const engineStore = this.deps.engineStore;
+    if (!engineStore || !origin || !channel || event.eventKey !== "slack.app_mention") return null;
+    const team = slackEventTeam(event.subjects, event.payload, channel);
+    if (!team) return null;
+    const db = this.deps.db;
+    return findWatchingWaiter(
+      { engineStore, sessionOwner: (sessionId) => loadSessionOwner(db, sessionId) },
+      event.orgId, owner, team, channel,
+    );
   }
 
   private async startWorkflow(

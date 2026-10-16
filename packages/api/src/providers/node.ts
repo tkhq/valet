@@ -832,6 +832,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // The catalog a subscription's `{{payload.<field>}}` variable resolves
     // through. It is the same merged catalog the write validator uses.
     plugins,
+    // Routes a mention to the thread whose event waiter watches its channel.
+    engineStore,
   });
 
   // Repository content sync. `readerFor` gives each source the GitHub
