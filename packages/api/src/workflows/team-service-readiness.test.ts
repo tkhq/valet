@@ -123,7 +123,7 @@ describe("teamServiceReadiness", () => {
   });
 
   function deps(plugins: ValetPlugin[] = [gmailPlugin, slackOrgPlugin, githubPlugin]) {
-    return { db, credentials, plugins, env: {} as NodeJS.ProcessEnv };
+    return { db, credentials, plugins, env: {} };
   }
 
   it("treats a direct team credential as ready", async () => {
@@ -816,7 +816,7 @@ describe("teamServiceReadiness: native app identities", () => {
   });
 
   function deps(plugins: ValetPlugin[] = [nativeLinear, nativeSlack, gmailPlugin, githubPlugin]) {
-    return { db, credentials, plugins, env: {} as NodeJS.ProcessEnv };
+    return { db, credentials, plugins, env: {} };
   }
 
   it("an app node of Linear is ready when the Linear app is connected", async () => {
