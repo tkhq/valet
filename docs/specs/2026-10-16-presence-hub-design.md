@@ -218,7 +218,7 @@ Pass criterion: all steps, in one run, from a clean start.
    a rule's `own` thread, an `existing` pin, or a subject thread.
 2. A subject thread's header names its place.
 
-## Part H: Rename `presence` to `appearance`
+## Part H: Rename `presence` to `appearance` and `orchestrator` to `assistant`
 
 *Conformance: shared types, api, web.*
 
@@ -231,6 +231,16 @@ Pass criterion: all steps, in one run, from a clean start.
 3. The stored `target` JSON is read with both names until the accept-both
    window closes. No backfill runs.
 4. UI copy says **Appears as**.
+5. The stored target discriminator `kind: "orchestrator"`, the wire field
+   `orchestrator: "user" | "team" | "org"`, and the schedule
+   `target_kind` value `orchestrator` become `assistant`. The API MUST
+   accept both values on write for one release and MUST emit `assistant`
+   on read. Stored rows are read with both values. No backfill runs.
+6. Code identifiers that name the delivery path use `assistant`
+   (`deliverToAssistant`, `assistant-target.ts`). The wider rename of
+   child-session code and the `smoke-orchestrator` make target is a
+   separate sweep. CLAUDE.md names `assistant` as the only word for new
+   code.
 
 ## Invariants
 
