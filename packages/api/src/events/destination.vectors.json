@@ -173,5 +173,28 @@
       "claim": null
     },
     "expected": { "kind": "target", "sessionId": "sess-fixed", "threadId": "thread-fixed", "reason": "policy_existing" }
+  },
+  {
+    "name": "policy existing on a schedule rule targets the pinned thread unchanged",
+    "input": {
+      "rule": {
+        "id": "sched-3",
+        "kind": "schedule",
+        "name": "Weekly digest",
+        "policy": { "mode": "existing", "sessionId": "sess-sched-fixed", "threadId": "thread-sched-fixed" }
+      },
+      "binding": null,
+      "claim": null
+    },
+    "expected": { "kind": "target", "sessionId": "sess-sched-fixed", "threadId": "thread-sched-fixed", "reason": "policy_existing" }
+  },
+  {
+    "name": "a claim paired with a schedule (no event) skips, reachable only by type",
+    "input": {
+      "rule": { "id": "sched-4", "kind": "schedule", "name": "No-event claim", "policy": { "mode": "own" } },
+      "binding": null,
+      "claim": { "sessionId": "sess-sched-claim", "threadId": "thread-sched-claim", "waiterId": "wk-5" }
+    },
+    "expected": { "kind": "skip", "reason": "claim:thread-sched-claim" }
   }
 ]

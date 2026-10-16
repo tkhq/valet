@@ -11,8 +11,22 @@ interface Vector {
 
 function isDestinationShaped(value: unknown): value is Destination {
   if (typeof value !== "object" || value === null) return false;
-  const kind = (value as Record<string, unknown>).kind;
-  return kind === "target" || kind === "key" || kind === "skip";
+  const row = value as Record<string, unknown>;
+  if (row.kind === "target") {
+    return typeof row.sessionId === "string" && typeof row.threadId === "string" && typeof row.reason === "string";
+  }
+  if (row.kind === "key") {
+    return (
+      typeof row.key === "string" &&
+      typeof row.title === "string" &&
+      typeof row.reason === "string" &&
+      (row.note === undefined || typeof row.note === "string")
+    );
+  }
+  if (row.kind === "skip") {
+    return typeof row.reason === "string" && row.reason.startsWith("claim:");
+  }
+  return false;
 }
 
 function isVectorArray(value: unknown): value is Vector[] {
@@ -44,4 +58,27 @@ describe("resolveDestination", () => {
       expect(resolveDestination(vector.input)).toEqual(vector.expected);
     });
   }
+});
+
+// The vectors format can assert a return value, not a throw. These two
+// malformed-input cases (Part A forbids them in practice; the type system
+// cannot) go beside the vector walk instead.
+describe("resolveDestination's throw paths", () => {
+  it("throws for a new-mode subscription rule with no event", () => {
+    const input: DestinationInput = {
+      rule: { id: "rule-x", kind: "subscription", name: "No event", policy: { mode: "new" } },
+      binding: null,
+      claim: null,
+    };
+    expect(() => resolveDestination(input)).toThrow("A subscription rule's new-mode destination needs the event.");
+  });
+
+  it("throws for a new-mode schedule rule with no fireAt", () => {
+    const input: DestinationInput = {
+      rule: { id: "sched-x", kind: "schedule", name: "No fire time", policy: { mode: "new" } },
+      binding: null,
+      claim: null,
+    };
+    expect(() => resolveDestination(input)).toThrow("A schedule rule's new-mode destination needs fireAt.");
+  });
 });
