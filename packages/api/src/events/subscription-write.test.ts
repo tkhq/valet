@@ -11,3 +11,17 @@ describe("subscription presence", () => {
     expect(validateSubscription([githubPlugin], body)).toBeNull();
   });
 });
+
+describe("derived event keys (spec Part G, Non-goals)", () => {
+  const body = { name: "CI", filters: [], target: { kind: "orchestrator" } };
+
+  it("refuses a derived key and names the fix", () => {
+    const error = validateSubscription([githubPlugin], { ...body, eventKeys: ["github.pull_request.checks_completed"] });
+    expect(error).toContain("github.pull_request.checks_completed");
+    expect(error).toContain("wait_for_event");
+  });
+
+  it("keeps a glob that also covers a derived key, without selecting it", () => {
+    expect(validateSubscription([githubPlugin], { ...body, eventKeys: ["github.pull_request.*"] })).toBeNull();
+  });
+});

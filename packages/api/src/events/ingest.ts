@@ -24,18 +24,44 @@ export interface IngestDeps {
   waiters?: WaiterMatchDeps;
 }
 
-export function catalogForService(plugins: ValetPlugin[], service: string): EventCatalogEntry[] {
-  return plugins
-    .flatMap((p) => p.triggers ?? [])
-    .filter((t) => t.service === service)
-    .flatMap((t) => t.catalog);
+/**
+ * A plugin's derived event keys (spec 2026-10-15: event wakeups, Part B) for
+ * `service`, as catalog entries marked `derived: true`. A derived key belongs
+ * to the service its plugin has triggers for and its key prefix names. No
+ * event with this key ever reaches ingest, so the entries declare no filters.
+ */
+function derivedCatalogEntries(plugin: ValetPlugin, service: string): EventCatalogEntry[] {
+  if (!(plugin.triggers ?? []).some((t) => t.service === service)) return [];
+  return (plugin.derivedEvents ?? [])
+    .filter((d) => d.key.startsWith(`${service}.`))
+    .map((d) => ({ key: d.key, description: d.description, filters: [], derived: true }));
 }
 
-/** The merged catalog across every plugin and service. The one traversal the
- * subscription validator, the mention-scope gate, and the filter-options
- * lookup all share, so a catalog-shape change lands in one place. */
+export function catalogForService(plugins: ValetPlugin[], service: string): EventCatalogEntry[] {
+  return plugins.flatMap((p) => [
+    ...(p.triggers ?? []).filter((t) => t.service === service).flatMap((t) => t.catalog),
+    ...derivedCatalogEntries(p, service),
+  ]);
+}
+
+/** The merged catalog across every plugin and service, derived keys included
+ * (marked `derived: true`). The one traversal the subscription validator,
+ * the mention-scope gate, and the filter-options lookup all share, so a
+ * catalog-shape change lands in one place. */
 export function allCatalogEntries(plugins: ValetPlugin[]): EventCatalogEntry[] {
-  return plugins.flatMap((p) => p.triggers ?? []).flatMap((t) => t.catalog);
+  return plugins.flatMap((p) => {
+    const services = [...new Set((p.triggers ?? []).map((t) => t.service))];
+    return [
+      ...(p.triggers ?? []).flatMap((t) => t.catalog),
+      ...services.flatMap((service) => derivedCatalogEntries(p, service)),
+    ];
+  });
+}
+
+/** Catalog entries a subscription may name: every entry except derived keys
+ * (spec 2026-10-15: event wakeups, Part G and Non-goals). */
+export function subscribableEntries(entries: EventCatalogEntry[]): EventCatalogEntry[] {
+  return entries.filter((e) => e.derived !== true);
 }
 
 export interface IngestResult {
