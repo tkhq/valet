@@ -34,6 +34,25 @@ function process(id: string, status: Wakeup["status"], threadId = "th-1"): Wakeu
   };
 }
 
+function event(id: string, subject: string, threadId = "th-1"): Wakeup {
+  return {
+    id,
+    sessionId: "s-1",
+    threadId,
+    kind: "event",
+    status: "running",
+    reason: "wait for CI",
+    deadlineAt: NOW + 3_600_000,
+    logOffset: 0,
+    logTail: "",
+    eventCount: 0,
+    createdAt: NOW,
+    updatedAt: NOW,
+    subjects: [subject],
+    eventMatch: { clauses: [{ key: "github.check_run.completed" }], once: true, self: [] },
+  };
+}
+
 function hold(id: string, threadId?: string): Lease {
   return {
     id,
@@ -86,6 +105,12 @@ describe("selectWork", () => {
     const work = { wakeups: [], leases: [hold("ls_none")] };
     expect(selectWork(work, { threadId: "th-1" })).toEqual([]);
     expect(selectWork(work, { leasedOnly: true }).map((w) => w.id)).toEqual(["ls_none"]);
+  });
+
+  it("excludes an event waiter from leasedOnly: it holds no lease (INV-E3), like a timer", () => {
+    const work = { wakeups: [event("wk_e", "github:acme/lean-proofs#42")], leases: [] };
+    expect(selectWork(work, { leasedOnly: true })).toEqual([]);
+    expect(selectWork(work, {}).map((w) => w.id)).toEqual(["wk_e"]);
   });
 });
 
@@ -149,5 +174,32 @@ describe("cancelWorkAsHuman body (fix wave 4, data N2 and security N3)", () => {
     expect(body).toContain("A person stopped this watch");
     expect(body).not.toContain("Last output");
     expect(body).not.toContain("held 1");
+  });
+});
+
+describe("cancelWorkAsHuman of an event waiter (spec 2026-10-15, F1)", () => {
+  it("sends event.ended with cause=cancelled, not event.exited", async () => {
+    const store = new InMemorySessionStore();
+    await store.createWakeup(event("wk_e", "github:acme/lean-proofs#42"));
+    const sb = sandbox();
+    const seam = buildWakeupsSeam({ engineStore: store, limits: LIMITS, now: () => NOW }, "s-1", () => ({
+      sandbox: sb,
+      attachment: { sandboxId: "sb-1", current: () => sb },
+    }));
+    const prompt = vi.fn(async (_content: PromptContent, _opts: PromptOptions): Promise<unknown> => ({}));
+    const session: HumanCancelSession = { options: { wakeups: seam }, prompt, threadById: () => ({}) };
+    const result = await cancelWorkAsHuman(store, session, "s-1", "wk_e", {
+      actorUserId: "u1",
+      signal: "deliver",
+      now: () => NOW,
+    });
+    expect(result.kind).toBe("cancelled");
+    const content = prompt.mock.calls[0]?.[0] as PromptContent & { signalType?: string; attributes?: Record<string, string> };
+    expect(content.signalType).toBe("event.ended");
+    expect(content.attributes?.cause).toBe("cancelled");
+    expect(content.attributes?.subject).toBe("github:acme/lean-proofs#42");
+    expect("body" in content && typeof content.body === "string" ? content.body : "").toContain(
+      "A person stopped this event",
+    );
   });
 });

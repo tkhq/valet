@@ -1114,7 +1114,10 @@ export class ChildWatcher {
    *    releases every lease by then, so a lease past the bound is a bug:
    *    log it, count it, and settle anyway.
    * 2. A pending timer: its turn is still owed. A timer that fires beyond
-   *    the retention window does not hold the settle; it is logged.
+   *    the retention window does not hold the settle; it is logged. A
+   *    running event waiter whose deadline falls inside the same bound
+   *    follows the same rule (spec 2026-10-15, F2): it holds no lease
+   *    (INV-E3), so it does not show in rule 1.
    * 3. A wakeup that ended after the watched submission was admitted, or
    *    was created after it: its terminal signal turn (dispatch id
    *    `wakeup:<id>:terminal`) is owed. Await it once admitted. Until
@@ -1180,7 +1183,13 @@ export class ChildWatcher {
 
       const wakeups = await store.listWakeups(child, []);
       const timers = wakeups.filter((w) => w.kind === "timer" && w.status === "pending");
-      if (timers.some((t) => t.fireAt === undefined || t.fireAt <= now + timerBoundMs)) {
+      // An event waiter holds no lease (INV-E3), so it is not in `leases`
+      // above; it follows the timer bound instead (spec 2026-10-15, F2).
+      const eventWaiters = wakeups.filter((w) => w.kind === "event" && w.status === "running");
+      if (
+        timers.some((t) => t.fireAt === undefined || t.fireAt <= now + timerBoundMs) ||
+        eventWaiters.some((e) => e.deadlineAt === undefined || e.deadlineAt <= now + timerBoundMs)
+      ) {
         await pause();
         continue;
       }
@@ -1237,6 +1246,11 @@ export class ChildWatcher {
       if (timers.length > 0) {
         console.warn(
           `ChildWatcher: ${child} settles with ${timers.length} timer(s) set to fire after the ${Math.round(timerBoundMs / 3_600_000)}h wait bound; the parent will not hear their turns.`,
+        );
+      }
+      if (eventWaiters.length > 0) {
+        console.warn(
+          `ChildWatcher: ${child} settles with ${eventWaiters.length} event waiter(s) set to end after the ${Math.round(timerBoundMs / 3_600_000)}h wait bound; the parent will not hear their turns.`,
         );
       }
       break;
@@ -1431,23 +1445,27 @@ export class ChildWatcher {
   }
 
   /**
-   * True while the child holds a lease or a pending timer. A person can
-   * prompt a settled child to start long work, and that work must keep its
-   * sandbox past the retention window (fix wave 3, concurrency M2; spec
-   * INV-8). Logged once per child.
+   * True while the child holds a lease, a pending timer, or a running event
+   * waiter. A person can prompt a settled child to start long work, and
+   * that work must keep its sandbox past the retention window (fix wave 3,
+   * concurrency M2; spec INV-8). Logged once per child.
    */
   private async holdsBackgroundWork(childSessionId: string): Promise<boolean> {
     const store = this.deps.engineStore;
     const leases = await store.countActiveLeases(childSessionId);
-    const timers = leases > 0 ? 0 : (await store.listWakeups(childSessionId, ["pending"])).filter((w) => w.kind === "timer").length;
-    if (leases === 0 && timers === 0) {
+    // An event waiter holds no lease (INV-E3) and is always "running", never
+    // "pending" (spec 2026-10-15, F2), so it needs its own count.
+    const open = leases > 0 ? [] : await store.listWakeups(childSessionId, ["pending", "running"]);
+    const timers = open.filter((w) => w.kind === "timer" && w.status === "pending").length;
+    const events = open.filter((w) => w.kind === "event" && w.status === "running").length;
+    if (leases === 0 && timers === 0 && events === 0) {
       this.keptForWork.delete(childSessionId);
       return false;
     }
     if (!this.keptForWork.has(childSessionId)) {
       this.keptForWork.add(childSessionId);
       console.warn(
-        `ChildWatcher: retention keeps ${childSessionId} past its window: it holds ${leases} lease(s) and ${timers} pending timer(s).`,
+        `ChildWatcher: retention keeps ${childSessionId} past its window: it holds ${leases} lease(s), ${timers} pending timer(s), and ${events} event waiter(s).`,
       );
     }
     return true;

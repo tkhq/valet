@@ -17,6 +17,7 @@ import {
   type SandboxStatus,
   type Wakeup,
 } from "@valet/engine";
+import githubPlugin from "@valet/plugin-github/plugin";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -198,6 +199,34 @@ async function seedTimer(t: TestApi, sessionId: string, threadId: string, n: num
   return wakeup;
 }
 
+async function seedEvent(
+  t: TestApi,
+  sessionId: string,
+  threadId: string,
+  n: number,
+  subject = "github:acme/lean-proofs#42",
+): Promise<Wakeup> {
+  const now = Date.now();
+  const wakeup: Wakeup = {
+    id: `wk_event${n}`,
+    sessionId,
+    threadId,
+    kind: "event",
+    status: "running",
+    reason: "wait for CI",
+    deadlineAt: now + 2 * HOUR_MS,
+    logOffset: 0,
+    logTail: "",
+    eventCount: 0,
+    createdAt: now,
+    updatedAt: now,
+    subjects: [subject],
+    eventMatch: { clauses: [{ key: "github.check_run.completed" }, { key: "github.pull_request.synchronize" }], once: true, self: [] },
+  };
+  await t.providers.engineStore.createWakeup(wakeup);
+  return wakeup;
+}
+
 async function seedHold(t: TestApi, sessionId: string, threadId: string, n: number): Promise<Lease> {
   const now = Date.now();
   const lease: Lease = {
@@ -245,6 +274,31 @@ describe("GET /api/sessions/:id/wakeups", () => {
     expect(body.leases).toEqual([
       expect.objectContaining({ id: "ls_proc1", ownerKind: "process", ownerId: "wk_proc1" }),
     ]);
+  });
+
+  it("maps an event waiter's subject to a label and URL via the owning plugin (spec 2026-10-15, Part H)", async () => {
+    api = await bootTestApi({ plugins: [githubPlugin] });
+    await seedSession(api, "wk-list-event");
+    const session = await api.providers.engineHost.sessionFor("wk-list-event", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/wakeups-route-wk-list-event",
+    });
+    const thread = await session.ensureDefaultThread();
+    await seedEvent(api, "wk-list-event", thread.id, 1, "github:acme/lean-proofs#42");
+
+    const res = await fetch(`${api.baseUrl}/api/sessions/wk-list-event/wakeups`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListSessionWakeupsResponse;
+    const ev = body.wakeups.find((w) => w.id === "wk_event1");
+    expect(ev).toMatchObject({
+      kind: "event",
+      status: "running",
+      subject: "github:acme/lean-proofs#42",
+      subjectLabel: "acme/lean-proofs#42",
+      subjectUrl: "https://github.com/acme/lean-proofs/pull/42",
+      clauseCount: 2,
+    });
   });
 
   it("404s for a session the caller cannot view", async () => {
@@ -914,5 +968,108 @@ describe("refusal items carry their status (fix wave 4, N11)", () => {
     const conflict = (await res.json()) as BackgroundWorkConflict;
     const status = Object.fromEntries(conflict.work.map((w) => [w.id, w.status]));
     expect(status).toEqual({ wk_timer1: "pending", wk_proc2: "running" });
+  });
+});
+
+describe("the background-work rule applies to event waiters (spec 2026-10-15, F2)", () => {
+  it("pause leaves a running event waiter alone: it holds no lease (INV-E3)", async () => {
+    const provider = new LeaseTestProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    await seedSession(api, "wk-event-pause");
+    const session = await warmSession(api, "wk-event-pause");
+    const thread = await session.ensureDefaultThread();
+    await seedEvent(api, "wk-event-pause", thread.id, 1);
+
+    const paused = await post(api, "/api/sessions/wk-event-pause/pause");
+    expect(paused.status).toBe(200);
+    expect(await api.providers.engineStore.getWakeup("wk_event1")).toMatchObject({ status: "running" });
+  });
+
+  it("a profile change leaves a running event waiter alone: it holds no lease (INV-E3)", async () => {
+    api = await bootTestApi();
+    await seedSession(api, "wk-event-profile");
+    const session = await api.providers.engineHost.sessionFor("wk-event-profile", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/wakeups-route-wk-event-profile",
+    });
+    const thread = await session.ensureDefaultThread();
+    await seedEvent(api, "wk-event-profile", thread.id, 1);
+
+    const patched = await fetch(`${api?.baseUrl}/api/sessions/wk-event-profile`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile: "full" }),
+    });
+    expect(patched.status).toBe(200);
+    expect(await api.providers.engineStore.getWakeup("wk_event1")).toMatchObject({ status: "running" });
+  });
+
+  it("owner move stops a running event waiter with event.ended, cause=cancelled", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "team_mv_event", [{ userId: "local-user", role: "admin" }]);
+    await seedSession(api, "wk-event-move");
+    const session = await api.providers.engineHost.sessionFor("wk-event-move", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/wakeups-route-wk-event-move",
+    });
+    const thread = await session.ensureDefaultThread();
+    await seedEvent(api, "wk-event-move", thread.id, 1);
+    const patch = (body: unknown) =>
+      fetch(`${api?.baseUrl}/api/sessions/wk-event-move`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    const refused = await patch({ teamId: "team_mv_event" });
+    expect(refused.status).toBe(409);
+    const conflict = (await refused.json()) as BackgroundWorkConflict;
+    expect(conflict.work.map((w) => w.id)).toEqual(["wk_event1"]);
+
+    const forced = await patch({ teamId: "team_mv_event", force: true });
+    expect(forced.status).toBe(200);
+    const store = api.providers.engineStore;
+    expect(await store.getWakeup("wk_event1")).toMatchObject({ status: "cancelled", cause: "cancelled" });
+
+    const item = await store.getQueueItemByDispatchId("wk-event-move", "wakeup:wk_event1:terminal");
+    const content = item?.content;
+    if (typeof content === "object" && content !== null && "kind" in content && content.kind === "signal") {
+      expect(content.signalType).toBe("event.ended");
+      expect(content.attributes).toMatchObject({ cause: "cancelled", cancelledBy: "user:local-user" });
+      expect(content.body).toContain("A person stopped this event");
+    } else {
+      throw new Error("the move sent no event.ended signal");
+    }
+  });
+
+  it("thread archive stops a running event waiter on that thread", async () => {
+    api = await bootTestApi();
+    await seedSession(api, "wk-event-archive");
+    const session = await api.providers.engineHost.sessionFor("wk-event-archive", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/wakeups-route-wk-event-archive",
+    });
+    const main = await session.ensureDefaultThread();
+    const side = await session.createThread("web:side");
+    await seedEvent(api, "wk-event-archive", side.id, 1);
+    const patch = (body: unknown) =>
+      fetch(`${api?.baseUrl}/api/sessions/wk-event-archive/threads/${side.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    const refused = await patch({ archived: true });
+    expect(refused.status).toBe(409);
+
+    const res = await patch({ archived: true, force: true });
+    expect(res.status).toBe(200);
+    const store = api.providers.engineStore;
+    expect(await store.getWakeup("wk_event1")).toMatchObject({ status: "cancelled", cause: "cancelled" });
+    // The signal lands on the main thread: the archived thread is hidden.
+    expect((await store.getQueueItemByDispatchId("wk-event-archive", "wakeup:wk_event1:terminal"))?.threadId).toBe(main.id);
   });
 });
