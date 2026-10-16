@@ -10,6 +10,8 @@ import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/
 import { InMemoryCredentialStore } from "@valet/engine";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordService } from "./onepassword.js";
 import { CredentialReferenceBrokenError } from "../plugins/team-credential-store.js";
+import { LinearAppTokenStore } from "../plugins/linear-app-token-store.js";
+import { startLinearFixture } from "../test-helpers/linear-fixture.js";
 import {
   resolveOrgCredentialRead,
   readTeamCredential,
@@ -330,6 +332,75 @@ describe("resolveOrgCredentialRead", () => {
     const result = await resolveOrgCredentialRead({ credentials, onePassword }, { orgId }, "nope");
 
     expect(result).toBeNull();
+  });
+
+  // INV-P1 / vector P5: the org `linear` row is the app connection. Its
+  // metadata holds the inbound webhook HMAC secret, so an action gets the
+  // access token and nothing else.
+  describe("app credential org row (grant: client_credentials)", () => {
+    const appRow = (tokenExpiresAt: number): StoredCredential => ({
+      type: "oauth2",
+      accessToken: "lin-app-token",
+      metadata: {
+        webhookSecret: "hook-secret-value",
+        workspaceId: "ws-value",
+        grant: "client_credentials",
+        tokenExpiresAt,
+        connectionId: "conn-value",
+      },
+    });
+
+    it("hands an org-owned read the access token with no metadata", async () => {
+      const credentials = fakeCredentialStore();
+      await credentials.save({ type: "org", id: orgId }, "linear", appRow(Date.now() + 10 * 86_400_000));
+
+      const result = await resolveOrgCredentialRead({ credentials }, { orgId, userId, scopes: ["org"] }, "linear");
+
+      expect(result).toEqual({ type: "oauth2", accessToken: "lin-app-token" });
+      const text = JSON.stringify(result);
+      for (const leaked of ["webhookSecret", "hook-secret-value", "workspaceId", "ws-value", "connectionId", "conn-value", "grant", "tokenExpiresAt"]) {
+        expect(text).not.toContain(leaked);
+      }
+      // The stored row keeps its metadata: only the value handed out is reduced.
+      expect((await credentials.get({ type: "org", id: orgId }, "linear"))?.metadata?.webhookSecret).toBe("hook-secret-value");
+    });
+
+    it("still renews a renewal-due row through LinearAppTokenStore, then hands out the fresh token only", async () => {
+      const fixture = startLinearFixture();
+      try {
+        const inner = fakeCredentialStore();
+        await inner.save({ type: "org", id: orgId }, "linear_app", { type: "service_account", apiKey: "secret", metadata: { clientId: "client", connectionId: "conn-value" } });
+        await inner.save({ type: "org", id: orgId }, "linear", appRow(Date.now() - 1));
+        const credentials = new LinearAppTokenStore(inner, { env: { LINEAR_API_URL: fixture.url } });
+
+        const result = await resolveOrgCredentialRead({ credentials }, { orgId, scopes: ["org"] }, "linear");
+
+        expect(fixture.calls).toHaveLength(1);
+        expect(result).toEqual({ type: "oauth2", accessToken: "lin_app_token" });
+        expect(JSON.stringify(result)).not.toContain("hook-secret-value");
+        const saved = await inner.get({ type: "org", id: orgId }, "linear");
+        expect(saved?.accessToken).toBe("lin_app_token");
+        expect(saved?.metadata).toMatchObject({ webhookSecret: "hook-secret-value", workspaceId: "ws-value", grant: "client_credentials" });
+      } finally {
+        await fixture.close();
+      }
+    });
+
+    it("returns null for an app row with no token", async () => {
+      const credentials = fakeCredentialStore();
+      const { accessToken: _token, ...noToken } = appRow(Date.now() + 86_400_000);
+      await credentials.save({ type: "org", id: orgId }, "linear", noToken);
+
+      expect(await resolveOrgCredentialRead({ credentials }, { orgId }, "linear")).toBeNull();
+    });
+
+    it("leaves an org row that is not an app credential unchanged", async () => {
+      const credentials = fakeCredentialStore();
+      const botRow: StoredCredential = { type: "bot_token", apiKey: "xoxb-1", metadata: { webhookSecret: "slack-signing" } };
+      await credentials.save({ type: "org", id: orgId }, "slack", botRow);
+
+      expect(await resolveOrgCredentialRead({ credentials }, { orgId }, "slack")).toEqual(botRow);
+    });
   });
 });
 
