@@ -1,5 +1,18 @@
+import type { NormalizedEvent } from "@valet/engine";
 import { describe, expect, it } from "vitest";
-import { githubEventSubjects, githubSubjects } from "./subjects.js";
+import { githubEventSubjects, githubNaturalSubject, githubSubjects } from "./subjects.js";
+
+function event(overrides: Partial<NormalizedEvent> = {}): NormalizedEvent {
+  return {
+    key: "github.check_run.completed",
+    dedupeKey: "d1",
+    occurredAt: "2026-10-16T00:00:00.000Z",
+    refs: {},
+    summary: "check run completed",
+    payload: {},
+    ...overrides,
+  };
+}
 
 const SHA = "aaaa000000000000000000000000000000000001";
 
@@ -145,5 +158,28 @@ describe("githubSubjects label/url", () => {
   it("label and url round-trip a repo subject", () => {
     expect(githubSubjects.label("github:acme/lean-proofs")).toBe("acme/lean-proofs");
     expect(githubSubjects.url("github:acme/lean-proofs")).toBe("https://github.com/acme/lean-proofs");
+  });
+});
+
+describe("githubNaturalSubject", () => {
+  it("returns the pull request subject when the payload names one", () => {
+    const { subjects } = githubEventSubjects("check_run", checkRunFailurePr42);
+    expect(githubNaturalSubject(event({ subjects }))).toEqual({
+      subject: "github:acme/lean-proofs#42",
+      label: "acme/lean-proofs#42",
+    });
+  });
+
+  it("falls back to the repository subject when no pull request or issue is named", () => {
+    const { subjects } = githubEventSubjects("check_suite", checkSuiteForkNoPrs);
+    expect(githubNaturalSubject(event({ subjects }))).toEqual({
+      subject: "github:acme/lean-proofs",
+      label: "acme/lean-proofs",
+    });
+  });
+
+  it("returns null when the event names no repository", () => {
+    const { subjects } = githubEventSubjects("ping", {});
+    expect(githubNaturalSubject(event({ subjects }))).toBeNull();
   });
 });
