@@ -1,6 +1,6 @@
 # Incident mention routing
 
-Date: 2026-10-15. Status: implemented.
+Date: 2026-10-15. Status: superseded by `2026-10-16-delivery-threads-and-claims-design.md` (Part C). Accurate for the code on this branch until that spec ships.
 
 Depends on: `2026-10-15-event-wakeups-design.md` (event waiters, the
 mention rule, Scenario E) and `2026-07-20-event-system-design.md`
