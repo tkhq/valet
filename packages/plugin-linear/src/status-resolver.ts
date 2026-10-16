@@ -8,7 +8,13 @@
 import type { DeriveContext, StatusResolver } from "@valet/engine";
 
 const CACHE_TTL_MS = 60 * 60 * 1000;
-const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
+/**
+ * The GraphQL endpoint. `LINEAR_API_URL` overrides the host, as the arm
+ * checks and the Linear service read it, so a fixture serves both.
+ */
+export function linearGraphqlUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return `${env.LINEAR_API_URL || "https://api.linear.app"}/graphql`;
+}
 
 const WORKFLOW_STATES_QUERY = `
   query ValetWorkflowStates($teamKey: String!) {
@@ -40,7 +46,7 @@ async function fetchStatusByStateId(ctx: DeriveContext, teamKey: string): Promis
 
   let res: Response;
   try {
-    res = await ctx.fetch(LINEAR_GRAPHQL_URL, {
+    res = await ctx.fetch(linearGraphqlUrl(), {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ query: WORKFLOW_STATES_QUERY, variables: { teamKey } }),

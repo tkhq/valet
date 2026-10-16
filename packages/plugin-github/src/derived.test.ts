@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DeriveContext, NormalizedEvent } from "@valet/engine";
-import { checksCompleted } from "./derived.js";
+import { checksCompleted, latestCompletedAt } from "./derived.js";
 
 // Spec: docs/specs/2026-10-15-event-wakeups-design.md, Part B1 and the B2
 // vectors. A stub `fetch` serves fixture JSON; no test reaches the network.
@@ -10,12 +10,12 @@ const OLD = "bbbb000000000000000000000000000000000002";
 const API = "https://api.github.com";
 const PR_SUBJECT = "github:acme/lean-proofs#42";
 
-interface CheckRun { status: string; conclusion: string | null }
+interface CheckRun { status: string; conclusion: string | null; completed_at?: string }
 interface Fixture {
   head?: string;
   /** Check-run pages, in order. */
   pages?: CheckRun[][];
-  combined?: { state: string; statuses: { state: string }[] };
+  combined?: { state: string; statuses: { state: string; updated_at?: string }[] };
   /** A path that answers with this HTTP status instead of fixture JSON. */
   failPath?: { path: string; status: number };
 }
@@ -68,7 +68,8 @@ function source(sha: string, key = "github.check_run.completed"): NormalizedEven
   };
 }
 
-const ok = (n: number): CheckRun[] => Array.from({ length: n }, () => ({ status: "completed", conclusion: "success" }));
+const DONE_AT = "2026-10-15T12:00:00.000Z";
+const ok = (n: number): CheckRun[] => Array.from({ length: n }, () => ({ status: "completed", conclusion: "success", completed_at: DONE_AT }));
 
 describe("checksCompleted (spec B1)", () => {
   it("declares the derived key and its sources", () => {
@@ -99,14 +100,14 @@ describe("checksCompleted (spec B1)", () => {
       const event = await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD));
       expect(event?.status).toBe("success");
       expect(event?.key).toBe("github.pull_request.checks_completed");
-      expect(event?.dedupeKey).toBe(`derived:checks_completed:acme/lean-proofs@${HEAD}:success`);
+      expect(event?.dedupeKey).toBe(`derived:checks_completed:acme/lean-proofs@${HEAD}:success:${DONE_AT}`);
     });
 
     it("returns status failure when all runs complete and one fails", async () => {
-      const stub = stubFetch({ pages: [[...ok(2), { status: "completed", conclusion: "failure" }]], combined: { state: "pending", statuses: [] } });
+      const stub = stubFetch({ pages: [[...ok(2), { status: "completed", conclusion: "failure", completed_at: "2026-10-15T12:05:00Z" }]], combined: { state: "pending", statuses: [] } });
       const event = await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD));
       expect(event?.status).toBe("failure");
-      expect(event?.dedupeKey).toBe(`derived:checks_completed:acme/lean-proofs@${HEAD}:failure`);
+      expect(event?.dedupeKey).toBe(`derived:checks_completed:acme/lean-proofs@${HEAD}:failure:2026-10-15T12:05:00.000Z`);
     });
 
     it("returns null when all runs succeed but the combined status is pending with one status", async () => {
@@ -123,6 +124,21 @@ describe("checksCompleted (spec B1)", () => {
   it.each(["failure", "error"])("treats combined status %s as failure", async (state) => {
     const stub = stubFetch({ pages: [ok(1)], combined: { state, statuses: [{ state }] } });
     expect((await checksCompleted.derive(ctxWith(stub.fetch), PR_SUBJECT, source(HEAD)))?.status).toBe("failure");
+  });
+
+  it("gives a CI re-run on the same SHA a new dedupe key (B1 step 5)", async () => {
+    const first = stubFetch({ pages: [[{ status: "completed", conclusion: "failure", completed_at: "2026-10-15T12:05:00Z" }]], combined: { state: "pending", statuses: [] } });
+    const rerun = stubFetch({ pages: [[{ status: "completed", conclusion: "failure", completed_at: "2026-10-15T13:40:00Z" }]], combined: { state: "pending", statuses: [] } });
+    const a = await checksCompleted.derive(ctxWith(first.fetch), PR_SUBJECT, source(HEAD));
+    const b = await checksCompleted.derive(ctxWith(rerun.fetch), PR_SUBJECT, source(HEAD));
+    expect(a?.dedupeKey).toBe(`derived:checks_completed:acme/lean-proofs@${HEAD}:failure:2026-10-15T12:05:00.000Z`);
+    expect(b?.dedupeKey).toBe(`derived:checks_completed:acme/lean-proofs@${HEAD}:failure:2026-10-15T13:40:00.000Z`);
+  });
+
+  it("latestCompletedAt takes the newest check-run or status time, or 0 when none reports one", () => {
+    expect(latestCompletedAt([{ completedAt: "2026-10-15T12:00:00Z" }], [{ updated_at: "2026-10-15T12:30:00Z" }])).toBe("2026-10-15T12:30:00.000Z");
+    expect(latestCompletedAt([{ completedAt: "2026-10-15T14:00:00Z" }, {}], [{ state: "success" }])).toBe("2026-10-15T14:00:00.000Z");
+    expect(latestCompletedAt([{}], [])).toBe("0");
   });
 
   it("returns null for a pull request with no checks", async () => {

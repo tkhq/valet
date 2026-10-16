@@ -37,7 +37,7 @@ function githubFixture(opts: { conclusion?: string; statusCode?: number } = {}):
       return Response.json({ number: 42, html_url: "https://github.com/acme/lean-proofs/pull/42", head: { sha: HEAD } });
     }
     if (url.pathname.endsWith("/check-runs")) {
-      return Response.json({ total_count: 1, check_runs: [{ status: "completed", conclusion: opts.conclusion ?? "failure" }] });
+      return Response.json({ total_count: 1, check_runs: [{ status: "completed", conclusion: opts.conclusion ?? "failure", completed_at: "2026-10-15T12:00:00Z" }] });
     }
     if (url.pathname.endsWith("/status")) return Response.json({ state: "pending", statuses: [] });
     return new Response("not found", { status: 404 });
@@ -63,7 +63,7 @@ describe("runDerive", () => {
     if (out.result !== "event") return;
     expect(out.digest.key).toBe(KEY);
     expect(out.digest.status).toBe("failure");
-    expect(out.digest.dedupeKey).toBe(`derived:checks_completed:acme/lean-proofs@${HEAD}:failure`);
+    expect(out.digest.dedupeKey).toBe(`derived:checks_completed:acme/lean-proofs@${HEAD}:failure:2026-10-15T12:00:00.000Z`);
     expect(out.digest.url).toBe("https://github.com/acme/lean-proofs/pull/42");
     expect(out.digest.derive).toBeUndefined();
     expect(rec.points).toEqual([{ key: KEY, result: "event" }]);

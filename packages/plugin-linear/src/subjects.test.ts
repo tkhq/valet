@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { linearEventSubjects, linearSubjects } from "./subjects.js";
+import { issueFromUrl, linearEventSubjects, linearSubjects } from "./subjects.js";
 
 // Recorded webhook payloads, trimmed to the fields `linearEventSubjects`
 // reads (spec: docs/specs/2026-10-15-event-wakeups-design.md, Part A4/A6).
@@ -47,6 +47,24 @@ describe("linearEventSubjects", () => {
     const r = linearEventSubjects("Comment", commentByApp);
     expect(r.bot).toBe(true);
     expect(r.subjects).toEqual(["linear:team/ENG", "linear:ENG-8"]);
+  });
+
+  it("a comment whose issue has only { id, title } takes the parent from the top-level url (final review, item 9)", () => {
+    const r = linearEventSubjects("Comment", {
+      action: "create",
+      type: "Comment",
+      actor: { id: "u-1", type: "user" },
+      url: "https://linear.app/acme/issue/ENG-7/fix-login#comment-c3",
+      data: { id: "c-3", body: "ping", issue: { id: "i-7", title: "Fix login" } },
+    });
+    expect(r.subjects).toEqual(["linear:team/ENG", "linear:ENG-7"]);
+  });
+
+  it("issueFromUrl reads the identifier and team key, or null", () => {
+    expect(issueFromUrl("https://linear.app/acme/issue/ENG-7/fix-login")).toEqual({ identifier: "ENG-7", teamKey: "ENG" });
+    expect(issueFromUrl("https://linear.app/acme/issue/A2B-12")).toEqual({ identifier: "A2B-12", teamKey: "A2B" });
+    expect(issueFromUrl("https://linear.app/acme/team/ENG/triage")).toBeNull();
+    expect(issueFromUrl(undefined)).toBeNull();
   });
 
   it("a comment payload without the parent identifier gives only the team subject", () => {
