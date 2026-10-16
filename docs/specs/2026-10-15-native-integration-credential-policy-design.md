@@ -207,9 +207,9 @@ deployment after merge.
    the org PAT row.** That order is not new. The change is that the
    action's repository owner now picks the installation, so an org with
    several installations stops falling through to the PAT row. A strict
-   app-only order breaks orgs that use only a PAT. The PAT answers only when no installation resolves (`null`). If
-   the installation mint fails with an error, the run fails with that
-   error and does not use the PAT. `action-invoker.test.ts` holds this.
+   app-only order breaks orgs that use only a PAT. The PAT answers only
+   when no installation resolves (`null`). If the installation mint fails
+   with an error, the run fails with that error and does not use the PAT. `action-invoker.test.ts` holds this.
 3. **Spike S1 was resolved from Linear's documentation**, not from a live
    call. The live check runs on the dev deployment after merge.
 4. **The app credential row map is a fixed list.**
@@ -259,6 +259,9 @@ deployment after merge.
    keeps the other keys, for example `teamId`, `teamName`, `botUserId`,
    and `botId`. This applies to org-owned reads, org-provided fallbacks,
    and workflow nodes pinned to `app`. The stored row keeps its secrets.
-   The channel transport (`channels/host.ts`) is the only reader that
-   gets them, through `resolveOrgChannelCredentialRead`, because it
-   verifies inbound requests and opens Socket Mode.
+   The channel transport (`channels/host.ts`) is the only resolved org
+   read that keeps them, through `resolveOrgChannelCredentialRead`,
+   because it verifies inbound requests and opens Socket Mode. Ingress
+   and status routes (`http-slack.ts`, `http-installations.ts`,
+   `linear-ingress.ts`) read the stored row directly and never reach an
+   action.
