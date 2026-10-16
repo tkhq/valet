@@ -39,11 +39,13 @@ const prClosedMerged = {
 };
 
 // Trimmed to omit `pull_request.head.sha` — this fixture only exercises the
-// PR-number subject, per A6's row for this event.
+// PR-number subject, per A6's row for this event. `review.state` is the real
+// payload casing ("APPROVED"), so `statusOf`'s `.toLowerCase()` is exercised
+// rather than asserted against an already-lowercase fixture.
 const reviewApproved = {
   action: "submitted",
   pull_request: { number: 42 },
-  review: { state: "approved" },
+  review: { state: "APPROVED" },
   repository: { full_name: "acme/lean-proofs" },
   sender: { id: 1, login: "octocat", type: "User" },
 };
