@@ -1980,6 +1980,17 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
   // triggers move the hours and days.
   { describe: "usage workflow step attribution", probe: { kind: "column", table: "usage_step_attribution_ready", column: "version" }, prepare: prepareUsageStepAttribution, sql: USAGE_STEP_ATTRIBUTION_PUBLISH_SQL },
 
+  {
+    // Normalized subjects on the stored event (spec 2026-10-15: event
+    // wakeups, Part G). Delivery-time rechecks (team-coverage, redeliver)
+    // read this column so they match the implicit `subject` filter the same
+    // way ingest did; a row stored before this column existed reads null,
+    // which that matching treats as no subjects (fails closed).
+    describe: "events.subjects column",
+    probe: { kind: "column", table: "events", column: "subjects" },
+    sql: 'ALTER TABLE "events" ADD COLUMN IF NOT EXISTS "subjects" text[]',
+  },
+
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

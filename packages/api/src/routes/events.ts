@@ -573,7 +573,7 @@ eventsRouter.post("/events/:id/redeliver", async (c) => {
   const catalog = catalogForService(plugins, event.service);
   const matched: typeof subs = [];
   for (const sub of subs) {
-    if (await authorizedSubscriptionMatchesEvent(db, sub, event.eventKey, event.payload, catalog)) matched.push(sub);
+    if (await authorizedSubscriptionMatchesEvent(db, sub, event.eventKey, event.payload, catalog, event.subjects ?? undefined)) matched.push(sub);
   }
 
   if (matched.length > 0) {

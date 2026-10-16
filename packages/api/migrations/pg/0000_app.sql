@@ -1073,7 +1073,8 @@ CREATE TABLE "events" (
 	"summary" text NOT NULL,
 	"payload" jsonb NOT NULL,
 	"occurred_at" bigint NOT NULL,
-	"received_at" bigint NOT NULL
+	"received_at" bigint NOT NULL,
+	"subjects" text[]
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "events_service_dedupe" ON "events" ("service","dedupe_key");

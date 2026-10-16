@@ -1948,6 +1948,11 @@ export const events = pgTable(
     payload: jsonb("payload").notNull(),
     occurredAt: bigint("occurred_at", { mode: "number" }).notNull(),
     receivedAt: bigint("received_at", { mode: "number" }).notNull(),
+    /** Normalized subjects (spec 2026-10-15: event wakeups, Part A1), coarse
+     * to fine. Null on a row stored before this column existed; delivery-time
+     * matching treats that as no subjects, so a `subject` filter fails closed
+     * for it rather than matching. */
+    subjects: text("subjects").array(),
   },
   (t) => [
     uniqueIndex("events_service_dedupe").on(t.service, t.dedupeKey),

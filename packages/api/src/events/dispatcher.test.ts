@@ -57,6 +57,7 @@ interface SeedOpts {
   summary?: string;
   payload?: unknown;
   actor?: unknown;
+  subjects?: string[];
 }
 
 describe("EventDispatcher", () => {
@@ -85,6 +86,7 @@ describe("EventDispatcher", () => {
       payload: opts.payload ?? { action: "opened", issue: { number: 7 } },
       occurredAt: now - 5_000,
       receivedAt: now,
+      subjects: opts.subjects ?? null,
     });
     await db.insert(eventSubscriptions).values({
       id: subscriptionId,
@@ -146,6 +148,45 @@ describe("EventDispatcher", () => {
     expect(personal!.enabled).toBe(expected !== "skipped");
     await dispatcher.pollOnce();
     expect(deliver).toHaveBeenCalledTimes(expected === "delivered" ? 1 : 0);
+  });
+
+  it("a team subscription's matching subject filter suppresses delivery under ignoreIfMyTeamSubscribed (spec Part G)", async () => {
+    const db = tdb.appDb;
+    const subjects = ["github:acme", "github:acme/site", "github:acme/site#7"];
+    const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator", deliveryPolicy: "ignoreIfMyTeamSubscribed" }, subjects });
+    await db.insert(teams).values({ id: "subject-team", orgId: ORG, name: "Subject", createdAt: Date.now() });
+    await db.insert(teamMembers).values({ teamId: "subject-team", userId: "user-1", role: "member" });
+    await db.insert(eventSubscriptions).values({
+      id: "subject-rule", orgId: ORG, ownerType: "team", ownerId: "subject-team", name: "Team coverage",
+      eventKeys: ["github.issues.*"], filters: [{ field: "subject", op: "eq", value: "github:acme/site#7" }],
+      target: { kind: "orchestrator", orchestrator: "team", teamId: "subject-team" },
+      enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver, plugins: [githubPlugin] });
+    await dispatcher.pollOnce();
+    expect((await getDelivery(deliveryId)).status).toBe("skipped");
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it("a team subscription's non-matching subject filter does not suppress delivery (spec Part G)", async () => {
+    const db = tdb.appDb;
+    const subjects = ["github:acme", "github:acme/site", "github:acme/site#7"];
+    const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator", deliveryPolicy: "ignoreIfMyTeamSubscribed" }, subjects });
+    await db.insert(teams).values({ id: "subject-team-2", orgId: ORG, name: "Subject2", createdAt: Date.now() });
+    await db.insert(teamMembers).values({ teamId: "subject-team-2", userId: "user-1", role: "member" });
+    await db.insert(eventSubscriptions).values({
+      id: "subject-rule-2", orgId: ORG, ownerType: "team", ownerId: "subject-team-2", name: "Team coverage",
+      // Names a different issue on the same repo — the key matches, the subject does not.
+      eventKeys: ["github.issues.*"], filters: [{ field: "subject", op: "eq", value: "github:acme/site#999" }],
+      target: { kind: "orchestrator", orchestrator: "team", teamId: "subject-team-2" },
+      enabled: true, createdBy: "user-1", createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const dispatcher = new EventDispatcher({ db, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToOrchestrator: deliver, plugins: [githubPlugin] });
+    await dispatcher.pollOnce();
+    expect((await getDelivery(deliveryId)).status).toBe("delivered");
+    expect(deliver).toHaveBeenCalledTimes(1);
   });
 
   it("skips only matching events without pausing and respects a later disabled team rule on retry", async () => {

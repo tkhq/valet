@@ -600,6 +600,9 @@ Every catalog entry gains the implicit filter field `subject`. Its value
 matches when any of the event's subjects equals it (`eq`) or starts with it
 (`prefix`). Derived keys stay unavailable to subscriptions (see Non-goals).
 
+A stored event keeps its subjects, so a delivery-time recheck (team
+coverage, redeliver) matches a `subject` filter the same way ingest did.
+
 ## Part H: Web
 
 *Depends on: Part F.*
