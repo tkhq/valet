@@ -147,7 +147,7 @@ describe("teamApiKeyPathAllowed", () => {
     expect(teamApiKeyPathAllowed("/api/workspaces/team_1/runtime", "GET", TEAM)).toBe(true);
     expect(teamApiKeyPathAllowed("/api/workspaces/team_1/outcomes", "GET", TEAM)).toBe(true);
     expect(teamApiKeyPathAllowed("/api/workspaces/team_1/active-work", "GET", TEAM)).toBe(true);
-    expect(teamApiKeyPathAllowed("/api/workspaces/team_1/briefings", "GET", TEAM)).toBe(true);
+    expect(teamApiKeyPathAllowed("/api/workspaces/team_1/briefings", "GET", TEAM)).toBe(false);
     expect(teamApiKeyPathAllowed("/api/workspaces/team_2/briefings", "GET", TEAM)).toBe(false);
     expect(teamApiKeyPathAllowed("/api/workspaces/user/briefings", "GET", TEAM)).toBe(false);
     expect(teamApiKeyPathAllowed("/api/workspaces/team_2/active-work", "GET", TEAM)).toBe(false);

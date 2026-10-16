@@ -288,7 +288,7 @@ export function threadVisibility(deps: AccessDeps, session: { ownerType: string;
 
 /**
  * SQL: whether a team thread may appear in content every member sees at once,
- * such as a cached briefing. Not a person's own thread, and not a Slack
+ * such as shared workflow outcomes. Not a person's own thread, and not a Slack
  * channel thread unless its public classification is fresh: nobody's access is
  * checked when the content is read. A channel is classified the first time
  * any member's thread list shows it.

@@ -2,7 +2,6 @@ import { sql } from "drizzle-orm";
 import { afterEach, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { sessionThreads } from "../schema/index.js";
-import { collectWorkspaceBriefingSources } from "./workspace-briefing-sources.js";
 import type { ListThreadsResponse, WaitingThreadsResponse } from "../wire/types.js";
 import {
   isSharedThreadKey, lastAgentAsk, listWaitingThreads, sharedThreadKey,
@@ -159,12 +158,4 @@ it("keeps private helper and editor threads out of shared workspace lists", asyn
     expect(await shared(key, viewer), `${key} for ${viewer}`).toBe(expected);
     expect(isSharedThreadKey(key, viewer), `${key} for ${viewer}`).toBe(expected);
   }
-
-  // Brief evidence is shared by every member, so it never reads a helper thread.
-  const now = Date.now();
-  const helper = await (await fetch(`${api.baseUrl}/api/workspaces/user/conversation`, { method: "POST" })).json() as { sessionId: string; threadId: string };
-  await api.providers.db.insert(sessionThreads).values({ id: helper.threadId, sessionId: helper.sessionId, createdAt: now, lastUserActivityAt: now });
-  await agentMessage(api, { id: helper.threadId, sessionId: helper.sessionId }, now);
-  const sources = await collectWorkspaceBriefingSources(api.providers.db, "local-org", { type: "user", id: "local-user" });
-  expect(sources.some(item => item.source.threadId === helper.threadId)).toBe(false);
 });

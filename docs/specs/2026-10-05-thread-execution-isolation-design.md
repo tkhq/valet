@@ -49,15 +49,13 @@ Retained publications do not require reconstructing source-thread metadata. New 
 Artifacts from snapshot-proven legacy runtimes retain their prior access contract and publication token. Missing source-thread metadata alone does not quarantine them. New unverified sources remain restricted.
 Record access/recovery dispositions and repeat the inventory. Unexplained changes block cutover; code review cannot certify target data.
 
-## Delivery and briefing recovery
+## Delivery recovery
 
 Slack-event workflow chaining stays blocked until child runs carry the channel audience. Linked-account admission remains required.
 Slack ingress and workflow events drain independently. At most ten inbox rows process concurrently, with renewed fenced leases.
 After ten failures, retain the encrypted payload, set `failed_at`, and record `slack_delivery_failed` atomically.
 Operators inspect receipt stages and repair consumers before resetting the verified organization's delivery to `attempts=0`, `failed_at=null`, `next_attempt_at=0`.
 Do not delete accepted payloads. Durable dispatch IDs prevent replay from starting another admitted turn.
-Shared briefing evidence and cached responses require public Slack classifications checked within five minutes, including event-only sources and effects.
-Outages exclude expired evidence. Refreshes renew leases through collection/generation/validation; replaced workers cannot publish or renew.
 
 ## Validation
 

@@ -54,7 +54,7 @@ function DashboardBody() {
   return (
     <div className="min-w-0 flex-1 overflow-y-auto">
       <div className={cn(pageClass, "space-y-8")}>
-        <header><h1 className="font-display text-2xl">Personal</h1><p className="mt-1 text-sm text-muted">Your briefing: what needs attention, what finished, and what comes next.</p></header>
+        <header><h1 className="font-display text-2xl">Personal</h1><p className="mt-1 text-sm text-muted">Your recent work and items that need attention.</p></header>
         <WorkspaceCatchUp />
         <div className="grid gap-4 md:grid-cols-2">
           <MemoryCard />
