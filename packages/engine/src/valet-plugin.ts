@@ -167,6 +167,11 @@ export interface StatusResolver {
 export interface EventCatalogEntry {
   key: string;
   description: string;
+  /**
+   * True for a key from a plugin's `derivedEvents` (spec Part B). An event
+   * waiter accepts it; a subscription does not.
+   */
+  derived?: boolean;
   /** Filterable fields: `field` is the user-facing name, `path` a dot-path into the raw payload. */
   filters: {
     field: string;

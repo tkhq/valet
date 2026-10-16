@@ -90,6 +90,7 @@ interface Instruments {
   wakeupBadRows: Counter;
   eventWaiterBufferFull: Counter;
   eventWaiterMatches: Counter;
+  eventDerive: Counter;
   eventMatchFailed: Counter;
   wakeupSweepOkAt: ObservableGauge;
   wakeupSweepFailed: Counter;
@@ -201,6 +202,10 @@ function inst(): Instruments {
     eventWaiterMatches: meter.createCounter("valet.event_waiter.matches", {
       description:
         "Event matches that ingest appended to an event waiter's buffer, by service. Prometheus exports it as valet_event_waiter_matches_total. A redelivered event the waiter already holds is not counted.",
+    }),
+    eventDerive: meter.createCounter("valet.event_waiter.derive", {
+      description:
+        "Derived event computations for event waiters, by derived key and result (event, null, error). Prometheus exports it as valet_event_waiter_derive_total. result=error means a provider read failed and the match digest was kept; a sustained rate means the provider or its credential is broken.",
     }),
     eventMatchFailed: meter.createCounter("valet.wakeups.event_match_failed", {
       description:
@@ -441,6 +446,14 @@ export function recordEventWaiterBufferFull(): void {
 /** Ingest appended one event match to an event waiter for `service`. */
 export function recordEventWaiterMatch(service: string): void {
   inst().eventWaiterMatches.add(1, { service });
+}
+
+/** The outcome of one derived event computation (spec Part J). */
+export type EventDeriveResult = "event" | "null" | "error";
+
+/** One `DerivedEventDef.derive` call finished with `result`. */
+export function recordEventDerive(key: string, result: EventDeriveResult): void {
+  inst().eventDerive.add(1, { key, result });
 }
 
 /** Event waiter matching failed during ingest. */

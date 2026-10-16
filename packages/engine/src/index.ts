@@ -119,6 +119,7 @@ export {
   recordWakeupBadRow,
   recordEventWaiterBufferFull,
   recordEventWaiterMatch,
+  recordEventDerive,
   recordEventMatchFailed,
   recordWakeupSweepFailed,
   recordWakeupSweepOk,
@@ -127,6 +128,7 @@ export {
   type SandboxDestroyReason,
   type SandboxFlagKind,
   type WorkspaceGrowOutcome,
+  type EventDeriveResult,
 } from "./metrics.js";
 export { Engine } from "./engine.js";
 export { Session, type ThreadInitialSettings } from "./session.js";
