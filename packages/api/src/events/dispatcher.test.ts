@@ -8,11 +8,11 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { eq, sql } from "drizzle-orm";
-import type { Wakeup } from "@valet/engine";
+import type { ChannelOrigin, EventClause, Wakeup } from "@valet/engine";
 import type { RunHost, WorkflowTriggerPayload } from "@valet/workflow";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
-import { findFollowedThread } from "./followed-threads.js";
+import { findFollowedThread, upsertFollowedThread } from "./followed-threads.js";
 import {
   teams,
   teamMembers,
@@ -657,24 +657,28 @@ describe("EventDispatcher", () => {
   describe("incident mention routing", () => {
     const CHANNEL_SUBJECT = "slack:T001/C1";
 
-    function waiter(id: string, sessionId: string, opts: { createdAt: number; once?: boolean; subjects?: string[]; status?: Wakeup["status"] }): Wakeup {
+    function waiter(id: string, sessionId: string, opts: {
+      createdAt: number; once?: boolean; subjects?: string[]; status?: Wakeup["status"];
+      clauses?: EventClause[]; primarySubject?: string;
+    }): Wakeup {
       return {
         id, sessionId, threadId: `thr-${id}`, kind: "event", status: opts.status ?? "running", reason: "Incident",
         logOffset: 0, logTail: "", eventCount: 0, createdAt: opts.createdAt, updatedAt: opts.createdAt,
         subjects: opts.subjects ?? [CHANNEL_SUBJECT],
-        eventMatch: { clauses: [{ key: "slack.message" }], once: opts.once ?? false, self: [] },
+        eventMatch: {
+          clauses: opts.clauses ?? [{ key: "slack.message" }], once: opts.once ?? false, self: [],
+          ...(opts.primarySubject ? { primarySubject: opts.primarySubject } : {}),
+        },
       };
     }
 
     /**
-     * A store whose `findEventWaiters` returns every seeded row, ignoring the
-     * queried subjects. A real store already filters by subject overlap
-     * (`store.ts` `findEventWaiters`, `subjects && $1`) before `dispatcher.ts`
-     * ever calls it with a single-element array — so that overlap can never
-     * exclude anything `findWatchingWaiter` wouldn't exclude itself. Returning
-     * everything here instead routes a thread-subject-only waiter through
-     * `findWatchingWaiter`'s OWN step-3 filter, so the guard is the thing
-     * under test, not the fake.
+     * A store whose `findEventWaiters` returns every seeded row and ignores
+     * the queried subjects. A real store filters by subject overlap
+     * (`subjects && $1`). That overlap never excludes a row that
+     * `findWatchingWaiter` keeps. Returning every row sends a waiter on a
+     * thread subject alone through `findWatchingWaiter`'s own subject
+     * filter, so the test checks that filter and not the fake.
      */
     function fakeStore(rows: Wakeup[]) {
       const lookups: string[][] = [];
@@ -710,8 +714,8 @@ describe("EventDispatcher", () => {
     }
 
     /** A deliverable watching-waiter session: a real execution of the
-     * owner's assistant, with its own thread — the shape
-     * `deliverToAssistantThread` requires for an explicit target. */
+     * owner's assistant, with its own thread. `deliverToAssistantThread`
+     * requires this shape for an explicit target. */
     async function seedSession(id: string, ownerType: "user" | "team", ownerId: string, threadId: string, orgId = ORG) {
       const { assistantId, governingThreadId } = await seedAssistant(ownerType, ownerId, orgId);
       await tdb.appDb.insert(agentSessions).values({ id, orgId, userId: "member-9", ownerType, ownerId, workspace: "/workspace", createdAt: 1, updatedAt: 1 });
@@ -722,10 +726,9 @@ describe("EventDispatcher", () => {
         VALUES (${threadId}, ${id}, ${threadId}, 'idle', 'steer', 1, 1)`);
     }
 
-    /** A session with no `assistants` / `assistant_executions` row at all —
-     * "a team-owned child or plain session" (review finding 1): it would
-     * dead-letter `deliverToAssistantThread`, so `findWatchingWaiter` must
-     * skip it. */
+    /** A session with no `assistants` or `assistant_executions` row: a
+     * team-owned child or plain session. Delivery to it dead-letters, so
+     * `findWatchingWaiter` skips it (Part A step 5). */
     async function seedPlainSession(id: string, ownerType: "user" | "team", ownerId: string, orgId = ORG) {
       await tdb.appDb.insert(agentSessions).values({ id, orgId, userId: "member-9", ownerType, ownerId, workspace: "/workspace", createdAt: 1, updatedAt: 1 });
     }
@@ -735,7 +738,7 @@ describe("EventDispatcher", () => {
       await tdb.appDb.insert(sessionThreads).values({ id: threadId, sessionId, createdAt: 1, archivedAt: Date.now() });
     }
 
-    async function dispatchMention(rows: Wakeup[], opts: { subjects?: string[]; payload?: Record<string, unknown> } = {}) {
+    async function dispatchMention(rows: Wakeup[], opts: { subjects?: string[]; payload?: Record<string, unknown>; origin?: ChannelOrigin } = {}) {
       const { deliveryId } = await seedDelivery({
         target: { kind: "orchestrator", follow: true },
         ownerType: "team", ownerId: "team-x", service: "slack",
@@ -750,7 +753,7 @@ describe("EventDispatcher", () => {
       await new EventDispatcher({
         db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
         deliverToOrchestrator: deliver,
-        resolveChannelOrigin: () => ({ channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" }),
+        resolveChannelOrigin: () => opts.origin ?? { channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.2" },
         engineStore: fake.store,
       }).pollOnce();
       return { deliver, deliveryId, lookups: fake.lookups };
@@ -793,7 +796,7 @@ describe("EventDispatcher", () => {
       expect(deliver.mock.calls[0][0].target).toEqual({ sessionId: "sess-mine", threadId: "thr-mine" });
     });
 
-    it("keeps today's delivery and follow when no waiter watches the channel itself (Part A steps 3 and 5)", async () => {
+    it("keeps today's delivery and follow when no waiter watches the channel itself (Part A steps 4 and 7)", async () => {
       await seedMentionMember("team-x");
       await seedSession("sess-1", "team", "team-x", "thr-sess-1");
       await seedSession("sess-2", "team", "team-z", "thr-sess-2");
@@ -833,15 +836,13 @@ describe("EventDispatcher", () => {
       expect((await getDelivery(deliveryId)).status).toBe("dead");
     });
 
-    // Review finding 1: `findWatchingWaiter` must only pick a candidate that
-    // `deliverToAssistantThread` would actually deliver to. It reuses that
-    // function's own gate (`isDeliverableTarget`) rather than a looser,
-    // duplicated owner-only check.
+    // Part A step 5: `findWatchingWaiter` picks only a candidate that
+    // `deliverToAssistantThread` accepts. It reuses that function's own gate
+    // (`isDeliverableTarget`).
     it("a newer waiter in a non-assistant session loses to an older assistant one", async () => {
       await seedMentionMember("team-x");
-      // A plain `agent_sessions` row with no `assistants` / `assistant_executions`
-      // wiring — a team-owned child or ad hoc session that would dead-letter
-      // `deliverToAssistantThread`'s explicit-target check.
+      // A plain `agent_sessions` row with no assistant wiring. Delivery
+      // with an explicit target to this session dead-letters.
       await seedPlainSession("sess-plain", "team", "team-x");
       await seedSession("sess-asst", "team", "team-x", "thr-asst");
       const { deliver, deliveryId } = await dispatchMention([
@@ -865,6 +866,69 @@ describe("EventDispatcher", () => {
       expect(deliver.mock.calls[0][0].target).toBeUndefined();
       expect((await getDelivery(deliveryId)).status).toBe("delivered");
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
+    });
+
+    it("keeps a threaded mention in a Slack thread the same owner already follows (Part A step 1)", async () => {
+      await seedMentionMember("team-x");
+      await seedSession("sess-1", "team", "team-x", "thr-w");
+      // The mention is a reply in Slack thread 1.1, which team-x already follows.
+      await upsertFollowedThread(tdb.appDb, {
+        orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.1",
+        ownerType: "team", ownerId: "team-x", createdBy: "member-9",
+      });
+      const { deliver, lookups } = await dispatchMention([waiter("w", "sess-1", { createdAt: 100 })], {
+        payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2", thread_ts: "1.1" },
+        origin: { channelType: "slack", threadKey: "slack:C1:1.1", messageTs: "1.2" },
+      });
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(deliver.mock.calls[0][0].target).toBeUndefined();
+      expect(lookups).toEqual([]);
+    });
+
+    it("routes a threaded mention when another owner follows its Slack thread", async () => {
+      await seedMentionMember("team-x");
+      await tdb.appDb.insert(teams).values({ id: "team-z", orgId: ORG, name: "Other", createdAt: Date.now() });
+      await seedSession("sess-1", "team", "team-x", "thr-w");
+      await upsertFollowedThread(tdb.appDb, {
+        orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.1",
+        ownerType: "team", ownerId: "team-z", createdBy: "member-9",
+      });
+      const { deliver } = await dispatchMention([waiter("w", "sess-1", { createdAt: 100 })], {
+        payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2", thread_ts: "1.1" },
+        origin: { channelType: "slack", threadKey: "slack:C1:1.1", messageTs: "1.2" },
+      });
+      expect(deliver.mock.calls[0][0].target).toEqual({ sessionId: "sess-1", threadId: "thr-w" });
+    });
+
+    it("skips a waiter that would not receive every later channel message (Part A step 4)", async () => {
+      await seedMentionMember("team-x");
+      // Each waiter sits in its own deliverable session, so only the clause
+      // check can exclude it.
+      for (const id of ["other-key", "one-sender", "status", "primary"]) {
+        await seedSession(`sess-${id}`, "team", "team-x", `thr-${id}`);
+      }
+      const { deliver } = await dispatchMention([
+        // No slack.message clause at all.
+        waiter("other-key", "sess-other-key", { createdAt: 400, clauses: [{ key: "slack.reaction_added" }] }),
+        // A sender restriction.
+        waiter("one-sender", "sess-one-sender", { createdAt: 300, clauses: [{ key: "slack.message", actor: "U7" }] }),
+        // A status filter, which a Slack message never satisfies.
+        waiter("status", "sess-status", { createdAt: 200, clauses: [{ key: "slack.message", status: ["open"] }] }),
+        // A primary subject other than the channel.
+        waiter("primary", "sess-primary", { createdAt: 150, primarySubject: "slack:T001/C1/9.9" }),
+      ]);
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(deliver.mock.calls[0][0].target).toBeUndefined();
+      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
+    });
+
+    it("accepts a waiter whose open slack.message clause sits beside narrower clauses", async () => {
+      await seedMentionMember("team-x");
+      await seedSession("sess-1", "team", "team-x", "thr-mixed");
+      const { deliver } = await dispatchMention([
+        waiter("mixed", "sess-1", { createdAt: 100, clauses: [{ key: "slack.message", actor: "U7" }, { key: "slack.message", bots: false }] }),
+      ]);
+      expect(deliver.mock.calls[0][0].target).toEqual({ sessionId: "sess-1", threadId: "thr-mixed" });
     });
 
     it("falls back to today's behavior and binds the follow when only invalid candidates watch the channel", async () => {

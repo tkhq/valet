@@ -542,9 +542,14 @@ step that returns early for an event that no subscription matched.
 
 Mention rule: a `slack.message` event whose text contains `<@bot user id>`
 MUST NOT match an event waiter when an enabled subscription naming
-`slack.app_mention` matches that channel. The matcher evaluates that
-subscription with the existing subscription matcher against the same
-payload. The mention then reaches the agent once, through the subscription.
+`slack.app_mention` matches that channel and its sender gate admits the
+sender. The matcher evaluates that subscription with the existing
+subscription matcher against the same payload. It then runs the
+dispatcher's own sender gate (`mentionSenderActor`), without a drop log.
+The mention then reaches the agent once, through the subscription. When
+the gate refuses the sender, for example an unlinked sender under a team
+rule, no subscription delivers the mention. The event waiter then MUST
+receive it as an ordinary channel message.
 7. Append a receipt stage `waiter_match` with the count of waiters that
    matched. The stage holds metadata only. An event with no candidate
    waiter adds no stage.

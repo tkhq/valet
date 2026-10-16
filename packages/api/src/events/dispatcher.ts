@@ -41,9 +41,9 @@ import {
   followBindingAuthorized,
   isTeamAssistantMention,
   mentionAudience,
+  mentionSenderActor,
   channelMessageAuthor,
   newcomerAuthor,
-  teamMentionActor,
 } from "./team-slack-gate.js";
 import { resolvePath } from "./match.js";
 import { loadSessionOwner } from "./waiters.js";
@@ -294,9 +294,9 @@ export class EventDispatcher {
         const teamMention = isTeamAssistantMention(sub, event.eventKey);
         const audience = mentionAudience(sub);
         // A verified mention carries a human actor. Other shared event work
-        // acts as its owner, never as the member who created the rule.
-        const actorUserId = teamMention ? await teamMentionActor(db, sub, event.payload)
-          : sub.ownerType === "user" ? sub.createdBy : `${sub.ownerType}:${sub.ownerId}`;
+        // acts as its owner, never as the member who created the rule. The
+        // event waiter's mention rule reuses this gate (`mentionSenderActor`).
+        const actorUserId = await mentionSenderActor(db, sub, event.eventKey, event.payload);
         if (event.orgId !== sub.orgId || actorUserId === null) {
           // Name the membership this rule's audience actually requires, the
           // same split the drop log makes in `team-slack-gate.ts`.
@@ -504,6 +504,14 @@ export class EventDispatcher {
     const team = slackEventTeam(event.subjects, event.payload, channel);
     if (!team) return null;
     const db = this.deps.db;
+    // Part A step 1: a reply in a Slack thread that this owner already
+    // follows stays with that follow, so one Slack conversation keeps one
+    // assistant thread.
+    const [, channelId, threadTs] = origin.threadKey.split(":");
+    if (channelId && threadTs && threadTs !== origin.messageTs) {
+      const bound = await findFollowedThread(db, { orgId: event.orgId, channelType: origin.channelType, channelId, threadTs });
+      if (bound && bound.ownerType === owner.type && bound.ownerId === owner.id) return null;
+    }
     return findWatchingWaiter(
       {
         engineStore,
