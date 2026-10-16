@@ -2767,22 +2767,21 @@ export const usageDaily = pgTable("usage_daily", {
  index("usage_daily_outcomes").on(t.createdAt,t.sessionId).where(sql`${t.pullRequests}>0 OR ${t.reviews}>0`),
  index("usage_daily_empty").on(t.createdAt).where(sql`${t.turns}=0 AND ${t.toolCalls}=0 AND ${t.pullRequests}=0 AND ${t.reviews}=0`)]);
 
-/** One durable, fenced briefing snapshot per workspace. */
+/** Retained snapshots from the removed workspace briefing feature. No runtime reads or writes. */
 export const workspaceBriefingCache = pgTable("workspace_briefing_cache", {
   orgId: text("org_id").notNull(),
   ownerType: text("owner_type").notNull(),
   ownerId: text("owner_id").notNull(),
   version: text("version").notNull(),
   evidenceHash: text("evidence_hash"),
-  response: jsonb("response").$type<import("../wire/types.js").WorkspaceBriefingsResponse>(),
+  response: jsonb("response"),
   checkedAt: bigint("checked_at", { mode: "number" }),
   nextCheckAt: bigint("next_check_at", { mode: "number" }).notNull().default(0),
   leaseToken: text("lease_token"),
   leaseUntil: bigint("lease_until", { mode: "number" }).notNull().default(0),
 }, t => [primaryKey({ columns: [t.orgId,t.ownerType,t.ownerId] })]);
 
-/** A brief one person dismissed in one workspace. A brief's id hashes its
- * sources, so new activity makes a new brief that shows again. */
+/** Failed workflow run dismissals and retained legacy briefing dismissals. */
 export const briefingDismissals = pgTable("briefing_dismissals", {
   userId: text("user_id").notNull(),
   orgId: text("org_id").notNull(),

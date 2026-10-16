@@ -17,7 +17,6 @@ Thread search rejects NUL characters. Proposal retries require matching normaliz
 - A supplied missing, archived, or invalid workflow origin rejects start/retry; event retries retain provenance. Ordinary unattended starts may omit origin. Chained runs inherit the parent run's stored origin under matching organization/owner; missing parents fail closed. Team Slack event chaining stays blocked until the child can carry channel audience.
 - Run details, both run lists, and outcomes enforce persisted origin/event audiences, including private Slack channels and named approvers. Origin checks retain the session ID to follow private execution ancestry. Lists scan at most ten store pages; visible continuations never expose private run identifiers. An exhausted budget without visible rows returns an error. Outcome cursors encrypt hidden identifiers; recognizable Slack events missing channels fail closed.
 - Missing source threads deny artifact/batch visibility and bearer-token disclosure. Team artifacts with source sessions but no thread are quarantined; truly originless publications remain supported. Legacy artifacts cannot inject comments into team runtimes. Missing-thread ordinary gates are omitted; named approvers retain exact gate-only access without read/cancel rights.
-- Briefing collection and cache reads check persisted workflow/artifact/outcome origins independently of response links. Missing, foreign, archived, or private origins fail closed. Slack event-only sources recheck channel privacy; originless sources remain supported. See execution isolation for freshness and publication leases.
 
 ## Credentials and private execution
 
@@ -47,7 +46,7 @@ Chat gates use the composer column and shared primitives. Pending actions disabl
 
 Workflow approval commits its signal, grants, audit, and wake flag together. Only the unique signal winner writes grants. Conflicting decisions return already_resolved; grant failure rolls back everything. Shared-account grants remain run-scoped, and durable wake recovers after restart.
 
-Workflow signals use collapsed operation rows with outcome/run link visible and full report on expansion. Recent results starts collapsed; questions, failures, and approvals remain visible. Conversation updates use Open thread; detected questions use Reply. Briefings without a next step avoid claiming no action is needed.
+Workflow signals use collapsed operation rows with outcome/run link visible and full report on expansion. Recent results starts collapsed; questions, failures, and approvals remain visible. Conversation updates use Open thread; detected questions use Reply.
 
 Automation creation/editing share event matching and filter validation. Deselecting events prunes unsupported filters; catalog loading preserves stored filters. Fixed channel scope or explicit Any channel is required for mention rules. Edits send changed fields only; rename and collision retry retain existing behavior.
 

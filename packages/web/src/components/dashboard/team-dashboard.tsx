@@ -14,7 +14,7 @@ export function TeamDashboard({ teamId }: { teamId: string }) {
   const teams = useTeams();
   const team = teams.error ? undefined : teams.data?.teams.find(row => row.id === teamId);
   return <div className="min-w-0 flex-1 overflow-y-auto"><div className={cn(pageClass, "space-y-8")}>
-    <header className="space-y-1"><div className="flex flex-wrap items-center gap-3"><h1 className="font-display text-2xl">{team?.name ?? "Team"}</h1>{team && <Badge variant="neutral">{team.memberCount} members</Badge>}</div><p className="text-sm text-muted">Your team’s briefing: what needs attention, what finished, and what comes next.</p></header>
+    <header className="space-y-1"><div className="flex flex-wrap items-center gap-3"><h1 className="font-display text-2xl">{team?.name ?? "Team"}</h1>{team && <Badge variant="neutral">{team.memberCount} members</Badge>}</div><p className="text-sm text-muted">Your team’s recent work and items that need attention.</p></header>
     <TeamSlackSetupCard key={teamId} teamId={teamId} />
     <WorkspaceCatchUp owner={{ ownerType: "team", ownerId: teamId }} />
     <div className="grid gap-4 md:grid-cols-2"><TeamUsageCard teamId={teamId} /><TeamMemoryCard teamId={teamId} /></div>

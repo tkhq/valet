@@ -48,7 +48,7 @@ A share admits a person to the thread, never to the session. Only two entry poin
 
 An event's page (`GET /api/events/:id`) also calls `threadEntry`, but only to decide whether a delivery shows its thread link. It admits nobody. A guest sees the link to a shared thread, because the link opens for them.
 
-Every session-addressed route (`/api/sessions/:id/...`) keeps `canViewSession` and returns 404 to a guest. So the owner's other threads, the session detail, the thread list, the session's decisions, child sessions, sandbox files, terminal access, and memory all stay private. A guest's own thread lists, notifications, and briefings never include the shared thread.
+Every session-addressed route (`/api/sessions/:id/...`) keeps `canViewSession` and returns 404 to a guest. So the owner's other threads, the session detail, the thread list, the session's decisions, child sessions, sandbox files, terminal access, and memory all stay private. A guest's own thread lists and notifications never include the shared thread.
 
 Artifacts need no change. A personal artifact is visible to its organization by default, so a link the thread shows already opens for a guest. Comments on an artifact do not reach the owner's session from a guest, because `canSendToSourceSession` still requires `canViewSession`.
 

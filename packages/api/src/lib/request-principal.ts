@@ -76,7 +76,6 @@ export function teamApiKeyPathAllowed(path: string, method: string, teamId: stri
   if (underSegment(path, "/api/threads")) return true;
   if (underSegment(path, "/api/workflows")) return true;
   if (path === `/api/workspaces/${teamId}/runtime` && (method === "POST" || method === "GET")) return true;
-  if (path === `/api/workspaces/${teamId}/briefings` && method === "GET") return true;
   if (path === `/api/workspaces/${teamId}/active-work` && method === "GET") return true;
   if (path === `/api/workspaces/${teamId}/outcomes` && method === "GET") return true;
   if (path === `/api/workspaces/${teamId}/runtime/info` && method === "GET") return true;
