@@ -518,6 +518,12 @@ after this continuation ends. A stale fenced prompt append stops the
 continuation before another model call. A child watcher therefore cannot report
 `child.settled` at the compaction boundary.
 
+For workflow-purpose sessions, the continuation requests unattended completion of remaining authorized work and the required output.
+A progress recap is not completion. Genuine blocking failures must remain truthful.
+The instruction preserves the original scope, tools, constraints, safety boundaries, and approvals.
+Other session purposes retain the existing interactive continuation wording, including the option to pause for clarification.
+Queue identity, synthetic metadata, cancellation, and disabled-continuation behavior do not change.
+
 
 ### October 5: model selection feedback
 
