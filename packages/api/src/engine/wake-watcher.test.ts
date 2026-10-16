@@ -7,6 +7,7 @@ import {
   SandboxUnavailableError,
 } from "@valet/engine";
 import type {
+  EventMatchDigest,
   ExecResult,
   JobPoll,
   JobPollOpts,
@@ -18,6 +19,7 @@ import type {
   WakeupCause,
   WakeupKind,
 } from "@valet/engine";
+import { eventWaiterDeriver, type RunDeriveResult } from "../events/derive.js";
 import { WakeWatcher, type WakeWatcherDeps, type WakeWatcherSession } from "./wake-watcher.js";
 
 const NOW = 1_700_000_000_000;
@@ -59,7 +61,7 @@ interface Harness {
   wakeupEnded: ReturnType<typeof vi.fn<(kind: WakeupKind, cause: WakeupCause) => void>>;
   signalLost: ReturnType<typeof vi.fn<(kind: WakeupKind | "hold") => void>>;
   leasesUnannotated: ReturnType<typeof vi.fn<(count: number) => void>>;
-  watcher(extra?: Partial<Pick<WakeWatcherDeps, "batchSize" | "metrics" | "jobLogDir" | "sweepIntervalMs">>): WakeWatcher;
+  watcher(extra?: Partial<Pick<WakeWatcherDeps, "batchSize" | "metrics" | "jobLogDir" | "sweepIntervalMs" | "deriveEvent">>): WakeWatcher;
 }
 
 function harness(poll: PollScript = async () => ({ status: "running", output: "", nextOffset: 0 })): Harness {
@@ -1009,3 +1011,235 @@ describe("WakeWatcher", () => {
     });
   });
 });
+
+describe("WakeWatcher event waiters (event wakeups spec, Part F)", () => {
+  const CHECKS = "github.pull_request.checks_completed";
+  const digest = (n: number, over: Partial<EventMatchDigest> = {}): EventMatchDigest => ({
+    key: "github.check_run.completed",
+    status: "failure",
+    subjects: ["github:acme/lean-proofs#42"],
+    summary: `acme/lean-proofs: check_run completed (test-${n})`,
+    occurredAt: "2026-10-15T00:00:00Z",
+    dedupeKey: `d-${n}`,
+    ...over,
+  });
+  const derived: EventMatchDigest = {
+    key: CHECKS,
+    status: "failure",
+    subjects: ["github:acme/lean-proofs#42"],
+    summary: "acme/lean-proofs#42: checks completed",
+    occurredAt: "2026-10-15T00:00:00Z",
+    dedupeKey: "derived:checks_completed:acme/lean-proofs@aaaa:failure",
+  };
+  const eventRow = (over: Partial<Wakeup> = {}, once = true): Wakeup =>
+    wakeup({
+      id: "wk_ev",
+      kind: "event",
+      reason: "CI on #42",
+      command: undefined,
+      execId: undefined,
+      leaseId: undefined,
+      deadlineAt: NOW + 6 * HOUR,
+      subjects: ["github:acme/lean-proofs#42"],
+      eventMatch: { clauses: [{ key: "github.check_run.completed" }, { key: CHECKS }], once, self: [] },
+      eventBuffer: [],
+      ...over,
+    });
+
+  it("delivers a once-mode match as the terminal signal and ends the row as done/fired", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1)] }));
+    await h.watcher().sweep(NOW);
+    const row = await h.store.getWakeup("wk_ev");
+    expect(row?.status).toBe("done");
+    expect(row?.cause).toBe("fired");
+    expect(row?.eventBuffer).toEqual([]);
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    const { content, opts } = signalOf(h.prompt.mock.calls[0]);
+    expect(opts).toMatchObject({ threadId: "thread-1", dispatchId: "wakeup:wk_ev:terminal" });
+    expect(typeof content !== "string" && "body" in content ? content.body : "").toContain("github.check_run.completed · failure");
+    expect(h.wakeupEnded).toHaveBeenCalledWith("event", "fired");
+    // The row is terminal, so a second pass delivers nothing.
+    await h.watcher().sweep(NOW + 1);
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes only the delivered digests in stream mode, so a digest appended meanwhile stays", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1), digest(2)] }, false));
+    const transition = h.store.transitionWakeup.bind(h.store);
+    vi.spyOn(h.store, "transitionWakeup").mockImplementation(async (...args) => {
+      // Ingest appends after the watcher read the row, before its CAS.
+      await h.store.appendEventMatch("wk_ev", digest(3), NOW);
+      return transition(...args);
+    });
+    await h.watcher().sweep(NOW);
+    const row = await h.store.getWakeup("wk_ev");
+    expect(row?.status).toBe("running");
+    expect(row?.eventCount).toBe(1);
+    expect(row?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["d-3"]);
+    expect(row?.eventSeen).toEqual(["d-1", "d-2"]);
+    expect(h.prompt).toHaveBeenCalledTimes(1);
+    expect(signalOf(h.prompt.mock.calls[0]).opts.dispatchId).toBe("wakeup:wk_ev:event:1");
+    expect(h.wakeupEnded).not.toHaveBeenCalled();
+  });
+
+  it("holds a stream-mode digest inside the min interval and sends it after", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(2)], eventCount: 1, lastEmitAt: NOW - 60_000 }, false));
+    await h.watcher().sweep(NOW);
+    expect(h.prompt).not.toHaveBeenCalled();
+    expect((await h.store.getWakeup("wk_ev"))?.eventBuffer).toHaveLength(1);
+    await h.watcher().sweep(NOW + 60_000);
+    expect(signalOf(h.prompt.mock.calls[0]).opts.dispatchId).toBe("wakeup:wk_ev:event:2");
+    expect((await h.store.getWakeup("wk_ev"))?.eventBuffer).toEqual([]);
+  });
+
+  it("expires a waiter past its deadline with event.ended", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ deadlineAt: NOW - 1, createdAt: NOW - 6 * HOUR }));
+    await h.watcher().sweep(NOW);
+    const row = await h.store.getWakeup("wk_ev");
+    expect(row?.status).toBe("expired");
+    expect(row?.cause).toBe("deadline");
+    const { content } = signalOf(h.prompt.mock.calls[0]);
+    expect(typeof content !== "string" && "signalType" in content ? content.signalType : "").toBe("event.ended");
+    expect(h.wakeupEnded).toHaveBeenCalledWith("event", "deadline");
+  });
+
+  it("replaces a derive digest with the derived digest, then delivers it", async () => {
+    const h = harness();
+    const source = digest(1, { derive: CHECKS });
+    await h.store.createWakeup(eventRow({ eventBuffer: [source] }));
+    const deriveEvent = vi.fn(async (_row: Wakeup, _d: EventMatchDigest): Promise<RunDeriveResult> => ({ result: "event", digest: derived }));
+    await h.watcher({ deriveEvent }).sweep(NOW);
+    expect(deriveEvent).toHaveBeenCalledTimes(1);
+    expect(deriveEvent.mock.calls[0]?.[1]).toEqual(source);
+    const row = await h.store.getWakeup("wk_ev");
+    expect(row?.status).toBe("done");
+    const { content } = signalOf(h.prompt.mock.calls[0]);
+    expect(typeof content !== "string" && "body" in content ? content.body : "").toContain(`${CHECKS} · failure`);
+  });
+
+  it("derives only the latest source digest per tick and drops the older ones it supersedes", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS }), digest(2, { derive: CHECKS })] }, false));
+    const deriveEvent = vi.fn(async (): Promise<RunDeriveResult> => ({ result: "null" }));
+    await h.watcher({ deriveEvent }).sweep(NOW);
+    expect(deriveEvent).toHaveBeenCalledTimes(1);
+    expect(deriveEvent.mock.calls[0]).toEqual([expect.objectContaining({ id: "wk_ev" }), expect.objectContaining({ dedupeKey: "d-2" })]);
+    const row = await h.store.getWakeup("wk_ev");
+    expect(row?.status).toBe("running");
+    expect(row?.eventBuffer).toEqual([]);
+    expect(h.prompt).not.toHaveBeenCalled();
+  });
+
+  it("drops a digest whose derive returns null and sends no signal", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS })] }));
+    await h.watcher({ deriveEvent: async () => ({ result: "null" }) }).sweep(NOW);
+    const row = await h.store.getWakeup("wk_ev");
+    expect(row?.status).toBe("running");
+    expect(row?.eventBuffer).toEqual([]);
+    expect(h.prompt).not.toHaveBeenCalled();
+  });
+
+  it("keeps a digest whose derive fails, records result=error once, and sends no signal (Review Focus 4)", async () => {
+    const h = harness();
+    await h.store.createWakeup(eventRow({ eventBuffer: [digest(1, { derive: CHECKS })] }));
+    const record = vi.fn();
+    const deriveEvent = eventWaiterDeriver({
+      plugins: [
+        {
+          name: "github",
+          version: "1.0.0",
+          derivedEvents: [
+            {
+              key: CHECKS,
+              description: "all checks done",
+              sources: ["github.check_run.completed"],
+              derive: async () => {
+                throw new Error("GitHub returned 502");
+              },
+            },
+          ],
+        },
+      ],
+      sessionOrg: async () => "org-1",
+      contextFor: (orgId) => ({ orgId, appToken: async () => "tok", fetch }),
+      record,
+    });
+    await h.watcher({ deriveEvent }).sweep(NOW);
+    expect(record.mock.calls).toEqual([[CHECKS, "error"]]);
+    expect((await h.store.getWakeup("wk_ev"))?.eventBuffer?.map((d) => d.dedupeKey)).toEqual(["d-1"]);
+    expect(h.prompt).not.toHaveBeenCalled();
+  });
+
+  it("treats a derive past its deadline as an error and keeps the digest", async () => {
+    vi.useFakeTimers();
+    try {
+      const record = vi.fn();
+      const deriveEvent = eventWaiterDeriver({
+        plugins: [
+          {
+            name: "github",
+            version: "1.0.0",
+            derivedEvents: [{ key: CHECKS, description: "d", sources: ["github.check_run.completed"], derive: () => new Promise(() => {}) }],
+          },
+        ],
+        sessionOrg: async () => "org-1",
+        contextFor: (orgId) => ({ orgId, appToken: async () => "tok", fetch }),
+        record,
+        deadlineMs: 20_000,
+      });
+      const pending = deriveEvent(eventRow(), digest(1, { derive: CHECKS }));
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect((await pending).result).toBe("error");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not derive when the waiter's session is gone", async () => {
+    const derive = vi.fn(async () => null);
+    const deriveEvent = eventWaiterDeriver({
+      plugins: [{ name: "github", version: "1.0.0", derivedEvents: [{ key: CHECKS, description: "d", sources: ["github.check_run.completed"], derive }] }],
+      sessionOrg: async () => null,
+      contextFor: (orgId) => ({ orgId, appToken: async () => "tok", fetch }),
+      record: vi.fn(),
+    });
+    expect((await deriveEvent(eventRow(), digest(1, { derive: CHECKS }))).result).toBe("error");
+    expect(derive).not.toHaveBeenCalled();
+  });
+
+  it("runs exactly one more pass after it when nudge() arrives during a running pass", async () => {
+    const h = harness();
+    const releases: Array<() => void> = [];
+    const list = h.store.listDueWakeups.bind(h.store);
+    const spy = vi.spyOn(h.store, "listDueWakeups").mockImplementation(async (...args) => {
+      await new Promise<void>((resolve) => releases.push(resolve));
+      return list(...args);
+    });
+    const watcher = h.watcher({ sweepIntervalMs: HOUR });
+    watcher.start();
+    watcher.nudge();
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    watcher.nudge();
+    watcher.nudge();
+    releases.shift()?.();
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    expect(spy).toHaveBeenCalledTimes(2);
+    releases.shift()?.();
+    await watcher.stop();
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores nudge() before start()", async () => {
+    const h = harness();
+    const spy = vi.spyOn(h.store, "listDueWakeups");
+    h.watcher({ sweepIntervalMs: HOUR }).nudge();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+

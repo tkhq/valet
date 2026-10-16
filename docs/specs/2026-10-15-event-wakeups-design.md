@@ -483,15 +483,21 @@ The WakeWatcher processes running event waiters with a non-empty
 1. For each digest marked `derive`, call the plugin's `derive`. Replace the
    digest with the derived event's digest. On `null`, drop it. Process at
    most one derive call per waiter per tick for the latest source digest.
+   That call answers for the older digests with the same derive key, so the
+   WakeWatcher removes them with it. One deadline of 20 seconds bounds the
+   call. A call past it counts as an error, and the digests stay.
 2. Once mode: CAS the row from `running` to `done` with cause `fired`. Then
    submit one `event.matched` signal with the first digest. List any other
    buffered digests under `Also matched`.
-3. Stream mode: submit one `event.matched` signal with every buffered digest,
-   then remove the sent digests with `removeEventMatches`. The first signal goes out at once. Later signals
+3. Stream mode: CAS the row's event count, remove the digests it will send
+   with `removeEventMatches`, then submit one `event.matched` signal with
+   them. The first signal goes out at once. Later signals
    follow the waiter's `minIntervalMs` when set, else `watchMinIntervalMs`,
    and `watchMaxEventsPerHour`, through the same
-   rate code as `watch`. When the hourly cap trips, the row ends with cause
-   `rate`.
+   rate code as `watch`. Each delivered digest counts once toward the cap.
+   When the hourly cap trips, the row ends with cause `rate`. Past
+   `deadlineAt`, stream mode submits the digests it still holds, then the
+   `deadline` ending.
 4. The dispatch id is `wakeup:<id>:event:<eventCount>`. The terminal
    dispatch id is `wakeup:<id>:terminal`.
 
@@ -676,3 +682,7 @@ webhook MUST include `Issue` and `Comment`. Add the Part J alert rule.
   `GET /api/workflows/trigger-catalog`) leave out derived keys, because
   subscriptions refuse them (Part G). `workflows.list_event_types` lists them
   with `derived: true`.
+- Part F step 3 removes the digests before it submits the signal, not
+  after. A crash between the two steps then loses one signal instead of
+  sending it twice, which keeps INV-E4. A failed removal stops the tick
+  before the submit, so the digests go out on the next tick.

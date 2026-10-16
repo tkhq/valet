@@ -199,7 +199,7 @@ export function mountPluginHttpRoutes(app: Hono<AppEnv>, plugins: ValetPlugin[],
           return c.json({ error: 'signature verification failed' }, 403);
         }
         for (const event of verification.events) {
-          await ingestEvent({ db, plugins: c.var.providers.plugins, onIngest: eventDispatcher.nudge, waiters: waiterMatchDeps(c.var.providers) }, {
+          await ingestEvent({ db, plugins: c.var.providers.plugins, onIngest: eventDispatcher.nudge, waiters: waiterMatchDeps(c.var.providers, { nudge: () => c.var.providers.wakeWatcher.nudge() }) }, {
             orgId: installation.orgId, service: plugin.name, event,
           });
         }

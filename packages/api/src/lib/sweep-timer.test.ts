@@ -40,4 +40,69 @@ describe("startSweepTimer (fix wave 2, M3)", () => {
       vi.useRealTimers();
     }
   });
+
+  describe("runNow (event wakeups spec, Part E step 6)", () => {
+    it("starts a pass at once when none is in flight", async () => {
+      vi.useFakeTimers();
+      try {
+        const pass = vi.fn(async () => {});
+        const timer = startSweepTimer("test", 60_000, pass);
+        timer.runNow();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(pass).toHaveBeenCalledTimes(1);
+        await timer.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("never overlaps a running pass and runs exactly one more pass after it", async () => {
+      vi.useFakeTimers();
+      try {
+        const releases: Array<() => void> = [];
+        let running = 0;
+        let maxRunning = 0;
+        const pass = vi.fn(async () => {
+          running++;
+          maxRunning = Math.max(maxRunning, running);
+          await new Promise<void>((resolve) => releases.push(resolve));
+          running--;
+        });
+        const timer = startSweepTimer("test", 60_000, pass);
+        timer.runNow();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(pass).toHaveBeenCalledTimes(1);
+        // Three nudges during the pass coalesce into one follow-up pass.
+        timer.runNow();
+        timer.runNow();
+        timer.runNow();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(pass).toHaveBeenCalledTimes(1);
+        releases.shift()?.();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(pass).toHaveBeenCalledTimes(2);
+        releases.shift()?.();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(pass).toHaveBeenCalledTimes(2);
+        expect(maxRunning).toBe(1);
+        await timer.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("runs nothing after stop()", async () => {
+      vi.useFakeTimers();
+      try {
+        const pass = vi.fn(async () => {});
+        const timer = startSweepTimer("test", 60_000, pass);
+        await timer.stop();
+        timer.runNow();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(pass).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

@@ -16,24 +16,51 @@ export interface SweepTimer {
    * await it, or the pass loses its database mid-write (fix wave 2, M3).
    */
   stop(): Promise<void>;
+  /**
+   * Starts a pass now. With a pass in flight, it schedules exactly one more
+   * pass after that pass ends, however many calls arrive meanwhile, so two
+   * passes never overlap. After `stop`, it does nothing.
+   */
+  runNow(): void;
 }
 
 export function startSweepTimer(name: string, intervalMs: number, pass: () => Promise<unknown>): SweepTimer {
   let inFlight: Promise<void> | null = null;
+  let again = false;
+  let stopped = false;
+  const begin = () => {
+    inFlight = (async () => {
+      do {
+        again = false;
+        try {
+          await pass();
+        } catch (err) {
+          console.error(`${name}: sweep failed:`, err);
+        }
+      } while (again && !stopped);
+    })().finally(() => {
+      inFlight = null;
+    });
+  };
   const timer = setInterval(() => {
-    if (inFlight) return;
-    inFlight = pass()
-      .then(() => undefined)
-      .catch((err) => console.error(`${name}: sweep failed:`, err))
-      .finally(() => {
-        inFlight = null;
-      });
+    if (inFlight || stopped) return;
+    begin();
   }, intervalMs);
   timer.unref();
   return {
     async stop() {
+      stopped = true;
+      again = false;
       clearInterval(timer);
       await inFlight;
+    },
+    runNow() {
+      if (stopped) return;
+      if (inFlight) {
+        again = true;
+        return;
+      }
+      begin();
     },
   };
 }

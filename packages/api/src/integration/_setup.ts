@@ -55,6 +55,7 @@ import { FsBlobStore } from "../providers/blob-fs.js";
 import { resolveScratchCaps, resolveWakeupLimits } from "../providers/sandbox-backend.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { productionEventWaiterDeriver } from "../events/derive.js";
 import { createOnePasswordService } from "../services/onepassword.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { assemblePlugins } from "../plugins/assemble.js";
@@ -426,6 +427,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineHost,
     provider: sandboxProvider,
     limits: wakeupLimits,
+    deriveEvent: productionEventWaiterDeriver({ db, plugins, githubTokenDeps }),
     sweepIntervalMs: 0,
   });
 

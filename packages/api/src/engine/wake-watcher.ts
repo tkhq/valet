@@ -30,12 +30,14 @@ import type {
   WakeupLimits,
   WakeupStatus,
 } from "@valet/engine";
+import type { EventWaiterDerive } from "../events/derive.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { agentSessions } from "../schema/index.js";
 import type { SessionMeta } from "./host.js";
 import { loadSessionMeta } from "./session-meta.js";
 import {
+  decideEventWaiter,
   decideWakeup,
   LOG_TAIL_BYTES,
   PENDING_START_GRACE_MS,
@@ -115,6 +117,12 @@ interface WakeWatcherBaseDeps {
    */
   jobLogDir?: string;
   sweepIntervalMs?: number;
+  /**
+   * Resolves an event waiter digest marked `derive` (spec 2026-10-15, Part
+   * F step 1). Production passes `productionEventWaiterDeriver`. Absent, a
+   * marked digest stays buffered until the waiter ends, and each tick logs it.
+   */
+  deriveEvent?: EventWaiterDerive;
   /** Rows per `listDueWakeups` page. Defaults to `WAKE_WATCHER_BATCH`. */
   batchSize?: number;
   metrics?: Partial<WakeWatcherMetrics>;
@@ -207,6 +215,16 @@ export class WakeWatcher {
     await timer?.stop();
   }
 
+  /**
+   * Runs one pass soon, for an event waiter that ingest just appended to
+   * (spec 2026-10-15, Part E step 6). It never overlaps a running pass:
+   * a nudge during a pass runs exactly one more pass after it. Before
+   * `start()` and after `stop()`, it does nothing.
+   */
+  nudge(): void {
+    this.timer?.runNow();
+  }
+
   /** One pass. Records its liveness: `sweep_ok_at` on success, `sweep_failed` on a throw (fix wave 2, M5). */
   async sweep(now: number = this.clock()): Promise<void> {
     try {
@@ -263,16 +281,16 @@ export class WakeWatcher {
   }
 
   private async processRow(now: number, row: Wakeup, progress: { pastCas: boolean }): Promise<void> {
+    if (row.kind === "event") {
+      await this.processEventRow(now, row, progress);
+      return;
+    }
     let sandbox: Sandbox | null = null;
     let probe: WakeupProbe;
-    if (
-      row.kind === "timer" ||
-      row.kind === "event" ||
-      (row.status === "pending" && now - row.createdAt < PENDING_START_GRACE_MS)
-    ) {
-      // A timer and an event waiter run no job, so nothing is probed. A
-      // pending process or watch inside its start grace is not probed: the
-      // seam may still be starting it.
+    if (row.kind === "timer" || (row.status === "pending" && now - row.createdAt < PENDING_START_GRACE_MS)) {
+      // A timer runs no job, so nothing is probed. A pending process or
+      // watch inside its start grace is not probed: the seam may still be
+      // starting it.
       probe = { kind: "none" };
     } else if (row.execId === undefined) {
       console.error(`WakeWatcher: ${row.kind} wakeup ${row.id} has no execId; it expires at its deadline.`);
@@ -321,6 +339,65 @@ export class WakeWatcher {
   }
 
   /**
+   * One due event waiter (spec 2026-10-15, Part F): the derive step, then
+   * `decideEventWaiter` through the shared `applyDecision`. An event waiter
+   * runs no job, so it has no probe, lease, or kill.
+   */
+  private async processEventRow(now: number, row: Wakeup, progress: { pastCas: boolean }): Promise<void> {
+    const current = await this.deriveStep(row);
+    if (!current) return;
+    const decision = decideEventWaiter(now, current, this.decideOptions);
+    if (!decision) return;
+    if (decision.badRow) {
+      this.metrics.badRow("engine_wakeups");
+      console.error(`WakeWatcher: event wakeup ${row.id} has no match spec; it ends as ${decision.to}.`);
+    }
+    await this.applyDecision(current, decision, null, progress);
+  }
+
+  /**
+   * Spec Part F step 1: at most one derive call per waiter per tick, for the
+   * latest digest marked `derive`. The buffer changes only by key, never by
+   * a whole-buffer write, so a digest that ingest appends meanwhile stays.
+   *
+   * - `event`: remove the source digests, then append the derived digest.
+   *   `appendEventMatch` refuses a derived key that the waiter already
+   *   holds or delivered (INV-E4).
+   * - `null`: remove the source digests. No signal.
+   * - `error`: keep them for the next tick.
+   *
+   * The source digests are the latest one and every older digest with the
+   * same derive key. A derive reads the subject's current state, so the
+   * latest source answers for the older ones too.
+   *
+   * Returns the row to decide on, or null when it is gone.
+   */
+  private async deriveStep(row: Wakeup): Promise<Wakeup | null> {
+    const buffer = row.eventBuffer ?? [];
+    const latest = [...buffer].reverse().find((d) => d.derive !== undefined);
+    if (!latest) return row;
+    if (!this.deps.deriveEvent) {
+      console.error(`WakeWatcher: event wakeup ${row.id} holds a ${latest.derive} digest, but this watcher has no derive step; it stays buffered.`);
+      return row;
+    }
+    let outcome: Awaited<ReturnType<EventWaiterDerive>>;
+    try {
+      outcome = await this.deps.deriveEvent(row, latest);
+    } catch (error) {
+      outcome = { result: "error", error };
+    }
+    if (outcome.result === "error") {
+      console.warn(`WakeWatcher: derive of ${latest.derive} for event wakeup ${row.id} failed; it retries next tick:`, outcome.error);
+      return row;
+    }
+    const sources = buffer.filter((d) => d.derive === latest.derive).map((d) => d.dedupeKey);
+    const at = this.clock();
+    await this.deps.engineStore.removeEventMatches(row.id, sources, at);
+    if (outcome.result === "event") await this.deps.engineStore.appendEventMatch(row.id, outcome.digest, at);
+    return this.deps.engineStore.getWakeup(row.id);
+  }
+
+  /**
    * Applies one decision: the CAS with its lease release, the kill, the
    * signals, and the end metric. Returns the updated row, or null when
    * another writer won the CAS.
@@ -358,6 +435,15 @@ export class WakeWatcher {
         : await this.deps.engineStore.transitionWakeup(row.id, [row.status], decision.to, patch, at);
     if (!updated) return null;
     progress.pastCas = true;
+
+    // An event waiter in stream mode removes what it delivers, by key and
+    // before the delivery: a digest that ingest appended after the read
+    // stays, and a crash here loses a signal rather than sending it twice
+    // (INV-E4, INV-E7). A failed removal throws before any delivery, so
+    // the digests go out next tick under the next event count.
+    if (decision.deliveredKeys && decision.deliveredKeys.length > 0) {
+      await this.deps.engineStore.removeEventMatches(row.id, decision.deliveredKeys, at);
+    }
 
     for (const signal of decision.signals) {
       try {
