@@ -326,6 +326,11 @@ export async function ingestEvent(
           payload: event.payload,
           occurredAt,
           receivedAt: now,
+          // Persisted so delivery-time rechecks (team coverage, redeliver)
+          // can match the implicit `subject` filter the same way ingest did
+          // (spec 2026-10-15: event wakeups, Part G) — the stored row, not
+          // the in-memory NormalizedEvent, is all they have.
+          subjects: event.subjects ?? null,
         })
         .onConflictDoNothing({ target: [events.service, events.dedupeKey] })
         .returning({ id: events.id });

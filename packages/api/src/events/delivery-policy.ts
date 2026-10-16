@@ -4,11 +4,14 @@ import type { AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions, teams, teamMembers } from "../schema/index.js";
 import { isTeamAssistantRule, subscriptionMatchOutcome } from "./team-slack-gate.js";
 
-/** Evaluate current team coverage at dispatch, including retries, not symbolic overlap. */
+/** Evaluate current team coverage at dispatch, including retries, not symbolic overlap.
+ * `event.subjects` comes from the stored event row (spec 2026-10-15: event wakeups,
+ * Part G); null/absent (a row stored before that column existed) reads as no
+ * subjects, so a team subscription's `subject` filter fails closed for it. */
 export async function hasTeamCoverage(
   db: AppDb,
   personal: typeof eventSubscriptions.$inferSelect,
-  event: { eventKey: string; payload: unknown },
+  event: { eventKey: string; payload: unknown; subjects?: string[] | null },
   catalog: EventCatalogEntry[],
 ): Promise<boolean> {
   const target = personal.target;
@@ -31,7 +34,7 @@ export async function hasTeamCoverage(
           .where(and(eq(teamMembers.teamId, sub.ownerId), eq(teamMembers.userId, personal.ownerId))).limit(1);
         if (!member) continue;
       }
-      if (await subscriptionMatchOutcome(db, sub, event.eventKey, event.payload, catalog, false) === "matched") return true;
+      if (await subscriptionMatchOutcome(db, sub, event.eventKey, event.payload, catalog, false, event.subjects ?? []) === "matched") return true;
     }
     if (page.length < 100) return false;
     after = page[page.length - 1]!.sub.id;

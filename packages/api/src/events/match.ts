@@ -124,10 +124,10 @@ export function withSubjectFilter(entry: EventCatalogEntry): EventCatalogEntry {
  */
 function subjectFilterMatches(subjects: string[] | undefined, filter: SubscriptionFilter): boolean {
   if (!subjects || subjects.length === 0) return false;
-  if (filter.op === "eq") return typeof filter.value === "string" && subjects.includes(filter.value);
-  if (filter.op === "prefix") {
-    return typeof filter.value === "string" && subjects.some((s) => s.startsWith(filter.value as string));
-  }
+  const value = filter.value;
+  if (typeof value !== "string") return false;
+  if (filter.op === "eq") return subjects.includes(value);
+  if (filter.op === "prefix") return subjects.some((s) => s.startsWith(value));
   return false;
 }
 
