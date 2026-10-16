@@ -94,6 +94,7 @@ import {
   estimateContextTokens,
   estimateLiveContextTokens,
   estimateTokens,
+  estimateEntryTokens,
   estimateSummaryEntryTokens,
   estimateTotalTokens,
   extractFileContext,
@@ -541,6 +542,8 @@ export class Thread {
    * hit the model with an over-budget context.
    */
   private rehydratedCheckPending = false;
+  /** The contract added by the last reconstruction; retire it on an unrelated turn. */
+  private retainedTaskSourceQueueItemId?: string;
   /**
    * Per-thread model override (id string, e.g. "claude-opus-4-7"). When set,
    * overlays the session-default at turn start and is restored after.
@@ -2165,7 +2168,8 @@ export class Thread {
       attributeAuthors: this.attributeAuthors,
       threadKey: this.key,
       activeLeafEntryId: this.activeLeafEntryId,
-    }));
+      taskSourceQueueItemId: this.taskSourceFor(),
+    }), this.taskSourceFor());
     // Arm the pre-turn proactive check (spec decision 5) so the first
     // post-restart turn is protected. The trigger estimates the rehydrated
     // transcript directly (TKAI-305), so no usage seeding is needed and a
@@ -3323,6 +3327,14 @@ export class Thread {
   ): Promise<void> {
     // Load before taking ownership so a store failure cannot strand a retained gate claim.
     await this.ensureTranscript();
+    const taskSource = this.taskSourceFor(item);
+    if (taskSource) {
+      const snapshot = await this.transcriptSnapshot();
+      this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.effectiveModelLenient(), {
+        attributeAuthors: this.attributeAuthors, threadKey: this.key,
+        activeLeafEntryId: this.activeLeafEntryId, taskSourceQueueItemId: taskSource,
+      }), taskSource);
+    }
     const store = this.session.providers.store;
     const attemptId = uid("att");
     const expectedAttemptId = item.attemptId;
@@ -3511,8 +3523,9 @@ export class Thread {
           attributeAuthors: this.attributeAuthors,
           threadKey: this.key,
           activeLeafEntryId: this.activeLeafEntryId,
+          taskSourceQueueItemId: this.taskSourceFor(),
         },
-      ));
+      ), this.taskSourceFor());
       this.transcriptPending = false;
       this.agent.state.tools = this.buildTools();
 
@@ -3938,23 +3951,24 @@ export class Thread {
       }
     }
 
-    // A repair may target a task compacted before task retention existed.
-    // Rebuild its prior context using the durable source, before runAgent
-    // appends the repair message. Existing replay entries already carry it.
-    const taskSource = item.metadata?.taskSourceQueueItemId;
-    if (item.metadata?.preserveTask === true && typeof taskSource === "string") {
+    // Restore a compacted active task before appending its next message.
+    // A repair can reference an older task without retention metadata.
+    // Retire an injected contract before an unrelated submission runs.
+    const taskSource = this.taskSourceFor(item);
+    if (taskSource || this.retainedTaskSourceQueueItemId) {
       const snapshot = await this.transcriptSnapshot();
       const activeEntries = walkTranscriptDag(snapshot.entries, this.activeLeafEntryId);
       const source = activeEntries.find(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === taskSource);
       const checkpoint = findMostRecentCompaction(activeEntries);
-      if (source && checkpoint?.coveredEntryIds.includes(source.id)
+      const retirePrior = this.retainedTaskSourceQueueItemId !== undefined && this.retainedTaskSourceQueueItemId !== taskSource;
+      if (((source && checkpoint?.coveredEntryIds.includes(source.id)) || retirePrior)
         && !activeEntries.some(entry => entry.type === "message" && entry.role === "user" && entry.queueItemId === item.id)) {
         this.replaceAgentMessages(entriesToAgentMessages(snapshot.entries, this.agent.state.model, {
           attributeAuthors: this.attributeAuthors,
           threadKey: this.key,
           activeLeafEntryId: this.activeLeafEntryId,
           taskSourceQueueItemId: taskSource,
-        }));
+        }), taskSource);
         this.prevCacheSnapshot = undefined;
       }
     }
@@ -4065,7 +4079,14 @@ export class Thread {
     }];
   }
 
-  private replaceAgentMessages(messages: AgentMessage[]): void {
+  private taskSourceFor(item: QueueItem | null = this.runningItem): string | undefined {
+    if (item?.metadata?.preserveTask !== true) return undefined;
+    const source = item.metadata.taskSourceQueueItemId;
+    return typeof source === "string" ? source : item.id;
+  }
+
+  private replaceAgentMessages(messages: AgentMessage[], taskSourceQueueItemId?: string): void {
+    this.retainedTaskSourceQueueItemId = taskSourceQueueItemId;
     const system = getCurrentSystemMessage(this.agent.state.messages);
     this.agent.state.messages = system ? [system, ...messages] : messages;
   }
@@ -4670,8 +4691,23 @@ export class Thread {
       effectiveEntries = mutable;
     }
 
-    // Step 2: cut-point selection.
-    const cut = selectCutPoint({ entries, model: effectiveModel, cfg });
+    // Step 2: cut-point selection. The active task is retained independently
+    // of the summary, so reserve it before choosing the recent tail.
+    const taskSource = this.taskSourceFor();
+    const retainedTask = taskSource ? effectiveEntries.find(entry => entry.type === "message"
+      && entry.role === "user" && entry.queueItemId === taskSource) : undefined;
+    const retainedMessages = retainedTask ? entriesToAgentMessages([retainedTask], effectiveModel, {
+      attributeAuthors: this.attributeAuthors,
+    }).filter((message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult") : [];
+    const retainedTokens = estimateContextTokens(undefined, retainedMessages);
+    const toolTokens = estimateTokens(JSON.stringify(this.buildTools().map(tool => ({
+      name: tool.name, description: tool.description, parameters: tool.parameters,
+    }))));
+    const fixedPrompt = this.modelSystemPrompt(this.agent.state.systemPrompt, effectiveModel);
+    const cut = selectCutPoint({ entries: effectiveEntries, model: effectiveModel, cfg,
+      ...(retainedTask ? { reservedTokens: retainedTokens + estimateTokens(fixedPrompt ?? "") + toolTokens,
+        tokenize: (entry: SessionEntry) => entry.id === retainedTask.id ? 0 : estimateEntryTokens(entry) } : {}),
+    });
     if (cut.cutIndex === 0 || cut.cutIndex === entries.length) {
       // Nothing to compact: either the tail already fits everything, or
       // there's no tail to preserve. The pruning pass above may have been
@@ -4901,10 +4937,25 @@ export class Thread {
         summary: summaryResult.summary,
         coveredEntryIds: coveredEntries.map((e) => e.id),
         tokenCountBefore: estimateTotalTokens(coveredEntries),
-        tokenCountAfter: estimateTokens(summaryResult.summary),
+        tokenCountAfter: estimateTokens(summaryResult.summary) + (retainedTask && covered.has(retainedTask.id) ? retainedTokens : 0),
         fileContext: extractFileContext(coveredEntries),
         createdAt: Date.now(),
       };
+      if (retainedTask && usable > 0) {
+        const tail = effectiveEntries.slice(cut.cutIndex);
+        const required = entriesToAgentMessages([
+          ...(!tail.some(entry => entry.id === retainedTask.id) ? [retainedTask] : []),
+          ...tail, compactionEntry,
+        ], effectiveModel, { attributeAuthors: this.attributeAuthors, threadKey: this.key, taskSourceQueueItemId: taskSource })
+          .filter((message): message is Message => message.role === "user" || message.role === "assistant" || message.role === "toolResult");
+        const requiredTokens = estimateContextTokens(fixedPrompt, required) + toolTokens;
+        if (requiredTokens >= usable) {
+          span?.setAttributes({ "valet.compaction.insufficient_reason": "retained_task_too_large", "valet.compaction.required_tokens": requiredTokens });
+          this.emitError("context_overflow_unrecoverable",
+            "The active task, summary, and recent context do not fit the selected model. Choose a larger model or shorten the task.");
+          return "insufficient";
+        }
+      }
       // Head entries this pass deferred to the next one. They are live
       // context, not lost history, so this is a size signal and not a
       // violation: a head that needs many passes shows up here as a large
@@ -4939,8 +4990,9 @@ export class Thread {
           attributeAuthors: this.attributeAuthors,
           threadKey: this.key,
           activeLeafEntryId: this.activeLeafEntryId,
+          taskSourceQueueItemId: this.taskSourceFor(),
         },
-      ));
+      ), this.taskSourceFor());
       // Compaction legitimately rewrites the prefix — the next turn's cache
       // reads SHOULD drop. Reset the break-detector baseline so the expected
       // drop is not counted as a break (TKAI-320).
@@ -6481,7 +6533,7 @@ export function entriesToAgentMessages(
     threadKey?: string;
     /** Durable leaf of the active transcript branch. */
     activeLeafEntryId?: string;
-    /** Original task for a repair whose user entry has not been appended yet. */
+    /** Original task of the active submission or repair. Omit for settled history. */
     taskSourceQueueItemId?: string;
   },
 ): AgentMessage[] {
@@ -6496,24 +6548,12 @@ export function entriesToAgentMessages(
     }
   }
 
-  // A workflow task is a durable source entry, not summary prose. Keep only
-  // the latest task contract; repair points back to the first submission.
-  // Resolve it on the active branch so another branch cannot supply context.
-  let taskEntryId: string | undefined;
-  if (activeCompaction && opts?.taskSourceQueueItemId) {
-    taskEntryId = activeEntries.find(entry => entry.type === "message" && entry.role === "user"
-      && entry.queueItemId === opts.taskSourceQueueItemId)?.id;
-  } else if (activeCompaction) {
-    for (let i = activeEntries.length - 1; i >= 0; i--) {
-      const entry = activeEntries[i];
-      if (entry.type !== "message" || entry.role !== "user" || entry.metadata?.preserveTask !== true) continue;
-      const source = entry.metadata.taskSourceQueueItemId;
-      const queueItemId = typeof source === "string" ? source : entry.queueItemId;
-      if (queueItemId) taskEntryId = activeEntries.slice(0, i + 1).find(candidate =>
-        candidate.type === "message" && candidate.role === "user" && candidate.queueItemId === queueItemId)?.id;
-      break;
-    }
-  }
+  // Only a caller holding an active submission selects a task contract.
+  // Historical markers alone must not resurrect completed workflow requests.
+  const taskEntryId = activeCompaction && opts?.taskSourceQueueItemId
+    ? activeEntries.find(entry => entry.type === "message" && entry.role === "user"
+      && entry.queueItemId === opts.taskSourceQueueItemId)?.id
+    : undefined;
 
   const out: AgentMessage[] = [];
   if (activeCompaction) {

@@ -563,11 +563,18 @@ A valid structure does not prove that every fact in the summary is correct.
 
 Workflow admissions mark their user entry with `metadata.preserveTask`.
 Compaction retains that original rendered task once, independently of the summary, using the existing sender, signal, attachment, and input-spill rendering.
-The latest marked task replaces an older task contract. A schema repair carries `taskSourceQueueItemId` from the first submission receipt.
+Only the active submission selects a retained task. Historical task markers cannot restore a completed request.
+A schema repair carries `taskSourceQueueItemId` from the first submission receipt.
 The engine resolves that source only on the active transcript branch and keeps the original task rather than the repair instructions.
 It rebuilds repair context before appending the repair message, so the repair itself appears once.
 A new repair can recover an original entry admitted before task markers existed, in both running and restarted sessions.
 Already-queued repairs without a source reference are not rewritten.
+Restart, interrupted continuation, and gate replay restore the active submission's task reference.
+Before an unrelated submission runs, the engine removes any contract injected into the running context.
+Cut-point selection reserves the rendered task, system prompt, and current tool definitions before choosing the recent tail.
+Checkpoint size includes a covered task that remains in context.
+The engine rejects a new checkpoint if the required task, summary, recent tail, and fixed context cannot fit.
+Deferred older history can still use the existing bounded compaction passes.
 The existing per-request context check budgets the retained task before calling the provider.
 
 

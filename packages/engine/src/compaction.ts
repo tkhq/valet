@@ -435,6 +435,8 @@ export interface SelectCutPointOptions {
   entries: readonly SessionEntry[];
   model: Model<any>;
   cfg?: CompactionConfig;
+  /** Context retained outside the tail, such as an active task and fixed model instructions. */
+  reservedTokens?: number;
   /** Override token estimator for tests. Defaults to estimateEntryTokens. */
   tokenize?: (entry: SessionEntry) => number;
 }
@@ -462,7 +464,9 @@ export function selectCutPoint(opts: SelectCutPointOptions): CutPoint {
   }
 
   const usable = usableTokens(model, cfg);
-  const budget = tailBudget(usable, cfg);
+  const budget = opts.reservedTokens
+    ? Math.max(0, Math.min(tailBudget(usable, cfg), usable - opts.reservedTokens))
+    : tailBudget(usable, cfg);
   const allTurns = turns(entries);
   if (allTurns.length === 0) {
     return { cutIndex: entries.length, tailStartId: undefined, fallbackToFloor: false };

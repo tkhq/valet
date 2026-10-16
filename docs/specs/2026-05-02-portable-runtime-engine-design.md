@@ -432,7 +432,11 @@ The engine does not substitute an earlier answer, recover streamed text, or repl
 
 Workflow prompts retain their original rendered user entry through compaction using `metadata.preserveTask`.
 Session and orchestrator repairs carry `taskSourceQueueItemId` from the first submission receipt, including after checkpoint resume.
-The host persists that reference in prompt metadata. The engine restores the original task only from the active transcript branch.
+The host persists that reference in prompt metadata. The engine restores the original task only for an active submission on its transcript branch.
+Restart and gate replay retain this scope. An unrelated submission removes a previously injected contract.
+Completed task markers do not restore old requests.
+Compaction reserves the rendered active task and fixed context before selecting the recent tail.
+It rejects a checkpoint when the required task, summary, and recent tail cannot fit with that fixed context.
 It does not rerender the task from edited inputs, reread the whole thread through a tool, add a workflow node, or change schema validation.
 The existing single repair limit and side-effect reuse instructions still apply.
 Repair context preserves failed-tool diagnostics and operation receipts across transcript reconstruction and restart.
