@@ -44,11 +44,20 @@ describe("slackEventSubjects", () => {
     expect(r.subjects[0]).toBe("slack:T001");
   });
 
-  it("prefers the inner event's own team field over the envelope team id", () => {
+  it("prefers the envelope team over the inner team of a Slack Connect reply (final review, item 8)", () => {
+    const r = slackEventSubjects(
+      "message",
+      { type: "message", team: "TEXT", channel: "C001", ts: "1712345699.000200", thread_ts: "1712345678.000100" },
+      "T001",
+    );
+    expect(r.subjects).toEqual(["slack:T001", "slack:T001/C001", "slack:T001/C001/1712345678.000100"]);
+  });
+
+  it("falls back to the inner event's team when the envelope has none", () => {
     const r = slackEventSubjects(
       "message",
       { type: "message", team: "T002", channel: "C001", ts: "1712345678.000100" },
-      "T001",
+      undefined,
     );
     expect(r.subjects[0]).toBe("slack:T002");
   });

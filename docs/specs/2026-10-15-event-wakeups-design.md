@@ -216,8 +216,12 @@ and issues in one sequence, so a comment on pull request 42 carries
 
 ### A3. Slack mapping
 
-- The team comes from the event's team field. When it is absent, the
-  ingress passes the team id of the org's connected workspace.
+- The team comes from the event envelope (`team_id`, passed to the
+  normalizer as `context.teamId`). When the envelope has none, the
+  normalizer uses the inner event's `team` field. In a Slack Connect
+  channel the inner `team` names the sender's workspace, so the envelope
+  wins. Vector: a reply whose inner `team` is `TEXT` in an envelope for
+  `T001` carries `slack:T001/...`.
 - Every event with a channel carries the channel subject.
 - A message with `thread_ts` carries the thread subject for that
   `thread_ts`. A message without `thread_ts` carries the thread subject
@@ -230,7 +234,11 @@ and issues in one sequence, so a comment on pull request 42 carries
 - Issue events carry `linear:team/<data.team.key>` and
   `linear:<data.identifier>`.
 - Comment events carry the team subject and, when the payload includes it,
-  the parent issue's identifier.
+  the parent issue's identifier. When `data.issue` has no `identifier` or
+  `team.key` (a payload can carry only `{ id, title }`), the normalizer
+  reads the identifier (`[A-Z][A-Z0-9]*-\d+`) from the top-level `url`
+  (`https://linear.app/<workspace>/issue/ENG-7/...`) and takes the team
+  key from its prefix.
 - Status is the issue state's `type`: `triage`, `backlog`, `unstarted`,
   `started`, `completed`, or `canceled`.
 - `previousStatus`: Linear's `updatedFrom` reports a state id only. The
@@ -320,7 +328,11 @@ subject.
    `startup_failure`, or the combined status is `failure` or `error`.
    Return status `success` in all other cases.
 5. The derived `dedupeKey` is
-   `derived:checks_completed:<owner>/<repo>@<sha>:<status>`.
+   `derived:checks_completed:<owner>/<repo>@<sha>:<status>:<latest>`.
+   `<latest>` is the newest `completed_at` of the check runs or
+   `updated_at` of the statuses, as ISO 8601, or `0` when none reports
+   one. A CI re-run on the same SHA finishes later, so it gets a new key
+   and the waiter is not blocked by the earlier run's seen key.
 
 A pull request with no checks never produces this event. The waiter's
 deadline ends that wait.

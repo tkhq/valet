@@ -21,8 +21,10 @@ export interface SlackEventSubjectsResult {
 const MESSAGE_LIKE = new Set(["message", "app_mention", "bot_message"]);
 
 /**
- * @param teamId Envelope `team_id`, used only when the inner event has no
- * `team` field (spec A3).
+ * @param teamId The envelope team (`context.teamId`, from `team_id`). It
+ * wins over the inner event's `team`: in a Slack Connect channel, `team`
+ * names the sender's workspace, not the one Valet is installed in (spec
+ * A3). The inner `team` is the fallback when the envelope has none.
  */
 export function slackEventSubjects(
   eventType: string,
@@ -34,7 +36,7 @@ export function slackEventSubjects(
   const channel = str(payload.channel) ?? str(channelRec?.id) ?? str(payload.channel_id) ?? str(itemRec?.channel);
 
   const userRec = rec(payload.user);
-  const team = str(payload.team) ?? str(userRec?.team_id) ?? teamId;
+  const team = teamId ?? str(payload.team) ?? str(userRec?.team_id);
 
   const subjects: string[] = [];
   if (team) subjects.push(`slack:${team}`);

@@ -58,7 +58,7 @@ async function getJson(ctx: DeriveContext, token: string, path: string): Promise
   return res.json();
 }
 
-interface CheckRunState { status: string; conclusion: string | null }
+interface CheckRunState { status: string; conclusion: string | null; completedAt?: string }
 
 async function listCheckRuns(ctx: DeriveContext, token: string, base: string, sha: string): Promise<CheckRunState[]> {
   const runs: CheckRunState[] = [];
@@ -67,12 +67,30 @@ async function listCheckRuns(ctx: DeriveContext, token: string, base: string, sh
     const items = Array.isArray(body?.check_runs) ? body.check_runs : [];
     for (const item of items) {
       const run = rec(item);
-      runs.push({ status: str(run?.status) ?? "", conclusion: str(run?.conclusion) ?? null });
+      const completedAt = str(run?.completed_at);
+      runs.push({ status: str(run?.status) ?? "", conclusion: str(run?.conclusion) ?? null, ...(completedAt ? { completedAt } : {}) });
     }
     const total = typeof body?.total_count === "number" ? body.total_count : runs.length;
     if (items.length < CHECK_RUNS_PER_PAGE || runs.length >= total) return runs;
   }
   throw new Error(`Commit ${sha} has more than ${CHECK_RUNS_PER_PAGE * CHECK_RUNS_MAX_PAGES} check runs. Wait on github.check_suite.completed instead.`);
+}
+
+/**
+ * The latest finish time among the check runs (`completed_at`) and the
+ * commit statuses (`updated_at`), as ISO 8601, or `0` when none reports
+ * one. A re-run on the same SHA finishes later, so its derived event gets
+ * a new dedupe key (spec B1 step 5).
+ */
+export function latestCompletedAt(runs: readonly { completedAt?: string }[], statuses: readonly unknown[]): string {
+  let latest = Number.NEGATIVE_INFINITY;
+  const consider = (value: string | undefined) => {
+    const ms = value === undefined ? Number.NaN : Date.parse(value);
+    if (Number.isFinite(ms) && ms > latest) latest = ms;
+  };
+  for (const run of runs) consider(run.completedAt);
+  for (const status of statuses) consider(str(rec(status)?.updated_at));
+  return Number.isFinite(latest) ? new Date(latest).toISOString() : "0";
 }
 
 /**
@@ -115,7 +133,8 @@ export const checksCompleted: DerivedEventDef = {
     const runs = await listCheckRuns(ctx, token, base, sha);
     const combined = rec(await getJson(ctx, token, `${base}/commits/${sha}/status`));
     const combinedState = str(combined?.state) ?? "";
-    const statusCount = Array.isArray(combined?.statuses) ? combined.statuses.length : 0;
+    const statuses: unknown[] = Array.isArray(combined?.statuses) ? combined.statuses : [];
+    const statusCount = statuses.length;
 
     // A pull request with no checks never produces this event.
     if (runs.length === 0 && statusCount === 0) return null;
@@ -134,7 +153,7 @@ export const checksCompleted: DerivedEventDef = {
     return {
       key: CHECKS_COMPLETED_KEY,
       // Step 5.
-      dedupeKey: `derived:checks_completed:${ownerRepo}@${sha}:${status}`,
+      dedupeKey: `derived:checks_completed:${ownerRepo}@${sha}:${status}:${latestCompletedAt(runs, statuses)}`,
       occurredAt: source.occurredAt,
       refs: { repo: ownerRepo, pull_request: String(pr.number), head_sha: sha },
       summary: failed ? `Checks failed on ${label}` : `All checks passed on ${label}`,

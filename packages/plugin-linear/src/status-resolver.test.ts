@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DeriveContext } from "@valet/engine";
-import { linearStatusResolver } from "./status-resolver.js";
+import { linearGraphqlUrl, linearStatusResolver } from "./status-resolver.js";
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -56,5 +56,20 @@ describe("linearStatusResolver", () => {
     const status = await linearStatusResolver.resolve(ctx, { teamKey: "ENG-UNKNOWN", stateId: "state-nope" });
 
     expect(status).toBeNull();
+  });
+
+  it("posts to LINEAR_API_URL when it is set (final review, item 16)", async () => {
+    vi.stubEnv("LINEAR_API_URL", "https://linear.fixture");
+    try {
+      const fetchImpl = fetchStub(WORKFLOW_STATES_RESPONSE);
+      await linearStatusResolver.resolve(makeCtx(fetchImpl), { teamKey: "ENG-ENV", stateId: "state-backlog" });
+      expect(vi.mocked(fetchImpl).mock.calls[0]?.[0]).toBe("https://linear.fixture/graphql");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("linearGraphqlUrl defaults to the public API", () => {
+    expect(linearGraphqlUrl({})).toBe("https://api.linear.app/graphql");
   });
 });

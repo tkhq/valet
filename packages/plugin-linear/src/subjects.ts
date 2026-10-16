@@ -23,6 +23,20 @@ export interface LinearEventSubjectsResult {
   bot: boolean;
 }
 
+const ISSUE_URL_RE = /\/issue\/([A-Z][A-Z0-9]*-\d+)(?:[/?#]|$)/;
+
+/**
+ * The issue identifier and team key in a Linear URL such as
+ * `https://linear.app/<workspace>/issue/ENG-7/...`, or null. The team key
+ * is the identifier's prefix.
+ */
+export function issueFromUrl(url: string | undefined): { identifier: string; teamKey: string } | null {
+  if (!url) return null;
+  const identifier = ISSUE_URL_RE.exec(url)?.[1];
+  if (!identifier) return null;
+  return { identifier, teamKey: identifier.slice(0, identifier.lastIndexOf("-")) };
+}
+
 export function linearEventSubjects(type: string, payload: Record<string, unknown>): LinearEventSubjectsResult {
   const data = rec(payload.data) ?? {};
   const subjects: string[] = [];
@@ -35,10 +49,13 @@ export function linearEventSubjects(type: string, payload: Record<string, unknow
     if (identifier) subjects.push(`linear:${identifier}`);
     status = str(rec(data.state)?.type);
   } else if (type === "Comment") {
+    // A comment webhook's issue object can carry only `{ id, title }`. The
+    // top-level `url` (`.../issue/ENG-7/...`) still names the parent.
     const issue = rec(data.issue);
-    const teamKey = str(rec(issue?.team)?.key) ?? str(rec(data.team)?.key);
+    const fromUrl = issueFromUrl(str(payload.url));
+    const teamKey = str(rec(issue?.team)?.key) ?? str(rec(data.team)?.key) ?? fromUrl?.teamKey;
     if (teamKey) subjects.push(`linear:team/${teamKey}`);
-    const identifier = str(issue?.identifier);
+    const identifier = str(issue?.identifier) ?? fromUrl?.identifier;
     if (identifier) subjects.push(`linear:${identifier}`);
   } else {
     const teamKey = str(rec(data.team)?.key);
