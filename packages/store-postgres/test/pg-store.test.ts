@@ -116,6 +116,39 @@ describe("PgSessionStore (PGlite)", () => {
     }
   });
 
+  it("skips and counts an event waiter whose match_json or event_buffer is unreadable", async () => {
+    const store = await factory();
+    const base = {
+      sessionId: "s", threadId: "t", kind: "event" as const, status: "running" as const, reason: "r",
+      subjects: ["github:acme/lean-proofs#42"], deadlineAt: 5,
+      eventMatch: { clauses: [{ key: "github.check_run.completed" }], once: true, self: [] },
+      eventBuffer: [], logOffset: 0, logTail: "", eventCount: 0, createdAt: 1, updatedAt: 1,
+    };
+    await store.createWakeup({ ...base, id: "wk_good" });
+    await store.createWakeup({ ...base, id: "wk_badmatch" });
+    await store.createWakeup({ ...base, id: "wk_badbuf" });
+    await db.query(`UPDATE engine_wakeups SET match_json = '{"clauses":"nope","once":true,"self":[]}' WHERE id = 'wk_badmatch'`);
+    await db.query(`UPDATE engine_wakeups SET event_buffer = 'not json' WHERE id = 'wk_badbuf'`);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect((await store.findEventWaiters(["github:acme/lean-proofs#42"])).map((w) => w.id)).toEqual(["wk_good"]);
+      expect((await store.listDueWakeups(10, 10)).rows.map((w) => w.id)).toEqual(["wk_good"]);
+      expect(await store.getWakeup("wk_badbuf")).toBeNull();
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("wk_badmatch"), expect.anything());
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("wk_badbuf"), expect.anything());
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("creates the event subjects index as a partial GIN index", async () => {
+    await factory();
+    const r = await db.query(
+      `SELECT indexdef FROM pg_indexes WHERE tablename = 'engine_wakeups' AND indexname = 'engine_wakeups_event_subjects'`,
+    );
+    expect(String(r.rows[0]?.indexdef)).toMatch(/USING gin \(subjects\) WHERE \(\(kind = 'event'::text\) AND \(status = 'running'::text\)\)/);
+  });
+
   it("bounds recent history in the database after excluding compactions", async () => {
     const store = await factory();
     await store.saveSession({ id: "bounded", userId: "u1", orgId: "o1", owner: { type: "user", id: "u1" }, workspace: "/", purpose: "interactive", status: "running", createdAt: 1, updatedAt: 1 });

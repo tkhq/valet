@@ -325,9 +325,12 @@ CREATE INDEX "engine_wakeups_event_subjects" ON "engine_wakeups"
 
 - `findEventWaiters(subjects: string[]): Promise<Wakeup[]>` returns running
   event waiters whose subjects overlap the argument.
-- `appendEventMatch(id, digest): Promise<boolean>` appends a digest only
-  while the row is `running` and only when no buffered digest has the same
-  `dedupeKey`. It returns whether it appended.
+- `appendEventMatch(id, digest, updatedAt): Promise<boolean>` appends a
+  digest and sets `updatedAt` only while the row is `running` and only when
+  no buffered digest has the same `dedupeKey`. It returns whether it
+  appended.
+- `listDueWakeups` also returns a running event waiter whose buffer is not
+  empty or whose `deadlineAt` has passed.
 
 A match digest holds `key`, `status`, `previousStatus`, `subjects`,
 `summary`, `url`, `actor` login, `occurredAt`, `dedupeKey`, `text`, and an

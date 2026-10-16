@@ -5,6 +5,9 @@ import type {
   CompactionEntry,
   DecisionGate,
   DecisionGateEntry,
+  EventClause,
+  EventMatchDigest,
+  EventMatchSpec,
   Lease,
   LeaseOwnerKind,
   LeaseReleaseCause,
@@ -745,6 +748,11 @@ export interface WakeupRow {
   window_count: number | null;
   watch_buffer: string | null;
   last_emit_at: number | null;
+  /** `event`: the `EventMatchSpec` as JSON. */
+  match_json: string | null;
+  subjects: string[] | null;
+  /** `event`: a JSON array of `EventMatchDigest`. */
+  event_buffer: string | null;
 }
 
 /**
@@ -797,11 +805,117 @@ export function rawToWakeupRow(raw: Record<string, unknown>): WakeupRow {
     window_count: toNumOrNull(raw.window_count, "window_count"),
     watch_buffer: asStringOrNull(raw.watch_buffer, "watch_buffer"),
     last_emit_at: toNumOrNull(raw.last_emit_at, "last_emit_at"),
+    match_json: asStringOrNull(raw.match_json, "match_json"),
+    subjects: asStringArrayOrNull(raw.subjects, "subjects"),
+    event_buffer: asStringOrNull(raw.event_buffer, "event_buffer"),
   };
 }
 
+function asStringArrayOrNull(value: unknown, field: string): string[] | null {
+  if (value === null || value === undefined) return null;
+  if (!Array.isArray(value) || !value.every((v) => typeof v === "string")) {
+    throw new Error(`expected a string array for ${field}`);
+  }
+  return value;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((x) => typeof x === "string");
+}
+
+function optString(o: Record<string, unknown>, key: string, field: string): string | undefined {
+  const v = o[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "string") throw new Error(`${field}.${key} is not a string`);
+  return v;
+}
+
+function optStringArray(o: Record<string, unknown>, key: string, field: string): string[] | undefined {
+  const v = o[key];
+  if (v === undefined || v === null) return undefined;
+  if (!isStringArray(v)) throw new Error(`${field}.${key} is not a string array`);
+  return v;
+}
+
+function optBoolean(o: Record<string, unknown>, key: string, field: string): boolean | undefined {
+  const v = o[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "boolean") throw new Error(`${field}.${key} is not a boolean`);
+  return v;
+}
+
+function reqString(o: Record<string, unknown>, key: string, field: string): string {
+  const v = o[key];
+  if (typeof v !== "string") throw new Error(`${field}.${key} is not a string`);
+  return v;
+}
+
+/** Throws on a value that is not an `EventClause`, so the row reads as unreadable. */
+function toEventClause(v: unknown, field: string): EventClause {
+  if (!isRecord(v)) throw new Error(`${field} is not an object`);
+  const status = optStringArray(v, "status", field);
+  const fromStatus = optStringArray(v, "from_status", field);
+  const actor = optString(v, "actor", field);
+  const bots = optBoolean(v, "bots", field);
+  const includeSelf = optBoolean(v, "include_self", field);
+  return {
+    key: reqString(v, "key", field),
+    ...(status !== undefined ? { status } : {}),
+    ...(fromStatus !== undefined ? { from_status: fromStatus } : {}),
+    ...(actor !== undefined ? { actor } : {}),
+    ...(bots !== undefined ? { bots } : {}),
+    ...(includeSelf !== undefined ? { include_self: includeSelf } : {}),
+  };
+}
+
+/** Narrows a stored `match_json`. Throws on unreadable JSON or a wrong shape. */
+export function parseEventMatchJson(raw: string): EventMatchSpec {
+  const parsed: unknown = JSON.parse(raw);
+  const field = "engine_wakeups.match_json";
+  if (!isRecord(parsed)) throw new Error(`${field} is not an object`);
+  if (!Array.isArray(parsed.clauses)) throw new Error(`${field}.clauses is not an array`);
+  if (typeof parsed.once !== "boolean") throw new Error(`${field}.once is not a boolean`);
+  if (!isStringArray(parsed.self)) throw new Error(`${field}.self is not a string array`);
+  return {
+    clauses: parsed.clauses.map((c, i) => toEventClause(c, `${field}.clauses[${i}]`)),
+    once: parsed.once,
+    self: parsed.self,
+  };
+}
+
+/** Throws on a value that is not an `EventMatchDigest`. */
+function toEventMatchDigest(v: unknown, field: string): EventMatchDigest {
+  if (!isRecord(v)) throw new Error(`${field} is not an object`);
+  if (!isStringArray(v.subjects)) throw new Error(`${field}.subjects is not a string array`);
+  const optional = ["status", "previousStatus", "url", "actor", "text", "derive"] as const;
+  const out: EventMatchDigest = {
+    key: reqString(v, "key", field),
+    subjects: v.subjects,
+    summary: reqString(v, "summary", field),
+    occurredAt: reqString(v, "occurredAt", field),
+    dedupeKey: reqString(v, "dedupeKey", field),
+  };
+  for (const key of optional) {
+    const value = optString(v, key, field);
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
+/** Narrows a stored `event_buffer`. Throws on unreadable JSON or a wrong shape. */
+export function parseEventBufferJson(raw: string): EventMatchDigest[] {
+  const parsed: unknown = JSON.parse(raw);
+  const field = "engine_wakeups.event_buffer";
+  if (!Array.isArray(parsed)) throw new Error(`${field} is not an array`);
+  return parsed.map((d, i) => toEventMatchDigest(d, `${field}[${i}]`));
+}
+
 function isWakeupKind(v: string): v is WakeupKind {
-  return v === "process" || v === "watch" || v === "timer";
+  return v === "process" || v === "watch" || v === "timer" || v === "event";
 }
 
 function isWakeupStatus(v: string): v is WakeupStatus {
@@ -844,6 +958,9 @@ export function rowToWakeup(row: WakeupRow): Wakeup {
     ...(row.window_count !== null ? { windowCount: row.window_count } : {}),
     ...(row.watch_buffer !== null ? { watchBuffer: row.watch_buffer } : {}),
     ...(row.last_emit_at !== null ? { lastEmitAt: row.last_emit_at } : {}),
+    ...(row.subjects !== null ? { subjects: row.subjects } : {}),
+    ...(row.match_json !== null ? { eventMatch: parseEventMatchJson(row.match_json) } : {}),
+    ...(row.event_buffer !== null ? { eventBuffer: parseEventBufferJson(row.event_buffer) } : {}),
   };
 }
 
