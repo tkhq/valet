@@ -14,6 +14,8 @@ const ENGINE_TABLES = [
   "engine_sessions",
   "engine_suspended_turns",
   "engine_threads",
+  "engine_wakeups",
+  "engine_leases",
 ];
 
 async function tableExists(db: PgDb, table: string): Promise<boolean> {
@@ -38,10 +40,37 @@ describe("applyEngineMigrations", () => {
     await db.close();
   });
 
-  it("creates all 10 engine_* tables", async () => {
+  it("creates all 12 engine_* tables", async () => {
     for (const table of ENGINE_TABLES) {
       expect(await tableExists(db, table), `expected table ${table} to exist`).toBe(true);
     }
+  });
+
+  it("creates the fix wave 2 wakeup and lease columns, all nullable", async () => {
+    const result = await db.query(
+      `SELECT table_name, column_name, is_nullable FROM information_schema.columns
+       WHERE table_schema = current_schema() AND table_name IN ('engine_wakeups','engine_leases')
+         AND column_name IN ('origin_json','window_start_at','window_count','thread_id')`,
+    );
+    const got = result.rows.map((r) => `${String(r.table_name)}.${String(r.column_name)}:${String(r.is_nullable)}`).sort();
+    expect(got).toEqual([
+      "engine_leases.origin_json:YES",
+      "engine_leases.thread_id:YES",
+      "engine_wakeups.origin_json:YES",
+      "engine_wakeups.thread_id:NO",
+      "engine_wakeups.window_count:YES",
+      "engine_wakeups.window_start_at:YES",
+    ]);
+  });
+
+  it("creates the fix wave 3 watch buffer columns, both nullable (fix wave 4, data contract gaps)", async () => {
+    const result = await db.query(
+      `SELECT column_name, data_type, is_nullable FROM information_schema.columns
+       WHERE table_schema = current_schema() AND table_name = 'engine_wakeups'
+         AND column_name IN ('watch_buffer','last_emit_at')`,
+    );
+    const got = result.rows.map((r) => `${String(r.column_name)}:${String(r.data_type)}:${String(r.is_nullable)}`).sort();
+    expect(got).toEqual(["last_emit_at:bigint:YES", "watch_buffer:text:YES"]);
   });
 
   it("creates the partial created_at index cost attribution scans", async () => {

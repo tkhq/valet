@@ -34,6 +34,18 @@ describe("engineSignalToWire", () => {
   it("returns undefined for undefined input", () => {
     expect(engineSignalToWire(undefined)).toBeUndefined();
   });
+
+  it("ships only the origin channel type, never the thread key", () => {
+    const signal: NonNullable<MessageEntry["signal"]> = {
+      signalType: "wakeup.process.exited",
+      tagName: "signal",
+      origin: { channelType: "slack", threadKey: "slack:C1:171.1", reply: "auto" },
+    };
+    expect(engineSignalToWire(signal)).toEqual({
+      signalType: "wakeup.process.exited",
+      origin: { channelType: "slack" },
+    });
+  });
 });
 
 describe("engineToWireParts", () => {

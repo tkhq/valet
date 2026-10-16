@@ -46,6 +46,8 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     testDb = await freshTestPgDb();
     const { pgdb, appDb } = testDb;
     engineHost = new EngineHost({
+      scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore: new PgSessionStore(pgdb),
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new PgEventStream(pgdb),
@@ -365,6 +367,8 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     testDb = await freshTestPgDb();
     const { pgdb, appDb } = testDb;
     engineHost = new EngineHost({
+      scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
       engineStore: new PgSessionStore(pgdb),
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new PgEventStream(pgdb),

@@ -1,11 +1,39 @@
 import { intersectToolScopes } from "@valet/shared";
 import { toolScopeSchema } from "../tool-scope-schema.js";
 import { Type } from "typebox";
-import type { TSchema } from "typebox";
-import { isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange } from "@valet/shared";
+import {
+  isValidSandboxCpu,
+  parseResourceQuantity,
+  sandboxCpuRange,
+  MIN_SCRATCH_BYTES,
+  isScratchRequestError,
+  ScratchRequestError,
+} from "@valet/shared";
 import { storedToolResultText } from "../compaction.js";
 import { isDecisionGateExpired } from "../decision-gate.js";
 import { terminalOutcome } from "./terminal-outcome.js";
+import { defineTool } from "./define.js";
+export { defineTool } from "./define.js";
+import {
+  watchTool,
+  wakeAtTool,
+  holdSandboxTool,
+  processReadTool,
+  wakeupListTool,
+  wakeupCancelTool,
+  startBackgroundProcess,
+} from "./wakeups.js";
+export {
+  watchTool,
+  wakeAtTool,
+  holdSandboxTool,
+  processReadTool,
+  wakeupListTool,
+  wakeupCancelTool,
+  startBackgroundProcess,
+} from "./wakeups.js";
+import { validateBackground, sleepRefusal } from "../wakeups/validate.js";
+import type { WakeupLimits } from "../wakeups/types.js";
 import type {
   ChildReader,
   ChildSender,
@@ -92,6 +120,21 @@ function abortErrorFrom(signal: AbortSignal): Error {
 }
 
 /**
+ * The foreground timeout text (fix wave 2, M16). A short command usually
+ * needs a larger timeout, not background mode, so the background advice
+ * appears only after a command ran a minute or more. It names every field
+ * background mode requires, so the retry does not fail validation. At the
+ * 3600-second max, a larger timeout is not an option (fix wave 3, UX L5).
+ */
+export function timeoutHint(timeoutMs: number): string {
+  const seconds = Math.round(timeoutMs / 1000);
+  const background = "For work longer than an hour, rerun with background: true, deadline_hours, and reason.";
+  if (seconds >= 3600) return `[timed out after ${seconds}s] This is the largest timeout. ${background}`;
+  const base = `[timed out after ${seconds}s] Rerun with a larger timeout (max 3600).`;
+  return seconds >= 60 ? `${base} ${background}` : base;
+}
+
+/**
  * Best-effort job cancellation: the sandbox may already be gone
  * (SandboxUnavailableError) or the exec superseded (SandboxSupersededError)
  * by the time we try to cancel it. Either way, cancellation failing must
@@ -135,7 +178,7 @@ async function pollJobToCompletion(
     if (Date.now() >= deadline) {
       await bestEffortCancel(cancelJob, execId);
       const truncNote = truncated ? BASH_TRUNCATION_NOTE : "";
-      return { text: `${output}${truncNote}\n[timed out after ${Math.round(timeoutMs / 1000)}s]` };
+      return { text: `${output}${truncNote}\n${timeoutHint(timeoutMs)}` };
     }
 
     const poll = await pollJob(execId, offset);
@@ -161,14 +204,6 @@ async function pollJobToCompletion(
     const waitMs = JOB_POLL_WARMUP_MS[pollCount - 1] ?? JOB_POLL_INTERVAL_MS;
     await sleep(waitMs, ctx.signal);
   }
-}
-
-/**
- * Helper that preserves the schema's static type through the ToolDef so
- * `args` in `execute` is typed precisely instead of `unknown`.
- */
-export function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
-  return def;
 }
 
 /**
@@ -290,6 +325,8 @@ export const editTool = defineTool({
   },
 });
 
+const DEFAULT_WAKEUP_LIMITS: WakeupLimits = { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 };
+
 export const bashTool = defineTool({
   name: "bash",
   description:
@@ -297,12 +334,31 @@ export const bashTool = defineTool({
     `${BASH_DEFAULT_TIMEOUT_S}, max 3600) bounds how long the command may ` +
     "run; commands with an effective timeout beyond 60s automatically run " +
     "in job mode (poll-based, non-blocking on the transport) when the " +
-    "sandbox supports it.",
+    "sandbox supports it. `background: true` starts the command as a " +
+    "detached sandbox process and returns at once; give `deadline_hours` " +
+    "(1 to the deploy max) and `reason`. The process is killed at the " +
+    "deadline, and the deadline cannot be extended; `timeout` does not " +
+    "apply to it. The thread receives a `process.exited` signal when it " +
+    "ends. Use it for work longer than an hour. When the session has " +
+    "/scratch, put large temporary files there; it is wiped when the " +
+    "sandbox stops.",
   parameters: Type.Object({
     command: Type.String(),
     timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600 })),
+    background: Type.Optional(Type.Boolean()),
+    deadline_hours: Type.Optional(Type.Number()),
+    reason: Type.Optional(Type.String()),
   }),
   execute: async (args, ctx) => {
+    if (args.background) {
+      const limits = ctx.wakeups?.limits ?? DEFAULT_WAKEUP_LIMITS;
+      const v = validateBackground(args, limits);
+      if (!v.ok) return { text: v.text };
+      return startBackgroundProcess(ctx, args.command, v.value);
+    }
+    const sleep = sleepRefusal(args.command);
+    if (sleep) return { text: sleep };
+
     const timeoutMs = (args.timeout ?? BASH_DEFAULT_TIMEOUT_S) * 1000;
 
     // Mode selection (spec decision 10). NOTE: `ctx.sandbox` is normally a
@@ -340,10 +396,11 @@ export const bashTool = defineTool({
     }
 
     const result = await ctx.sandbox.exec(args.command, { signal: ctx.signal, timeout: timeoutMs });
-    const exitNote = result.exitCode === 0 ? "" : `\n[exit ${result.exitCode}]`;
     const truncNote = result.truncated ? BASH_TRUNCATION_NOTE : "";
+    const timeoutNote = result.timedOut ? `\n${timeoutHint(timeoutMs)}` : "";
+    const exitNote = !result.timedOut && result.exitCode !== 0 ? `\n[exit ${result.exitCode}]` : "";
     const outcome = terminalOutcome(args.command, result.stdout, result.exitCode);
-    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}`, ...(outcome ? { outcome } : {}) };
+    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}${timeoutNote}`, ...(outcome ? { outcome } : {}) };
   },
 });
 
@@ -824,7 +881,9 @@ export const taskTool = defineTool({
     "XL children review only. Include the scope, selected tier and reason, " +
     "and acceptance checks in the brief. Tiers resolve through org config; " +
     "do not name specific models. To retry capacity-blocked children, set " +
-    "task.resources to lower CPU or memory values. Omitted fields inherit defaults.",
+    "task.resources to lower CPU or memory values. resources.scratch requests " +
+    "node-local scratch disk for the child, bounded by the deploy agent cap. " +
+    "Omitted fields inherit defaults.",
   parameters: Type.Object({
     prompt: Type.String({ minLength: 1, description: "The task for the child session to perform." }),
     toolScope: Type.Optional(toolScopeSchema),
@@ -840,6 +899,12 @@ export const taskTool = defineTool({
         memory: Type.Optional(
           Type.String({
             description: 'Memory for the child\'s sandbox as a Kubernetes quantity, such as "4Gi". Omit to use the host default.',
+          }),
+        ),
+        scratch: Type.Optional(
+          Type.String({
+            description:
+              'Node-local /scratch size for the child, in whole bytes or with a Ki, Mi, Gi, or Ti suffix, such as "200Gi". Other forms, such as "500G", are refused. Wiped when the child\'s sandbox stops. Bounded by the deploy agent cap.',
           }),
         ),
       }),
@@ -893,9 +958,23 @@ export const taskTool = defineTool({
         }
       }
 
+      const scratchRaw = args.resources.scratch;
+      let normalizedScratch: string | undefined;
+      if (scratchRaw !== undefined) {
+        // Syntax only here; the spawner applies the deploy and agent caps
+        // (spec A4) because the caps live in api config.
+        const text = typeof scratchRaw === "string" ? scratchRaw.trim() : "";
+        const bytes = text ? parseResourceQuantity(text) : null;
+        if (bytes === null || bytes < MIN_SCRATCH_BYTES) {
+          return { text: `[task_resources] scratch "${String(scratchRaw)}" is not a Kubernetes quantity of at least 1Gi. Use a form like "200Gi".` };
+        }
+        normalizedScratch = text;
+      }
+
       resources = {
         ...(args.resources.cpu !== undefined ? { cpu: args.resources.cpu } : {}),
         ...(normalizedMemory !== undefined ? { memory: normalizedMemory } : {}),
+        ...(normalizedScratch !== undefined ? { scratch: normalizedScratch } : {}),
       };
     }
 
@@ -911,15 +990,23 @@ export const taskTool = defineTool({
       docker: args.docker,
     };
     const owner = ctx.owner ?? { type: "user", id: ctx.userId };
-    const result = await spawner(req, {
-      parentSessionId: ctx.sessionId,
-      parentThreadId: ctx.threadId,
-      actorUserId: ctx.userId,
-      owner,
-      // The spawning submission's channel origin rides to the watcher, so
-      // the child.settled signal can inherit it (see ChildWatcher).
-      ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
-    });
+    let result;
+    try {
+      result = await spawner(req, {
+        parentSessionId: ctx.sessionId,
+        parentThreadId: ctx.threadId,
+        actorUserId: ctx.userId,
+        owner,
+        // The spawning submission's channel origin rides to the watcher, so
+        // the child.settled signal can inherit it (see ChildWatcher).
+        ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
+      });
+    } catch (err) {
+      if (isScratchRequestError(err)) {
+        return { text: `[task_resources] ${err.message}` };
+      }
+      throw err;
+    }
     return {
       text: [
         `spawned child session ${result.childSessionId} (submission ${result.queueItemId}). Its result will arrive in this thread as a child.settled signal.`,
@@ -934,6 +1021,12 @@ export const builtinTools: ToolDef[] = [
   writeTool,
   editTool,
   bashTool,
+  watchTool,
+  wakeAtTool,
+  holdSandboxTool,
+  processReadTool,
+  wakeupListTool,
+  wakeupCancelTool,
   threadReadTool,
   listThreadsTool,
   switchModelTool,

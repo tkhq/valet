@@ -242,7 +242,7 @@ describe("EngineHost buildSpecProvider", () => {
     prebuildYaml = "invalid";
     const failed = await specProvider!();
     expect(failed.resources).toBeUndefined();
-    expect(failed.preserveResourceFields).toEqual(["cpu", "memory"]);
+    expect(failed.preserveResourceFields).toEqual(["cpu", "memory", "scratch"]);
   });
 
   it("reads disabled repository defaults on every invocation while YAML remains cached", async () => {

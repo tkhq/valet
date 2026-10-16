@@ -26,6 +26,13 @@ describe("applySandboxResourceOverrides", () => {
     });
   });
 
+  it("sets scratch from an override", () => {
+    expect(applySandboxResourceOverrides(resolved, { scratch: "50Gi" })).toMatchObject({
+      initialResources: { cpu: 4, memory: "8Gi", scratch: "50Gi" },
+      resources: { cpu: 4, memory: "8Gi", scratch: "50Gi" },
+    });
+  });
+
   it.each([undefined, {}])("leaves resolved resources unchanged for %j", (overrides) => {
     expect(applySandboxResourceOverrides(resolved, overrides)).toBe(resolved);
   });
@@ -42,7 +49,7 @@ describe("applySandboxResourceOverrides", () => {
       ...withheld,
       initialResources: { cpu: 2, memory: "8Gi" },
       resources: { cpu: 2 },
-      preserveResourceFields: ["memory"],
+      preserveResourceFields: ["memory", "scratch"],
     });
   });
 
@@ -87,6 +94,18 @@ describe("resolveRepoResources", () => {
     expect(absent.resources).toEqual({ cpu: 2, memory: "4Gi" });
     const cpu = await resolveRepoResources(harness.appDb, "org-a", primary, async () => ({ docker: false, outcome: "declared", resources: { cpu: 8 } }));
     expect(cpu.resources).toEqual({ cpu: 8, memory: "4Gi" });
+  });
+
+  it("merges a saved scratch default under a YAML cpu declaration", async () => {
+    await harness.appDb.insert(imageSources).values({
+      id: "org-a-github", orgId: "org-a", kind: "repo", name: primary.fullName,
+      repoHost: "github", repoFullName: primary.fullName, enabled: false,
+      sandboxResources: { scratch: "100Gi" }, createdAt: 1, updatedAt: 1,
+    });
+    const merged = await resolveRepoResources(harness.appDb, "org-a", primary, async () => ({
+      docker: false, outcome: "declared", resources: { cpu: 2 },
+    }));
+    expect(merged.resources).toEqual({ scratch: "100Gi", cpu: 2 });
   });
 
   it("scopes defaults by organization and host and treats missing rows as no defaults", async () => {
@@ -156,11 +175,11 @@ describe("resolveRepoResources", () => {
     expect(failed.resources).toBeUndefined();
     expect(failed.initialResources).toBeUndefined();
     expect(failed.resourcesWithheld).toBeUndefined();
-    expect(failed.preserveResourceFields).toEqual(["cpu", "memory"]);
+    expect(failed.preserveResourceFields).toEqual(["cpu", "memory", "scratch"]);
     expect(applySandboxResourceOverrides(failed, { memory: "4Gi" })).toMatchObject({
       initialResources: { memory: "4Gi" },
       resources: { memory: "4Gi" },
-      preserveResourceFields: ["cpu"],
+      preserveResourceFields: ["cpu", "scratch"],
     });
   });
 });

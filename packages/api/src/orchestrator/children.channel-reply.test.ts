@@ -133,7 +133,7 @@ async function bootDelegation(childId: string) {
     replyRoute: "origin",
   });
   const deps: ChildrenDeps = {
-    db, engineHost, engineStore, prebuildService: api.providers.prebuildService,
+    db, engineHost, engineStore, prebuildService: api.providers.prebuildService, scratchCaps: {},
     workspaceRoot: mkdtempSync(join(tmpdir(), "valet-child-reply-test-")),
   };
   const watcher = new ChildWatcher(deps);

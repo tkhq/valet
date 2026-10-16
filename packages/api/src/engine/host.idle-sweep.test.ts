@@ -82,6 +82,8 @@ function buildHost(
   extra: Partial<EngineHostOpts> = {},
 ): EngineHost {
   return new EngineHost({
+    scratchCaps: {},
+    wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
     engineStore: store,
     sandboxProvider: provider,
     eventStream: new InMemoryEventStream(),
@@ -206,6 +208,36 @@ describe("EngineHost idle sweep", () => {
     host.evictAll();
   });
 
+  it("never suspends a session with an active lease; suspends once it is released", async () => {
+    vi.useFakeTimers();
+    const provider = new HibernatingTestProvider();
+    const store = new InMemorySessionStore();
+    const host = buildHost(store, provider, { idleMinutes: 1 });
+
+    const sessionId = "s-leased";
+    const session = await buildReadySession(host, sessionId);
+    await stampActivity(store, sessionId, "th-leased");
+    await store.createLease({
+      id: "lease-1",
+      sessionId,
+      ownerKind: "process",
+      reason: "long build",
+      createdAt: Date.now(),
+      deadlineAt: Date.now() + 3_600_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(session.attachment.state).toBe("ready");
+    expect(provider.suspendCalls).toEqual([]);
+
+    await store.releaseLease("lease-1", "owner_ended", Date.now());
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(session.attachment.state).toBe("suspended");
+
+    host.evictAll();
+  });
+
   it("resets the idle clock on new activity", async () => {
     vi.useFakeTimers();
     const provider = new HibernatingTestProvider();
@@ -258,6 +290,37 @@ describe("EngineHost idle sweep", () => {
     await vi.advanceTimersByTimeAsync(120_000);
 
     expect(hookCalls).toBe(1);
+    expect(provider.suspendCalls).toEqual([]);
+    expect(session.attachment.state).toBe("ready");
+
+    host.evictAll();
+  });
+
+  it("a hold set during the race window wins — suspend is skipped (PR review 2, item 1)", async () => {
+    vi.useFakeTimers();
+    const provider = new HibernatingTestProvider();
+    const store = new InMemorySessionStore();
+    let hookCalls = 0;
+    const host = buildHost(store, provider, {
+      idleMinutes: 1,
+      idleSweepTestHooks: {
+        beforeSuspend: async (sessionId) => {
+          hookCalls++;
+          const now = Date.now();
+          await store.createLease({
+            id: "ls_race", sessionId, ownerKind: "hold", reason: "keep it", createdAt: now, deadlineAt: now + 3_600_000,
+          });
+        },
+      },
+    });
+
+    const sessionId = "s-hold-race";
+    const session = await buildReadySession(host, sessionId);
+    await stampActivity(store, sessionId, "th-hold-race-initial");
+
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    expect(hookCalls).toBeGreaterThanOrEqual(1);
     expect(provider.suspendCalls).toEqual([]);
     expect(session.attachment.state).toBe("ready");
 

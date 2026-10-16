@@ -66,6 +66,7 @@ import { browserRuntimeFingerprint, browserTargetContainer, hasBrowserCompanion 
  * applies.
  */
 import { findPodEviction, type SandboxEvictionApi } from "./eviction.js";
+import { EXEC_ID_PATTERN, newExecId } from "@valet/engine/wakeups-ids";
 import { HOME_LAYOUT_VERSION } from "./home-persistence.js";
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
@@ -76,6 +77,7 @@ import type {
   ExecResult,
   GatewayEndpoint,
   JobPoll,
+  JobPollOpts,
   Sandbox,
   SandboxCapabilities,
   SandboxCommandChannel,
@@ -106,8 +108,11 @@ import {
   classifyPodPending,
   clearNeverReadyOwner,
   deleteSandbox,
+  EVICTION_PROTECT_ANNOTATION,
   getSandbox,
+  resourceOverridesWithLiveScratch,
   imageFingerprint,
+  LEASED_LABEL,
   listSandboxMetadata,
   livePodDrift,
   podTemplateResourceFingerprint,
@@ -120,6 +125,7 @@ import {
   type SandboxCustomObjectsApi,
   type SandboxPodDeleteApi,
   type SandboxPodsApi,
+  type PodEventSummary,
   type SandboxPodStatusApi,
 } from "./lifecycle.js";
 import {
@@ -132,9 +138,10 @@ import {
   SANDBOX_CONTAINER_NAME,
   sandboxCrName,
   SESSION_ANNOTATION_KEY,
+  SESSION_LABEL_KEY,
   NEVER_READY_OWNER_ANNOTATION_KEY,
 } from "./manifest.js";
-import type { K8sProviderConfig } from "./types.js";
+import type { K8sProviderConfig, SandboxCRRead } from "./types.js";
 import { deleteRuntimeState, ensureRuntimeState, listRuntimeStateOwners, RUNTIME_STATE_ANNOTATION, type RuntimeStateApi } from "./runtime-state.js";
 import {
   growWorkspacePvc,
@@ -171,7 +178,7 @@ function reportAdoptedWorkspacePvcError(args: {
   recordSandboxWorkspaceGrow("error");
 }
 
-/** How old the Sandbox CR must be before an unscheduled Pending pod is a
+/** How old the backing POD must be before an unscheduled Pending pod is a
  * TERMINAL capacity verdict rather than a retryable timeout. A cluster
  * autoscaler provisions a node in 2–5 minutes, and the retryable timeout
  * RETAINS the CR — whose Pending pod is the autoscaler's scale-up signal.
@@ -179,15 +186,41 @@ function reportAdoptedWorkspacePvcError(args: {
  * would remove the signal and hard-fail sessions a later retry would have
  * served. Past this age, unscheduled means capacity is genuinely absent —
  * fail with the cause instead of re-queueing forever (the 2026-08-22
- * incident's sessions waited 47h behind retryable timeouts). */
+ * incident's sessions waited 47h behind retryable timeouts). The age is the
+ * pod's, not the CR's: a resumed or adopted CR is always older than the
+ * grace while its new pod waits for a node pool to scale up from zero. */
 const PENDING_TERMINAL_GRACE_MS = 10 * 60_000;
+
+/** A `TriggeredScaleUp` event newer than the grace keeps a Pending pod
+ * retryable, but only until the pod is this old. A scale-up that loops
+ * without placing the pod still reaches the terminal verdict. */
+const SCALE_UP_DEFERRAL_CAP_MS = 30 * 60_000;
 
 interface PendingPodDiagnosis {
   detail: string;
+  /** How long the pod has been Pending. A scale-up deferral can push the
+   * verdict past the 10-minute grace, up to `SCALE_UP_DEFERRAL_CAP_MS`. */
+  ageMs: number;
   requests: {
     cpu?: string | number;
     memory?: string | number;
   };
+  ephemeralStorage?: string;
+  scratch?: string;
+}
+
+/** True when the autoscaler's latest verdict on this pod is a scale-up
+ * inside the grace window. A later `NotTriggerScaleUp` or `FailedScaleUp`
+ * ends it. */
+export function scaleUpInFlight(events: readonly PodEventSummary[], nowMs: number): boolean {
+  let latest: PodEventSummary | undefined;
+  for (const event of events) {
+    if (event.timestamp === undefined) continue;
+    if (!["TriggeredScaleUp", "NotTriggerScaleUp", "FailedScaleUp"].includes(event.reason ?? "")) continue;
+    if (latest?.timestamp === undefined || event.timestamp > latest.timestamp) latest = event;
+  }
+  return latest?.reason === "TriggeredScaleUp" && latest.timestamp !== undefined &&
+    nowMs - latest.timestamp < PENDING_TERMINAL_GRACE_MS;
 }
 
 /** This error marks all post-grace Pending failures eligible for owned cleanup. */
@@ -225,6 +258,9 @@ export interface PodLivenessApi {
   /** Returns the pod's current `metadata.uid`, or `null` if the pod does
    * not exist (a 404 from the API server). */
   getPodUid(namespace: string, podName: string): Promise<string | null>;
+  /** Returns the pod's `status.phase`, or `null` if the pod does not exist.
+   * Optional: a fake without it skips the phase check. */
+  getPodPhase?(namespace: string, podName: string): Promise<string | null>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -242,6 +278,15 @@ export function podLivenessApiAdapter(api: k8s.CoreV1Api): PodLivenessApi {
       try {
         const pod = await api.readNamespacedPod({ name: podName, namespace });
         return pod.metadata?.uid ?? null;
+      } catch (err) {
+        if (isNotFoundError(err)) return null;
+        throw err;
+      }
+    },
+    async getPodPhase(namespace, podName) {
+      try {
+        const pod = await api.readNamespacedPod({ name: podName, namespace });
+        return pod.status?.phase ?? null;
       } catch (err) {
         if (isNotFoundError(err)) return null;
         throw err;
@@ -269,13 +314,11 @@ function extractExitCodeFromMessage(message: string): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
-/** execId format guard (carried forward from Task 4 review): generated
- * execIds are provider-owned counters, never user input, but this is
- * asserted defensively anyway so a malformed id can never be interpolated
- * into a `/tmp/valet-jobs/{execId}.*` path and traverse out of that
- * directory (no `/`, no `.`, no whitespace). Exported for unit testing. */
-const EXEC_ID_PATTERN = /^job-[0-9]+$/;
-
+/** execId format guard (carried forward from Task 4 review): an execId is
+ * `newExecId()` output, never user input, but this is asserted defensively
+ * anyway so a malformed id can never be interpolated into a
+ * `/tmp/valet-jobs/{execId}.*` path and traverse out of that directory (no
+ * `/`, no `.`, no whitespace). Exported for unit testing. */
 export function assertSafeExecId(execId: string): void {
   if (!EXEC_ID_PATTERN.test(execId)) {
     throw new Error(`invalid execId ${JSON.stringify(execId)}: expected to match ${EXEC_ID_PATTERN}`);
@@ -468,7 +511,6 @@ export class KubernetesSandbox implements Sandbox {
   adopted?: boolean;
   resourceOverrides?: Sandbox["resourceOverrides"];
   private readonly deps: KubernetesSandboxDeps;
-  private nextJobId = 1;
   private lastPodContext?: { podName: string; uid: string | null };
   private readonly jobPods = new Map<string, { podName: string; uid: string | null }>();
 
@@ -501,8 +543,15 @@ export class KubernetesSandbox implements Sandbox {
     return { ...this.execDeps(), containerName, docker: false, browser: false };
   }
 
-  private nextExecId(): string {
-    return `job-${this.nextJobId++}`;
+  /**
+   * A job id unique across handles: job files outlive this handle, so a
+   * per-handle counter reused a live job's files after an api restart
+   * (fix wave 2, B1). A caller may request an id it already stored.
+   */
+  private nextExecId(requested?: string): string {
+    if (requested === undefined) return newExecId();
+    assertSafeExecId(requested);
+    return requested;
   }
 
   /** Resolves the current backing pod name PLUS its `uid` baseline (the
@@ -677,7 +726,7 @@ export class KubernetesSandbox implements Sandbox {
 
   async execJob(command: string, opts?: ExecOpts): Promise<ExecJobHandle> {
     if (opts?.target === "browser") throw new Error("Browser jobs are not supported. Use browser exec or a browser command channel.");
-    const execId = this.nextExecId();
+    const execId = this.nextExecId(opts?.execId);
     return this.withPodContext(async (ctx) => {
       const handle = await execJobInPod(this.execDeps(), ctx.podName, execId, command, opts);
       this.jobPods.set(execId, ctx);
@@ -694,6 +743,7 @@ export class KubernetesSandbox implements Sandbox {
     try {
       // Read the original identity before resolvePodContext can observe a healthy replacement.
       if (original) await this.checkEviction(original.podName, original.uid);
+      else await this.checkRestoredJobPod();
       return await this.withPodContext(async (current) => {
         if (original && (original.podName !== current.podName || (original.uid !== null && original.uid !== current.uid))) {
           await this.checkEviction(original.podName, original.uid);
@@ -708,10 +758,40 @@ export class KubernetesSandbox implements Sandbox {
     }
   }
 
-  async pollJob(execId: string, offset: number): Promise<JobPoll> {
+  /**
+   * A handle with no kickoff identity (restored after an api restart, or
+   * polled again after a terminal poll) cannot compare pod uids. It checks
+   * the backing pod instead. A job's process lives only in the Running pod
+   * that started it, so a missing CR, a missing pod, or a pod in another
+   * phase (a recreated pod still Pending) means the job is gone. The error
+   * text is the one `isSandboxGone` matches, so the wakeup row ends
+   * `sandbox_unavailable` instead of waiting for its deadline (fix wave 3,
+   * concurrency P1).
+   */
+  private async checkRestoredJobPod(): Promise<void> {
+    const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.deps.cfg, this.id);
+    if (podName === null) {
+      throw podUnavailableError(this.id, "no backing pod — the job's backing pod was recreated or removed");
+    }
+    const phase = await this.deps.livenessApi.getPodPhase?.(this.deps.cfg.namespace, podName);
+    if (phase === null) {
+      throw podUnavailableError(this.id, `pod ${podName} not found — the job's backing pod was recreated or removed`);
+    }
+    if (phase === "Pending" || phase === "Succeeded" || phase === "Failed") {
+      throw podUnavailableError(this.id, `pod ${podName} is ${phase} — the job's backing pod was recreated or removed`);
+    }
+    if (phase !== undefined && phase !== "Running") {
+      // `Unknown`: the kubelet lost contact. The process may still run, so
+      // this is a transient probe error, not a gone sandbox; the deadline
+      // still bounds the row.
+      throw new Error(`pod ${podName} phase is ${phase}; the job poll retries on the next tick`);
+    }
+  }
+
+  async pollJob(execId: string, offset: number, opts?: JobPollOpts): Promise<JobPoll> {
     assertSafeExecId(execId);
     return this.withJobPod(execId, async ({ podName, uid }) => {
-      const poll = await pollJobInPod(this.execDeps(), podName, execId, offset);
+      const poll = await pollJobInPod(this.execDeps(), podName, execId, offset, opts);
       if (poll.status === "done") await this.checkExitForDeath(podName, uid, poll.exitCode);
       if (poll.status !== "running") this.jobPods.delete(execId);
       return poll;
@@ -846,13 +926,19 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * sweep). */
   async list(): Promise<SandboxListing[]> {
     const items = await listSandboxMetadata(this.deps.objectsApi, this.cfg);
-    const rows: SandboxListing[] = items.map((item) => {
+    // `scratchBytes` feeds the reconcile sweep's fleet scratch gauge. Only a
+    // running CR counts: a suspended one has no pod and no emptyDir.
+    const rows: Array<SandboxListing & { scratchBytes?: number }> = items.map((item) => {
       const createdAtMs = item.creationTimestamp ? Date.parse(item.creationTimestamp) : Number.NaN;
+      const scratchBytes = item.scratch !== undefined && item.operatingMode !== "Suspended"
+        ? parseStorageQuantity(item.scratch) ?? undefined
+        : undefined;
       return {
         id: item.name,
         sessionId: item.annotations?.[SESSION_ANNOTATION_KEY] ?? null,
         browserEnabled: Boolean(item.annotations?.[RUNTIME_STATE_ANNOTATION]),
         createdAtMs: Number.isNaN(createdAtMs) ? null : createdAtMs,
+        ...(scratchBytes !== undefined ? { scratchBytes } : {}),
       };
     });
     if (this.deps.runtimeStateApi) {
@@ -950,18 +1036,35 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       }
     }
 
+    // A leased session's live pod must survive a cold re-attach (spec
+    // INV-8). Skip the CR update and every roll, and wait for readiness
+    // with no expectations: `waitReady` deletes a pod that does not match
+    // them. The change lands after the lease releases.
+    if (opts.preserveLivePod && previous && previous.spec.operatingMode !== "Suspended" && await this.hasLivePod(name)) {
+      console.log(`k8s sandbox ${name}: keeping the live pod unchanged while a lease is active`);
+      await this.waitReady(name);
+      const kept = this.sandboxFromCr(name, previous);
+      kept.adopted = true;
+      kept.resourceOverrides = resourceOverridesWithLiveScratch(previous);
+      return kept;
+    }
+
     // `adopted` decides cleanup for ordinary startup failures below. A CR
     // that this call created is safe to delete because its pod never ran.
     // An adopted CR can hold prior work and stays for those failures.
     // Post-grace capacity failures are different: the provider retained the
     // CR across earlier attempts, and no attempt returned a sandbox handle.
-    const { cpu, memory } = opts.resources ?? {};
+    const { cpu, memory, scratch } = opts.resources ?? {};
     let applyResult: Awaited<ReturnType<typeof applySandbox>>;
     try {
       applyResult = await applySandbox(this.deps.objectsApi, this.cfg, manifest, {
         preserveResourcesOnAdopt: opts.preserveResourcesOnAdopt,
         preserveResourceFieldsOnAdopt: opts.preserveResourceFieldsOnAdopt,
-        resourceOverrides: { ...(cpu !== undefined ? { cpu } : {}), ...(memory !== undefined ? { memory } : {}) },
+        resourceOverrides: {
+          ...(cpu !== undefined ? { cpu } : {}),
+          ...(memory !== undefined ? { memory } : {}),
+          ...(scratch !== undefined ? { scratch } : {}),
+        },
         readResourceOverrides: opts.readResourceOverrides
           ? async () => {
             const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name);
@@ -1189,6 +1292,17 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     if (cr === null) {
       throw new Error(`KubernetesSandboxProvider.restore: Sandbox CR "${id}" not found`);
     }
+    return this.sandboxFromCr(id, cr);
+  }
+
+  /** True when the CR's backing pod exists. */
+  private async hasLivePod(name: string): Promise<boolean> {
+    const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name);
+    return podName !== null && (await this.deps.livenessApi.getPodUid(this.cfg.namespace, podName)) !== null;
+  }
+
+  /** A handle shaped by the CR's persisted labels, not by create options. */
+  private sandboxFromCr(id: string, cr: SandboxCRRead): KubernetesSandbox {
     // Either persisted browser marker requires the protected workload identity.
     const browser = Boolean(
       cr.metadata.annotations?.[RUNTIME_STATE_ANNOTATION] ||
@@ -1341,6 +1455,65 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
   }
 
+  /**
+   * Eviction-protection seam (spec 2026-10-08, wakeups/leases; paired with
+   * `SandboxProvider.setEvictionProtection`). The api-side `WakeWatcher`
+   * calls this around a lease window so cluster-autoscaler leaves the
+   * sandbox's node alone (`EVICTION_PROTECT_ANNOTATION`) while `LEASED_LABEL`
+   * lets `listEvictionProtected` find every protected sandbox by selector.
+   * A missing backing pod (CR not yet reconciled, or already gone) is
+   * reported as `changed: false` and logged at debug level, never thrown:
+   * eviction protection is advisory, and the caller has no pod to mark.
+   * Idempotent: a pod already in the desired state is not re-patched.
+   */
+  async setEvictionProtection(id: string, enabled: boolean): Promise<{ changed: boolean }> {
+    const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, id);
+    if (podName === null) {
+      console.debug(`k8s sandbox ${id}: setEvictionProtection(${enabled}) skipped, no backing pod`);
+      return { changed: false };
+    }
+    // The session label narrows the read to this sandbox's pods. The
+    // watcher calls this per leased sandbox every tick, so an unfiltered
+    // list would read every pod in the namespace each time.
+    const { items } = await this.deps.podsApi.listNamespacedPod({
+      namespace: this.cfg.namespace,
+      labelSelector: `${SESSION_LABEL_KEY}=${id}`,
+    });
+    const pod = items.find((item) => item.name === podName);
+    const hasAnnotation = pod?.annotations?.[EVICTION_PROTECT_ANNOTATION] === "false";
+    const hasLabel = pod?.labels?.[LEASED_LABEL] === "true";
+    // Enabled wants BOTH set; disabled wants BOTH absent. A partial state
+    // (e.g. a crash cleared the label but not the annotation) is not
+    // "already desired" either way, so it always falls through to patch.
+    const hasDesired = enabled ? hasAnnotation && hasLabel : !hasAnnotation && !hasLabel;
+    if (hasDesired) return { changed: false };
+    await this.deps.podsApi.patchNamespacedPod({
+      name: podName,
+      namespace: this.cfg.namespace,
+      body: {
+        metadata: {
+          annotations: { [EVICTION_PROTECT_ANNOTATION]: enabled ? "false" : null },
+          labels: { [LEASED_LABEL]: enabled ? "true" : null },
+        },
+      },
+    });
+    return { changed: true };
+  }
+
+  /** Every sandbox id (Sandbox CR name) this provider currently marks
+   * eviction-protected. The `LEASED_LABEL` selector reads straight off
+   * live pods, so this reflects reality even if a lease crashed mid-release
+   * without clearing the label. */
+  async listEvictionProtected(): Promise<string[]> {
+    const { items } = await this.deps.podsApi.listNamespacedPod({
+      namespace: this.cfg.namespace,
+      labelSelector: `${LEASED_LABEL}=true`,
+    });
+    return items
+      .map((item) => item.labels?.[SESSION_LABEL_KEY])
+      .filter((name): name is string => typeof name === "string");
+  }
+
   private makeSandbox(id: string, workloadUser: boolean, browser = false): KubernetesSandbox {
     return new KubernetesSandbox(
       {
@@ -1380,13 +1553,14 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * throwing a plain `Error` — that IS a transient, retry-shaped condition.
    */
   private async waitReady(name: string, expected?: { image?: string; resourceFingerprint?: string; homeLayoutVersion?: string; browserFingerprint?: string }): Promise<void> {
-    const deadline = Date.now() + READY_TIMEOUT_MS;
+    const startedAtMs = Date.now();
+    const deadline = startedAtMs + READY_TIMEOUT_MS;
     const expectedImageFingerprint = expected?.image !== undefined ? imageFingerprint(expected.image) : undefined;
     const rolledGenerations = new Set<string>();
     let lastReadError: string | undefined;
     let lastState: SandboxStatus["state"] = "provisioning";
     for (;;) {
-      const pendingError = await this.pendingTerminalError(name);
+      const pendingError = await this.pendingTerminalError(name, startedAtMs);
       if (pendingError !== null) throw pendingError;
       try {
         const status = await sandboxStatus(this.deps.objectsApi, this.cfg, name, this.deps.podsApi, this.deps.podStatusApi);
@@ -1449,27 +1623,46 @@ export class KubernetesSandboxProvider implements SandboxProvider {
 
   /** Return the backing pod's post-grace Pending diagnosis. Return null if
    * the pod is absent, past Pending, unresolvable, or inside the grace period.
-   * Transient API errors and autoscaler scale-up windows stay retryable. */
-  private async podPendingDiagnosis(name: string): Promise<PendingPodDiagnosis | null> {
+   * The grace runs from the pod's creation time, or from `startedAtMs` (the
+   * readiness wait's start) when the pod reports none. Transient API errors
+   * and autoscaler scale-up windows stay retryable. */
+  private async podPendingDiagnosis(name: string, startedAtMs: number): Promise<PendingPodDiagnosis | null> {
     if (!this.deps.podStatusApi) return null;
+    // A pod is never older than its CR, so a young CR (or one with no
+    // readable age) skips the pod reads.
     const cr = await getSandbox(this.deps.objectsApi, this.cfg, name).catch(() => null);
-    const bornAtMs = cr?.metadata.creationTimestamp ? Date.parse(cr.metadata.creationTimestamp) : Number.NaN;
-    if (Number.isNaN(bornAtMs) || Date.now() - bornAtMs < PENDING_TERMINAL_GRACE_MS) return null;
+    const crBornAtMs = cr?.metadata.creationTimestamp ? Date.parse(cr.metadata.creationTimestamp) : Number.NaN;
+    if (Number.isNaN(crBornAtMs) || Date.now() - crBornAtMs < PENDING_TERMINAL_GRACE_MS) return null;
     const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name).catch(() => null);
     if (!podName) return null;
     const pod = await this.deps.podStatusApi.getPodStatus(this.cfg.namespace, podName).catch(() => null);
     const detail = classifyPodPending(pod);
     if (detail === null) return null;
-    return { detail, requests: pod?.sandboxResources?.requests ?? {} };
+    const podBornAtMs = pod?.createdAt ? Date.parse(pod.createdAt) : Number.NaN;
+    const bornAtMs = Number.isNaN(podBornAtMs) ? startedAtMs : podBornAtMs;
+    const ageMs = Date.now() - bornAtMs;
+    if (ageMs < PENDING_TERMINAL_GRACE_MS) return null;
+    if (ageMs < SCALE_UP_DEFERRAL_CAP_MS && this.deps.podStatusApi.listPodEvents) {
+      const events = await this.deps.podStatusApi.listPodEvents(this.cfg.namespace, podName).catch(() => []);
+      if (scaleUpInFlight(events, Date.now())) return null;
+    }
+    return {
+      detail,
+      ageMs,
+      requests: pod?.sandboxResources?.requests ?? {},
+      ...(pod?.ephemeralStorageRequest !== undefined ? { ephemeralStorage: pod.ephemeralStorageRequest } : {}),
+      ...(pod?.sandboxResources?.scratch !== undefined ? { scratch: pod.sandboxResources.scratch } : {}),
+    };
   }
 
   /** Return a terminal error when an unscheduled pod is past the grace period. */
-  private async pendingTerminalError(name: string): Promise<SandboxStartupError | null> {
-    const pending = await this.podPendingDiagnosis(name);
+  private async pendingTerminalError(name: string, startedAtMs: number): Promise<SandboxStartupError | null> {
+    const pending = await this.podPendingDiagnosis(name, startedAtMs);
     if (pending === null) return null;
     const requests = [
       ...(pending.requests.cpu === undefined ? [] : [`cpu=${pending.requests.cpu}`]),
       ...(pending.requests.memory === undefined ? [] : [`memory=${pending.requests.memory}`]),
+      ...(pending.ephemeralStorage === undefined ? [] : [`ephemeral-storage=${pending.ephemeralStorage}`]),
     ];
     const requestDetail = requests.length === 0 ? "" : ` Pod requests: ${requests.join(", ")}.`;
     const shortages = classifyPodCapacityShortages(pending.detail);
@@ -1481,7 +1674,13 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         "If a lower value fails, check the largest node's available CPU and memory.",
       );
     }
-    if (shortages.includes("ephemeral-storage")) {
+    const scratchShortage = shortages.includes("ephemeral-storage") && pending.scratch !== undefined;
+    if (scratchShortage) {
+      actions.push(
+        "Lower resources.scratch in .valet/prebuild.yaml or task.resources.scratch, " +
+        "or ask an admin to add a node pool with enough local disk.",
+      );
+    } else if (shortages.includes("ephemeral-storage")) {
       actions.push(
         "Check node ephemeral-storage capacity. Check the deployment ephemeral-storage request. " +
         "If you correct the capacity mismatch, retry.",
@@ -1489,8 +1688,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
     const action = actions.length === 0 ? "Free or add node capacity. Then retry." : actions.join(" ");
     const schedulerDetail = pending.detail.replace(/[.!?]+$/, "");
-    const message = `pod has been Pending for over ${Math.round(PENDING_TERMINAL_GRACE_MS / 60_000)} minutes ` +
-      `(${schedulerDetail}).${requestDetail} The cluster has no schedulable capacity for this sandbox. ${action}`;
+    const scratchDetail = scratchShortage ? ` (scratch ${pending.scratch})` : "";
+    const message = `pod has been Pending for ${Math.floor(pending.ageMs / 60_000)} minutes ` +
+      `(${schedulerDetail})${scratchDetail}.${requestDetail} The cluster has no schedulable capacity for this sandbox. ${action}`;
     return new PendingTerminalStartupError(name, message);
   }
 }

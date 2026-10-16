@@ -20,8 +20,8 @@
 import * as k8s from "@kubernetes/client-node";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { SandboxProvider, SandboxResources } from "@valet/engine";
-import { isValidSandboxCpu, sandboxCpuRange } from "@valet/shared";
+import type { SandboxProvider, SandboxResources, WakeupLimits } from "@valet/engine";
+import { isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange, type ScratchCaps } from "@valet/shared";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
 import {
@@ -401,6 +401,170 @@ export function resolveSandboxWorkspaceStorageMax(env: NodeJS.ProcessEnv): strin
   return quantityEnv("VALET_SANDBOX_WORKSPACE_MAX", env.VALET_SANDBOX_WORKSPACE_MAX, "20Gi");
 }
 
+/**
+ * Deploy-wide hard cap for the node-local `/scratch` volume
+ * (`VALET_SANDBOX_SCRATCH_MAX`). Unlike the workspace knobs above, the
+ * default is UNSET: scratch is disabled deployment-wide until an operator
+ * opts in by setting this. `"0"` keeps it disabled explicitly.
+ */
+export function resolveSandboxScratchMax(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = env.VALET_SANDBOX_SCRATCH_MAX;
+  const trimmed = raw?.trim();
+  if (trimmed === undefined || trimmed === "") return undefined;
+  const bytes = parseStorageQuantity(trimmed);
+  if (bytes === 0) return undefined;
+  if (bytes === null || bytes < 0) {
+    throw new Error(
+      `VALET_SANDBOX_SCRATCH_MAX="${raw}" is not a positive Kubernetes quantity. Use a form like "1Ti", or "0" to disable.`,
+    );
+  }
+  return trimmed;
+}
+
+/**
+ * Per-child-agent cap on a `task`-requested `/scratch` volume
+ * (`VALET_SANDBOX_SCRATCH_AGENT_MAX`, default "100Gi"). Only the `task`
+ * source is bound by this cap (`validateScratchRequest`'s `source` param).
+ * A repository's `.valet/prebuild.yaml` or a saved default can still request
+ * up to the deploy cap. `"0"` removes the agent cap entirely.
+ */
+export function resolveSandboxScratchAgentMax(env: NodeJS.ProcessEnv): string | undefined {
+  return quantityEnv("VALET_SANDBOX_SCRATCH_AGENT_MAX", env.VALET_SANDBOX_SCRATCH_AGENT_MAX, "100Gi");
+}
+
+/**
+ * Resolves both scratch caps together and throws at boot when the agent cap
+ * exceeds the deploy cap (a `task` request the agent cap would allow could
+ * never actually provision). Called unconditionally regardless of
+ * `VALET_SANDBOX_BACKEND` so the check always runs, not only under
+ * kubernetes.
+ */
+export function resolveScratchCaps(env: NodeJS.ProcessEnv): ScratchCaps {
+  const max = resolveSandboxScratchMax(env);
+  const agentMax = resolveSandboxScratchAgentMax(env);
+  if (max !== undefined && agentMax !== undefined) {
+    const maxBytes = parseStorageQuantity(max);
+    const agentBytes = parseStorageQuantity(agentMax);
+    if (maxBytes !== null && agentBytes !== null && agentBytes > maxBytes) {
+      throw new Error(
+        `VALET_SANDBOX_SCRATCH_AGENT_MAX (effective "${agentMax}") exceeds VALET_SANDBOX_SCRATCH_MAX (effective "${max}"). ` +
+          "Lower the agent cap or raise the deploy cap.",
+      );
+    }
+  }
+  return {
+    ...(max !== undefined ? { max } : {}),
+    ...(agentMax !== undefined ? { agentMax } : {}),
+  };
+}
+
+/** Default cap on one detached job's log: 2 GiB. */
+export const DEFAULT_JOB_LOG_MAX_BYTES = 2 * 1024 ** 3;
+
+/**
+ * The detached job log cap from `VALET_JOB_LOG_MAX_BYTES`: whole bytes or a
+ * quantity such as `2Gi`, default 2Gi. Resolved once at boot, so a bad
+ * value stops the api instead of failing every session build (data M3).
+ *
+ * On a scratch pod the job logs live on `/scratch`, and they count against
+ * its emptyDir `sizeLimit`. A cap above the deploy scratch cap can never be
+ * safe, so the boot also fails when `VALET_SANDBOX_SCRATCH_MAX` is set and
+ * smaller (k8s M-B). A session can still request less scratch than the cap.
+ */
+export function resolveJobLogMaxBytes(env: NodeJS.ProcessEnv): number {
+  const raw = env.VALET_JOB_LOG_MAX_BYTES?.trim();
+  let bytes = DEFAULT_JOB_LOG_MAX_BYTES;
+  if (raw !== undefined && raw !== "") {
+    const parsed = /^\d+$/.test(raw) ? Number(raw) : parseResourceQuantity(raw);
+    if (parsed === null || !Number.isSafeInteger(parsed) || parsed < 1) {
+      throw new Error(
+        `VALET_JOB_LOG_MAX_BYTES="${raw}" is not a byte size. Set a whole number of bytes or a quantity such as 2Gi.`,
+      );
+    }
+    bytes = parsed;
+  }
+  const scratchMax = resolveSandboxScratchMax(env);
+  const scratchMaxBytes = scratchMax === undefined ? null : parseStorageQuantity(scratchMax);
+  if (scratchMaxBytes !== null && bytes > scratchMaxBytes) {
+    throw new Error(
+      `VALET_JOB_LOG_MAX_BYTES (effective "${bytes}" bytes) exceeds VALET_SANDBOX_SCRATCH_MAX ("${scratchMax}"). ` +
+        "Set sandbox.jobLogMaxBytes to at most sandbox.scratchMax in the Valet chart.",
+    );
+  }
+  return bytes;
+}
+
+/**
+ * A boot warning when scratch is enabled before its node pool exists.
+ * Without a local-NVMe pool, a scratch request lands on a node's shared
+ * root disk, and heavy writes there made nodes unhealthy (2026-08-28).
+ * `VALET_SANDBOX_SCRATCH_POOL_READY=1` says the pool exists.
+ */
+export function scratchPoolWarning(env: NodeJS.ProcessEnv): string | undefined {
+  const scratchMax = resolveSandboxScratchMax(env);
+  if (scratchMax === undefined || env.VALET_SANDBOX_SCRATCH_POOL_READY?.trim() === "1") return undefined;
+  return `VALET_SANDBOX_SCRATCH_MAX is ${scratchMax}, but VALET_SANDBOX_SCRATCH_POOL_READY is not 1. ` +
+    "A scratch request can land on a shared root disk and make the node unhealthy. " +
+    'Set sandbox.scratchMax to "0" until a local-NVMe scratch node pool exists, then set sandbox.scratchPoolReady.';
+}
+
+/**
+ * Shared parse for the wakeup/lease limit knobs below: unset or empty →
+ * the default. Anything else must be plain decimal digits (no `1e3`, `0x10`,
+ * `12.0`, or sign) from 1 to `max`, or the boot THROWS naming the env var
+ * and the valid range. The bound keeps a value like `VALET_TIMER_MAX_HOURS`
+ * from overflowing the `bigint` deadline columns.
+ */
+function positiveIntEnv(name: string, raw: string | undefined, defaultValue: number, max: number): number {
+  const trimmed = raw?.trim();
+  if (trimmed === undefined || trimmed === "") return defaultValue;
+  const n = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
+  if (!Number.isSafeInteger(n) || n < 1 || n > max) {
+    throw new Error(`${name}="${raw}" is not a whole number from 1 to ${max}. Set it to a value in that range.`);
+  }
+  return n;
+}
+
+/** Upper bounds for the wakeup/lease knobs: one year of hours, and counts
+ * far above any sane deploy that still fit every column. */
+const MAX_LIMIT_HOURS = 8760;
+const MAX_WAKEUPS_PER_SESSION = 1000;
+const MAX_WATCH_EVENTS_PER_HOUR = 100_000;
+/** One day: a watch that waits longer between events should be a timer. */
+const MAX_WATCH_MIN_INTERVAL_MS = 86_400_000;
+
+/**
+ * Resolves the wakeups/leases limits (spec 2026-10-08) from env:
+ * `VALET_LEASE_MAX_HOURS` (default 72), `VALET_TIMER_MAX_HOURS` (default
+ * 720), `VALET_WAKEUPS_PER_SESSION` (default 20), and
+ * `VALET_WATCH_MAX_EVENTS_PER_HOUR` (default 120), and
+ * `VALET_WATCH_MIN_INTERVAL_MS` (default 120000, the shortest gap between
+ * two watch signal turns). Called unconditionally at boot so a
+ * misconfigured deploy fails loud before serving a session.
+ *
+ * The return type names `watchMinIntervalMs` explicitly, so this compiles
+ * before and after the field joins `WakeupLimits`.
+ */
+export function resolveWakeupLimits(env: NodeJS.ProcessEnv): WakeupLimits & { watchMinIntervalMs: number } {
+  return {
+    leaseMaxHours: positiveIntEnv("VALET_LEASE_MAX_HOURS", env.VALET_LEASE_MAX_HOURS, 72, MAX_LIMIT_HOURS),
+    timerMaxHours: positiveIntEnv("VALET_TIMER_MAX_HOURS", env.VALET_TIMER_MAX_HOURS, 720, MAX_LIMIT_HOURS),
+    perSession: positiveIntEnv("VALET_WAKEUPS_PER_SESSION", env.VALET_WAKEUPS_PER_SESSION, 20, MAX_WAKEUPS_PER_SESSION),
+    watchMaxEventsPerHour: positiveIntEnv(
+      "VALET_WATCH_MAX_EVENTS_PER_HOUR",
+      env.VALET_WATCH_MAX_EVENTS_PER_HOUR,
+      120,
+      MAX_WATCH_EVENTS_PER_HOUR,
+    ),
+    watchMinIntervalMs: positiveIntEnv(
+      "VALET_WATCH_MIN_INTERVAL_MS",
+      env.VALET_WATCH_MIN_INTERVAL_MS,
+      120_000,
+      MAX_WATCH_MIN_INTERVAL_MS,
+    ),
+  };
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a
@@ -422,6 +586,9 @@ export function buildSandboxProvider(
   deps: BuildSandboxProviderDeps = {},
 ): SandboxProvider {
   const backend = parseSandboxBackend(env.VALET_SANDBOX_BACKEND);
+  // Boot check only, every backend: a contradictory deploy config (agent cap
+  // above the deploy cap) must fail loud here, not only under kubernetes.
+  resolveScratchCaps(env);
   switch (backend) {
     case "docker":
       return new DockerSandboxProvider({

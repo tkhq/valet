@@ -141,6 +141,9 @@ export function engineSignalToWire(
     signalType: signal.signalType,
     attributes: signal.attributes,
     senderSessionId: signal.senderSessionId,
+    // Only the channel type ships. The thread key is a host-side routing
+    // handle and stays off the wire.
+    ...(signal.origin ? { origin: { channelType: signal.origin.channelType } } : {}),
   };
 }
 

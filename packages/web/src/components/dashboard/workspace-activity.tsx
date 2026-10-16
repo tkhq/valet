@@ -8,6 +8,13 @@ import { useArtifacts } from "~/api/artifacts";
 import { useDismissRun, useWorkflows, useWorkflowActionRequired } from "~/api/workflows";
 import { Badge, Button, ErrorRow, LoadingRow, textLinkClass, WorkRow, WorkSection, WorkList } from "~/components/primitives";
 import { RunStateBadge } from "~/components/run-state-badge";
+import { useBackgroundWorkGuard, type GuardedAction } from "~/components/session/background-work-confirm";
+import { errorText } from "~/lib/error-text";
+
+const STOP_AND_ARCHIVE: GuardedAction = {
+  title: "Stop background work and archive?",
+  confirmLabel: "Stop background work and archive",
+};
 
 const CONVERSATION_PAGE_SIZE = 10;
 
@@ -108,6 +115,17 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
   }, [lastConversationPage]);
   const visibleReplies = replies.slice(currentConversationPage * CONVERSATION_PAGE_SIZE, (currentConversationPage + 1) * CONVERSATION_PAGE_SIZE);
   const finish = useFinishWaitingThread(owner);
+  // A thread whose agent is waiting on its own background work looks
+  // "done" here. The server refuses its archive (409); the guard names the
+  // work and archives with `force` only on confirm (fix wave 3, H1).
+  const workGuard = useBackgroundWorkGuard();
+  const [finishError, setFinishError] = useState<string>();
+  const markDone = (row: WaitingThread) => {
+    setFinishError(undefined);
+    workGuard.attempt(STOP_AND_ARCHIVE, (force) =>
+      finish.mutateAsync({ sessionId: row.sessionId, threadId: row.threadId, ...(force ? { force: true } : {}) }),
+    ).catch((err: unknown) => setFinishError(errorText(err, "Could not archive the thread. Try again.")));
+  };
   const inProgress = activeThreads.filter(row => row.state === "working");
   const attentionRuns = runs.filter(row => runCategory(row) === "attention");
   const progressRuns = runs.filter(row => runCategory(row) === "progress");
@@ -125,14 +143,16 @@ function ScopedCatchUp({ owner }: { owner: OwnerFilter }) {
   return <div className="space-y-7">
     {errors.map(({ label, query }) => <ErrorRow key={label}>Could not load {label}. <button className="underline" onClick={() => void query.refetch()}>Retry</button></ErrorRow>)}
     {loading && <LoadingRow label="Loading work…" />}
+    {finishError && <ErrorRow>{finishError}</ErrorRow>}
+    {workGuard.dialog}
     {incomplete && <p className="text-xs text-muted">More active work is available. Use the paging controls below to see it.</p>}
     {(needsYou.length + attentionRuns.length + questions.length > 0) && <WorkSection title="Needs attention" icon={<CircleAlert className="h-4 w-4 text-amber" />} count={needsYou.length + attentionRuns.length + questions.length}>
       {needsYou.map(row => <ActiveRow key={row.id} row={row} />)}
-      {questions.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} onDone={() => finish.mutate(row)} />)}
+      {questions.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} onDone={() => markDone(row)} />)}
       {attentionRuns.map(row => <RunRow key={row.runId} row={row} prompt={gates.error ? undefined : gates.data?.items.find(item => item.runId === row.runId && item.owner.type === owner.ownerType && item.owner.id === owner.ownerId)?.gate.prompt} />)}
     </WorkSection>}
     {replies.length > 0 && <WorkSection title="Conversation updates" icon={<MessageSquare className="h-4 w-4 text-muted" />} count={replies.length}>
-      {visibleReplies.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} onDone={() => finish.mutate(row)} />)}
+      {visibleReplies.map(row => <WaitingRow key={`${row.sessionId}:${row.threadId}`} row={row} onDone={() => markDone(row)} />)}
       {lastConversationPage > 0 && <nav aria-label="Conversation updates pagination" className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
         <Button variant="secondary" size="sm" aria-label="Previous page" disabled={currentConversationPage === 0} onClick={() => setConversationPage(currentConversationPage - 1)}>Previous</Button>
         <span className="text-xs text-muted" aria-live="polite">Page {currentConversationPage + 1} of {lastConversationPage + 1}</span>

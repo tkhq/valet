@@ -49,13 +49,13 @@ it("links a brief back to the Slack thread that started it, and only over http(s
   expect(within(unsafe).queryByRole("link", { name: "Open in Slack" })).toBeNull();
 });
 it("dismisses a brief with its threads and reports what stayed open", async () => {
-  vi.mocked(api.dismissWorkspaceBriefing).mockResolvedValue({ dismissed: true, archived: 1, keptWaiting: 1 });
+  vi.mocked(api.dismissWorkspaceBriefing).mockResolvedValue({ dismissed: true, archived: 1, keptWaiting: 1, keptRunning: 1 });
   setup();
   fireEvent.click(await screen.findByRole("button", { name: `Dismiss ${briefing.title}` }));
   // The server archives the threads its own copy of the brief names.
   await waitFor(() => expect(api.dismissWorkspaceBriefing).toHaveBeenCalledWith(owner, briefing.id));
   expect(await screen.findByRole("status")).toHaveProperty("textContent",
-    `Dismissed "${briefing.title}". Archived 1 thread. 1 waiting on an approval stays open.`);
+    `Dismissed "${briefing.title}". Archived 1 thread. 1 waiting on an approval stays open. 1 with background work stays open.`);
 });
 it("briefs one goal across conversations and runs with one concise summary", async () => {
   setup();
