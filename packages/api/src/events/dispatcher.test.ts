@@ -19,6 +19,7 @@ import {
   orgMembers,
   userIdentityLinks,
   eventDeliveries,
+  eventReceipts,
   events,
   eventSubscriptions,
   workflowDefinitions,
@@ -31,7 +32,14 @@ import {
   threadPullRequests,
 } from "../schema/index.js";
 import { OWN_WRITE_SETTLE_MS, recordChannelMessage } from "../services/channel-messages.js";
-import { EventDispatcher, type AssistantDeliverFn } from "./dispatcher.js";
+import { EventDispatcher, recordSkippedDelivery, type AssistantDeliverFn } from "./dispatcher.js";
+import { PinUnavailableError } from "./assistant-delivery.js";
+
+const recordDeliveryDestination = vi.hoisted(() => vi.fn());
+vi.mock("../observability/delivery-metrics.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../observability/delivery-metrics.js")>()),
+  recordDeliveryDestination,
+}));
 
 const ORG = "org-1";
 /** The thread a recording delivery fake reports it landed in. */
@@ -913,6 +921,37 @@ describe("EventDispatcher", () => {
       expect((await getDelivery(deliveryId)).status).toBe("delivered");
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ ownerType: "team", ownerId: "team-x" });
     });
+
+    it("binds the follow to the thread the mention landed in, and the binding wins the next mention (Part B step 5)", async () => {
+      await seedMentionMember("team-x");
+      const { deliver } = await dispatchMention([]);
+      expect(deliver.mock.calls[0]?.[0].destination).toMatchObject({ kind: "key", reason: "policy_own" });
+      expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ sessionId: LANDED.sessionId, threadId: LANDED.threadId });
+
+      // Point the follow at a live thread, then mention again inside the Slack thread.
+      await seedSession("sess-bound", "team", "team-x", "thr-bound");
+      await tdb.appDb.execute(sql`UPDATE followed_threads SET session_id = 'sess-bound', thread_id = 'thr-bound'`);
+      const second = await dispatchMention([], {
+        payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> again", ts: "1.3", thread_ts: "1.2" },
+        origin: { channelType: "slack", threadKey: "slack:C1:1.2", messageTs: "1.3" },
+      });
+      expect(second.deliver.mock.calls[0]?.[0].destination).toEqual({ kind: "target", sessionId: "sess-bound", threadId: "thr-bound", reason: "conversation_follow" });
+    });
+
+    it("ignores a follow binding whose thread was archived and lets the policy decide", async () => {
+      await seedMentionMember("team-x");
+      await seedSession("sess-bound", "team", "team-x", "thr-bound");
+      await archiveThread("sess-bound", "thr-bound");
+      await upsertFollowedThread(tdb.appDb, {
+        orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.1",
+        ownerType: "team", ownerId: "team-x", createdBy: "member-9", target: { sessionId: "sess-bound", threadId: "thr-bound" },
+      });
+      const { deliver } = await dispatchMention([], {
+        payload: { type: "app_mention", channel: "C1", user: "U9", text: "<@U-BOT> status?", ts: "1.2", thread_ts: "1.1" },
+        origin: { channelType: "slack", threadKey: "slack:C1:1.1", messageTs: "1.2" },
+      });
+      expect(deliver.mock.calls[0]?.[0].destination).toMatchObject({ kind: "key", reason: "policy_own" });
+    });
   });
 
   it("signal target: inserts workflow_signals for org runs parked on event:<key> and wakes them", async () => {
@@ -1106,6 +1145,99 @@ describe("EventDispatcher", () => {
     expect(row.status).toBe("delivered");
     expect(row.attempts).toBe(1);
   });
+  /** Thread policy plumbing (spec 2026-10-16: delivery threads, Part B and Part E). */
+  describe("thread policy destinations", () => {
+    const PR_SUBJECTS = ["github:acme/site", "github:acme/site#7"];
+
+    function dispatcherWith(deliver: AssistantDeliverFn): EventDispatcher {
+      return new EventDispatcher({
+        db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb),
+        deliverToAssistant: deliver, plugins: [githubPlugin],
+      });
+    }
+
+    it("own: keys on the rule and titles the thread by the rule name", async () => {
+      const { subscriptionId } = await seedDelivery({ target: { kind: "orchestrator", thread: { mode: "own" } } });
+      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+      await dispatcherWith(deliver).pollOnce();
+      expect(deliver.mock.calls[0]?.[0].destination).toEqual({ kind: "key", key: `sub:${subscriptionId}`, title: "test sub", reason: "policy_own" });
+    });
+
+    it("new: keys on the delivery id, so a retry reuses the same key", async () => {
+      const { subscriptionId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator", thread: { mode: "new" } } });
+      let calls = 0;
+      const deliver = vi.fn<AssistantDeliverFn>(async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("transient");
+        return LANDED;
+      });
+      const dispatcher = dispatcherWith(deliver);
+      await dispatcher.pollOnce();
+      expect((await getDelivery(deliveryId)).status).toBe("failed");
+      await tdb.appDb.update(eventDeliveries).set({ nextAttemptAt: Date.now() - 1 }).where(eq(eventDeliveries.id, deliveryId));
+      await dispatcher.pollOnce();
+      expect((await getDelivery(deliveryId)).status).toBe("delivered");
+      const keys = deliver.mock.calls.map(([args]) => args.destination);
+      const expected = { kind: "key", key: `sub:${subscriptionId}:${deliveryId}`, title: "Issue #7 opened: broken build", reason: "policy_new" };
+      expect(keys).toEqual([expected, expected]);
+    });
+
+    it("subject: two rules of one owner on one pull request share one key (INV-D8)", async () => {
+      const { eventId, subscriptionId } = await seedDelivery({ target: { kind: "orchestrator", thread: { mode: "subject" } }, subjects: PR_SUBJECTS });
+      const secondSub = randomUUID();
+      const now = Date.now();
+      await tdb.appDb.insert(eventSubscriptions).values({
+        id: secondSub, orgId: ORG, ownerType: "user", ownerId: "user-1", name: "second rule", eventKeys: ["github.issues.*"],
+        filters: [], target: { kind: "orchestrator", thread: { mode: "subject" } }, enabled: true, createdBy: "user-1", createdAt: now, updatedAt: now,
+      });
+      await tdb.appDb.insert(eventDeliveries).values({ id: randomUUID(), eventId, subscriptionId: secondSub, status: "pending", attempts: 0, nextAttemptAt: now - 1_000, createdAt: now });
+      const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+      await dispatcherWith(deliver).pollOnce();
+      expect(subscriptionId).not.toBe(secondSub);
+      const destinations = deliver.mock.calls.map(([args]) => args.destination);
+      const expected = { kind: "key", key: "subject:github:acme/site#7", title: "acme/site#7", reason: "policy_subject" };
+      expect(destinations).toEqual([expected, expected]);
+    });
+
+    it("existing: a pin that cannot receive deliveries dead-letters with the fix text", async () => {
+      const pin = { mode: "existing", sessionId: "sess-pin", threadId: "thr-pin" };
+      const { deliveryId } = await seedDelivery({ target: { kind: "orchestrator", thread: pin } });
+      const deliver = vi.fn<AssistantDeliverFn>(async () => { throw new PinUnavailableError(); });
+      recordDeliveryDestination.mockClear();
+      await dispatcherWith(deliver).pollOnce();
+      expect(deliver).toHaveBeenCalledOnce();
+      expect(deliver.mock.calls[0]?.[0].destination).toEqual({ kind: "target", sessionId: "sess-pin", threadId: "thr-pin", reason: "policy_existing" });
+      expect(await getDelivery(deliveryId)).toMatchObject({ status: "dead", attempts: 1, lastError: "Pick another thread for this rule in Presence." });
+      expect(recordDeliveryDestination.mock.calls).toEqual([["pin_unavailable"]]);
+    });
+
+    it("records the destination stage on the event's receipt and counts the reason", async () => {
+      const { eventId, subscriptionId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
+      await tdb.appDb.insert(eventReceipts).values({
+        id: "rcpt-1", orgId: ORG, service: "github", metadata: {}, stages: [], subscriptions: [], eventId, createdAt: 1, updatedAt: 1,
+      });
+      recordDeliveryDestination.mockClear();
+      await dispatcherWith(vi.fn<AssistantDeliverFn>(async () => LANDED)).pollOnce();
+      const [receipt] = await tdb.appDb.select().from(eventReceipts).where(eq(eventReceipts.id, "rcpt-1"));
+      expect(receipt?.stages).toEqual([expect.objectContaining({
+        stage: "destination", outcome: "policy_own",
+        detail: `Subscription ${subscriptionId}, delivery ${deliveryId}: thread key sub:${subscriptionId}.`,
+      })]);
+      expect(recordDeliveryDestination.mock.calls).toEqual([["policy_own"]]);
+    });
+
+    it("a skip marks the delivery skipped and creates no thread (INV-D3)", async () => {
+      const { eventId, subscriptionId, deliveryId } = await seedDelivery({ target: { kind: "orchestrator" } });
+      recordDeliveryDestination.mockClear();
+      await recordSkippedDelivery(tdb.appDb, {
+        deliveryId, subscriptionId, attempts: 0, orgId: ORG, eventId, destination: { kind: "skip", reason: "claim:thr-w" },
+      });
+      expect(await getDelivery(deliveryId)).toMatchObject({ status: "skipped", attempts: 1, lastError: "Skipped, claim:thr-w." });
+      expect(recordDeliveryDestination.mock.calls).toEqual([["claim_skip"]]);
+      const threads = await tdb.appDb.execute(sql`SELECT count(*)::int AS n FROM engine_threads`) as { rows: Array<{ n: number }> };
+      expect(threads.rows[0]?.n).toBe(0);
+    });
+  });
 });
 
 /**
@@ -1201,4 +1333,5 @@ describe("EventDispatcher — team-owned subscriptions", () => {
     expect(args.ownerId).toBe("author-user");
     expect(args.actorUserId).toBe("author-user");
   });
+
 });

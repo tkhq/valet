@@ -468,6 +468,28 @@ describe("handleFollowedMessage", () => {
     });
   });
 
+  it("routes a followed message to the thread the binding mention landed in", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const session = await defaultAssistantSessionFor(deps, { type: "org", id: ORG }, { actorUserId: USER, orgId: ORG });
+    const landed = await session.createThread("sub:mention-rule:delivery-1");
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2",
+      ownerType: "org", ownerId: ORG, createdBy: USER, target: { sessionId: session.id, threadId: landed.id },
+    });
+
+    await handleFollowedMessage(deps, { orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "any update?" }) });
+
+    let userEntry: MessageEntry | undefined;
+    for (let i = 0; i < 100; i++) {
+      const entries = await session.providers.store.getEntries(session.id, landed.id);
+      userEntry = entries.find((e) => e.type === "message" && e.role === "user") as MessageEntry | undefined;
+      if (userEntry) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(userEntry?.content).toBe("any update?");
+    expect(await session.threadByKey("slack:C1:1.2")).toBeNull();
+  });
+
   it("prepends the missed window and advances last_seen_ts", async () => {
     await upsertFollowedThread(testDb.appDb, {
       orgId: ORG,

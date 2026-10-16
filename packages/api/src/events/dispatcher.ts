@@ -175,6 +175,26 @@ function normalizedEventFromRow(event: typeof events.$inferSelect): NormalizedEv
   };
 }
 
+/**
+ * Settle a delivery whose destination is a skip (spec 2026-10-16: delivery
+ * threads, Part B step 3). It submits nothing and creates no thread
+ * (INV-D3). The row, the counter, and the receipt record the reason.
+ */
+export async function recordSkippedDelivery(db: AppDb, args: {
+  deliveryId: string;
+  subscriptionId: string;
+  attempts: number;
+  orgId: string;
+  eventId: string;
+  destination: Extract<Destination, { kind: "skip" }>;
+}): Promise<void> {
+  await db.update(eventDeliveries).set({ status: "skipped", lastError: `Skipped, ${args.destination.reason}.`, attempts: args.attempts + 1 })
+    .where(eq(eventDeliveries.id, args.deliveryId));
+  recordDeliveryDestination("claim_skip");
+  await appendReceiptStageForEvent(db, args.orgId, args.eventId,
+    destinationReceiptStage({ subscriptionId: args.subscriptionId, deliveryId: args.deliveryId }, args.destination));
+}
+
 /** The `target` jsonb column's shape — written only by the subscriptions CRUD validator. */
 interface SubscriptionTarget {
   kind: "workflow" | "orchestrator" | "signal";
@@ -452,11 +472,7 @@ export class EventDispatcher {
           });
         const receiptIds = { subscriptionId: sub.id, deliveryId: delivery.id };
         if (destination.kind === "skip") {
-          // A skip submits nothing and creates no thread (INV-D3).
-          await db.update(eventDeliveries).set({ status: "skipped", lastError: `Skipped, ${destination.reason}.`, attempts: delivery.attempts + 1 })
-            .where(eq(eventDeliveries.id, deliveryId));
-          recordDeliveryDestination("claim_skip");
-          await appendReceiptStageForEvent(db, event.orgId, event.id, destinationReceiptStage(receiptIds, destination));
+          await recordSkippedDelivery(db, { ...receiptIds, attempts: delivery.attempts, orgId: event.orgId, eventId: event.id, destination });
           return;
         }
         const author = teamMention

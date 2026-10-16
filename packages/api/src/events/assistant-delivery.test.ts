@@ -12,7 +12,7 @@ import { assistantExecutions, assistants, sessionThreads, teams, users } from ".
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
-import { deliverToAssistantThread } from "./assistant-delivery.js";
+import { deliverToAssistantThread, PinUnavailableError } from "./assistant-delivery.js";
 
 const ORG = "org-1";
 const USER = "user-1";
@@ -402,5 +402,109 @@ describe("deliverToAssistantThread — which assistant answers", () => {
     const rows = await testDb.appDb.select().from(assistants);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ ownerType: OWNER.type, ownerId: OWNER.id });
+  });
+});
+
+describe("deliverToAssistantThread — destinations (spec 2026-10-16: delivery threads, Part B)", () => {
+  let testDb: TestPgDb;
+  let engineHost: EngineHost;
+  let faux: FauxProviderRegistration;
+
+  beforeEach(async () => {
+    faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    faux.setResponses(Array.from({ length: 6 }, () => fauxAssistantMessage("(noted)")));
+    vi.stubEnv("ANTHROPIC_API_KEY", "faux-key");
+    testDb = await freshTestPgDb();
+    const { pgdb, appDb } = testDb;
+    engineHost = new EngineHost({
+      scratchCaps: {},
+      wakeupLimits: { leaseMaxHours: 72, timerMaxHours: 720, perSession: 20, watchMaxEventsPerHour: 120 },
+      engineStore: new PgSessionStore(pgdb),
+      sandboxProvider: new VirtualSandboxProvider(),
+      eventStream: new PgEventStream(pgdb),
+      engineCredentials: new PgCredentialStore(pgdb, deriveSecretKey("test-key")),
+      db: appDb,
+      apiBaseUrl: "http://127.0.0.1:1",
+      plugins: [],
+    });
+  });
+
+  afterEach(async () => {
+    await engineHost.destroyAll();
+    faux.unregister();
+    vi.unstubAllEnvs();
+  });
+
+  const signal = (body: string) => ({ kind: "signal" as const, signalType: "linear.issue.update", body, attributes: {} });
+  const base = { orgId: ORG, owner: OWNER, actorUserId: USER, mismatchReason: "event_target_mismatch" };
+
+  async function threadsWithKey(key: string): Promise<Array<{ id: string }>> {
+    const result = await testDb.appDb.execute(sql`SELECT id FROM engine_threads WHERE key = ${key}`) as { rows: Array<{ id: string }> };
+    return result.rows;
+  }
+
+  async function mirrorRow(threadId: string) {
+    const [row] = await testDb.appDb.select().from(sessionThreads).where(eq(sessionThreads.id, threadId));
+    return row;
+  }
+
+  it("own: creates one thread titled by the rule name and reuses it", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const destination = { kind: "key" as const, key: "sub:rule-eng", title: "ENG triage" };
+    const first = await deliverToAssistantThread(deps, { ...base, destination, signal: signal("ENG-42"), dispatchId: "event:d1" });
+    const second = await deliverToAssistantThread(deps, { ...base, destination, signal: signal("ENG-43"), dispatchId: "event:d2" });
+    expect(second).toEqual(first);
+    expect(await threadsWithKey("sub:rule-eng")).toEqual([{ id: first.threadId }]);
+    expect((await mirrorRow(first.threadId))?.title).toBe("ENG triage");
+    const session = engineHost.liveSession(first.sessionId);
+    expect(session?.threadById(first.threadId)?.toThreadData().metadata?.title).toBe("ENG triage");
+  });
+
+  it("new: a retry of one delivery reuses its thread (INV-D4)", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const args = { ...base, destination: { kind: "key" as const, key: "sub:rule-ci:delivery-2", title: "CI failed on main" }, signal: signal("CI failed"), dispatchId: "event:delivery-2" };
+    const first = await deliverToAssistantThread(deps, args);
+    const retry = await deliverToAssistantThread(deps, args);
+    expect(retry).toEqual(first);
+    expect(await threadsWithKey("sub:rule-ci:delivery-2")).toHaveLength(1);
+    const admitted = await testDb.appDb.execute(sql`SELECT id FROM engine_queue_items WHERE dispatch_id = 'event:delivery-2'`) as { rows: unknown[] };
+    expect(admitted.rows).toHaveLength(1);
+  });
+
+  it("subject: two rules on one pull request share one thread (INV-D8)", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const destination = { kind: "key" as const, key: "subject:github:acme/api#12", title: "acme/api#12" };
+    const review = await deliverToAssistantThread(deps, { ...base, destination, signal: signal("review"), dispatchId: "event:rule-a-delivery" });
+    const checks = await deliverToAssistantThread(deps, { ...base, destination, signal: signal("checks"), dispatchId: "event:rule-b-delivery" });
+    expect(checks).toEqual(review);
+    expect(await threadsWithKey("subject:github:acme/api#12")).toHaveLength(1);
+  });
+
+  it("own: an archived thread found by key reopens on delivery", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const destination = { kind: "key" as const, key: "sub:rule-eng", title: "ENG triage" };
+    const first = await deliverToAssistantThread(deps, { ...base, destination, signal: signal("ENG-42"), dispatchId: "event:d1" });
+    await testDb.appDb.update(sessionThreads).set({ archivedAt: Date.now() }).where(eq(sessionThreads.id, first.threadId));
+    const again = await deliverToAssistantThread(deps, { ...base, destination, signal: signal("ENG-42 again"), dispatchId: "event:d2" });
+    expect(again).toEqual(first);
+    expect((await mirrorRow(first.threadId))?.archivedAt).toBeNull();
+  });
+
+  it("existing: an archived pin throws the fix text and creates or reopens no thread (INV-D3)", async () => {
+    const deps = { db: testDb.appDb, engineHost };
+    const session = await defaultAssistantSessionFor(deps, OWNER, { actorUserId: USER, orgId: ORG });
+    const pinned = await session.createThread("web:platform-ci");
+    const archivedAt = Date.now();
+    await testDb.appDb.insert(sessionThreads).values({ id: pinned.id, sessionId: session.id, createdAt: 1, archivedAt, title: "Platform CI" });
+    const before = await testDb.appDb.execute(sql`SELECT count(*)::int AS n FROM engine_threads`) as { rows: Array<{ n: number }> };
+    await expect(deliverToAssistantThread(deps, {
+      ...base, signal: signal("CI failed"), dispatchId: "event:pin-delivery",
+      destination: { kind: "target", sessionId: session.id, threadId: pinned.id, reason: "policy_existing" },
+    })).rejects.toThrow(new PinUnavailableError());
+    const after = await testDb.appDb.execute(sql`SELECT count(*)::int AS n FROM engine_threads`) as { rows: Array<{ n: number }> };
+    expect(after.rows[0]?.n).toBe(before.rows[0]?.n);
+    expect((await mirrorRow(pinned.id))?.archivedAt).toBe(archivedAt);
+    const admitted = await testDb.appDb.execute(sql`SELECT id FROM engine_queue_items WHERE dispatch_id = 'event:pin-delivery'`) as { rows: unknown[] };
+    expect(admitted.rows).toHaveLength(0);
   });
 });
