@@ -573,20 +573,29 @@ fail ingestion. The matcher increments
 *Depends on: Parts B, C, and E.*
 
 The WakeWatcher processes running event waiters with a non-empty
-`event_buffer`.
+`event_buffer`. A full pass handles them after the process, watch, and
+timer rows, so a slow derive never delays those rows. A nudge from ingest
+runs a light pass: it reads the nudged waiters by id and handles only
+those. It lists no due rows, probes no sandbox, and does no lease work.
+The light pass never overlaps a full pass.
 
 1. For each digest marked `derive`, call the plugin's `derive`. Replace the
-   digest with the derived event's digest. On `null`, drop it. Process at
+   digest with the derived event's digest when a clause on the derived key
+   accepts its `status` and `from_status`. On `null`, or when no such
+   clause accepts it, drop the digest and send no signal. Process at
    most one derive call per waiter per tick for the latest source digest.
    That call answers for the older digests with the same derive key, so the
    WakeWatcher removes them with it. One deadline of 20 seconds bounds the
-   call. A call past it counts as an error, and the digests stay.
+   call. A call past it counts as an error, and the digests stay. At most
+   4 derive calls run at once, so 8 slow waiters take about two deadlines.
 2. Once mode: CAS the row from `running` to `done` with cause `fired`. Then
    submit one `event.matched` signal with the first digest. List any other
    buffered digests under `Also matched`.
 3. Stream mode: CAS the row's event count, remove the digests it will send
    with `removeEventMatches`, then submit one `event.matched` signal with
-   them. The first signal goes out at once. Later signals
+   them. One signal holds the digests in buffer order while its body and
+   its `digests` attribute fit in 64 KiB, and at least one digest. The
+   rest stay buffered for the next signal. The first signal goes out at once. Later signals
    follow the waiter's `minIntervalMs` when set, else `watchMinIntervalMs`,
    and `watchMaxEventsPerHour`, through the same
    rate code as `watch`. Each `event.matched` signal counts once toward the
@@ -594,10 +603,13 @@ The WakeWatcher processes running event waiters with a non-empty
    ends with cause `rate`. If the removal fails after the CAS, the
    WakeWatcher rolls the CAS back and sends nothing, so the next tick sends
    the digests once and counts them once.
-5. Past `deadlineAt`, stream mode sends the digests it still holds in one
+4. Past `deadlineAt`, stream mode sends the digests it still holds in one
    last `event.matched` signal. That signal skips the min interval and
-   counts once in the rate window. Then the row ends with cause `deadline`.
-4. The dispatch id is `wakeup:<id>:event:<eventCount>`. The terminal
+   counts once in the rate window. Digests past the 64 KiB cap appear
+   under `Also matched` as header lines only (`<key> · <status> · by
+   <actor>`), with no text. Header lines past the cap end with
+   `and <n> more.`. Then the row ends with cause `deadline`.
+5. The dispatch id is `wakeup:<id>:event:<eventCount>`. The terminal
    dispatch id is `wakeup:<id>:terminal`.
 
 Signal body, one block per digest:
@@ -608,14 +620,19 @@ acme/lean-proofs: check_run completed (test)
 https://github.com/acme/lean-proofs/runs/123
 ```
 
-A digest with `text` adds the text after the URL.
+A digest with `text` adds the text after the URL. Every text line starts
+with `> `, so a message cannot add a line that reads as the header of
+another digest.
 
 `event.matched` attributes: `wakeupId`, `kind: event`, `subject`,
-`matchCount`. `event.ended` attributes: `wakeupId`, `kind: event`,
+`matchCount`, and `digests`. `digests` is a JSON array of
+`{ key, status, actor, summary, url }`, with no text, for the digests the
+signal shows as blocks. The web card renders from it and falls back to the
+body when it is absent. `matchCount` counts every digest the signal names. `event.ended` attributes: `wakeupId`, `kind: event`,
 `subject`, `cause`.
 
 If the waiter's thread is gone, the signal goes to the session's main
-thread without the digests. The body names the waiter id and tells the
+thread without the digests and without the `digests` attribute. The body names the waiter id and tells the
 agent to arm a new wait in an open thread.
 
 ### F1. Endings
@@ -624,8 +641,8 @@ agent to arm a new wait in an open thread.
 |---|---|---|
 | `fired` (once mode) | `event.matched` | the digest |
 | `deadline`, no match delivered | `event.ended` | `No matching event arrived within <n> hours. Check the subject's state before you wait again.` |
-| `deadline`, `<m>` matches delivered (stream mode, including the last flush) | `event.ended` | `The wait reached its <n>-hour deadline after <m> matched events. Arm a new wait to keep watching.` (`event` when `<m>` is 1) |
-| `cancelled` by a person | `event.ended` | the human-cancel text of the wakeups spec |
+| `deadline`, `<m>` event signals delivered (stream mode, including the last flush) | `event.ended` | `The wait reached its <n>-hour deadline after <m> event signals. Arm a new wait to keep watching.` (`event signal` when `<m>` is 1). `<m>` counts signals, not digests. |
+| `cancelled` by a person | `event.ended` | `A person stopped this event wait at <ISO time>.`, then the human-cancel note of the wakeups spec |
 | `cancelled` by the agent | none | |
 | `rate` | `event.ended` | `Ended after <n> events in an hour. Narrow the clauses, then wait again.` `<n>` is the signal count in the rate window. |
 
@@ -798,6 +815,12 @@ webhook MUST include `Issue` and `Comment`. Add the Part J alert rule.
   sending it twice, which keeps INV-E4. A failed removal rolls the CAS back
   and stops the tick before the submit, so the digests go out once on the
   next tick.
+- Part F step 1 re-checks a derived event against every clause on its
+  derived key, read from the waiter's own `match_json`. The digest carries
+  no clause index: each clause on one derived key matches every source of
+  that key, so the set is the same for each digest.
+- The nudge carries waiter ids, not a store query. A nudge lost to a crash
+  or a stop costs at most one tick: the next full pass reads the row.
 - Worst-case arm latency on a Slack thread subject is about 28 seconds.
   `checkArm` makes 5 sequential reads before `selfIds`
   (`ARM_PROVIDER_TIMEOUT_MS` is 4 seconds each, so 20 seconds when every

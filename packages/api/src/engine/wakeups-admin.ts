@@ -288,7 +288,7 @@ function wakeupCancelledSignal(row: Wakeup, opts: HumanCancelOptions, nowMs: num
     return {
       kind: "signal",
       signalType: "event.ended",
-      body: `A person stopped this event at ${at}. ${opts.note ?? DEFAULT_CANCEL_NOTE}`,
+      body: `A person stopped this event wait at ${at}. ${opts.note ?? DEFAULT_CANCEL_NOTE}`,
       attributes,
       tagName: "wakeup",
     };

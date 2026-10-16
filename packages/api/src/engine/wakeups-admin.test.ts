@@ -199,7 +199,7 @@ describe("cancelWorkAsHuman of an event waiter (spec 2026-10-15, F1)", () => {
     expect(content.attributes?.cause).toBe("cancelled");
     expect(content.attributes?.subject).toBe("github:acme/lean-proofs#42");
     expect("body" in content && typeof content.body === "string" ? content.body : "").toContain(
-      "A person stopped this event",
+      "A person stopped this event wait at ",
     );
   });
 });

@@ -568,45 +568,148 @@ function decideWatchTick(
 }
 
 /** The line that opens a digest's block: key, status, and actor. */
-function digestHeader(d: EventMatchDigest): string {
+export function digestHeader(d: EventMatchDigest): string {
   const parts = [d.key];
   if (d.status !== undefined) parts.push(d.status);
   if (d.actor !== undefined) parts.push(`by ${d.actor}`);
   return parts.join(" · ");
 }
 
-/** One digest's block (spec Part F): header, summary, URL, then the text. */
-function digestBlock(d: EventMatchDigest): string {
+/**
+ * Most bytes of one stream `event.matched` signal: its body plus its
+ * `digests` attribute, which the model also reads (spec Part F). Digests
+ * past it stay buffered for the next signal.
+ */
+export const EVENT_SIGNAL_MAX_BYTES = 64 * 1024;
+
+/**
+ * One digest's block (spec Part F): header, summary, URL, then the text.
+ * Every text line starts with `> `, so a message cannot make a line that
+ * reads as a header of another digest.
+ */
+export function digestBlock(d: EventMatchDigest): string {
   const lines = [digestHeader(d), d.summary];
   if (d.url !== undefined) lines.push(d.url);
-  if (d.text !== undefined && d.text !== "") lines.push(d.text);
+  if (d.text !== undefined && d.text !== "") lines.push(...d.text.split("\n").map((line) => `> ${line}`));
   return lines.join("\n");
+}
+
+/** One entry of the `digests` signal attribute: the digest without its text. */
+export interface EventDigestEntry {
+  key: string;
+  status?: string;
+  actor?: string;
+  summary: string;
+  url?: string;
+}
+
+function digestEntry(d: EventMatchDigest): EventDigestEntry {
+  return {
+    key: d.key,
+    ...(d.status !== undefined ? { status: d.status } : {}),
+    ...(d.actor !== undefined ? { actor: d.actor } : {}),
+    summary: d.summary,
+    ...(d.url !== undefined ? { url: d.url } : {}),
+  };
+}
+
+function bytes(s: string): number {
+  return Buffer.byteLength(s);
 }
 
 function eventAttributes(row: Wakeup): Record<string, string> {
   return { wakeupId: row.id, kind: row.kind, subject: row.subjects?.[0] ?? "" };
 }
 
+/** The `Also matched` section that follows the blocks, or "" with no lines. */
+function alsoMatched(lines: readonly string[]): string {
+  return lines.length === 0 ? "" : `\n\nAlso matched:\n${lines.join("\n")}`;
+}
+
+/**
+ * The layout of a stream signal within `maxBytes` (spec Part F step 3).
+ * `full` digests go out as blocks, in buffer order, while the body and
+ * the `digests` attribute fit. With `overflow`, every other digest goes
+ * out as one header line under `Also matched` (the deadline flush), and
+ * the header lines count toward the cap too. Without it, the other
+ * digests stay buffered. At least one digest goes out as a block unless
+ * `overflow` is set.
+ */
+export function layoutStreamSignal(
+  digests: readonly EventMatchDigest[],
+  overflow: boolean,
+  maxBytes: number = EVENT_SIGNAL_MAX_BYTES,
+): { full: EventMatchDigest[]; headers: string[] } {
+  const headers = digests.map(digestHeader);
+  // Bytes of the header lines from index i to the end, for the overflow layout.
+  const headerBytesFrom: number[] = new Array<number>(digests.length + 1).fill(0);
+  for (let i = digests.length - 1; i >= 0; i--) headerBytesFrom[i] = headerBytesFrom[i + 1]! + bytes(headers[i]!) + 1;
+  const section = (from: number): number => (overflow && from < digests.length ? bytes("\n\nAlso matched:") + headerBytesFrom[from]! : 0);
+  let blockBytes = 0;
+  let entryBytes = 2;
+  let count = 0;
+  for (const d of digests) {
+    const nextBlock = blockBytes + bytes(digestBlock(d)) + (count > 0 ? 2 : 0);
+    const nextEntries = entryBytes + bytes(JSON.stringify(digestEntry(d))) + (count > 0 ? 1 : 0);
+    if (nextBlock + nextEntries + section(count + 1) > maxBytes && (count > 0 || overflow)) break;
+    blockBytes = nextBlock;
+    entryBytes = nextEntries;
+    count++;
+  }
+  if (!overflow) return { full: digests.slice(0, count), headers: [] };
+  // Header lines past the cap are counted, not listed.
+  const rest = headers.slice(count);
+  let used = blockBytes + (count > 0 ? entryBytes : 0) + bytes("\n\nAlso matched:");
+  const listed: string[] = [];
+  for (const [index, line] of rest.entries()) {
+    const tailLine = `and ${rest.length - index} more.`;
+    if (used + bytes(line) + 1 + bytes(tailLine) + 1 > maxBytes && index < rest.length - 1) {
+      listed.push(tailLine);
+      break;
+    }
+    listed.push(line);
+    used += bytes(line) + 1;
+  }
+  return { full: digests.slice(0, count), headers: listed };
+}
+
 /**
  * The `event.matched` signal (spec Part F). Stream mode lists one block per
- * digest. Once mode (`terminal`) shows the first digest in full and lists
- * the others, one line each, under `Also matched`.
+ * digest in `digests`, then `overflow` header lines under `Also matched`.
+ * Once mode (`terminal`) shows the first digest in full and lists the
+ * others, one line each, under `Also matched`. The `digests` attribute
+ * lists the digests shown as blocks, without their text, for the web card.
+ * `matchCount` counts every digest the signal names.
  */
-export function eventMatchedSignal(row: Wakeup, digests: EventMatchDigest[], n: number, terminal: boolean): SignalDraft {
+export function eventMatchedSignal(
+  row: Wakeup,
+  digests: EventMatchDigest[],
+  n: number,
+  terminal: boolean,
+  overflow: { lines: string[]; count: number } = { lines: [], count: 0 },
+): SignalDraft {
   let body: string;
+  let shown: EventMatchDigest[];
+  let matchCount: number;
   if (terminal) {
     const [first, ...rest] = digests;
-    body = first ? digestBlock(first) : "";
-    if (rest.length > 0) {
-      body += `\n\nAlso matched:\n${rest.map((d) => `${digestHeader(d)} · ${d.summary}`).join("\n")}`;
-    }
+    shown = first ? [first] : [];
+    body = (first ? digestBlock(first) : "") + alsoMatched(rest.map((d) => `${digestHeader(d)} · ${d.summary}`));
+    matchCount = digests.length;
   } else {
-    body = digests.map(digestBlock).join("\n\n");
+    shown = digests;
+    body = digests.map(digestBlock).join("\n\n") + alsoMatched(overflow.lines);
+    if (digests.length === 0) body = body.replace(/^\n\n/, "");
+    matchCount = digests.length + overflow.count;
   }
   return {
     signalType: "event.matched",
     body,
-    attributes: { ...eventAttributes(row), matchCount: String(digests.length) },
+    attributes: {
+      ...eventAttributes(row),
+      matchCount: String(matchCount),
+      digests: JSON.stringify(shown.map(digestEntry)),
+    },
     dispatchId: terminal ? `wakeup:${row.id}:terminal` : `wakeup:${row.id}:event:${n}`,
   };
 }
@@ -614,7 +717,7 @@ export function eventMatchedSignal(row: Wakeup, digests: EventMatchDigest[], n: 
 /**
  * The `event.ended` signal (spec F1). For `deadline`, `count` is the number
  * of `event.matched` signals the waiter delivered over its life: with none,
- * the body is the F1 text; otherwise it names the count. For `rate`,
+ * the body is the F1 text; otherwise it names the signal count. For `rate`,
  * `count` is the signal count in the rate window.
  */
 export function eventEndedSignal(row: Wakeup, cause: "deadline" | "rate", hours: number, count: number): SignalDraft {
@@ -624,7 +727,7 @@ export function eventEndedSignal(row: Wakeup, cause: "deadline" | "rate", hours:
   } else if (count === 0) {
     body = `No matching event arrived within ${hours} hours. Check the subject's state before you wait again.`;
   } else {
-    body = `The wait reached its ${hours}-hour deadline after ${count} matched ${count === 1 ? "event" : "events"}. Arm a new wait to keep watching.`;
+    body = `The wait reached its ${hours}-hour deadline after ${count} event ${count === 1 ? "signal" : "signals"}. Arm a new wait to keep watching.`;
   }
   return {
     signalType: "event.ended",
@@ -640,14 +743,16 @@ export function eventEndedSignal(row: Wakeup, cause: "deadline" | "rate", hours:
  * this, so a digest that still carries `derive` is never delivered here.
  *
  * - Once mode: the first deliverable digest ends the row as `done/fired`.
- * - Stream mode: every deliverable digest goes out in one signal. The first
+ * - Stream mode: the deliverable digests go out in one signal, in buffer
+ *   order, up to `EVENT_SIGNAL_MAX_BYTES`; the rest stay buffered. The first
  *   signal goes out at once; later ones wait for `eventMatch.minIntervalMs`,
  *   else `watchMinIntervalMs`. Each signal counts once toward
  *   `watchMaxEventsPerHour` through the watch rate window, however many
  *   digests it lists; past it the row ends as `done/rate`.
  * - Past `deadlineAt`, the row ends as `expired/deadline`. Stream mode first
  *   flushes the matches it still holds in one last signal, which skips the
- *   min interval and counts once in the window.
+ *   min interval and counts once in the window. Digests past the size cap
+ *   appear there as header lines only.
  */
 export function decideEventWaiter(now: number, row: Wakeup, opts: DecideOptions): WakeupDecision | null {
   if (row.kind !== "event" || row.status !== "running") return null;
@@ -674,7 +779,11 @@ export function decideEventWaiter(now: number, row: Wakeup, opts: DecideOptions)
     if (ready.length > 0) {
       delivered += 1;
       const window = nextWindow(now, row, opts.watchMaxEventsPerHour, opts.tickMs ?? DEFAULT_TICK_MS);
-      signals.push(eventMatchedSignal(row, ready, delivered, false));
+      // The last flush names every digest: blocks within the cap, then one
+      // header line each for the rest.
+      const layout = layoutStreamSignal(ready, true);
+      const overflowCount = ready.length - layout.full.length;
+      signals.push(eventMatchedSignal(row, layout.full, delivered, false, { lines: layout.headers, count: overflowCount }));
       Object.assign(patch, { eventCount: delivered, lastEmitAt: now, windowStartAt: window.windowStartAt, windowCount: window.windowCount });
     }
     signals.push(eventEndedSignal(row, "deadline", hours, delivered));
@@ -696,10 +805,12 @@ export function decideEventWaiter(now: number, row: Wakeup, opts: DecideOptions)
     };
   }
   const eventCount = row.eventCount + 1;
+  // Within the size cap. The digests that do not fit stay buffered.
+  const { full } = layoutStreamSignal(ready, false);
   return {
     to: "running",
     patch: { eventCount, lastEmitAt: now, windowStartAt: window.windowStartAt, windowCount: window.windowCount },
-    signals: [eventMatchedSignal(row, ready, eventCount, false)],
-    deliveredKeys: ready.map((d) => d.dedupeKey),
+    signals: [eventMatchedSignal(row, full, eventCount, false)],
+    deliveredKeys: full.map((d) => d.dedupeKey),
   };
 }
