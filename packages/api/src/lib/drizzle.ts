@@ -1981,6 +1981,13 @@ VALUES ('workflow-run-threads-in-automations-v1', (extract(epoch FROM clock_time
     probe: { kind: "column", table: "events", column: "subjects" },
     sql: 'ALTER TABLE "events" ADD COLUMN IF NOT EXISTS "subjects" text[]',
   },
+  {
+    // A schedule's thread policy (spec 2026-10-16: delivery threads, Part
+    // A). Null reads as `{ mode: "own" }`, so existing rows need no backfill.
+    describe: "workflow_schedules.thread_policy column",
+    probe: { kind: "column", table: "workflow_schedules", column: "thread_policy" },
+    sql: 'ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "thread_policy" jsonb',
+  },
 
 ];
 

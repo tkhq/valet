@@ -1136,6 +1136,8 @@ CREATE TABLE "workflow_schedules" (
 	"target_kind" text DEFAULT 'workflow' NOT NULL,
 	"workflow_id" text,
 	"prompt" text,
+	-- An AssistantThreadPolicy for an orchestrator target. NULL reads as own.
+	"thread_policy" jsonb,
 	"name" text NOT NULL,
 	"cron" text NOT NULL,
 	"timezone" text DEFAULT 'UTC' NOT NULL,

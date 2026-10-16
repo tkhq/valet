@@ -9,6 +9,7 @@ import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { seedAssistantThread } from "../test-helpers/assistant-thread.js";
 import { eventSubscriptions, teamMembers, teams, userIdentityLinks, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import type {
   CreateWorkflowEventTriggerRequest,
@@ -910,5 +911,91 @@ describe("GET /api/workflows/{triggers,runs}?ownerType=&ownerId=", () => {
     await seedTeamWithoutCaller(a, "team_x");
     const res = await fetch(`${a.baseUrl}/api/workflows/runs?ownerType=team&ownerId=team_x`);
     expect(res.status).toBe(404);
+  });
+});
+
+describe("schedule thread policy (spec 2026-10-16, Part A)", () => {
+  const NO_SUBJECT = "This rule's events have no subject to group by. Pick another thread option.";
+
+  async function createSchedule(a: TestApi, thread: unknown, target: unknown = { kind: "orchestrator", prompt: "Summarize the morning" }): Promise<Response> {
+    return fetch(`${a.baseUrl}/api/workflows/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Morning summary", cron: VALID_CRON, target, thread }),
+    });
+  }
+
+  async function patchSchedule(a: TestApi, id: string, body: unknown): Promise<Response> {
+    return fetch(`${a.baseUrl}/api/workflows/schedules/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("refuses subject on a schedule", async () => {
+    const a = await boot();
+    const res = await createSchedule(a, { mode: "subject" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: NO_SUBJECT });
+    expect(await a.providers.db.select().from(workflowSchedules)).toEqual([]);
+  });
+
+  it("refuses a malformed policy and a policy on a workflow target", async () => {
+    const a = await boot();
+    const malformed = await createSchedule(a, { mode: "own", extra: true });
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toEqual({ error: 'Thread policy has an unknown field "extra". Remove it.' });
+    const wfId = await createWorkflow(a.baseUrl, "wf_thread");
+    const onWorkflow = await createSchedule(a, { mode: "new" }, { kind: "workflow", workflowId: wfId });
+    expect(onWorkflow.status).toBe(400);
+    expect(await onWorkflow.json()).toEqual({ error: "A thread policy applies only to an assistant-prompt schedule. Remove thread from this workflow schedule." });
+  });
+
+  it("refuses another owner's thread and an archived thread", async () => {
+    const a = await boot();
+    const foreign = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "someone-else" }, sessionId: "sess-foreign", threadId: "thr-foreign",
+    });
+    const mine = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "local-user" }, sessionId: "sess-mine", threadId: "thr-old", archived: true,
+    });
+    const cross = await createSchedule(a, { mode: "existing", ...foreign });
+    expect(cross.status).toBe(400);
+    expect(await cross.json()).toEqual({ error: "This thread belongs to another owner. Pick a thread in your workspace." });
+    const archived = await createSchedule(a, { mode: "existing", ...mine });
+    expect(archived.status).toBe(400);
+    expect(await archived.json()).toEqual({ error: "This thread is archived. Pick an open thread." });
+  });
+
+  it("stores the policy, lists it, and clears it with null", async () => {
+    const a = await boot();
+    const res = await createSchedule(a, { mode: "new" });
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as WorkflowScheduleResponse;
+    expect(created.schedule.thread).toEqual({ mode: "new" });
+
+    const listed = (await (await fetch(`${a.baseUrl}/api/workflows/triggers`)).json()) as ListWorkflowTriggersResponse;
+    const item = listed.triggers.find((t) => t.id === created.schedule.scheduleId);
+    expect(item?.kind === "schedule" ? item.detail.thread : undefined).toEqual({ mode: "new" });
+
+    const subject = await patchSchedule(a, created.schedule.scheduleId, { thread: { mode: "subject" } });
+    expect(subject.status).toBe(400);
+    expect(await subject.json()).toEqual({ error: NO_SUBJECT });
+
+    const cleared = await patchSchedule(a, created.schedule.scheduleId, { thread: null });
+    expect(cleared.status).toBe(200);
+    expect(((await cleared.json()) as WorkflowScheduleResponse).schedule.thread).toBeUndefined();
+    const [row] = await a.providers.db.select().from(workflowSchedules).where(eq(workflowSchedules.id, created.schedule.scheduleId));
+    expect(row.threadPolicy).toBeNull();
+  });
+
+  it("reads a schedule with no stored policy as absent", async () => {
+    const a = await boot();
+    await seedScheduleRow(a, "sched_legacy", "local-org", { owner: { type: "user", id: "local-user" } });
+    const listed = (await (await fetch(`${a.baseUrl}/api/workflows/triggers`)).json()) as ListWorkflowTriggersResponse;
+    const item = listed.triggers.find((t) => t.id === "sched_legacy");
+    expect(item?.kind).toBe("schedule");
+    expect(item?.kind === "schedule" ? item.detail.thread : "missing").toBeUndefined();
   });
 });

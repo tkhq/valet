@@ -5,10 +5,13 @@ import { isDeepStrictEqual } from "node:util";
  * runs; this module owns validation and the cron math so both the loop and
  * the agent tools share one implementation.
  */
+import type { Principal } from "@valet/engine";
+import { readThreadPolicy, validateThreadPolicy, type AssistantThreadPolicy } from "@valet/shared";
 import type { WorkflowDefinition } from "@valet/workflow";
 import { CronExpressionParser } from "cron-parser";
 import { and, eq } from "drizzle-orm";
 import { proposalId } from "../events/proposals.js";
+import { existingThreadError, NO_SUBJECT_ERROR } from "../events/thread-policy-write.js";
 import { randomUUID } from "node:crypto";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowSchedules } from "../schema/index.js";
@@ -30,6 +33,8 @@ export interface WorkflowScheduleSummary {
   targetKind: "workflow" | "orchestrator";
   workflowId?: string;
   prompt?: string;
+  /** Absent reads as `{ mode: "own" }`. */
+  thread?: AssistantThreadPolicy;
   name: string;
   cron: string;
   timezone: string;
@@ -76,6 +81,7 @@ function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowSched
     targetKind: row.targetKind,
     workflowId: row.workflowId ?? undefined,
     prompt: row.prompt ?? undefined,
+    ...(row.threadPolicy !== null ? { thread: readThreadPolicy(row.threadPolicy) } : {}),
     name: row.name,
     cron: row.cron,
     timezone: row.timezone,
@@ -84,6 +90,28 @@ function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowSched
     lastFiredAt: row.lastFiredAt,
     nextFireAt: row.nextFireAt,
   };
+}
+
+/**
+ * Validate a schedule's thread policy (spec 2026-10-16: delivery threads,
+ * Part A). Only an orchestrator-prompt schedule takes one, and never
+ * `subject`: a schedule firing has no subject. An `existing` thread must be
+ * an open assistant thread of the schedule's owner.
+ */
+async function scheduleThreadError(
+  db: AppDb,
+  orgId: string,
+  owner: Principal,
+  targetKind: "workflow" | "orchestrator",
+  thread: unknown,
+): Promise<string | null> {
+  if (targetKind !== "orchestrator") {
+    return "A thread policy applies only to an assistant-prompt schedule. Remove thread from this workflow schedule.";
+  }
+  const shapeError = validateThreadPolicy(thread);
+  if (shapeError) return shapeError;
+  if (readThreadPolicy(thread).mode === "subject") return NO_SUBJECT_ERROR;
+  return existingThreadError(db, orgId, owner, thread);
 }
 
 /**
@@ -112,6 +140,8 @@ export async function createWorkflowSchedule(
      * workflow target (owner follows the workflow).
      */
     teamId?: string;
+    /** An `AssistantThreadPolicy` for a prompt schedule; validated here. */
+    thread?: unknown;
     proposalKey?: string;
   },
   now = Date.now(),
@@ -192,6 +222,12 @@ export async function createWorkflowSchedule(
     return { ok: false, error: "Assistant selection is not supported. Choose the schedule workspace instead." };
   }
 
+  if (input.thread !== undefined) {
+    const threadError = await scheduleThreadError(db, owner.orgId,
+      { type: scheduleOwner.ownerType, id: scheduleOwner.ownerId }, hasWorkflow ? "workflow" : "orchestrator", input.thread);
+    if (threadError) return { ok: false, error: threadError };
+  }
+
   const values = {
     id: input.proposalKey ? proposalId("schedule", owner.orgId, scheduleOwner.ownerType, scheduleOwner.ownerId, input.proposalKey, hasWorkflow ? input.workflowId : undefined) : randomUUID(),
     orgId: owner.orgId,
@@ -200,6 +236,7 @@ export async function createWorkflowSchedule(
     targetKind: hasWorkflow ? "workflow" as const : "orchestrator" as const,
     workflowId: hasWorkflow ? input.workflowId! : null,
     prompt: hasPrompt ? input.prompt! : null,
+    threadPolicy: input.thread !== undefined ? readThreadPolicy(input.thread) : null,
     name: input.name,
     cron: input.cron,
     timezone,
@@ -213,8 +250,8 @@ export async function createWorkflowSchedule(
 
   const result = (row: typeof workflowSchedules.$inferSelect): Awaited<ReturnType<typeof createWorkflowSchedule>> => {
     if (input.proposalKey && !isDeepStrictEqual(
-      [row.targetKind, row.workflowId, row.prompt, row.name, row.cron, row.timezone, row.input, row.createdBy],
-      [values.targetKind, values.workflowId, values.prompt, values.name, values.cron, values.timezone, values.input, values.createdBy],
+      [row.targetKind, row.workflowId, row.prompt, row.threadPolicy, row.name, row.cron, row.timezone, row.input, row.createdBy],
+      [values.targetKind, values.workflowId, values.prompt, values.threadPolicy, values.name, values.cron, values.timezone, values.input, values.createdBy],
     )) return { ok: false, error: "This proposal key already names a different schedule. Use a new proposal_key." };
     return { ok: true, schedule: rowToSummary(row) };
   };
@@ -310,6 +347,8 @@ export interface WorkflowSchedulePatch {
   enabled?: boolean;
   prompt?: string;
   input?: unknown;
+  /** `null` clears the policy; absent leaves it alone. Validated here. */
+  thread?: unknown;
 }
 
 /**
@@ -348,6 +387,12 @@ export async function updateWorkflowSchedule(
     return { ok: false, status: 400, error: "prompt must not be empty. Provide the text to send to the workspace assistant." };
   }
 
+  if (patch.thread !== undefined && patch.thread !== null) {
+    const threadError = await scheduleThreadError(db, owner.orgId,
+      { type: row.ownerType, id: row.ownerId }, row.targetKind, patch.thread);
+    if (threadError) return { ok: false, status: 400, error: threadError };
+  }
+
   const cron = patch.cron ?? row.cron;
   const timezone = patch.timezone ?? row.timezone;
   const cronOrTzChanged = cron !== row.cron || timezone !== row.timezone;
@@ -369,6 +414,8 @@ export async function updateWorkflowSchedule(
       enabled: patch.enabled ?? row.enabled,
       prompt: patch.prompt ?? row.prompt,
       input: patch.input !== undefined ? patch.input : row.input,
+      threadPolicy: patch.thread === undefined ? row.threadPolicy
+        : patch.thread === null ? null : readThreadPolicy(patch.thread),
       nextFireAt: nextAt,
       updatedAt: now,
     })

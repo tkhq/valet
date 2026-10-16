@@ -102,6 +102,7 @@ workflowTriggersRouter.get("/triggers", async (c) => {
         timezone: s.timezone,
         targetKind: s.targetKind,
         prompt: s.prompt,
+        ...(s.thread !== undefined ? { thread: s.thread } : {}),
         input: s.input,
         nextFireAt: s.nextFireAt,
         lastFiredAt: s.lastFiredAt,
@@ -194,6 +195,7 @@ workflowTriggersRouter.post("/schedules", async (c) => {
     prompt: body.target.kind === "orchestrator" ? body.target.prompt : undefined,
     input: body.target.kind === "workflow" ? body.target.input : undefined,
     teamId,
+    thread: body.thread,
   });
   if (!result.ok) return c.json({ error: withCronHint(result.error) }, 400);
   const resp: WorkflowScheduleResponse = { schedule: result.schedule };

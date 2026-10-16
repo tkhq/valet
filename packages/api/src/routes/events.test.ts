@@ -28,6 +28,7 @@ import {
 } from "../schema/index.js";
 import * as teamsService from "../services/teams.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
+import { seedAssistantThread } from "../test-helpers/assistant-thread.js";
 import { deleteTeam } from "../services/teams.js";
 import type {
   CreateEventSubscriptionRequest,
@@ -2420,5 +2421,86 @@ describe("replacement proposals", () => {
 
     expect((await patchSubscription(a.baseUrl, "sub_next", { enabled: true })).status).toBe(500);
     expect(await enabledById(a)).toMatchObject({ sub_live: true, sub_next: false });
+  });
+});
+
+describe("event-subscription thread policy (spec 2026-10-16, Part A)", () => {
+  const CROSS_OWNER = "This thread belongs to another owner. Pick a thread in your workspace.";
+  const ARCHIVED = "This thread is archived. Pick an open thread.";
+
+  function withThread(thread: unknown): unknown {
+    return { ...VALID_BODY, target: { kind: "orchestrator", thread } };
+  }
+
+  it("refuses an existing thread of another owner", async () => {
+    const a = await boot();
+    const foreign = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "someone-else" }, sessionId: "sess-foreign", threadId: "thr-foreign",
+    });
+    const res = await postSubscription(a.baseUrl, withThread({ mode: "existing", ...foreign }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: CROSS_OWNER });
+    expect(await a.providers.db.select().from(eventSubscriptions)).toEqual([]);
+  });
+
+  it("refuses a thread id that does not exist like another owner's", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, withThread({ mode: "existing", sessionId: "sess-none", threadId: "thr-none" }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: CROSS_OWNER });
+  });
+
+  it("refuses an archived thread of the owner", async () => {
+    const a = await boot();
+    const mine = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "local-user" }, sessionId: "sess-mine", threadId: "thr-old", archived: true,
+    });
+    const res = await postSubscription(a.baseUrl, withThread({ mode: "existing", ...mine }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: ARCHIVED });
+  });
+
+  it("stores an open thread of the owner and reads it back", async () => {
+    const a = await boot();
+    const mine = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "local-user" }, sessionId: "sess-mine", threadId: "thr-ci",
+    });
+    const res = await postSubscription(a.baseUrl, withThread({ mode: "existing", ...mine }));
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(created.target).toEqual({ kind: "orchestrator", thread: { mode: "existing", ...mine } });
+  });
+
+  it("patches the policy, refuses another owner's thread, and clears it with null", async () => {
+    const a = await boot();
+    const foreign = await seedAssistantThread(a.providers.db, {
+      orgId: "local-org", owner: { type: "user", id: "someone-else" }, sessionId: "sess-foreign", threadId: "thr-foreign",
+    });
+    const created = (await (await postSubscription(a.baseUrl, withThread({ mode: "new" }))).json()) as CreateEventSubscriptionResponse;
+    expect(created.target).toEqual({ kind: "orchestrator", thread: { mode: "new" } });
+
+    const refused = await patchSubscription(a.baseUrl, created.id, { thread: { mode: "existing", ...foreign } });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: CROSS_OWNER });
+
+    const subject = await patchSubscription(a.baseUrl, created.id, { thread: { mode: "subject" } });
+    expect(subject.status).toBe(200);
+    expect(((await subject.json()) as PatchEventSubscriptionResponse).target).toEqual({ kind: "orchestrator", thread: { mode: "subject" } });
+
+    const cleared = await patchSubscription(a.baseUrl, created.id, { thread: null });
+    expect(cleared.status).toBe(200);
+    expect(((await cleared.json()) as PatchEventSubscriptionResponse).target).toEqual({ kind: "orchestrator" });
+    const [row] = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, created.id));
+    expect(row.target).toEqual({ kind: "orchestrator" });
+  });
+
+  it("refuses a thread patch on a workflow rule", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_wf", "local-org", {
+      ownerId: "local-user", target: { kind: "workflow", workflowId: "wf-1" },
+    });
+    const res = await patchSubscription(a.baseUrl, "sub_wf", { thread: { mode: "new" } });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "A thread policy applies only to an assistant target. Remove thread from this workflow rule." });
   });
 });

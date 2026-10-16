@@ -21,6 +21,11 @@ export function validateThreadPolicy(value: unknown): string | null {
   ) {
     return "Thread policy mode must be new, subject, own, or existing.";
   }
+  const allowed = policy.mode === "existing" ? ["mode", "sessionId", "threadId"] : ["mode"];
+  const unknownKey = Object.keys(policy).find((key) => !allowed.includes(key));
+  if (unknownKey !== undefined) {
+    return `Thread policy has an unknown field "${unknownKey}". Remove it.`;
+  }
   if (policy.mode === "existing" && (typeof policy.sessionId !== "string" || typeof policy.threadId !== "string")) {
     return "An existing thread needs sessionId and threadId.";
   }
