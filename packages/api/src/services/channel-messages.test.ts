@@ -127,3 +127,11 @@ describe("pullRequestComment", () => {
     expect(review?.message.text).toBe("Review: changes requested");
   });
 });
+
+
+it("records readable image-comment activity instead of encoded image markup", () => {
+  expect(actionChannelMessage({ ...base, actionId: "github.create_comment",
+    params: { owner: "acme", repo: "app", issueNumber: 12 },
+    result: { success: true, data: { id: 77, body: "![&#91;](https://example.test/image.png)", activityText: "Updated view\n\nAttached 2 image(s).", html_url: "https://github.com/acme/app/pull/12#issuecomment-77" } },
+  }, null)?.text).toBe("Updated view\n\nAttached 2 image(s).");
+});

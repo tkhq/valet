@@ -93,6 +93,12 @@ function lookupHeader(headers: Record<string, string>, name: string): string | u
   return undefined;
 }
 
+/** Internal assets never start push workflows, even if GitHub emits custom-ref webhooks. */
+export function isAssetsPush(payload: unknown): boolean {
+  return typeof payload === "object" && payload !== null && "ref" in payload
+    && typeof payload.ref === "string" && payload.ref.startsWith("refs/valet/pr-assets/");
+}
+
 function makeVerify(eventFamily: string): TriggerDef["verify"] {
   return async (req, secrets) => {
     const secret = secrets.webhookSecret;
@@ -103,7 +109,7 @@ function makeVerify(eventFamily: string): TriggerDef["verify"] {
 
     const rawBodyText = new TextDecoder().decode(req.rawBody);
     const { eventType, payload, deliveryId } = parseWebhook(req.headers, rawBodyText);
-    if (eventType !== eventFamily) return null;
+    if (eventType !== eventFamily || (eventType === "push" && isAssetsPush(payload))) return null;
     if (!deliveryId) return null;
 
     return {

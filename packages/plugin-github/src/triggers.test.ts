@@ -493,3 +493,12 @@ describe("github review event families", () => {
     }
   });
 });
+
+
+it.each(["refs/valet/pr-assets/885", "refs/heads/main", "refs/tags/v1"])("push admission excludes internal assets: %s", async (ref) => {
+  const rawBody = encode({ ref, repository: { full_name: "acme/widgets" } });
+  const event = await findTrigger("push").verify({ rawBody, headers: {
+    "x-github-event": "push", "x-github-delivery": "d-assets", "x-hub-signature-256": sign(rawBody),
+  } }, { webhookSecret: SECRET });
+  expect(event !== null).toBe(!ref.startsWith("refs/valet/"));
+});

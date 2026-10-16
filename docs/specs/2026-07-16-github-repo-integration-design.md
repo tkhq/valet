@@ -121,3 +121,112 @@ This section restores the legacy stack's personal-installation behavior. Its one
 - **`GET /api/me/github/org-status`** returns `personalInstallUrl` when the org allows personal installations and the caller connected GitHub through the App, as the legacy GitHub card did. It also returns `personalInstallations`, the caller's own linked installations, as the legacy `GET /api/me/github` did.
 - **The webhook forwards events only from installations that serve the org.** A public App lets anybody install it, the App's webhook secret signs every installation's deliveries, and discovery records every installation. So a signature or a row proves nothing. Before the webhook forwards an event to subscriptions, `installationServesOrg` admits the installation on the App owner's account (the `owner.login` from `GET /app`, kept per App id until restart) and a `User` installation linked to a member. The webhook drops every other event and writes it to the drop log. This includes an installation on another GitHub organization, even if a member installed it. Installation events still apply, so discovery stays current. Push and pull request state updates are not gated, because each acts only on the repository that the delivery names.
 - **Token resolution and repo listing are unchanged.** Resolution still matches the repo owner against every installation of the org (decision 2), so a member's personal repository resolves through that member's personal installation. Like the legacy stack, once the App is public any member can use any installation, personal ones included.
+
+## PR comment images (2026-10-13)
+
+`github.create_comment` accepts optional `images: [{ path, alt?, caption? }]` for any supported sandbox images, without a capture step.
+Reads use the sandbox port (`sandbox.stat` and `sandbox.readBinary`), as `slack.reply_file_to_origin` does.
+Images precede the optional `body`, so open Markdown or HTML containers cannot swallow them, without parsing or changing the body.
+Calls without `images` keep the existing issue-comment endpoint, request, and result.
+Image calls require a PR number in `issueNumber`. Plain issues accept body-only comments. Standalone workflow actions need a session sandbox for images.
+
+The action validates the complete batch before a GitHub write:
+
+- Supply 1 to 10 files, each between 1 byte and 10 MiB, with at most 20 MiB total.
+- PNG, JPEG, GIF, and WebP signatures catch mistakes, not exfiltration. Extensions do not determine the type.
+- Checks do not decode images. A valid signature followed by secret data passes. Select only files safe to publish to the target repository.
+- Alt text and captions accept at most 1,000 characters each. Alt punctuation uses numeric entities. Captions escape only HTML delimiters inside code elements.
+- Captions never become fallback alt text. Ten 1,000-character ASCII captions fit without duplicating or encoding each letter.
+- Body, encoded alt text and captions, and reserved URL space must fit within 60,000 characters. The error names this encoded limit.
+
+The action uses supported Git Data APIs: [blobs](https://docs.github.com/en/rest/git/blobs), [trees](https://docs.github.com/en/rest/git/trees), [commits](https://docs.github.com/en/rest/git/commits), and [refs](https://docs.github.com/en/rest/git/refs).
+It creates an orphan commit at `refs/valet/pr-assets/<PR number>` in the target repository. Later batches append commits there.
+Each tree contains only its batch. Parent history retains prior batches. Content hashes deduplicate identical files within a batch.
+The action requires the exact `Valet-Assets: pr-<number>` trailer line on existing assets commits. Asset commits contain no `Changelog:` trailer.
+The custom ref cannot name a PR head, PR base, or default branch. No images enter the PR's own diff.
+Updates use `force: false`. Requests and delays use the session abort signal.
+Image operations have one 120-second wall-time deadline, including credential resolution, queued requests, backoff, and commenting.
+The deadline aborts requests and returns recovery Markdown if publication completed. Check the PR after an uncertain comment or ref response.
+A user abort rejects immediately, including while waiting in a throttle queue. Requests receive the combined abort signal.
+No further GitHub requests run after cancellation. An abort cannot undo a completed remote write.
+Octokit has no supported way to remove an already queued no-op slot reservation. It can consume that reservation without sending the aborted request.
+Unabortable credential or sandbox reads may finish locally after cancellation or the deadline.
+Confirmed concurrent changes or ref deletion get at most twelve attempts with jittered backoff capped at one second.
+Blobs and the batch tree are written once, not on every attempt. Each new parent requires a new commit and non-forced ref write.
+Image Octokit clients use supported `throttle.id` values prefixed with `valet-comment-images-`, followed by a SHA-256 hash of the resolved token.
+Clients sharing a token share the one-write-per-second image queue. Different tokens do not wait behind each other's image writes.
+A single token (often the org's App installation token) supports roughly 50 to 60 image writes per 120 seconds, and interleaved heavy bursts time out together (8 of 9 ten-image batches timed out in review), with same-token upload serialization a possible follow-up, not implemented here.
+Default clients retain their `no-id` limiter. Image writes form a second write stream per token, not a new GitHub rate allowance.
+GitHub's approximate 80-content-writes-per-minute secondary limit still covers both streams. A secondary rate limit makes the call fail fast.
+Automatic Octokit retries are disabled for image operations. Rate-limit handlers return without retrying.
+The deadline remains bounded at 120 seconds, including queue waits, and preserves recovery Markdown when publication completed.
+Credentials resolve before storage. Missing tokens return the plain corrective message, without a storage/network prefix.
+Most tests disable throttle clocks. The 4-way, 6-way, ten-image, and queued-abort tests use real Octokit/Bottleneck throttling.
+Real-clock completion times were 16.034, 23.033, 28.033, and 31.034 seconds for four concurrent uploads to one PR.
+Six concurrent uploads finished at 24.032, 35.031, 44.031, 51.031, 56.032, and 59.032 seconds.
+One batch of ten distinct images completed in 13.029 seconds. All succeeded with enforced fast-forward semantics in the concurrency fixtures.
+Deadline tests use fake timers. Local contention tests use deterministic jitter, not a live GitHub rate-limit model.
+Ruleset failures keep GitHub's message and name the repository-admin fix, separately from contention exhaustion.
+
+One new comment embeds commit-pinned `github.com/<owner>/<repo>/blob/<SHA>/<path>?raw=true` URLs.
+Normal comment fields remain, with `imageUrls`, `assetsRef`, `assetsCommit`, and readable `activityText` added.
+If commenting fails after storage, the error includes recovery Markdown with all images and the original body. Engine and workflow failures expose this text, not failure data.
+Retry with that Markdown in `body`, without `images`. Check the PR before retrying a lost response because a comment might already exist.
+
+Public image URLs are public. Private images require a logged-in GitHub browser with repository access.
+Email, mobile push, Slack unfurls, and Valet channel views can show broken private images. The tool cannot authenticate external image fetches.
+Same-repository blob URLs have [reported private-rendering evidence](https://github.com/juangadm/pre-post/issues/4), not live private verification here.
+Do not embed credentials or temporary raw download tokens in comments.
+[Release assets](https://docs.github.com/en/rest/releases/assets) need contents write and add release/tag clutter. Deleting assets provides direct cleanup.
+Public release downloads can serve images, but private downloads need authentication. Unreliable private Markdown rendering and clutter caused their rejection.
+External public storage risks exposing private images. The undocumented browser-session attachment endpoint is not used.
+
+The App needs `contents:write`, `pull_requests:read`, and `issues:write`, already covered by the default manifest.
+User credentials also need a suitable repository role. Token resolution and GitHub actor attribution are unchanged.
+Branch and tag rulesets do not cover `refs/valet/*`. A rejected namespace is not a permission an admin can grant.
+Non-rule storage 422s name rejected fields and direct unsupported namespaces to the Valet maintainer. No namespace fallback runs.
+Explicit ruleset errors retain GitHub's message. PR lookup errors, comment validation errors, and user-role errors each name their own correction.
+The recorded channel activity uses `activityText`: the original body plus image count, not the encoded comment body.
+Valet ignores `refs/valet/pr-assets/*` push events in trigger verification and webhook ingress before workflow or content-sync effects.
+Whether GitHub emits these push webhooks was not verified. The guard applies if it does.
+One custom ref per PR retains binary history. No automatic cleanup runs. Owners can delete refs when comments no longer need images.
+Ref deletion is not secure erasure. GitHub can retain commit URLs and cached images. Failed publication can leave unreferenced blobs and commits.
+
+### Custom-ref evidence (2026-10-13)
+
+A public probe in `tkhq/valet` created orphan commit `4569db363042d494137e635981b95798ed34de1d`, pointed to only by `refs/valet/pr-assets/885-validation`.
+`GET /repos/tkhq/valet/git/ref/valet/pr-assets/885-validation` returned HTTP 200.
+The [SHA-pinned image URL](https://github.com/tkhq/valet/blob/4569db363042d494137e635981b95798ed34de1d/ref-probe.png?raw=true) returned HTTP 200 and identical PNG bytes without authentication.
+The probe image also serves after deleting the ref. HTTP 200 proves rendering, not garbage-collection protection.
+Retention relies on standard reachability from `refs/*` and is not demonstrated by this probe.
+
+Live API validation used an App installation token from the sandbox's `/api/sandbox/git-credential` path, without exposing it.
+`GET /installation/repositories` returned HTTP 200, confirming the installation-token type.
+The scratch ref was `refs/valet/pr-assets/1791925280`. Root commit: `872a8778b065a2633fe822fe34062e9a61ffd889`.
+Child commit: `8ae8bd20277fad42417bcb3ecfaf724294ce02fe`, with that root as its sole parent.
+Both `POST /repos/tkhq/valet/git/commits` calls returned HTTP 201.
+`POST /repos/tkhq/valet/git/refs` with the scratch ref and root returned HTTP 201.
+`PATCH /repos/tkhq/valet/git/refs/valet/pr-assets/1791925280` with the child and `force: false` returned HTTP 200.
+`DELETE` on that same ref endpoint returned HTTP 204. A later anonymous `GET` returned HTTP 404, confirming removal.
+
+`POST /markdown` in `gfm` mode with `context: tkhq/valet` returned HTTP 200 for 13 injection samples using minimal escaping.
+GitHub rendered 13 images and 13 code captions, with identical decoded text, no injected blocks, mention links, or URL autolinks.
+Samples included fences, indentation, lists, headings, quotes, strikethrough, `@tkhq/team`, bare URLs, HTML tags, and entities.
+The local `marked` tests are a GFM proxy, not GitHub's sanitizer or mention parser.
+A later live `POST /markdown` probe used the actual `imageCommentBody` output for four open body containers.
+Unclosed backtick and tilde fences, an HTML comment, and a details block each returned HTTP 200 with both images and the caption visible.
+The rendered images preceded the body and were outside code and details containers. GitHub's Camo URLs were checked through `data-canonical-src`.
+Default clone/fetch refspecs fetch `refs/heads/*`, not `refs/valet/*`. Custom refs avoid branch lists, compare banners, and ordinary branch CI discovery.
+Mirror clones and explicit custom-ref fetches still fetch binaries. Automation that watches all refs may still react.
+
+
+### Owner cleanup
+
+Custom refs are invisible in the branch and tag UI. Keep them while comments need their images.
+
+1. List assets refs: `git ls-remote origin 'refs/valet/*'`.
+2. Delete a selected ref: `git push origin :refs/valet/pr-assets/<PR>`.
+
+The supported API equivalents are `GET /repos/{owner}/{repo}/git/matching-refs/valet/pr-assets/`
+and `DELETE /repos/{owner}/{repo}/git/refs/valet/pr-assets/{PR}`.
+Deletion can break future image retrieval. It does not securely erase Git objects or cached images.
