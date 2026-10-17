@@ -2,12 +2,13 @@ import { InMemorySessionStore, type CredentialStore, type NormalizedEvent, type 
 import linearPlugin from "@valet/plugin-linear/plugin";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { eventDeliveries, eventReceipts, eventSubscriptions, orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/index.js";
+import { eventDeliveries, eventReceipts, eventSubscriptions, followedThreads, orgMembers, teamMembers, teams, userIdentityLinks } from "../schema/index.js";
 import type { ClaimDeps } from "./claims.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
-import { __resetIngestDropThrottle, ingestEvent, type IngestDeps, type IngestResult } from "./ingest.js";
+import { __resetIngestDropThrottle, followRoutedOwner, ingestEvent, type IngestDeps, type IngestResult } from "./ingest.js";
 import { sanitizeReceiptStages } from "./receipts.js";
 import { waiterMatchDeps, type WaiterMatchDeps } from "./waiters.js";
+import { upsertFollowedThread } from "./followed-threads.js";
 
 const ORG = "acme";
 const THREAD_SUBJECT = "slack:T001/C001/1712345678.000100";
@@ -302,6 +303,26 @@ describe("ingestEvent event waiter matching", () => {
     expect(await stagesOf()).toContainEqual({ stage: "claim_resolution", outcome: "failed", detail: expect.stringContaining("thread policy") });
     expect(failed).toHaveBeenCalledTimes(1);
     errors.mockRestore();
+  });
+
+  it("counts a followed reply as routed only after the router's cursor passed it (Part C step 4)", async () => {
+    await db.appDb.insert(orgMembers).values({ orgId: ORG, userId: "u-001", role: "member" });
+    await db.appDb.insert(userIdentityLinks).values({ id: "link-u002-own", provider: "slack", externalId: "U002", userId: "u-001", createdAt: 1 });
+    const bind = (lastSeenTs: string) => upsertFollowedThread(db.appDb, {
+      orgId: ORG, channelType: "slack", channelId: "C001", threadTs: "1712345678.000100",
+      ownerType: "user", ownerId: "u-001", createdBy: "u-001", target: { sessionId: "s-1", threadId: "t-1" }, lastSeenTs,
+    });
+    const reply = { type: "message", channel: "C001", user: "U002", text: "on it", thread_ts: "1712345678.000100", ts: "1712345690.000100" };
+    const routed = () => followRoutedOwner(db.appDb, { orgId: ORG, botUserId: "U-BOT", payload: reply });
+    // The mention bound the thread after the router dropped the reply: the
+    // cursor is the mention's ts. The reply is not routed, so its waiters append.
+    await bind("1712345680.000100");
+    expect(await routed()).toBeNull();
+    // The router delivered the reply and advanced the cursor to its ts.
+    await db.appDb.update(followedThreads).set({ lastSeenTs: "1712345690.000100" });
+    expect(await routed()).toEqual({ type: "user", id: "u-001" });
+    await db.appDb.update(followedThreads).set({ lastSeenTs: "1712345699.000100" });
+    expect(await routed()).toEqual({ type: "user", id: "u-001" });
   });
 
   it("appends every waiter's digest when the delivery insert throws (INV-D6)", async () => {

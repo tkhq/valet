@@ -158,6 +158,17 @@ describe("resolveClaims: Scenario C", () => {
     expect(withP.deliveries.get("P")).toMatchObject({ kind: "target", reason: "conversation_follow", suppressedWaiterIds: ["w-inc"] });
   });
 
+  it("C3b: a reply the router did not deliver lets the bound thread's waiter append, with no rule matched", async () => {
+    const f = fakes();
+    // The router dropped the reply before its binding existed, so ingest's route check says no.
+    f.deps.followRoute = async () => null;
+    f.bindings.set("team:sre", { sessionId: "s-inc", threadId: "t-inc", via: "follow" });
+    const reply = slackEvent("slack.message", "1.0", { payload: { channel: "C900", user: "U001", text: "on it", ts: "1.65", thread_ts: "1.0" } });
+    const d = await resolve(f, { event: reply, matched: [], candidates: [tInc(reply)] });
+    expect(d.waiters.get("w-inc") ?? "append").toBe("append");
+    expect(d.deliveries.size).toBe(0);
+  });
+
   it("C3b: a failing follow route check lets the waiter append (INV-D6)", async () => {
     const f = fakes();
     f.deps.followRoute = async () => { throw new Error("db down"); };

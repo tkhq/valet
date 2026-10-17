@@ -264,9 +264,11 @@ incident routing spec's Parts A and B.
    append theirs. The `target` stamp names the suppressed waiters in
    `suppressedWaiterIds`. A binding delivery never ends a waiter.
    - A followed reply has one owner: the follow router. When the router
-     will deliver a `slack.message` to a stored follow binding and admit its
-     sender (`followRouteFor`), ingest treats it as an assistant delivery
-     of the binding's owner, even when no rule of that owner matched. The
+     delivers a `slack.message` to a stored follow binding and admits its
+     sender (`followRouteFor`), and its cursor (`last_seen_ts`) has passed
+     the message's ts, ingest treats it as an assistant delivery of the
+     binding's owner, even when no rule of that owner matched. A reply that
+     the router dropped is not routed, so its waiters append. The
      waiters in the bound thread append no digest. The dispatcher skips a
      `slack.message` delivery whose destination is that binding with
      `Skipped, the followed thread delivers this reply.` and reason
@@ -586,9 +588,12 @@ event wakeups spec Part A.
   same reply again. This duplication is accepted (INV-D6). A reply that the
   router passes because a later reply advanced the cursor reaches the
   thread only as re-hydrated context.
-- **A failed router run can duplicate.** If the follow router throws, its
-  cursor stays put and the subscription delivers the reply. The inbox retry
-  then runs the router again, which can deliver the reply a second time.
+- **A failed router run can duplicate, or lose the reply.** If the follow
+  router throws, its cursor stays put. When a rule of the owner matched the
+  reply, that rule's delivery reaches the thread, and the inbox retry can
+  make the router deliver the reply a second time. When no rule matched,
+  only the inbox retries can deliver it. If every retry fails, no thread
+  receives the reply. The inbox record's `failedAt` is the visible record.
 - **A `mention_covered` skip with no waiter trusts the mention.** For a
   bound thread with no waiter, the dispatcher skips the message half when
   the owner's mention rule will deliver the `app_mention` half. If that

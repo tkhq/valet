@@ -42,6 +42,15 @@ describe("legacy Slack bot identity", () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(4);
   });
 
+  it("keeps one entry per credential input, so two readers do not evict each other", async () => {
+    const owner = {};
+    await resolveSlackBotIdentity(owner, input);
+    await resolveSlackBotIdentity(owner, { ...input, accessToken: "xoxb-resolved" });
+    await resolveSlackBotIdentity(owner, input);
+    await resolveSlackBotIdentity(owner, { ...input, accessToken: "xoxb-resolved" });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("backs off failed lookups, then retries without reconnecting", async () => {
     vi.useFakeTimers();
     const owner = {};
