@@ -986,7 +986,7 @@ export const api = {
     ),
   revokeOwnWorkflowAccounts: (id: string) => request<{ ok: boolean }>("DELETE", `/workflows/${encodeURIComponent(id)}/permissions/accounts`),
   revokeWorkflowPermissions: (id: string) => request<{ ok: boolean }>("DELETE", `/workflows/${encodeURIComponent(id)}/permissions/allow`),
-  allowWorkflowPermissions: (id: string, body: AllowWorkflowPermissionsRequest = {}) =>
+  allowWorkflowPermissions: (id: string, body: AllowWorkflowPermissionsRequest) =>
     request<AllowWorkflowPermissionsResponse>(
       "POST",
       `/workflows/${encodeURIComponent(id)}/permissions/allow`,

@@ -12,6 +12,7 @@ import {
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
+  AllowWorkflowPermissionsRequest,
   AllowWorkflowPermissionsResponse,
   CreateWorkflowEventTriggerRequest,
   CreateWorkflowRequest,
@@ -303,8 +304,8 @@ export function useWorkflowPermissions(
 /** Persist permissions for this workflow only. */
 export function useAllowWorkflowPermissions(id: string) {
   const qc = useQueryClient();
-  return useMutation<AllowWorkflowPermissionsResponse, Error, string[]>({
-    mutationFn: (actionIds) => api.allowWorkflowPermissions(id, { actionIds }),
+  return useMutation<AllowWorkflowPermissionsResponse, Error, AllowWorkflowPermissionsRequest>({
+    mutationFn: (body) => api.allowWorkflowPermissions(id, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkWorkflows.permissions(id) });
     },
