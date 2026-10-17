@@ -313,7 +313,9 @@ event wakeups spec Part A.
    `policy_new`, `policy_subject`, `policy_own`, `policy_existing`,
    `conversation_follow`, `conversation_pull_request`, `claim_redirect`,
    `claim_skip`, `pin_unavailable`. A rising `pin_unavailable` pages a
-   person. No code repairs it.
+   person. No code repairs it. The chart's Grafana rule
+   `valet-event-delivery-pin-unavailable` (`deploy/chart/valet/alerts/events.yaml`)
+   fires on the first increase.
 
 ## Invariants
 
