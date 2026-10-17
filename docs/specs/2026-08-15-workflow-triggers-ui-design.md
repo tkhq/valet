@@ -54,6 +54,12 @@ endpoint lands later, it joins the normalized list as a third kind.
    triggers panel that reuses the same components.
 4. **Orchestrator-target schedules are first-class.** They have no
    workflowId. The global Triggers tab is their only home.
+   An assistant-prompt schedule also carries an optional thread policy
+   (`thread`: `new`, `own`, or `existing`; stored in
+   `workflow_schedules.thread_policy`). The delivery threads spec
+   (`2026-10-16-delivery-threads-and-claims-design.md`, Part A) defines it.
+   An absent policy reads as `own`. A schedule refuses `subject`, because a
+   firing has no subject.
 
 ## API design (`packages/api`)
 
@@ -74,7 +80,8 @@ Schedules (wrap `schedule-service`):
 
 - `POST /api/workflows/schedules` — body: `name`, `cron`, `timezone?`,
   target (`{ kind: "workflow", workflowId, input? }` or
-  `{ kind: "orchestrator", prompt }`), `enabled?`. Invalid cron returns 400
+  `{ kind: "orchestrator", prompt }`), `enabled?`, and `thread?` for an
+  assistant-prompt schedule. Invalid cron returns 400
   with the parse error and an example expression.
 - `PATCH /api/workflows/schedules/:id` — partial update of the same
   fields, including `enabled` for toggle. A cron or timezone change
