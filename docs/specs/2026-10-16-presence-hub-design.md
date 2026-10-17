@@ -262,7 +262,9 @@ Pass criterion: all steps, in one run, from a clean start.
 - Route tests for Part A step 4, one per row.
 - Component tests for the sentence renderers (Part C step 1, Part D step 1,
   Part E step 1), one per `<does>` row.
-- The acceptance scenario as a browser test over the full stack.
+- The acceptance scenario as a browser test over the full stack. See
+  Deviations: it runs as a router-level web test and an api integration
+  test.
 - A copy lint for INV-H2.
 
 ## Non-goals (normative boundary)
@@ -376,3 +378,40 @@ Pass criterion: all steps, in one run, from a clean start.
   wizard pins the place's filter. An event without the filter's field drops
   it, and a later event with the field brings it back. A filter the reader
   removed stays removed.
+- **A restored filter takes its first value.** The wizard restores a pinned
+  filter with the value the place gave it. If the reader edited that value
+  and an event change dropped the filter, the restored filter shows the
+  place's value, not the edit.
+- **The acceptance runs as a web test and an api test (Testing).** The repo
+  has no browser driver for the web app, and the full-stack e2e row drives
+  HTTP and WebSocket only. Two suites replace the browser test and the
+  plan's `presence-hub` e2e row:
+  `packages/web/src/routes/-presence-acceptance.test.tsx` renders the app's
+  route tree with a memory history and walks H1 to H12 against a `fetch`
+  stub that answers with wire-typed fixtures.
+  `packages/api/src/integration/presence-hub.test.ts` runs the data half over
+  a real database: places, place pages, feeders, a listener's `problem` from
+  a real dead-lettered delivery, and a routine's `disabledReason` from a real
+  scheduler fire. The api suite is in the core integration list.
+- **H11 renders the background section alone.** The thread page needs a
+  live session socket, so the web test renders the thread context card's
+  background section with its own router. In the api test, M works in its
+  own thread `t-inc` and P is pinned to it, so the feeders read names both.
+- **The copy lint reads source, not the build (INV-H2).** The lint parses
+  every non-test file under `components/presence/` and every
+  `routes/presence*.tsx`. It checks string literals, template text, and JSX
+  text. It skips imports, types, object keys, comparisons, `case` labels,
+  the values of code properties (`key`, `mode`, `kind`, `type`, `id`, `tab`,
+  `status`, `view`, `outcome`), non-copy JSX attributes (`className`, `to`,
+  `href`, and similar), and strings with no space that hold `.`, `_`, `:`,
+  `/`, `*`, `$`, or `-`. A line marked `// copy-lint: allow <word>`, or the
+  line after the marker, may use that word.
+- **Copy lint allowances.** The workflow editor
+  (`routes/presence.workflows.$workflowId.tsx`) keeps the drawer state value
+  `triggers` on two lines. The value never shows; the drawer's title is
+  `Listeners and routines`.
+- **A routine page is read-only until it knows the viewer (Part D step 2).**
+  The page enables its controls for the owner of a personal routine and for
+  a member of the owning team, as the server's trigger access rule does. A
+  routine that runs a workflow keeps its controls on, and the server checks
+  the workflow. While the viewer or the teams load, the controls stay off.
