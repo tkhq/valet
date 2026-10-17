@@ -7,7 +7,7 @@ import { Outlet, createFileRoute } from "@tanstack/react-router";
  * again. This layout itself holds no `beforeLoad`: a parent's `beforeLoad`
  * runs for every child URL too, so a redirect here would fire before a
  * child's own (and send `/presence/workflows/$workflowId` to the bare list,
- * dropping the id) — each leaf redirects for itself instead. */
+ * dropping the id); each leaf redirects for itself instead. */
 export const Route = createFileRoute("/presence/workflows")({
   component: () => <Outlet />,
 });
