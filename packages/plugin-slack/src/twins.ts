@@ -22,6 +22,9 @@ const MENTION_SUFFIX = ":mention";
  * implies, or null when the event has no twin. The twin keeps the
  * original's channel, ts, user, text, subjects, refs, actor, and
  * occurredAt; only `key` and `dedupeKey` change.
+ *
+ * The twin is a prediction for matching only. Its `summary` and
+ * `payload.type` are the original's, so it is never a delivery or digest body.
  */
 export function slackConversationalTwin(
   event: NormalizedEvent,
