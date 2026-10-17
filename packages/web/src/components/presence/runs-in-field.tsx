@@ -16,11 +16,11 @@ import {
   carriesSlackConversation,
   ownOptionLabel,
   SHARED_SLACK_THREAD_NOTE,
-  runsInLabel,
   subjectOptionLabel,
   type RuleKind,
   type SubjectKind,
 } from "./thread-policy-copy";
+import { runsInLabel } from "./sentences";
 
 /** The text a parent shows when it refuses a save with no picked thread. */
 export const PICK_A_THREAD_ERROR = "Pick a thread for Runs in, or choose another option.";

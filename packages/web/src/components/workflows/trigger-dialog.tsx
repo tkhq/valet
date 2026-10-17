@@ -1,6 +1,7 @@
 import { type AssistantThreadPolicy, type Appearance, validateAppearance } from "@valet/shared";
 import { PICK_A_THREAD_ERROR, RunsInField } from "~/components/presence/runs-in-field";
-import { runsInLabel, sameThreadPolicy } from "~/components/presence/thread-policy-copy";
+import { runsInLabel } from "~/components/presence/sentences";
+import { sameThreadPolicy } from "~/components/presence/thread-policy-copy";
 import { PERSONAL, useWorkspaceScope } from "~/lib/workspace-scope";
 import { AppearanceSettings } from "~/components/presence/appearance-settings";
 import { AutomationReview } from "~/components/events/automation-review";

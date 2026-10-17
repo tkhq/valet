@@ -51,30 +51,6 @@ export function ownOptionLabel(ruleKind: RuleKind): string {
 }
 
 /**
- * Where a rule's deliveries land, as one phrase. `threadTitle` names an
- * `existing` thread; without it the phrase falls back to a generic name.
- */
-export function runsInLabel(
-  policy: AssistantThreadPolicy,
-  subjectKind: SubjectKind | null,
-  ruleKind: RuleKind,
-  threadTitle?: string,
-): string {
-  switch (policy.mode) {
-    case "new":
-      return "A new thread each time";
-    case "subject":
-      return subjectOptionLabel(subjectKind);
-    case "own":
-      return ownOptionLabel(ruleKind);
-    case "existing":
-      return threadTitle !== undefined && threadTitle.trim().length > 0
-        ? `The thread ${threadTitle}`
-        : "The thread you picked";
-  }
-}
-
-/**
  * True when a rule's keys carry Slack conversations: mentions, channel
  * messages, replies, and direct messages. Deliveries of these events have a
  * Slack channel origin.
